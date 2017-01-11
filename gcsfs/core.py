@@ -469,6 +469,6 @@ def put_object(credentials, bucket, name, data):
     out = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o?uploadType=media&name=%s' %(
                             bucket, name),
                         headers={'Authorization': 'Bearer '+credentials.access_token,
-                                 'Content-Type':'application/octet-stream',
-                                 'Content-Length':len(data)}, data=data)
+                                 'Content-Type': 'application/octet-stream',
+                                 'Content-Length': len(data)}, data=data)
     assert out.status_code == 200
