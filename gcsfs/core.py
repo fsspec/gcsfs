@@ -2,8 +2,9 @@
 """
 Google Cloud Storage pythonic interface
 """
-from __future__ import print_function, unicode_literals
+from __future__ import print_function
 
+import io
 import json
 from json.decoder import JSONDecodeError
 import logging
@@ -12,10 +13,12 @@ import os
 import pickle
 import re
 import requests
+import sys
 import time
 import webbrowser
 
 from s3fs.utils import read_block
+PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,8 @@ not_secret = {"client_id": "586241054156-is96mugvl2prnj0ib5gsg1l3q9m9jp7p."
 tfile = os.path.join(os.path.expanduser("~"), '.gcs_tokens')
 ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
         "private", "projectprivate", "publicread"}
+bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
+         "publicReadWrite"}
 
 
 def split_path(path):
@@ -95,7 +100,8 @@ class GCSFileSystem(object):
         self.dirs = {}
         self.connect()
 
-    def _parse_gtoken(self, t):
+    @staticmethod
+    def _parse_gtoken(t):
         if isinstance(t, str):
             t = json.load(open(t))
         else:
@@ -221,8 +227,20 @@ class GCSFileSystem(object):
             self.dirs[bucket] = dirs
         return self.dirs[bucket]
 
-    def mkdir(self, bucket, acl='private'):
-        """New bucket"""
+    def mkdir(self, bucket, acl='projectPrivate',
+              default_acl='bucketOwnerFullControl'):
+        """
+        New bucket
+
+        Parameters
+        ----------
+        bucket: str
+            bucket name
+        acl: string, one of bACLs
+            access for the bucket itself
+        default_acl: str, one of ACLs
+            default ACL for objects created in this bucket
+        """
         self._call('post', 'b/', predefinedAcl=acl, project=self.project,
                    json={"name": bucket})
 
@@ -230,9 +248,9 @@ class GCSFileSystem(object):
         """Delete an empty bucket"""
         self._call('delete', 'b/' + bucket)
         if '' in self.dirs:
-            for dir in self.dirs[:]:
-                if dir['name'] == bucket:
-                    self.dirs[''].remove(dir)
+            for k, v in self.dirs.items():
+                if v['name'] == bucket:
+                    self.dirs[''].remove(k)
         self.invalidate_cache(bucket)
 
     def invalidate_cache(self, bucket=None):
@@ -397,23 +415,29 @@ GCSFileSystem.load_tokens()
 
 class GCSFile:
 
-    def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20):
+    def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
+                 acl=None):
         bucket, key = split_path(path)
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
-        if mode not in {'rb'}:
+        if mode not in {'rb', 'wb'}:
             raise ValueError('File mode not supported')
         self.mode = mode
         self.blocksize = block_size
         self.cache = b""
         self.loc = 0
-        self.start = None
+        self.acl = acl
         self.end = None
         self.closed = False
         self.trim = True
-        self.details = gcsfs.info(path)
-        self.size = self.details['size']
+        if mode == 'rb':
+            self.details = gcsfs.info(path)
+            self.size = self.details['size']
+        else:
+            self.buffer = io.BytesIO()
+            self.offset = 0
+            self.forced = False
 
     def info(self):
         """ File information about this path """
@@ -482,6 +506,117 @@ class GCSFile:
         """ Return all lines in a file as a list """
         return list(self)
 
+    def write(self, data):
+        """
+        Write data to buffer.
+
+        Buffer only sent to S3 on flush() or if buffer is greater than or equal to blocksize.
+
+        Parameters
+        ----------
+        data : bytes
+            Set of bytes to be written.
+        """
+        if self.mode not in {'wb', 'ab'}:
+            raise ValueError('File not in write mode')
+        if self.closed:
+            raise ValueError('I/O operation on closed file.')
+        out = self.buffer.write(ensure_writable(data))
+        self.loc += out
+        if self.buffer.tell() >= self.blocksize:
+            self.flush()
+        return out
+
+    def flush(self, force=False):
+        """
+        Write buffered data to S3.
+
+        Uploads the current buffer, if it is larger than the block-size, or if
+        the file is being closed.
+
+        Parameters
+        ----------
+        force : bool
+            When closing, write the last block even if it is smaller than
+            blocks are allowed to be.
+        """
+        if self.mode not in {'wb', 'ab'}:
+            raise ValueError('Flush on a file not in write mode')
+        if self.closed:
+            raise ValueError('Flush on closed file')
+        if self.buffer.tell() == 0 and not force:
+            # no data in the buffer to write
+            return
+        if force and self.forced:
+            raise ValueError("Force flush cannot be called more than once")
+        if force:
+            self.forced = True
+        if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
+            self._simple_upload()
+            return
+
+        if not self.offset:
+            print('initiate')
+            self._initiate_upload()
+        self._upload_chunk(final=force)
+
+    def _upload_chunk(self, final=False):
+        self.buffer.seek(0)
+        data = self.buffer.read()
+        head = self.gcsfs.head.copy()
+        l = len(data)
+        if final:
+            if l:
+                head['Content-Range'] = 'bytes %i-%i/%i' % (
+                    self.offset, self.offset + l - 1, self.offset + l)
+            else:
+                # closing when buffer is empty
+                head['Content-Range'] = 'bytes */%i' % self.offset
+                data = None
+        else:
+            head['Content-Range'] = 'bytes %i-%i/*' % (
+                self.offset, self.offset + l - 1)
+        head.update({'Content-Type': 'application/octet-stream',
+                     'Content-Length': str(l)})
+        r = requests.post(self.location, params={'uploadType': 'resumable'},
+                          headers=head, data=data)
+        if not r.ok:
+            raise RuntimeError(r.text)
+        if 'Range' in r.headers:
+            shortfall = (self.offset + l - 1) - int(
+                    r.headers['Range'].split('-')[1])
+            if shortfall:
+                self.buffer = io.BytesIO(data[-shortfall:])
+                self.buffer.seek(shortfall)
+            else:
+                self.buffer = io.BytesIO()
+            import pdb
+            # pdb.set_trace()
+            self.offset += l - shortfall
+        else:
+            self.buffer = io.BytesIO()
+            self.offset += l
+
+    def _initiate_upload(self):
+        r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
+                          % self.bucket, params={'uploadType': 'resumable'},
+                          headers=self.gcsfs.head, json={'name': self.key})
+        self.location = r.headers['Location']
+
+    def _simple_upload(self):
+        """One-shot upload, less than 5MB"""
+        head = self.gcsfs.head.copy()
+        self.buffer.seek(0)
+        data = self.buffer.read()
+        # head.update({'Content-Type': 'application/octet-stream',
+        #              'Content-Length': str(len(data))})
+        r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
+                          % self.bucket, params={'uploadType': 'media',
+                                                 'name': self.key},
+                          headers=head, data=data)
+        if not r.ok:
+            raise RuntimeError(r.text)
+
     def _fetch(self, start, end):
         if self.start is None and self.end is None:
             # First read
@@ -532,7 +667,11 @@ class GCSFile:
         """ Close file """
         if self.closed:
             return
-        self.cache = None
+        if self.mode == 'rb':
+            self.cache = None
+        else:
+            self.flush(force=True)
+            self.gcsfs.invalidate_cache(self.bucket)
         self.closed = True
 
     def readable(self):
@@ -596,3 +735,9 @@ def put_object(credentials, bucket, name, data):
                                  'Content-Type': 'application/octet-stream',
                                  'Content-Length': len(data)}, data=data)
     assert out.status_code == 200
+
+
+def ensure_writable(b):
+    if PY2 and isinstance(b, array.array):
+        return b.tostring()
+    return b

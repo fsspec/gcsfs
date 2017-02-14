@@ -2,6 +2,7 @@
 from gcsfs.core import GCSFileSystem
 from gcsfs.tests import settings
 import pytest
+import sys
 import vcr
 
 my_vcr = vcr.VCR(
@@ -27,4 +28,16 @@ def token_restore():
         yield
     finally:
         GCSFileSystem.tokens = cache
-        GCSFileSystem._save_tokens()
+        GCSFileSystem._save_tokens(GCSFileSystem)
+
+
+@pytest.yield_fixture
+def gcs(token_restore):
+    gcs = GCSFileSystem(settings.TEST_PROJECT, token=settings.GOOGLE_TOKEN)
+    try:
+        gcs.mkdir(settings.TEST_BUCKET, 'publicreadwrite')
+        yield gcs
+    finally:
+        gcs.ls(settings.TEST_BUCKET)
+        [gcs.rm(f) for f in gcs.ls(settings.TEST_BUCKET)]
+        gcs.rmdir(settings.TEST_BUCKET)
