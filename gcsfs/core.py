@@ -15,6 +15,7 @@ import re
 import requests
 import sys
 import time
+import warnings
 import webbrowser
 
 from s3fs.utils import read_block
@@ -30,7 +31,7 @@ ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
         "private", "projectprivate", "publicread"}
 bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
-
+DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', None)
 
 def split_path(path):
     """
@@ -48,6 +49,8 @@ def split_path(path):
     """
     if path.startswith('gcs://'):
         path = path[6:]
+    if path.startswith('gs://'):
+        path = path[5:]
     if '/' not in path:
         return path, ""
     else:
@@ -87,10 +90,14 @@ class GCSFileSystem(object):
     scopes = {'read_only', 'read_write', 'full_control'}
     retries = 10
     base = "https://www.googleapis.com/storage/v1/"
+    _singleton = [None]
 
-    def __init__(self, project, access='full_control', token=None):
+    def __init__(self, project=DEFAULT_PROJECT, access='full_control',
+                 token=None):
         if access not in self.scopes:
             raise ValueError('access must be one of %s', self.scopes)
+        if project is None:
+            warnings.warn('GCS project not set - cannot list or create buckets')
         if token is not None:
             if 'type' in token or isinstance(token, str):
                 token = self._parse_gtoken(token)
@@ -99,6 +106,18 @@ class GCSFileSystem(object):
         self.access = access
         self.dirs = {}
         self.connect()
+        self._singleton[0] = self
+
+    @classmethod
+    def current(cls):
+        """ Return the most recently created S3FileSystem
+
+        If no S3FileSystem has been created, then create one
+        """
+        if not cls._singleton[0]:
+            return GCSFileSystem()
+        else:
+            return cls._singleton[0]
 
     @staticmethod
     def _parse_gtoken(t):
@@ -273,6 +292,7 @@ class GCSFileSystem(object):
             files = self._list_buckets()
         else:
             bucket, prefix = split_path(path)
+            path = '/'.join([bucket, prefix])
             files = self._list_bucket(bucket)
             files = [f for f in files if f['name'].startswith(path)]
         if detail:
@@ -292,6 +312,7 @@ class GCSFileSystem(object):
         path0 = path
         path = path.rstrip('/')
         bucket, key = split_path(path)
+        path = '/'.join([bucket, key])
         if "*" in bucket:
             raise ValueError('Bucket cannot contain a "*"')
         if '*' not in path:
@@ -314,8 +335,13 @@ class GCSFileSystem(object):
 
     def info(self, path):
         # also have direct info call available
+        path = '/'.join(split_path(path))
         files = self.ls(path, True)
-        return [f for f in files if f['name']==path][0]
+        out = [f for f in files if f['name'] == path]
+        if out:
+            return out[0]
+        else:
+            raise FileNotFoundError(path)
 
     def cat(self, path):
         """ Simple one-shot get of file data """
@@ -429,6 +455,7 @@ class GCSFile:
         self.loc = 0
         self.acl = acl
         self.end = None
+        self.start = None
         self.closed = False
         self.trim = True
         if mode == 'rb':
