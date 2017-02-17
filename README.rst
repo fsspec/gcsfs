@@ -1,0 +1,4 @@
+gcsfs
+=====
+
+Pythonic file-system for Google Cloud Storage

@@ -35,7 +35,7 @@ def token_restore():
 def gcs(token_restore):
     gcs = GCSFileSystem(settings.TEST_PROJECT, token=settings.GOOGLE_TOKEN)
     try:
-        gcs.mkdir(settings.TEST_BUCKET, 'publicreadwrite')
+        gcs.mkdir(settings.TEST_BUCKET)
         yield gcs
     finally:
         gcs.ls(settings.TEST_BUCKET)
