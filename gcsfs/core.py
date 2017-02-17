@@ -202,7 +202,7 @@ class GCSFileSystem(object):
             data['access_token'] = json.loads(r.content.decode())['access_token']
 
         self.tokens[(project, access)] = data
-        self.head = {'Authorization': 'Bearer ' + data['access_token']}
+        self.header = {'Authorization': 'Bearer ' + data['access_token']}
         self._save_tokens()
 
     def _save_tokens(self):
@@ -219,7 +219,7 @@ class GCSFileSystem(object):
                 del kwargs[k]
         json = kwargs.pop('json', None)
         meth = getattr(requests, method)
-        r = meth(self.base + path, headers=self.head, params=kwargs,
+        r = meth(self.base + path, headers=self.header, params=kwargs,
                  json=json)
         try:
             out = r.json()
@@ -346,7 +346,7 @@ class GCSFileSystem(object):
     def cat(self, path):
         """ Simple one-shot get of file data """
         details = self.info(path)
-        return _fetch_range(self.head, details)
+        return _fetch_range(self.header, details)
 
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
         with self.open(rpath, 'rb', block_size=0), open(lpath, 'wb') as f1, f2:
@@ -583,14 +583,13 @@ class GCSFile:
             return
 
         if not self.offset:
-            print('initiate')
             self._initiate_upload()
         self._upload_chunk(final=force)
 
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
         data = self.buffer.read()
-        head = self.gcsfs.head.copy()
+        head = self.gcsfs.header.copy()
         l = len(data)
         if final:
             if l:
@@ -627,12 +626,12 @@ class GCSFile:
     def _initiate_upload(self):
         r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                           % self.bucket, params={'uploadType': 'resumable'},
-                          headers=self.gcsfs.head, json={'name': self.key})
+                          headers=self.gcsfs.header, json={'name': self.key})
         self.location = r.headers['Location']
 
     def _simple_upload(self):
         """One-shot upload, less than 5MB"""
-        head = self.gcsfs.head.copy()
+        head = self.gcsfs.header.copy()
         self.buffer.seek(0)
         data = self.buffer.read()
         # head.update({'Content-Type': 'application/octet-stream',
@@ -649,17 +648,17 @@ class GCSFile:
             # First read
             self.start = start
             self.end = end + self.blocksize
-            self.cache = _fetch_range(self.gcsfs.head, self.details,
+            self.cache = _fetch_range(self.gcsfs.header, self.details,
                                       start, self.end)
         if start < self.start:
-            new = _fetch_range(self.gcsfs.head, self.details,
+            new = _fetch_range(self.gcsfs.header, self.details,
                                start, self.start)
             self.start = start
             self.cache = new + self.cache
         if end > self.end:
             if self.end > self.size:
                 return
-            new = _fetch_range(self.gcsfs.head, self.details,
+            new = _fetch_range(self.gcsfs.header, self.details,
                                self.end, end + self.blocksize)
             self.end = end + self.blocksize
             self.cache = self.cache + new
