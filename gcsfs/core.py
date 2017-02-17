@@ -18,7 +18,7 @@ import time
 import warnings
 import webbrowser
 
-from s3fs.utils import read_block
+from .utils import read_block
 PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
