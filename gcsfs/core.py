@@ -226,7 +226,10 @@ class GCSFileSystem(object):
         except JSONDecodeError:
             out = r.content
         if not r.ok:
-            raise RuntimeError(str(out))
+            if "Not Found" in str(out):
+                raise FileNotFoundError(path)
+            else:
+                raise RuntimeError(str(out))
         return out
 
     def _list_buckets(self):
@@ -238,7 +241,10 @@ class GCSFileSystem(object):
 
     def _list_bucket(self, bucket):
         if bucket not in self.dirs:
-            out = self._call('get', 'b/%s/o/' % bucket)
+            try:
+                out = self._call('get', 'b/%s/o/' % bucket)
+            except FileNotFoundError:
+                out = []
             dirs = out.get('items', [])
             for f in dirs:
                 f['name'] = '%s/%s' % (bucket, f['name'])
@@ -262,14 +268,16 @@ class GCSFileSystem(object):
         """
         self._call('post', 'b/', predefinedAcl=acl, project=self.project,
                    json={"name": bucket})
+        self.invalidate_cache(bucket)
+        self.invalidate_cache('')
 
     def rmdir(self, bucket):
         """Delete an empty bucket"""
         self._call('delete', 'b/' + bucket)
         if '' in self.dirs:
-            for k, v in self.dirs.items():
+            for v in self.dirs[''].copy():
                 if v['name'] == bucket:
-                    self.dirs[''].remove(k)
+                    self.dirs[''].remove(v)
         self.invalidate_cache(bucket)
 
     def invalidate_cache(self, bucket=None):
@@ -333,6 +341,13 @@ class GCSFileSystem(object):
             out = self.ls(path0)
         return out
 
+    def exists(self, path):
+        bucket, key = split_path(path)
+        if key:
+            return bool(self.info(path))
+        else:
+            return bucket in self.ls('')
+
     def info(self, path):
         # also have direct info call available
         path = '/'.join(split_path(path))
@@ -385,10 +400,15 @@ class GCSFileSystem(object):
 
     def rm(self, path):
         bucket, path = split_path(path)
-        self._call('delete', "b/%s/o/%s" % (bucket, path))
+        self._call('delete', "b/%s/o/%s" % (bucket, path.replace('/', '%2F')))
+        self.invalidate_cache(bucket)
 
     def open(self, path, mode='rb', block_size=5 * 2 ** 20, acl=None):
         return GCSFile(self, path, mode, block_size)
+
+    def touch(self, path):
+        with self.open(path, 'wb'):
+            pass
 
     def read_block(self, fn, offset, length, delimiter=None):
         """ Read a block of bytes from a GCS file

@@ -35,9 +35,10 @@ def token_restore():
 def gcs(token_restore):
     gcs = GCSFileSystem(settings.TEST_PROJECT, token=settings.GOOGLE_TOKEN)
     try:
-        gcs.mkdir(settings.TEST_BUCKET)
+        if not gcs.exists(settings.TEST_BUCKET):
+            gcs.mkdir(settings.TEST_BUCKET)
         yield gcs
     finally:
         gcs.ls(settings.TEST_BUCKET)
         [gcs.rm(f) for f in gcs.ls(settings.TEST_BUCKET)]
-        gcs.rmdir(settings.TEST_BUCKET)
+        # gcs.rmdir(settings.TEST_BUCKET)
