@@ -20,6 +20,10 @@ import webbrowser
 
 from .utils import read_block
 PY2 = sys.version_info.major == 2
+if PY2:
+    from urllib import quote_plus
+else:
+    from urllib.parse import quote_plus
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +99,7 @@ class GCSFileSystem(object):
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None):
         if access not in self.scopes:
-            raise ValueError('access must be one of %s', self.scopes)
+            raise ValueError('access must be one of {}', self.scopes)
         if project is None:
             warnings.warn('GCS project not set - cannot list or create buckets')
         if token is not None:
@@ -212,13 +216,15 @@ class GCSFileSystem(object):
         except Exception:
             pass
 
-    def _call(self, method, path, **kwargs):
+    def _call(self, method, path, *args, **kwargs):
         for k, v in list(kwargs.items()):
             # only pass parameters that have values
             if v is None:
                 del kwargs[k]
         json = kwargs.pop('json', None)
         meth = getattr(requests, method)
+        if args:
+            path = path.format(*[quote_plus(p) for p in args])
         r = meth(self.base + path, headers=self.header, params=kwargs,
                  json=json)
         try:
@@ -242,7 +248,7 @@ class GCSFileSystem(object):
     def _list_bucket(self, bucket):
         if bucket not in self.dirs:
             try:
-                out = self._call('get', 'b/%s/o/' % bucket)
+                out = self._call('get', 'b/{}/o/', bucket)
             except FileNotFoundError:
                 out = []
             dirs = out.get('items', [])
@@ -386,7 +392,7 @@ class GCSFileSystem(object):
         """Concatenate objects within a single bucket"""
         bucket, key = split_path(path)
         source = [{'name': split_path(p)[1]} for p in paths]
-        self._call('post', 'b/%s/o/%s/compose' % (bucket, key),
+        self._call('post', 'b/{}/o/{}/compose', bucket, key,
                    destinationPredefinedAcl=acl,
                    json={'sourceObjects': source,
                          "kind": "storage#composeRequest",
@@ -395,12 +401,12 @@ class GCSFileSystem(object):
     def copy(self, path1, path2, acl=None):
         b1, k1 = split_path(path1)
         b2, k2 = split_path(path2)
-        self._call('post', 'b/%s/o/%s/copyTo/b/%s/o/%s' % (b1, k1, b2, k2),
+        self._call('post', 'b/{}/o/{}/copyTo/b/{}/o/{}', b1, k1, b2, k2,
                    destinationPredefinedAcl=acl)
 
     def rm(self, path):
         bucket, path = split_path(path)
-        self._call('delete', "b/%s/o/%s" % (bucket, path.replace('/', '%2F')))
+        self._call('delete', "b/{}/o/{}", bucket, quote_plus(path))
         self.invalidate_cache(bucket)
 
     def open(self, path, mode='rb', block_size=5 * 2 ** 20, acl=None):
@@ -645,7 +651,8 @@ class GCSFile:
 
     def _initiate_upload(self):
         r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
-                          % self.bucket, params={'uploadType': 'resumable'},
+                          % quote_plus(self.bucket),
+                          params={'uploadType': 'resumable'},
                           headers=self.gcsfs.header, json={'name': self.key})
         self.location = r.headers['Location']
 
@@ -654,11 +661,9 @@ class GCSFile:
         head = self.gcsfs.header.copy()
         self.buffer.seek(0)
         data = self.buffer.read()
-        # head.update({'Content-Type': 'application/octet-stream',
-        #              'Content-Length': str(len(data))})
         r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
-                          % self.bucket, params={'uploadType': 'media',
-                                                 'name': self.key},
+                          % quote_plus(self.bucket),
+                          params={'uploadType': 'media', 'name': self.key},
                           headers=head, data=data)
         if not r.ok:
             raise RuntimeError(r.text)
@@ -756,7 +761,7 @@ def _fetch_range(head, obj_dict, start=None, end=None):
     start, end : None or integers
         if not both None, fetch only given range
     """
-    logger.debug("Fetch: %s/%s, %s-%s", obj_dict['name'], start, end)
+    logger.debug("Fetch: {}/{}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
         end = end or -0
@@ -775,8 +780,9 @@ def put_object(credentials, bucket, name, data):
     name : object name
     data : binary
     """
-    out = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o?uploadType=media&name=%s' %(
-                            bucket, name),
+    out = requests.post('https://www.googleapis.com/upload/storage/'
+                        'v1/b/%s/o?uploadType=media&name=%s' % (
+                            quote_plus(bucket), quote_plus(name)),
                         headers={'Authorization': 'Bearer '+credentials.access_token,
                                  'Content-Type': 'application/octet-stream',
                                  'Content-Length': len(data)}, data=data)
