@@ -20,10 +20,6 @@ import webbrowser
 
 from .utils import read_block
 PY2 = sys.version_info.major == 2
-if PY2:
-    from urllib import quote_plus
-else:
-    from urllib.parse import quote_plus
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +32,26 @@ ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
 bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
+
+
+def quote_plus(s):
+    """
+    Convert some URL elements to be HTTP-safe.
+
+    Not the same as in urllib, because, for instance, parentheses and commas
+    are passed through.
+
+    Parameters
+    ----------
+    s: input URL/portion
+
+    Returns
+    -------
+    corrected URL
+    """
+    s = s.replace('/', '%2F')
+    s = s.replace(' ', '%20')
+    return s
 
 def split_path(path):
     """
