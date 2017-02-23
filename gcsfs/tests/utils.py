@@ -110,7 +110,7 @@ def token_restore():
 
 
 @contextmanager
-def gcs_maker():
+def gcs_maker(populate=False):
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
     try:
         if not gcs.exists(TEST_BUCKET):
@@ -120,10 +120,11 @@ def gcs_maker():
                 gcs.rm(k)
             except:
                 pass
-        for flist in [files, csv_files, text_files]:
-            for fname, data in flist.items():
-                with gcs.open(TEST_BUCKET+'/'+fname, 'wb') as f:
-                    f.write(data)
+        if populate:
+            for flist in [files, csv_files, text_files]:
+                for fname, data in flist.items():
+                    with gcs.open(TEST_BUCKET+'/'+fname, 'wb') as f:
+                        f.write(data)
         yield gcs
     finally:
         gcs.ls(TEST_BUCKET)

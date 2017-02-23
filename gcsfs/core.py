@@ -247,10 +247,7 @@ class GCSFileSystem(object):
 
     def _list_bucket(self, bucket):
         if bucket not in self.dirs:
-            try:
-                out = self._call('get', 'b/{}/o/', bucket)
-            except FileNotFoundError:
-                out = []
+            out = self._call('get', 'b/{}/o/', bucket)
             dirs = out.get('items', [])
             for f in dirs:
                 f['name'] = '%s/%s' % (bucket, f['name'])
@@ -349,10 +346,13 @@ class GCSFileSystem(object):
 
     def exists(self, path):
         bucket, key = split_path(path)
-        if key:
-            return bool(self.info(path))
-        else:
-            return bucket in self.ls('')
+        try:
+            if key:
+                return bool(self.info(path))
+            else:
+                return bucket in self.ls('')
+        except FileNotFoundError:
+            return False
 
     def info(self, path):
         # also have direct info call available
