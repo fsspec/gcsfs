@@ -1,6 +1,7 @@
-
+from contextlib import contextmanager
 import gzip
 import json
+import os
 import pytest
 import sys
 import vcr
@@ -23,14 +24,44 @@ def before_record_response(response):
         pass
     return response
 
+
+def before_record(request):
+    request.uri = request.uri.replace(TEST_PROJECT, 'test_project')
+    return request
+
+
+def matcher(r1, r2):
+    if r1.uri.replace(TEST_PROJECT,
+                      'test_project') != r2.uri.replace(TEST_PROJECT,
+                      'test_project'):
+        print('uri mismatch')
+        return False
+    if r1.body != r2.body:
+        print('body mismatch')
+        return False
+    if r1.method != r2.method:
+        print('method mismatch')
+        return False
+    for key in ['Content-Length', 'Content-Type', 'Range', 'Server']:
+        if r1.head.get(key, '') != r2.head.get(key, ''):
+            print('header mismatch', key)
+            return False
+    print('match')
+    return True
+
+recording_path = os.path.join(os.path.dirname(__file__), 'recordings')
+
 my_vcr = vcr.VCR(
+    cassette_library_dir=recording_path,
     record_mode=RECORD_MODE,
     path_transformer=vcr.VCR.ensure_suffix('.yaml'),
     filter_headers=['Authorization'],
     filter_query_parameters=['refresh_token', 'upload_id', 'client_id',
                              'client_secret'],
     before_record_response=before_record_response,
+    before_record=before_record
     )
+my_vcr.register_matcher('all', matcher)
 files = {'test/accounts.1.json':  (b'{"amount": 100, "name": "Alice"}\n'
                                    b'{"amount": 200, "name": "Bob"}\n'
                                    b'{"amount": 300, "name": "Charlie"}\n'
@@ -78,8 +109,8 @@ def token_restore():
         GCSFileSystem._save_tokens(GCSFileSystem)
 
 
-@pytest.yield_fixture
-def gcs(token_restore):
+@contextmanager
+def gcs_maker():
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
     try:
         if not gcs.exists(TEST_BUCKET):
