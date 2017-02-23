@@ -1,4 +1,5 @@
 
+import gzip
 import json
 import pytest
 import sys
@@ -11,12 +12,13 @@ from gcsfs.tests.settings import (TEST_BUCKET, TEST_PROJECT, RECORD_MODE,
 
 def before_record_response(response):
     try:
-        data = json.loads(response['body']['string'].decode())
+        data = json.loads(gzip.uncompress(response['body']['string']).decode())
         if 'access_token' in data:
             data['access_token'] = 'xxx'
         if 'id_token' in data:
             data['id_token'] = 'xxx'
-        response['body']['string'] = json.dumps(data).encode()
+        response['body']['string'] = gzip.compress(
+                json.dumps(data).replace(TEST_PROJECT, 'test_project').encode())
     except:
         pass
     return response
@@ -25,9 +27,9 @@ my_vcr = vcr.VCR(
     record_mode=RECORD_MODE,
     path_transformer=vcr.VCR.ensure_suffix('.yaml'),
     filter_headers=['Authorization'],
-    filter_query_parameters=['refresh_token', 'upload_id'],
-    decode_compressed_response=True,
-    before_record_response=before_record_response
+    filter_query_parameters=['refresh_token', 'upload_id', 'client_id',
+                             'client_secret'],
+    before_record_response=before_record_response,
     )
 files = {'test/accounts.1.json':  (b'{"amount": 100, "name": "Alice"}\n'
                                    b'{"amount": 200, "name": "Bob"}\n'

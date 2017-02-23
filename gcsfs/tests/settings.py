@@ -2,8 +2,8 @@
 import os
 from gcsfs.core import not_secret
 
-RECORD_MODE = os.environ.get('GCSFS_RECORD_MODE', 'all')
-TEST_PROJECT = os.environ.get('GCSFS_TEST_PROJECT', '')
+RECORD_MODE = os.environ.get('GCSFS_RECORD_MODE', 'none')
+TEST_PROJECT = os.environ.get('GCSFS_TEST_PROJECT', 'test_project')
 
 TEST_BUCKET = 'gcsfs-testing'
 

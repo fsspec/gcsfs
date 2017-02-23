@@ -8,24 +8,39 @@ interactions:
       Content-Length: ['0']
       User-Agent: [python-requests/2.13.0]
     method: POST
-    uri: https://www.googleapis.com/oauth2/v4/token?client_id=764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com&client_secret=d-FL95Q19q7MQmFpd7hHD0Ty&grant_type=refresh_token
+    uri: https://www.googleapis.com/oauth2/v4/token?grant_type=refresh_token
   response:
-    body: {string: '{"access_token": "xxx", "id_token": "xxx", "expires_in": 3600,
-        "token_type": "Bearer"}'}
+    body:
+      string: !!binary |
+        H4sIAAAAAAAAAEWTSbOjNgCE7/Mrpt45ngKxPJMbmMUiRiwGBLq4QGCz2jwbG1Aq/z34pSpzbam6
+        v+6S/v7x8yOjtHw8TuOtLa8ff/78WDKg/LI64VNVRKVVona7FNLhSAQQ2rqm2+Iy8Lh6uRxNdQ5d
+        PBJWGplOW/LZkWQ+clUtytDa3tWN7JVF1+vhZ6o20Tlg0FBFXeIUq2ibvLGOcq4t3bzlAoYih0Ix
+        llvmeWGZTR9/rGDfRKdxGco3llZm9/L+fVDOQ30vH6f6zSvIHPcW6+J3hXKxq9yitVvbx4hBHtXw
+        AftxIDsow4ZOKTY7R2+FtI8m0htLGraSG154p/d5BAzO1bUOWagiOqmJBUUHO/XZ/7XaDlRw3ra3
+        Yh9MlN1eB2A2KVD4/BqwQ1+8clA8yFFqcsDVh509pIlfu83bkoqIqRLS2xUlFumK4oT+ql0EpEec
+        e5zqNAnOmWWy7BuzXbDRQdzbIAgrgHvk+p35RDiIg854e1cFXr1rKKDGn1w9nVBoiChUR3Q1F7RX
+        ARG0AfXVc9UA3fsiwQNPwwsjVsuQbt6KBD7TRJvoIl1zoFxzK+YpiJe1z7Ow4mex+78HKzB8Z81O
+        GAlu6AsO80WHpZKjr5l6JKGmfd/rcmwOuakAktgD6bvuPXmxt3ny3W+YYHOrEUs5R78AR49mV4+m
+        Q0hm2gQT6ospC8ktb6IJXTXOteKvIjFEBwTDmjdn+3g59OZE986TAOVFwNwVCepoj17r/l1+9Z8r
+        +wjrqc6s9zb2yi9xGZb4AnPPDG9/M7437vm2SNancg3U/zp3zyKJx0PfveCV+4V3c87f2KiokI2G
+        LkcVGhML4LFaaNSYJ/d2rk+AFWOWk7nBJJLPlSZ5e31MCFUvfvl5DZZMOxCc4RKpHuORM6fGRsOP
+        Zeo2ytWILX14xKPVcTbMmkrqJa/Ez0uoKuCwHNNEFptU7ew6M28nzkg351yQnbM2OC8W7JS70+LZ
+        VQeocSfZ2oWMMXtSzTyQZWbe4Lb83Dz6wYcb11BIcjx1SQnb4XjfencSb83ir736gBeQXGqBBTrP
+        6KHSrCbaEuCWZ2oB6aXMQdAs/lHxYEcVz5F23GnvLZyvXpevbrJjiivOjdP6eTfMcQd6M7T91pHl
+        o+dkliC8kvRLx/ir3PyV0s1+AeL6t3/88+NfiZSMOngEAAA=
     headers:
-      Alt-Svc: ['quic=":443"; ma=2592000; v="36,35,34"']
+      Alt-Svc: ['quic=":443"; ma=2592000; v="35,34"']
       Cache-Control: ['no-cache, no-store, max-age=0, must-revalidate']
+      Content-Encoding: [gzip]
       Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:11:15 GMT']
+      Date: ['Thu, 23 Feb 2017 17:29:09 GMT']
       Expires: ['Mon, 01 Jan 1990 00:00:00 GMT']
       Pragma: [no-cache]
       Server: [GSE]
-      Transfer-Encoding: [chunked]
       Vary: [Origin, X-Origin]
       X-Content-Type-Options: [nosniff]
       X-Frame-Options: [SAMEORIGIN]
       X-XSS-Protection: [1; mode=block]
-      content-length: ['1144']
     status: {code: 200, message: OK}
 - request:
     body: null
@@ -37,46 +52,53 @@ interactions:
     method: GET
     uri: https://www.googleapis.com/storage/v1/b/?project=continuum-compute
   response:
-    body: {string: '{"kind": "storage#buckets", "items": [{"selfLink": "https://www.googleapis.com/storage/v1/b/anaconda-data",
-        "kind": "storage#bucket", "name": "anaconda-data", "metageneration": "1",
-        "updated": "2016-08-18T17:18:21.788Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "anaconda-data", "projectNumber": "586241054156", "timeCreated":
-        "2016-08-18T17:18:21.788Z", "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/artifacts.continuum-compute.appspot.com",
-        "kind": "storage#bucket", "name": "artifacts.continuum-compute.appspot.com",
-        "metageneration": "1", "updated": "2016-05-17T18:29:22.774Z", "storageClass":
-        "STANDARD", "etag": "CAE=", "id": "artifacts.continuum-compute.appspot.com",
-        "projectNumber": "586241054156", "timeCreated": "2016-05-17T18:29:22.774Z",
-        "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/blaze-data",
-        "kind": "storage#bucket", "name": "blaze-data", "metageneration": "2", "updated":
-        "2015-09-06T15:55:01.051Z", "storageClass": "STANDARD", "etag": "CAI=", "id":
-        "blaze-data", "projectNumber": "586241054156", "timeCreated": "2015-09-06T04:08:21.262Z",
-        "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/dask_example_data",
-        "kind": "storage#bucket", "name": "dask_example_data", "metageneration": "1",
-        "updated": "2017-02-15T18:07:45.948Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "dask_example_data", "projectNumber": "586241054156", "timeCreated":
-        "2017-02-15T18:07:45.948Z", "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testing",
-        "kind": "storage#bucket", "name": "gcsfs-testing", "metageneration": "1",
-        "updated": "2017-02-17T21:55:56.343Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "gcsfs-testing", "projectNumber": "586241054156", "timeCreated":
-        "2017-02-17T21:55:56.343Z", "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket",
-        "kind": "storage#bucket", "name": "gcsfs-testingnew-bucket", "metageneration":
-        "1", "updated": "2017-02-18T00:04:56.871Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "gcsfs-testingnew-bucket", "projectNumber": "586241054156",
-        "timeCreated": "2017-02-18T00:04:56.871Z", "location": "US"}, {"selfLink":
-        "https://www.googleapis.com/storage/v1/b/temporary_output", "kind": "storage#bucket",
-        "name": "temporary_output", "metageneration": "1", "updated": "2017-02-17T18:05:35.301Z",
-        "storageClass": "STANDARD", "etag": "CAE=", "id": "temporary_output", "projectNumber":
-        "586241054156", "timeCreated": "2017-02-17T18:05:35.301Z", "location": "US"}]}'}
+    body: {string: "{\n \"kind\": \"storage#buckets\",\n \"items\": [\n  {\n   \"kind\":
+        \"storage#bucket\",\n   \"id\": \"anaconda-data\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/anaconda-data\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"anaconda-data\",\n
+        \  \"timeCreated\": \"2016-08-18T17:18:21.788Z\",\n   \"updated\": \"2016-08-18T17:18:21.788Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"artifacts.continuum-compute.appspot.com\",\n   \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/artifacts.continuum-compute.appspot.com\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"artifacts.continuum-compute.appspot.com\",\n
+        \  \"timeCreated\": \"2016-05-17T18:29:22.774Z\",\n   \"updated\": \"2016-05-17T18:29:22.774Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"blaze-data\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/blaze-data\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"blaze-data\",\n   \"timeCreated\":
+        \"2015-09-06T04:08:21.262Z\",\n   \"updated\": \"2015-09-06T15:55:01.051Z\",\n
+        \  \"metageneration\": \"2\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAI=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"dask_example_data\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask_example_data\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"dask_example_data\",\n
+        \  \"timeCreated\": \"2017-02-15T18:07:45.948Z\",\n   \"updated\": \"2017-02-15T18:07:45.948Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcsfs-testing\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"gcsfs-testing\",\n
+        \  \"timeCreated\": \"2017-02-17T21:55:56.343Z\",\n   \"updated\": \"2017-02-17T21:55:56.343Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcsfs-testingnew-bucket\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"gcsfs-testingnew-bucket\",\n
+        \  \"timeCreated\": \"2017-02-18T00:04:56.871Z\",\n   \"updated\": \"2017-02-18T00:04:56.871Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"temporary_output\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/temporary_output\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"temporary_output\",\n
+        \  \"timeCreated\": \"2017-02-17T18:05:35.301Z\",\n   \"updated\": \"2017-02-17T18:05:35.301Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  }\n ]\n}\n"}
     headers:
-      Alt-Svc: ['quic=":443"; ma=2592000; v="36,35,34"']
+      Alt-Svc: ['quic=":443"; ma=2592000; v="35,34"']
       Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
       Content-Length: ['2854']
       Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:11:15 GMT']
-      Expires: ['Thu, 23 Feb 2017 15:11:15 GMT']
+      Date: ['Thu, 23 Feb 2017 17:29:10 GMT']
+      Expires: ['Thu, 23 Feb 2017 17:29:10 GMT']
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
-      X-GUploader-UploadID: [AEnB2Uo9PNbJWB2DvXZ3VrFJ2bGLjkhWv7x43LXQZOkbYNOj4ufNkN_b89c1EHkifrwX3E1Va28To2oc5x2s6YeCsbIIbjA7bg]
+      X-GUploader-UploadID: [AEnB2UpoL0Gt26MxSZXDQhTvUt_D5UBhHEIvQdpJbd9PHAc3_tB0VKDYwyzqra98pSD3vwOpldXRnWe2gyVqjGpQg31LatgI-Q]
     status: {code: 200, message: OK}
 - request:
     body: null
@@ -87,24 +109,39 @@ interactions:
       Content-Length: ['0']
       User-Agent: [python-requests/2.13.0]
     method: POST
-    uri: https://www.googleapis.com/oauth2/v4/token?client_id=764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com&client_secret=d-FL95Q19q7MQmFpd7hHD0Ty&grant_type=refresh_token
+    uri: https://www.googleapis.com/oauth2/v4/token?grant_type=refresh_token
   response:
-    body: {string: '{"access_token": "xxx", "id_token": "xxx", "expires_in": 3600,
-        "token_type": "Bearer"}'}
+    body:
+      string: !!binary |
+        H4sIAAAAAAAAAEWSyY6jSBiE7/UUrTqPS5BgDHNjMYsNSYFZ82IBiVnM5oW1Ne/e0C1NXyN/RXwR
+        yp8fPz6jJElfr+u7vafN578/PucIcF9KRR34hZA6Sxvitwh96zCwUQqejyS6BQ/Fk+aWG2xFjEZK
+        I8VbPvQ6uFBMenDkdB7rHIsPc59ZJlPZEoGoYyxUOKWfO3DYP3JQt30mH81yJC/NefmO4g7uWpm+
+        5WMZWoatff6zgv0mur7nLt2whDR6ps/fD+nUFc/0dS02XoohiE0s8N8K6XzKYyUpzOJ0cReNhIX2
+        0up3h0SN0Uq5hotQQckrUG0tyDnVRi3fDSkD0JFzo3QnU+Jpw+GJsIRlCOwc+cfiZn2ttl1CGZtt
+        i1V7TJZ20IG8nnBk3NiLXuMhBviFLvsyBkShi6cuDKzCLI+EKSU0XPg9dPgVxaOTFcVwrFXLKCi5
+        pCGORRjYt0iRl2jDbGQBg5D0j5UVAhwhj52xO12cGp19+bh559hfvQuNgqU1mlI4QudIr/5v2Mgz
+        VHmAKKGDdd6vGkhUi0Z+RyZOtiDlvkBJbnGg9WEgjMm8b2LANbHikQnw5rVPjxWvx+L/PRbsa1vW
+        ZDguZToWZSwWbSzh3pDWTMndw/K+3VWxL3exzAEUnDpUV9U2OVZPJLps/bpRK9sCLiGxzW1I29Tu
+        qDtoSkp7hDUeIwe1cemOsBEIU/EeODjSBrC7NW+KVG/Wa3lMVKNHgBsQmCocwCqp4bDuX8WN1a/s
+        b60Yi0jZtjmt/Hsi8vck9ok+8tm/jNvGNXnHwfpVGpv/07nqceC99boatIb4EnimXcgiFM1jk5H8
+        kkasfPbLMD24hHthRtfideVkTmPO+Jxt6lz8Ih5uyZ9DShzym76Y3D11DKNVnzvuhFSLZG0OBfSL
+        toRiRqzgfUvVEua33tw5vqWpRO6Bb3e47DwTsrYqelCp4OIRw7W3D0jcF9/FIExXordbQcrOT/Zb
+        Hl5M6ojqtVzmAGvjlT/UJqSbqO7iVnjHKX3OirvZT06An+a8o57YlE8IXcdMVcashHJUlpzNTjd1
+        magQU7qJjyPfeGe+y6F+uYGnpOd5pol3nuOyyS3Ml0y23SPQfZFlKM8mrruMCUJLe2dk9MRcwJx7
+        +xV35K7nXj5vie6hD1lW6mvBBlbu8J8f/338AqBOzzd4BAAA
     headers:
-      Alt-Svc: ['quic=":443"; ma=2592000; v="36,35,34"']
+      Alt-Svc: ['quic=":443"; ma=2592000; v="35,34"']
       Cache-Control: ['no-cache, no-store, max-age=0, must-revalidate']
+      Content-Encoding: [gzip]
       Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:11:16 GMT']
+      Date: ['Thu, 23 Feb 2017 17:29:10 GMT']
       Expires: ['Mon, 01 Jan 1990 00:00:00 GMT']
       Pragma: [no-cache]
       Server: [GSE]
-      Transfer-Encoding: [chunked]
       Vary: [Origin, X-Origin]
       X-Content-Type-Options: [nosniff]
       X-Frame-Options: [SAMEORIGIN]
       X-XSS-Protection: [1; mode=block]
-      content-length: ['1144']
     status: {code: 200, message: OK}
 - request:
     body: null
@@ -116,203 +153,52 @@ interactions:
     method: GET
     uri: https://www.googleapis.com/storage/v1/b/?project=continuum-compute
   response:
-    body: {string: '{"kind": "storage#buckets", "items": [{"selfLink": "https://www.googleapis.com/storage/v1/b/anaconda-data",
-        "kind": "storage#bucket", "name": "anaconda-data", "metageneration": "1",
-        "updated": "2016-08-18T17:18:21.788Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "anaconda-data", "projectNumber": "586241054156", "timeCreated":
-        "2016-08-18T17:18:21.788Z", "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/artifacts.continuum-compute.appspot.com",
-        "kind": "storage#bucket", "name": "artifacts.continuum-compute.appspot.com",
-        "metageneration": "1", "updated": "2016-05-17T18:29:22.774Z", "storageClass":
-        "STANDARD", "etag": "CAE=", "id": "artifacts.continuum-compute.appspot.com",
-        "projectNumber": "586241054156", "timeCreated": "2016-05-17T18:29:22.774Z",
-        "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/blaze-data",
-        "kind": "storage#bucket", "name": "blaze-data", "metageneration": "2", "updated":
-        "2015-09-06T15:55:01.051Z", "storageClass": "STANDARD", "etag": "CAI=", "id":
-        "blaze-data", "projectNumber": "586241054156", "timeCreated": "2015-09-06T04:08:21.262Z",
-        "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/dask_example_data",
-        "kind": "storage#bucket", "name": "dask_example_data", "metageneration": "1",
-        "updated": "2017-02-15T18:07:45.948Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "dask_example_data", "projectNumber": "586241054156", "timeCreated":
-        "2017-02-15T18:07:45.948Z", "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testing",
-        "kind": "storage#bucket", "name": "gcsfs-testing", "metageneration": "1",
-        "updated": "2017-02-17T21:55:56.343Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "gcsfs-testing", "projectNumber": "586241054156", "timeCreated":
-        "2017-02-17T21:55:56.343Z", "location": "US"}, {"selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket",
-        "kind": "storage#bucket", "name": "gcsfs-testingnew-bucket", "metageneration":
-        "1", "updated": "2017-02-18T00:04:56.871Z", "storageClass": "STANDARD", "etag":
-        "CAE=", "id": "gcsfs-testingnew-bucket", "projectNumber": "586241054156",
-        "timeCreated": "2017-02-18T00:04:56.871Z", "location": "US"}, {"selfLink":
-        "https://www.googleapis.com/storage/v1/b/temporary_output", "kind": "storage#bucket",
-        "name": "temporary_output", "metageneration": "1", "updated": "2017-02-17T18:05:35.301Z",
-        "storageClass": "STANDARD", "etag": "CAE=", "id": "temporary_output", "projectNumber":
-        "586241054156", "timeCreated": "2017-02-17T18:05:35.301Z", "location": "US"}]}'}
-    headers:
-      Alt-Svc: ['quic=":443"; ma=2592000; v="36,35,34"']
-      Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
-      Content-Length: ['2854']
-      Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:11:16 GMT']
-      Expires: ['Thu, 23 Feb 2017 15:11:16 GMT']
-      Server: [UploadServer]
-      Vary: [Origin, X-Origin]
-      X-GUploader-UploadID: [AEnB2Uoq8rvaXNc5DQWrm1mj1ba3U-fYJeVDkEMiMlDgCzHVhEqnCNsOfR_tdM5td9PGKia8z0rp2gDLnqLqOJyiICXSHxjYxA]
-    status: {code: 200, message: OK}
-- request:
-    body: null
-    headers:
-      Accept: ['*/*']
-      Accept-Encoding: ['gzip, deflate']
-      Connection: [keep-alive]
-      Content-Length: ['0']
-      User-Agent: [python-requests/2.13.0]
-    method: POST
-    uri: https://www.googleapis.com/oauth2/v4/token?client_id=764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com&client_secret=d-FL95Q19q7MQmFpd7hHD0Ty&grant_type=refresh_token
-  response:
-    body: {string: '{"access_token": "xxx", "id_token": "xxx", "expires_in": 3600,
-        "token_type": "Bearer"}'}
-    headers:
-      Alt-Svc: ['quic=":443"; ma=2592000; v="35,34"']
-      Cache-Control: ['no-cache, no-store, max-age=0, must-revalidate']
-      Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:13:47 GMT']
-      Expires: ['Mon, 01 Jan 1990 00:00:00 GMT']
-      Pragma: [no-cache]
-      Server: [GSE]
-      Transfer-Encoding: [chunked]
-      Vary: [Origin, X-Origin]
-      X-Content-Type-Options: [nosniff]
-      X-Frame-Options: [SAMEORIGIN]
-      X-XSS-Protection: [1; mode=block]
-      content-length: ['1144']
-    status: {code: 200, message: OK}
-- request:
-    body: null
-    headers:
-      Accept: ['*/*']
-      Accept-Encoding: ['gzip, deflate']
-      Connection: [keep-alive]
-      User-Agent: [python-requests/2.13.0]
-    method: GET
-    uri: https://www.googleapis.com/storage/v1/b/?project=continuum-compute
-  response:
-    body: {string: '{"kind": "storage#buckets", "items": [{"storageClass": "STANDARD",
-        "kind": "storage#bucket", "name": "anaconda-data", "updated": "2016-08-18T17:18:21.788Z",
-        "metageneration": "1", "projectNumber": "586241054156", "id": "anaconda-data",
-        "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/anaconda-data",
-        "timeCreated": "2016-08-18T17:18:21.788Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "artifacts.continuum-compute.appspot.com",
-        "updated": "2016-05-17T18:29:22.774Z", "metageneration": "1", "projectNumber":
-        "586241054156", "id": "artifacts.continuum-compute.appspot.com", "etag": "CAE=",
-        "selfLink": "https://www.googleapis.com/storage/v1/b/artifacts.continuum-compute.appspot.com",
-        "timeCreated": "2016-05-17T18:29:22.774Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "blaze-data", "updated": "2015-09-06T15:55:01.051Z",
-        "metageneration": "2", "projectNumber": "586241054156", "id": "blaze-data",
-        "etag": "CAI=", "selfLink": "https://www.googleapis.com/storage/v1/b/blaze-data",
-        "timeCreated": "2015-09-06T04:08:21.262Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "dask_example_data", "updated":
-        "2017-02-15T18:07:45.948Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "dask_example_data", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/dask_example_data",
-        "timeCreated": "2017-02-15T18:07:45.948Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "gcsfs-testing", "updated":
-        "2017-02-17T21:55:56.343Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "gcsfs-testing", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testing",
-        "timeCreated": "2017-02-17T21:55:56.343Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "gcsfs-testingnew-bucket", "updated":
-        "2017-02-18T00:04:56.871Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "gcsfs-testingnew-bucket", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket",
-        "timeCreated": "2017-02-18T00:04:56.871Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "temporary_output", "updated":
-        "2017-02-17T18:05:35.301Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "temporary_output", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/temporary_output",
-        "timeCreated": "2017-02-17T18:05:35.301Z", "location": "US"}]}'}
+    body: {string: "{\n \"kind\": \"storage#buckets\",\n \"items\": [\n  {\n   \"kind\":
+        \"storage#bucket\",\n   \"id\": \"anaconda-data\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/anaconda-data\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"anaconda-data\",\n
+        \  \"timeCreated\": \"2016-08-18T17:18:21.788Z\",\n   \"updated\": \"2016-08-18T17:18:21.788Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"artifacts.continuum-compute.appspot.com\",\n   \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/artifacts.continuum-compute.appspot.com\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"artifacts.continuum-compute.appspot.com\",\n
+        \  \"timeCreated\": \"2016-05-17T18:29:22.774Z\",\n   \"updated\": \"2016-05-17T18:29:22.774Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"blaze-data\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/blaze-data\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"blaze-data\",\n   \"timeCreated\":
+        \"2015-09-06T04:08:21.262Z\",\n   \"updated\": \"2015-09-06T15:55:01.051Z\",\n
+        \  \"metageneration\": \"2\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAI=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"dask_example_data\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask_example_data\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"dask_example_data\",\n
+        \  \"timeCreated\": \"2017-02-15T18:07:45.948Z\",\n   \"updated\": \"2017-02-15T18:07:45.948Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcsfs-testing\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"gcsfs-testing\",\n
+        \  \"timeCreated\": \"2017-02-17T21:55:56.343Z\",\n   \"updated\": \"2017-02-17T21:55:56.343Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcsfs-testingnew-bucket\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"gcsfs-testingnew-bucket\",\n
+        \  \"timeCreated\": \"2017-02-18T00:04:56.871Z\",\n   \"updated\": \"2017-02-18T00:04:56.871Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"temporary_output\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/temporary_output\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"temporary_output\",\n
+        \  \"timeCreated\": \"2017-02-17T18:05:35.301Z\",\n   \"updated\": \"2017-02-17T18:05:35.301Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  }\n ]\n}\n"}
     headers:
       Alt-Svc: ['quic=":443"; ma=2592000; v="35,34"']
       Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
       Content-Length: ['2854']
       Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:13:47 GMT']
-      Expires: ['Thu, 23 Feb 2017 15:13:47 GMT']
+      Date: ['Thu, 23 Feb 2017 17:29:10 GMT']
+      Expires: ['Thu, 23 Feb 2017 17:29:10 GMT']
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
-      X-GUploader-UploadID: [AEnB2Uqiad2p18ZVhun_akbW9mRWP8s9m3U-LB8uPCisCP63MJ2U7osnWrUfzk8Oeg0TPAxgn-ZMnqTM-ur3d9GDLFf_suJogw]
-    status: {code: 200, message: OK}
-- request:
-    body: null
-    headers:
-      Accept: ['*/*']
-      Accept-Encoding: ['gzip, deflate']
-      Connection: [keep-alive]
-      Content-Length: ['0']
-      User-Agent: [python-requests/2.13.0]
-    method: POST
-    uri: https://www.googleapis.com/oauth2/v4/token?client_id=764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com&client_secret=d-FL95Q19q7MQmFpd7hHD0Ty&grant_type=refresh_token
-  response:
-    body: {string: '{"access_token": "xxx", "id_token": "xxx", "expires_in": 3600,
-        "token_type": "Bearer"}'}
-    headers:
-      Alt-Svc: ['quic=":443"; ma=2592000; v="35,34"']
-      Cache-Control: ['no-cache, no-store, max-age=0, must-revalidate']
-      Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:13:47 GMT']
-      Expires: ['Mon, 01 Jan 1990 00:00:00 GMT']
-      Pragma: [no-cache]
-      Server: [GSE]
-      Transfer-Encoding: [chunked]
-      Vary: [Origin, X-Origin]
-      X-Content-Type-Options: [nosniff]
-      X-Frame-Options: [SAMEORIGIN]
-      X-XSS-Protection: [1; mode=block]
-      content-length: ['1144']
-    status: {code: 200, message: OK}
-- request:
-    body: null
-    headers:
-      Accept: ['*/*']
-      Accept-Encoding: ['gzip, deflate']
-      Connection: [keep-alive]
-      User-Agent: [python-requests/2.13.0]
-    method: GET
-    uri: https://www.googleapis.com/storage/v1/b/?project=continuum-compute
-  response:
-    body: {string: '{"kind": "storage#buckets", "items": [{"storageClass": "STANDARD",
-        "kind": "storage#bucket", "name": "anaconda-data", "updated": "2016-08-18T17:18:21.788Z",
-        "metageneration": "1", "projectNumber": "586241054156", "id": "anaconda-data",
-        "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/anaconda-data",
-        "timeCreated": "2016-08-18T17:18:21.788Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "artifacts.continuum-compute.appspot.com",
-        "updated": "2016-05-17T18:29:22.774Z", "metageneration": "1", "projectNumber":
-        "586241054156", "id": "artifacts.continuum-compute.appspot.com", "etag": "CAE=",
-        "selfLink": "https://www.googleapis.com/storage/v1/b/artifacts.continuum-compute.appspot.com",
-        "timeCreated": "2016-05-17T18:29:22.774Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "blaze-data", "updated": "2015-09-06T15:55:01.051Z",
-        "metageneration": "2", "projectNumber": "586241054156", "id": "blaze-data",
-        "etag": "CAI=", "selfLink": "https://www.googleapis.com/storage/v1/b/blaze-data",
-        "timeCreated": "2015-09-06T04:08:21.262Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "dask_example_data", "updated":
-        "2017-02-15T18:07:45.948Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "dask_example_data", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/dask_example_data",
-        "timeCreated": "2017-02-15T18:07:45.948Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "gcsfs-testing", "updated":
-        "2017-02-17T21:55:56.343Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "gcsfs-testing", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testing",
-        "timeCreated": "2017-02-17T21:55:56.343Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "gcsfs-testingnew-bucket", "updated":
-        "2017-02-18T00:04:56.871Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "gcsfs-testingnew-bucket", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket",
-        "timeCreated": "2017-02-18T00:04:56.871Z", "location": "US"}, {"storageClass":
-        "STANDARD", "kind": "storage#bucket", "name": "temporary_output", "updated":
-        "2017-02-17T18:05:35.301Z", "metageneration": "1", "projectNumber": "586241054156",
-        "id": "temporary_output", "etag": "CAE=", "selfLink": "https://www.googleapis.com/storage/v1/b/temporary_output",
-        "timeCreated": "2017-02-17T18:05:35.301Z", "location": "US"}]}'}
-    headers:
-      Alt-Svc: ['quic=":443"; ma=2592000; v="35,34"']
-      Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
-      Content-Length: ['2854']
-      Content-Type: [application/json; charset=UTF-8]
-      Date: ['Thu, 23 Feb 2017 15:13:48 GMT']
-      Expires: ['Thu, 23 Feb 2017 15:13:48 GMT']
-      Server: [UploadServer]
-      Vary: [Origin, X-Origin]
-      X-GUploader-UploadID: [AEnB2UpCdo1rEsVJVoLQGplrFDPf6piJBq81buS4z7Y1OvwyBHukxyfK1cWN8w1KIbWWJ7riLSK-l9qqAGw9ZDSLiFbFChMRgw]
+      X-GUploader-UploadID: [AEnB2UpB5M58Xdl08SGWvak5fHPKAl7ecZ38ypiiAnvetHPO8fvrvj59rX5gupSElXxPUpGf-2IYH64qBQoAGyPKuL4XcqS0JQ]
     status: {code: 200, message: OK}
 version: 1

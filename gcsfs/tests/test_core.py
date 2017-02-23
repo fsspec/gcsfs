@@ -1,9 +1,10 @@
 
+import os
+import pytest
+
 from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
 from gcsfs.tests.utils import tempdir, token_restore, my_vcr, gcs
 from gcsfs.core import GCSFileSystem
-import os
-import pytest
 
 
 @my_vcr.use_cassette
