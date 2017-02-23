@@ -6,7 +6,7 @@ import os
 import pytest
 
 
-# @my_vcr.use_cassette
+@my_vcr.use_cassette
 def test_simple(token_restore):
     assert not GCSFileSystem.tokens
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
@@ -17,6 +17,7 @@ def test_simple(token_restore):
     assert gcs.ls('')
 
 
+@my_vcr.use_cassette
 def test_simple_upload(gcs):
     fn = TEST_BUCKET + '/test'
     with gcs.open(fn, 'wb') as f:
@@ -24,6 +25,7 @@ def test_simple_upload(gcs):
     assert gcs.cat(fn) == b'zz'
 
 
+@my_vcr.use_cassette
 def test_multi_upload(gcs):
     fn = TEST_BUCKET + '/test'
     d = b'01234567' * 2**15

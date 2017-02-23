@@ -1,14 +1,33 @@
 
-from gcsfs.core import GCSFileSystem
-from gcsfs.tests import settings
+import json
 import pytest
 import sys
 import vcr
 
+from gcsfs.core import GCSFileSystem
+from gcsfs.tests.settings import (TEST_BUCKET, TEST_PROJECT, RECORD_MODE,
+                                  GOOGLE_TOKEN)
+
+
+def before_record_response(response):
+    try:
+        data = json.loads(response['body']['string'].decode())
+        if 'access_token' in data:
+            data['access_token'] = 'xxx'
+        if 'id_token' in data:
+            data['id_token'] = 'xxx'
+        response['body']['string'] = json.dumps(data).encode()
+    except:
+        pass
+    return response
+
 my_vcr = vcr.VCR(
-    record_mode=settings.RECORD_MODE,
+    record_mode=RECORD_MODE,
     path_transformer=vcr.VCR.ensure_suffix('.yaml'),
     filter_headers=['Authorization'],
+    filter_query_parameters=['refresh_token', 'upload_id'],
+    decode_compressed_response=True,
+    before_record_response=before_record_response
     )
 files = {'test/accounts.1.json':  (b'{"amount": 100, "name": "Alice"}\n'
                                    b'{"amount": 200, "name": "Bob"}\n'
@@ -32,10 +51,10 @@ text_files = {'nested/file1': b'hello\n',
               'nested/file2': b'world',
               'nested/nested2/file1': b'hello\n',
               'nested/nested2/file2': b'world'}
-a = test_bucket_name+'/tmp/test/a'
-b = test_bucket_name+'/tmp/test/b'
-c = test_bucket_name+'/tmp/test/c'
-d = test_bucket_name+'/tmp/test/d'
+a = TEST_BUCKET+'/tmp/test/a'
+b = TEST_BUCKET+'/tmp/test/b'
+c = TEST_BUCKET+'/tmp/test/c'
+d = TEST_BUCKET+'/tmp/test/d'
 
 
 @pytest.yield_fixture()
@@ -59,20 +78,21 @@ def token_restore():
 
 @pytest.yield_fixture
 def gcs(token_restore):
-    gcs = GCSFileSystem(settings.TEST_PROJECT, token=settings.GOOGLE_TOKEN)
+    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
     try:
-        if not gcs.exists(settings.TEST_BUCKET):
-            gcs.mkdir(settings.TEST_BUCKET)
+        if not gcs.exists(TEST_BUCKET):
+            gcs.mkdir(TEST_BUCKET)
         for k in [a, b, c, d]:
             try:
-                client.delete_object(Bucket=test_bucket_name, Key=k)
+                gcs.rm(k)
             except:
                 pass
         for flist in [files, csv_files, text_files]:
-            for f, data in flist.items():
-                client.put_object(Bucket=test_bucket_name, Key=f, Body=data)
+            for fname, data in flist.items():
+                with gcs.open(TEST_BUCKET+'/'+fname, 'wb') as f:
+                    f.write(data)
         yield gcs
     finally:
-        gcs.ls(settings.TEST_BUCKET)
-        [gcs.rm(f) for f in gcs.ls(settings.TEST_BUCKET)]
+        gcs.ls(TEST_BUCKET)
+        [gcs.rm(f) for f in gcs.ls(TEST_BUCKET)]
         # gcs.rmdir(settings.TEST_BUCKET)

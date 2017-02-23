@@ -35,7 +35,7 @@ ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
         "private", "projectprivate", "publicread"}
 bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
-DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', None)
+DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
 
 def split_path(path):
     """
@@ -406,7 +406,7 @@ class GCSFileSystem(object):
 
     def rm(self, path):
         bucket, path = split_path(path)
-        self._call('delete', "b/{}/o/{}", bucket, quote_plus(path))
+        self._call('delete', "b/{}/o/{}", bucket, path)
         self.invalidate_cache(bucket)
 
     def open(self, path, mode='rb', block_size=5 * 2 ** 20, acl=None):
