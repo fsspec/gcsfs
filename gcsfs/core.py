@@ -300,19 +300,53 @@ class GCSFileSystem(object):
 
     def ls(self, path, detail=False):
         if path in ['', '/']:
-            files = self._list_buckets()
+            out = self._list_buckets()
         else:
             bucket, prefix = split_path(path)
             path = '/'.join([bucket, prefix])
             files = self._list_bucket(bucket)
-            files = [f for f in files if f['name'].startswith(path)]
+            seek, l, bit = (path, len(path), '') if path.endswith('/') else (
+                path+'/', len(path)+1, '/')
+            out = []
+            for f in files:
+                if (f['name'].startswith(seek) and '/' not in f['name'][l:] or
+                        f['name'] == path):
+                    out.append(f)
+                elif f['name'].startswith(seek) and '/' in f['name'][l:]:
+                    directory = {
+                        'bucket': bucket, 'kind': 'storage#object',
+                        'size': 0, 'storageClass': 'DIRECTORY',
+                        'name': path+bit+f['name'][l:].split('/', 1)[0]+'/'}
+                    if directory not in out:
+                        out.append(directory)
+        if detail:
+            return out
+        else:
+            return [f['name'] for f in out]
+
+    def walk(self, path, detail=False):
+        bucket, prefix = split_path(path)
+        path = '/'.join([bucket, prefix])
+        files = self._list_bucket(bucket)
+        if path.endswith('/'):
+            files = [f for f in files if f['name'].startswith(path) or
+                     f['name'] == path]
+        else:
+            files = [f for f in files if f['name'].startswith(path+'/') or
+                     f['name'] == path]
         if detail:
             return files
         else:
             return [f['name'] for f in files]
 
-    def walk(self, path):
-        return self.ls(path)
+    def du(self, path, total=False, deep=False):
+        if deep:
+            files = self.walk(path, True)
+        else:
+            files = [f for f in self.ls(path, True)]
+        if total:
+            return sum(f['size'] for f in files)
+        return {f['name']: f['size'] for f in files}
 
     def glob(self, path):
         """
@@ -320,7 +354,6 @@ class GCSFileSystem(object):
 
         Note that the bucket part of the path must not contain a "*"
         """
-        path0 = path
         path = path.rstrip('/')
         bucket, key = split_path(path)
         path = '/'.join([bucket, key])
@@ -332,7 +365,7 @@ class GCSFileSystem(object):
             ind = path[:path.index('*')].rindex('/')
             root = path[:ind + 1]
         else:
-            root = '/'
+            root = ''
         allfiles = self.walk(root)
         pattern = re.compile("^" + path.replace('//', '/')
                              .rstrip('/')
@@ -340,8 +373,6 @@ class GCSFileSystem(object):
                              .replace('?', '.') + "$")
         out = [f for f in allfiles if re.match(pattern,
                f.replace('//', '/').rstrip('/'))]
-        if not out:
-            out = self.ls(path0)
         return out
 
     def exists(self, path):
@@ -355,7 +386,6 @@ class GCSFileSystem(object):
             return False
 
     def info(self, path):
-        # also have direct info call available
         path = '/'.join(split_path(path))
         files = self.ls(path, True)
         out = [f for f in files if f['name'] == path]

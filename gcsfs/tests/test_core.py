@@ -99,3 +99,54 @@ def test_rm(token_restore):
             gcs.rm(TEST_BUCKET+'/nonexistent')
         with pytest.raises((OSError, IOError)):
             gcs.rm('nonexistent')
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_file_access(token_restore):
+    with gcs_maker() as gcs:
+        fn = TEST_BUCKET+'/nested/file1'
+        data = b'hello\n'
+        with gcs.open(fn, 'wb') as f:
+            f.write(data)
+        assert gcs.cat(fn) == data
+        assert gcs.head(fn, 3) == data[:3]
+        assert gcs.tail(fn, 3) == data[-3:]
+        assert gcs.tail(fn, 10000) == data
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_file_info(token_restore):
+    with gcs_maker() as gcs:
+        fn = TEST_BUCKET+'/nested/file1'
+        data = b'hello\n'
+        with gcs.open(fn, 'wb') as f:
+            f.write(data)
+        assert fn in gcs.walk(TEST_BUCKET)
+        assert gcs.exists(fn)
+        assert not gcs.exists(fn+'another')
+        assert gcs.info(fn)['size'] == len(data)
+        with pytest.raises((OSError, IOError)):
+            gcs.info(fn+'another')
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_du(token_restore):
+    with gcs_maker(True) as gcs:
+        d = gcs.du(TEST_BUCKET, deep=True)
+        assert all(isinstance(v, int) and v >= 0 for v in d.values())
+        assert TEST_BUCKET+'/nested/file1' in d
+
+        assert gcs.du(TEST_BUCKET + '/test/', total=True) == sum(
+                map(len, files.values()))
+        assert gcs.du(TEST_BUCKET) == gcs.du('gcs://'+TEST_BUCKET)
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_ls(token_restore):
+    with gcs_maker(True) as gcs:
+        fn = TEST_BUCKET+'/nested/file1'
+        assert fn not in gcs.ls(TEST_BUCKET+'/')
+        assert fn in gcs.ls(TEST_BUCKET+'/nested/')
+        assert fn in gcs.ls(TEST_BUCKET+'/nested')
+        assert gcs.ls('gcs://'+TEST_BUCKET+'/nested/') == gcs.ls(
+                TEST_BUCKET+'/nested')

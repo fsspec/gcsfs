@@ -127,6 +127,5 @@ def gcs_maker(populate=False):
                         f.write(data)
         yield gcs
     finally:
-        gcs.ls(TEST_BUCKET)
-        [gcs.rm(f) for f in gcs.ls(TEST_BUCKET)]
+        [gcs.rm(f) for f in gcs.walk(TEST_BUCKET)]
         # gcs.rmdir(settings.TEST_BUCKET)
