@@ -77,6 +77,27 @@ def split_path(path):
         return path.split('/', 1)
 
 
+def validate_response(r, path):
+    """
+    Check the requests object r, raise error if it's not ok.
+
+    Parameters
+    ----------
+    r: requests response object
+    path: associated URL path, for error messages
+    """
+    if not r.ok:
+        msg = str(r.content)
+        if "Not Found" in msg:
+            raise FileNotFoundError(path)
+        elif "forbidden" in msg:
+            raise IOError("Forbidden: %s" % path)
+        elif "invalid" in msg:
+            raise ValueError("Bad Request: %s" % path)
+        else:
+            raise RuntimeError(msg)
+
+
 class GCSFileSystem(object):
     """
     Connect to Google Cloud Storage.
@@ -247,11 +268,7 @@ class GCSFileSystem(object):
             out = r.json()
         except JSONDecodeError:
             out = r.content
-        if not r.ok:
-            if "Not Found" in str(out):
-                raise FileNotFoundError(path)
-            else:
-                raise RuntimeError(str(out))
+        validate_response(r, path)
         return out
 
     def _list_buckets(self):
@@ -342,6 +359,8 @@ class GCSFileSystem(object):
 
     def walk(self, path, detail=False):
         bucket, prefix = split_path(path)
+        if not bucket:
+            raise ValueError('Cannot walk all of GCS')
         path = '/'.join([bucket, prefix])
         files = self._list_bucket(bucket)
         if path.endswith('/'):
@@ -410,18 +429,31 @@ class GCSFileSystem(object):
         else:
             raise FileNotFoundError(path)
 
+    def url(self, path):
+        return self.info(path)['mediaLink']
+
     def cat(self, path):
         """ Simple one-shot get of file data """
         details = self.info(path)
         return _fetch_range(self.header, details)
 
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
-        with self.open(rpath, 'rb', block_size=0), open(lpath, 'wb') as f1, f2:
-            while True:
-                d = f1.read(blocksize)
-                if not d:
-                    break
-                f2.write(d)
+        with self.open(rpath, 'rb', block_size=blocksize) as f1:
+            with open(lpath, 'wb') as f2:
+                while True:
+                    d = f1.read(blocksize)
+                    if not d:
+                        break
+                    f2.write(d)
+
+    def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None):
+        with self.open(rpath, 'wb', block_size=blocksize, acl=acl) as f1:
+            with open(lpath, 'rb') as f2:
+                while True:
+                    d = f2.read(blocksize)
+                    if not d:
+                        break
+                    f1.write(d)
 
     def head(self, path, size=1024):
         with self.open(path, 'rb') as f:
@@ -449,6 +481,10 @@ class GCSFileSystem(object):
         b2, k2 = split_path(path2)
         self._call('post', 'b/{}/o/{}/copyTo/b/{}/o/{}', b1, k1, b2, k2,
                    destinationPredefinedAcl=acl)
+
+    def mv(self, path1, path2, acl=None):
+        self.copy(path1, path2, acl)
+        self.rm(path1)
 
     def rm(self, path):
         bucket, path = split_path(path)
@@ -519,8 +555,6 @@ class GCSFile:
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
-        if mode not in {'rb', 'wb'}:
-            raise ValueError('File mode not supported')
         self.mode = mode
         self.blocksize = block_size
         self.cache = b""
@@ -530,10 +564,15 @@ class GCSFile:
         self.start = None
         self.closed = False
         self.trim = True
+        if mode not in {'rb', 'wb'}:
+            raise NotImplementedError('File mode not supported')
         if mode == 'rb':
             self.details = gcsfs.info(path)
             self.size = self.details['size']
         else:
+            if block_size < 2**18:
+                warnings.warn('Setting block size to minimum value, 2**18')
+                self.blocksize = 2**18
             self.buffer = io.BytesIO()
             self.offset = 0
             self.forced = False
@@ -541,6 +580,9 @@ class GCSFile:
     def info(self):
         """ File information about this path """
         return self.details
+
+    def url(self):
+        return self.details['mediaLink']
 
     def tell(self):
         """ Current file location """
@@ -678,8 +720,7 @@ class GCSFile:
                      'Content-Length': str(l)})
         r = requests.post(self.location, params={'uploadType': 'resumable'},
                           headers=head, data=data)
-        if not r.ok:
-            raise RuntimeError(r.text)
+        validate_response(r, self.location)
         if 'Range' in r.headers:
             shortfall = (self.offset + l - 1) - int(
                     r.headers['Range'].split('-')[1])
@@ -707,12 +748,12 @@ class GCSFile:
         head = self.gcsfs.header.copy()
         self.buffer.seek(0)
         data = self.buffer.read()
-        r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
-                          % quote_plus(self.bucket),
+        path = ('https://www.googleapis.com/upload/storage/v1/b/%s/o'
+                % quote_plus(self.bucket))
+        r = requests.post(path,
                           params={'uploadType': 'media', 'name': self.key},
                           headers=head, data=data)
-        if not r.ok:
-            raise RuntimeError(r.text)
+        validate_response(r, path)
 
     def _fetch(self, start, end):
         if self.start is None and self.end is None:
@@ -815,6 +856,8 @@ def _fetch_range(head, obj_dict, start=None, end=None):
         head['Range'] = 'bytes=%i-%i' % (start, end - 1)
     back = requests.get(obj_dict['mediaLink'], headers=head)
     data = back.content
+    if data == b'Request range not satisfiable':
+        return b''
     return data
 
 
