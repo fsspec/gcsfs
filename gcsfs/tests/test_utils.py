@@ -1,4 +1,5 @@
-from gcsfs.utils import read_block, seek_delimiter, tmpfile
+from gcsfs.utils import read_block, seek_delimiter
+from gcsfs.tests.utils import tmpfile
 import io
 import os
 

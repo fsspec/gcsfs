@@ -3,6 +3,7 @@ import gzip
 import json
 import os
 import pytest
+import pickle
 import sys
 import tempfile
 import vcr
@@ -13,22 +14,29 @@ from gcsfs.tests.settings import (TEST_BUCKET, TEST_PROJECT, RECORD_MODE,
 
 
 def before_record_response(response):
+    r = pickle.loads(pickle.dumps(response))
     try:
-        data = json.loads(gzip.uncompress(response['body']['string']).decode())
-        if 'access_token' in data:
-            data['access_token'] = 'xxx'
-        if 'id_token' in data:
-            data['id_token'] = 'xxx'
-        response['body']['string'] = gzip.compress(
-                json.dumps(data).replace(TEST_PROJECT, 'test_project').encode())
-    except:
+        try:
+            data = json.loads(gzip.decompress(r['body']['string']).decode())
+            if 'access_token' in data:
+                data['access_token'] = 'xxx'
+            if 'id_token' in data:
+                data['id_token'] = 'xxx'
+            r['body']['string'] = gzip.compress(
+                    json.dumps(data).replace(
+                            TEST_PROJECT, 'test_project').encode())
+        except (OSError, TypeError, ValueError):
+            r['body']['string'] = r['body']['string'].replace(
+                    TEST_PROJECT.encode(), b'test_project')
+    except Exception:
         pass
-    return response
+    return r
 
 
 def before_record(request):
-    request.uri = request.uri.replace(TEST_PROJECT, 'test_project')
-    return request
+    r = pickle.loads(pickle.dumps(request))
+    r.uri = request.uri.replace(TEST_PROJECT, 'test_project')
+    return r
 
 
 def matcher(r1, r2):
@@ -133,7 +141,7 @@ def token_restore():
         yield
     finally:
         GCSFileSystem.tokens = cache
-        GCSFileSystem._save_tokens(GCSFileSystem)
+        GCSFileSystem._save_tokens()
 
 
 @contextmanager

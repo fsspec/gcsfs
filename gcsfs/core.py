@@ -4,9 +4,9 @@ Google Cloud Storage pythonic interface
 """
 from __future__ import print_function
 
+import array
 import io
 import json
-from json.decoder import JSONDecodeError
 import logging
 import oauth2client.client   # version 1.5.2
 import os
@@ -32,6 +32,10 @@ ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
 bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
+DEBUG = False
+
+if PY2:
+    FileNotFoundError = IOError
 
 
 def quote_plus(s):
@@ -88,6 +92,13 @@ def validate_response(r, path):
     """
     if not r.ok:
         msg = str(r.content)
+
+        if DEBUG:
+            print(r.url, r.headers, sep='\n')
+            import logging
+            logging.basicConfig()
+            vcr_log = logging.getLogger("vcr")
+            vcr_log.setLevel(logging.DEBUG)
         if "Not Found" in msg:
             raise FileNotFoundError(path)
         elif "forbidden" in msg:
@@ -201,11 +212,11 @@ class GCSFileSystem(object):
         else:
             # no credentials - try to ask google in the browser
             scope = "https://www.googleapis.com/auth/devstorage." + access
-            r = requests.post('https://accounts.google.com/o/oauth2/device/code',
+            path = 'https://accounts.google.com/o/oauth2/device/code'
+            r = requests.post(path,
                               params={'client_id': not_secret['client_id'],
                                       'scope': scope})
-            if r.status_code != 200:
-                raise RuntimeError
+            validate_response(r, path)
             data = json.loads(r.content.decode())
             print('Enter the following code when prompted in the browser:')
             print(data['user_code'])
@@ -231,14 +242,14 @@ class GCSFileSystem(object):
             data.update(not_secret)
         if refresh or time.time() - data['timestamp'] > data['expires_in'] - 100:
             # token has expired, or is about to - call refresh
+            path = "https://www.googleapis.com/oauth2/v4/token"
             r = requests.post(
-                    "https://www.googleapis.com/oauth2/v4/token",
+                    path,
                     params={'client_id': data['client_id'],
                             'client_secret': data['client_secret'],
                             'refresh_token': data['refresh_token'],
                             'grant_type': "refresh_token"})
-            if r.status_code != 200:
-                raise RuntimeError
+            validate_response(r, path)
             data['timestamp'] = time.time()
             data['access_token'] = json.loads(r.content.decode())['access_token']
 
@@ -246,7 +257,8 @@ class GCSFileSystem(object):
         self.header = {'Authorization': 'Bearer ' + data['access_token']}
         self._save_tokens()
 
-    def _save_tokens(self):
+    @staticmethod
+    def _save_tokens():
         try:
             with open(tfile, 'wb') as f:
                 pickle.dump(self.tokens, f, 2)
@@ -266,7 +278,7 @@ class GCSFileSystem(object):
                  json=json)
         try:
             out = r.json()
-        except JSONDecodeError:
+        except ValueError:
             out = r.content
         validate_response(r, path)
         return out
@@ -311,7 +323,7 @@ class GCSFileSystem(object):
         """Delete an empty bucket"""
         self._call('delete', 'b/' + bucket)
         if '' in self.dirs:
-            for v in self.dirs[''].copy():
+            for v in self.dirs[''][:]:
                 if v['name'] == bucket:
                     self.dirs[''].remove(v)
         self.invalidate_cache(bucket)

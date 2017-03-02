@@ -186,8 +186,9 @@ def test_read_keys_from_bucket(token_restore):
             file_contents = gcs.cat('/'.join([TEST_BUCKET, k]))
             assert file_contents == data
 
-        assert (gcs.cat('/'.join([TEST_BUCKET, k])) ==
-                gcs.cat('gcs://' + '/'.join([TEST_BUCKET, k])))
+        assert all(gcs.cat('/'.join([TEST_BUCKET, k])) ==
+                   gcs.cat('gcs://' + '/'.join([TEST_BUCKET, k]))
+                   for k in files)
 
 
 @my_vcr.use_cassette(match=['all'])

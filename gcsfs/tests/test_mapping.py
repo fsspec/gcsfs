@@ -2,7 +2,7 @@ import pytest
 from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
 from gcsfs.tests.utils import (tempdir, token_restore, my_vcr, gcs_maker,
                                files, csv_files, text_files, a, b, c, d)
-from gcsfs import GCSMap, GCSFileSystem
+from gcsfs import GCSMap, GCSFileSystem, core
 
 root = TEST_BUCKET+'/mapping'
 
