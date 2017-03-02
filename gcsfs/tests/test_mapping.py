@@ -7,7 +7,7 @@ from gcsfs import GCSMap, GCSFileSystem
 root = TEST_BUCKET+'/mapping'
 
 @my_vcr.use_cassette(match=['all'])
-def test_simple(token_restore):
+def test_map_simple(token_restore):
     with gcs_maker() as gcs:
         d = GCSMap(root, gcs)
         assert not d
@@ -19,14 +19,14 @@ def test_simple(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_default_gcsfilesystem(token_restore):
+def test_map_default_gcsfilesystem(token_restore):
     with gcs_maker() as gcs:
         d = GCSMap(root)
         assert d.gcs is gcs
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_errors(token_restore):
+def test_map_errors(token_restore):
     with gcs_maker() as gcs:
         d = GCSMap(root, gcs)
         with pytest.raises(KeyError):
@@ -38,7 +38,7 @@ def test_errors(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_with_data(token_restore):
+def test_map_with_data(token_restore):
     with gcs_maker() as gcs:
         d = GCSMap(root, gcs)
         d['x'] = b'123'
@@ -61,7 +61,7 @@ def test_with_data(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_complex_keys(token_restore):
+def test_map_complex_keys(token_restore):
     with gcs_maker() as gcs:
         d = GCSMap(root, gcs)
         d[1] = b'hello'
@@ -79,7 +79,7 @@ def test_complex_keys(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_clear_empty(token_restore):
+def test_map_clear_empty(token_restore):
     with gcs_maker() as gcs:
         d = GCSMap(root, gcs)
         d.clear()
@@ -91,10 +91,11 @@ def test_clear_empty(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_pickle(token_restore):
+def test_map_pickle(token_restore):
     with gcs_maker() as gcs:
         d = GCSMap(root, gcs)
         d['x'] = b'1'
+        assert d['x'] == b'1'
 
         import pickle
         d2 = pickle.loads(pickle.dumps(d))
@@ -103,7 +104,7 @@ def test_pickle(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_array(token_restore):
+def test_map_array(token_restore):
     with gcs_maker() as gcs:
         from array import array
         d = GCSMap(root, gcs)
@@ -113,7 +114,7 @@ def test_array(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_bytearray(token_restore):
+def test_map_bytearray(token_restore):
     with gcs_maker() as gcs:
         from array import array
         d = GCSMap(root, gcs)
