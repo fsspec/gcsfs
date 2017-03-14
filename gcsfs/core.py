@@ -59,16 +59,16 @@ def quote_plus(s):
 
 def split_path(path):
     """
-    Normalise S3 path string into bucket and key.
+    Normalise GCS path string into bucket and key.
 
     Parameters
     ----------
     path : string
-        Input path, like `s3://mybucket/path/to/file`
+        Input path, like `gcs://mybucket/path/to/file`
 
     Examples
     --------
-    >>> split_path("s3://mybucket/path/to/file")
+    >>> split_path("gcs://mybucket/path/to/file")
     ['mybucket', 'path/to/file']
     """
     if path.startswith('gcs://'):
@@ -159,9 +159,9 @@ class GCSFileSystem(object):
 
     @classmethod
     def current(cls):
-        """ Return the most recently created S3FileSystem
+        """ Return the most recently created GCSFileSystem
 
-        If no S3FileSystem has been created, then create one
+        If no GCSFileSystem has been created, then create one
         """
         if not cls._singleton[0]:
             return GCSFileSystem()
@@ -263,9 +263,9 @@ class GCSFileSystem(object):
     def _save_tokens():
         try:
             with open(tfile, 'wb') as f:
-                pickle.dump(self.tokens, f, 2)
-        except Exception:
-            pass
+                pickle.dump(GCSFileSystem.tokens, f, 2)
+        except Exception as e:
+            warnings.warn('Saving token cache failed: ' + str(e))
 
     def _call(self, method, path, *args, **kwargs):
         for k, v in list(kwargs.items()):
@@ -526,7 +526,7 @@ class GCSFileSystem(object):
         Parameters
         ----------
         fn: string
-            Path to filename on S3
+            Path to filename on GCS
         offset: int
             Byte offset to start read
         length: int
@@ -676,7 +676,8 @@ class GCSFile:
         """
         Write data to buffer.
 
-        Buffer only sent to S3 on flush() or if buffer is greater than or equal to blocksize.
+        Buffer only sent to GCS on flush() or if buffer is greater than
+        or equal to blocksize.
 
         Parameters
         ----------
@@ -695,7 +696,7 @@ class GCSFile:
 
     def flush(self, force=False):
         """
-        Write buffered data to S3.
+        Write buffered data to GCS.
 
         Uploads the current buffer, if it is larger than the block-size, or if
         the file is being closed.
