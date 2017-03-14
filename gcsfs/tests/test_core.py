@@ -75,8 +75,11 @@ def test_pickle(token_restore):
     with gcs_maker() as gcs:
         import pickle
         gcs2 = pickle.loads(pickle.dumps(gcs))
+
+        # *values* may be equal during tests
+        assert gcs.header is not gcs2.header
         gcs.touch(a)
-        assert gcs.ls(TEST_BUCKET) == gcs.ls(TEST_BUCKET)
+        assert gcs.ls(TEST_BUCKET) == gcs2.ls(TEST_BUCKET)
 
 
 @my_vcr.use_cassette(match=['all'])
