@@ -150,10 +150,7 @@ class GCSFileSystem(object):
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
             warnings.warn('GCS project not set - cannot list or create buckets')
-        if token is not None:
-            if 'type' in token or isinstance(token, str):
-                token = self._parse_gtoken(token)
-            self.tokens[(project, access)] = token
+        self.input_token = token
         self.project = project
         self.access = access
         self.dirs = {}
@@ -205,7 +202,12 @@ class GCSFileSystem(object):
         refresh: bool (False)
             Force refresh, even if the token is expired.
         """
+        token = self.input_token
         project, access = self.project, self.access
+        if token is not None:
+            if 'type' in token or isinstance(token, str):
+                token = self._parse_gtoken(token)
+            self.tokens[(project, access)] = token
         if (project, access) in self.tokens:
             # cached credentials
             data = self.tokens[(project, access)]
@@ -555,6 +557,17 @@ class GCSFileSystem(object):
                 length = size - offset
             bytes = read_block(f, offset, length, delimiter)
         return bytes
+
+    def __getstate__(self):
+        d = self.__dict__.copy()
+        del d['header']
+        logger.debug("Serialize with state: %s", d)
+        return d
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.connect()
+
 
 GCSFileSystem.load_tokens()
 
