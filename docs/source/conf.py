@@ -54,7 +54,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = 'GCSFs'
-copyright = '2016, Continuum Analytics'
+copyright = '2017, Continuum Analytics'
 author = 'Continuum Analytics'
 
 # The version info for the project you're documenting, acts as replacement for
