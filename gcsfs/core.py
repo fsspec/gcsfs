@@ -57,6 +57,7 @@ def quote_plus(s):
     s = s.replace(' ', '%20')
     return s
 
+
 def split_path(path):
     """
     Normalise GCS path string into bucket and key.
@@ -317,6 +318,7 @@ class GCSFileSystem(object):
             default ACL for objects created in this bucket
         """
         self._call('post', 'b/', predefinedAcl=acl, project=self.project,
+                   predefinedDefaultObjectAcl=default_acl,
                    json={"name": bucket})
         self.invalidate_cache(bucket)
         self.invalidate_cache('')
@@ -648,7 +650,7 @@ class GCSFile:
         self._fetch(self.loc, self.loc + 1)
         while True:
             found = self.cache[self.loc - self.start:].find(b'\n') + 1
-            if length > 0 and found > length:
+            if 0 < length < found:
                 return self.read(length)
             if found:
                 return self.read(found)
@@ -877,7 +879,7 @@ def _fetch_range(head, obj_dict, start=None, end=None):
     logger.debug("Fetch: {}/{}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
-        end = end or -0
+        end = end or 0
         head = head.copy()
         head['Range'] = 'bytes=%i-%i' % (start, end - 1)
     back = requests.get(obj_dict['mediaLink'], headers=head)
@@ -898,7 +900,8 @@ def put_object(credentials, bucket, name, data):
     out = requests.post('https://www.googleapis.com/upload/storage/'
                         'v1/b/%s/o?uploadType=media&name=%s' % (
                             quote_plus(bucket), quote_plus(name)),
-                        headers={'Authorization': 'Bearer '+credentials.access_token,
+                        headers={'Authorization': 'Bearer ' +
+                                                  credentials.access_token,
                                  'Content-Type': 'application/octet-stream',
                                  'Content-Length': len(data)}, data=data)
     assert out.status_code == 200
