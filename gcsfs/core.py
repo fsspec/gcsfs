@@ -786,8 +786,8 @@ class GCSFile:
 
     def _fetch(self, start, end):
         # force read to 5MB boundaries
-        start = (start // 5 * 2**20) * 5 * 2**20
-        end = (end // 5 * 2 ** 20 + 1) * 5 * 2 ** 20
+        start = start // (5 * 2**20) * 5 * 2**20
+        end = (end // (5 * 2 ** 20) + 1) * 5 * 2 ** 20
         if self.start is None and self.end is None:
             # First read
             self.start = start
