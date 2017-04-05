@@ -293,13 +293,13 @@ class GCSFileSystem(object):
             self.dirs[''] = dirs
         return self.dirs['']
 
-    def _list_bucket(self, bucket):
+    def _list_bucket(self, bucket, max_results=1000):
         if bucket not in self.dirs:
-            out = self._call('get', 'b/{}/o/', bucket)
+            out = self._call('get', 'b/{}/o/', bucket, maxResults=max_results)
             dirs = out.get('items', [])
             next_page_token = out.get('nextPageToken', None)
             while next_page_token is not None:
-                out = self._call('get', 'b/{}/o/', bucket, pageToken=next_page_token)
+                out = self._call('get', 'b/{}/o/', bucket, maxResults=max_results, pageToken=next_page_token)
                 dirs.extend(out.get('items', []))
                 next_page_token = out.get('nextPageToken', None)
             for f in dirs:
