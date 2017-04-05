@@ -116,6 +116,7 @@ Contents
 
 .. toctree::
    api
+   developer
    :maxdepth: 2
 
 
