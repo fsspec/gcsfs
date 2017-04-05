@@ -297,6 +297,11 @@ class GCSFileSystem(object):
         if bucket not in self.dirs:
             out = self._call('get', 'b/{}/o/', bucket)
             dirs = out.get('items', [])
+            next_page_token = out.get('nextPageToken', None)
+            while next_page_token is not None:
+                out = self._call('get', 'b/{}/o/', bucket, pageToken=next_page_token)
+                dirs.extend(out.get('items', []))
+                next_page_token = out.get('nextPageToken', None)
             for f in dirs:
                 f['name'] = '%s/%s' % (bucket, f['name'])
                 f['size'] = int(f.get('size'), 0)
