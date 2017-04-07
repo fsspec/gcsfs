@@ -69,6 +69,14 @@ def test_ls2(token_restore):
         gcs.touch(fn)
         assert fn in gcs.ls(TEST_BUCKET+'/test')
 
+@my_vcr.use_cassette(match=['all'])
+def test_list_bucket_multipage(token_restore):
+    with gcs_maker() as gcs:
+        gcs.touch(a)
+        gcs.touch(b)
+        gcs.touch(c)
+        dirs=gcs._list_bucket(TEST_BUCKET, max_results=2)
+        assert len(dirs) == 3
 
 @my_vcr.use_cassette(match=['all'])
 def test_pickle(token_restore):
