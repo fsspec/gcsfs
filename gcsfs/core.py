@@ -96,10 +96,6 @@ def validate_response(r, path):
 
         if DEBUG:
             print(r.url, r.headers, sep='\n')
-            import logging
-            logging.basicConfig()
-            vcr_log = logging.getLogger("vcr")
-            vcr_log.setLevel(logging.DEBUG)
         if "Not Found" in msg:
             raise FileNotFoundError(path)
         elif "forbidden" in msg:
@@ -144,14 +140,17 @@ class GCSFileSystem(object):
     retries = 10
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
+    default_block_size = 5 * 2**20
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
-                 token=None):
+                 token=None, block_size=None):
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
             warnings.warn('GCS project not set - cannot list or create buckets')
         self.input_token = token
+        if block_size is not None:
+            self.default_block_size = block_size
         self.project = project
         self.access = access
         self.dirs = {}
@@ -170,11 +169,11 @@ class GCSFileSystem(object):
             return cls._singleton[0]
 
     @staticmethod
-    def _parse_gtoken(t):
-        if isinstance(t, str):
-            t = json.load(open(t))
+    def _parse_gtoken(gt):
+        if isinstance(gt, str):
+            t = json.load(open(gt))
         else:
-            t = t.copy()
+            t = gt.copy()
         typ = t.pop('type')
         if typ != "authorized_user":
             raise ValueError("Only 'authorized_user' tokens accepted, got: %s"
@@ -512,7 +511,9 @@ class GCSFileSystem(object):
         self._call('delete', "b/{}/o/{}", bucket, path)
         self.invalidate_cache(bucket)
 
-    def open(self, path, mode='rb', block_size=5 * 2 ** 20, acl=None):
+    def open(self, path, mode='rb', block_size=None, acl=None):
+        if block_size is None:
+            block_size = self.default_block_size
         return GCSFile(self, path, mode, block_size)
 
     def touch(self, path):
@@ -789,6 +790,9 @@ class GCSFile:
         validate_response(r, path)
 
     def _fetch(self, start, end):
+        # force read to 5MB boundaries
+        start = start // (5 * 2**20) * 5 * 2**20
+        end = (end // (5 * 2 ** 20) + 1) * 5 * 2 ** 20
         if self.start is None and self.end is None:
             # First read
             self.start = start
@@ -881,6 +885,8 @@ def _fetch_range(head, obj_dict, start=None, end=None):
     start, end : None or integers
         if not both None, fetch only given range
     """
+    if DEBUG:
+        print('Fetch: ', start, end)
     logger.debug("Fetch: {}/{}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
