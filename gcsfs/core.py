@@ -208,7 +208,8 @@ class GCSFileSystem(object):
         token = self.input_token
         project, access = self.project, self.access
         if token is not None:
-            if 'type' in token or isinstance(token, str):
+            if ('type' in token or isinstance(token, str)
+                    and str(token) != 'cloud'):
                 token = self._parse_gtoken(token)
             self.tokens[(project, access)] = token
         if (project, access) in self.tokens:
