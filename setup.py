@@ -6,7 +6,7 @@ from setuptools import setup
 setup(name='gcsfs',
       version='0.0.1',
       description='Convenient Filesystem interface over GCS',
-      url='https://github.com/martindurant/gcsfs',
+      url='https://github.com/dask/gcsfs',
       maintainer='Martin Durant',
       maintainer_email='mdurant@continuum.io',
       license='BSD',
