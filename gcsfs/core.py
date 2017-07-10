@@ -92,6 +92,7 @@ def validate_response(r, path):
     path: associated URL path, for error messages
     """
     if not r.ok:
+        m = str(r.content)
         try:
             msg = r.json()['error']['message']
         except:
@@ -99,14 +100,14 @@ def validate_response(r, path):
 
         if DEBUG:
             print(r.url, r.headers, sep='\n')
-        if "Not Found" in msg:
+        if "Not Found" in m:
             raise FileNotFoundError(path)
-        elif "forbidden" in msg:
+        elif "forbidden" in m:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
-        elif "invalid" in msg:
+        elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         else:
-            raise RuntimeError(msg)
+            raise RuntimeError(m)
 
 
 class GCSFileSystem(object):
