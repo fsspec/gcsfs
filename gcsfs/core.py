@@ -92,16 +92,19 @@ def validate_response(r, path):
     path: associated URL path, for error messages
     """
     if not r.ok:
-        msg = str(r.content)
+        try:
+            msg = r.json()['error']['message']
+        except:
+            msg = str(r.content)
 
         if DEBUG:
             print(r.url, r.headers, sep='\n')
         if "Not Found" in msg:
             raise FileNotFoundError(path)
         elif "forbidden" in msg:
-            raise IOError("Forbidden: %s" % path)
+            raise IOError("Forbidden: %s\n%s" % (path, msg))
         elif "invalid" in msg:
-            raise ValueError("Bad Request: %s" % path)
+            raise ValueError("Bad Request: %s\n%s" % (path, msg))
         else:
             raise RuntimeError(msg)
 

@@ -311,13 +311,14 @@ def test_errors(token_restore):
             f.close()
             f.read()
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, RuntimeError) as e:
             gcs.mkdir('/')
+            assert 'bucket' in str(e)
 
         with pytest.raises(ValueError):
             gcs.walk('')
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, RuntimeError):
             gcs.walk('gcs://')
 
 
