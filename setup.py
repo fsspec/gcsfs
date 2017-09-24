@@ -4,7 +4,7 @@ import os
 from setuptools import setup
 
 setup(name='gcsfs',
-      version='0.0.2',
+      version='0.0.3',
       description='Convenient Filesystem interface over GCS',
       url='https://github.com/dask/gcsfs',
       maintainer='Martin Durant',
