@@ -23,9 +23,10 @@ PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
 
-not_secret = {"client_id": "586241054156-is96mugvl2prnj0ib5gsg1l3q9m9jp7p."
+# client created 23-Sept-2017
+not_secret = {"client_id": "586241054156-7a3vrghs70ffkkfkmnnatjnbjg03cq9a."
                            "apps.googleusercontent.com",
-              "client_secret": "_F-W4r2HzuuoPvi6ROeaUB6o"}
+              "client_secret": "RsSQZJKYE00oRv2ibYlj28Sx"}
 tfile = os.path.join(os.path.expanduser("~"), '.gcs_tokens')
 ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
         "private", "projectprivate", "publicread"}
@@ -255,10 +256,10 @@ class GCSFileSystem(object):
         if refresh or time.time() - data['timestamp'] > data['expires_in'] - 100:
             # token has expired, or is about to - call refresh
             if data.get('type', None) == 'cloud':
-                r = requests.get(
-                    'http://metadata.google.internal/computeMetadata/v1/'
-                    'instance/service-accounts/default/token',
-                    headers={'Metadata-Flavor': 'Google'})
+                path = ('http://metadata.google.internal/computeMetadata/v1/'
+                        'instance/service-accounts/default/token')
+                r = requests.get(path, headers={'Metadata-Flavor': 'Google'})
+                validate_response(r, path)
                 data = r.json()
                 data['timestamp'] = time.time()
                 data['type'] = 'cloud'
