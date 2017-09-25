@@ -13,6 +13,7 @@ import os
 import pickle
 import re
 import requests
+import requests.exceptions
 import sys
 import time
 import warnings
@@ -23,10 +24,9 @@ PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
 
-# client created 23-Sept-2017
-not_secret = {"client_id": "586241054156-7a3vrghs70ffkkfkmnnatjnbjg03cq9a."
+not_secret = {"client_id": "586241054156-is96mugvl2prnj0ib5gsg1l3q9m9jp7p."
                            "apps.googleusercontent.com",
-              "client_secret": "RsSQZJKYE00oRv2ibYlj28Sx"}
+              "client_secret": "_F-W4r2HzuuoPvi6ROeaUB6o"}
 tfile = os.path.join(os.path.expanduser("~"), '.gcs_tokens')
 ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
         "private", "projectprivate", "publicread"}
@@ -34,6 +34,7 @@ bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
 DEBUG = False
+RETRY_COUNT = 4
 
 if PY2:
     FileNotFoundError = IOError
@@ -109,6 +110,37 @@ def validate_response(r, path):
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         else:
             raise RuntimeError(m)
+
+def _isHtmlError(dictionary):
+    """True if it's a dictionary with keys 'errors', 'code', and 'message'."""
+    goal_keys=['errors', 'code', 'message']
+    return isinstance(dictionary, dict) and all(x in dictionary for x in goal_keys)
+
+def _asHtmlError(error):
+    """
+    Looks for an error that is dictionary with keys
+    "errors", "code", and "message".
+    If the input is one, or is an Error that contains one,
+    then return the dict. Otherwise, None.
+    """
+    if _isHtmlError(error):
+        warnings.warn('is not htmlerror: ' + error.__repr__())
+        return error
+    try:
+        inner = error.args[0]
+        if _isHtmlError(inner):
+            warnings.warn('args[0] is htmlerror: ' + inner.__repr__())
+            return inner
+        if isinstance(inner, dict):
+            inner = inner.get('error', None)
+            if _isHtmlError(inner):
+                warnings.warn('args[0]["error"] is htmlerror: ' + inner.__repr__())
+                return inner
+            warnings.warn('args[0]["error"] is not htmlerror: ' + inner.__repr__())
+        return None
+    except AttributeError:
+        warnings.warn('AttributeError on: ' + error.__repr__())
+        return None
 
 
 class GCSFileSystem(object):
@@ -256,10 +288,10 @@ class GCSFileSystem(object):
         if refresh or time.time() - data['timestamp'] > data['expires_in'] - 100:
             # token has expired, or is about to - call refresh
             if data.get('type', None) == 'cloud':
-                path = ('http://metadata.google.internal/computeMetadata/v1/'
-                        'instance/service-accounts/default/token')
-                r = requests.get(path, headers={'Metadata-Flavor': 'Google'})
-                validate_response(r, path)
+                r = requests.get(
+                    'http://metadata.google.internal/computeMetadata/v1/'
+                    'instance/service-accounts/default/token',
+                    headers={'Metadata-Flavor': 'Google'})
                 data = r.json()
                 data['timestamp'] = time.time()
                 data['type'] = 'cloud'
@@ -296,13 +328,47 @@ class GCSFileSystem(object):
         meth = getattr(requests, method)
         if args:
             path = path.format(*[quote_plus(p) for p in args])
-        r = meth(self.base + path, headers=self.header, params=kwargs,
-                 json=json)
+        for retry in range(RETRY_COUNT):
+            try:
+                time.sleep(2**retry-1)
+                r = meth(self.base + path, headers=self.header, params=kwargs,
+                         json=json)
+                validate_response(r, path)
+                break
+            except RuntimeError as e:
+                warnings.warn("_call caught RuntimeError: " + e.__repr__())
+                with open('/tmp/error', 'wb') as f:
+                    pickle.dump(e, f)
+                print('error saved to /tmp/error')
+                if retry + 1 == RETRY_COUNT:
+                    warnings.warn('GCS call failure, out of retries: ' + str(e))
+                    raise e
+                html_error = _asHtmlError(e)
+                if html_error :
+                    if html_error['code'] in [500, 503, 504, '500', '503', '504']:
+                        # 5xx error, let's retry
+                        warnings.warn('Retrying after GCS call failure: ' + str(e))
+                        continue
+                    else:
+                        warnings.warn('GCS call failure, HtmlError but "' + str(html_error.get('code', '')) + '" so not retrying: ' + str(e))
+                else:
+                    warnings.warn('GCS call failure, not an HtmlError so not retrying: ' + str(e))
+                raise e
+            except requests.exceptions.ChunkedEncodingError as e:
+                warnings.warn("_call caught ChunkedEncodingError: " + e.__repr__())
+                with open('/tmp/error', 'wb') as f:
+                    pickle.dump(e, f)
+                print('error saved to /tmp/error')
+                # We get those sometimes, let's retry
+                if retry + 1 == RETRY_COUNT:
+                    warnings.warn('GCS call failure, out of retries: ' + str(e))
+                    raise e
+                warnings.warn('Retrying after GCS call failure: ' + str(e))
+                continue
         try:
             out = r.json()
         except ValueError:
             out = r.content
-        validate_response(r, path)
         return out
 
     def _list_buckets(self):
