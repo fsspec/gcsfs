@@ -289,10 +289,10 @@ class GCSFileSystem(object):
         if refresh or time.time() - data['timestamp'] > data['expires_in'] - 100:
             # token has expired, or is about to - call refresh
             if data.get('type', None) == 'cloud':
-                r = requests.get(
-                    'http://metadata.google.internal/computeMetadata/v1/'
-                    'instance/service-accounts/default/token',
-                    headers={'Metadata-Flavor': 'Google'})
+                path = ('http://metadata.google.internal/computeMetadata/v1/'
+                        'instance/service-accounts/default/token')
+                r = requests.get(path, headers={'Metadata-Flavor': 'Google'})
+                validate_response(r, path)
                 data = r.json()
                 data['timestamp'] = time.time()
                 data['type'] = 'cloud'
