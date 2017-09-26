@@ -119,28 +119,27 @@ def _isHtmlError(dictionary):
 
 def _asHtmlError(error):
     """
-    Looks for an error that is dictionary with keys
+    Looks for an error that is a JSON-encoded dictionary
+    that maps 'error' to a dictionary with keys
     "errors", "code", and "message".
-    If the input is one, or is an Error that contains one,
-    then return the dict. Otherwise, None.
+    Then return the inner dictionary if any (None otherwise).
+    We do this because that's what we get back from the cloud.
     """
     if _isHtmlError(error):
-        warnings.warn('is not htmlerror: ' + error.__repr__())
         return error
     try:
         inner = error.args[0]
-        if _isHtmlError(inner):
-            warnings.warn('args[0] is htmlerror: ' + inner.__repr__())
-            return inner
-        if isinstance(inner, dict):
-            inner = inner.get('error', None)
-            if _isHtmlError(inner):
-                warnings.warn('args[0]["error"] is htmlerror: ' + inner.__repr__())
-                return inner
-            warnings.warn('args[0]["error"] is not htmlerror: ' + inner.__repr__())
+        try:
+            dictFromJson = json.loads(inner)
+            if isinstance(dictFromJson, dict):
+                error = dictFromJson.get('error', None)
+                if _isHtmlError(error):
+                    return error
+        except ValueError:
+            # wasn't JSON
+            pass
         return None
     except AttributeError:
-        warnings.warn('AttributeError on: ' + error.__repr__())
         return None
 
 
@@ -337,34 +336,25 @@ class GCSFileSystem(object):
                 validate_response(r, path)
                 break
             except RuntimeError as e:
-                warnings.warn("_call caught RuntimeError: " + e.__repr__())
-                with open('/tmp/error', 'wb') as f:
-                    pickle.dump(e, f)
-                print('error saved to /tmp/error')
                 if retry + 1 == RETRY_COUNT:
-                    warnings.warn('GCS call failure, out of retries: ' + str(e))
                     raise e
                 html_error = _asHtmlError(e)
                 if html_error :
                     if html_error['code'] in [500, 503, 504, '500', '503', '504']:
                         # 5xx error, let's retry
-                        warnings.warn('Retrying after GCS call failure: ' + str(e))
                         continue
-                    else:
-                        warnings.warn('GCS call failure, HtmlError but "' + str(html_error.get('code', '')) + '" so not retrying: ' + str(e))
-                else:
-                    warnings.warn('GCS call failure, not an HtmlError so not retrying: ' + str(e))
                 raise e
-            except requests.exceptions.ChunkedEncodingError as e:
-                warnings.warn("_call caught ChunkedEncodingError: " + e.__repr__())
-                with open('/tmp/error', 'wb') as f:
-                    pickle.dump(e, f)
-                print('error saved to /tmp/error')
+            except (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ReadTimeout,
+                requests.exception.Timeout,
+                requests.exceptions.ProxyError,
+                requests.exception.SSLError,
+                requests.exception.ContentDecodingError
+                ) as e:
                 # We get those sometimes, let's retry
                 if retry + 1 == RETRY_COUNT:
-                    warnings.warn('GCS call failure, out of retries: ' + str(e))
                     raise e
-                warnings.warn('Retrying after GCS call failure: ' + str(e))
                 continue
         try:
             out = r.json()
