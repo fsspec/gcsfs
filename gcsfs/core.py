@@ -347,10 +347,10 @@ class GCSFileSystem(object):
             except (requests.exceptions.ChunkedEncodingError,
                 requests.exceptions.ConnectionError,
                 requests.exceptions.ReadTimeout,
-                requests.exception.Timeout,
+                requests.exceptions.Timeout,
                 requests.exceptions.ProxyError,
-                requests.exception.SSLError,
-                requests.exception.ContentDecodingError
+                requests.exceptions.SSLError,
+                requests.exceptions.ContentDecodingError
                 ) as e:
                 # We get those sometimes, let's retry
                 if retry + 1 == RETRY_COUNT:
