@@ -38,7 +38,6 @@ bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
 DEBUG = False
-RETRY_COUNT = 4
 
 if PY2:
     FileNotFoundError = IOError
@@ -305,7 +304,7 @@ class GCSFileSystem(object):
         meth = getattr(requests, method)
         if args:
             path = path.format(*[quote_plus(p) for p in args])
-        for retry in range(RETRY_COUNT):
+        for retry in range(self.retries):
             try:
                 time.sleep(2**retry-1)
                 r = meth(self.base + path, headers=self.header, params=kwargs,
@@ -313,7 +312,7 @@ class GCSFileSystem(object):
                 validate_response(r, path)
                 break
             except (HtmlError, RequestException) as e:
-                if retry + 1 == RETRY_COUNT:
+                if retry == self.retries - 1:
                     raise e
                 if is_retriable(e):
                     # retry
