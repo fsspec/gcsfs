@@ -1,3 +1,4 @@
+import requests.exceptions
 
 
 def seek_delimiter(file, delimiter, blocksize):
@@ -84,3 +85,31 @@ def read_block(f, offset, length, delimiter=None):
     f.seek(offset)
     bytes = f.read(length)
     return bytes
+
+
+class HtmlError(Exception):
+    def __init__(self, error_response=None):
+        if error_response:
+            self.message = error_response.get('message', '')
+            self.code = error_response.get('code', None)
+        else:
+            self.message = ''
+            self.code = None
+        # Call the base class constructor with the parameters it needs
+        super(HtmlError, self).__init__(self.message)
+
+
+def is_retriable(exception):
+    if isinstance(exception, HtmlError):
+        return exception.code in [500, 503, 504, '500', '503', '504']
+    for retriable_class in (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.Timeout,
+                requests.exceptions.ProxyError,
+                requests.exceptions.SSLError,
+                requests.exceptions.ContentDecodingError
+                ):
+        if isinstance(exception, retriable_class):
+            return True
+    return False

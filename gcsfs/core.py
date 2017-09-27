@@ -13,13 +13,16 @@ import os
 import pickle
 import re
 import requests
-import requests.exceptions
 import sys
 import time
 import warnings
 import webbrowser
 
+from requests.exceptions import RequestException
+from .utils import HtmlError
+from .utils import is_retriable
 from .utils import read_block
+
 PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
@@ -96,8 +99,10 @@ def validate_response(r, path):
     """
     if not r.ok:
         m = str(r.content)
+        error = None
         try:
-            msg = r.json()['error']['message']
+            error = r.json()['error']
+            msg = error['message']
         except:
             msg = str(r.content)
 
@@ -109,38 +114,10 @@ def validate_response(r, path):
             raise IOError("Forbidden: %s\n%s" % (path, msg))
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
+        elif error:
+            raise HtmlError(error)
         else:
             raise RuntimeError(m)
-
-def _isHtmlError(dictionary):
-    """True if it's a dictionary with keys 'errors', 'code', and 'message'."""
-    goal_keys=['errors', 'code', 'message']
-    return isinstance(dictionary, dict) and all(x in dictionary for x in goal_keys)
-
-def _asHtmlError(error):
-    """
-    Looks for an error that is a JSON-encoded dictionary
-    that maps 'error' to a dictionary with keys
-    "errors", "code", and "message".
-    Then return the inner dictionary if any (None otherwise).
-    We do this because that's what we get back from the cloud.
-    """
-    if _isHtmlError(error):
-        return error
-    try:
-        inner = error.args[0]
-        try:
-            dictFromJson = json.loads(inner)
-            if isinstance(dictFromJson, dict):
-                error = dictFromJson.get('error', None)
-                if _isHtmlError(error):
-                    return error
-        except ValueError:
-            # wasn't JSON
-            pass
-        return None
-    except AttributeError:
-        return None
 
 
 class GCSFileSystem(object):
@@ -335,27 +312,13 @@ class GCSFileSystem(object):
                          json=json)
                 validate_response(r, path)
                 break
-            except RuntimeError as e:
+            except (HtmlError, RequestException) as e:
                 if retry + 1 == RETRY_COUNT:
                     raise e
-                html_error = _asHtmlError(e)
-                if html_error :
-                    if html_error['code'] in [500, 503, 504, '500', '503', '504']:
-                        # 5xx error, let's retry
-                        continue
+                if is_retriable(e):
+                    # retry
+                    continue
                 raise e
-            except (requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.ReadTimeout,
-                requests.exceptions.Timeout,
-                requests.exceptions.ProxyError,
-                requests.exceptions.SSLError,
-                requests.exceptions.ContentDecodingError
-                ) as e:
-                # We get those sometimes, let's retry
-                if retry + 1 == RETRY_COUNT:
-                    raise e
-                continue
         try:
             out = r.json()
         except ValueError:
