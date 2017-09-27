@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Test helper to open the same file many times.
+
+This is not a python unit test, but rather a standalone program that will open
+a file repeatedly, to check whether a cloud storage transient error can
+defeat gcsfs.
+
+Ideally you should see nothing, just the attempt count go up until we're done.
 """
 from __future__ import print_function
 import sys

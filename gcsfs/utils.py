@@ -88,6 +88,7 @@ def read_block(f, offset, length, delimiter=None):
 
 
 class HtmlError(Exception):
+    """Holds the message and code from cloud errors."""
     def __init__(self, error_response=None):
         if error_response:
             self.message = error_response.get('message', '')
@@ -100,6 +101,7 @@ class HtmlError(Exception):
 
 
 def is_retriable(exception):
+    """Returns True iff this exception is retriable."""
     if isinstance(exception, HtmlError):
         return exception.code in [500, 503, 504, '500', '503', '504']
     for retriable_class in (requests.exceptions.ChunkedEncodingError,
