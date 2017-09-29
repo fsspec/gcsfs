@@ -18,7 +18,11 @@ import time
 import warnings
 import webbrowser
 
+from requests.exceptions import RequestException
+from .utils import HtmlError
+from .utils import is_retriable
 from .utils import read_block
+
 PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
@@ -94,8 +98,10 @@ def validate_response(r, path):
     """
     if not r.ok:
         m = str(r.content)
+        error = None
         try:
-            msg = r.json()['error']['message']
+            error = r.json()['error']
+            msg = error['message']
         except:
             msg = str(r.content)
 
@@ -107,6 +113,8 @@ def validate_response(r, path):
             raise IOError("Forbidden: %s\n%s" % (path, msg))
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
+        elif error:
+            raise HtmlError(error)
         else:
             raise RuntimeError(m)
 
@@ -145,7 +153,7 @@ class GCSFileSystem(object):
         (see description of authentication methods, above)
     """
     scopes = {'read_only', 'read_write', 'full_control'}
-    retries = 10
+    retries = 4  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
     default_block_size = 5 * 2**20
@@ -296,13 +304,24 @@ class GCSFileSystem(object):
         meth = getattr(requests, method)
         if args:
             path = path.format(*[quote_plus(p) for p in args])
-        r = meth(self.base + path, headers=self.header, params=kwargs,
-                 json=json)
+        for retry in range(self.retries):
+            try:
+                time.sleep(2**retry-1)
+                r = meth(self.base + path, headers=self.header, params=kwargs,
+                         json=json)
+                validate_response(r, path)
+                break
+            except (HtmlError, RequestException) as e:
+                if retry == self.retries - 1:
+                    raise e
+                if is_retriable(e):
+                    # retry
+                    continue
+                raise e
         try:
             out = r.json()
         except ValueError:
             out = r.content
-        validate_response(r, path)
         return out
 
     def _list_buckets(self):
