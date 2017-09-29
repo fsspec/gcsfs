@@ -5,7 +5,7 @@ import gcsfs.core
 RECORD_MODE = os.environ.get('GCSFS_RECORD_MODE', 'none')
 TEST_PROJECT = os.environ.get('GCSFS_TEST_PROJECT', 'test_project')
 
-TEST_BUCKET = 'gcsfs-testing'
+TEST_BUCKET = os.environ.get('GCSFS_TEST_BUCKET', 'gcsfs-testing')
 
 FAKE_TOKEN = {'access_token': 'xxx', 'expires_in': 0,
               'grant_type': 'refresh_token',

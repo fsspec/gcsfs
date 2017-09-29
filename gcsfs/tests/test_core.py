@@ -117,6 +117,16 @@ def test_rm(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
+def test_rm_recursive(token_restore):
+    files = ['/a', '/a/b', '/a/c']
+    with gcs_maker() as gcs:
+        for fn in files:
+            gcs.touch(TEST_BUCKET + fn)
+        gcs.rm(TEST_BUCKET + files[0], True)
+        assert gcs.ls(TEST_BUCKET) == []
+
+
+@my_vcr.use_cassette(match=['all'])
 def test_file_access(token_restore):
     with gcs_maker() as gcs:
         fn = TEST_BUCKET+'/nested/file1'

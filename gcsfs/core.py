@@ -545,10 +545,16 @@ class GCSFileSystem(object):
         self.copy(path1, path2, acl)
         self.rm(path1)
 
-    def rm(self, path):
-        bucket, path = split_path(path)
-        self._call('delete', "b/{}/o/{}", bucket, path)
-        self.invalidate_cache(bucket)
+    def rm(self, path, recursive=False):
+        """Delete keys. If recursive, also delete all keys
+        given by walk(path)"""
+        if recursive:
+            for p in self.walk(path):
+                self.rm(p)
+        else:
+            bucket, path = split_path(path)
+            self._call('delete', "b/{}/o/{}", bucket, path)
+            self.invalidate_cache(bucket)
 
     def open(self, path, mode='rb', block_size=None, acl=None):
         if block_size is None:

@@ -24,10 +24,12 @@ def before_record_response(response):
                 data['id_token'] = 'xxx'
             r['body']['string'] = gzip.compress(
                     json.dumps(data).replace(
-                            TEST_PROJECT, 'test_project').encode())
+                            TEST_PROJECT, 'test_project').replace(
+                        TEST_BUCKET, 'gcsfs-testing').encode())
         except (OSError, TypeError, ValueError):
             r['body']['string'] = r['body']['string'].replace(
-                    TEST_PROJECT.encode(), b'test_project')
+                    TEST_PROJECT.encode(), b'test_project').replace(
+                        TEST_BUCKET.encode(), b'gcsfs-testing')
     except Exception:
         pass
     return r
@@ -35,7 +37,8 @@ def before_record_response(response):
 
 def before_record(request):
     r = pickle.loads(pickle.dumps(request))
-    r.uri = request.uri.replace(TEST_PROJECT, 'test_project')
+    r.uri = request.uri.replace(TEST_PROJECT, 'test_project').replace(
+        TEST_BUCKET, 'gcsfs-testing')
     return r
 
 
