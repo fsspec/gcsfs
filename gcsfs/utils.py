@@ -99,19 +99,21 @@ class HtmlError(Exception):
         # Call the base class constructor with the parameters it needs
         super(HtmlError, self).__init__(self.message)
 
+RETRIABLE_EXCEPTIONS = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.Timeout,
+    requests.exceptions.ProxyError,
+    requests.exceptions.SSLError,
+    requests.exceptions.ContentDecodingError
+)
+
 
 def is_retriable(exception):
-    """Returns True iff this exception is retriable."""
+    """Returns True if this exception is retriable."""
     if isinstance(exception, HtmlError):
         return exception.code in [500, 503, 504, '500', '503', '504']
-    for retriable_class in (requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.ReadTimeout,
-                requests.exceptions.Timeout,
-                requests.exceptions.ProxyError,
-                requests.exceptions.SSLError,
-                requests.exceptions.ContentDecodingError
-                ):
-        if isinstance(exception, retriable_class):
-            return True
+    if isinstance(exception, RETRIABLE_EXCEPTIONS):
+        return True
     return False

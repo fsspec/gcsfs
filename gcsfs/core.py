@@ -153,7 +153,7 @@ class GCSFileSystem(object):
         (see description of authentication methods, above)
     """
     scopes = {'read_only', 'read_write', 'full_control'}
-    retries = 10
+    retries = 4  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
     default_block_size = 5 * 2**20

@@ -1,7 +1,8 @@
-from gcsfs.utils import read_block, seek_delimiter
-from gcsfs.tests.utils import tmpfile
 import io
 import os
+import requests
+from gcsfs.utils import read_block, seek_delimiter, HtmlError, is_retriable
+from gcsfs.tests.utils import tmpfile
 
 
 def test_tempfile():
@@ -59,3 +60,18 @@ def test_seek_delimiter_endline():
     f.seek(5)
     seek_delimiter(f, b'\n', 5)
     assert f.tell() == 7
+
+
+def retriable_exception():
+    e = requests.exceptions.Timeout()
+    assert is_retriable(e)
+    e = ValueError
+    assert not is_retriable(e)
+    e = HtmlError({'message': '', 'code': 500})
+    assert is_retriable(e)
+    e = HtmlError({'message': '', 'code': '500'})
+    assert is_retriable(e)
+    e = HtmlError({'message': '', 'code': 400})
+    assert notis_retriable(e)
+    e = HtmlError()
+    assert not is_retriable(e)
