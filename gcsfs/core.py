@@ -641,7 +641,7 @@ GCSFileSystem.load_tokens()
 class GCSFile:
 
     def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
-                 acl=None, consistency='none'):
+                 acl=None, consistency='size'):
         """
         Open a file.
 
