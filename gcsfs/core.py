@@ -641,7 +641,7 @@ GCSFileSystem.load_tokens()
 class GCSFile:
 
     def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
-                 acl=None, consistency='size'):
+                 acl=None, consistency='md5'):
         """
         Open a file.
 
@@ -820,8 +820,6 @@ class GCSFile:
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
         data = self.buffer.read()
-        if self.consistency == 'md5':
-            self.md5.update(data)
         head = self.gcsfs.header.copy()
         l = self.buffer.tell()
         if final:
@@ -845,9 +843,13 @@ class GCSFile:
             shortfall = (self.offset + l - 1) - int(
                     r.headers['Range'].split('-')[1])
             if shortfall:
+                if self.consistency == 'md5':
+                    self.md5.update(data[:-shortfall])
                 self.buffer = io.BytesIO(data[-shortfall:])
                 self.buffer.seek(shortfall)
             else:
+                if self.consistency == 'md5':
+                    self.md5.update(data)
                 self.buffer = io.BytesIO()
             self.offset += l - shortfall
         else:
