@@ -5,6 +5,8 @@ Google Cloud Storage pythonic interface
 from __future__ import print_function
 
 import array
+from base64 import b64encode
+from hashlib import md5
 import io
 import json
 import logging
@@ -151,6 +153,8 @@ class GCSFileSystem(object):
         e.g., access control.
     token: None, dict or string
         (see description of authentication methods, above)
+    consistency: 'none', 'size', 'md5'
+        Check method when writing files. Can be overridden in open().
     """
     scopes = {'read_only', 'read_write', 'full_control'}
     retries = 4  # number of retries on http failure
@@ -159,7 +163,7 @@ class GCSFileSystem(object):
     default_block_size = 5 * 2**20
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
-                 token=None, block_size=None):
+                 token=None, block_size=None, consistency='none'):
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
@@ -169,6 +173,7 @@ class GCSFileSystem(object):
             self.default_block_size = block_size
         self.project = project
         self.access = access
+        self.consistency = consistency
         self.dirs = {}
         self.connect()
         self._singleton[0] = self
@@ -556,10 +561,18 @@ class GCSFileSystem(object):
             self._call('delete', "b/{}/o/{}", bucket, path)
             self.invalidate_cache(bucket)
 
-    def open(self, path, mode='rb', block_size=None, acl=None):
+    def open(self, path, mode='rb', block_size=None, acl=None,
+             consistency=None):
+        """
+        See ``GCSFile``.
+
+        consistency: None or str
+            If None, use default for this instance
+        """
         if block_size is None:
             block_size = self.default_block_size
-        return GCSFile(self, path, mode, block_size)
+        const = consistency or self.consistency
+        return GCSFile(self, path, mode, block_size, consistency=const)
 
     def touch(self, path):
         with self.open(path, 'wb'):
@@ -628,7 +641,29 @@ GCSFileSystem.load_tokens()
 class GCSFile:
 
     def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
-                 acl=None):
+                 acl=None, consistency='none'):
+        """
+        Open a file.
+
+        Parameters
+        ----------
+        gcsfs: instance of GCSFileSystem
+        path: str
+            location in GCS, like 'bucket/path/to/file'
+        mode: str
+            Normal file modes. Currently only 'wb' amd 'rb'.
+        block_size: int
+            Buffer size for reading or writing
+        acl: str
+            ACL to apply, if any, one of ``ACLs``. New files are normally
+            "bucketownerfullcontrol", but a default can be configured per
+            bucket.
+        consistency: str, 'none', 'size', 'md5'
+            Check for success in writing, applied at file close.
+            'size' ensures that the number of bytes reported by GCS matches
+            the number we wrote; 'md5' does a full checksum. Any value other
+            than 'size' or 'md5' is assumed to mean no checking.
+        """
         bucket, key = split_path(path)
         self.gcsfs = gcsfs
         self.bucket = bucket
@@ -642,6 +677,9 @@ class GCSFile:
         self.start = None
         self.closed = False
         self.trim = True
+        self.consistency = consistency
+        if self.consistency == 'md5':
+            self.md5 = md5()
         if mode not in {'rb', 'wb'}:
             raise NotImplementedError('File mode not supported')
         if mode == 'rb':
@@ -782,8 +820,10 @@ class GCSFile:
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
         data = self.buffer.read()
+        if self.consistency == 'md5':
+            self.md5.update(data)
         head = self.gcsfs.header.copy()
-        l = len(data)
+        l = self.buffer.tell()
         if final:
             if l:
                 head['Content-Range'] = 'bytes %i-%i/%i' % (
@@ -801,6 +841,7 @@ class GCSFile:
                           headers=head, data=data)
         validate_response(r, self.location)
         if 'Range' in r.headers:
+            assert not final, "Response looks like upload is partial"
             shortfall = (self.offset + l - 1) - int(
                     r.headers['Range'].split('-')[1])
             if shortfall:
@@ -808,10 +849,15 @@ class GCSFile:
                 self.buffer.seek(shortfall)
             else:
                 self.buffer = io.BytesIO()
-            import pdb
-            # pdb.set_trace()
             self.offset += l - shortfall
         else:
+            assert final, "Response looks like upload is over"
+            size, md5 = int(r.json()['size']), r.json()['md5Hash']
+            if self.consistency == 'size':
+                assert size == self.buffer.tell() + self.offset, "Size mismatch"
+            if self.consistency == 'md5':
+                assert b64encode(
+                    self.md5.digest()) == md5.encode(), "MD5 checksum failed"
             self.buffer = io.BytesIO()
             self.offset += l
 
@@ -833,6 +879,12 @@ class GCSFile:
                           params={'uploadType': 'media', 'name': self.key},
                           headers=head, data=data)
         validate_response(r, path)
+        size, md5 = int(r.json()['size']), r.json()['md5Hash']
+        if self.consistency == 'size':
+            assert size == self.buffer.tell(), "Size mismatch"
+        if self.consistency == 'md5':
+            self.md5.update(data)
+            assert b64encode(self.md5.digest()) == md5.encode(), "MD5 checksum failed"
 
     def _fetch(self, start, end):
         # force read to 5MB boundaries
