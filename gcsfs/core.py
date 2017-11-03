@@ -126,8 +126,10 @@ class GCSFileSystem(object):
     Connect to Google Cloud Storage.
 
     Two modes of authentication are supported:
-    - if ``token=None``, you will be given a "device code", which you must
-      enter into a browser where you are logged in with your Google identity.
+    - if ``token=None``, GCSFS will attempt to use your default google
+      credentials; if this is not found, you will be given a "device code",
+      which you must enter into a browser where you are logged in with your
+      Google identity.
     - if ``token='cloud'``, we assume we are running within google compute
       or google container engine, and query the internal metadata directly for
       a token.
@@ -236,36 +238,41 @@ class GCSFileSystem(object):
             data = {'timestamp': time.time() - 3600, 'expires_in': 1,
                     'type': 'cloud'}
         else:
-            # no credentials - try to ask google in the browser
-            scope = "https://www.googleapis.com/auth/devstorage." + access
-            path = 'https://accounts.google.com/o/oauth2/device/code'
-            r = requests.post(path,
-                              params={'client_id': not_secret['client_id'],
-                                      'scope': scope})
-            validate_response(r, path)
-            data = json.loads(r.content.decode())
-            print('Enter the following code when prompted in the browser:')
-            print(data['user_code'])
-            webbrowser.open(data['verification_url'])
-            for i in range(self.retries):
-                time.sleep(2)
-                r = requests.post(
-                        "https://www.googleapis.com/oauth2/v4/token",
-                        params={'client_id': not_secret['client_id'],
+            try:
+                data = self.get_default_gtoken()
+                self.tokens[(project, access)] = data
+            except:
+                # no credentials - try to ask google in the browser
+                scope = "https://www.googleapis.com/auth/devstorage." + access
+                path = 'https://accounts.google.com/o/oauth2/device/code'
+                r = requests.post(path,
+                                  params={'client_id': not_secret['client_id'],
+                                          'scope': scope})
+                validate_response(r, path)
+                data = json.loads(r.content.decode())
+                print('Enter the following code when prompted in the browser:')
+                print(data['user_code'])
+                webbrowser.open(data['verification_url'])
+                for i in range(self.retries):
+                    time.sleep(2)
+                    r = requests.post(
+                            "https://www.googleapis.com/oauth2/v4/token",
+                            params={
+                                'client_id': not_secret['client_id'],
                                 'client_secret': not_secret['client_secret'],
                                 'code': data['device_code'],
                                 'grant_type':
                                     "http://oauth.net/grant_type/device/1.0"})
-                data2 = json.loads(r.content.decode())
-                if 'error' in data2:
-                    if i == self.retries - 1:
-                        raise RuntimeError("Waited too long for browser"
-                                           "authentication.")
-                    continue
-                data = data2
-                break
-            data['timestamp'] = time.time()
-            data.update(not_secret)
+                    data2 = json.loads(r.content.decode())
+                    if 'error' in data2:
+                        if i == self.retries - 1:
+                            raise RuntimeError("Waited too long for browser"
+                                               "authentication.")
+                        continue
+                    data = data2
+                    break
+                data['timestamp'] = time.time()
+                data.update(not_secret)
         if refresh or time.time() - data['timestamp'] > data['expires_in'] - 100:
             # token has expired, or is about to - call refresh
             if data.get('type', None) == 'cloud':
@@ -291,6 +298,14 @@ class GCSFileSystem(object):
         self.tokens[(project, access)] = data
         self.header = {'Authorization': 'Bearer ' + data['access_token']}
         self._save_tokens()
+
+    @staticmethod
+    def get_default_gtoken():
+        au = oauth2client.client.GoogleCredentials.get_application_default()
+        tok = {"client_id": au.client_id, "client_secret": au.client_secret,
+               "refresh_token": au.refresh_token, "type": "authorized_user",
+               "timestamp": time.time(), "expires_in": 0}
+        return tok
 
     @staticmethod
     def _save_tokens():
