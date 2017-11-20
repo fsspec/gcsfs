@@ -822,15 +822,14 @@ class GCSFile:
             return
         if force and self.forced:
             raise ValueError("Force flush cannot be called more than once")
-        if force:
-            self.forced = True
         if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
             self._simple_upload()
             return
-
         if not self.offset:
             self._initiate_upload()
         self._upload_chunk(final=force)
+        if force:
+            self.forced = True
 
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
