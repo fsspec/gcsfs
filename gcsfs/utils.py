@@ -112,8 +112,8 @@ RETRIABLE_EXCEPTIONS = (
 
 def is_retriable(exception):
     """Returns True if this exception is retriable."""
+    errs = list(range(500, 505))
+    errs += [str(e) for e in errs]
     if isinstance(exception, HtmlError):
-        return exception.code in [500, 503, 504, '500', '503', '504']
-    if isinstance(exception, RETRIABLE_EXCEPTIONS):
-        return True
-    return False
+        return exception.code in errs
+    return isinstance(exception, RETRIABLE_EXCEPTIONS)

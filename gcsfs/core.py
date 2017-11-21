@@ -147,9 +147,12 @@ class GCSFileSystem(object):
     Parameters
     ----------
     project : string
+        project_id to work under. Note that this is not the same as, but ofter
+        very similar to, the project name.
         GCS users may only access to contents of one project in a single
         instance of GCSFileSystem. This is required in order
-        to list all the buckets you have access to within a project.
+        to list all the buckets you have access to within a project and to
+        create/delete buckets, or update their access policies.
     access : one of {'read_only', 'read_write', 'full_control'}
         Full control implies read/write as well as modifying metadata,
         e.g., access control.
@@ -253,7 +256,8 @@ class GCSFileSystem(object):
                 print('Enter the following code when prompted in the browser:')
                 print(data['user_code'])
                 webbrowser.open(data['verification_url'])
-                for i in range(self.retries):
+                for i in range(max(self.retries, 10)):
+                    # minimum 10 retries =20s, usually reasonable
                     time.sleep(2)
                     r = requests.post(
                             "https://www.googleapis.com/oauth2/v4/token",
@@ -357,7 +361,9 @@ class GCSFileSystem(object):
             dirs = out.get('items', [])
             next_page_token = out.get('nextPageToken', None)
             while next_page_token is not None:
-                out = self._call('get', 'b/{}/o/', bucket, maxResults=max_results, pageToken=next_page_token)
+                out = self._call('get', 'b/{}/o/', bucket,
+                                 maxResults=max_results,
+                                 pageToken=next_page_token)
                 dirs.extend(out.get('items', []))
                 next_page_token = out.get('nextPageToken', None)
             for f in dirs:
@@ -482,8 +488,8 @@ class GCSFileSystem(object):
             root = ''
         allfiles = self.walk(root)
         pattern = re.compile("^" + path.replace('//', '/')
-                             .rstrip('/')
-                             .replace('*', '[^/]*')
+                             .rstrip('/').replace('**', '.+')
+                             .replace('*', '[^/]+')
                              .replace('?', '.') + "$")
         out = [f for f in allfiles if re.match(pattern,
                f.replace('//', '/').rstrip('/'))]
@@ -707,6 +713,7 @@ class GCSFile:
             self.buffer = io.BytesIO()
             self.offset = 0
             self.forced = False
+            self.location = None
 
     def info(self):
         """ File information about this path """
@@ -794,6 +801,8 @@ class GCSFile:
             raise ValueError('File not in write mode')
         if self.closed:
             raise ValueError('I/O operation on closed file.')
+        if self.forced:
+            raise ValueError('This file has been force-flushed, can only close')
         out = self.buffer.write(ensure_writable(data))
         self.loc += out
         if self.buffer.tell() >= self.blocksize:
@@ -811,7 +820,7 @@ class GCSFile:
         ----------
         force : bool
             When closing, write the last block even if it is smaller than
-            blocks are allowed to be.
+            blocks are allowed to be. Disallows further writing to this file.
         """
         if self.mode not in {'wb', 'ab'}:
             raise ValueError('Flush on a file not in write mode')
@@ -822,15 +831,14 @@ class GCSFile:
             return
         if force and self.forced:
             raise ValueError("Force flush cannot be called more than once")
-        if force:
-            self.forced = True
         if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
             self._simple_upload()
-            return
-
-        if not self.offset:
+        elif not self.offset:
             self._initiate_upload()
-        self._upload_chunk(final=force)
+        if self.location is not None:
+            self._upload_chunk(final=force)
+        if force:
+            self.forced = True
 
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
