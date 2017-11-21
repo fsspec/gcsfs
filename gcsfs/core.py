@@ -488,8 +488,8 @@ class GCSFileSystem(object):
             root = ''
         allfiles = self.walk(root)
         pattern = re.compile("^" + path.replace('//', '/')
-                             .rstrip('/')
-                             .replace('*', '[^/]*')
+                             .rstrip('/').replace('**', '.+')
+                             .replace('*', '[^/]+')
                              .replace('?', '.') + "$")
         out = [f for f in allfiles if re.match(pattern,
                f.replace('//', '/').rstrip('/'))]

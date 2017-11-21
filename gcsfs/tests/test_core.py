@@ -194,6 +194,7 @@ def test_gcs_glob(token_restore):
         assert fn in gcs.glob(TEST_BUCKET+'/nested/*')
         assert fn in gcs.glob(TEST_BUCKET+'/nested/file*')
         assert fn in gcs.glob(TEST_BUCKET+'/*/*')
+        assert fn in gcs.glob(TEST_BUCKET+'/**')
         assert all(f in gcs.walk(TEST_BUCKET) for f in
                    gcs.glob(TEST_BUCKET+'/nested/*'))
         with pytest.raises(ValueError):
