@@ -583,7 +583,7 @@ class GCSFileSystem(object):
             self.invalidate_cache(bucket)
 
     def open(self, path, mode='rb', block_size=None, acl=None,
-             consistency=None):
+             consistency=None, metadata=None):
         """
         See ``GCSFile``.
 
@@ -593,7 +593,7 @@ class GCSFileSystem(object):
         if block_size is None:
             block_size = self.default_block_size
         const = consistency or self.consistency
-        return GCSFile(self, path, mode, block_size, consistency=const)
+        return GCSFile(self, path, mode, block_size, consistency=const, metadata=metadata)
 
     def touch(self, path):
         with self.open(path, 'wb'):
@@ -662,7 +662,7 @@ GCSFileSystem.load_tokens()
 class GCSFile:
 
     def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
-                 acl=None, consistency='md5'):
+                 acl=None, consistency='md5', metadata=None):
         """
         Open a file.
 
@@ -684,11 +684,14 @@ class GCSFile:
             'size' ensures that the number of bytes reported by GCS matches
             the number we wrote; 'md5' does a full checksum. Any value other
             than 'size' or 'md5' is assumed to mean no checking.
+        metadata: dict
+            Custom metadata, in key/value pairs, added at file creation
         """
         bucket, key = split_path(path)
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
+        self.metadata = metadata
         self.mode = mode
         self.blocksize = block_size
         self.cache = b""
@@ -890,7 +893,7 @@ class GCSFile:
         r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                           % quote_plus(self.bucket),
                           params={'uploadType': 'resumable'},
-                          headers=self.gcsfs.header, json={'name': self.key})
+                          headers=self.gcsfs.header, json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
     def _simple_upload(self):
