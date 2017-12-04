@@ -1012,7 +1012,7 @@ def _fetch_range(head, obj_dict, start=None, end=None):
     """
     if DEBUG:
         print('Fetch: ', start, end)
-    logger.debug("Fetch: {}/{}, {}-{}", obj_dict['name'], start, end)
+    logger.debug("Fetch: {}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
         end = end or 0
