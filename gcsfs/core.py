@@ -350,8 +350,11 @@ class GCSFileSystem(object):
 
     def _list_buckets(self):
         if '' not in self.dirs:
-            out = self._call('get', 'b/', project=self.project)
-            dirs = out.get('items', [])
+            try:
+                out = self._call('get', 'b/', project=self.project)
+                dirs = out.get('items', [])
+            except ValueError:
+                dirs = []
             self.dirs[''] = dirs
         return self.dirs['']
 
@@ -501,7 +504,16 @@ class GCSFileSystem(object):
             if key:
                 return bool(self.info(path))
             else:
-                return bucket in self.ls('')
+                if bucket in self.ls(''):
+                    return True
+                else:
+                    try:
+                        self._list_bucket(bucket)
+                        return True
+                    except ValueError:
+                        # bucket listing failed as it doesn't exist or we can't
+                        # see it
+                        return False
         except FileNotFoundError:
             return False
 
