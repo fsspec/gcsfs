@@ -353,7 +353,7 @@ class GCSFileSystem(object):
             try:
                 out = self._call('get', 'b/', project=self.project)
                 dirs = out.get('items', [])
-            except ValueError:
+            except:
                 dirs = []
             self.dirs[''] = dirs
         return self.dirs['']
@@ -510,7 +510,7 @@ class GCSFileSystem(object):
                     try:
                         self._list_bucket(bucket)
                         return True
-                    except ValueError:
+                    except:
                         # bucket listing failed as it doesn't exist or we can't
                         # see it
                         return False
