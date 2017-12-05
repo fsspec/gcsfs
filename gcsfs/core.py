@@ -353,7 +353,7 @@ class GCSFileSystem(object):
             try:
                 out = self._call('get', 'b/', project=self.project)
                 dirs = out.get('items', [])
-            except:
+            except (FileNotFoundError, IOError, ValueError):
                 dirs = []
             self.dirs[''] = dirs
         return self.dirs['']
@@ -402,7 +402,7 @@ class GCSFileSystem(object):
             for v in self.dirs[''][:]:
                 if v['name'] == bucket:
                     self.dirs[''].remove(v)
-        self.invalidate_cache(bucket)
+        self.dirs.pop(bucket, None)
 
     def invalidate_cache(self, bucket=None):
         """
@@ -510,7 +510,7 @@ class GCSFileSystem(object):
                     try:
                         self._list_bucket(bucket)
                         return True
-                    except:
+                    except (FileNotFoundError, IOError, ValueError):
                         # bucket listing failed as it doesn't exist or we can't
                         # see it
                         return False
