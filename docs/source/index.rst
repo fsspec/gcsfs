@@ -7,7 +7,7 @@ This software is alpha, use at your own risk.
 
 Please file issues and requests on github_ and we welcome pull requests.
 
-.. _github: https://github.com/martindurant/gcsfs/issues
+.. _github: https://github.com/dask/gcsfs/issues
 
 Installation
 ------------
@@ -79,8 +79,8 @@ Two modes of authentication are supported:
 
     - if ``token=None``, GCSFS will attempt to use your default gcloud
       credentials or, if that fails,
-      you will be given a "device code", which you must
-      enter into a browser where you are logged in with your Google identity.
+      will print a "device code" and a link you must follow to
+      authenticate with your Google identity.
 
     - if ``token='cloud'``, we assume we are running within google (compute
       or container engine) and fetch the credentials automatically from the
@@ -90,7 +90,8 @@ Two modes of authentication are supported:
       gcloud_ utility; this is either a python dictionary, or the name of a file
       containing the JSON returned by logging in with the gcloud CLI tool. On
       a posix system this may be at
-      ``~/.config/gcloud/application_default_credentials.json``
+      ``~/.config/gcloud/application_default_credentials.json`` or
+      ``~/.config/gcloud/legacy_credentials/<YOUR GOOGLE USERNAME>/adc.json``
 
 Authorizations are cached in a local file, for a given project/access level, so
 you should not need to authorize again.
