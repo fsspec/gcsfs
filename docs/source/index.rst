@@ -80,7 +80,7 @@ Two modes of authentication are supported:
     - if ``token=None``, GCSFS will attempt to use your default gcloud
       credentials or, if that fails,
       will print a "device code" and a link you must follow to
-      authenticate with your goodle Google identity.
+      authenticate with your Google identity.
 
     - if ``token='cloud'``, we assume we are running within google (compute
       or container engine) and fetch the credentials automatically from the
