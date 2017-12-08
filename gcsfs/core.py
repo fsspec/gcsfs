@@ -18,7 +18,6 @@ import requests
 import sys
 import time
 import warnings
-import webbrowser
 
 from requests.exceptions import RequestException
 from .utils import HtmlError
@@ -253,12 +252,10 @@ class GCSFileSystem(object):
                                           'scope': scope})
                 validate_response(r, path)
                 data = json.loads(r.content.decode())
-                print('Enter the following code when prompted in the browser:')
-                print(data['user_code'])
-                webbrowser.open(data['verification_url'])
-                for i in range(max(self.retries, 10)):
-                    # minimum 10 retries =20s, usually reasonable
-                    time.sleep(2)
+                print('Navigate to:', data['verification_url'])
+                print('Enter code:', data['user_code'])
+                while True:
+                    time.sleep(1)
                     r = requests.post(
                             "https://www.googleapis.com/oauth2/v4/token",
                             params={
@@ -269,9 +266,6 @@ class GCSFileSystem(object):
                                     "http://oauth.net/grant_type/device/1.0"})
                     data2 = json.loads(r.content.decode())
                     if 'error' in data2:
-                        if i == self.retries - 1:
-                            raise RuntimeError("Waited too long for browser"
-                                               "authentication.")
                         continue
                     data = data2
                     break
@@ -330,7 +324,7 @@ class GCSFileSystem(object):
             path = path.format(*[quote_plus(p) for p in args])
         for retry in range(self.retries):
             try:
-                time.sleep(2**retry-1)
+                time.sleep(2**retry - 1)
                 r = meth(self.base + path, headers=self.header, params=kwargs,
                          json=json)
                 validate_response(r, path)
