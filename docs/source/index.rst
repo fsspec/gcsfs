@@ -7,7 +7,7 @@ This software is alpha, use at your own risk.
 
 Please file issues and requests on github_ and we welcome pull requests.
 
-.. _github: https://github.com/martindurant/gcsfs/issues
+.. _github: https://github.com/dask/gcsfs/issues
 
 Installation
 ------------
