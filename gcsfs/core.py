@@ -18,7 +18,6 @@ import requests
 import sys
 import time
 import warnings
-import webbrowser
 
 from requests.exceptions import RequestException
 from .utils import HtmlError
@@ -126,8 +125,10 @@ class GCSFileSystem(object):
     Connect to Google Cloud Storage.
 
     Two modes of authentication are supported:
-    - if ``token=None``, you will be given a "device code", which you must
-      enter into a browser where you are logged in with your Google identity.
+    - if ``token=None``, GCSFS will attempt to use your default google
+      credentials; if this is not found, you will be given a "device code",
+      which you must enter into a browser where you are logged in with your
+      Google identity.
     - if ``token='cloud'``, we assume we are running within google compute
       or google container engine, and query the internal metadata directly for
       a token.
@@ -145,9 +146,12 @@ class GCSFileSystem(object):
     Parameters
     ----------
     project : string
+        project_id to work under. Note that this is not the same as, but ofter
+        very similar to, the project name.
         GCS users may only access to contents of one project in a single
         instance of GCSFileSystem. This is required in order
-        to list all the buckets you have access to within a project.
+        to list all the buckets you have access to within a project and to
+        create/delete buckets, or update their access policies.
     access : one of {'read_only', 'read_write', 'full_control'}
         Full control implies read/write as well as modifying metadata,
         e.g., access control.
@@ -236,36 +240,37 @@ class GCSFileSystem(object):
             data = {'timestamp': time.time() - 3600, 'expires_in': 1,
                     'type': 'cloud'}
         else:
-            # no credentials - try to ask google in the browser
-            scope = "https://www.googleapis.com/auth/devstorage." + access
-            path = 'https://accounts.google.com/o/oauth2/device/code'
-            r = requests.post(path,
-                              params={'client_id': not_secret['client_id'],
-                                      'scope': scope})
-            validate_response(r, path)
-            data = json.loads(r.content.decode())
-            print('Enter the following code when prompted in the browser:')
-            print(data['user_code'])
-            webbrowser.open(data['verification_url'])
-            for i in range(self.retries):
-                time.sleep(2)
-                r = requests.post(
-                        "https://www.googleapis.com/oauth2/v4/token",
-                        params={'client_id': not_secret['client_id'],
+            try:
+                data = self.get_default_gtoken()
+                self.tokens[(project, access)] = data
+            except:
+                # no credentials - try to ask google in the browser
+                scope = "https://www.googleapis.com/auth/devstorage." + access
+                path = 'https://accounts.google.com/o/oauth2/device/code'
+                r = requests.post(path,
+                                  params={'client_id': not_secret['client_id'],
+                                          'scope': scope})
+                validate_response(r, path)
+                data = json.loads(r.content.decode())
+                print('Navigate to:', data['verification_url'])
+                print('Enter code:', data['user_code'])
+                while True:
+                    time.sleep(1)
+                    r = requests.post(
+                            "https://www.googleapis.com/oauth2/v4/token",
+                            params={
+                                'client_id': not_secret['client_id'],
                                 'client_secret': not_secret['client_secret'],
                                 'code': data['device_code'],
                                 'grant_type':
                                     "http://oauth.net/grant_type/device/1.0"})
-                data2 = json.loads(r.content.decode())
-                if 'error' in data2:
-                    if i == self.retries - 1:
-                        raise RuntimeError("Waited too long for browser"
-                                           "authentication.")
-                    continue
-                data = data2
-                break
-            data['timestamp'] = time.time()
-            data.update(not_secret)
+                    data2 = json.loads(r.content.decode())
+                    if 'error' in data2:
+                        continue
+                    data = data2
+                    break
+                data['timestamp'] = time.time()
+                data.update(not_secret)
         if refresh or time.time() - data['timestamp'] > data['expires_in'] - 100:
             # token has expired, or is about to - call refresh
             if data.get('type', None) == 'cloud':
@@ -293,6 +298,14 @@ class GCSFileSystem(object):
         self._save_tokens()
 
     @staticmethod
+    def get_default_gtoken():
+        au = oauth2client.client.GoogleCredentials.get_application_default()
+        tok = {"client_id": au.client_id, "client_secret": au.client_secret,
+               "refresh_token": au.refresh_token, "type": "authorized_user",
+               "timestamp": time.time(), "expires_in": 0}
+        return tok
+
+    @staticmethod
     def _save_tokens():
         try:
             with open(tfile, 'wb') as f:
@@ -311,7 +324,7 @@ class GCSFileSystem(object):
             path = path.format(*[quote_plus(p) for p in args])
         for retry in range(self.retries):
             try:
-                time.sleep(2**retry-1)
+                time.sleep(2**retry - 1)
                 r = meth(self.base + path, headers=self.header, params=kwargs,
                          json=json)
                 validate_response(r, path)
@@ -331,8 +344,11 @@ class GCSFileSystem(object):
 
     def _list_buckets(self):
         if '' not in self.dirs:
-            out = self._call('get', 'b/', project=self.project)
-            dirs = out.get('items', [])
+            try:
+                out = self._call('get', 'b/', project=self.project)
+                dirs = out.get('items', [])
+            except (FileNotFoundError, IOError, ValueError):
+                dirs = []
             self.dirs[''] = dirs
         return self.dirs['']
 
@@ -342,7 +358,9 @@ class GCSFileSystem(object):
             dirs = out.get('items', [])
             next_page_token = out.get('nextPageToken', None)
             while next_page_token is not None:
-                out = self._call('get', 'b/{}/o/', bucket, maxResults=max_results, pageToken=next_page_token)
+                out = self._call('get', 'b/{}/o/', bucket,
+                                 maxResults=max_results,
+                                 pageToken=next_page_token)
                 dirs.extend(out.get('items', []))
                 next_page_token = out.get('nextPageToken', None)
             for f in dirs:
@@ -378,7 +396,7 @@ class GCSFileSystem(object):
             for v in self.dirs[''][:]:
                 if v['name'] == bucket:
                     self.dirs[''].remove(v)
-        self.invalidate_cache(bucket)
+        self.dirs.pop(bucket, None)
 
     def invalidate_cache(self, bucket=None):
         """
@@ -467,8 +485,8 @@ class GCSFileSystem(object):
             root = ''
         allfiles = self.walk(root)
         pattern = re.compile("^" + path.replace('//', '/')
-                             .rstrip('/')
-                             .replace('*', '[^/]*')
+                             .rstrip('/').replace('**', '.+')
+                             .replace('*', '[^/]+')
                              .replace('?', '.') + "$")
         out = [f for f in allfiles if re.match(pattern,
                f.replace('//', '/').rstrip('/'))]
@@ -480,7 +498,16 @@ class GCSFileSystem(object):
             if key:
                 return bool(self.info(path))
             else:
-                return bucket in self.ls('')
+                if bucket in self.ls(''):
+                    return True
+                else:
+                    try:
+                        self._list_bucket(bucket)
+                        return True
+                    except (FileNotFoundError, IOError, ValueError):
+                        # bucket listing failed as it doesn't exist or we can't
+                        # see it
+                        return False
         except FileNotFoundError:
             return False
 
@@ -569,7 +596,7 @@ class GCSFileSystem(object):
             self.invalidate_cache(bucket)
 
     def open(self, path, mode='rb', block_size=None, acl=None,
-             consistency=None):
+             consistency=None, metadata=None):
         """
         See ``GCSFile``.
 
@@ -579,7 +606,7 @@ class GCSFileSystem(object):
         if block_size is None:
             block_size = self.default_block_size
         const = consistency or self.consistency
-        return GCSFile(self, path, mode, block_size, consistency=const)
+        return GCSFile(self, path, mode, block_size, consistency=const, metadata=metadata)
 
     def touch(self, path):
         with self.open(path, 'wb'):
@@ -648,7 +675,7 @@ GCSFileSystem.load_tokens()
 class GCSFile:
 
     def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
-                 acl=None, consistency='md5'):
+                 acl=None, consistency='md5', metadata=None):
         """
         Open a file.
 
@@ -670,11 +697,14 @@ class GCSFile:
             'size' ensures that the number of bytes reported by GCS matches
             the number we wrote; 'md5' does a full checksum. Any value other
             than 'size' or 'md5' is assumed to mean no checking.
+        metadata: dict
+            Custom metadata, in key/value pairs, added at file creation
         """
         bucket, key = split_path(path)
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
+        self.metadata = metadata
         self.mode = mode
         self.blocksize = block_size
         self.cache = b""
@@ -699,6 +729,7 @@ class GCSFile:
             self.buffer = io.BytesIO()
             self.offset = 0
             self.forced = False
+            self.location = None
 
     def info(self):
         """ File information about this path """
@@ -786,6 +817,8 @@ class GCSFile:
             raise ValueError('File not in write mode')
         if self.closed:
             raise ValueError('I/O operation on closed file.')
+        if self.forced:
+            raise ValueError('This file has been force-flushed, can only close')
         out = self.buffer.write(ensure_writable(data))
         self.loc += out
         if self.buffer.tell() >= self.blocksize:
@@ -803,7 +836,7 @@ class GCSFile:
         ----------
         force : bool
             When closing, write the last block even if it is smaller than
-            blocks are allowed to be.
+            blocks are allowed to be. Disallows further writing to this file.
         """
         if self.mode not in {'wb', 'ab'}:
             raise ValueError('Flush on a file not in write mode')
@@ -814,15 +847,14 @@ class GCSFile:
             return
         if force and self.forced:
             raise ValueError("Force flush cannot be called more than once")
-        if force:
-            self.forced = True
         if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
             self._simple_upload()
-            return
-
-        if not self.offset:
+        elif not self.offset:
             self._initiate_upload()
-        self._upload_chunk(final=force)
+        if self.location is not None:
+            self._upload_chunk(final=force)
+        if force:
+            self.forced = True
 
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
@@ -876,7 +908,7 @@ class GCSFile:
         r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                           % quote_plus(self.bucket),
                           params={'uploadType': 'resumable'},
-                          headers=self.gcsfs.header, json={'name': self.key})
+                          headers=self.gcsfs.header, json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
     def _simple_upload(self):
@@ -996,7 +1028,7 @@ def _fetch_range(head, obj_dict, start=None, end=None):
     """
     if DEBUG:
         print('Fetch: ', start, end)
-    logger.debug("Fetch: {}/{}, {}-{}", obj_dict['name'], start, end)
+    logger.debug("Fetch: {}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
         end = end or 0
