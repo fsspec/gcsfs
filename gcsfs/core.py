@@ -127,8 +127,9 @@ class GCSFileSystem(object):
     Two modes of authentication are supported:
     - if ``token=None``, GCSFS will attempt to use your default google
       credentials; if this is not found, you will be given a "device code",
-      which you must enter into a browser where you are logged in with your
-      Google identity.
+      and a URL - open the URL in a browser and enter the device code; you will
+      be asked to allow gcsfs to access your data. Once you agree, the
+      authentication will be complete.
     - if ``token='cloud'``, we assume we are running within google compute
       or google container engine, and query the internal metadata directly for
       a token.
@@ -137,7 +138,8 @@ class GCSFileSystem(object):
       utility; this is either a python dictionary, or the name of a file
       containing the JSON returned by logging in with the gcloud CLI tool. On
       a posix system this may be at
-      ``c``
+      ``~/.config/gcloud/application_default_credentials.json`` or
+      ``~/.config/gcloud/legacy_credentials/<YOUR GOOGLE USERNAME>/adc.json``
 
     We maintain a cache of refresh tokens in the file ~/.gcs_tokens, so for any
     pair of (project, access), you will not need to log in once your credentials
