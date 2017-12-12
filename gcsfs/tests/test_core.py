@@ -80,9 +80,16 @@ def test_list_bucket_multipage(token_restore):
 
 @my_vcr.use_cassette(match=['all'])
 def test_pickle(token_restore):
+    import pickle
     with gcs_maker() as gcs:
-        import pickle
-        gcs2 = pickle.loads(pickle.dumps(gcs))
+        gcs['abcdefg'] = b'1234567'
+
+        b = pickle.dumps(gcs)
+        assert b'abcdefg' not in b  # verify that data is not passed
+        assert b'1234567' not in b
+
+        gcs2 = pickle.loads(b)
+        assert gcs2['abcdefg'] == b'1234567'
 
         # *values* may be equal during tests
         assert gcs.header is not gcs2.header
