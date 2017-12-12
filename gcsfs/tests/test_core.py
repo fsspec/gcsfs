@@ -82,14 +82,19 @@ def test_list_bucket_multipage(token_restore):
 def test_pickle(token_restore):
     import pickle
     with gcs_maker() as gcs:
-        gcs['abcdefg'] = b'1234567'
 
+        # Write data to distinct filename
+        fn = TEST_BUCKET+'/nested/abcdefg'
+        data = b'hello\n'
+        with gcs.open(fn, 'wb') as f:
+            f.write(b'1234567')
+
+        # verify that that filename is not in the serialized form
         b = pickle.dumps(gcs)
-        assert b'abcdefg' not in b  # verify that data is not passed
+        assert b'abcdefg' not in b
         assert b'1234567' not in b
 
         gcs2 = pickle.loads(b)
-        assert gcs2['abcdefg'] == b'1234567'
 
         # *values* may be equal during tests
         assert gcs.header is not gcs2.header
