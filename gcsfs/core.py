@@ -127,8 +127,9 @@ class GCSFileSystem(object):
     Two modes of authentication are supported:
     - if ``token=None``, GCSFS will attempt to use your default google
       credentials; if this is not found, you will be given a "device code",
-      which you must enter into a browser where you are logged in with your
-      Google identity.
+      and a URL - open the URL in a browser and enter the device code; you will
+      be asked to allow gcsfs to access your data. Once you agree, the
+      authentication will be complete.
     - if ``token='cloud'``, we assume we are running within google compute
       or google container engine, and query the internal metadata directly for
       a token.
@@ -137,7 +138,8 @@ class GCSFileSystem(object):
       utility; this is either a python dictionary, or the name of a file
       containing the JSON returned by logging in with the gcloud CLI tool. On
       a posix system this may be at
-      ``~/.config/gcloud/application_default_credentials.json``
+      ``~/.config/gcloud/application_default_credentials.json`` or
+      ``~/.config/gcloud/legacy_credentials/<YOUR GOOGLE USERNAME>/adc.json``
 
     We maintain a cache of refresh tokens in the file ~/.gcs_tokens, so for any
     pair of (project, access), you will not need to log in once your credentials
@@ -512,13 +514,20 @@ class GCSFileSystem(object):
             return False
 
     def info(self, path):
-        path = '/'.join(split_path(path))
-        files = self.ls(path, True)
-        out = [f for f in files if f['name'] == path]
-        if out:
-            return out[0]
+        bucket, key = split_path(path)
+        if bucket not in self.dirs:
+            d = self._call('get', 'b/{}/o/{}', bucket, key)
+            d['name'] = '%s/%s' % (bucket, d['name'])
+            d['size'] = int(d.get('size'), 0)
+            return d
         else:
-            raise FileNotFoundError(path)
+            path = '/'.join(split_path(path))
+            files = self.ls(path, True)
+            out = [f for f in files if f['name'] == path]
+            if out:
+                return out[0]
+            else:
+                raise FileNotFoundError(path)
 
     def url(self, path):
         return self.info(path)['mediaLink']
@@ -896,6 +905,8 @@ class GCSFile:
             self.offset += l
 
     def _initiate_upload(self):
+        print("##INITIATE UPLOAD##", 'https://www.googleapis.com/upload/storage/v1/b/%s/o'
+                          % quote_plus(self.bucket))
         r = requests.post('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                           % quote_plus(self.bucket),
                           params={'uploadType': 'resumable'},
@@ -909,6 +920,7 @@ class GCSFile:
         data = self.buffer.read()
         path = ('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                 % quote_plus(self.bucket))
+        print("##SIMPLE UPLOAD##", path)
         r = requests.post(path,
                           params={'uploadType': 'media', 'name': self.key},
                           headers=head, data=data)
