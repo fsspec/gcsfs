@@ -60,6 +60,13 @@ def test_info(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
+def test_info_directory(token_restore):
+    with gcs_maker() as gcs:
+        gcs.mkdir(a)
+        assert gcs.info(a)['storageClass'] == 'DIRECTORY'
+
+
+@my_vcr.use_cassette(match=['all'])
 def test_ls2(token_restore):
     with gcs_maker() as gcs:
         assert TEST_BUCKET in gcs.ls('')
