@@ -515,19 +515,39 @@ class GCSFileSystem(object):
 
     def info(self, path):
         bucket, key = split_path(path)
+        if not key:
+            files = self.ls('', True)
+            f = [f for f in files if f['name'] == bucket]
+            if f:
+                return f
+            if self.ls(bucket):
+                return {'bucket': bucket, 'kind': 'storage#object',
+                        'size': 0, 'storageClass': 'DIRECTORY',
+                        'name': bucket+'/'}
+            raise FileNotFoundError
         if bucket not in self.dirs:
-            d = self._call('get', 'b/{}/o/{}', bucket, key)
-            d['name'] = '%s/%s' % (bucket, d['name'])
-            d['size'] = int(d.get('size'), 0)
-            return d
-        else:
-            path = '/'.join(split_path(path))
-            files = self.ls(path, True)
-            out = [f for f in files if f['name'] == path]
-            if out:
-                return out[0]
-            else:
-                raise FileNotFoundError(path)
+            try:
+                d = self._call('get', 'b/{}/o/{}', bucket, key)
+                d['name'] = '%s/%s' % (bucket, d['name'])
+                d['size'] = int(d.get('size'), 0)
+                return d
+            except FileNotFoundError:
+                pass
+        path1 = '/'.join(split_path(path))
+        out = []
+        try:
+            files = self.ls(path1, True)
+            out = [f for f in files if f['name'] == path1]
+        except FileNotFoundError:
+            pass
+        if not out:
+            # no such file, but try for such a directory
+            parent = path.rstrip('/').rsplit('/', 1)[0]
+            files = self.ls(parent, True)
+            out = [f for f in files if f['name'] == path.rstrip('/') + '/']
+        if out:
+            return out[0]
+        raise FileNotFoundError(path)
 
     def url(self, path):
         return self.info(path)['mediaLink']
