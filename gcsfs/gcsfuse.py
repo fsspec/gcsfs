@@ -29,7 +29,7 @@ class GCSFS(Operations):
         data = {'st_uid': 1000, 'st_gid': 1000}
         perm = 0o777
 
-        if info['storageClass'] == 'DIRECTORY':
+        if info['storageClass'] == 'DIRECTORY' or info['size'] == 0:
             data['st_atime'] = 0
             data['st_ctime'] = 0
             data['st_mtime'] = 0
@@ -67,10 +67,11 @@ class GCSFS(Operations):
             self.gcs.rm(path, False)
 
     def read(self, path, size, offset, fh):
-        if offset == 0:
-            with self.gcs.open(''.join([self.root, path]), 'rb') as f:
-                f.seek(offset)
-                return f.read(size)
+        print('read', path, size, offset)
+        with self.gcs.open(''.join([self.root, path]), 'rb') as f:
+            f.seek(offset)
+            out = f.read(size)
+            return out
 
     def write(self, path, data, offset, fh):
         if offset == 0:
@@ -104,7 +105,7 @@ class GCSFS(Operations):
 
 
 def main(mountpofloat, root):
-    FUSE(GCSFS(root, ), mountpofloat, nothreads=True, foreground=True)
+    FUSE(GCSFS(root, project='continuum-compute'), mountpofloat, nothreads=True, foreground=True)
 
 if __name__ == '__main__':
     main(sys.argv[2], sys.argv[1])
