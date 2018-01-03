@@ -963,17 +963,29 @@ class GCSFile:
             self.cache = _fetch_range(self.gcsfs.header, self.details,
                                       start, self.end)
         if start < self.start:
-            new = _fetch_range(self.gcsfs.header, self.details,
-                               start, self.start)
-            self.start = start
-            self.cache = new + self.cache
+            if self.end - end > self.blocksize:
+                self.start = start
+                self.end = end + self.blocksize
+                self.cache = _fetch_range(self.gcsfs.header, self.details,
+                                          self.start, self.end)
+            else:
+                new = _fetch_range(self.gcsfs.header, self.details,
+                                   start, self.start)
+                self.start = start
+                self.cache = new + self.cache
         if end > self.end:
             if self.end > self.size:
                 return
-            new = _fetch_range(self.gcsfs.header, self.details,
-                               self.end, end + self.blocksize)
-            self.end = end + self.blocksize
-            self.cache = self.cache + new
+            if end - self.end > self.blocksize:
+                self.start = start
+                self.end = end + self.blocksize
+                self.cache = _fetch_range(self.gcsfs.header, self.details,
+                                          self.start, self.end)
+            else:
+                new = _fetch_range(self.gcsfs.header, self.details,
+                                   self.end, end + self.blocksize)
+                self.end = end + self.blocksize
+                self.cache = self.cache + new
 
     def read(self, length=-1):
         """

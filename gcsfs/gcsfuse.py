@@ -15,10 +15,22 @@ def str_to_time(s):
     return t.to_datetime64().view('int64') / 1e9
 
 
+class FileCache:
+    def __init__(self, gcs):
+        self.gcs = gcs
+        self.files = {}
+
+    def __getitem__(self, item):
+        if item not in self.files:
+            self.files[item] = self.gcs.open(item, 'rb')
+        return self.files[item]
+
+
 class GCSFS(Operations):
 
     def __init__(self, path='.', **fsargs):
         self.gcs = GCSFileSystem(**fsargs)
+        self.cache = FileCache(self.gcs)
         self.root = path
 
     def getattr(self, path, fh=None):
@@ -68,10 +80,11 @@ class GCSFS(Operations):
 
     def read(self, path, size, offset, fh):
         print('read', path, size, offset)
-        with self.gcs.open(''.join([self.root, path]), 'rb') as f:
-            f.seek(offset)
-            out = f.read(size)
-            return out
+        fn = ''.join([self.root, path])
+        f = self.cache[fn]
+        f.seek(offset)
+        out = f.read(size)
+        return out
 
     def write(self, path, data, offset, fh):
         if offset == 0:
