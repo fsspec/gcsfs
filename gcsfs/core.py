@@ -725,6 +725,8 @@ class GCSFile:
             Custom metadata, in key/value pairs, added at file creation
         """
         bucket, key = split_path(path)
+        if not key:
+            raise OSError('Attempt to open a bucket')
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
