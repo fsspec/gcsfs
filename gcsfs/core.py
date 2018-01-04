@@ -656,11 +656,13 @@ class GCSFileSystem(object):
     def __getstate__(self):
         d = self.__dict__.copy()
         del d['header']
+        del d['dirs']
         logger.debug("Serialize with state: %s", d)
         return d
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self.dirs = {}
         self.connect()
 
 

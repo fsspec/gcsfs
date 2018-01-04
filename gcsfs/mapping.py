@@ -89,3 +89,11 @@ class GCSMap(MutableMapping):
 
     def __len__(self):
         return sum(1 for _ in self.keys())
+
+    def __getstate__(self):
+        return self.gcs, self.root
+
+    def __setstate__(self, state):
+        gcs, root = state
+        self.gcs = gcs
+        self.root = root

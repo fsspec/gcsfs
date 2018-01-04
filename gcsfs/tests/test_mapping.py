@@ -143,3 +143,18 @@ def test_new_bucket(token_restore):
             assert not d
         finally:
             gcs.rmdir(new_bucket)
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_pickle(token_restore):
+    import pickle
+    with gcs_maker() as gcs:
+        d = GCSMap(root, gcs)
+        d['x'] = b'1234567890'
+
+        b = pickle.dumps(d)
+        assert b'1234567890' not in b
+
+        e = pickle.loads(b)
+
+        assert dict(e) == {'x': b'1234567890'}
