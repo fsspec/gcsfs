@@ -130,7 +130,7 @@ class GCSFileSystem(object):
       metadata service, anonymous.
     - ``token='gtoken'``, your default gcloud credentials will be used, which
       are typically established by doing ``gcloud login`` in a terminal.
-    - ``token=='cache'``, credentials from previoudly successful gcsfs
+    - ``token=='cache'``, credentials from previously successful gcsfs
       authentication will be used (use this after "browser" auth succeeded)
     - ``token='anon'``, no authentication is preformed, and you can only
       access data which is accessible to allUsers (in this case, the project and
@@ -226,9 +226,9 @@ class GCSFileSystem(object):
     def _connect_gtoken(self):
         try:
             self.token = self.get_default_gtoken()
+            self._refresh_token()
         except:
             return
-        self._refresh_token()
 
     def _connect_cloud(self):
         path = ('http://metadata.google.internal/computeMetadata/v1/'
