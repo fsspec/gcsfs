@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import os
+import posixpath
 import pickle
 import re
 import requests
@@ -74,6 +75,11 @@ def quote_plus(s):
     return s
 
 
+def norm_path(path):
+    """Canonicalize path by split and rejoining."""
+    # TODO Should canonical path include protocol?
+    return "/".join(split_path(path))
+
 def split_path(path):
     """
     Normalise GCS path string into bucket and key.
@@ -81,12 +87,21 @@ def split_path(path):
     Parameters
     ----------
     path : string
-        Input path, like `gcs://mybucket/path/to/file`
+        Input path, like `gcs://mybucket/path/to/file`.
+        Path is of the form: '[gs|gcs://]bucket[/key]'
+
+    Returns
+    -------
+        (bucket, key) tuple
 
     Examples
     --------
     >>> split_path("gcs://mybucket/path/to/file")
     ['mybucket', 'path/to/file']
+    >>> split_path("mybucket/path/to/file")
+    ['mybucket', 'path/to/file']
+    >>> split_path("gs://mybucket")
+    ['mybucket', '']
     """
     if path.startswith('gcs://'):
         path = path[6:]
@@ -179,6 +194,9 @@ class GCSFileSystem(object):
         (see description of authentication methods, above)
     consistency: 'none', 'size', 'md5'
         Check method when writing files. Can be overridden in open().
+    cache_timeout: float, seconds
+        Cache expiration time in seconds for object metadata cache.
+        Set cache_timeout <= 0 for no caching, None for no cache expiration.
     """
     scopes = {'read_only', 'read_write', 'full_control'}
     retries = 4  # number of retries on http failure
@@ -187,7 +205,7 @@ class GCSFileSystem(object):
     default_block_size = 5 * 2**20
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
-                 token=None, block_size=None, consistency='none'):
+                 token=None, block_size=None, consistency='none', cache_timeout = 60 ):
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
@@ -198,11 +216,15 @@ class GCSFileSystem(object):
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
-        self.dirs = {}
         self.token = token
         self.session = None
         self.connect(method=token)
+
+
         self._singleton[0] = self
+
+        self.cache_timeout = cache_timeout
+        self._listing_cache = {}
 
     @classmethod
     def current(cls):
@@ -336,6 +358,8 @@ class GCSFileSystem(object):
             warnings.warn('Saving token cache failed: ' + str(e))
 
     def _call(self, method, path, *args, **kwargs):
+        logger.debug("_call(%s, %s, args=%s, kwargs=%s)", method, path, args, kwargs)
+
         for k, v in list(kwargs.items()):
             # only pass parameters that have values
             if v is None:
@@ -351,6 +375,7 @@ class GCSFileSystem(object):
                 validate_response(r, path)
                 break
             except (HtmlError, RequestException) as e:
+                logger.exception("_call exception: %s", e)
                 if retry == self.retries - 1:
                     raise e
                 if is_retriable(e):
@@ -363,32 +388,168 @@ class GCSFileSystem(object):
             out = r.content
         return out
 
-    def _list_buckets(self):
-        if '' not in self.dirs:
-            try:
-                out = self._call('get', 'b/', project=self.project)
-                dirs = out.get('items', [])
-            except (FileNotFoundError, IOError, ValueError):
-                dirs = []
-            self.dirs[''] = dirs
-        return self.dirs['']
+    @property
+    def buckets(self):
+        """Return list of available project buckets."""
+        return [b["name"] for b in self._list_buckets()["items"]]
 
-    def _list_bucket(self, bucket, max_results=1000):
-        if bucket not in self.dirs:
-            out = self._call('get', 'b/{}/o/', bucket, maxResults=max_results)
-            dirs = out.get('items', [])
-            next_page_token = out.get('nextPageToken', None)
-            while next_page_token is not None:
-                out = self._call('get', 'b/{}/o/', bucket,
-                                 maxResults=max_results,
-                                 pageToken=next_page_token)
-                dirs.extend(out.get('items', []))
-                next_page_token = out.get('nextPageToken', None)
-            for f in dirs:
-                f['name'] = '%s/%s' % (bucket, f['name'])
-                f['size'] = int(f.get('size'), 0)
-            self.dirs[bucket] = dirs
-        return self.dirs[bucket]
+
+    @classmethod
+    def _process_object(self, bucket, object_metadata):
+        object_metadata["size"] = int(object_metadata.get("size", 0))
+        return object_metadata
+
+    def _get_object(self, path):
+        """Return object information at the given path."""
+        logger.debug("_get_object(%s)", path)
+        bucket, key = split_path(path)
+
+        # Check if parent dir is in listing cache
+        parent = "/".join([bucket, posixpath.dirname(key.rstrip("/"))]) + "/"
+        parent_cache = self._maybe_get_cached_listing(parent)
+        if parent_cache:
+            cached_obj = [o for o in parent_cache["items"] if o["name"] == key]
+            if cached_obj:
+                logging.debug("found cached object: %s", cached_obj)
+                return cached_obj[0]
+            else:
+                # Should error on missing cache or reprobe?
+                pass
+
+        if not key:
+            # Attempt to "get" the bucket root, return error instead of
+            # listing.
+            raise FileNotFoundError(path)
+
+        result = self._process_object(bucket, self._call('get', 'b/{}/o/{}', bucket, key))
+
+        logger.debug("_get_object result: %s", result)
+        return result
+
+
+    def _maybe_get_cached_listing(self, path):
+        logger.debug("_maybe_get_cached_listing: %s", path)
+        if path in self._listing_cache:
+            retrieved_time, listing = self._listing_cache[path]
+            cache_age = time.time() - retrieved_time
+            if self.cache_timeout is not None and cache_age > self.cache_timeout:
+                logger.debug(
+                    "expired cache path: %s retrieved_time: %.3f cache_age: %.3f cache_timeout: %.3f",
+                    path, retrieved_time, cache_age, self.cache_timeout
+                )
+                del self._listing_cache[path]
+                return None
+
+            return listing
+
+        return None
+
+    def _list_objects(self, path):
+        path = norm_path(path)
+
+        clisting = self._maybe_get_cached_listing(path)
+        if clisting:
+            return clisting
+
+        listing = self._do_list_objects(path)
+        retrieved_time = time.time()
+
+        self._listing_cache[path] = (retrieved_time, listing)
+        return listing
+
+    def _do_list_objects(self, path, max_results = None):
+        """Return depaginated object listing for the given {bucket}/{prefix}/ path."""
+        logger.debug("_list_objects(%s, max_results=%s)", path, max_results)
+        bucket, prefix = split_path(path)
+        if prefix:
+            assert prefix.endswith("/")
+        else:
+            prefix = None
+
+        prefixes = []
+        items = []
+        page = self._call(
+            'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix, maxResults=max_results)
+
+        assert page["kind"] == "storage#objects"
+        prefixes.extend(page.get("prefixes", []))
+        items.extend(page.get("items", []))
+        next_page_token = page.get('nextPageToken', None)
+
+        while next_page_token is not None:
+            page = self._call(
+                'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix, maxResults=max_results,
+                pageToken=next_page_token)
+
+            assert page["kind"] == "storage#objects"
+            prefixes.extend(page.get("prefixes", []))
+            items.extend(page.get("items", []))
+            next_page_token = page.get('nextPageToken', None)
+
+        result = {
+            "kind" : "storage#objects",
+            "prefixes" : prefixes,
+            "items" : items,
+        }
+
+        logger.debug("_list_objects result: %s", {k : len(result[k]) for k in ("prefixes", "items")})
+        items = [self._process_object(bucket, i) for i in items]
+
+        return result
+
+    def _list_buckets(self):
+        """Return list of all buckets under the current project."""
+
+        logger.debug("_list_buckets")
+
+        items = []
+        page = self._call(
+            'get', 'b/', project=self.project
+        )
+
+        assert page["kind"] == "storage#buckets"
+        items.extend(page.get("items", []))
+        next_page_token = page.get('nextPageToken', None)
+
+        while next_page_token is not None:
+            page = self._call(
+                'get', 'b/', project=self.roject, pageToken=next_page_token)
+
+            assert page["kind"] == "storage#buckets"
+            items.extend(page.get("items", []))
+            next_page_token = page.get('nextPageToken', None)
+
+        result = {
+            "kind" : "storage#buckets",
+            "items" : items,
+        }
+
+        logger.debug("_list_buckets result: %s", {k : len(result[k]) for k in ("items",)})
+
+        return result
+
+    def invalidate_cache(self, path=None):
+        """
+        Invalidate listing cache for given path, so that it is reloaded on next use.
+
+        Parameters
+        ----------
+        path: string or None
+            If None, clear all listings cached else listings at or under given path.
+        """
+
+        if not path:
+            logger.debug("invalidate_cache clearing cache")
+            self._listing_cache.clear()
+        else:
+            path = norm_path(path)
+            logger.debug("invalidate_cache prefix: %s", path)
+
+            invalid_keys = [k for k in self._listing_cache if k.startswith(path)]
+            logger.debug("invalidate_cache keys: %s", invalid_keys)
+
+            for k in invalid_keys:
+                self._listing_cache.pop(k, None)
 
     def mkdir(self, bucket, acl='projectPrivate',
               default_acl='bucketOwnerFullControl'):
@@ -408,7 +569,6 @@ class GCSFileSystem(object):
                    predefinedDefaultObjectAcl=default_acl,
                    json={"name": bucket})
         self.invalidate_cache(bucket)
-        self.invalidate_cache('')
 
     def rmdir(self, bucket):
         """Delete an empty bucket"""
@@ -417,65 +577,77 @@ class GCSFileSystem(object):
             for v in self.dirs[''][:]:
                 if v['name'] == bucket:
                     self.dirs[''].remove(v)
-        self.dirs.pop(bucket, None)
-
-    def invalidate_cache(self, bucket=None):
-        """
-        Mark files cache as dirty, so that it is reloaded on next use.
-
-        Parameters
-        ----------
-        bucket: string or None
-            If None, clear all files cached; if a string, clear the files
-            corresponding to that bucket.
-        """
-        if bucket in {'/', '', None}:
-            self.dirs.clear()
-        else:
-            self.dirs.pop(bucket, None)
+        self.invalidate_cache(bucket)
 
     def ls(self, path, detail=False):
-        if path in ['', '/']:
-            out = self._list_buckets()
+        """List objects under the given '/{bucket}/{prefix} path."""
+        if path in ['/', '']:
+            out = self.buckets
         else:
-            bucket, prefix = split_path(path)
-            path = '/'.join([bucket, prefix])
-            files = self._list_bucket(bucket)
-            seek, l, bit = (path, len(path), '') if path.endswith('/') else (
-                path+'/', len(path)+1, '/')
-            out = []
-            for f in files:
-                if (f['name'].startswith(seek) and '/' not in f['name'][l:] or
-                        f['name'] == path):
-                    out.append(f)
-                elif f['name'].startswith(seek) and '/' in f['name'][l:]:
-                    directory = {
-                        'bucket': bucket, 'kind': 'storage#object',
-                        'size': 0, 'storageClass': 'DIRECTORY',
-                        'name': path+bit+f['name'][l:].split('/', 1)[0]+'/'}
-                    if directory not in out:
-                        out.append(directory)
-        if detail:
-            return out
-        else:
-            return [f['name'] for f in out]
+            if not path.endswith("/"):
+                path = path + "/"
+
+            listing = self._list_objects(path)
+            bucket, key = split_path(path)
+
+            if not detail:
+                result = []
+
+                # Convert item listing into list of 'item' and 'subdir/'
+                # entries. Items may be of form "key/", in which case there
+                # will be duplicate entries in prefix and item_names.
+                item_names = [
+                    f["name"][len(key):] for f in listing["items"]
+                    if f["name"][len(key):]
+                ]
+                prefixes = [p for p in listing["prefixes"]]
+
+                return list(set(item_names + prefixes))
+
+            else:
+                item_details = listing["items"]
+                pseudodirs = [{
+                        'bucket': bucket,
+                        'name': key + prefix,
+                        'kind': 'storage#object',
+                        'size': 0,
+                        'storageClass': 'DIRECTORY',
+                    }
+                    for prefix in listing["prefixes"]
+                ]
+
+                return item_details + pseudodirs
 
     def walk(self, path, detail=False):
+        """ Return all real keys belows path. """
         bucket, prefix = split_path(path)
+
         if not bucket:
-            raise ValueError('Cannot walk all of GCS')
+            raise ValueError(
+                "walk path must include target bucket: %s" % path)
+
         path = '/'.join([bucket, prefix])
-        files = self._list_bucket(bucket)
+
         if path.endswith('/'):
-            files = [f for f in files if f['name'].startswith(path) or
-                     f['name'] == path]
+            results = []
+            listing = self.ls(path, detail=True)
+
+            files = [l for l in listing if l["storageClass"] != "DIRECTORY"]
+            dirs = [l for l in listing if l["storageClass"] == "DIRECTORY"]
+            for d in dirs:
+                files.extend(
+                        self.walk(posixpath.join(bucket, d["name"]), detail=True))
         else:
-            files = [f for f in files if f['name'].startswith(path+'/') or
-                     f['name'] == path]
+            files = self.walk(path + "/", detail=True)
+            files.extend([
+                f for f in self.ls(posixpath.dirname(path), detail=True)
+                if f["name"] == prefix
+            ])
+
         if detail:
             return files
         else:
-            return [f['name'] for f in files]
+            return [posixpath.join(f["bucket"], f['name']) for f in files]
 
     def du(self, path, total=False, deep=False):
         if deep:
@@ -519,11 +691,13 @@ class GCSFileSystem(object):
             if key:
                 return bool(self.info(path))
             else:
-                if bucket in self.ls(''):
+                if bucket in self.buckets:
                     return True
                 else:
                     try:
-                        self._list_bucket(bucket)
+                        # Bucket may be present & viewable, but not owned by
+                        # the current project. Attempt to list.
+                        self._list_objects(path)
                         return True
                     except (FileNotFoundError, IOError, ValueError):
                         # bucket listing failed as it doesn't exist or we can't
@@ -535,38 +709,35 @@ class GCSFileSystem(object):
     def info(self, path):
         bucket, key = split_path(path)
         if not key:
-            files = self.ls('', True)
-            f = [f for f in files if f['name'] == bucket]
-            if f:
-                return f[0]
-            if self.ls(bucket):
-                return {'bucket': bucket, 'kind': 'storage#object',
-                        'size': 0, 'storageClass': 'DIRECTORY',
-                        'name': bucket+'/'}
-            raise FileNotFoundError
-        if bucket not in self.dirs:
-            try:
-                d = self._call('get', 'b/{}/o/{}', bucket, key)
-                d['name'] = '%s/%s' % (bucket, d['name'])
-                d['size'] = int(d.get('size'), 0)
-                return d
-            except FileNotFoundError:
-                pass
-        path1 = '/'.join(split_path(path))
-        out = []
+            # Return a pseudo dir for the bucket root
+            return {
+                'bucket': bucket,
+                'name': "/",
+                'kind': 'storage#object',
+                'size': 0,
+                'storageClass': 'DIRECTORY',
+            }
+
         try:
-            files = self.ls(path1, True)
-            out = [f for f in files if f['name'] == path1]
+            return self._get_object(path)
         except FileNotFoundError:
-            pass
-        if not out:
-            # no such file, but try for such a directory
-            parent = path.rstrip('/').rsplit('/', 1)[0]
-            files = self.ls(parent, True)
-            out = [f for f in files if f['name'] == path.rstrip('/') + '/']
-        if out:
-            return out[0]
-        raise FileNotFoundError(path)
+            logger.debug("info FileNotFound at path: %s", path)
+            # ls containing directory of path to determine
+            # if a pseudodirectory is needed for this entry.
+            ikey = key.rstrip("/")
+            dkey = ikey + "/"
+            assert ikey, "Stripped path resulted in root object."
+
+            parent_listing = self.ls(
+                posixpath.join(bucket, posixpath.dirname(ikey)), detail=True)
+            pseudo_listing = [
+                i for i in parent_listing
+                if i["storageClass"] == "DIRECTORY" and i["name"] == dkey ]
+
+            if pseudo_listing:
+                return pseudo_listing[0]
+            else:
+                raise
 
     def url(self, path):
         return self.info(path)['mediaLink']
@@ -632,9 +803,9 @@ class GCSFileSystem(object):
             for p in self.walk(path):
                 self.rm(p)
         else:
-            bucket, path = split_path(path)
-            self._call('delete', "b/{}/o/{}", bucket, path)
-            self.invalidate_cache(bucket)
+            bucket, key = split_path(path)
+            self._call('delete', "b/{}/o/{}", bucket, key)
+            self.invalidate_cache(posixpath.dirname(norm_path(path)))
 
     def open(self, path, mode='rb', block_size=None, acl=None,
              consistency=None, metadata=None):
@@ -1047,7 +1218,8 @@ class GCSFile:
             self.cache = None
         else:
             self.flush(force=True)
-            self.gcsfs.invalidate_cache(self.bucket)
+            self.gcsfs.invalidate_cache(
+                posixpath.dirname("/".join([self.bucket, self.key])))
         self.closed = True
 
     def readable(self):
