@@ -147,7 +147,7 @@ class GCSFileSystem(object):
       This may be at
       ``~/.config/gcloud/application_default_credentials.json``,
       `` ~/.config/gcloud/credentials``, or
-      ``C:\Users\%username%\AppData\Roaming\gcloud\credentials``, etc.
+      ``~\AppData\Roaming\gcloud\credentials``, etc.
 
     Parameters
     ----------
