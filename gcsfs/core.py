@@ -228,7 +228,7 @@ class GCSFileSystem(object):
             self.token = self.get_default_gtoken()
             self._refresh_token()
         except:
-            return
+            self.token = None
 
     def _connect_cloud(self):
         path = ('http://metadata.google.internal/computeMetadata/v1/'
