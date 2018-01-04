@@ -306,6 +306,7 @@ class GCSFileSystem(object):
         self.session = requests.Session()
         if method not in ['gtoken', 'cache', 'cloud', 'token', 'anon',
                           'browser', None]:
+            self.token = method
             method = 'token'
         if method is None:
             for meth in ['gtoken', 'cache', 'cloud', 'anon']:
