@@ -128,7 +128,7 @@ class GCSFileSystem(object):
     - ``token=None``, GCSFS will attempt to guess your credentials in the
       following order: gcloud CLI default, gcsfs cached token, google compute
       metadata service, anonymous.
-    - ``token='gtoken'``, your default gcloud credentials will be used, which
+    - ``token='google_default'``, your default gcloud credentials will be used, which
       are typically established by doing ``gcloud login`` in a terminal.
     - ``token=='cache'``, credentials from previously successful gcsfs
       authentication will be used (use this after "browser" auth succeeded)
@@ -223,7 +223,7 @@ class GCSFileSystem(object):
             tokens = {}
         GCSFileSystem.tokens = tokens
 
-    def _connect_gtoken(self):
+    def _connect_google_default(self):
         try:
             self.token = self.get_default_gtoken()
             self._refresh_token()
@@ -288,6 +288,7 @@ class GCSFileSystem(object):
             break
         data['timestamp'] = time.time()
         data.update(not_secret)
+        self.method = 'cache'  # no need to repeat on new connect()
         self.token = data
         self.tokens[(project, access)] = self.token
         self._save_tokens()
@@ -299,17 +300,17 @@ class GCSFileSystem(object):
 
         Parameters
         ----------
-        method: str (gtoken|cache|cloud|token|anon|browser) or None
+        method: str (google_default|cache|cloud|token|anon|browser) or None
             Type of authorisation to implement - calls `_connect_*` methods.
             If None, will try sequence of methods.
         """
         self.session = requests.Session()
-        if method not in ['gtoken', 'cache', 'cloud', 'token', 'anon',
+        if method not in ['google_default', 'cache', 'cloud', 'token', 'anon',
                           'browser', None]:
             self.token = method
             method = 'token'
         if method is None:
-            for meth in ['gtoken', 'cache', 'cloud', 'anon']:
+            for meth in ['google_default', 'cache', 'cloud', 'anon']:
                 self.connect(method=meth)
                 if self.token:
                     break
