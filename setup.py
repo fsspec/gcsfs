@@ -15,4 +15,8 @@ setup(name='gcsfs',
       install_requires=[open('requirements.txt').read().strip().split('\n')],
       long_description=(open('README.rst').read() if os.path.exists('README.rst')
                         else ''),
+      entry_points='''
+        [console_scripts]
+        gcsfuse=gcsfs.cli.gcsfuse:main
+      ''',
       zip_safe=False)

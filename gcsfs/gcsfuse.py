@@ -1,10 +1,9 @@
 from __future__ import print_function
 import os
-import sys
 import stat
 import pandas as pd
 from errno import ENOENT, EIO
-from fuse import FUSE, Operations, FuseOSError
+from fuse import Operations, FuseOSError
 from gcsfs import GCSFileSystem
 from pwd import getpwnam
 from grp import getgrnam
@@ -115,10 +114,3 @@ class GCSFS(Operations):
 
     def chmod(self, path, mode):
         raise NotImplementedError
-
-
-def main(mountpofloat, root):
-    FUSE(GCSFS(root, project='continuum-compute'), mountpofloat, nothreads=True, foreground=True)
-
-if __name__ == '__main__':
-    main(sys.argv[2], sys.argv[1])
