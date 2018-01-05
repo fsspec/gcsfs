@@ -80,9 +80,21 @@ def test_list_bucket_multipage(token_restore):
 
 @my_vcr.use_cassette(match=['all'])
 def test_pickle(token_restore):
+    import pickle
     with gcs_maker() as gcs:
-        import pickle
-        gcs2 = pickle.loads(pickle.dumps(gcs))
+
+        # Write data to distinct filename
+        fn = TEST_BUCKET+'/nested/abcdefg'
+        data = b'hello\n'
+        with gcs.open(fn, 'wb') as f:
+            f.write(b'1234567')
+
+        # verify that that filename is not in the serialized form
+        b = pickle.dumps(gcs)
+        assert b'abcdefg' not in b
+        assert b'1234567' not in b
+
+        gcs2 = pickle.loads(b)
 
         # *values* may be equal during tests
         assert gcs.header is not gcs2.header
