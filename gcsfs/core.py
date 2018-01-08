@@ -194,6 +194,7 @@ class GCSFileSystem(object):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.dirs = {}
+        self.session = None
         self.connect(method=token)
         self._singleton[0] = self
 
@@ -274,15 +275,17 @@ class GCSFileSystem(object):
             Type of authorisation to implement - calls `_connect_*` methods.
             If None, will try sequence of methods.
         """
-        self.session = requests.Session()
         if method not in ['google_default', 'cache', 'cloud', 'token', 'anon',
                           'browser', None]:
             self.token = method
             method = 'token'
         if method is None:
             for meth in ['google_default', 'cache', 'cloud', 'anon']:
-                self.connect(method=meth)
-                if self.token:
+                try:
+                    self.connect(method=meth)
+                except:
+                    logging.debug('Connection with method "%s" failed' % meth)
+                if self.session:
                     break
         else:
             self.__getattribute__('_connect_' + method)()
