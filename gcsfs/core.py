@@ -6,11 +6,14 @@ from __future__ import print_function
 
 import array
 from base64 import b64encode
+import google.auth as gauth
+from google.auth.transport.requests import AuthorizedSession
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from hashlib import md5
 import io
 import json
 import logging
-import oauth2client.client   # version 1.5.2
 import os
 import pickle
 import re
@@ -32,6 +35,12 @@ logger = logging.getLogger(__name__)
 not_secret = {"client_id": "586241054156-7a3vrghs70ffkkfkmnnatjnbjg03cq9a."
                            "apps.googleusercontent.com",
               "client_secret": "RsSQZJKYE00oRv2ibYlj28Sx"}
+client_config = {'installed': {
+    'client_id': not_secret['client_id'],
+    'client_secret': not_secret['client_secret'],
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://accounts.google.com/o/oauth2/token"
+}}
 tfile = os.path.join(os.path.expanduser("~"), '.gcs_tokens')
 ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
         "private", "projectprivate", "publicread"}
@@ -178,11 +187,11 @@ class GCSFileSystem(object):
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
             warnings.warn('GCS project not set - cannot list or create buckets')
-        self.token = None
         if block_size is not None:
             self.default_block_size = block_size
         self.project = project
         self.access = access
+        self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.dirs = {}
         self.connect(method=token)
@@ -200,98 +209,59 @@ class GCSFileSystem(object):
             return cls._singleton[0]
 
     @staticmethod
-    def _parse_gtoken(gt):
-        if isinstance(gt, str):
-            t = json.load(open(gt))
-        else:
-            t = gt.copy()
-        typ = t.pop('type')
-        if typ != "authorized_user":
-            raise ValueError("Only 'authorized_user' tokens accepted, got: %s"
-                             % typ)
-        t['grant_type'] = 'refresh_token'
-        t['timestamp'] = time.time()
-        t['expires_in'] = 0
-        return t
-
-    @staticmethod
     def load_tokens():
         try:
             with open(tfile, 'rb') as f:
                 tokens = pickle.load(f)
-        except Exception:
+            # backwards compatability
+            tokens = {k: (GCSFileSystem._dict_to_credentials(v)
+                          if isinstance(v, dict) else v)
+                      for k, v in tokens.items()}
+        except IOError:
             tokens = {}
         GCSFileSystem.tokens = tokens
 
     def _connect_google_default(self):
-        try:
-            self.token = self.get_default_gtoken()
-            self._refresh_token()
-        except:
-            self.token = None
+        credentials, project = gauth.default()
+        self.project = project
+        self.session = AuthorizedSession(credentials)
 
     def _connect_cloud(self):
-        path = ('http://metadata.google.internal/computeMetadata/v1/'
-                'instance/service-accounts/default/token')
-        try:
-            r = self.session.get(
-                path, headers={'Metadata-Flavor': 'Google'})
-            validate_response(r, path)
-        except:
-            return
-        data = r.json()
-        data['timestamp'] = time.time()
-        data['type'] = 'cloud'
-        self.token = data
+        credentials = gauth.compute_engine.Credentials()
+        self.session = AuthorizedSession(credentials)
 
     def _connect_cache(self):
         project, access = self.project, self.access
         if (project, access) in self.tokens:
-            self.token = self.tokens[(project, access)]
-            self._refresh_token()
+            credentials = self.tokens[(project, access)]
+            self.session = AuthorizedSession(credentials)
 
-    def _connect_token(self):
-        if 'type' in self.token or isinstance(self.token, str):
-            self.token = self._parse_gtoken(self.token)
-        self.tokens[(self.project, self.access)] = self.token
-        self._refresh_token()
-        self._save_tokens()
+    @staticmethod
+    def _dict_to_credentials(token):
+        """
+        Convert old dict-style token
+        """
+        return Credentials(
+            token['access_token'], refresh_token=token['refresh_token'],
+            client_secret=token['client_secret'],
+            client_id=token['client_id'],
+            token_uri='https://www.googleapis.com/oauth2/v4/token'
+        )
+
+    def _connect_service_account_file(self, fn):
+        credentials = (gauth.service_account.Credentials.
+                       from_service_account_file(fn))
+        self.session = AuthorizedSession(credentials)
 
     def _connect_anon(self):
-        self.token = None
+        self.session = requests.Session()
 
     def _connect_browser(self):
-        project, access = self.project, self.access
-        scope = "https://www.googleapis.com/auth/devstorage." + access
-        path = 'https://accounts.google.com/o/oauth2/device/code'
-        r = self.session.post(
-            path, params={'client_id': not_secret['client_id'],
-                          'scope': scope})
-        validate_response(r, path)
-        data = json.loads(r.content.decode())
-        print('Navigate to:', data['verification_url'])
-        print('Enter code:', data['user_code'])
-        while True:
-            time.sleep(1)
-            r = self.session.post(
-                    "https://www.googleapis.com/oauth2/v4/token",
-                    params={
-                        'client_id': not_secret['client_id'],
-                        'client_secret': not_secret['client_secret'],
-                        'code': data['device_code'],
-                        'grant_type':
-                            "http://oauth.net/grant_type/device/1.0"})
-            data2 = json.loads(r.content.decode())
-            if 'error' in data2:
-                continue
-            data = data2
-            break
-        data['timestamp'] = time.time()
-        data.update(not_secret)
-        self.method = 'cache'  # no need to repeat on new connect()
-        self.token = data
-        self.tokens[(project, access)] = self.token
+        flow = InstalledAppFlow.from_client_config(client_config, [self.scope])
+        credentials = flow.run_console()
+        self.tokens[(self.project, self.access)] = credentials
         self._save_tokens()
+        self.session = AuthorizedSession(credentials)
 
     def connect(self, method=None):
         """
@@ -318,39 +288,6 @@ class GCSFileSystem(object):
             self.__getattribute__('_connect_' + method)()
             self.method = method
 
-        if self.token:
-            self.header = {'Authorization':
-                           'Bearer ' + self.token['access_token']}
-        else:
-            # a warning if we ended up with no token but method!='anon'?
-            self.header = {}
-
-    def _refresh_token(self, refresh=False):
-        data = self.token
-        if data is None:
-            # anonymous, no need to refresh
-            return
-        if refresh or time.time() - data['timestamp'] > data['expires_in'] - 100:
-            # token has expired, or is about to - call refresh
-            path = "https://www.googleapis.com/oauth2/v4/token"
-            r = self.session.post(
-                path,
-                params={'client_id': data['client_id'],
-                        'client_secret': data['client_secret'],
-                        'refresh_token': data['refresh_token'],
-                        'grant_type': "refresh_token"})
-            validate_response(r, path)
-            data['timestamp'] = time.time()
-            data['access_token'] = r.json()['access_token']
-
-    @staticmethod
-    def get_default_gtoken():
-        au = oauth2client.client.GoogleCredentials.get_application_default()
-        tok = {"client_id": au.client_id, "client_secret": au.client_secret,
-               "refresh_token": au.refresh_token, "type": "authorized_user",
-               "timestamp": time.time(), "expires_in": 0}
-        return tok
-
     @staticmethod
     def _save_tokens():
         try:
@@ -371,8 +308,7 @@ class GCSFileSystem(object):
         for retry in range(self.retries):
             try:
                 time.sleep(2**retry - 1)
-                r = meth(self.base + path, headers=self.header, params=kwargs,
-                         json=json)
+                r = meth(self.base + path, params=kwargs, json=json)
                 validate_response(r, path)
                 break
             except (HtmlError, RequestException) as e:
