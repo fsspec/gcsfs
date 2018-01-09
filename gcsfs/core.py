@@ -10,6 +10,7 @@ import google.auth as gauth
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from hashlib import md5
 import io
 import json
@@ -137,8 +138,8 @@ class GCSFileSystem(object):
     - ``token=None``, GCSFS will attempt to guess your credentials in the
       following order: gcloud CLI default, gcsfs cached token, google compute
       metadata service, anonymous.
-    - ``token='google_default'``, your default gcloud credentials will be used, which
-      are typically established by doing ``gcloud login`` in a terminal.
+    - ``token='google_default'``, your default gcloud credentials will be used,
+      which are typically established by doing ``gcloud login`` in a terminal.
     - ``token=='cache'``, credentials from previously successful gcsfs
       authentication will be used (use this after "browser" auth succeeded)
     - ``token='anon'``, no authentication is preformed, and you can only
@@ -163,10 +164,11 @@ class GCSFileSystem(object):
     project : string
         project_id to work under. Note that this is not the same as, but ofter
         very similar to, the project name.
-        GCS users may only access to contents of one project in a single
-        instance of GCSFileSystem. This is required in order
+        This is required in order
         to list all the buckets you have access to within a project and to
         create/delete buckets, or update their access policies.
+        If ``token='google_default'``, the value is overriden by the default,
+        if ``token='anon'``, the value is ignored.
     access : one of {'read_only', 'read_write', 'full_control'}
         Full control implies read/write as well as modifying metadata,
         e.g., access control.
@@ -240,18 +242,35 @@ class GCSFileSystem(object):
     @staticmethod
     def _dict_to_credentials(token):
         """
-        Convert old dict-style token
+        Convert old dict-style token.
+
+        Does not preserve access token itself, assumes refresh required.
         """
         return Credentials(
-            token['access_token'], refresh_token=token['refresh_token'],
+            None, refresh_token=token['refresh_token'],
             client_secret=token['client_secret'],
             client_id=token['client_id'],
             token_uri='https://www.googleapis.com/oauth2/v4/token'
         )
 
-    def _connect_service_account_file(self, fn):
-        credentials = (gauth.service_account.Credentials.
-                       from_service_account_file(fn))
+    def _connect_token(self, token):
+        if isinstance(token, str) and os.path.exists(token):
+            try:
+                # is this a "service" token?
+                self._connect_service(token)
+                return
+            except:
+                # some other kind of token file
+                # will raise exception if is not json
+                token = json.load(open(token))
+        elif not isinstance(token, dict):
+            raise ValueError('Token format no understood')
+        credentials = GCSFileSystem._dict_to_credentials(token)
+        self.session = AuthorizedSession(credentials)
+
+    def _connect_service(self, fn):
+        # raises exception if file does not match expectation
+        credentials = service_account.Credentials.from_service_account_file(fn)
         self.session = AuthorizedSession(credentials)
 
     def _connect_anon(self):
@@ -277,9 +296,8 @@ class GCSFileSystem(object):
         """
         if method not in ['google_default', 'cache', 'cloud', 'token', 'anon',
                           'browser', None]:
-            self.token = method
-            method = 'token'
-        if method is None:
+            self._connect_token(method)
+        elif method is None:
             for meth in ['google_default', 'cache', 'cloud', 'anon']:
                 try:
                     self.connect(method=meth)
