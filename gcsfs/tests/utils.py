@@ -36,6 +36,8 @@ def before_record_response(response):
                 data['access_token'] = 'xxx'
             if 'id_token' in data:
                 data['id_token'] = 'xxx'
+            if 'refresh_token' in data:
+                data['refresh_token'] = 'xxx'
             r['body']['string'] = gzip.compress(
                     json.dumps(data).replace(
                             TEST_PROJECT, 'test_project').replace(
