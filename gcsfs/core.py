@@ -197,6 +197,7 @@ class GCSFileSystem(object):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.dirs = {}
+        self.token = token
         self.session = None
         self.connect(method=token)
         self._singleton[0] = self
@@ -685,7 +686,6 @@ class GCSFileSystem(object):
 
     def __getstate__(self):
         d = self.__dict__.copy()
-        del d['header']
         del d['dirs']
         logger.debug("Serialize with state: %s", d)
         return d
@@ -693,7 +693,7 @@ class GCSFileSystem(object):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.dirs = {}
-        self.connect()
+        self.connect(self.token)
 
 
 GCSFileSystem.load_tokens()

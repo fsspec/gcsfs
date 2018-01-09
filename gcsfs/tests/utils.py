@@ -15,6 +15,8 @@ from gcsfs.tests.settings import (TEST_BUCKET, TEST_PROJECT, RECORD_MODE,
 
 def before_record_response(response):
     r = pickle.loads(pickle.dumps(response))
+    for field in ['Alt-Svc', 'Date', 'Expires']:
+        r['headers'].pop(field, None)
     try:
         try:
             data = json.loads(gzip.decompress(r['body']['string']).decode())
@@ -37,28 +39,26 @@ def before_record_response(response):
 
 def before_record(request):
     r = pickle.loads(pickle.dumps(request))
+    for field in ['User-Agent']:
+        r.headers.pop(field, None)
     r.uri = request.uri.replace(TEST_PROJECT, 'test_project').replace(
         TEST_BUCKET, 'gcsfs-testing')
     return r
 
 
 def matcher(r1, r2):
+    print(r1, r2, file=open('/Users/mdurant/out', 'a'))
     if r1.uri.replace(TEST_PROJECT,
                       'test_project') != r2.uri.replace(TEST_PROJECT,
                       'test_project'):
-        print('uri mismatch')
         return False
     if r1.body != r2.body:
-        print('body mismatch')
         return False
     if r1.method != r2.method:
-        print('method mismatch')
         return False
-    for key in ['Content-Length', 'Content-Type', 'Range', 'Server']:
+    for key in ['Content-Length', 'Content-Type', 'Range']:
         if r1.head.get(key, '') != r2.head.get(key, ''):
-            print('header mismatch', key)
             return False
-    print('match')
     return True
 
 recording_path = os.path.join(os.path.dirname(__file__), 'recordings')
