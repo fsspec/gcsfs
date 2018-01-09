@@ -155,7 +155,7 @@ class GCSFileSystem(object):
       utility; this is either a python dictionary, the name of a file
       containing the JSON returned by logging in with the gcloud CLI tool,
       or a Credentials object. gcloud typically stores its tokens in locations
-      such as 
+      such as
       ``~/.config/gcloud/application_default_credentials.json``,
       `` ~/.config/gcloud/credentials``, or
       ``~\AppData\Roaming\gcloud\credentials``, etc.
@@ -551,7 +551,7 @@ class GCSFileSystem(object):
     def cat(self, path):
         """ Simple one-shot get of file data """
         details = self.info(path)
-        return _fetch_range(self.header, details, self.session)
+        return _fetch_range(details, self.session)
 
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
         with self.open(rpath, 'rb', block_size=blocksize) as f1:
@@ -624,7 +624,14 @@ class GCSFileSystem(object):
         if block_size is None:
             block_size = self.default_block_size
         const = consistency or self.consistency
-        return GCSFile(self, path, mode, block_size, consistency=const, metadata=metadata)
+        if 'b' in mode:
+            return GCSFile(self, path, mode, block_size, consistency=const,
+                           metadata=metadata)
+        else:
+            mode = mode.replace('t', '') + 'b'
+            return io.TextIOWrapper(
+                GCSFile(self, path, mode, block_size, consistency=const,
+                        metadata=metadata))
 
     def touch(self, path):
         with self.open(path, 'wb'):
@@ -879,7 +886,7 @@ class GCSFile:
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
         data = self.buffer.read()
-        head = self.gcsfs.header.copy()
+        head = {}
         l = self.buffer.tell()
         if final:
             if l:
@@ -928,20 +935,17 @@ class GCSFile:
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
             % quote_plus(self.bucket),
             params={'uploadType': 'resumable'},
-            headers=self.gcsfs.header, json={'name': self.key,
-                                             'metadata': self.metadata})
+            json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
     def _simple_upload(self):
         """One-shot upload, less than 5MB"""
-        head = self.gcsfs.header.copy()
         self.buffer.seek(0)
         data = self.buffer.read()
         path = ('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                 % quote_plus(self.bucket))
         r = self.gcsfs.session.post(
-            path, params={'uploadType': 'media', 'name': self.key},
-            headers=head, data=data)
+            path, params={'uploadType': 'media', 'name': self.key}, data=data)
         validate_response(r, path)
         size, md5 = int(r.json()['size']), r.json()['md5Hash']
         if self.consistency == 'size':
@@ -958,18 +962,17 @@ class GCSFile:
             # First read
             self.start = start
             self.end = end + self.blocksize
-            self.cache = _fetch_range(self.gcsfs.header, self.details,
-                                      self.gcsfs.session, start, self.end)
+            self.cache = _fetch_range(self.details, self.gcsfs.session, start,
+                                      self.end)
         if start < self.start:
-            new = _fetch_range(self.gcsfs.header, self.details,
-                               self.gcsfs.session, start, self.start)
+            new = _fetch_range(self.details, self.gcsfs.session, start,
+                               self.start)
             self.start = start
             self.cache = new + self.cache
         if end > self.end:
             if self.end > self.size:
                 return
-            new = _fetch_range(self.gcsfs.header, self.details,
-                               self.gcsfs.session, self.end,
+            new = _fetch_range(self.details, self.gcsfs.session, self.end,
                                end + self.blocksize)
             self.end = end + self.blocksize
             self.cache = self.cache + new
@@ -1038,11 +1041,9 @@ class GCSFile:
         self.close()
 
 
-def _fetch_range(head, obj_dict, session, start=None, end=None):
+def _fetch_range(obj_dict, session, start=None, end=None):
     """ Get data from GCS
 
-    head : dict
-        Contains authorization header
     obj_dict : an entry from ls() or info()
     session: requests.Session instance
     start, end : None or integers
@@ -1054,8 +1055,9 @@ def _fetch_range(head, obj_dict, session, start=None, end=None):
     if start is not None or end is not None:
         start = start or 0
         end = end or 0
-        head = head.copy()
-        head['Range'] = 'bytes=%i-%i' % (start, end - 1)
+        head = {'Range': 'bytes=%i-%i' % (start, end - 1)}
+    else:
+        head = None
     back = session.get(obj_dict['mediaLink'], headers=head)
     data = back.content
     if data == b'Request range not satisfiable':
