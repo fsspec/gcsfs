@@ -32,7 +32,7 @@ class GCSMap(MutableMapping):
 
     def __init__(self, root, gcs=None, check=False, create=False):
         self.gcs = gcs or GCSFileSystem.current()
-        self.root = root
+        self.root = root.rstrip('/')
         if check:
             self.gcs.touch(root+'/a')
             self.gcs.rm(root+'/a')
