@@ -27,8 +27,11 @@ class FileCache:
 
 class GCSFS(Operations):
 
-    def __init__(self, path='.', **fsargs):
-        self.gcs = GCSFileSystem(**fsargs)
+    def __init__(self, path='.', gcs=None, **fsargs):
+        if gcs is None:
+            self.gcs = GCSFileSystem(**fsargs)
+        else:
+            self.gcs = gcs
         self.cache = FileCache(self.gcs)
         self.root = path
 
@@ -40,7 +43,7 @@ class GCSFS(Operations):
         data = {'st_uid': 1000, 'st_gid': 1000}
         perm = 0o777
 
-        if info['storageClass'] == 'DIRECTORY' or info['size'] == 0:
+        if info['storageClass'] == 'DIRECTORY' or 'bucket' in info['kind']:
             data['st_atime'] = 0
             data['st_ctime'] = 0
             data['st_mtime'] = 0

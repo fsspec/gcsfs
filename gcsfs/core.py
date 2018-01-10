@@ -536,7 +536,7 @@ class GCSFileSystem(object):
             files = self.ls('', True)
             f = [f for f in files if f['name'] == bucket]
             if f:
-                return f
+                return f[0]
             if self.ls(bucket):
                 return {'bucket': bucket, 'kind': 'storage#object',
                         'size': 0, 'storageClass': 'DIRECTORY',
