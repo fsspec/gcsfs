@@ -5,7 +5,6 @@ language: python
 matrix:
   include:
     - python: 2.7
-    - python: 3.4
     - python: 3.5
     - python: 3.6
 
@@ -20,7 +19,7 @@ install:
   # Install dependencies
   - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests
   - source activate test
-  - conda install -c conda-forge oauth2client
+  - conda install -c conda-forge google-auth google-auth-oauthlib
   - pip install vcrpy
 
 script:

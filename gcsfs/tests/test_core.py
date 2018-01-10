@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 
 import io
 from itertools import chain
@@ -16,11 +17,7 @@ from gcsfs.utils import seek_delimiter
 def test_simple(token_restore):
     assert not GCSFileSystem.tokens
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
-    assert gcs.ls('')
-
-    # token is now cached
-    gcs = GCSFileSystem(TEST_PROJECT)
-    assert gcs.ls('')
+    gcs.ls(TEST_BUCKET)  # no error
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -96,8 +93,7 @@ def test_pickle(token_restore):
 
         gcs2 = pickle.loads(b)
 
-        # *values* may be equal during tests
-        assert gcs.header is not gcs2.header
+        assert gcs.session is not gcs2.session
         gcs.touch(a)
         assert gcs.ls(TEST_BUCKET) == gcs2.ls(TEST_BUCKET)
 
@@ -401,8 +397,6 @@ def test_read_block(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_write_fails(token_restore):
     with gcs_maker() as gcs:
-        with pytest.raises(NotImplementedError):
-            gcs.open(TEST_BUCKET+'/temp', 'w')
         with pytest.raises(ValueError):
             gcs.touch(TEST_BUCKET+'/temp')
             gcs.open(TEST_BUCKET+'/temp', 'rb').write(b'hello')
@@ -420,6 +414,16 @@ def test_write_fails(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
+def text_mode(token_restore):
+    text = 'Hello µ'
+    with gcs_maker() as gcs:
+        with gcs.open(TEST_BUCKET+'/temp', 'w') as f:
+            f.write(text)
+        with gcs.open(TEST_BUCKET+'/temp', 'r') as f:
+            assert f.read() == text
+
+
+@my_vcr.use_cassette(match=['all'])
 def test_write_blocks(token_restore):
     with gcs_maker() as gcs:
         with gcs.open(TEST_BUCKET+'/temp', 'wb', block_size=2**18) as f:
@@ -430,11 +434,16 @@ def test_write_blocks(token_restore):
             f.write(b'a' * 100000)
             assert f.offset
         assert gcs.info(TEST_BUCKET+'/temp')['size'] == 300000
-        with gcs.open(TEST_BUCKET+'/temp', 'wb', block_size=2**18) as f:
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_write_blocks2(token_restore):
+    with gcs_maker() as gcs:
+        with gcs.open(TEST_BUCKET+'/temp1', 'wb', block_size=2**18) as f:
             f.write(b'a' * (2**18+1))
             # leftover bytes: GCS accepts blocks in multiples of 2**18 bytes
             assert f.buffer.tell() == 1
-        assert gcs.info(TEST_BUCKET+'/temp')['size'] == 2**18+1
+        assert gcs.info(TEST_BUCKET+'/temp1')['size'] == 2**18+1
 
 
 @my_vcr.use_cassette(match=['all'])

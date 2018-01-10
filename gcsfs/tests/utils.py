@@ -10,11 +10,25 @@ import vcr
 
 from gcsfs.core import GCSFileSystem
 from gcsfs.tests.settings import (TEST_BUCKET, TEST_PROJECT, RECORD_MODE,
-                                  GOOGLE_TOKEN)
+                                  GOOGLE_TOKEN, FAKE_GOOGLE_TOKEN, DEBUG)
+
+import vcr
+import requests
+import logging
+
+if DEBUG:
+    logging.basicConfig() # you need to initialize logging, otherwise you will not see anything from vcrpy
+    vcr_log = logging.getLogger("vcr")
+    vcr_log.setLevel(logging.DEBUG)
 
 
 def before_record_response(response):
     r = pickle.loads(pickle.dumps(response))
+    for field in ['Alt-Svc', 'Date', 'Expires', 'X-GUploader-UploadID']:
+        r['headers'].pop(field, None)
+    if 'Location' in r['headers']:
+        r['headers']['Location'] = [r['headers']['Location'][0].replace(
+            TEST_BUCKET, 'gcsfs-testing')]
     try:
         try:
             data = json.loads(gzip.decompress(r['body']['string']).decode())
@@ -22,6 +36,8 @@ def before_record_response(response):
                 data['access_token'] = 'xxx'
             if 'id_token' in data:
                 data['id_token'] = 'xxx'
+            if 'refresh_token' in data:
+                data['refresh_token'] = 'xxx'
             r['body']['string'] = gzip.compress(
                     json.dumps(data).replace(
                             TEST_PROJECT, 'test_project').replace(
@@ -37,28 +53,43 @@ def before_record_response(response):
 
 def before_record(request):
     r = pickle.loads(pickle.dumps(request))
+    for field in ['User-Agent']:
+        r.headers.pop(field, None)
     r.uri = request.uri.replace(TEST_PROJECT, 'test_project').replace(
         TEST_BUCKET, 'gcsfs-testing')
+    if r.body:
+        for field in FAKE_GOOGLE_TOKEN:
+            r.body = r.body.replace(FAKE_GOOGLE_TOKEN[field].encode(), b'xxx')
+        r.body = r.body.replace(TEST_PROJECT.encode(), b'test_project').replace(
+                        TEST_BUCKET.encode(), b'gcsfs-testing')
     return r
 
 
 def matcher(r1, r2):
-    if r1.uri.replace(TEST_PROJECT,
-                      'test_project') != r2.uri.replace(TEST_PROJECT,
-                      'test_project'):
-        print('uri mismatch')
-        return False
-    if r1.body != r2.body:
-        print('body mismatch')
+    if r2.uri.replace(TEST_PROJECT, 'test_project').replace(
+            TEST_BUCKET, 'gcsfs-testing') != r1.uri:
         return False
     if r1.method != r2.method:
-        print('method mismatch')
         return False
-    for key in ['Content-Length', 'Content-Type', 'Range', 'Server']:
-        if r1.head.get(key, '') != r2.head.get(key, ''):
-            print('header mismatch', key)
-            return False
-    print('match')
+    if r1.method != 'POST' and r1.body != r2.body:
+        return False
+    if r1.method == 'POST':
+        try:
+            return json.loads(r2.body.decode()) == json.loads(r1.body.decode())
+        except:
+            pass
+        r1q = (r1.body or b'').split(b'&')
+        r2q = (r2.body or b'').split(b'&')
+        for q in r1q:
+            if b'secret' in q or b'token' in q:
+                continue
+            if q not in r2q:
+                return False
+    else:
+        for key in ['Content-Length', 'Content-Type', 'Range']:
+            if key in r1.headers and key in r2.headers:
+                if r1.headers.get(key, '') != r2.headers.get(key, ''):
+                    return False
     return True
 
 recording_path = os.path.join(os.path.dirname(__file__), 'recordings')
@@ -68,12 +99,13 @@ my_vcr = vcr.VCR(
     record_mode=RECORD_MODE,
     path_transformer=vcr.VCR.ensure_suffix('.yaml'),
     filter_headers=['Authorization'],
-    filter_query_parameters=['refresh_token', 'upload_id', 'client_id',
+    filter_query_parameters=['refresh_token', 'client_id',
                              'client_secret'],
     before_record_response=before_record_response,
     before_record=before_record
     )
 my_vcr.register_matcher('all', matcher)
+my_vcr.match_on = ['all']
 files = {'test/accounts.1.json':  (b'{"amount": 100, "name": "Alice"}\n'
                                    b'{"amount": 200, "name": "Bob"}\n'
                                    b'{"amount": 300, "name": "Charlie"}\n'
@@ -138,8 +170,8 @@ def tmpfile(extension='', dir=None):
 
 @pytest.yield_fixture
 def token_restore():
+    cache = GCSFileSystem.tokens
     try:
-        cache = GCSFileSystem.tokens
         GCSFileSystem.tokens = {}
         yield
     finally:
@@ -165,5 +197,7 @@ def gcs_maker(populate=False):
                         f.write(data)
         yield gcs
     finally:
-        [gcs.rm(f) for f in gcs.walk(TEST_BUCKET)]
-        # gcs.rmdir(settings.TEST_BUCKET)
+        try:
+            [gcs.rm(f) for f in gcs.walk(TEST_BUCKET)]
+        except:
+            pass

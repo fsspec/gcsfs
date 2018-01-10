@@ -131,7 +131,7 @@ def test_new_bucket(token_restore):
             gcs.rmdir(new_bucket)
         except:
             pass
-        with pytest.raises(ValueError) as e:
+        with pytest.raises(Exception) as e:
             d = GCSMap(new_bucket, gcs)
         assert 'create=True' in str(e)
 
@@ -146,7 +146,7 @@ def test_new_bucket(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
-def test_pickle(token_restore):
+def test_map_pickle(token_restore):
     import pickle
     with gcs_maker() as gcs:
         d = GCSMap(root, gcs)
