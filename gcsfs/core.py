@@ -92,6 +92,8 @@ def split_path(path):
         path = path[6:]
     if path.startswith('gs://'):
         path = path[5:]
+    if path.startswith('/'):
+        path = path[1:]
     if '/' not in path:
         return path, ""
     else:

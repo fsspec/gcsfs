@@ -18,6 +18,7 @@ def test_simple(token_restore):
     assert not GCSFileSystem.tokens
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
     gcs.ls(TEST_BUCKET)  # no error
+    gcs.ls('/' + TEST_BUCKET)  # OK to lead with '/'
 
 
 @my_vcr.use_cassette(match=['all'])
