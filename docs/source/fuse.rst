@@ -63,10 +63,8 @@ expect exceptions.
 
 Furthermore:
 
-   - although mutation operations (rm, touch) tentatively work, you are best-off
-     regarding the mounted directory as read-only. In particular, writing recreates
-     the key on each call, so any write longer than a single OS block (typically
-     64kB) will result in corruption.
+   - although mutation operations tentatively work, you should not at the moment
+     depend on gcsfuse as a reliable system that won't loose your data.
 
    - permissions on GCS are complicated, so all files will be shown as fully-open
      0o777, regardless of state. If a read fails, you likely don't have the right

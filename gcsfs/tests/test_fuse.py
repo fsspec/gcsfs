@@ -19,7 +19,6 @@ PY2 = sys.version_info.major < 3
 def test_fuse(token_restore):
     mountpath = tempfile.mkdtemp()
     with gcs_maker() as gcs:
-        gcs.touch(TEST_BUCKET + '/hello')
         if PY2:
             th = threading.Thread(target=lambda:
             fuse.FUSE(
@@ -34,5 +33,11 @@ def test_fuse(token_restore):
                           daemon=True)
         th.start()
         time.sleep(2)
+        with open(os.path.join(mountpath, 'hello'), 'w') as f:
+            # NB this is in TEXT mode
+            f.write('hello')
         files = os.listdir(mountpath)
         assert 'hello' in files
+        with open(os.path.join(mountpath, 'hello'), 'r') as f:
+            # NB this is in TEXT mode
+            assert f.read() == 'hello'

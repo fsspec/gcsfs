@@ -14,17 +14,6 @@ def str_to_time(s):
     return t.to_datetime64().view('int64') / 1e9
 
 
-class FileCache:
-    def __init__(self, gcs):
-        self.gcs = gcs
-        self.files = {}
-
-    def __getitem__(self, item):
-        if item not in self.files:
-            self.files[item] = self.gcs.open(item, 'rb')
-        return self.files[item]
-
-
 class GCSFS(Operations):
 
     def __init__(self, path='.', gcs=None, **fsargs):
@@ -32,7 +21,8 @@ class GCSFS(Operations):
             self.gcs = GCSFileSystem(**fsargs)
         else:
             self.gcs = gcs
-        self.cache = FileCache(self.gcs)
+        self.cache = {}
+        self.counter = 0
         self.root = path
 
     def getattr(self, path, fh=None):
@@ -81,7 +71,7 @@ class GCSFS(Operations):
             self.gcs.rm(path, False)
 
     def read(self, path, size, offset, fh):
-        print('read', path, size, offset)
+        print('read', path, size, offset, fh)
         fn = ''.join([self.root, path])
         f = self.cache[fn]
         f.seek(offset)
@@ -89,30 +79,41 @@ class GCSFS(Operations):
         return out
 
     def write(self, path, data, offset, fh):
-        print('write', path, offset)
-        fn = ''.join([self.root, path])
-        if offset == 0:
-            with self.gcs.open(fn, 'wb') as f:
-                f.write(data)
-                return len(data)
+        print('write', path, offset, fh)
+        f = self.cache[fh]
+        f.write(data)
+        return len(data)
 
     def create(self, path, flags):
         print('create', path, oct(flags))
         fn = ''.join([self.root, path])
-        self.gcs.touch(fn)
-        return 0
+        self.gcs.touch(fn)  # this makes sure directory entry exists - wasteful!
+        # write (but ignore creation flags)
+        f = self.gcs.open(fn, 'wb')
+        self.cache[self.counter] = f
+        self.counter += 1
+        return self.counter - 1
 
     def open(self, path, flags):
-        # TODO: the real way to do this is to open the GCSFile here, and
-        # expect it to be passed to the read/write methods
-        print('open', path, flags)
+        print('open', path, oct(flags))
         fn = ''.join([self.root, path])
         if flags % 2 == 0:
-            return 0
-        return 1
+            # read
+            f = self.gcs.open(fn, 'rb')
+        else:
+            # write (but ignore creation flags)
+            f = self.gcs.open(fn, 'wb')
+        self.cache[self.counter] = f
+        self.counter += 1
+        return self.counter - 1
 
     def truncate(self, path, length, fh=None):
-        raise NotImplementedError
+        print('truncate', path, length, fh)
+        fn = ''.join([self.root, path])
+        if length != 0:
+            raise NotImplementedError
+        # maybe should be no-op since open with write sets size to zero anyway
+        self.gcs.touch(fn)
 
     def unlink(self, path):
         print('delete', path)
@@ -123,7 +124,13 @@ class GCSFS(Operations):
             raise FuseOSError(EIO)
 
     def release(self, path, fh):
-        print('close', path)
+        print('close', path, fh)
+        try:
+            f = self.cache[fh]
+            f.close()
+            self.cache.pop(fh, None)  # should release any cache memory
+        except Exception as e:
+            print(e)
         return 0
 
     def chmod(self, path, mode):
