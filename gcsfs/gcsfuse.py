@@ -4,7 +4,7 @@ import stat
 import pandas as pd
 from errno import ENOENT, EIO
 from fuse import Operations, FuseOSError
-from gcsfs import GCSFileSystem
+from gcsfs import GCSFileSystem, core
 from pwd import getpwnam
 from grp import getgrnam
 
@@ -68,7 +68,7 @@ class GCSFS(Operations):
         return ['.', '..'] + files
 
     def mkdir(self, path, mode):
-        bucket, key = gcsfs.core.split_path(path)
+        bucket, key = core.split_path(path)
         if not self.gcs.info(path):
             self.gcs.dirs['bucket'].append({
                         'bucket': bucket, 'kind': 'storage#object',
@@ -89,16 +89,24 @@ class GCSFS(Operations):
         return out
 
     def write(self, path, data, offset, fh):
+        print('write', path, offset)
+        fn = ''.join([self.root, path])
         if offset == 0:
-            with self.gcs.open(path, 'wb') as f:
+            with self.gcs.open(fn, 'wb') as f:
                 f.write(data)
                 return len(data)
 
     def create(self, path, flags):
-        self.gcs.touch(path)
+        print('create', path, oct(flags))
+        fn = ''.join([self.root, path])
+        self.gcs.touch(fn)
         return 0
 
     def open(self, path, flags):
+        # TODO: the real way to do this is to open the GCSFile here, and
+        # expect it to be passed to the read/write methods
+        print('open', path, flags)
+        fn = ''.join([self.root, path])
         if flags % 2 == 0:
             return 0
         return 1
@@ -107,12 +115,15 @@ class GCSFS(Operations):
         raise NotImplementedError
 
     def unlink(self, path):
+        print('delete', path)
+        fn = ''.join([self.root, path])
         try:
-            self.gcs.rm(path, False)
+            self.gcs.rm(fn, False)
         except (IOError, FileNotFoundError):
             raise FuseOSError(EIO)
 
     def release(self, path, fh):
+        print('close', path)
         return 0
 
     def chmod(self, path, mode):
