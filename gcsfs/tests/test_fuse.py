@@ -19,18 +19,11 @@ PY2 = sys.version_info.major < 3
 def test_fuse(token_restore):
     mountpath = tempfile.mkdtemp()
     with gcs_maker() as gcs:
-        if PY2:
-            th = threading.Thread(target=lambda:
-            fuse.FUSE(
-                GCSFS(TEST_BUCKET, gcs=gcs), mountpath, nothreads=False,
-                foreground=True))
-            th.daemon = True
-        else:
-            th = threading.Thread(target=lambda:
-                fuse.FUSE(
-                    GCSFS(TEST_BUCKET, gcs=gcs), mountpath, nothreads=False,
-                    foreground=True),
-                          daemon=True)
+        th = threading.Thread(target=lambda:
+        fuse.FUSE(
+            GCSFS(TEST_BUCKET, gcs=gcs), mountpath, nothreads=False,
+            foreground=True))
+        th.daemon = True
         th.start()
         time.sleep(2)
         with open(os.path.join(mountpath, 'hello'), 'w') as f:
