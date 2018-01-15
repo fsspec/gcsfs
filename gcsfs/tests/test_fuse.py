@@ -29,6 +29,7 @@ def test_fuse(token_restore):
         with open(os.path.join(mountpath, 'hello'), 'w') as f:
             # NB this is in TEXT mode
             f.write('hello')
+        time.sleep(1)
         files = os.listdir(mountpath)
         assert 'hello' in files
         with open(os.path.join(mountpath, 'hello'), 'r') as f:
