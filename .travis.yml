@@ -1,4 +1,4 @@
-sudo: False
+sudo: True
 
 language: python
 
@@ -9,6 +9,10 @@ matrix:
     - python: 3.6
 
 install:
+  # install fuse libs
+  - sudo apt-get update
+  - sudo apt-get install libfuse-dev
+
   # Install conda
   - wget http://repo.continuum.io/miniconda/Miniconda-latest-Linux-x86_64.sh -O miniconda.sh
   - bash miniconda.sh -b -p $HOME/miniconda
@@ -17,10 +21,10 @@ install:
   - conda update conda
 
   # Install dependencies
-  - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests
+  - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests pandas
   - source activate test
   - conda install -c conda-forge google-auth google-auth-oauthlib
-  - pip install vcrpy
+  - pip install vcrpy fusepy
 
 script:
   - GCSFS_RECORD_MODE=none py.test -vv -x  gcsfs

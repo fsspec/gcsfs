@@ -265,7 +265,7 @@ def test_seek(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_bad_open(token_restore):
     with gcs_maker() as gcs:
-        with pytest.raises(IOError):
+        with pytest.raises((IOError, OSError)):
             gcs.open('')
 
 
@@ -319,7 +319,7 @@ def test_errors(token_restore):
         with pytest.raises((IOError, OSError)):
             gcs.open('x', 'rb')
 
-        with pytest.raises(IOError):
+        with pytest.raises((IOError, OSError)):
             gcs.rm('unknown')
 
         with pytest.raises(ValueError):

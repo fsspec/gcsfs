@@ -118,6 +118,7 @@ Contents
 .. toctree::
    api
    developer
+   fuse
    :maxdepth: 2
 
 

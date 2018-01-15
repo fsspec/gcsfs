@@ -534,19 +534,39 @@ class GCSFileSystem(object):
 
     def info(self, path):
         bucket, key = split_path(path)
+        if not key:
+            files = self.ls('', True)
+            f = [f for f in files if f['name'] == bucket]
+            if f:
+                return f[0]
+            if self.ls(bucket):
+                return {'bucket': bucket, 'kind': 'storage#object',
+                        'size': 0, 'storageClass': 'DIRECTORY',
+                        'name': bucket+'/'}
+            raise FileNotFoundError
         if bucket not in self.dirs:
-            d = self._call('get', 'b/{}/o/{}', bucket, key)
-            d['name'] = '%s/%s' % (bucket, d['name'])
-            d['size'] = int(d.get('size'), 0)
-            return d
-        else:
-            path = '/'.join(split_path(path))
-            files = self.ls(path, True)
-            out = [f for f in files if f['name'] == path]
-            if out:
-                return out[0]
-            else:
-                raise FileNotFoundError(path)
+            try:
+                d = self._call('get', 'b/{}/o/{}', bucket, key)
+                d['name'] = '%s/%s' % (bucket, d['name'])
+                d['size'] = int(d.get('size'), 0)
+                return d
+            except FileNotFoundError:
+                pass
+        path1 = '/'.join(split_path(path))
+        out = []
+        try:
+            files = self.ls(path1, True)
+            out = [f for f in files if f['name'] == path1]
+        except FileNotFoundError:
+            pass
+        if not out:
+            # no such file, but try for such a directory
+            parent = path.rstrip('/').rsplit('/', 1)[0]
+            files = self.ls(parent, True)
+            out = [f for f in files if f['name'] == path.rstrip('/') + '/']
+        if out:
+            return out[0]
+        raise FileNotFoundError(path)
 
     def url(self, path):
         return self.info(path)['mediaLink']
@@ -730,6 +750,8 @@ class GCSFile:
             Custom metadata, in key/value pairs, added at file creation
         """
         bucket, key = split_path(path)
+        if not key:
+            raise OSError('Attempt to open a bucket')
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
@@ -967,17 +989,29 @@ class GCSFile:
             self.cache = _fetch_range(self.details, self.gcsfs.session, start,
                                       self.end)
         if start < self.start:
-            new = _fetch_range(self.details, self.gcsfs.session, start,
-                               self.start)
-            self.start = start
-            self.cache = new + self.cache
+            if self.end - end > self.blocksize:
+                self.start = start
+                self.end = end + self.blocksize
+                self.cache = _fetch_range(self.details, self.gcsfs.session,
+                                          self.start, self.end)
+            else:
+                new = _fetch_range(self.details, self.gcsfs.session, start,
+                                   self.start)
+                self.start = start
+                self.cache = new + self.cache
         if end > self.end:
             if self.end > self.size:
                 return
-            new = _fetch_range(self.details, self.gcsfs.session, self.end,
-                               end + self.blocksize)
-            self.end = end + self.blocksize
-            self.cache = self.cache + new
+            if end - self.end > self.blocksize:
+                self.start = start
+                self.end = end + self.blocksize
+                self.cache = _fetch_range(self.details, self.gcsfs.session,
+                                          self.start, self.end)
+            else:
+                new = _fetch_range(self.details, self.gcsfs.session, self.end,
+                                   end + self.blocksize)
+                self.end = end + self.blocksize
+                self.cache = self.cache + new
 
     def read(self, length=-1):
         """
