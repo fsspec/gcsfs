@@ -33,9 +33,9 @@ PY2 = sys.version_info.major == 2
 logger = logging.getLogger(__name__)
 
 # client created 23-Sept-2017
-not_secret = {"client_id": "586241054156-7a3vrghs70ffkkfkmnnatjnbjg03cq9a."
-                           "apps.googleusercontent.com",
-              "client_secret": "RsSQZJKYE00oRv2ibYlj28Sx"}
+not_secret = {"client_id": "586241054156-0asut23a7m10790r2ik24309flribp7j"
+                           ".apps.googleusercontent.com",
+              "client_secret": "w6VkI99jS6e9mECscNztXvQv"}
 client_config = {'installed': {
     'client_id': not_secret['client_id'],
     'client_secret': not_secret['client_secret'],

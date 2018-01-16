@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import gzip
 import json
 import os
+import re
 import pytest
 import pickle
 import sys
@@ -62,6 +63,7 @@ def before_record(request):
             r.body = r.body.replace(FAKE_GOOGLE_TOKEN[field].encode(), b'xxx')
         r.body = r.body.replace(TEST_PROJECT.encode(), b'test_project').replace(
                         TEST_BUCKET.encode(), b'gcsfs-testing')
+        r.body = re.sub(b'refresh_token=[^&]+', b'refresh_token=xxx', r.body)
     return r
 
 
