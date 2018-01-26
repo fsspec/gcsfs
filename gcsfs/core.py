@@ -573,10 +573,6 @@ class GCSFileSystem(object):
     def rmdir(self, bucket):
         """Delete an empty bucket"""
         self._call('delete', 'b/' + bucket)
-        if '' in self.dirs:
-            for v in self.dirs[''][:]:
-                if v['name'] == bucket:
-                    self.dirs[''].remove(v)
         self.invalidate_cache(bucket)
 
     def ls(self, path, detail=False):
@@ -879,13 +875,12 @@ class GCSFileSystem(object):
 
     def __getstate__(self):
         d = self.__dict__.copy()
-        del d['dirs']
+        d["_listing_cache"] = {}
         logger.debug("Serialize with state: %s", d)
         return d
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self.dirs = {}
         self.connect(self.token)
 
 
