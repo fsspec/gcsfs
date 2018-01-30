@@ -288,7 +288,9 @@ class GCSFileSystem(object):
 
     def _connect_service(self, fn):
         # raises exception if file does not match expectation
-        credentials = service_account.Credentials.from_service_account_file(fn)
+        credentials = service_account.Credentials.from_service_account_file(
+            fn, scopes=[self.scope])
+        credentials.set
         self.session = AuthorizedSession(credentials)
 
     def _connect_anon(self):
