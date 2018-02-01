@@ -14,6 +14,37 @@ def str_to_time(s):
     return t.to_datetime64().view('int64') / 1e9
 
 
+class SmallChunkCacher:
+    def __init__(self, cutoff=10000, maxmem=50 * 2 ** 20):
+        self.cache = {}
+        self.cutoff = cutoff
+        self.maxmem = maxmem
+        self.mem = 0
+
+    def read(self, fn, offset, size, f):
+        if size > self.cutoff:
+            # big reads are likely sequential
+            f.seek(offset)
+            return f.read(size)
+        if fn not in self.cache:
+            self.cache[fn] = []
+        c = self.cache[fn]
+        for chunk in c:
+            if chunk['start'] < offset and chunk['end'] > offset + size:
+                print('cache hit')
+                start = offset - chunk['start']
+                return chunk['data'][start:start + size]
+        print('cache miss')
+        f.seek(offset)
+        out = f.read(size)
+        c.append({'start': f.start, 'end': f.end, 'data': f.cache})
+        self.mem += len(f.cache)
+        return out
+
+    def close(self, fn):
+        self.cache.pop(fn, None)
+
+
 class GCSFS(Operations):
 
     def __init__(self, path='.', gcs=None, **fsargs):
@@ -22,6 +53,7 @@ class GCSFS(Operations):
         else:
             self.gcs = gcs
         self.cache = {}
+        self.chunk_cacher = SmallChunkCacher()
         self.counter = 0
         self.root = path
 
@@ -53,7 +85,7 @@ class GCSFS(Operations):
 
     def readdir(self, path, fh):
         path = ''.join([self.root, path])
-        print("List", path, fh)
+        print("List", path, fh, flush=True)
         files = self.gcs.ls(path)
         files = [f.rstrip('/').rsplit('/', 1)[1] for f in files]
         return ['.', '..'] + files
@@ -76,8 +108,7 @@ class GCSFS(Operations):
         print('read #{} ({}) offset: {}, size: {}'.format(
             fh, fn, offset,size))
         f = self.cache[fh]
-        f.seek(offset)
-        out = f.read(size)
+        out = self.chunk_cacher.read(fn, offset, size, f)
         return out
 
     def write(self, path, data, offset, fh):
