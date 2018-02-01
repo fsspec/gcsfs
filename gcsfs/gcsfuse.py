@@ -53,6 +53,7 @@ class GCSFS(Operations):
 
     def readdir(self, path, fh):
         path = ''.join([self.root, path])
+        print("List", path, fh)
         files = self.gcs.ls(path)
         files = [f.rstrip('/').rsplit('/', 1)[1] for f in files]
         return ['.', '..'] + files
@@ -71,32 +72,35 @@ class GCSFS(Operations):
             self.gcs.rm(path, False)
 
     def read(self, path, size, offset, fh):
-        print('read', path, size, offset, fh)
         fn = ''.join([self.root, path])
-        f = self.cache[fn]
+        print('read #{} ({}) offset: {}, size: {}'.format(
+            fh, fn, offset,size))
+        f = self.cache[fh]
         f.seek(offset)
         out = f.read(size)
         return out
 
     def write(self, path, data, offset, fh):
-        print('write', path, offset, fh)
+        fn = ''.join([self.root, path])
+        print('write #{} ({}) offset'.format(fh, fn, offset))
         f = self.cache[fh]
         f.write(data)
         return len(data)
 
     def create(self, path, flags):
-        print('create', path, oct(flags))
         fn = ''.join([self.root, path])
+        print('create', fn, oct(flags), end=' ')
         self.gcs.touch(fn)  # this makes sure directory entry exists - wasteful!
         # write (but ignore creation flags)
         f = self.gcs.open(fn, 'wb')
         self.cache[self.counter] = f
+        print('-> fh #', self.counter)
         self.counter += 1
         return self.counter - 1
 
     def open(self, path, flags):
-        print('open', path, oct(flags))
         fn = ''.join([self.root, path])
+        print('open', fn, oct(flags), end=' ')
         if flags % 2 == 0:
             # read
             f = self.gcs.open(fn, 'rb')
@@ -104,27 +108,29 @@ class GCSFS(Operations):
             # write (but ignore creation flags)
             f = self.gcs.open(fn, 'wb')
         self.cache[self.counter] = f
+        print('-> fh #', self.counter)
         self.counter += 1
         return self.counter - 1
 
     def truncate(self, path, length, fh=None):
-        print('truncate', path, length, fh)
         fn = ''.join([self.root, path])
+        print('truncate #{} ({}) to {}'.format(fh, fn, length))
         if length != 0:
             raise NotImplementedError
         # maybe should be no-op since open with write sets size to zero anyway
         self.gcs.touch(fn)
 
     def unlink(self, path):
-        print('delete', path)
         fn = ''.join([self.root, path])
+        print('delete', fn)
         try:
             self.gcs.rm(fn, False)
         except (IOError, FileNotFoundError):
             raise FuseOSError(EIO)
 
     def release(self, path, fh):
-        print('close', path, fh)
+        fn = ''.join([self.root, path])
+        print('close #{} ({})'.format(fh, fn))
         try:
             f = self.cache[fh]
             f.close()
