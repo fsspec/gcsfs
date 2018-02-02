@@ -85,7 +85,7 @@ class GCSFS(Operations):
     @_tracemethod
     def read(self, path, size, offset, fh):
         fn = ''.join([self.root, path])
-        f = self.cache[fn]
+        f = self.cache[fh]
         f.seek(offset)
         out = f.read(size)
         return out
