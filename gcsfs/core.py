@@ -616,7 +616,7 @@ class GCSFileSystem(object):
 
                 pseudodirs = [{
                         'bucket': bucket,
-                        'name': key + prefix,
+                        'name': prefix,
                         'kind': 'storage#object',
                         'size': 0,
                         'storageClass': 'DIRECTORY',
