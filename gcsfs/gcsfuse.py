@@ -64,7 +64,7 @@ class GCSFS(Operations):
     def readdir(self, path, fh):
         path = ''.join([self.root, path])
         files = self.gcs.ls(path)
-        files = [f.rstrip('/').rsplit('/', 1)[1] for f in files]
+        files = [os.path.basename(f.rstrip('/')) for f in files]
         return ['.', '..'] + files
 
     @_tracemethod
