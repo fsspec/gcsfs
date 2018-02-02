@@ -4,6 +4,8 @@ Google Cloud Storage pythonic interface
 """
 from __future__ import print_function
 
+import decorator
+
 import array
 from base64 import b64encode
 import google.auth as gauth
@@ -32,6 +34,11 @@ from .utils import read_block
 PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
+
+@decorator.decorator
+def _tracemethod(f, self, *args, **kwargs):
+   logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+   return f(self, *args, **kwargs)
 
 # client created 23-Sept-2017
 not_secret = {"client_id": "586241054156-0asut23a7m10790r2ik24309flribp7j"
@@ -528,6 +535,7 @@ class GCSFileSystem(object):
 
         return result
 
+    @_tracemethod
     def invalidate_cache(self, path=None):
         """
         Invalidate listing cache for given path, so that it is reloaded on next use.
@@ -551,6 +559,7 @@ class GCSFileSystem(object):
             for k in invalid_keys:
                 self._listing_cache.pop(k, None)
 
+    @_tracemethod
     def mkdir(self, bucket, acl='projectPrivate',
               default_acl='bucketOwnerFullControl'):
         """
@@ -570,11 +579,13 @@ class GCSFileSystem(object):
                    json={"name": bucket})
         self.invalidate_cache(bucket)
 
+    @_tracemethod
     def rmdir(self, bucket):
         """Delete an empty bucket"""
         self._call('delete', 'b/' + bucket)
         self.invalidate_cache(bucket)
 
+    @_tracemethod
     def ls(self, path, detail=False):
         """List objects under the given '/{bucket}/{prefix} path."""
         if path in ['/', '']:
@@ -602,6 +613,7 @@ class GCSFileSystem(object):
 
             else:
                 item_details = listing["items"]
+
                 pseudodirs = [{
                         'bucket': bucket,
                         'name': key + prefix,
@@ -614,6 +626,7 @@ class GCSFileSystem(object):
 
                 return item_details + pseudodirs
 
+    @_tracemethod
     def walk(self, path, detail=False):
         """ Return all real keys belows path. """
         bucket, prefix = split_path(path)
@@ -645,6 +658,7 @@ class GCSFileSystem(object):
         else:
             return [posixpath.join(f["bucket"], f['name']) for f in files]
 
+    @_tracemethod
     def du(self, path, total=False, deep=False):
         if deep:
             files = self.walk(path, True)
@@ -654,6 +668,7 @@ class GCSFileSystem(object):
             return sum(f['size'] for f in files)
         return {f['name']: f['size'] for f in files}
 
+    @_tracemethod
     def glob(self, path):
         """
         Find files by glob-matching.
@@ -681,6 +696,7 @@ class GCSFileSystem(object):
                f.replace('//', '/').rstrip('/'))]
         return out
 
+    @_tracemethod
     def exists(self, path):
         bucket, key = split_path(path)
         try:
@@ -702,6 +718,7 @@ class GCSFileSystem(object):
         except FileNotFoundError:
             return False
 
+    @_tracemethod
     def info(self, path):
         bucket, key = split_path(path)
         if not key:
@@ -735,14 +752,17 @@ class GCSFileSystem(object):
             else:
                 raise
 
+    @_tracemethod
     def url(self, path):
         return self.info(path)['mediaLink']
 
+    @_tracemethod
     def cat(self, path):
         """ Simple one-shot get of file data """
         details = self.info(path)
         return _fetch_range(details, self.session)
 
+    @_tracemethod
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
         with self.open(rpath, 'rb', block_size=blocksize) as f1:
             with open(lpath, 'wb') as f2:
@@ -752,6 +772,7 @@ class GCSFileSystem(object):
                         break
                     f2.write(d)
 
+    @_tracemethod
     def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None):
         with self.open(rpath, 'wb', block_size=blocksize, acl=acl) as f1:
             with open(lpath, 'rb') as f2:
@@ -761,10 +782,12 @@ class GCSFileSystem(object):
                         break
                     f1.write(d)
 
+    @_tracemethod
     def head(self, path, size=1024):
         with self.open(path, 'rb') as f:
             return f.read(size)
 
+    @_tracemethod
     def tail(self, path, size=1024):
         if size > self.info(path)['size']:
             return self.cat(path)
@@ -772,6 +795,7 @@ class GCSFileSystem(object):
             f.seek(-size, 2)
             return f.read()
 
+    @_tracemethod
     def merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
         bucket, key = split_path(path)
@@ -782,16 +806,19 @@ class GCSFileSystem(object):
                          "kind": "storage#composeRequest",
                          'destination': {'name': key, 'bucket': bucket}})
 
+    @_tracemethod
     def copy(self, path1, path2, acl=None):
         b1, k1 = split_path(path1)
         b2, k2 = split_path(path2)
         self._call('post', 'b/{}/o/{}/copyTo/b/{}/o/{}', b1, k1, b2, k2,
                    destinationPredefinedAcl=acl)
 
+    @_tracemethod
     def mv(self, path1, path2, acl=None):
         self.copy(path1, path2, acl)
         self.rm(path1)
 
+    @_tracemethod
     def rm(self, path, recursive=False):
         """Delete keys. If recursive, also delete all keys
         given by walk(path)"""
@@ -803,6 +830,7 @@ class GCSFileSystem(object):
             self._call('delete', "b/{}/o/{}", bucket, key)
             self.invalidate_cache(posixpath.dirname(norm_path(path)))
 
+    @_tracemethod
     def open(self, path, mode='rb', block_size=None, acl=None,
              consistency=None, metadata=None):
         """
@@ -823,10 +851,12 @@ class GCSFileSystem(object):
                 GCSFile(self, path, mode, block_size, consistency=const,
                         metadata=metadata))
 
+    @_tracemethod
     def touch(self, path):
         with self.open(path, 'wb'):
             pass
 
+    @_tracemethod
     def read_block(self, fn, offset, length, delimiter=None):
         """ Read a block of bytes from a GCS file
 
