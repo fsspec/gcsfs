@@ -1,4 +1,5 @@
 import click
+import logging
 from fuse import FUSE
 
 from gcsfs.gcsfuse import GCSFS
@@ -13,7 +14,17 @@ from gcsfs.gcsfuse import GCSFS
               help="Billing Project ID")
 @click.option('--foreground/--background', default=True,
               help="Run in the foreground or as a background process")
-def main(bucket, mount_point, token, project_id, foreground):
+@click.option('-v', '--verbose', count=True,
+              help="Set logging level. '-v' for 'gcsfuse' logging."
+                   "'-v -v' for complete debug logging.")
+def main(bucket, mount_point, token, project_id, foreground, verbose):
+
+    if verbose == 1:
+        logging.basicConfig(level=logging.INFO)
+        logging.getLogger("gcsfs.gcsfuse").setLevel(logging.DEBUG)
+    if verbose > 1:
+        logging.basicConfig(level=logging.DEBUG)
+
     """ Mount a Google Cloud Storage (GCS) bucket to a local directory """
     print("Mounting bucket %s to directory %s" % (bucket, mount_point))
     FUSE(GCSFS(bucket, token=token, project=project_id),

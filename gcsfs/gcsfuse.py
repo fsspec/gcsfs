@@ -1,5 +1,7 @@
 from __future__ import print_function
 import os
+import logging
+import decorator
 import stat
 import pandas as pd
 from errno import ENOENT, EIO
@@ -7,6 +9,14 @@ from fuse import Operations, FuseOSError
 from gcsfs import GCSFileSystem, core
 from pwd import getpwnam
 from grp import getgrnam
+
+logger = logging.getLogger(__name__)
+
+
+@decorator.decorator
+def _tracemethod(f, self, *args, **kwargs):
+    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+    return f(self, *args, **kwargs)
 
 
 def str_to_time(s):
@@ -57,6 +67,7 @@ class GCSFS(Operations):
         self.counter = 0
         self.root = path
 
+    @_tracemethod
     def getattr(self, path, fh=None):
         try:
             info = self.gcs.info(''.join([self.root, path]))
@@ -83,13 +94,15 @@ class GCSFS(Operations):
 
         return data
 
+    @_tracemethod
     def readdir(self, path, fh):
         path = ''.join([self.root, path])
         print("List", path, fh, flush=True)
         files = self.gcs.ls(path)
-        files = [f.rstrip('/').rsplit('/', 1)[1] for f in files]
+        files = [os.path.basename(f.rstrip('/')) for f in files]
         return ['.', '..'] + files
 
+    @_tracemethod
     def mkdir(self, path, mode):
         bucket, key = core.split_path(path)
         if not self.gcs.info(path):
@@ -98,11 +111,13 @@ class GCSFS(Operations):
                         'size': 0, 'storageClass': 'DIRECTORY',
                         'name': path.rstrip('/') + '/'})
 
+    @_tracemethod
     def rmdir(self, path):
         info = self.gcs.info(path)
         if info['storageClass': 'DIRECTORY']:
             self.gcs.rm(path, False)
 
+    @_tracemethod
     def read(self, path, size, offset, fh):
         fn = ''.join([self.root, path])
         print('read #{} ({}) offset: {}, size: {}'.format(
@@ -111,6 +126,7 @@ class GCSFS(Operations):
         out = self.chunk_cacher.read(fn, offset, size, f)
         return out
 
+    @_tracemethod
     def write(self, path, data, offset, fh):
         fn = ''.join([self.root, path])
         print('write #{} ({}) offset'.format(fh, fn, offset))
@@ -118,6 +134,7 @@ class GCSFS(Operations):
         f.write(data)
         return len(data)
 
+    @_tracemethod
     def create(self, path, flags):
         fn = ''.join([self.root, path])
         print('create', fn, oct(flags), end=' ')
@@ -129,6 +146,7 @@ class GCSFS(Operations):
         self.counter += 1
         return self.counter - 1
 
+    @_tracemethod
     def open(self, path, flags):
         fn = ''.join([self.root, path])
         print('open', fn, oct(flags), end=' ')
@@ -143,6 +161,7 @@ class GCSFS(Operations):
         self.counter += 1
         return self.counter - 1
 
+    @_tracemethod
     def truncate(self, path, length, fh=None):
         fn = ''.join([self.root, path])
         print('truncate #{} ({}) to {}'.format(fh, fn, length))
@@ -151,6 +170,7 @@ class GCSFS(Operations):
         # maybe should be no-op since open with write sets size to zero anyway
         self.gcs.touch(fn)
 
+    @_tracemethod
     def unlink(self, path):
         fn = ''.join([self.root, path])
         print('delete', fn)
@@ -159,6 +179,7 @@ class GCSFS(Operations):
         except (IOError, FileNotFoundError):
             raise FuseOSError(EIO)
 
+    @_tracemethod
     def release(self, path, fh):
         fn = ''.join([self.root, path])
         print('close #{} ({})'.format(fh, fn))
@@ -167,8 +188,9 @@ class GCSFS(Operations):
             f.close()
             self.cache.pop(fh, None)  # should release any cache memory
         except Exception as e:
-            print(e)
+            logger.exception("exception on release")
         return 0
 
+    @_tracemethod
     def chmod(self, path, mode):
         raise NotImplementedError
