@@ -88,7 +88,6 @@ class GCSFS(Operations):
             info = self.gcs.info(''.join([self.root, path]))
         except FileNotFoundError:
             raise FuseOSError(ENOENT)
-        logger.info(str(list(self.gcs._listing_cache)))
         data = {'st_uid': 1000, 'st_gid': 1000}
         perm = 0o777
 
@@ -157,7 +156,7 @@ class GCSFS(Operations):
         # write (but ignore creation flags)
         f = self.gcs.open(fn, 'wb')
         self.write_cache[self.counter] = f
-        print('-> fh #', self.counter)
+        logger.info('-> fh #{}'.format(self.counter))
         self.counter += 1
         return self.counter - 1
 

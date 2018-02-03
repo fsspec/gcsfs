@@ -56,7 +56,6 @@ ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
 bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
-DEBUG = False
 
 if PY2:
     FileNotFoundError = IOError
@@ -140,8 +139,6 @@ def validate_response(r, path):
         except:
             msg = str(r.content)
 
-        if DEBUG:
-            print(r.url, r.headers, sep='\n')
         if "Not Found" in m:
             raise FileNotFoundError(path)
         elif "forbidden" in m:
@@ -1284,8 +1281,6 @@ def _fetch_range(obj_dict, session, start=None, end=None):
     start, end : None or integers
         if not both None, fetch only given range
     """
-    if DEBUG:
-        print('Fetch: ', start, end)
     logger.debug("Fetch: {}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
