@@ -422,7 +422,7 @@ class GCSFileSystem(object):
                 return cached_obj[0]
             else:
                 # Should error on missing cache or reprobe?
-                pass
+                raise FileNotFoundError
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -433,7 +433,6 @@ class GCSFileSystem(object):
 
         logger.debug("_get_object result: %s", result)
         return result
-
 
     def _maybe_get_cached_listing(self, path):
         logger.debug("_maybe_get_cached_listing: %s", path)
@@ -466,7 +465,7 @@ class GCSFileSystem(object):
         return listing
 
     def _do_list_objects(self, path, max_results = None):
-        """Return depaginated object listing for the given {bucket}/{prefix}/ path."""
+        """Return depaginated object listing for the given path."""
         logger.debug("_list_objects(%s, max_results=%s)", path, max_results)
         bucket, prefix = split_path(path)
         if prefix:
@@ -724,6 +723,8 @@ class GCSFileSystem(object):
         bucket, key = split_path(path)
         if not key:
             # Return a pseudo dir for the bucket root
+            # TODO: check that it exists (either is in bucket list,
+            # or can list it)
             return {
                 'bucket': bucket,
                 'name': "/",

@@ -18,12 +18,12 @@ from gcsfs.gcsfuse import GCSFS
               help="Set logging level. '-v' for 'gcsfuse' logging."
                    "'-v -v' for complete debug logging.")
 def main(bucket, mount_point, token, project_id, foreground, verbose):
-
+    fmt = '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
     if verbose == 1:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO, format=fmt)
         logging.getLogger("gcsfs.gcsfuse").setLevel(logging.DEBUG)
     if verbose > 1:
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(level=logging.DEBUG, format=fmt)
 
     """ Mount a Google Cloud Storage (GCS) bucket to a local directory """
     print("Mounting bucket %s to directory %s" % (bucket, mount_point))
