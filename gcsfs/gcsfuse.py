@@ -1,4 +1,5 @@
 from __future__ import print_function
+from collections import OrderedDict, MutableMapping
 import os
 import logging
 import decorator
@@ -25,27 +26,57 @@ def str_to_time(s):
     return t.to_datetime64().view('int64') / 1e9
 
 
+class LRUDict(MutableMapping):
+    """A dict that discards least-recently-used items"""
+
+    def __init__(self, *args, size=128, **kwargs):
+        """Same arguments as OrderedDict with one additions:
+
+        size: maximum number of entries
+        """
+        self.data = OrderedDict(*args, **kwargs)
+        self.size = size
+        self.purge()
+
+    def purge(self):
+        """Removes expired or overflowing entries."""
+        # pop until maximum capacity is reached
+        extra = max(0, len(self.data) - self.size)
+        for _ in range(extra):
+            self.data.popitem(last=False)
+
+    def __getitem__(self, key):
+        self.data.move_to_end(key)
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        self.data[key] = value
+        self.purge()
+
+    def __delitem__(self, key):
+        del self.data[key]
+
+    def __iter__(self):
+        return iter(list(self.data))
+
+    def __len__(self):
+        return len(self.data)
+
+
 class SmallChunkCacher:
-    def __init__(self, gcs, cutoff=10000, maxmem=50 * 2 ** 20,
-                 nfiles=10):
+    def __init__(self, gcs, cutoff=10000, nfiles=3):
         self.gcs = gcs
-        self.file_cache = {}
-        self.block_cache = {}
+        self.cache = LRUDict(size=nfiles)
         self.cutoff = cutoff
-        self.maxmem = maxmem
         self.nfiles = nfiles
-        self.mem = 0
 
     def read(self, fn, offset, size):
-        f = self.file_cache[fn]
+        f, chunks = self.cache[fn]
         if size > self.cutoff:
             # big reads are likely sequential
             f.seek(offset)
             return f.read(size)
-        if fn not in self.block_cache:
-            self.block_cache[fn] = []
-        c = self.block_cache[fn]
-        for chunk in c:
+        for chunk in chunks:
             if chunk['start'] < offset and chunk['end'] > offset + size:
                 logger.info('cache hit')
                 start = offset - chunk['start']
@@ -53,21 +84,20 @@ class SmallChunkCacher:
         logger.info('cache miss')
         f.seek(offset)
         out = f.read(size)
-        c.append({'start': f.start, 'end': f.end, 'data': f.cache})
-        self.mem += len(f.cache)
+        chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
+        sizes = {f: "%.1fMB" % (sum(
+            [c['end'] - c['start'] + 1 for c in ch[1]])/2**20)
+                 for f, ch in self.cache.items()}
+        logger.info('Cache Report: {}'.format(sizes))
         return out
 
     def open(self, fn):
-        if fn not in self.file_cache:
-            self.file_cache[fn] = self.gcs.open(fn, 'rb')
+        if fn not in self.cache:
+            self.cache[fn] = self.gcs.open(fn, 'rb'), []
             logger.info('{} inserted into cache'.format(fn))
         else:
             logger.info('{} found in cache'.format(fn))
-        return self.file_cache[fn]
-
-    def close(self, fn):
-        self.block_cache.pop(fn, None)
-        self.file_cache.pop(fn, None)
+        return self.cache[fn][0]
 
 
 class GCSFS(Operations):
