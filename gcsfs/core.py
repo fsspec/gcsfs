@@ -27,9 +27,7 @@ import time
 import warnings
 
 from requests.exceptions import RequestException
-from .utils import HtmlError
-from .utils import is_retriable
-from .utils import read_block
+from .utils import HtmlError, is_retriable, read_block
 
 PY2 = sys.version_info.major == 2
 
@@ -40,7 +38,7 @@ def _tracemethod(f, self, *args, **kwargs):
    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
    return f(self, *args, **kwargs)
 
-# client created 23-Sept-2017
+# client created 16-Jan-2018
 not_secret = {"client_id": "586241054156-0asut23a7m10790r2ik24309flribp7j"
                            ".apps.googleusercontent.com",
               "client_secret": "w6VkI99jS6e9mECscNztXvQv"}
@@ -209,7 +207,8 @@ class GCSFileSystem(object):
     default_block_size = 5 * 2**20
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
-                 token=None, block_size=None, consistency='none', cache_timeout = 60 ):
+                 token=None, block_size=None, consistency='none',
+                 cache_timeout=60):
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:

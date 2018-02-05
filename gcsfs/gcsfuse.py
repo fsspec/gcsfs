@@ -64,6 +64,19 @@ class LRUDict(MutableMapping):
 
 
 class SmallChunkCacher:
+    """
+    Cache open GCSFiles, and data chunks from small reads
+
+    Parameters
+    ----------
+    gcs : instance of GCSFileSystem
+    cutoff : int
+        Will store/fetch data from cache for calls to read() with values smaller
+        than this.
+    nfile : int
+        Number of files to store in LRU cache.
+    """
+
     def __init__(self, gcs, cutoff=10000, nfiles=3):
         self.gcs = gcs
         self.cache = LRUDict(size=nfiles)
@@ -71,6 +84,12 @@ class SmallChunkCacher:
         self.nfiles = nfiles
 
     def read(self, fn, offset, size):
+        """Reach block from file
+
+        If size is less than cutoff, see if the relevant data is in the cache;
+        either return data from there, or call read() on underlying file object
+        and store the resultant block in the cache.
+        """
         f, chunks = self.cache[fn]
         if size > self.cutoff:
             # big reads are likely sequential
@@ -92,6 +111,10 @@ class SmallChunkCacher:
         return out
 
     def open(self, fn):
+        """Create cache entry, or return existing open file
+
+        May result in the eviction of LRU file object and its data blocks.
+        """
         if fn not in self.cache:
             self.cache[fn] = self.gcs.open(fn, 'rb'), []
             logger.info('{} inserted into cache'.format(fn))
@@ -104,7 +127,8 @@ class GCSFS(Operations):
 
     def __init__(self, path='.', gcs=None, **fsargs):
         if gcs is None:
-            self.gcs = GCSFileSystem(**fsargs)
+            # minimum block size: still read on 5MB boundaries.
+            self.gcs = GCSFileSystem(block_size=2 * 2 ** 20, **fsargs)
         else:
             self.gcs = gcs
         self.cache = SmallChunkCacher(self.gcs)
