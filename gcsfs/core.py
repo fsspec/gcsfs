@@ -7,6 +7,7 @@ from __future__ import print_function
 import array
 from base64 import b64encode
 import google.auth as gauth
+import google.auth.compute_engine
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
