@@ -11,6 +11,7 @@ from gcsfs import GCSFileSystem, core
 from pwd import getpwnam
 from grp import getgrnam
 import time
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -98,14 +99,18 @@ class SmallChunkCacher:
         f, chunks = self.cache[fn]
         if size > self.cutoff:
             # big reads are likely sequential
+            f.lock.acquire()
             f.seek(offset)
-            return f.read(size)
+            out = f.read(size)
+            f.lock.release()
+            return out
         for chunk in chunks:
             if chunk['start'] < offset and chunk['end'] > offset + size:
                 logger.info('cache hit')
                 start = offset - chunk['start']
                 return chunk['data'][start:start + size]
         logger.info('cache miss')
+        f.lock.acquire()
         f.seek(offset)
         out = f.read(size)
         new = True
@@ -120,6 +125,7 @@ class SmallChunkCacher:
                 new = False
         if new:
             chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
+        f.lock.release()
 
         sizes = sum([sum(
             [c['end'] - c['start'] + 1 for c in ch[1]])/2**20
@@ -134,6 +140,7 @@ class SmallChunkCacher:
         """
         if fn not in self.cache:
             self.cache[fn] = self.gcs.open(fn, 'rb'), []
+            self.cache[fn].lock = Lock()
             logger.info('{} inserted into cache'.format(fn))
         else:
             logger.info('{} found in cache'.format(fn))
