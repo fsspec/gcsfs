@@ -17,10 +17,12 @@ import cProfile
 import atexit
 
 prof = cProfile.Profile()
+prof.enable()
 logger = logging.getLogger(__name__)
 
 
 def dump():
+    prof.disable()
     prof.dump_stats('/home/ubuntu/out.prof')
 
 
@@ -30,9 +32,7 @@ atexit.register(dump)
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
     logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
-    prof.enable()
     out = f(self, *args, **kwargs)
-    prof.disable()
     return out
 
 
