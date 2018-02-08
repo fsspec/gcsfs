@@ -424,8 +424,6 @@ class GCSFileSystem(object):
             # listing.
             raise FileNotFoundError(path)
 
-        import pdb
-        pdb.set_trace()
         result = self._process_object(bucket, self._call('get', 'b/{}/o/{}', bucket, key))
 
         logger.debug("_get_object result: %s", result)
