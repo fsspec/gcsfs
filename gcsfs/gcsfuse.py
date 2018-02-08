@@ -99,38 +99,31 @@ class SmallChunkCacher:
         f, chunks = self.cache[fn]
         if size > self.cutoff:
             # big reads are likely sequential
-            f.lock.acquire()
-            f.seek(offset)
-            out = f.read(size)
-            f.lock.release()
-            return out
+            with f.lock:
+                f.seek(offset)
+                return f.read(size)
         for chunk in chunks:
             if chunk['start'] < offset and chunk['end'] > offset + size:
                 logger.info('cache hit')
                 start = offset - chunk['start']
                 return chunk['data'][start:start + size]
         logger.info('cache miss')
-        f.lock.acquire()
-        f.seek(offset)
-        out = f.read(size)
-        new = True
-        for chunk in chunks:
-            if chunk['end'] == f.start - 1:
-                chunk['end'] = f.end
-                chunk['data'] += f.cache
-                new = False
-            elif chunk['start'] == f.end + 1:
-                chunk['start'] = f.start
-                chunk['data'] = f.cache + chunk['data']
-                new = False
-        if new:
-            chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
-        f.lock.release()
+        with f.lock:
+            f.seek(offset)
+            out = f.read(size)
+            new = True
+            for chunk in chunks:
+                if chunk['end'] == f.start - 1:
+                    chunk['end'] = f.end
+                    chunk['data'] += f.cache
+                    new = False
+                elif chunk['start'] == f.end + 1:
+                    chunk['start'] = f.start
+                    chunk['data'] = f.cache + chunk['data']
+                    new = False
+            if new:
+                chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
 
-        sizes = sum([sum(
-            [c['end'] - c['start'] + 1 for c in ch[1]])/2**20
-                 for f, ch in self.cache.items()])
-        logger.info('Cache Report: {}'.format(sizes))
         return out
 
     def open(self, fn):

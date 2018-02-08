@@ -1175,33 +1175,33 @@ class GCSFile:
     def _fetch(self, start, end):
         if self.start is None and self.end is None:
             # First read
-            self.start = _round_down(start)
-            self.end = _round_up(end + self.blocksize)
+            self.start = start
+            self.end = end + self.blocksize
             self.cache = _fetch_range(self.details, self.gcsfs.session,
                                       self.start, self.end)
         if start < self.start:
             if self.end - end > self.blocksize:
-                self.start = _round_down(start)
-                self.end = _round_up(end + self.blocksize)
+                self.start = start
+                self.end = end + self.blocksize
                 self.cache = _fetch_range(self.details, self.gcsfs.session,
                                           self.start, self.end)
             else:
                 new = _fetch_range(self.details, self.gcsfs.session,
-                                   _round_down(start), self.start)
-                self.start = _round_down(start)
+                                   start, self.start)
+                self.start = start
                 self.cache = new + self.cache
         if end > self.end:
             if self.end > self.size:
                 return
             if end - self.end > self.blocksize:
-                self.start = _round_down(start)
-                self.end = _round_up(end + self.blocksize)
+                self.start = start
+                self.end = end + self.blocksize
                 self.cache = _fetch_range(self.details, self.gcsfs.session,
                                           self.start, self.end)
             else:
                 new = _fetch_range(self.details, self.gcsfs.session, self.end,
-                                   _round_up(end + self.blocksize))
-                self.end = _round_up(end + self.blocksize)
+                                   end + self.blocksize)
+                self.end = end + self.blocksize
                 self.cache = self.cache + new
 
     def read(self, length=-1):
@@ -1267,16 +1267,6 @@ class GCSFile:
 
     def __exit__(self, *args):
         self.close()
-
-
-def _round_down(x):
-    """Next lowest 5MB boundary"""
-    return x // (5 * 2**20) * 5 * 2**20
-
-
-def _round_up(x):
-    """Next highest 5MB boundary"""
-    return (x // (5 * 2 ** 20) + 1) * 5 * 2 ** 20
 
 
 def _fetch_range(obj_dict, session, start=None, end=None):
