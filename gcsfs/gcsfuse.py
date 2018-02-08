@@ -147,7 +147,8 @@ class SmallChunkCacher:
         """
         if fn not in self.cache:
             f = self.gcs.open(fn, 'rb')
-            self.cache[fn] = f, []
+            chunk = f.read(5 * 2**20)
+            self.cache[fn] = f, [{'start': 0, 'end': 5 * 2**20, data:chunk}]
             f.lock = Lock()
             logger.info('{} inserted into cache'.format(fn))
         else:
@@ -160,7 +161,7 @@ class GCSFS(Operations):
     def __init__(self, path='.', gcs=None, nfiles=10, **fsargs):
         if gcs is None:
             # minimum block size: still read on 5MB boundaries.
-            self.gcs = GCSFileSystem(block_size=5 * 2 ** 20, **fsargs)
+            self.gcs = GCSFileSystem(block_size=2 * 2 ** 20, **fsargs)
         else:
             self.gcs = gcs
         self.cache = SmallChunkCacher(self.gcs, nfiles=nfiles)
