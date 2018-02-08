@@ -46,6 +46,8 @@ class LRUDict(MutableMapping):
             self.data.popitem(last=False)
 
     def __getitem__(self, key):
+        if key not in self.data:
+            raise KeyError(key)
         self.data.move_to_end(key)
         return self.data[key]
 
