@@ -33,9 +33,8 @@ def main(bucket, mount_point, token, project_id, foreground, threads,
 
     print("Mounting bucket %s to directory %s" % (bucket, mount_point))
     print('foreground:', foreground, ', nothreads:', not threads)
-    FUSE(GCSFS(bucket, token=token, project=project_id),
-         mount_point, nothreads=not threads, foreground=foreground,
-         nfiles=nfiles)
+    FUSE(GCSFS(bucket, token=token, project=project_id, nfiles=nfiles),
+         mount_point, nothreads=not threads, foreground=foreground)
 
 
 if __name__ == '__main__':
