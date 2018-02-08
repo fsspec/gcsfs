@@ -16,13 +16,24 @@ from threading import Lock
 import cProfile
 import atexit
 
+prof = cProfile.Profile()
 logger = logging.getLogger(__name__)
+
+
+def dump():
+    prof.dump_stats('/home/ubuntu/out.prof')
+
+
+atexit.register(dump)
 
 
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
     logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
-    return f(self, *args, **kwargs)
+    prof.enable()
+    out = f(self, *args, **kwargs)
+    prof.disable()
+    return out
 
 
 def str_to_time(s):
@@ -100,16 +111,16 @@ class SmallChunkCacher:
         if fn not in self.cache:
             self.open(fn)
         f, chunks = self.cache[fn]
-        if size > self.cutoff:
-            # big reads are likely sequential
-            with f.lock:
-                f.seek(offset)
-                return f.read(size)
         for chunk in chunks:
             if chunk['start'] < offset and chunk['end'] > offset + size:
                 logger.info('cache hit')
                 start = offset - chunk['start']
                 return chunk['data'][start:start + size]
+        if size > self.cutoff:
+            # big reads are likely sequential
+            with f.lock:
+                f.seek(offset)
+                return f.read(size)
         logger.info('cache miss')
         with f.lock:
             f.seek(offset)
@@ -156,17 +167,9 @@ class GCSFS(Operations):
         self.write_cache = {}
         self.counter = 0
         self.root = path
-        prof = cProfile.Profile()
-        self.prof = prof
-
-        def dump():
-            prof.dump_stats('/home/ubuntu/notebooks/out.prof')
-
-        atexit.register(dump)
 
     @_tracemethod
     def getattr(self, path, fh=None):
-        self.prof.enable()
         try:
             info = self.gcs.info(''.join([self.root, path]))
         except FileNotFoundError:
@@ -189,17 +192,14 @@ class GCSFS(Operations):
             data['st_size'] = info['size']
             data['st_blksize'] = 5 * 2**20
             data['st_nlink'] = 1
-        self.prof.disable()
         return data
 
     @_tracemethod
     def readdir(self, path, fh):
-        self.prof.enable()
         path = ''.join([self.root, path])
         logger.info("List {}, {}".format(path, fh))
         files = self.gcs.ls(path)
         files = [os.path.basename(f.rstrip('/')) for f in files]
-        self.prof.disable()
         return ['.', '..'] + files
 
     @_tracemethod
@@ -219,12 +219,10 @@ class GCSFS(Operations):
 
     @_tracemethod
     def read(self, path, size, offset, fh):
-        self.prof.enable()
         fn = ''.join([self.root, path])
         logger.info('read #{} ({}) offset: {}, size: {}'.format(
             fh, fn, offset,size))
         out = self.cache.read(fn, offset, size)
-        self.prof.disable()
         return out
 
     @_tracemethod

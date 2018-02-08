@@ -397,7 +397,6 @@ class GCSFileSystem(object):
         """Return list of available project buckets."""
         return [b["name"] for b in self._list_buckets()["items"]]
 
-
     @classmethod
     def _process_object(self, bucket, object_metadata):
         object_metadata["size"] = int(object_metadata.get("size", 0))
