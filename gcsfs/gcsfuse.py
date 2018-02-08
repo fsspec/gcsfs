@@ -51,6 +51,7 @@ class LRUDict(MutableMapping):
 
     def __setitem__(self, key, value):
         self.data[key] = value
+        self.data.move_to_end(key)
         self.purge()
 
     def __delitem__(self, key):
@@ -90,6 +91,8 @@ class SmallChunkCacher:
         either return data from there, or call read() on underlying file object
         and store the resultant block in the cache.
         """
+        if fn not in self.cache:
+            self.open(fn)
         f, chunks = self.cache[fn]
         if size > self.cutoff:
             # big reads are likely sequential
@@ -125,13 +128,13 @@ class SmallChunkCacher:
 
 class GCSFS(Operations):
 
-    def __init__(self, path='.', gcs=None, **fsargs):
+    def __init__(self, path='.', gcs=None, nfiles=10, **fsargs):
         if gcs is None:
             # minimum block size: still read on 5MB boundaries.
             self.gcs = GCSFileSystem(block_size=2 * 2 ** 20, **fsargs)
         else:
             self.gcs = gcs
-        self.cache = SmallChunkCacher(self.gcs)
+        self.cache = SmallChunkCacher(self.gcs, nfiles=nfiles)
         self.write_cache = {}
         self.counter = 0
         self.root = path
@@ -220,10 +223,10 @@ class GCSFS(Operations):
         logger.info('open {} {}'.format(fn, oct(flags)))
         if flags % 2 == 0:
             # read
-            f = self.cache.open(fn)
+            self.cache.open(fn)
         else:
             # write (but ignore creation flags)
-            f = self.gcs.open(fn, 'wb')
+            self.gcs.open(fn, 'wb')
             self.write_cache[self.counter] = f
         logger.info('-> fh #{}'.format(self.counter))
         self.counter += 1

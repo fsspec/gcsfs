@@ -14,10 +14,16 @@ from gcsfs.gcsfuse import GCSFS
               help="Billing Project ID")
 @click.option('--foreground/--background', default=True,
               help="Run in the foreground or as a background process")
+@click.option('--threads/--no-threads', default=True,
+              help="Run in the foreground or as a background process")
+@click.option('-cache-files', default=10,
+              help="Number of open files to cache")
 @click.option('-v', '--verbose', count=True,
               help="Set logging level. '-v' for 'gcsfuse' logging."
                    "'-v -v' for complete debug logging.")
-def main(bucket, mount_point, token, project_id, foreground, verbose):
+def main(bucket, mount_point, token, project_id, foreground, threads,
+         nfiles, verbose):
+    """ Mount a Google Cloud Storage (GCS) bucket to a local directory """
     fmt = '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
     if verbose == 1:
         logging.basicConfig(level=logging.INFO, format=fmt)
@@ -25,10 +31,11 @@ def main(bucket, mount_point, token, project_id, foreground, verbose):
     if verbose > 1:
         logging.basicConfig(level=logging.DEBUG, format=fmt)
 
-    """ Mount a Google Cloud Storage (GCS) bucket to a local directory """
     print("Mounting bucket %s to directory %s" % (bucket, mount_point))
+    print('foreground:', foreground, ', nothreads:', not threads)
     FUSE(GCSFS(bucket, token=token, project=project_id),
-         mount_point, nothreads=True, foreground=foreground)
+         mount_point, nothreads=not threads, foreground=foreground,
+         nfiles=nfiles)
 
 
 if __name__ == '__main__':
