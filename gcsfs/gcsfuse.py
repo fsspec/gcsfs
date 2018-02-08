@@ -158,13 +158,15 @@ class GCSFS(Operations):
         self.root = path
         prof = cProfile.Profile()
         self.prof = prof
+
         def dump():
             prof.dump_stats('/home/ubuntu/notebooks/out.prof')
+
         atexit.register(dump)
 
     @_tracemethod
     def getattr(self, path, fh=None):
-        self.prof.enable(())
+        self.prof.enable()
         try:
             info = self.gcs.info(''.join([self.root, path]))
         except FileNotFoundError:
