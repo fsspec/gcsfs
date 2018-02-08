@@ -189,17 +189,17 @@ class GCSFS(Operations):
             data['st_size'] = info['size']
             data['st_blksize'] = 5 * 2**20
             data['st_nlink'] = 1
-        self.prof.disable()()
+        self.prof.disable()
         return data
 
     @_tracemethod
     def readdir(self, path, fh):
-        self.prof.enable(())
+        self.prof.enable()
         path = ''.join([self.root, path])
         logger.info("List {}, {}".format(path, fh))
         files = self.gcs.ls(path)
         files = [os.path.basename(f.rstrip('/')) for f in files]
-        self.prof.disable()()
+        self.prof.disable()
         return ['.', '..'] + files
 
     @_tracemethod
@@ -219,12 +219,12 @@ class GCSFS(Operations):
 
     @_tracemethod
     def read(self, path, size, offset, fh):
-        self.prof.enable()()
+        self.prof.enable()
         fn = ''.join([self.root, path])
         logger.info('read #{} ({}) offset: {}, size: {}'.format(
             fh, fn, offset,size))
         out = self.cache.read(fn, offset, size)
-        self.prof.disable()()
+        self.prof.disable()
         return out
 
     @_tracemethod
