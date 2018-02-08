@@ -108,10 +108,22 @@ class SmallChunkCacher:
         logger.info('cache miss')
         f.seek(offset)
         out = f.read(size)
-        chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
-        sizes = {f: "%.1fMB" % (sum(
-            [c['end'] - c['start'] + 1 for c in ch[1]])/2**20)
-                 for f, ch in self.cache.items()}
+        new = True
+        for chunk in chunks:
+            if chunk['end'] == f.start - 1:
+                chunk['end'] = f.end
+                chunk['data'] += f.cache
+                new = False
+            elif chunk['start'] == f.end + 1:
+                chunk['start'] = f.start
+                chunk['data'] = f.cache + chunk['data']
+                new = False
+        if new:
+            chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
+
+        sizes = sum([sum(
+            [c['end'] - c['start'] + 1 for c in ch[1]])/2**20
+                 for f, ch in self.cache.items()])
         logger.info('Cache Report: {}'.format(sizes))
         return out
 
