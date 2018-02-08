@@ -161,7 +161,8 @@ class GCSFS(Operations):
     def __init__(self, path='.', gcs=None, nfiles=10, **fsargs):
         if gcs is None:
             # minimum block size: still read on 5MB boundaries.
-            self.gcs = GCSFileSystem(block_size=2 * 2 ** 20, **fsargs)
+            self.gcs = GCSFileSystem(block_size=2 * 2 ** 20,
+                                     cache_timeout=600, **fsargs)
         else:
             self.gcs = gcs
         self.cache = SmallChunkCacher(self.gcs, nfiles=nfiles)
