@@ -406,6 +406,7 @@ class GCSFileSystem(object):
         """Return object information at the given path."""
         logger.debug("_get_object(%s)", path)
         bucket, key = split_path(path)
+        fn = "/".join([bucket, key.rstrip("/")]) + "/"
 
         # Check if parent dir is in listing cache
         parent = "/".join([bucket, posixpath.dirname(key.rstrip("/"))]) + "/"
@@ -418,6 +419,14 @@ class GCSFileSystem(object):
             else:
                 # Should error on missing cache or reprobe?
                 raise FileNotFoundError
+        if fn in self._listing_cache:
+            return {
+                'bucket': bucket,
+                'name': key,
+                'kind': 'storage#object',
+                'size': 0,
+                'storageClass': 'DIRECTORY',
+            }
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
