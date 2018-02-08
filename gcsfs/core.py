@@ -424,6 +424,8 @@ class GCSFileSystem(object):
             # listing.
             raise FileNotFoundError(path)
 
+        import pdb
+        pdb.set_trace()
         result = self._process_object(bucket, self._call('get', 'b/{}/o/{}', bucket, key))
 
         logger.debug("_get_object result: %s", result)
@@ -1268,6 +1270,7 @@ class GCSFile:
         self.close()
 
 
+@_tracemethod
 def _fetch_range(obj_dict, session, start=None, end=None):
     """ Get data from GCS
 
@@ -1276,7 +1279,6 @@ def _fetch_range(obj_dict, session, start=None, end=None):
     start, end : None or integers
         if not both None, fetch only given range
     """
-    logger.debug("Fetch: {}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
         end = end or 0
