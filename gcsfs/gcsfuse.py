@@ -13,6 +13,9 @@ from grp import getgrnam
 import time
 from threading import Lock
 
+import cProfile
+import atexit
+
 logger = logging.getLogger(__name__)
 
 
@@ -153,9 +156,15 @@ class GCSFS(Operations):
         self.write_cache = {}
         self.counter = 0
         self.root = path
+        prof = cProfile.Profile()
+        self.prof = prof
+        def dump():
+            prof.dump_stats('/home/ubuntu/notebooks/out.prof')
+        atexit.register(dump)
 
     @_tracemethod
     def getattr(self, path, fh=None):
+        self.prof.enable(())
         try:
             info = self.gcs.info(''.join([self.root, path]))
         except FileNotFoundError:
@@ -178,15 +187,17 @@ class GCSFS(Operations):
             data['st_size'] = info['size']
             data['st_blksize'] = 5 * 2**20
             data['st_nlink'] = 1
-
+        self.prof.disable()()
         return data
 
     @_tracemethod
     def readdir(self, path, fh):
+        self.prof.enable(())
         path = ''.join([self.root, path])
         logger.info("List {}, {}".format(path, fh))
         files = self.gcs.ls(path)
         files = [os.path.basename(f.rstrip('/')) for f in files]
+        self.prof.disable()()
         return ['.', '..'] + files
 
     @_tracemethod
@@ -206,10 +217,12 @@ class GCSFS(Operations):
 
     @_tracemethod
     def read(self, path, size, offset, fh):
+        self.prof.enable()()
         fn = ''.join([self.root, path])
         logger.info('read #{} ({}) offset: {}, size: {}'.format(
             fh, fn, offset,size))
         out = self.cache.read(fn, offset, size)
+        self.prof.disable()()
         return out
 
     @_tracemethod
