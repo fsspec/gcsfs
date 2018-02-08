@@ -148,7 +148,7 @@ class SmallChunkCacher:
         if fn not in self.cache:
             f = self.gcs.open(fn, 'rb')
             chunk = f.read(5 * 2**20)
-            self.cache[fn] = f, [{'start': 0, 'end': 5 * 2**20, data:chunk}]
+            self.cache[fn] = f, [{'start': 0, 'end': 5 * 2**20, 'data': chunk}]
             f.lock = Lock()
             logger.info('{} inserted into cache'.format(fn))
         else:
