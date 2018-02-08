@@ -139,8 +139,9 @@ class SmallChunkCacher:
         May result in the eviction of LRU file object and its data blocks.
         """
         if fn not in self.cache:
-            self.cache[fn] = self.gcs.open(fn, 'rb'), []
-            self.cache[fn].lock = Lock()
+            f = self.gcs.open(fn, 'rb')
+            self.cache[fn] = f, []
+            f.lock = Lock()
             logger.info('{} inserted into cache'.format(fn))
         else:
             logger.info('{} found in cache'.format(fn))
