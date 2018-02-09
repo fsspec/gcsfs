@@ -359,7 +359,7 @@ class GCSFileSystem(object):
                 try:
                     self.connect(method=meth)
                 except:
-                    logging.debug('Connection with method "%s" failed' % meth)
+                    logger.debug('Connection with method "%s" failed' % meth)
                 if self.session:
                     break
         else:
@@ -427,7 +427,7 @@ class GCSFileSystem(object):
         if parent_cache:
             cached_obj = [o for o in parent_cache["items"] if o["name"] == key]
             if cached_obj:
-                logging.debug("found cached object: %s", cached_obj)
+                logger.debug("found cached object: %s", cached_obj)
                 return cached_obj[0]
             else:
                 # Should error on missing cache or reprobe?
