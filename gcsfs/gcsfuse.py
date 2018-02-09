@@ -123,6 +123,8 @@ class SmallChunkCacher:
                 return f.read(size)
         logger.info('cache miss')
         with f.lock:
+            bs = f.blocksize
+            f.blocksize = 2 * 2 ** 20
             f.seek(offset)
             out = f.read(size)
             new = True
@@ -137,6 +139,7 @@ class SmallChunkCacher:
                     new = False
             if new:
                 chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
+            f.blocksize = bs
 
         return out
 
@@ -161,8 +164,8 @@ class GCSFS(Operations):
     def __init__(self, path='.', gcs=None, nfiles=10, **fsargs):
         if gcs is None:
             # minimum block size: still read on 5MB boundaries.
-            self.gcs = GCSFileSystem(block_size=2 * 2 ** 20,
-                                     cache_timeout=600, **fsargs)
+            self.gcs = GCSFileSystem(block_size=30 * 2 ** 20,
+                                     cache_timeout=6000, **fsargs)
         else:
             self.gcs = gcs
         self.cache = SmallChunkCacher(self.gcs, nfiles=nfiles)
@@ -223,7 +226,7 @@ class GCSFS(Operations):
     def read(self, path, size, offset, fh):
         fn = ''.join([self.root, path])
         logger.info('read #{} ({}) offset: {}, size: {}'.format(
-            fh, fn, offset,size))
+            fh, fn, offset, size))
         out = self.cache.read(fn, offset, size)
         return out
 
