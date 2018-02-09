@@ -17,6 +17,7 @@ from hashlib import md5
 import io
 import json
 import logging
+import traceback
 import os
 import posixpath
 import pickle
@@ -38,6 +39,11 @@ logger = logging.getLogger(__name__)
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+   if logger.isEnabledFor(logging.DEBUG-1):
+       tb_io = io.StringIO()
+       traceback.print_stack(file=tb_io)
+       logger.log(logging.DEBUG - 1, tb_io.getvalue())
+
    return f(self, *args, **kwargs)
 
 # client created 23-Sept-2017
@@ -57,6 +63,10 @@ bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
 DEBUG = False
+
+GCS_MIN_BLOCK_SIZE = 2 ** 18
+DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
+READ_BLOCK_SIZE = 5 * 2 ** 20
 
 if PY2:
     FileNotFoundError = IOError
@@ -209,7 +219,7 @@ class GCSFileSystem(object):
     retries = 4  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
-    default_block_size = 5 * 2**20
+    default_block_size = DEFAULT_BLOCK_SIZE
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none', cache_timeout = 60 ):
@@ -856,7 +866,6 @@ class GCSFileSystem(object):
         with self.open(path, 'wb'):
             pass
 
-    @_tracemethod
     def read_block(self, fn, offset, length, delimiter=None):
         """ Read a block of bytes from a GCS file
 
@@ -919,7 +928,8 @@ GCSFileSystem.load_tokens()
 
 class GCSFile:
 
-    def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
+    @_tracemethod
+    def __init__(self, gcsfs, path, mode='rb', block_size=DEFAULT_BLOCK_SIZE,
                  acl=None, consistency='md5', metadata=None):
         """
         Open a file.
@@ -970,9 +980,9 @@ class GCSFile:
             self.details = gcsfs.info(path)
             self.size = self.details['size']
         else:
-            if block_size < 2**18:
+            if block_size < GCS_MIN_BLOCK_SIZE:
                 warnings.warn('Setting block size to minimum value, 2**18')
-                self.blocksize = 2**18
+                self.blocksize = GCS_MIN_BLOCK_SIZE
             self.buffer = io.BytesIO()
             self.offset = 0
             self.forced = False
@@ -989,6 +999,7 @@ class GCSFile:
         """ Current file location """
         return self.loc
 
+    @_tracemethod
     def seek(self, loc, whence=0):
         """ Set current file location
 
@@ -1072,6 +1083,7 @@ class GCSFile:
             self.flush()
         return out
 
+    @_tracemethod
     def flush(self, force=False):
         """
         Write buffered data to GCS.
@@ -1089,20 +1101,37 @@ class GCSFile:
             raise ValueError('Flush on a file not in write mode')
         if self.closed:
             raise ValueError('Flush on closed file')
+
         if self.buffer.tell() == 0 and not force:
             # no data in the buffer to write
             return
+        if self.buffer.tell() < GCS_MIN_BLOCK_SIZE and not force:
+            warnings.warn(
+                "GCSFile.flush(force=False) with buffer size (%s) below minimum GCS chunk size (2 ** 18), "
+                "skipping block upload." % self.buffer.tell()
+            )
+            return
+
         if force and self.forced:
             raise ValueError("Force flush cannot be called more than once")
-        if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
-            self._simple_upload()
-        elif not self.offset:
-            self._initiate_upload()
+
+
+        if not self.offset:
+            if force and self.buffer.tell() <= self.blocksize:
+                # Force-write a buffer below blocksizev with a single write
+                self._simple_upload()
+            else:
+                # At initialize a multipart upload, setting self.location
+                self._initiate_upload()
+
         if self.location is not None:
+            # Continue with multipart upload has been initalized
             self._upload_chunk(final=force)
+
         if force:
             self.forced = True
 
+    @_tracemethod
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
         data = self.buffer.read()
@@ -1117,6 +1146,7 @@ class GCSFile:
                 head['Content-Range'] = 'bytes */%i' % self.offset
                 data = None
         else:
+
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
@@ -1150,6 +1180,7 @@ class GCSFile:
             self.buffer = io.BytesIO()
             self.offset += l
 
+    @_tracemethod
     def _initiate_upload(self):
         r = self.gcsfs.session.post(
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
@@ -1158,6 +1189,7 @@ class GCSFile:
             json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
+    @_tracemethod
     def _simple_upload(self):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
@@ -1174,10 +1206,11 @@ class GCSFile:
             self.md5.update(data)
             assert b64encode(self.md5.digest()) == md5.encode(), "MD5 checksum failed"
 
+    @_tracemethod
     def _fetch(self, start, end):
         # force read to 5MB boundaries
-        start = start // (5 * 2**20) * 5 * 2**20
-        end = (end // (5 * 2 ** 20) + 1) * 5 * 2 ** 20
+        start = start // (READ_BLOCK_SIZE) * READ_BLOCK_SIZE
+        end = (end // (READ_BLOCK_SIZE) + 1) * READ_BLOCK_SIZE
         if self.start is None and self.end is None:
             # First read
             self.start = start
@@ -1235,6 +1268,7 @@ class GCSFile:
                 self.cache = self.cache[self.blocksize * num:]
         return out
 
+    @_tracemethod
     def close(self):
         """ Close file """
         if self.closed:
@@ -1259,6 +1293,7 @@ class GCSFile:
         """Return whether the GCSFile was opened for writing"""
         return self.mode in {'wb', 'ab'}
 
+    @_tracemethod
     def __del__(self):
         self.close()
 
@@ -1267,9 +1302,11 @@ class GCSFile:
 
     __repr__ = __str__
 
+    @_tracemethod
     def __enter__(self):
         return self
 
+    @_tracemethod
     def __exit__(self, *args):
         self.close()
 
