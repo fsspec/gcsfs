@@ -68,15 +68,6 @@ def test_ls2(token_restore):
         assert fn in gcs.ls(TEST_BUCKET+'/test')
 
 @my_vcr.use_cassette(match=['all'])
-def test_list_bucket_multipage(token_restore):
-    with gcs_maker() as gcs:
-        gcs.touch(a)
-        gcs.touch(b)
-        gcs.touch(c)
-        dirs=gcs._list_bucket(TEST_BUCKET, max_results=2)
-        assert len(dirs) == 3
-
-@my_vcr.use_cassette(match=['all'])
 def test_pickle(token_restore):
     import pickle
     with gcs_maker() as gcs:
@@ -103,12 +94,15 @@ def test_pickle(token_restore):
 def test_ls_touch(token_restore):
     with gcs_maker() as gcs:
         assert not gcs.exists(TEST_BUCKET+'/tmp/test')
+
         gcs.touch(a)
         gcs.touch(b)
-        L = gcs.ls(TEST_BUCKET+'/tmp/test', True)
-        assert set(d['name'] for d in L) == set([a, b])
+
         L = gcs.ls(TEST_BUCKET+'/tmp/test', False)
         assert set(L) == set([a, b])
+
+        L_d = gcs.ls(TEST_BUCKET+'/tmp/test', True)
+        assert set(d['path'] for d in L_d) == set([a, b])
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -179,11 +173,13 @@ def test_du(token_restore):
 def test_ls(token_restore):
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET+'/nested/file1'
+        gcs.touch(fn)
+
         assert fn not in gcs.ls(TEST_BUCKET+'/')
         assert fn in gcs.ls(TEST_BUCKET+'/nested/')
         assert fn in gcs.ls(TEST_BUCKET+'/nested')
-        assert gcs.ls('gcs://'+TEST_BUCKET+'/nested/') == gcs.ls(
-                TEST_BUCKET+'/nested')
+        assert list(sorted(gcs.ls('gcs://'+TEST_BUCKET+'/nested/'))) == \
+               list(sorted(gcs.ls(TEST_BUCKET+'/nested')))
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -394,6 +390,16 @@ def test_read_block(token_restore):
 
         assert gcs.read_block(path, 5, None) == gcs.read_block(path, 5, 1000)
 
+
+@my_vcr.use_cassette(match=['all'])
+def test_empty_flush(token_restore):
+    with gcs_maker() as gcs:
+        gcs.touch(TEST_BUCKET+'/temp')
+        handle = gcs.open(TEST_BUCKET+'/temp', 'rb')
+        handle.flush()
+
+        with pytest.raises(ValueError):
+            handle.write("abc")
 
 @my_vcr.use_cassette(match=['all'])
 def test_write_fails(token_restore):

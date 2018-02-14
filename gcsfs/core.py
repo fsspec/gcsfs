@@ -414,6 +414,8 @@ class GCSFileSystem(object):
     @classmethod
     def _process_object(self, bucket, object_metadata):
         object_metadata["size"] = int(object_metadata.get("size", 0))
+        object_metadata["path"] = posixpath.join(bucket, object_metadata["name"])
+
         return object_metadata
 
     def _get_object(self, path):
@@ -444,6 +446,7 @@ class GCSFileSystem(object):
         return result
 
 
+    @_tracemethod
     def _maybe_get_cached_listing(self, path):
         logger.debug("_maybe_get_cached_listing: %s", path)
         if path in self._listing_cache:
@@ -461,6 +464,7 @@ class GCSFileSystem(object):
 
         return None
 
+    @_tracemethod
     def _list_objects(self, path):
         path = norm_path(path)
 
@@ -474,13 +478,11 @@ class GCSFileSystem(object):
         self._listing_cache[path] = (retrieved_time, listing)
         return listing
 
+    @_tracemethod
     def _do_list_objects(self, path, max_results = None):
         """Return depaginated object listing for the given {bucket}/{prefix}/ path."""
-        logger.debug("_list_objects(%s, max_results=%s)", path, max_results)
         bucket, prefix = split_path(path)
-        if prefix:
-            assert prefix.endswith("/")
-        else:
+        if not prefix:
             prefix = None
 
         prefixes = []
@@ -598,43 +600,57 @@ class GCSFileSystem(object):
     @_tracemethod
     def ls(self, path, detail=False):
         """List objects under the given '/{bucket}/{prefix} path."""
+        path = norm_path(path)
+
         if path in ['/', '']:
-            out = self.buckets
+            return self.buckets
+        elif path.endswith("/"):
+            return self._ls(path, detail)
         else:
-            if not path.endswith("/"):
-                path = path + "/"
-
-            listing = self._list_objects(path)
-            bucket, key = split_path(path)
-
-            if not detail:
-                result = []
-
-                # Convert item listing into list of 'item' and 'subdir/'
-                # entries. Items may be of form "key/", in which case there
-                # will be duplicate entries in prefix and item_names.
-                item_names = [
-                    f["name"][len(key):] for f in listing["items"]
-                    if f["name"][len(key):]
-                ]
-                prefixes = [p for p in listing["prefixes"]]
-
-                return list(set(item_names + prefixes))
-
+            combined_listing = self._ls(path, detail) + self._ls(path + "/", detail)
+            if detail:
+                combined_entries = dict((l["path"],l) for l in combined_listing )
+                combined_entries.pop(path+"/", None)
+                return list(combined_entries.values())
             else:
-                item_details = listing["items"]
+                return list(set(combined_listing) - {path + "/"})
 
-                pseudodirs = [{
-                        'bucket': bucket,
-                        'name': prefix,
-                        'kind': 'storage#object',
-                        'size': 0,
-                        'storageClass': 'DIRECTORY',
-                    }
-                    for prefix in listing["prefixes"]
-                ]
+    def _ls(self, path, detail=False):
+        listing = self._list_objects(path)
+        bucket, key = split_path(path)
 
-                return item_details + pseudodirs
+        if not detail:
+            result = []
+
+            # Convert item listing into list of 'item' and 'subdir/'
+            # entries. Items may be of form "key/", in which case there
+            # will be duplicate entries in prefix and item_names.
+            item_names = [
+                f["name"] for f in listing["items"] if f["name"]
+            ]
+            prefixes = [p for p in listing["prefixes"]]
+
+            logger.debug("path: %s item_names: %s prefixes: %s", path, item_names, prefixes)
+
+            return [
+                posixpath.join(bucket, n) for n in set(item_names + prefixes)
+            ]
+
+        else:
+            item_details = listing["items"]
+
+            pseudodirs = [{
+                    'bucket': bucket,
+                    'name': prefix,
+                    'path': bucket + "/" + prefix,
+                    'kind': 'storage#object',
+                    'size': 0,
+                    'storageClass': 'DIRECTORY',
+                }
+                for prefix in listing["prefixes"]
+            ]
+
+            return item_details + pseudodirs
 
     @_tracemethod
     def walk(self, path, detail=False):
@@ -676,7 +692,7 @@ class GCSFileSystem(object):
             files = [f for f in self.ls(path, True)]
         if total:
             return sum(f['size'] for f in files)
-        return {f['name']: f['size'] for f in files}
+        return {f['path']: f['size'] for f in files}
 
     @_tracemethod
     def glob(self, path):
@@ -735,7 +751,7 @@ class GCSFileSystem(object):
             # Return a pseudo dir for the bucket root
             return {
                 'bucket': bucket,
-                'name': "/",
+                'name': bucket + "/",
                 'kind': 'storage#object',
                 'size': 0,
                 'storageClass': 'DIRECTORY',
@@ -1098,6 +1114,9 @@ class GCSFile:
             blocks are allowed to be. Disallows further writing to this file.
         """
         if self.mode not in {'wb', 'ab'}:
+            if self.mode == "rb" and not force:
+                return
+
             raise ValueError('Flush on a file not in write mode')
         if self.closed:
             raise ValueError('Flush on closed file')
