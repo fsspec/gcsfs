@@ -10,6 +10,7 @@ import array
 from base64 import b64encode
 import google.auth as gauth
 from google.auth.transport.requests import AuthorizedSession
+from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
@@ -391,7 +392,7 @@ class GCSFileSystem(object):
                 r = meth(self.base + path, params=kwargs, json=json)
                 validate_response(r, path)
                 break
-            except (HtmlError, RequestException) as e:
+            except (HtmlError, RequestException, GoogleAuthError) as e:
                 logger.exception("_call exception: %s", e)
                 if retry == self.retries - 1:
                     raise e
