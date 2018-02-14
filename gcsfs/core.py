@@ -902,7 +902,7 @@ class GCSFile:
             raise ValueError("Force flush cannot be called more than once")
         if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
             self._simple_upload()
-        elif not self.offset:
+        elif self.offset == 0 and self.buffer.tell() > 262144:
             self._initiate_upload()
         if self.location is not None:
             self._upload_chunk(final=force)
@@ -990,7 +990,7 @@ class GCSFile:
             self.end = end + self.blocksize
             self.cache = _fetch_range(self.details, self.gcsfs.session, start,
                                       self.end)
-        if start < self.start:
+        elif start < self.start:
             if self.end - end > self.blocksize:
                 self.start = start
                 self.end = end + self.blocksize
@@ -1001,7 +1001,7 @@ class GCSFile:
                                    self.start)
                 self.start = start
                 self.cache = new + self.cache
-        if end > self.end:
+        elif end > self.end:
             if self.end > self.size:
                 return
             if end - self.end > self.blocksize:
