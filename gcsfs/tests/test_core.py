@@ -39,8 +39,9 @@ def test_multi_upload(token_restore):
         # something to write on close
         with gcs.open(fn, 'wb', block_size=2**18) as f:
             f.write(d)
+            f.write(b'x')  # flush here
             f.write(b'xx')
-        assert gcs.cat(fn) == d + b'xx'
+        assert gcs.cat(fn) == d + b'xxx'
 
         # empty buffer on close
         with gcs.open(fn, 'wb', block_size=2**19) as f:
