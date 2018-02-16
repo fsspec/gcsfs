@@ -195,6 +195,35 @@ class GCSFileSystem(object):
       `` ~/.config/gcloud/credentials``, or
       ``~\AppData\Roaming\gcloud\credentials``, etc.
 
+    Objects
+    -------
+
+    Specific methods, (eg. `ls`, `info`, ...) may return object details from GCS.
+
+    These detailed listings include the 
+    [object resource](https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
+    with additional properties:
+        - "path" : string
+            The "{bucket}/{name}" path of the object, used in calls to GCSFileSystem or GCSFile.
+
+    GCS *does not* include  "directory" objects but instead generates directories by splitting
+    [object names](https://cloud.google.com/storage/docs/key-terms). This means that, for example,
+    a directory does not need to exist for an object to be created within it. Creating an object 
+    implicitly creates it's parent directories, and removing all objects from a directory implicitly
+    deletes the empty directory.
+
+    `GCSFileSystem` generates listing entries for these implied directories in listing apis with the 
+    object properies:
+        - "path" : string
+            The "{bucket}/{name}" path of the dir, used in calls to GCSFileSystem or GCSFile.
+        - "bucket" : string
+            The name of the bucket containing this object.
+        - "name" : string
+            The "/" terminated name of the directory within the bucket.
+        - "kind" : 'storage#object'
+        - "size" : 0
+        - "storageClass" : 'DIRECTORY'
+
     Parameters
     ----------
     project : string
