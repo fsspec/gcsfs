@@ -943,6 +943,7 @@ class GCSFile:
                 head['Content-Range'] = 'bytes */%i' % self.offset
                 data = None
         else:
+            assert l >= GCS_MIN_BLOCK_SIZE, "Non-final chunk write below min size."
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
