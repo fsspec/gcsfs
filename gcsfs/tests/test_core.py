@@ -9,7 +9,7 @@ from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
 from gcsfs.tests.utils import (tempdir, token_restore, my_vcr, gcs_maker,
                                files, csv_files, text_files, a, b, c, d,
                                tmpfile)
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.core import GCSFileSystem, quote_plus, GCS_MIN_BLOCK_SIZE
 from gcsfs.utils import seek_delimiter
 
 
@@ -393,6 +393,28 @@ def test_read_block(token_restore):
         assert gcs.read_block(path, 5000, 5010) == b''
 
         assert gcs.read_block(path, 5, None) == gcs.read_block(path, 5, 1000)
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_flush(token_restore):
+    with gcs_maker() as gcs:
+        gcs.touch(a)
+        with gcs.open(a, 'rb') as ro:
+            with pytest.raises(ValueError):
+                ro.write(b"abc")
+
+            ro.flush()
+
+
+        with gcs.open(b, 'wb') as wo:
+            wo.write(b"abc")
+            wo.flush()
+            assert not gcs.exists(b)
+
+        assert gcs.exists(b)
+        with pytest.raises(ValueError):
+            wo.write(b"abc")
+
 
 
 @my_vcr.use_cassette(match=['all'])

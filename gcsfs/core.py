@@ -893,13 +893,14 @@ class GCSFile:
             blocks are allowed to be. Disallows further writing to this file.
         """
 
-        if self.mode not in {'wb', 'ab'}:
-            raise ValueError('Flush on a file not in write mode')
         if self.closed:
             raise ValueError('Flush on closed file')
         if force and self.forced:
             raise ValueError("Force flush cannot be called more than once")
 
+        if self.mode not in {'wb', 'ab'}:
+            assert not hasattr(self, "buffer"), "flush on read-mode file with non-empty buffer"
+            return
         if self.buffer.tell() == 0 and not force:
             # no data in the buffer to write
             return
