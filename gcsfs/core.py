@@ -223,6 +223,17 @@ class GCSFileSystem(object):
         - "kind" : 'storage#object'
         - "size" : 0
         - "storageClass" : 'DIRECTORY'
+    
+    Caching
+    -------
+
+    GCSFileSystem maintains a per-implied-directory cache of object listings and fulfills all
+    object information and listing requests from cache. This implied, for example, that objects
+    created via other processes *will not* be visible to the GCSFileSystem until the cache
+    refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not effected by this cache.
+
+    In the default case the cache is never expired. This may be controlled via the `cache_timeout`
+    GCSFileSystem parameter or via explicit calls to `GCSFileSystem.invalidate_cache`.
 
     Parameters
     ----------
@@ -252,7 +263,7 @@ class GCSFileSystem(object):
     default_block_size = DEFAULT_BLOCK_SIZE
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
-                 token=None, block_size=None, consistency='none', cache_timeout = 60 ):
+                 token=None, block_size=None, consistency='none', cache_timeout = None):
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
@@ -448,6 +459,7 @@ class GCSFileSystem(object):
 
         return object_metadata
 
+    @_tracemethod
     def _get_object(self, path):
         """Return object information at the given path."""
         logger.debug("_get_object(%s)", path)
@@ -462,8 +474,8 @@ class GCSFileSystem(object):
                 logger.debug("found cached object: %s", cached_obj)
                 return cached_obj[0]
             else:
-                # Should error on missing cache or reprobe?
-                pass
+                logger.debug("object not found cached parent listing")
+                raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
