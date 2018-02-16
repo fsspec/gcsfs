@@ -1,6 +1,6 @@
 interactions:
 - request:
-    body: grant_type=refresh_token&client_id=xxx&client_secret=xxx&refresh_token=xxx
+    body: client_secret=xxx&refresh_token=xxx&grant_type=refresh_token&client_id=xxx
     headers:
       Accept: ['*/*']
       Accept-Encoding: ['gzip, deflate']
@@ -8,20 +8,20 @@ interactions:
       Content-Length: ['229']
       content-type: [application/x-www-form-urlencoded]
     method: POST
-    uri: https://accounts.google.com/o/oauth2/token
+    uri: https://www.googleapis.com/oauth2/v4/token
   response:
     body:
       string: !!binary |
-        H4sIANxWh1oC/6tWykyJL8nPTs1TslJQqqioUNJRUEpMTk4tLsYQBvPjSyoLUkGCTqmJRalFIPHU
-        ioLMotTi+EyQYmMzA4NaAIbFaipWAAAA
+        H4sIAB1ch1oC/6tWKsnPTs2LL6ksSFWyUlBySk0sSi1S0lFQSkxOTi0ujgdLg2QqKipAwpkpGEKp
+        FQWZRanF8ZkgQWMzA4NaAAUo03FWAAAA
     headers:
       Cache-Control: ['no-cache, no-store, max-age=0, must-revalidate']
-      Content-Disposition: [attachment; filename="json.txt"; filename*=UTF-8''json.txt]
       Content-Encoding: [gzip]
-      Content-Type: [application/json; charset=utf-8]
+      Content-Type: [application/json; charset=UTF-8]
       Pragma: [no-cache]
-      Server: [ESF]
+      Server: [GSE]
       Transfer-Encoding: [chunked]
+      Vary: [Origin, X-Origin]
       X-Content-Type-Options: [nosniff]
       X-Frame-Options: [SAMEORIGIN]
       X-XSS-Protection: [1; mode=block]
@@ -166,6 +166,59 @@ interactions:
       Accept-Encoding: ['gzip, deflate']
       Connection: [keep-alive]
     method: GET
+    uri: https://www.googleapis.com/storage/v1/b/?project=test_project
+  response:
+    body: {string: "{\n \"kind\": \"storage#buckets\",\n \"items\": [\n  {\n   \"kind\":
+        \"storage#bucket\",\n   \"id\": \"artifacts.test_project.appspot.com\",\n
+        \  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/artifacts.test_project.appspot.com\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"artifacts.test_project.appspot.com\",\n
+        \  \"timeCreated\": \"2016-05-17T06:25:43.063Z\",\n   \"updated\": \"2016-05-17T06:25:43.063Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcfs-testing-ipd\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcfs-testing-ipd\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"gcfs-testing-ipd\",\n
+        \  \"timeCreated\": \"2018-01-03T23:05:41.132Z\",\n   \"updated\": \"2018-01-03T23:05:41.132Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcsfs-testing\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"gcsfs-testing\",\n
+        \  \"timeCreated\": \"2018-02-14T00:31:53.922Z\",\n   \"updated\": \"2018-02-14T00:31:53.922Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"MULTI_REGIONAL\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"protein-design\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/protein-design\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"protein-design\",\n
+        \  \"timeCreated\": \"2016-05-03T01:44:55.308Z\",\n   \"updated\": \"2016-05-03T01:44:55.308Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"test_project\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/test_project\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"test_project\",\n
+        \  \"timeCreated\": \"2016-05-11T19:23:04.110Z\",\n   \"updated\": \"2016-05-11T19:23:04.110Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US-CENTRAL1\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"test_project-public\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/test_project-public\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"test_project-public\",\n
+        \  \"timeCreated\": \"2017-11-30T21:49:44.272Z\",\n   \"updated\": \"2017-12-09T08:15:48.368Z\",\n
+        \  \"metageneration\": \"2\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"MULTI_REGIONAL\",\n   \"etag\": \"CAI=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"test_project_cloudbuild\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/test_project_cloudbuild\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"test_project_cloudbuild\",\n
+        \  \"timeCreated\": \"2017-12-09T03:43:27.112Z\",\n   \"updated\": \"2017-12-09T03:43:27.112Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  }\n ]\n}\n"}
+    headers:
+      Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
+      Content-Length: ['2959']
+      Content-Type: [application/json; charset=UTF-8]
+      Server: [UploadServer]
+      Vary: [Origin, X-Origin]
+    status: {code: 200, message: OK}
+- request:
+    body: null
+    headers:
+      Accept: ['*/*']
+      Accept-Encoding: ['gzip, deflate']
+      Connection: [keep-alive]
+    method: GET
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2Fnonexistent
   response:
     body: {string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
@@ -185,7 +238,7 @@ interactions:
       Accept-Encoding: ['gzip, deflate']
       Connection: [keep-alive]
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?maxResults=1000
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping
   response:
     body: {string: "{\n \"kind\": \"storage#objects\"\n}\n"}
     headers:
@@ -202,7 +255,77 @@ interactions:
       Accept-Encoding: ['gzip, deflate']
       Connection: [keep-alive]
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/does-not-exist/o/?maxResults=1000
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping%2F
+  response:
+    body: {string: "{\n \"kind\": \"storage#objects\"\n}\n"}
+    headers:
+      Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
+      Content-Length: ['31']
+      Content-Type: [application/json; charset=UTF-8]
+      Server: [UploadServer]
+      Vary: [Origin, X-Origin]
+    status: {code: 200, message: OK}
+- request:
+    body: null
+    headers:
+      Accept: ['*/*']
+      Accept-Encoding: ['gzip, deflate']
+      Connection: [keep-alive]
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/?project=test_project
+  response:
+    body: {string: "{\n \"kind\": \"storage#buckets\",\n \"items\": [\n  {\n   \"kind\":
+        \"storage#bucket\",\n   \"id\": \"artifacts.test_project.appspot.com\",\n
+        \  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/artifacts.test_project.appspot.com\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"artifacts.test_project.appspot.com\",\n
+        \  \"timeCreated\": \"2016-05-17T06:25:43.063Z\",\n   \"updated\": \"2016-05-17T06:25:43.063Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcfs-testing-ipd\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcfs-testing-ipd\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"gcfs-testing-ipd\",\n
+        \  \"timeCreated\": \"2018-01-03T23:05:41.132Z\",\n   \"updated\": \"2018-01-03T23:05:41.132Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"gcsfs-testing\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"gcsfs-testing\",\n
+        \  \"timeCreated\": \"2018-02-14T00:31:53.922Z\",\n   \"updated\": \"2018-02-14T00:31:53.922Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"MULTI_REGIONAL\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"protein-design\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/protein-design\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"protein-design\",\n
+        \  \"timeCreated\": \"2016-05-03T01:44:55.308Z\",\n   \"updated\": \"2016-05-03T01:44:55.308Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"test_project\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/test_project\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"test_project\",\n
+        \  \"timeCreated\": \"2016-05-11T19:23:04.110Z\",\n   \"updated\": \"2016-05-11T19:23:04.110Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US-CENTRAL1\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"test_project-public\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/test_project-public\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"test_project-public\",\n
+        \  \"timeCreated\": \"2017-11-30T21:49:44.272Z\",\n   \"updated\": \"2017-12-09T08:15:48.368Z\",\n
+        \  \"metageneration\": \"2\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"MULTI_REGIONAL\",\n   \"etag\": \"CAI=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"id\": \"test_project_cloudbuild\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/test_project_cloudbuild\",\n
+        \  \"projectNumber\": \"353972334481\",\n   \"name\": \"test_project_cloudbuild\",\n
+        \  \"timeCreated\": \"2017-12-09T03:43:27.112Z\",\n   \"updated\": \"2017-12-09T03:43:27.112Z\",\n
+        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  }\n ]\n}\n"}
+    headers:
+      Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
+      Content-Length: ['2959']
+      Content-Type: [application/json; charset=UTF-8]
+      Server: [UploadServer]
+      Vary: [Origin, X-Origin]
+    status: {code: 200, message: OK}
+- request:
+    body: null
+    headers:
+      Accept: ['*/*']
+      Accept-Encoding: ['gzip, deflate']
+      Connection: [keep-alive]
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/does-not-exist/o/?delimiter=%2F
   response:
     body: {string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
         \   \"reason\": \"notFound\",\n    \"message\": \"Not Found\"\n   }\n  ],\n
@@ -214,4 +337,21 @@ interactions:
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
     status: {code: 404, message: Not Found}
+- request:
+    body: null
+    headers:
+      Accept: ['*/*']
+      Accept-Encoding: ['gzip, deflate']
+      Connection: [keep-alive]
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
+  response:
+    body: {string: "{\n \"kind\": \"storage#objects\"\n}\n"}
+    headers:
+      Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
+      Content-Length: ['31']
+      Content-Type: [application/json; charset=UTF-8]
+      Server: [UploadServer]
+      Vary: [Origin, X-Origin]
+    status: {code: 200, message: OK}
 version: 1
