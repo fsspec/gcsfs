@@ -1338,6 +1338,10 @@ class GCSFile:
         else:
             if not self.forced:
                 self.flush(force=True)
+            else:
+                logger.debug("close with forced=True, bypassing final flush.")
+                assert self.buffer.tell() == 0
+
             self.gcsfs.invalidate_cache(
                 posixpath.dirname("/".join([self.bucket, self.key])))
         self.closed = True
