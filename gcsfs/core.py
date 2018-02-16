@@ -71,7 +71,6 @@ DEBUG = False
 
 GCS_MIN_BLOCK_SIZE = 2 ** 18
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
-READ_BLOCK_SIZE = 5 * 2 ** 20
 
 if PY2:
     FileNotFoundError = IOError
@@ -1157,38 +1156,39 @@ class GCSFile:
             When closing, write the last block even if it is smaller than
             blocks are allowed to be. Disallows further writing to this file.
         """
-        if self.mode not in {'wb', 'ab'}:
-            if self.mode == "rb" and not force:
-                return
 
-            raise ValueError('Flush on a file not in write mode')
         if self.closed:
             raise ValueError('Flush on closed file')
+        if force and self.forced:
+            raise ValueError("Force flush cannot be called more than once")
 
+        if self.mode not in {'wb', 'ab'}:
+            assert not hasattr(self, "buffer"), "flush on read-mode file with non-empty buffer"
+            return
         if self.buffer.tell() == 0 and not force:
             # no data in the buffer to write
             return
         if self.buffer.tell() < GCS_MIN_BLOCK_SIZE and not force:
-            warnings.warn(
-                "GCSFile.flush(force=False) with buffer size (%s) below minimum GCS chunk size (2 ** 18), "
-                "skipping block upload." % self.buffer.tell()
+            logger.debug(
+                "flush(force=False) with buffer (%i) < min size (2 ** 18), "
+                "skipping block upload.", self.buffer.tell()
             )
             return
 
-        if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once")
-
-
         if not self.offset:
             if force and self.buffer.tell() <= self.blocksize:
-                # Force-write a buffer below blocksizev with a single write
+                # Force-write a buffer below blocksize with a single write
                 self._simple_upload()
+            elif not force and self.buffer.tell() <= self.blocksize:
+                # Defer initialization of multipart upload, *may* still
+                # be able to simple upload.
+                return
             else:
                 # At initialize a multipart upload, setting self.location
                 self._initiate_upload()
 
         if self.location is not None:
-            # Continue with multipart upload has been initalized
+            # Continue with multipart upload has been initialized
             self._upload_chunk(final=force)
 
         if force:
@@ -1209,7 +1209,7 @@ class GCSFile:
                 head['Content-Range'] = 'bytes */%i' % self.offset
                 data = None
         else:
-
+            assert l >= GCS_MIN_BLOCK_SIZE, "Non-final chunk write below min size."
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
@@ -1271,9 +1271,6 @@ class GCSFile:
 
     @_tracemethod
     def _fetch(self, start, end):
-        # force read to 5MB boundaries
-        start = start // (READ_BLOCK_SIZE) * READ_BLOCK_SIZE
-        end = (end // (READ_BLOCK_SIZE) + 1) * READ_BLOCK_SIZE
         if self.start is None and self.end is None:
             # First read
             self.start = start
@@ -1339,7 +1336,8 @@ class GCSFile:
         if self.mode == 'rb':
             self.cache = None
         else:
-            self.flush(force=True)
+            if not self.forced:
+                self.flush(force=True)
             self.gcsfs.invalidate_cache(
                 posixpath.dirname("/".join([self.bucket, self.key])))
         self.closed = True
@@ -1384,7 +1382,7 @@ def _fetch_range(obj_dict, session, start=None, end=None):
     """
     if DEBUG:
         print('Fetch: ', start, end)
-    logger.debug("Fetch: {}, {}-{}", obj_dict['name'], start, end)
+    logger.debug("Fetch: %s, %i-%i", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
         end = end or 0
