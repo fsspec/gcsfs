@@ -323,7 +323,7 @@ class GCSFileSystem(object):
                 try:
                     self.connect(method=meth)
                 except:
-                    logging.debug('Connection with method "%s" failed' % meth)
+                    logger.debug('Connection with method "%s" failed' % meth)
                 if self.session:
                     break
         else:
@@ -1069,6 +1069,9 @@ class GCSFile:
         else:
             if not self.forced:
                 self.flush(force=True)
+            else:
+                logger.debug("close with forced=True, bypassing final flush.")
+                assert self.buffer.tell() == 0
             self.gcsfs.invalidate_cache(self.bucket)
         self.closed = True
 
