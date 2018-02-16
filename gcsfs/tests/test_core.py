@@ -423,11 +423,13 @@ def test_write_fails(token_restore):
         with pytest.raises(ValueError):
             gcs.touch(TEST_BUCKET+'/temp')
             gcs.open(TEST_BUCKET+'/temp', 'rb').write(b'hello')
-        with pytest.raises(ValueError):
+
             with gcs.open(TEST_BUCKET+'/temp', 'wb') as f:
                 f.write(b'hello')
                 f.flush(force=True)
+            with pytest.raises(ValueError):
                 f.write(b'world')
+
         f = gcs.open(TEST_BUCKET+'/temp', 'wb')
         f.close()
         with pytest.raises(ValueError):

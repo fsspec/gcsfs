@@ -1067,7 +1067,8 @@ class GCSFile:
         if self.mode == 'rb':
             self.cache = None
         else:
-            self.flush(force=True)
+            if not self.forced:
+                self.flush(force=True)
             self.gcsfs.invalidate_cache(self.bucket)
         self.closed = True
 
