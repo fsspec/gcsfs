@@ -50,6 +50,10 @@ bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
 DEBUG = False
 
+GCS_MIN_BLOCK_SIZE = 2 ** 18
+DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
+READ_BLOCK_SIZE = 5 * 2 ** 20
+
 if PY2:
     FileNotFoundError = IOError
 
@@ -184,7 +188,7 @@ class GCSFileSystem(object):
     retries = 4  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
-    default_block_size = 5 * 2**20
+    default_block_size = DEFAULT_BLOCK_SIZE
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none'):
@@ -723,7 +727,7 @@ GCSFileSystem.load_tokens()
 
 class GCSFile:
 
-    def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
+    def __init__(self, gcsfs, path, mode='rb', block_size=DEFAULT_BLOCK_SIZE,
                  acl=None, consistency='md5', metadata=None):
         """
         Open a file.
@@ -774,9 +778,9 @@ class GCSFile:
             self.details = gcsfs.info(path)
             self.size = self.details['size']
         else:
-            if block_size < 2**18:
+            if block_size < GCS_MIN_BLOCK_SIZE:
                 warnings.warn('Setting block size to minimum value, 2**18')
-                self.blocksize = 2**18
+                self.blocksize = GCS_MIN_BLOCK_SIZE
             self.buffer = io.BytesIO()
             self.offset = 0
             self.forced = False
@@ -893,17 +897,33 @@ class GCSFile:
             raise ValueError('Flush on a file not in write mode')
         if self.closed:
             raise ValueError('Flush on closed file')
+
         if self.buffer.tell() == 0 and not force:
             # no data in the buffer to write
             return
+        if self.buffer.tell() < GCS_MIN_BLOCK_SIZE and not force:
+            warnings.warn(
+                "GCSFile.flush(force=False) with buffer size (%s) below minimum GCS chunk size (2 ** 18), "
+                "skipping block upload." % self.buffer.tell()
+            )
+            return
+
         if force and self.forced:
             raise ValueError("Force flush cannot be called more than once")
-        if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
-            self._simple_upload()
-        elif not self.offset:
-            self._initiate_upload()
+
+
+        if not self.offset:
+            if force and self.buffer.tell() <= self.blocksize:
+                # Force-write a buffer below blocksizev with a single write
+                self._simple_upload()
+            else:
+                # At initialize a multipart upload, setting self.location
+                self._initiate_upload()
+
         if self.location is not None:
+            # Continue with multipart upload has been initalized
             self._upload_chunk(final=force)
+
         if force:
             self.forced = True
 
@@ -980,8 +1000,8 @@ class GCSFile:
 
     def _fetch(self, start, end):
         # force read to 5MB boundaries
-        start = start // (5 * 2**20) * 5 * 2**20
-        end = (end // (5 * 2 ** 20) + 1) * 5 * 2 ** 20
+        start = start // (READ_BLOCK_SIZE) * READ_BLOCK_SIZE
+        end = (end // (READ_BLOCK_SIZE) + 1) * READ_BLOCK_SIZE
         if self.start is None and self.end is None:
             # First read
             self.start = start
