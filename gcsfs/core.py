@@ -51,9 +51,6 @@ bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
 DEBUG = False
 
-GCS_MIN_BLOCK_SIZE = 2 ** 18
-DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
-
 if PY2:
     FileNotFoundError = IOError
 
@@ -188,7 +185,7 @@ class GCSFileSystem(object):
     retries = 4  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
-    default_block_size = DEFAULT_BLOCK_SIZE
+    default_block_size = 5 * 2**20
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none'):
@@ -728,7 +725,7 @@ GCSFileSystem.load_tokens()
 
 class GCSFile:
 
-    def __init__(self, gcsfs, path, mode='rb', block_size=DEFAULT_BLOCK_SIZE,
+    def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
                  acl=None, consistency='md5', metadata=None):
         """
         Open a file.
@@ -779,9 +776,9 @@ class GCSFile:
             self.details = gcsfs.info(path)
             self.size = self.details['size']
         else:
-            if block_size < GCS_MIN_BLOCK_SIZE:
+            if block_size < 2**18:
                 warnings.warn('Setting block size to minimum value, 2**18')
-                self.blocksize = GCS_MIN_BLOCK_SIZE
+                self.blocksize = 2**18
             self.buffer = io.BytesIO()
             self.offset = 0
             self.forced = False
@@ -894,40 +891,21 @@ class GCSFile:
             When closing, write the last block even if it is smaller than
             blocks are allowed to be. Disallows further writing to this file.
         """
-
         if self.mode not in {'wb', 'ab'}:
             raise ValueError('Flush on a file not in write mode')
         if self.closed:
             raise ValueError('Flush on closed file')
-        if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once")
-
         if self.buffer.tell() == 0 and not force:
             # no data in the buffer to write
             return
-        if self.buffer.tell() < GCS_MIN_BLOCK_SIZE and not force:
-            logger.debug(
-                "flush(force=False) with buffer (%i) < min size (2 ** 18), "
-                "skipping block upload.", self.buffer.tell()
-            )
-            return
-
-        if not self.offset:
-            if force and self.buffer.tell() <= self.blocksize:
-                # Force-write a buffer below blocksize with a single write
-                self._simple_upload()
-            elif not force and self.buffer.tell() <= self.blocksize:
-                # Defer initialization of multipart upload, *may* still
-                # be able to simple upload.
-                return
-            else:
-                # At initialize a multipart upload, setting self.location
-                self._initiate_upload()
-
+        if force and self.forced:
+            raise ValueError("Force flush cannot be called more than once")
+        if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
+            self._simple_upload()
+        elif not self.offset:
+            self._initiate_upload()
         if self.location is not None:
-            # Continue with multipart upload has been initialized
             self._upload_chunk(final=force)
-
         if force:
             self.forced = True
 
@@ -945,7 +923,6 @@ class GCSFile:
                 head['Content-Range'] = 'bytes */%i' % self.offset
                 data = None
         else:
-            assert l >= GCS_MIN_BLOCK_SIZE, "Non-final chunk write below min size."
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
@@ -1004,6 +981,9 @@ class GCSFile:
             assert b64encode(self.md5.digest()) == md5.encode(), "MD5 checksum failed"
 
     def _fetch(self, start, end):
+        # force read to 5MB boundaries
+        start = start // (5 * 2**20) * 5 * 2**20
+        end = (end // (5 * 2 ** 20) + 1) * 5 * 2 ** 20
         if self.start is None and self.end is None:
             # First read
             self.start = start
@@ -1109,7 +1089,7 @@ def _fetch_range(obj_dict, session, start=None, end=None):
     """
     if DEBUG:
         print('Fetch: ', start, end)
-    logger.debug("Fetch: %s, %i-%i", obj_dict['name'], start, end)
+    logger.debug("Fetch: {}, {}-{}", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
         end = end or 0
