@@ -98,8 +98,7 @@ def quote_plus(s):
 
 
 def norm_path(path):
-    """Canonicalize path by split and rejoining."""
-    # TODO Should canonical path include protocol?
+    """Canonicalize path to '{bucket}/{name}' form."""
     return "/".join(split_path(path))
 
 def split_path(path):
@@ -700,13 +699,10 @@ class GCSFileSystem(object):
     @_tracemethod
     def walk(self, path, detail=False):
         """ Return all real keys belows path. """
-        bucket, prefix = split_path(path)
+        path = norm_path(path)
 
-        if not bucket:
-            raise ValueError(
-                "walk path must include target bucket: %s" % path)
-
-        path = '/'.join([bucket, prefix])
+        if path in ("/", ""):
+            raise ValueError("path must include at least target bucket")
 
         if path.endswith('/'):
             results = []
@@ -715,19 +711,21 @@ class GCSFileSystem(object):
             files = [l for l in listing if l["storageClass"] != "DIRECTORY"]
             dirs = [l for l in listing if l["storageClass"] == "DIRECTORY"]
             for d in dirs:
-                files.extend(
-                        self.walk(posixpath.join(bucket, d["name"]), detail=True))
+                files.extend(self.walk(d["path"], detail=True))
         else:
             files = self.walk(path + "/", detail=True)
-            files.extend([
-                f for f in self.ls(posixpath.dirname(path), detail=True)
-                if f["name"] == prefix
-            ])
+
+            try:
+                obj = self.info(path)
+                if obj["storageClass"] != "DIRECTORY":
+                    files.append(obj)
+            except FileNotFoundError:
+                pass
 
         if detail:
             return files
         else:
-            return [posixpath.join(f["bucket"], f['name']) for f in files]
+            return [f["path"] for f in files]
 
     @_tracemethod
     def du(self, path, total=False, deep=False):
@@ -796,7 +794,8 @@ class GCSFileSystem(object):
             # Return a pseudo dir for the bucket root
             return {
                 'bucket': bucket,
-                'name': bucket + "/",
+                'name': "/",
+                'path': bucket + "/",
                 'kind': 'storage#object',
                 'size': 0,
                 'storageClass': 'DIRECTORY',
