@@ -37,10 +37,14 @@ PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
 
+# Allow optional tracing of call locations for api calls.
+# Disabled by default to avoid *massive* test logs.
+_TRACE_METHOD_INVOCATIONS = False
+
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
-   if logger.isEnabledFor(logging.DEBUG-1):
+   if _TRACE_METHOD_INVOCATIONS and logger.isEnabledFor(logging.DEBUG-1):
        tb_io = io.StringIO()
        traceback.print_stack(file=tb_io)
        logger.log(logging.DEBUG - 1, tb_io.getvalue())
@@ -462,7 +466,6 @@ class GCSFileSystem(object):
     @_tracemethod
     def _get_object(self, path):
         """Return object information at the given path."""
-        logger.debug("_get_object(%s)", path)
         bucket, key = split_path(path)
 
         # Check if parent dir is in listing cache
