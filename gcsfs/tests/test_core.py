@@ -9,7 +9,7 @@ from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
 from gcsfs.tests.utils import (tempdir, token_restore, my_vcr, gcs_maker,
                                files, csv_files, text_files, a, b, c, d,
                                tmpfile)
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.core import GCSFileSystem, quote_plus, GCS_MIN_BLOCK_SIZE
 from gcsfs.utils import seek_delimiter
 
 
@@ -396,16 +396,40 @@ def test_read_block(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
+def test_flush(token_restore):
+    with gcs_maker() as gcs:
+        gcs.touch(a)
+        with gcs.open(a, 'rb') as ro:
+            with pytest.raises(ValueError):
+                ro.write(b"abc")
+
+            ro.flush()
+
+
+        with gcs.open(b, 'wb') as wo:
+            wo.write(b"abc")
+            wo.flush()
+            assert not gcs.exists(b)
+
+        assert gcs.exists(b)
+        with pytest.raises(ValueError):
+            wo.write(b"abc")
+
+
+
+@my_vcr.use_cassette(match=['all'])
 def test_write_fails(token_restore):
     with gcs_maker() as gcs:
         with pytest.raises(ValueError):
             gcs.touch(TEST_BUCKET+'/temp')
             gcs.open(TEST_BUCKET+'/temp', 'rb').write(b'hello')
-        with pytest.raises(ValueError):
+
             with gcs.open(TEST_BUCKET+'/temp', 'wb') as f:
                 f.write(b'hello')
                 f.flush(force=True)
+            with pytest.raises(ValueError):
                 f.write(b'world')
+
         f = gcs.open(TEST_BUCKET+'/temp', 'wb')
         f.close()
         with pytest.raises(ValueError):
