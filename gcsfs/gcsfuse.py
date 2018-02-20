@@ -1,5 +1,7 @@
 from __future__ import print_function
 import os
+import logging
+import decorator
 import stat
 import pandas as pd
 from errno import ENOENT, EIO
@@ -8,6 +10,12 @@ from gcsfs import GCSFileSystem, core
 from pwd import getpwnam
 from grp import getgrnam
 
+logger = logging.getLogger(__name__)
+
+@decorator.decorator
+def _tracemethod(f, self, *args, **kwargs):
+   logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+   return f(self, *args, **kwargs)
 
 def str_to_time(s):
     t = pd.to_datetime(s)
@@ -25,6 +33,7 @@ class GCSFS(Operations):
         self.counter = 0
         self.root = path
 
+    @_tracemethod
     def getattr(self, path, fh=None):
         try:
             info = self.gcs.info(''.join([self.root, path]))
@@ -51,12 +60,14 @@ class GCSFS(Operations):
 
         return data
 
+    @_tracemethod
     def readdir(self, path, fh):
         path = ''.join([self.root, path])
         files = self.gcs.ls(path)
-        files = [f.rstrip('/').rsplit('/', 1)[1] for f in files]
+        files = [os.path.basename(f.rstrip('/')) for f in files]
         return ['.', '..'] + files
 
+    @_tracemethod
     def mkdir(self, path, mode):
         bucket, key = core.split_path(path)
         if not self.gcs.info(path):
@@ -65,27 +76,28 @@ class GCSFS(Operations):
                         'size': 0, 'storageClass': 'DIRECTORY',
                         'name': path.rstrip('/') + '/'})
 
+    @_tracemethod
     def rmdir(self, path):
         info = self.gcs.info(path)
         if info['storageClass': 'DIRECTORY']:
             self.gcs.rm(path, False)
 
+    @_tracemethod
     def read(self, path, size, offset, fh):
-        print('read', path, size, offset, fh)
         fn = ''.join([self.root, path])
-        f = self.cache[fn]
+        f = self.cache[fh]
         f.seek(offset)
         out = f.read(size)
         return out
 
+    @_tracemethod
     def write(self, path, data, offset, fh):
-        print('write', path, offset, fh)
         f = self.cache[fh]
         f.write(data)
         return len(data)
 
+    @_tracemethod
     def create(self, path, flags):
-        print('create', path, oct(flags))
         fn = ''.join([self.root, path])
         self.gcs.touch(fn)  # this makes sure directory entry exists - wasteful!
         # write (but ignore creation flags)
@@ -94,8 +106,8 @@ class GCSFS(Operations):
         self.counter += 1
         return self.counter - 1
 
+    @_tracemethod
     def open(self, path, flags):
-        print('open', path, oct(flags))
         fn = ''.join([self.root, path])
         if flags % 2 == 0:
             # read
@@ -107,31 +119,32 @@ class GCSFS(Operations):
         self.counter += 1
         return self.counter - 1
 
+    @_tracemethod
     def truncate(self, path, length, fh=None):
-        print('truncate', path, length, fh)
         fn = ''.join([self.root, path])
         if length != 0:
             raise NotImplementedError
         # maybe should be no-op since open with write sets size to zero anyway
         self.gcs.touch(fn)
 
+    @_tracemethod
     def unlink(self, path):
-        print('delete', path)
         fn = ''.join([self.root, path])
         try:
             self.gcs.rm(fn, False)
         except (IOError, FileNotFoundError):
             raise FuseOSError(EIO)
 
+    @_tracemethod
     def release(self, path, fh):
-        print('close', path, fh)
         try:
             f = self.cache[fh]
             f.close()
             self.cache.pop(fh, None)  # should release any cache memory
         except Exception as e:
-            print(e)
+            logger.exception("exception on release")
         return 0
 
+    @_tracemethod
     def chmod(self, path, mode):
         raise NotImplementedError
