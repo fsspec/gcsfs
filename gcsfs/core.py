@@ -462,7 +462,6 @@ class GCSFileSystem(object):
     def _get_object(self, path):
         """Return object information at the given path."""
         bucket, key = split_path(path)
-        fn = "/".join([bucket, key.rstrip("/")]) + "/"
 
         # Check if parent dir is in listing cache
         parent = "/".join([bucket, posixpath.dirname(key.rstrip("/"))]) + "/"
@@ -481,7 +480,8 @@ class GCSFileSystem(object):
             # listing.
             raise FileNotFoundError(path)
 
-        result = self._process_object(bucket, self._call('get', 'b/{}/o/{}', bucket, key))
+        result = self._process_object(bucket, self._call('get', 'b/{}/o/{}',
+                                                         bucket, key))
 
         logger.debug("_get_object result: %s", result)
         return result
@@ -547,10 +547,11 @@ class GCSFileSystem(object):
             next_page_token = page.get('nextPageToken', None)
 
         result = {
-            "kind" : "storage#objects",
-            "prefixes" : prefixes,
-            "items" : items,
+            "kind": "storage#objects",
+            "prefixes": prefixes,
+            "items": items
         }
+        [self._process_object(bucket, i) for i in items],
 
         return result
 
@@ -577,8 +578,8 @@ class GCSFileSystem(object):
             next_page_token = page.get('nextPageToken', None)
 
         result = {
-            "kind" : "storage#buckets",
-            "items" : items,
+            "kind": "storage#buckets",
+            "items": items,
         }
 
         return result
@@ -643,10 +644,12 @@ class GCSFileSystem(object):
         elif path.endswith("/"):
             return self._ls(path, detail)
         else:
-            combined_listing = self._ls(path, detail) + self._ls(path + "/", detail)
+            combined_listing = self._ls(path, detail) + self._ls(path + "/",
+                                                                 detail)
             if detail:
-                combined_entries = dict((l["path"],l) for l in combined_listing )
-                combined_entries.pop(path+"/", None)
+                combined_entries = dict(
+                    (l["path"], l) for l in combined_listing)
+                combined_entries.pop(path + "/", None)
                 return list(combined_entries.values())
             else:
                 return list(set(combined_listing) - {path + "/"})

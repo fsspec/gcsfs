@@ -16,16 +16,17 @@ from threading import Lock
 import cProfile
 import atexit
 
-prof = cProfile.Profile()
-prof.enable()
+if True:
+    prof = cProfile.Profile()
+    prof.enable()
 
 
-def dump():
-    prof.disable()
-    prof.dump_stats('/home/ubuntu/out.prof')
+    def dump():
+        prof.disable()
+        prof.dump_stats(os.path.join(os.path.expanduser("~"), 'out.prof'))
 
 
-atexit.register(dump)
+    atexit.register(dump)
 
 
 @decorator.decorator
@@ -34,12 +35,15 @@ def _tracemethod(f, self, *args, **kwargs):
     out = f(self, *args, **kwargs)
     return out
 
+
 logger = logging.getLogger(__name__)
+
 
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
-   logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
-   return f(self, *args, **kwargs)
+    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+    return f(self, *args, **kwargs)
+
 
 def str_to_time(s):
     t = pd.to_datetime(s)
