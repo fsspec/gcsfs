@@ -53,13 +53,15 @@ def str_to_time(s):
 class LRUDict(MutableMapping):
     """A dict that discards least-recently-used items"""
 
-    def __init__(self, *args, size=128, **kwargs):
+    DEFAULT_SIZE = 128
+
+    def __init__(self, *args, **kwargs):
         """Same arguments as OrderedDict with one additions:
 
         size: maximum number of entries
         """
+        self.size = kwargs.pop('size', self.DEFAULT_SIZE)
         self.data = OrderedDict(*args, **kwargs)
-        self.size = size
         self.purge()
 
     def purge(self):
