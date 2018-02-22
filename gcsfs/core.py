@@ -453,10 +453,19 @@ class GCSFileSystem(object):
 
     @classmethod
     def _process_object(self, bucket, object_metadata):
-        object_metadata["size"] = int(object_metadata.get("size", 0))
-        object_metadata["path"] = posixpath.join(bucket, object_metadata["name"])
+        """Process object resource into gcsfs object information format.
+        
+        Process GCS object resource via type casting and attribute updates to
+        the cache-able gcsf object information format. Returns an updated copy
+        of the object resource.
 
-        return object_metadata
+        (See https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
+        """
+        result = dict(object_metadata)
+        result["size"] = int(object_metadata.get("size", 0))
+        result["path"] = posixpath.join(bucket, object_metadata["name"])
+
+        return result
 
     @_tracemethod
     def _get_object(self, path):
@@ -547,11 +556,12 @@ class GCSFileSystem(object):
             next_page_token = page.get('nextPageToken', None)
 
         result = {
-            "kind": "storage#objects",
-            "prefixes": prefixes,
-            "items": items
+            "kind" : "storage#objects",
+            "prefixes" : prefixes,
+            "items" : [self._process_object(bucket, i) for i in items],
         }
-        [self._process_object(bucket, i) for i in items],
+
+        logger.debug("_list_objects result: %s", {k : len(result[k]) for k in ("prefixes", "items")})
 
         return result
 
