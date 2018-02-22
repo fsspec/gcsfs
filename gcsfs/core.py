@@ -68,7 +68,6 @@ ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
 bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
-DEBUG = False
 
 GCS_MIN_BLOCK_SIZE = 2 ** 18
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
@@ -307,7 +306,7 @@ class GCSFileSystem(object):
             tokens = {k: (GCSFileSystem._dict_to_credentials(v)
                           if isinstance(v, dict) else v)
                       for k, v in tokens.items()}
-        except IOError:
+        except Exception:
             tokens = {}
         GCSFileSystem.tokens = tokens
 
@@ -1386,8 +1385,6 @@ def _fetch_range(obj_dict, session, start=None, end=None):
     start, end : None or integers
         if not both None, fetch only given range
     """
-    if DEBUG:
-        print('Fetch: ', start, end)
     logger.debug("Fetch: %s, %i-%i", obj_dict['name'], start, end)
     if start is not None or end is not None:
         start = start or 0
