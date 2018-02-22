@@ -42,16 +42,16 @@ _TRACE_METHOD_INVOCATIONS = False
 
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
-   logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
-   if _TRACE_METHOD_INVOCATIONS and logger.isEnabledFor(logging.DEBUG-1):
-       tb_io = io.StringIO()
-       traceback.print_stack(file=tb_io)
-       logger.log(logging.DEBUG - 1, tb_io.getvalue())
+    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+    if _TRACE_METHOD_INVOCATIONS and logger.isEnabledFor(logging.DEBUG-1):
+        tb_io = io.StringIO()
+        traceback.print_stack(file=tb_io)
+        logger.log(logging.DEBUG - 1, tb_io.getvalue())
 
-   return f(self, *args, **kwargs)
+    return f(self, *args, **kwargs)
 
-# client created 23-Sept-2017
 
+# client created 2018-01-16
 not_secret = {"client_id": "586241054156-0asut23a7m10790r2ik24309flribp7j"
                            ".apps.googleusercontent.com",
               "client_secret": "w6VkI99jS6e9mECscNztXvQv"}
