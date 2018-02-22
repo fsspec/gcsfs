@@ -24,6 +24,13 @@ from gcsfs.gcsfuse import GCSFS
 def main(bucket, mount_point, token, project_id, foreground, threads,
          cache_files, verbose):
     """ Mount a Google Cloud Storage (GCS) bucket to a local directory """
+
+    if verbose == 1:
+        logging.basicConfig(level=logging.INFO)
+        logging.getLogger("gcsfs.gcsfuse").setLevel(logging.DEBUG)
+    if verbose > 1:
+        logging.basicConfig(level=logging.DEBUG)
+
     fmt = '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
     if verbose == 1:
         logging.basicConfig(level=logging.INFO, format=fmt)

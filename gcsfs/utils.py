@@ -1,4 +1,5 @@
 import requests.exceptions
+import google.auth.exceptions
 
 
 def seek_delimiter(file, delimiter, blocksize):
@@ -106,7 +107,8 @@ RETRIABLE_EXCEPTIONS = (
     requests.exceptions.Timeout,
     requests.exceptions.ProxyError,
     requests.exceptions.SSLError,
-    requests.exceptions.ContentDecodingError
+    requests.exceptions.ContentDecodingError,
+    google.auth.exceptions.RefreshError,
 )
 
 

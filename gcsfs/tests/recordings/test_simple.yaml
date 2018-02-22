@@ -1,19 +1,19 @@
 interactions:
 - request:
-    body: client_id=xxx&refresh_token=1%2FGCGhDwpzixVpPbbOfPNMilRWjRhemf0zBkIU4uhs060&client_secret=xxx&grant_type=refresh_token
+    body: client_secret=xxx&refresh_token=xxx&grant_type=refresh_token&client_id=xxx
     headers:
       Accept: ['*/*']
       Accept-Encoding: ['gzip, deflate']
       Connection: [keep-alive]
-      Content-Length: ['208']
+      Content-Length: ['229']
       content-type: [application/x-www-form-urlencoded]
     method: POST
     uri: https://www.googleapis.com/oauth2/v4/token
   response:
     body:
       string: !!binary |
-        H4sIAKY5VVoC/6tWykyJL8nPTs1TslJQqqioUNJRUALz40sqC1JBgk6piUWpRSDx1IqCzKLU4vhM
-        kGJjMwMDoFhicnJqcTGqEbUAnoD1nVYAAAA=
+        H4sIALVbh1oC/6tWKsnPTs2LL6ksSFWyUlBySk0sSi1S0lFQSkxOTi0ujgdLg2QqKipAwpkpGEKp
+        FQWZRanF8ZkgQWMzA4NaAAUo03FWAAAA
     headers:
       Cache-Control: ['no-cache, no-store, max-age=0, must-revalidate']
       Content-Encoding: [gzip]
@@ -33,7 +33,7 @@ interactions:
       Accept-Encoding: ['gzip, deflate']
       Connection: [keep-alive]
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?maxResults=1000
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
   response:
     body: {string: "{\n \"kind\": \"storage#objects\"\n}\n"}
     headers:

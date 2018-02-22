@@ -18,7 +18,6 @@ import atexit
 
 prof = cProfile.Profile()
 prof.enable()
-logger = logging.getLogger(__name__)
 
 
 def dump():
@@ -35,6 +34,12 @@ def _tracemethod(f, self, *args, **kwargs):
     out = f(self, *args, **kwargs)
     return out
 
+logger = logging.getLogger(__name__)
+
+@decorator.decorator
+def _tracemethod(f, self, *args, **kwargs):
+   logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+   return f(self, *args, **kwargs)
 
 def str_to_time(s):
     t = pd.to_datetime(s)

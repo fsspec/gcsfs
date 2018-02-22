@@ -9,7 +9,9 @@ import decorator
 import array
 from base64 import b64encode
 import google.auth as gauth
+import google.auth.compute_engine
 from google.auth.transport.requests import AuthorizedSession
+from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
@@ -17,6 +19,7 @@ from hashlib import md5
 import io
 import json
 import logging
+import traceback
 import os
 import posixpath
 import pickle
@@ -33,12 +36,22 @@ PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
 
+# Allow optional tracing of call locations for api calls.
+# Disabled by default to avoid *massive* test logs.
+_TRACE_METHOD_INVOCATIONS = False
+
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
+   if _TRACE_METHOD_INVOCATIONS and logger.isEnabledFor(logging.DEBUG-1):
+       tb_io = io.StringIO()
+       traceback.print_stack(file=tb_io)
+       logger.log(logging.DEBUG - 1, tb_io.getvalue())
+
    return f(self, *args, **kwargs)
 
-# client created 16-Jan-2018
+# client created 23-Sept-2017
+
 not_secret = {"client_id": "586241054156-0asut23a7m10790r2ik24309flribp7j"
                            ".apps.googleusercontent.com",
               "client_secret": "w6VkI99jS6e9mECscNztXvQv"}
@@ -54,6 +67,9 @@ ACLs = {"authenticatedread", "bucketownerfullcontrol", "bucketownerread",
 bACLs = {"authenticatedRead", "private", "projectPrivate", "publicRead",
          "publicReadWrite"}
 DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
+
+GCS_MIN_BLOCK_SIZE = 2 ** 18
+DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
 if PY2:
     FileNotFoundError = IOError
@@ -80,8 +96,7 @@ def quote_plus(s):
 
 
 def norm_path(path):
-    """Canonicalize path by split and rejoining."""
-    # TODO Should canonical path include protocol?
+    """Canonicalize path to '{bucket}/{name}' form."""
     return "/".join(split_path(path))
 
 def split_path(path):
@@ -179,6 +194,46 @@ class GCSFileSystem(object):
       `` ~/.config/gcloud/credentials``, or
       ``~\AppData\Roaming\gcloud\credentials``, etc.
 
+    Objects
+    -------
+
+    Specific methods, (eg. `ls`, `info`, ...) may return object details from GCS.
+
+    These detailed listings include the 
+    [object resource](https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
+    with additional properties:
+        - "path" : string
+            The "{bucket}/{name}" path of the object, used in calls to GCSFileSystem or GCSFile.
+
+    GCS *does not* include  "directory" objects but instead generates directories by splitting
+    [object names](https://cloud.google.com/storage/docs/key-terms). This means that, for example,
+    a directory does not need to exist for an object to be created within it. Creating an object 
+    implicitly creates it's parent directories, and removing all objects from a directory implicitly
+    deletes the empty directory.
+
+    `GCSFileSystem` generates listing entries for these implied directories in listing apis with the 
+    object properies:
+        - "path" : string
+            The "{bucket}/{name}" path of the dir, used in calls to GCSFileSystem or GCSFile.
+        - "bucket" : string
+            The name of the bucket containing this object.
+        - "name" : string
+            The "/" terminated name of the directory within the bucket.
+        - "kind" : 'storage#object'
+        - "size" : 0
+        - "storageClass" : 'DIRECTORY'
+    
+    Caching
+    -------
+
+    GCSFileSystem maintains a per-implied-directory cache of object listings and fulfills all
+    object information and listing requests from cache. This implied, for example, that objects
+    created via other processes *will not* be visible to the GCSFileSystem until the cache
+    refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not effected by this cache.
+
+    In the default case the cache is never expired. This may be controlled via the `cache_timeout`
+    GCSFileSystem parameter or via explicit calls to `GCSFileSystem.invalidate_cache`.
+
     Parameters
     ----------
     project : string
@@ -204,11 +259,11 @@ class GCSFileSystem(object):
     retries = 4  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
-    default_block_size = 5 * 2**20
+    default_block_size = DEFAULT_BLOCK_SIZE
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
-                 cache_timeout=60):
+                 cache_timeout=None):
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
@@ -222,7 +277,6 @@ class GCSFileSystem(object):
         self.token = token
         self.session = None
         self.connect(method=token)
-
 
         self._singleton[0] = self
 
@@ -249,7 +303,7 @@ class GCSFileSystem(object):
             tokens = {k: (GCSFileSystem._dict_to_credentials(v)
                           if isinstance(v, dict) else v)
                       for k, v in tokens.items()}
-        except IOError:
+        except Exception:
             tokens = {}
         GCSFileSystem.tokens = tokens
 
@@ -346,7 +400,7 @@ class GCSFileSystem(object):
                 try:
                     self.connect(method=meth)
                 except:
-                    logging.debug('Connection with method "%s" failed' % meth)
+                    logger.debug('Connection with method "%s" failed' % meth)
                 if self.session:
                     break
         else:
@@ -378,7 +432,7 @@ class GCSFileSystem(object):
                 r = meth(self.base + path, params=kwargs, json=json)
                 validate_response(r, path)
                 break
-            except (HtmlError, RequestException) as e:
+            except (HtmlError, RequestException, GoogleAuthError) as e:
                 logger.exception("_call exception: %s", e)
                 if retry == self.retries - 1:
                     raise e
@@ -400,11 +454,13 @@ class GCSFileSystem(object):
     @classmethod
     def _process_object(self, bucket, object_metadata):
         object_metadata["size"] = int(object_metadata.get("size", 0))
+        object_metadata["path"] = posixpath.join(bucket, object_metadata["name"])
+
         return object_metadata
 
+    @_tracemethod
     def _get_object(self, path):
         """Return object information at the given path."""
-        logger.debug("_get_object(%s)", path)
         bucket, key = split_path(path)
         fn = "/".join([bucket, key.rstrip("/")]) + "/"
 
@@ -414,19 +470,11 @@ class GCSFileSystem(object):
         if parent_cache:
             cached_obj = [o for o in parent_cache["items"] if o["name"] == key]
             if cached_obj:
-                logging.debug("found cached object: %s", cached_obj)
+                logger.debug("found cached object: %s", cached_obj)
                 return cached_obj[0]
             else:
-                # Should error on missing cache or reprobe?
-                raise FileNotFoundError
-        if fn in self._listing_cache:
-            return {
-                'bucket': bucket,
-                'name': key,
-                'kind': 'storage#object',
-                'size': 0,
-                'storageClass': 'DIRECTORY',
-            }
+                logger.debug("object not found cached parent listing")
+                raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -438,6 +486,7 @@ class GCSFileSystem(object):
         logger.debug("_get_object result: %s", result)
         return result
 
+    @_tracemethod
     def _maybe_get_cached_listing(self, path):
         logger.debug("_maybe_get_cached_listing: %s", path)
         if path in self._listing_cache:
@@ -455,6 +504,7 @@ class GCSFileSystem(object):
 
         return None
 
+    @_tracemethod
     def _list_objects(self, path):
         path = norm_path(path)
 
@@ -468,19 +518,18 @@ class GCSFileSystem(object):
         self._listing_cache[path] = (retrieved_time, listing)
         return listing
 
+    @_tracemethod
     def _do_list_objects(self, path, max_results = None):
-        """Return depaginated object listing for the given path."""
-        logger.debug("_list_objects(%s, max_results=%s)", path, max_results)
+        """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, prefix = split_path(path)
-        if prefix:
-            assert prefix.endswith("/")
-        else:
+        if not prefix:
             prefix = None
 
         prefixes = []
         items = []
         page = self._call(
-            'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix, maxResults=max_results)
+            'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix,
+            maxResults=max_results)
 
         assert page["kind"] == "storage#objects"
         prefixes.extend(page.get("prefixes", []))
@@ -489,8 +538,8 @@ class GCSFileSystem(object):
 
         while next_page_token is not None:
             page = self._call(
-                'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix, maxResults=max_results,
-                pageToken=next_page_token)
+                'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix,
+                maxResults=max_results, pageToken=next_page_token)
 
             assert page["kind"] == "storage#objects"
             prefixes.extend(page.get("prefixes", []))
@@ -502,9 +551,6 @@ class GCSFileSystem(object):
             "prefixes" : prefixes,
             "items" : items,
         }
-
-        logger.debug("_list_objects result: %s", {k : len(result[k]) for k in ("prefixes", "items")})
-        items = [self._process_object(bucket, i) for i in items]
 
         return result
 
@@ -534,8 +580,6 @@ class GCSFileSystem(object):
             "kind" : "storage#buckets",
             "items" : items,
         }
-
-        logger.debug("_list_buckets result: %s", {k : len(result[k]) for k in ("items",)})
 
         return result
 
@@ -592,75 +636,87 @@ class GCSFileSystem(object):
     @_tracemethod
     def ls(self, path, detail=False):
         """List objects under the given '/{bucket}/{prefix} path."""
+        path = norm_path(path)
+
         if path in ['/', '']:
-            out = self.buckets
+            return self.buckets
+        elif path.endswith("/"):
+            return self._ls(path, detail)
         else:
-            if not path.endswith("/"):
-                path = path + "/"
-
-            listing = self._list_objects(path)
-            bucket, key = split_path(path)
-
-            if not detail:
-                result = []
-
-                # Convert item listing into list of 'item' and 'subdir/'
-                # entries. Items may be of form "key/", in which case there
-                # will be duplicate entries in prefix and item_names.
-                item_names = [
-                    f["name"][len(key):] for f in listing["items"]
-                    if f["name"][len(key):]
-                ]
-                prefixes = [p for p in listing["prefixes"]]
-
-                return list(set(item_names + prefixes))
-
+            combined_listing = self._ls(path, detail) + self._ls(path + "/", detail)
+            if detail:
+                combined_entries = dict((l["path"],l) for l in combined_listing )
+                combined_entries.pop(path+"/", None)
+                return list(combined_entries.values())
             else:
-                item_details = listing["items"]
+                return list(set(combined_listing) - {path + "/"})
 
-                pseudodirs = [{
-                        'bucket': bucket,
-                        'name': prefix,
-                        'kind': 'storage#object',
-                        'size': 0,
-                        'storageClass': 'DIRECTORY',
-                    }
-                    for prefix in listing["prefixes"]
-                ]
+    def _ls(self, path, detail=False):
+        listing = self._list_objects(path)
+        bucket, key = split_path(path)
 
-                return item_details + pseudodirs
+        if not detail:
+
+            # Convert item listing into list of 'item' and 'subdir/'
+            # entries. Items may be of form "key/", in which case there
+            # will be duplicate entries in prefix and item_names.
+            item_names = [
+                f["name"] for f in listing["items"] if f["name"]
+            ]
+            prefixes = [p for p in listing["prefixes"]]
+
+            logger.debug("path: %s item_names: %s prefixes: %s", path,
+                         item_names, prefixes)
+
+            return [
+                posixpath.join(bucket, n) for n in set(item_names + prefixes)
+            ]
+
+        else:
+            item_details = listing["items"]
+
+            pseudodirs = [{
+                    'bucket': bucket,
+                    'name': prefix,
+                    'path': bucket + "/" + prefix,
+                    'kind': 'storage#object',
+                    'size': 0,
+                    'storageClass': 'DIRECTORY',
+                }
+                for prefix in listing["prefixes"]
+            ]
+
+            return item_details + pseudodirs
 
     @_tracemethod
     def walk(self, path, detail=False):
         """ Return all real keys belows path. """
-        bucket, prefix = split_path(path)
+        path = norm_path(path)
 
-        if not bucket:
-            raise ValueError(
-                "walk path must include target bucket: %s" % path)
-
-        path = '/'.join([bucket, prefix])
+        if path in ("/", ""):
+            raise ValueError("path must include at least target bucket")
 
         if path.endswith('/'):
-            results = []
             listing = self.ls(path, detail=True)
 
             files = [l for l in listing if l["storageClass"] != "DIRECTORY"]
             dirs = [l for l in listing if l["storageClass"] == "DIRECTORY"]
             for d in dirs:
-                files.extend(
-                        self.walk(posixpath.join(bucket, d["name"]), detail=True))
+                files.extend(self.walk(d["path"], detail=True))
         else:
             files = self.walk(path + "/", detail=True)
-            files.extend([
-                f for f in self.ls(posixpath.dirname(path), detail=True)
-                if f["name"] == prefix
-            ])
+
+            try:
+                obj = self.info(path)
+                if obj["storageClass"] != "DIRECTORY":
+                    files.append(obj)
+            except FileNotFoundError:
+                pass
 
         if detail:
             return files
         else:
-            return [posixpath.join(f["bucket"], f['name']) for f in files]
+            return [f["path"] for f in files]
 
     @_tracemethod
     def du(self, path, total=False, deep=False):
@@ -670,7 +726,7 @@ class GCSFileSystem(object):
             files = [f for f in self.ls(path, True)]
         if total:
             return sum(f['size'] for f in files)
-        return {f['name']: f['size'] for f in files}
+        return {f['path']: f['size'] for f in files}
 
     @_tracemethod
     def glob(self, path):
@@ -732,6 +788,7 @@ class GCSFileSystem(object):
             return {
                 'bucket': bucket,
                 'name': "/",
+                'path': bucket + "/",
                 'kind': 'storage#object',
                 'size': 0,
                 'storageClass': 'DIRECTORY',
@@ -925,7 +982,8 @@ GCSFileSystem.load_tokens()
 
 class GCSFile:
 
-    def __init__(self, gcsfs, path, mode='rb', block_size=5 * 2 ** 20,
+    @_tracemethod
+    def __init__(self, gcsfs, path, mode='rb', block_size=DEFAULT_BLOCK_SIZE,
                  acl=None, consistency='md5', metadata=None):
         """
         Open a file.
@@ -976,9 +1034,9 @@ class GCSFile:
             self.details = gcsfs.info(path)
             self.size = self.details['size']
         else:
-            if block_size < 2**18:
+            if block_size < GCS_MIN_BLOCK_SIZE:
                 warnings.warn('Setting block size to minimum value, 2**18')
-                self.blocksize = 2**18
+                self.blocksize = GCS_MIN_BLOCK_SIZE
             self.buffer = io.BytesIO()
             self.offset = 0
             self.forced = False
@@ -995,6 +1053,7 @@ class GCSFile:
         """ Current file location """
         return self.loc
 
+    @_tracemethod
     def seek(self, loc, whence=0):
         """ Set current file location
 
@@ -1078,6 +1137,7 @@ class GCSFile:
             self.flush()
         return out
 
+    @_tracemethod
     def flush(self, force=False):
         """
         Write buffered data to GCS.
@@ -1091,24 +1151,45 @@ class GCSFile:
             When closing, write the last block even if it is smaller than
             blocks are allowed to be. Disallows further writing to this file.
         """
-        if self.mode not in {'wb', 'ab'}:
-            raise ValueError('Flush on a file not in write mode')
+
         if self.closed:
             raise ValueError('Flush on closed file')
+        if force and self.forced:
+            raise ValueError("Force flush cannot be called more than once")
+
+        if self.mode not in {'wb', 'ab'}:
+            assert not hasattr(self, "buffer"), "flush on read-mode file with non-empty buffer"
+            return
         if self.buffer.tell() == 0 and not force:
             # no data in the buffer to write
             return
-        if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once")
-        if force and not self.offset and self.buffer.tell() <= 5 * 2**20:
-            self._simple_upload()
-        elif not self.offset:
-            self._initiate_upload()
+        if self.buffer.tell() < GCS_MIN_BLOCK_SIZE and not force:
+            logger.debug(
+                "flush(force=False) with buffer (%i) < min size (2 ** 18), "
+                "skipping block upload.", self.buffer.tell()
+            )
+            return
+
+        if not self.offset:
+            if force and self.buffer.tell() <= self.blocksize:
+                # Force-write a buffer below blocksize with a single write
+                self._simple_upload()
+            elif not force and self.buffer.tell() <= self.blocksize:
+                # Defer initialization of multipart upload, *may* still
+                # be able to simple upload.
+                return
+            else:
+                # At initialize a multipart upload, setting self.location
+                self._initiate_upload()
+
         if self.location is not None:
+            # Continue with multipart upload has been initialized
             self._upload_chunk(final=force)
+
         if force:
             self.forced = True
 
+    @_tracemethod
     def _upload_chunk(self, final=False):
         self.buffer.seek(0)
         data = self.buffer.read()
@@ -1123,6 +1204,7 @@ class GCSFile:
                 head['Content-Range'] = 'bytes */%i' % self.offset
                 data = None
         else:
+            assert l >= GCS_MIN_BLOCK_SIZE, "Non-final chunk write below min size."
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
@@ -1156,6 +1238,7 @@ class GCSFile:
             self.buffer = io.BytesIO()
             self.offset += l
 
+    @_tracemethod
     def _initiate_upload(self):
         r = self.gcsfs.session.post(
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
@@ -1164,6 +1247,7 @@ class GCSFile:
             json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
+    @_tracemethod
     def _simple_upload(self):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
@@ -1180,6 +1264,7 @@ class GCSFile:
             self.md5.update(data)
             assert b64encode(self.md5.digest()) == md5.encode(), "MD5 checksum failed"
 
+    @_tracemethod
     def _fetch(self, start, end):
         if self.start is None and self.end is None:
             # First read
@@ -1238,6 +1323,7 @@ class GCSFile:
                 self.cache = self.cache[self.blocksize * num:]
         return out
 
+    @_tracemethod
     def close(self):
         """ Close file """
         if self.closed:
@@ -1245,7 +1331,12 @@ class GCSFile:
         if self.mode == 'rb':
             self.cache = None
         else:
-            self.flush(force=True)
+            if not self.forced:
+                self.flush(force=True)
+            else:
+                logger.debug("close with forced=True, bypassing final flush.")
+                assert self.buffer.tell() == 0
+
             self.gcsfs.invalidate_cache(
                 posixpath.dirname("/".join([self.bucket, self.key])))
         self.closed = True
@@ -1262,6 +1353,7 @@ class GCSFile:
         """Return whether the GCSFile was opened for writing"""
         return self.mode in {'wb', 'ab'}
 
+    @_tracemethod
     def __del__(self):
         self.close()
 
@@ -1270,9 +1362,11 @@ class GCSFile:
 
     __repr__ = __str__
 
+    @_tracemethod
     def __enter__(self):
         return self
 
+    @_tracemethod
     def __exit__(self, *args):
         self.close()
 

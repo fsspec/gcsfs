@@ -9,7 +9,7 @@ from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
 from gcsfs.tests.utils import (tempdir, token_restore, my_vcr, gcs_maker,
                                files, csv_files, text_files, a, b, c, d,
                                tmpfile)
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.core import GCSFileSystem, quote_plus, GCS_MIN_BLOCK_SIZE
 from gcsfs.utils import seek_delimiter
 
 
@@ -68,15 +68,6 @@ def test_ls2(token_restore):
         assert fn in gcs.ls(TEST_BUCKET+'/test')
 
 @my_vcr.use_cassette(match=['all'])
-def test_list_bucket_multipage(token_restore):
-    with gcs_maker() as gcs:
-        gcs.touch(a)
-        gcs.touch(b)
-        gcs.touch(c)
-        dirs=gcs._list_bucket(TEST_BUCKET, max_results=2)
-        assert len(dirs) == 3
-
-@my_vcr.use_cassette(match=['all'])
 def test_pickle(token_restore):
     import pickle
     with gcs_maker() as gcs:
@@ -103,12 +94,15 @@ def test_pickle(token_restore):
 def test_ls_touch(token_restore):
     with gcs_maker() as gcs:
         assert not gcs.exists(TEST_BUCKET+'/tmp/test')
+
         gcs.touch(a)
         gcs.touch(b)
-        L = gcs.ls(TEST_BUCKET+'/tmp/test', True)
-        assert set(d['name'] for d in L) == set([a, b])
+
         L = gcs.ls(TEST_BUCKET+'/tmp/test', False)
         assert set(L) == set([a, b])
+
+        L_d = gcs.ls(TEST_BUCKET+'/tmp/test', True)
+        assert set(d['path'] for d in L_d) == set([a, b])
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -179,11 +173,13 @@ def test_du(token_restore):
 def test_ls(token_restore):
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET+'/nested/file1'
+        gcs.touch(fn)
+
         assert fn not in gcs.ls(TEST_BUCKET+'/')
         assert fn in gcs.ls(TEST_BUCKET+'/nested/')
         assert fn in gcs.ls(TEST_BUCKET+'/nested')
-        assert gcs.ls('gcs://'+TEST_BUCKET+'/nested/') == gcs.ls(
-                TEST_BUCKET+'/nested')
+        assert list(sorted(gcs.ls('gcs://'+TEST_BUCKET+'/nested/'))) == \
+               list(sorted(gcs.ls(TEST_BUCKET+'/nested')))
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -396,16 +392,40 @@ def test_read_block(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
+def test_flush(token_restore):
+    with gcs_maker() as gcs:
+        gcs.touch(a)
+        with gcs.open(a, 'rb') as ro:
+            with pytest.raises(ValueError):
+                ro.write(b"abc")
+
+            ro.flush()
+
+
+        with gcs.open(b, 'wb') as wo:
+            wo.write(b"abc")
+            wo.flush()
+            assert not gcs.exists(b)
+
+        assert gcs.exists(b)
+        with pytest.raises(ValueError):
+            wo.write(b"abc")
+
+
+
+@my_vcr.use_cassette(match=['all'])
 def test_write_fails(token_restore):
     with gcs_maker() as gcs:
         with pytest.raises(ValueError):
             gcs.touch(TEST_BUCKET+'/temp')
             gcs.open(TEST_BUCKET+'/temp', 'rb').write(b'hello')
-        with pytest.raises(ValueError):
+
             with gcs.open(TEST_BUCKET+'/temp', 'wb') as f:
                 f.write(b'hello')
                 f.flush(force=True)
+            with pytest.raises(ValueError):
                 f.write(b'world')
+
         f = gcs.open(TEST_BUCKET+'/temp', 'wb')
         f.close()
         with pytest.raises(ValueError):
