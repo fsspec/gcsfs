@@ -138,18 +138,7 @@ class SmallChunkCacher:
             f.blocksize = 2 * 2 ** 20
             f.seek(offset)
             out = f.read(size)
-            new = True
-            for chunk in chunks:
-                if chunk['end'] == f.start - 1:
-                    chunk['end'] = f.end
-                    chunk['data'] += f.cache
-                    new = False
-                elif chunk['start'] == f.end + 1:
-                    chunk['start'] = f.start
-                    chunk['data'] = f.cache + chunk['data']
-                    new = False
-            if new:
-                chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
+            chunks.append({'start': f.start, 'end': f.end, 'data': f.cache})
             f.blocksize = bs
 
         return out

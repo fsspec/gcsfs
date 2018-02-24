@@ -415,9 +415,8 @@ class GCSFileSystem(object):
         except Exception as e:
             warnings.warn('Saving token cache failed: ' + str(e))
 
+    @_tracemethod
     def _call(self, method, path, *args, **kwargs):
-        logger.debug("_call(%s, %s, args=%s, kwargs=%s)", method, path, args, kwargs)
-
         for k, v in list(kwargs.items()):
             # only pass parameters that have values
             if v is None:
@@ -492,7 +491,6 @@ class GCSFileSystem(object):
         result = self._process_object(bucket, self._call('get', 'b/{}/o/{}',
                                                          bucket, key))
 
-        logger.debug("_get_object result: %s", result)
         return result
 
     @_tracemethod
@@ -503,7 +501,8 @@ class GCSFileSystem(object):
             cache_age = time.time() - retrieved_time
             if self.cache_timeout is not None and cache_age > self.cache_timeout:
                 logger.debug(
-                    "expired cache path: %s retrieved_time: %.3f cache_age: %.3f cache_timeout: %.3f",
+                    "expired cache path: %s retrieved_time: %.3f cache_age: "
+                    "%.3f cache_timeout: %.3f",
                     path, retrieved_time, cache_age, self.cache_timeout
                 )
                 del self._listing_cache[path]
@@ -556,20 +555,16 @@ class GCSFileSystem(object):
             next_page_token = page.get('nextPageToken', None)
 
         result = {
-            "kind" : "storage#objects",
-            "prefixes" : prefixes,
-            "items" : [self._process_object(bucket, i) for i in items],
+            "kind": "storage#objects",
+            "prefixes": prefixes,
+            "items": [self._process_object(bucket, i) for i in items],
         }
-
-        logger.debug("_list_objects result: %s", {k : len(result[k]) for k in ("prefixes", "items")})
 
         return result
 
+    @_tracemethod
     def _list_buckets(self):
         """Return list of all buckets under the current project."""
-
-        logger.debug("_list_buckets")
-
         items = []
         page = self._call(
             'get', 'b/', project=self.project
@@ -597,12 +592,13 @@ class GCSFileSystem(object):
     @_tracemethod
     def invalidate_cache(self, path=None):
         """
-        Invalidate listing cache for given path, so that it is reloaded on next use.
+        Invalidate listing cache for given path, it is reloaded on next use.
 
         Parameters
         ----------
         path: string or None
-            If None, clear all listings cached else listings at or under given path.
+            If None, clear all listings cached else listings at or under given
+            path.
         """
 
         if not path:
@@ -610,10 +606,9 @@ class GCSFileSystem(object):
             self._listing_cache.clear()
         else:
             path = norm_path(path)
-            logger.debug("invalidate_cache prefix: %s", path)
 
-            invalid_keys = [k for k in self._listing_cache if k.startswith(path)]
-            logger.debug("invalidate_cache keys: %s", invalid_keys)
+            invalid_keys = [k for k in self._listing_cache
+                            if k.startswith(path)]
 
             for k in invalid_keys:
                 self._listing_cache.pop(k, None)
@@ -664,6 +659,7 @@ class GCSFileSystem(object):
             else:
                 return list(set(combined_listing) - {path + "/"})
 
+    @_tracemethod
     def _ls(self, path, detail=False):
         listing = self._list_objects(path)
         bucket, key = split_path(path)
@@ -673,13 +669,8 @@ class GCSFileSystem(object):
             # Convert item listing into list of 'item' and 'subdir/'
             # entries. Items may be of form "key/", in which case there
             # will be duplicate entries in prefix and item_names.
-            item_names = [
-                f["name"] for f in listing["items"] if f["name"]
-            ]
+            item_names = [f["name"] for f in listing["items"] if f["name"]]
             prefixes = [p for p in listing["prefixes"]]
-
-            logger.debug("path: %s item_names: %s prefixes: %s", path,
-                         item_names, prefixes)
 
             return [
                 posixpath.join(bucket, n) for n in set(item_names + prefixes)
