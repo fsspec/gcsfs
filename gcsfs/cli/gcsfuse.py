@@ -15,7 +15,7 @@ from gcsfs.gcsfuse import GCSFS
 @click.option('--foreground/--background', default=True,
               help="Run in the foreground or as a background process")
 @click.option('--threads/--no-threads', default=True,
-              help="Run in the foreground or as a background process")
+              help="Whether to run with threads")
 @click.option('--cache_files', type=int, default=10,
               help="Number of open files to cache")
 @click.option('-v', '--verbose', count=True,

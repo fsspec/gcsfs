@@ -13,21 +13,6 @@ from grp import getgrnam
 import time
 from threading import Lock
 
-import cProfile
-import atexit
-
-if True:
-    prof = cProfile.Profile()
-    prof.enable()
-
-
-    def dump():
-        prof.disable()
-        prof.dump_stats(os.path.join(os.path.expanduser("~"), 'out.prof'))
-
-
-    atexit.register(dump)
-
 
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
