@@ -889,8 +889,12 @@ class GCSFileSystem(object):
     def rm(self, path, recursive=False):
         """Delete keys.
 
-        If a list, batch-delete all keys in one go (can span buckets).
-        If recursive, also delete all keys given by walk(path)"""
+        If a list, batch-delete all keys in one go (can span buckets)
+
+        Returns whether operation succeeded (a list if input was a list)
+
+        If recursive, delete all keys given by walk(path)
+        """
         if isinstance(path, (tuple, list)):
             template = ('\n--===============7330845974216740156==\n'
                         'Content-Type: application/http\n'
@@ -910,14 +914,18 @@ class GCSFileSystem(object):
                                           "7330845974216740156==--")
             # actually can have some succeed and some fail
             validate_response(r, path)
+            boundary = r.headers['Content-Type'].split('=', 1)[1]
             parents = {posixpath.dirname(norm_path(p)) for p in path}
             [self.invalidate_cache(parent) for parent in parents]
+            return ['200 OK' in c or '204 No Content' in c for c in
+                    r.text.split(boundary)][1:-1]
         elif recursive:
-            self.rm(self.walk(path))
+            return self.rm(self.walk(path))
         else:
             bucket, key = split_path(path)
             self._call('delete', "b/{}/o/{}", bucket, key)
             self.invalidate_cache(posixpath.dirname(norm_path(path)))
+            return True
 
     @_tracemethod
     def open(self, path, mode='rb', block_size=None, acl=None,
