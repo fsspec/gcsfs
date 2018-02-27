@@ -308,7 +308,7 @@ class GCSFileSystem(object):
         GCSFileSystem.tokens = tokens
 
     def _connect_google_default(self):
-        credentials, project = gauth.default()
+        credentials, project = gauth.default(scopes=[self.scope])
         self.project = project
         self.session = AuthorizedSession(credentials)
 
