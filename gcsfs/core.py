@@ -322,8 +322,7 @@ class GCSFileSystem(object):
             credentials = self.tokens[(project, access)]
             self.session = AuthorizedSession(credentials)
 
-    @staticmethod
-    def _dict_to_credentials(token):
+    def _dict_to_credentials(self, token):
         """
         Convert old dict-style token.
 
@@ -333,7 +332,8 @@ class GCSFileSystem(object):
             None, refresh_token=token['refresh_token'],
             client_secret=token['client_secret'],
             client_id=token['client_id'],
-            token_uri='https://www.googleapis.com/oauth2/v4/token'
+            token_uri='https://www.googleapis.com/oauth2/v4/token',
+            scopes=[self.scope]
         )
 
     def _connect_token(self, token):
@@ -358,7 +358,7 @@ class GCSFileSystem(object):
                 # will raise exception if is not json
                 token = json.load(open(token))
         if isinstance(token, dict):
-            credentials = GCSFileSystem._dict_to_credentials(token)
+            credentials = self._dict_to_credentials(token)
         elif isinstance(token, Credentials):
             credentials = token
         else:
