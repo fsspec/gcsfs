@@ -887,15 +887,45 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def rm(self, path, recursive=False):
-        """Delete keys. If recursive, also delete all keys
-        given by walk(path)"""
-        if recursive:
-            for p in self.walk(path):
-                self.rm(p)
+        """Delete keys.
+
+        If a list, batch-delete all keys in one go (can span buckets)
+
+        Returns whether operation succeeded (a list if input was a list)
+
+        If recursive, delete all keys given by walk(path)
+        """
+        if isinstance(path, (tuple, list)):
+            template = ('\n--===============7330845974216740156==\n'
+                        'Content-Type: application/http\n'
+                        'Content-Transfer-Encoding: binary\n'
+                        'Content-ID: <b29c5de2-0db4-490b-b421-6a51b598bd11+{i}>'
+                        '\n\nDELETE /storage/v1/b/{bucket}/o/{key} HTTP/1.1\n'
+                        'Content-Type: application/json\n'
+                        'accept: application/json\ncontent-length: 0\n')
+            body = "".join([template.format(i=i+1, bucket=p.split('/', 1)[0],
+                            key=quote_plus(p.split('/', 1)[1]))
+                            for i, p in enumerate(path)])
+            r = self.session.post('https://www.googleapis.com/batch', headers={
+                'Content-Type':
+                    'multipart/mixed; boundary="==============='
+                    '7330845974216740156=="'},
+                              data=body + "\n--==============="
+                                          "7330845974216740156==--")
+            # actually can have some succeed and some fail
+            validate_response(r, path)
+            boundary = r.headers['Content-Type'].split('=', 1)[1]
+            parents = {posixpath.dirname(norm_path(p)) for p in path}
+            [self.invalidate_cache(parent) for parent in parents]
+            return ['200 OK' in c or '204 No Content' in c for c in
+                    r.text.split(boundary)][1:-1]
+        elif recursive:
+            return self.rm(self.walk(path))
         else:
             bucket, key = split_path(path)
             self._call('delete', "b/{}/o/{}", bucket, key)
             self.invalidate_cache(posixpath.dirname(norm_path(path)))
+            return True
 
     @_tracemethod
     def open(self, path, mode='rb', block_size=None, acl=None,

@@ -120,6 +120,18 @@ def test_rm(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
+def test_rm_batch(token_restore):
+    with gcs_maker() as gcs:
+        gcs.touch(a)
+        gcs.touch(b)
+        assert a in gcs.walk(TEST_BUCKET)
+        assert b in gcs.walk(TEST_BUCKET)
+        gcs.rm([a, b])
+        assert a not in gcs.walk(TEST_BUCKET)
+        assert b not in gcs.walk(TEST_BUCKET)
+
+
+@my_vcr.use_cassette(match=['all'])
 def test_rm_recursive(token_restore):
     files = ['/a', '/a/b', '/a/c']
     with gcs_maker() as gcs:
