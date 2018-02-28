@@ -903,9 +903,9 @@ class GCSFileSystem(object):
                         '\n\nDELETE /storage/v1/b/{bucket}/o/{key} HTTP/1.1\n'
                         'Content-Type: application/json\n'
                         'accept: application/json\ncontent-length: 0\n')
-            body = "".join([template.format(i=i+1, bucket=path.split('/', 1)[0],
-                            key=quote_plus(path.split('/', 1)[1]))
-                            for i, path in enumerate(path)])
+            body = "".join([template.format(i=i+1, bucket=p.split('/', 1)[0],
+                            key=quote_plus(p.split('/', 1)[1]))
+                            for i, p in enumerate(path)])
             r = self.session.post('https://www.googleapis.com/batch', headers={
                 'Content-Type':
                     'multipart/mixed; boundary="==============='
