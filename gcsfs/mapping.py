@@ -33,17 +33,16 @@ class GCSMap(MutableMapping):
     def __init__(self, root, gcs=None, check=False, create=False):
         self.gcs = gcs or GCSFileSystem.current()
         self.root = root.rstrip('/')
+        bucket = split_path(root)[0]
+        if create:
+            self.gcs.mkdir(bucket)
         if check:
+            if not self.gcs.exists(bucket):
+                raise ValueError("Bucket %s does not exist. Create "
+                                 "bucket with the ``create=True`` keyword" %
+                                 bucket)
             self.gcs.touch(root+'/a')
             self.gcs.rm(root+'/a')
-        else:
-            bucket = split_path(root)[0]
-            if create:
-                self.gcs.mkdir(bucket)
-            elif not self.gcs.exists(bucket):
-                raise ValueError("Bucket %s does not exist."
-                        " Create bucket with the ``create=True`` keyword" %
-                        bucket)
 
     def clear(self):
         """Remove all keys below root - empties out mapping
