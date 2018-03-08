@@ -132,7 +132,7 @@ def test_new_bucket(token_restore):
         except:
             pass
         with pytest.raises(Exception) as e:
-            d = GCSMap(new_bucket, gcs)
+            d = GCSMap(new_bucket, gcs, check=True)
         assert 'create=True' in str(e)
 
         try:
