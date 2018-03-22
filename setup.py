@@ -2,9 +2,11 @@
 
 import os
 from setuptools import setup
+import versioneer
+
 
 setup(name='gcsfs',
-      version='0.0.5',
+      version=versioneer.get_version(),
       description='Convenient Filesystem interface over GCS',
       url='https://github.com/dask/gcsfs',
       maintainer='Martin Durant',
