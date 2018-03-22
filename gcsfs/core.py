@@ -152,7 +152,7 @@ def validate_response(r, path):
         except:
             msg = str(r.content)
 
-        if "Not Found" in m:
+        if "Not Found" in m or 'No such object' in m:
             raise FileNotFoundError(path)
         elif "forbidden" in m:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
