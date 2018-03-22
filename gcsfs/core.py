@@ -152,9 +152,9 @@ def validate_response(r, path):
         except:
             msg = str(r.content)
 
-        if "Not Found" in m:
+        if r.status_code == 404:
             raise FileNotFoundError(path)
-        elif "forbidden" in m:
+        elif r.status_code == 403:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
