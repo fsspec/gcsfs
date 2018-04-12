@@ -51,6 +51,7 @@ def register():
     dask.bytes.core._filesystems['gcs'] = DaskGCSFileSystem
     dask.bytes.core._filesystems['gs'] = DaskGCSFileSystem
 
+
 try:
     register()
 except ImportError as e:

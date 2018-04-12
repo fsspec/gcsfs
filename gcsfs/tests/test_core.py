@@ -656,8 +656,15 @@ def test_bigger_than_block_read(token_restore):
 
 @my_vcr.use_cassette(match=['all'])
 def test_current(token_restore):
+    from google.oauth2.credentials import Credentials
+
     with gcs_maker() as gcs:
         assert GCSFileSystem.current() is gcs
+        gcs2 = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
+        assert gcs2.session is gcs.session
+        gcs2 = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN,
+                             secure_serialize=False)
+        assert isinstance(gcs2.token, Credentials)
 
 
 @my_vcr.use_cassette(match=['all'])

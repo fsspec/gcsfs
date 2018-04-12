@@ -160,14 +160,20 @@ class GCSFS(Operations):
 
     @_tracemethod
     def getattr(self, path, fh=None):
+        path = ''.join([self.root, path])
         try:
-            info = self.gcs.info(''.join([self.root, path]))
+            info = self.gcs.info(path)
         except FileNotFoundError:
-            raise FuseOSError(ENOENT)
+            parent = path.rsplit('/', 1)[0]
+            if path in self.gcs.ls(parent):
+                info = True
+            else:
+                raise FuseOSError(ENOENT)
         data = {'st_uid': 1000, 'st_gid': 1000}
         perm = 0o777
 
-        if info['storageClass'] == 'DIRECTORY' or 'bucket' in info['kind']:
+        if (info is True or info['storageClass'] == 'DIRECTORY'
+                or 'bucket' in info['kind']):
             data['st_atime'] = 0
             data['st_ctime'] = 0
             data['st_mtime'] = 0
@@ -194,12 +200,13 @@ class GCSFS(Operations):
 
     @_tracemethod
     def mkdir(self, path, mode):
-        bucket, key = core.split_path(path)
-        if not self.gcs.info(path):
-            self.gcs.dirs['bucket'].append({
-                        'bucket': bucket, 'kind': 'storage#object',
-                        'size': 0, 'storageClass': 'DIRECTORY',
-                        'name': path.rstrip('/') + '/'})
+        path = ''.join([self.root, path])
+        logger.info("Mkdir {}".format(path))
+        parent, name = path.rsplit('/', 1)
+        prefixes = self.gcs._listing_cache[parent + '/'][1]['prefixes']
+        if name not in prefixes:
+            prefixes.append(name)
+        return 0
 
     @_tracemethod
     def rmdir(self, path):

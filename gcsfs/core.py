@@ -254,16 +254,22 @@ class GCSFileSystem(object):
     cache_timeout: float, seconds
         Cache expiration time in seconds for object metadata cache.
         Set cache_timeout <= 0 for no caching, None for no cache expiration.
+    secure_serialize: bool
+        If True, instances re-establish auth upon deserialization; if False,
+        token is passed directly, which may be a security risk if passed
+        across an insecure network.
     """
     scopes = {'read_only', 'read_write', 'full_control'}
     retries = 4  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
+    _singleton_pars = [None]
     default_block_size = DEFAULT_BLOCK_SIZE
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
-                 cache_timeout=None):
+                 cache_timeout=None, secure_serialize=True):
+        pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
@@ -275,13 +281,23 @@ class GCSFileSystem(object):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.token = token
-        self.session = None
-        self.connect(method=token)
+        self.cache_timeout = cache_timeout
+        if pars == self._singleton_pars[0]:
+            inst = self._singleton[0]
+            self.session = inst.session
+            self._listing_cache = inst._listing_cache
+            self.token = inst.token
+
+        else:
+            self.session = None
+            self.connect(method=token)
+            self._listing_cache = {}
 
         self._singleton[0] = self
+        self._singleton_pars[0] = pars
+        if not secure_serialize:
+            self.token = self.session.credentials
 
-        self.cache_timeout = cache_timeout
-        self._listing_cache = {}
 
     @classmethod
     def current(cls):

@@ -184,6 +184,7 @@ def token_restore():
 @contextmanager
 def gcs_maker(populate=False):
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
+    gcs.invalidate_cache()
     try:
         if not gcs.exists(TEST_BUCKET):
             gcs.mkdir(TEST_BUCKET)
