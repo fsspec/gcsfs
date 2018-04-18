@@ -426,6 +426,7 @@ class GCSFileSystem(object):
                     if self.check_credentials and method != 'anon':
                         self.ls('anaconda-public-data')
                 except:
+                    self.session = None
                     logger.debug('Connection with method "%s" failed' % meth)
                 if self.session:
                     break
