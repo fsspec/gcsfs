@@ -258,6 +258,12 @@ class GCSFileSystem(object):
         If True, instances re-establish auth upon deserialization; if False,
         token is passed directly, which may be a security risk if passed
         across an insecure network.
+    check_connection: bool
+        When token=None, gcsfs will attempt various methods of establishing
+        credentials, falling back to anon. It is possible for a methoc to
+        find credentials in the system that turn out not to be valid. Setting
+        this parameter to True will ensure that an actual operation is
+        attempted before deciding that credentials are valid.
     """
     scopes = {'read_only', 'read_write', 'full_control'}
     retries = 4  # number of retries on http failure
@@ -268,7 +274,8 @@ class GCSFileSystem(object):
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
-                 cache_timeout=None, secure_serialize=True):
+                 cache_timeout=None, secure_serialize=True,
+                 check_connection=True):
         pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
@@ -282,6 +289,7 @@ class GCSFileSystem(object):
         self.consistency = consistency
         self.token = token
         self.cache_timeout = cache_timeout
+        self.check_credentials = check_connection
         if pars == self._singleton_pars[0]:
             inst = self._singleton[0]
             self.session = inst.session
@@ -415,6 +423,8 @@ class GCSFileSystem(object):
             for meth in ['google_default', 'cache', 'cloud', 'anon']:
                 try:
                     self.connect(method=meth)
+                    if self.check_credentials and method != 'anon':
+                        self.ls('anaconda-public-data')
                 except:
                     logger.debug('Connection with method "%s" failed' % meth)
                 if self.session:
