@@ -423,7 +423,7 @@ class GCSFileSystem(object):
             for meth in ['google_default', 'cache', 'cloud', 'anon']:
                 try:
                     self.connect(method=meth)
-                    if self.check_credentials and method != 'anon':
+                    if self.check_credentials and meth != 'anon':
                         self.ls('anaconda-public-data')
                 except:
                     self.session = None
