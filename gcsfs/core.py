@@ -297,9 +297,9 @@ class GCSFileSystem(object):
             self.token = inst.token
 
         else:
+            self._listing_cache = {}
             self.session = None
             self.connect(method=token)
-            self._listing_cache = {}
 
         self._singleton[0] = self
         self._singleton_pars[0] = pars
