@@ -75,7 +75,7 @@ smoothly with other projects that consume the file interface like ``gzip`` or
 Credentials
 -----------
 
-Two modes of authentication are supported:
+Several modes of authentication are supported:
 
     - if ``token=None`` (default), GCSFS will attempt to use your default gcloud
       credentials or, attempt to get credentials from the google metadata
@@ -95,8 +95,8 @@ Two modes of authentication are supported:
       ``~/.config/gcloud/legacy_credentials/<YOUR GOOGLE USERNAME>/adc.json``)
       or any value google ``Credentials`` object.
 
-    - you can also generate tokens via oauth2 in the browser, with ``token='browser'``,
-      which, once done, will be saved in a local cache for future use.
+    - you can also generate tokens via Oauth2 in the browser using ``token='browser'``,
+      which gcsfs then caches in a special file, ~/.gcs_tokens, and can subsequently be accessed with ``token='cache'``.
 
 The acquired session tokens are *not* preserved when serializing the instances, so
 it is safe to pass them to worker processes on other machines if using in a
