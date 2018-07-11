@@ -564,7 +564,7 @@ class GCSFileSystem(object):
         items = []
         page = self._call(
             'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix,
-            maxResults=max_results)
+            maxResults=max_results, userProject=self.project)
 
         assert page["kind"] == "storage#objects"
         prefixes.extend(page.get("prefixes", []))
@@ -574,7 +574,7 @@ class GCSFileSystem(object):
         while next_page_token is not None:
             page = self._call(
                 'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix,
-                maxResults=max_results, pageToken=next_page_token)
+                maxResults=max_results, pageToken=next_page_token, userProject=self.project)
 
             assert page["kind"] == "storage#objects"
             prefixes.extend(page.get("prefixes", []))
