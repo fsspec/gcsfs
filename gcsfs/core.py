@@ -516,7 +516,7 @@ class GCSFileSystem(object):
             raise FileNotFoundError(path)
 
         result = self._process_object(bucket, self._call('get', 'b/{}/o/{}',
-                                                         bucket, key))
+                                                         bucket, key, userProject=self.project))
 
         return result
 
@@ -854,7 +854,7 @@ class GCSFileSystem(object):
     def cat(self, path):
         """ Simple one-shot get of file data """
         details = self.info(path)
-        return _fetch_range(details, self.session)
+        return _fetch_range(details, self.session, { 'userProject': self.project })
 
     @_tracemethod
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
@@ -1268,10 +1268,14 @@ class GCSFile:
             assert l >= GCS_MIN_BLOCK_SIZE, "Non-final chunk write below min size."
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
-        head.update({'Content-Type': 'application/octet-stream',
-                     'Content-Length': str(l)})
+        head.update(
+            {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': str(l)
+            }
+        )
         r = self.gcsfs.session.post(
-            self.location, params={'uploadType': 'resumable'},
+            self.location, params={'uploadType': 'resumable', 'userProject': self.gcsfs.project},
             headers=head, data=data)
         validate_response(r, self.location)
         if 'Range' in r.headers:
@@ -1304,7 +1308,7 @@ class GCSFile:
         r = self.gcsfs.session.post(
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
             % quote_plus(self.bucket),
-            params={'uploadType': 'resumable'},
+            params={'uploadType': 'resumable', 'userProject': self.gcsfs.project},
             json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
@@ -1316,7 +1320,7 @@ class GCSFile:
         path = ('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                 % quote_plus(self.bucket))
         r = self.gcsfs.session.post(
-            path, params={'uploadType': 'media', 'name': self.key}, data=data)
+            path, params={'uploadType': 'media', 'name': self.key, 'userProject': self.gcsfs.project}, data=data)
         validate_response(r, path)
         size, md5 = int(r.json()['size']), r.json()['md5Hash']
         if self.consistency == 'size':
@@ -1332,16 +1336,16 @@ class GCSFile:
             self.start = start
             self.end = end + self.blocksize
             self.cache = _fetch_range(self.details, self.gcsfs.session,
-                                      self.start, self.end)
+                                      self.start, self.end, { 'userProject': self.gcsfs.project })
         if start < self.start:
             if self.end - end > self.blocksize:
                 self.start = start
                 self.end = end + self.blocksize
                 self.cache = _fetch_range(self.details, self.gcsfs.session,
-                                          self.start, self.end)
+                                          self.start, self.end, { 'userProject': self.gcsfs.project })
             else:
                 new = _fetch_range(self.details, self.gcsfs.session,
-                                   start, self.start)
+                                   start, self.start, { 'userProject': self.gcsfs.project })
                 self.start = start
                 self.cache = new + self.cache
         if end > self.end:
@@ -1351,10 +1355,10 @@ class GCSFile:
                 self.start = start
                 self.end = end + self.blocksize
                 self.cache = _fetch_range(self.details, self.gcsfs.session,
-                                          self.start, self.end)
+                                          self.start, self.end, { 'userProject': self.gcsfs.project })
             else:
                 new = _fetch_range(self.details, self.gcsfs.session, self.end,
-                                   end + self.blocksize)
+                                   end + self.blocksize, { 'userProject': self.gcsfs.project })
                 self.end = end + self.blocksize
                 self.cache = self.cache + new
 
@@ -1433,7 +1437,7 @@ class GCSFile:
 
 
 @_tracemethod
-def _fetch_range(obj_dict, session, start=None, end=None):
+def _fetch_range(obj_dict, session, start=None, end=None, params=None):
     """ Get data from GCS
 
     obj_dict : an entry from ls() or info()
@@ -1441,13 +1445,15 @@ def _fetch_range(obj_dict, session, start=None, end=None):
     start, end : None or integers
         if not both None, fetch only given range
     """
+    if params is None:
+        params = {}
     if start is not None or end is not None:
         start = start or 0
         end = end or 0
         head = {'Range': 'bytes=%i-%i' % (start, end - 1)}
     else:
         head = None
-    back = session.get(obj_dict['mediaLink'], headers=head)
+    back = session.get(obj_dict['mediaLink'], headers=head, params=params)
     data = back.content
     if data == b'Request range not satisfiable':
         return b''
@@ -1469,7 +1475,9 @@ def put_object(credentials, bucket, name, data, session):
                        headers={'Authorization': 'Bearer ' +
                                                  credentials.access_token,
                                 'Content-Type': 'application/octet-stream',
-                                'Content-Length': len(data)}, data=data)
+                                'Content-Length': len(data)},
+                       data=data
+                       )
     assert out.status_code == 200
 
 
