@@ -13,7 +13,7 @@ def register():
     global DaskGCSFileSystem
     import dask.bytes.core
 
-    class DaskGCSFileSystem(GCSFileSystem, dask.bytes.core.FileSystem):
+    class DaskGCSFileSystem(GCSFileSystem):
 
         sep = '/'
 
