@@ -63,8 +63,7 @@ class GCSMap(MutableMapping):
     def __getitem__(self, key):
         key = self._key_to_str(key)
         try:
-            with self.gcs.open(key, 'rb') as f:
-                result = f.read()
+            return self.gcs.cat(key)
         except (IOError, OSError):
             raise KeyError(key)
         return result
