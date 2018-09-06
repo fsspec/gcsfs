@@ -854,11 +854,19 @@ class GCSFileSystem(object):
     def cat(self, path):
         """ Simple one-shot get of file data """
         u = 'https://www.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media'
-        u2 = u.format(*split_path(path))
+        bucket, object = split_path(path)
+        object = quote_plus(object)
+        u2 = u.format(bucket, object)
         r = self.session.get(u2)
         r.raise_for_status()
-        md = b64decode(r.headers['X-Goog-Hash'].split('md5=')[1])
-        assert md5(r.content).digest() == md, "Checksum failure"
+        if 'X-Goog-Hash' in r.headers:
+            # if header includes md5 hash, check that data matches
+            bits = r.headers['X-Goog-Hash'].split(',')
+            for bit in bits:
+                key, val = bit.split('=', 1)
+                if key == 'md5':
+                    md = b64decode(val)
+                    assert md5(r.content).digest() == md, "Checksum failure"
         return r.content
 
     @_tracemethod
