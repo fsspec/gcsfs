@@ -7,7 +7,7 @@ from __future__ import print_function
 import decorator
 
 import array
-from base64 import b64encode
+from base64 import b64encode, b64decode
 import google.auth as gauth
 import google.auth.compute_engine
 from google.auth.transport.requests import AuthorizedSession
@@ -853,8 +853,21 @@ class GCSFileSystem(object):
     @_tracemethod
     def cat(self, path):
         """ Simple one-shot get of file data """
-        details = self.info(path)
-        return _fetch_range(details, self.session)
+        u = 'https://www.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media'
+        bucket, object = split_path(path)
+        object = quote_plus(object)
+        u2 = u.format(bucket, object)
+        r = self.session.get(u2)
+        r.raise_for_status()
+        if 'X-Goog-Hash' in r.headers:
+            # if header includes md5 hash, check that data matches
+            bits = r.headers['X-Goog-Hash'].split(',')
+            for bit in bits:
+                key, val = bit.split('=', 1)
+                if key == 'md5':
+                    md = b64decode(val)
+                    assert md5(r.content).digest() == md, "Checksum failure"
+        return r.content
 
     @_tracemethod
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
@@ -1447,10 +1460,11 @@ def _fetch_range(obj_dict, session, start=None, end=None):
         head = {'Range': 'bytes=%i-%i' % (start, end - 1)}
     else:
         head = None
-    back = session.get(obj_dict['mediaLink'], headers=head)
-    data = back.content
+    r = session.get(obj_dict['mediaLink'], headers=head)
+    data = r.content
     if data == b'Request range not satisfiable':
         return b''
+    r.raise_for_status()
     return data
 
 
