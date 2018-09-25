@@ -1461,12 +1461,10 @@ def _fetch_range(obj_dict, session, start=None, end=None):
     else:
         head = None
     r = session.get(obj_dict['mediaLink'], headers=head)
-    r.raise_for_status()
-    md = b64decode(r.headers['X-Goog-Hash'].split('md5=')[1])
-    assert md5(r.content).digest() == md, "Checksum failure"
     data = r.content
     if data == b'Request range not satisfiable':
         return b''
+    r.raise_for_status()
     return data
 
 
