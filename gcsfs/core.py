@@ -320,6 +320,7 @@ class GCSFileSystem(object):
 
     @staticmethod
     def load_tokens():
+        """Get "browser" tokens from disc"""
         try:
             with open(tfile, 'rb') as f:
                 tokens = pickle.load(f)
@@ -751,6 +752,16 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def du(self, path, total=False, deep=False):
+        """Bytes used by keys at the given path
+
+        Parameters
+        ----------
+        total: bool
+            If True, returns a single integer which is the sum of the file
+            sizes; otherwise returns a {key: size} dictionary
+        deep: bool
+            Whether to descend into child directories
+        """
         if deep:
             files = self.walk(path, True)
         else:
@@ -789,6 +800,7 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def exists(self, path):
+        """Is there a key at the given path?"""
         bucket, key = split_path(path)
         try:
             if key:
@@ -811,6 +823,12 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def info(self, path):
+        """Get information about specific key
+
+        Returns a dictionary with the full name, size and type of the key.
+        The path will be labeled as directory-type if it doesn't exist as a
+        key, but there are sub-keys to the given path
+        """
         bucket, key = split_path(path)
         if not key:
             # Return a pseudo dir for the bucket root
@@ -848,6 +866,8 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def url(self, path):
+        """ Get HTTP URL of the given path from info entry """
+        # TODO: could be implemented without info call, see cat()
         return self.info(path)['mediaLink']
 
     @_tracemethod
@@ -871,6 +891,17 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
+        """Download remote files to local
+
+        Parameters
+        ----------
+        rpath: str
+            Remote location
+        lpath: str
+            Local location
+        blocksize: int
+            Chunks in which the data is fetched
+        """
         with self.open(rpath, 'rb', block_size=blocksize) as f1:
             with open(lpath, 'wb') as f2:
                 while True:
@@ -881,6 +912,19 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None):
+        """Upload local file to remote
+
+        Parameters
+        ----------
+        lpath: str
+            Local location
+        rpath: str
+            Remote location
+        blocksize: int
+            Chunks in which the data is sent
+        acl: str or None
+            Optional access control to apply to the created object
+        """
         with self.open(rpath, 'wb', block_size=blocksize, acl=acl) as f1:
             with open(lpath, 'rb') as f2:
                 while True:
@@ -891,11 +935,37 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def head(self, path, size=1024):
+        """ Fetch start of file
+
+        Parameters
+        ----------
+        path: str
+            File location
+        size: int
+            Number of bytes to fetch
+
+        Returns
+        -------
+        Up to "size" number of bytes
+        """
         with self.open(path, 'rb') as f:
             return f.read(size)
 
     @_tracemethod
     def tail(self, path, size=1024):
+        """ Fetch end of file
+
+        Parameters
+        ----------
+        path: str
+            File location
+        size: int
+            Number of bytes to fetch
+
+        Returns
+        -------
+        Up to "size" number of bytes
+        """
         if size > self.info(path)['size']:
             return self.cat(path)
         with self.open(path, 'rb') as f:
@@ -915,6 +985,8 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def copy(self, path1, path2, acl=None):
+        """Duplicate remote file
+        """
         b1, k1 = split_path(path1)
         b2, k2 = split_path(path2)
         self._call('post', 'b/{}/o/{}/copyTo/b/{}/o/{}', b1, k1, b2, k2,
@@ -922,6 +994,7 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def mv(self, path1, path2, acl=None):
+        """Simulate file move by copy and remove"""
         self.copy(path1, path2, acl)
         self.rm(path1)
 
@@ -990,6 +1063,7 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def touch(self, path):
+        """Create empty file"""
         with self.open(path, 'wb'):
             pass
 
@@ -1121,6 +1195,7 @@ class GCSFile:
         return self.details
 
     def url(self):
+        """ HTTP link to this file's data """
         return self.details['mediaLink']
 
     def tell(self):
@@ -1172,6 +1247,7 @@ class GCSFile:
             self._fetch(self.start, self.end + self.blocksize)
 
     def __next__(self):
+        """ Simulate iterating over lines """
         data = self.readline()
         if data:
             return data
@@ -1265,6 +1341,7 @@ class GCSFile:
 
     @_tracemethod
     def _upload_chunk(self, final=False):
+        """ Write one part of a multi-block file upload """
         self.buffer.seek(0)
         data = self.buffer.read()
         head = {}
@@ -1314,6 +1391,7 @@ class GCSFile:
 
     @_tracemethod
     def _initiate_upload(self):
+        """ Create multi-upload """
         r = self.gcsfs.session.post(
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
             % quote_plus(self.bucket),
@@ -1340,6 +1418,10 @@ class GCSFile:
 
     @_tracemethod
     def _fetch(self, start, end):
+        """ Get bytes between start and end, if not already in cache
+
+        Will read ahead by blocksize bytes.
+        """
         if self.start is None and self.end is None:
             # First read
             self.start = start
@@ -1399,7 +1481,10 @@ class GCSFile:
 
     @_tracemethod
     def close(self):
-        """ Close file """
+        """ Close file
+
+        Finalizes writes, discards cache
+        """
         if self.closed:
             return
         if self.mode == 'rb':
