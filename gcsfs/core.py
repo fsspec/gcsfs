@@ -922,7 +922,7 @@ class GCSFileSystem(object):
             Remote location
         blocksize: int
             Chunks in which the data is sent
-        act: str or None
+        acl: str or None
             Optional access control to apply to the created object
         """
         with self.open(rpath, 'wb', block_size=blocksize, acl=acl) as f1:
