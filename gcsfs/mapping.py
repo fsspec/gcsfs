@@ -54,6 +54,7 @@ class GCSMap(MutableMapping):
             pass
 
     def _key_to_str(self, key):
+        """ Map to target path name"""
         if isinstance(key, (tuple, list)):
             key = str(tuple(key))
         else:
@@ -74,6 +75,7 @@ class GCSMap(MutableMapping):
             f.write(value)
 
     def keys(self):
+        """ Contents of the mapping """
         return (x[len(self.root) + 1:] for x in self.gcs.walk(self.root))
 
     def __iter__(self):
