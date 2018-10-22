@@ -434,6 +434,8 @@ class GCSFileSystem(object):
         else:
             self.__getattribute__('_connect_' + method)()
             self.method = method
+        if self.session is None:
+            raise RuntimeError("Authentication Failed")
 
     @staticmethod
     def _save_tokens():
@@ -989,8 +991,12 @@ class GCSFileSystem(object):
         """
         b1, k1 = split_path(path1)
         b2, k2 = split_path(path2)
-        self._call('post', 'b/{}/o/{}/copyTo/b/{}/o/{}', b1, k1, b2, k2,
-                   destinationPredefinedAcl=acl)
+        out = self._call('post', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2,
+                         k2, destinationPredefinedAcl=acl)
+        while out['done'] is not True:
+            out = self._call('post', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1,
+                             b2, k2, rewriteToken=out['rewriteToken'],
+                             destinationPredefinedAcl=acl)
 
     @_tracemethod
     def mv(self, path1, path2, acl=None):
