@@ -169,6 +169,7 @@ class GCSFileSystem(object):
     Connect to Google Cloud Storage.
 
     The following modes of authentication are supported:
+
     - ``token=None``, GCSFS will attempt to guess your credentials in the
       following order: gcloud CLI default, gcsfs cached token, google compute
       metadata service, anonymous.
@@ -194,14 +195,11 @@ class GCSFileSystem(object):
       `` ~/.config/gcloud/credentials``, or
       ``~\AppData\Roaming\gcloud\credentials``, etc.
 
-    Objects
-    -------
-
     Specific methods, (eg. `ls`, `info`, ...) may return object details from GCS.
-
     These detailed listings include the 
     [object resource](https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
     with additional properties:
+
         - "path" : string
             The "{bucket}/{name}" path of the object, used in calls to GCSFileSystem or GCSFile.
 
@@ -213,6 +211,7 @@ class GCSFileSystem(object):
 
     `GCSFileSystem` generates listing entries for these implied directories in listing apis with the 
     object properies:
+
         - "path" : string
             The "{bucket}/{name}" path of the dir, used in calls to GCSFileSystem or GCSFile.
         - "bucket" : string
@@ -223,8 +222,6 @@ class GCSFileSystem(object):
         - "size" : 0
         - "storageClass" : 'DIRECTORY'
     
-    Caching
-    -------
 
     GCSFileSystem maintains a per-implied-directory cache of object listings and fulfills all
     object information and listing requests from cache. This implied, for example, that objects
@@ -435,7 +432,15 @@ class GCSFileSystem(object):
             self.__getattribute__('_connect_' + method)()
             self.method = method
         if self.session is None:
-            raise RuntimeError("Authentication Failed")
+            if method is None:
+                msg = ("Automatic authentication failed, you should try "
+                       "specifying a method with the token= kwarg")
+            else:
+                msg = ("Auth failed with method '%s'. See the docstrings for "
+                       "further details about your auth mechanism, also "
+                       "available at https://gcsfs.readthedocs.io/en/latest/"
+                       "api.html#gcsfs.core.GCSFileSystem" % method)
+            raise RuntimeError(msg)
 
     @staticmethod
     def _save_tokens():
