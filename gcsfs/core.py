@@ -3,6 +3,7 @@
 Google Cloud Storage pythonic interface
 """
 from __future__ import print_function
+import fsspec
 
 import decorator
 
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 # Allow optional tracing of call locations for api calls.
 # Disabled by default to avoid *massive* test logs.
 _TRACE_METHOD_INVOCATIONS = False
+
 
 @decorator.decorator
 def _tracemethod(f, self, *args, **kwargs):
@@ -99,6 +101,7 @@ def norm_path(path):
     """Canonicalize path to '{bucket}/{name}' form."""
     return "/".join(split_path(path))
 
+
 def split_path(path):
     """
     Normalise GCS path string into bucket and key.
@@ -149,7 +152,7 @@ def validate_response(r, path):
         try:
             error = r.json()['error']
             msg = error['message']
-        except:
+        except json.JSONDecodeError:
             msg = str(r.content)
 
         if r.status_code == 404:
@@ -164,7 +167,7 @@ def validate_response(r, path):
             raise RuntimeError(m)
 
 
-class GCSFileSystem(object):
+class GCSFileSystem(fsspec.AbstractFileSystem):
     """
     Connect to Google Cloud Storage.
 
@@ -198,33 +201,30 @@ class GCSFileSystem(object):
     Specific methods, (eg. `ls`, `info`, ...) may return object details from GCS.
     These detailed listings include the 
     [object resource](https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
-    with additional properties:
 
-        - "path" : string
-            The "{bucket}/{name}" path of the object, used in calls to GCSFileSystem or GCSFile.
+    GCS *does not* include  "directory" objects but instead generates
+    directories by splitting
+    [object names](https://cloud.google.com/storage/docs/key-terms).
+    This means that, for example,
+    a directory does not need to exist for an object to be created within it.
+    Creating an object implicitly creates it's parent directories, and removing
+    all objects from a directory implicitly deletes the empty directory.
 
-    GCS *does not* include  "directory" objects but instead generates directories by splitting
-    [object names](https://cloud.google.com/storage/docs/key-terms). This means that, for example,
-    a directory does not need to exist for an object to be created within it. Creating an object 
-    implicitly creates it's parent directories, and removing all objects from a directory implicitly
-    deletes the empty directory.
+    `GCSFileSystem` generates listing entries for these implied directories in
+    listing apis with the  object properies:
 
-    `GCSFileSystem` generates listing entries for these implied directories in listing apis with the 
-    object properies:
-
-        - "path" : string
-            The "{bucket}/{name}" path of the dir, used in calls to GCSFileSystem or GCSFile.
+        - "name" : string
+            The "{bucket}/{name}" path of the dir, used in calls to
+            GCSFileSystem or GCSFile.
         - "bucket" : string
             The name of the bucket containing this object.
-        - "name" : string
-            The "/" terminated name of the directory within the bucket.
         - "kind" : 'storage#object'
         - "size" : 0
         - "storageClass" : 'DIRECTORY'
-    
+        - type: 'directory' (fsspec compat)
 
-    GCSFileSystem maintains a per-implied-directory cache of object listings and fulfills all
-    object information and listing requests from cache. This implied, for example, that objects
+    GCSFileSystem maintains a per-implied-directory cache of object listings and
+    fulfills all object information and listing requests from cache. This implied, for example, that objects
     created via other processes *will not* be visible to the GCSFileSystem until the cache
     refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not effected by this cache.
 
@@ -272,7 +272,8 @@ class GCSFileSystem(object):
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
                  cache_timeout=None, secure_serialize=True,
-                 check_connection=True):
+                 check_connection=True, **kwargs):
+        super(GCSFileSystem, self).__init__(self, **kwargs)
         pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
@@ -302,18 +303,6 @@ class GCSFileSystem(object):
         self._singleton_pars[0] = pars
         if not secure_serialize:
             self.token = self.session.credentials
-
-
-    @classmethod
-    def current(cls):
-        """ Return the most recently created GCSFileSystem
-
-        If no GCSFileSystem has been created, then create one
-        """
-        if not cls._singleton[0]:
-            return GCSFileSystem()
-        else:
-            return cls._singleton[0]
 
     @staticmethod
     def load_tokens():
@@ -483,21 +472,22 @@ class GCSFileSystem(object):
     @property
     def buckets(self):
         """Return list of available project buckets."""
-        return [b["name"] for b in self._list_buckets()["items"]]
+        return [b["name"] for b in self._list_buckets()]
 
-    @classmethod
-    def _process_object(self, bucket, object_metadata):
+    @staticmethod
+    def _process_object(bucket, object_metadata):
         """Process object resource into gcsfs object information format.
         
         Process GCS object resource via type casting and attribute updates to
-        the cache-able gcsf object information format. Returns an updated copy
+        the cache-able gcsfs object information format. Returns an updated copy
         of the object resource.
 
         (See https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
         """
         result = dict(object_metadata)
         result["size"] = int(object_metadata.get("size", 0))
-        result["path"] = posixpath.join(bucket, object_metadata["name"])
+        result["name"] = posixpath.join(bucket, object_metadata["name"])
+        result['type'] = 'file'
 
         return result
 
@@ -594,7 +584,6 @@ class GCSFileSystem(object):
             "prefixes": prefixes,
             "items": [self._process_object(bucket, i) for i in items],
         }
-
         return result
 
     @_tracemethod
@@ -617,12 +606,8 @@ class GCSFileSystem(object):
             items.extend(page.get("items", []))
             next_page_token = page.get('nextPageToken', None)
 
-        result = {
-            "kind": "storage#buckets",
-            "items": items,
-        }
-
-        return result
+        return [{'name': i['name'] + '/', 'size': 0, 'type': "directory"}
+                for i in items]
 
     @_tracemethod
     def invalidate_cache(self, path=None):
@@ -657,12 +642,15 @@ class GCSFileSystem(object):
         Parameters
         ----------
         bucket: str
-            bucket name
+            bucket name. If contains '/' (i.e., looks like subdir), will
+            have no effect because GCS doesn't have real directories.
         acl: string, one of bACLs
             access for the bucket itself
         default_acl: str, one of ACLs
             default ACL for objects created in this bucket
         """
+        if '/' in bucket:
+            return
         self._call('post', 'b/', predefinedAcl=acl, project=self.project,
                    predefinedDefaultObjectAcl=default_acl,
                    json={"name": bucket})
@@ -670,7 +658,16 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def rmdir(self, bucket):
-        """Delete an empty bucket"""
+        """Delete an empty bucket
+
+        Parameters
+        ----------
+        bucket: str
+            bucket name. If contains '/' (i.e., looks like subdir), will
+            have no effect because GCS doesn't have real directories.
+        """
+        if '/' in bucket:
+            return
         self._call('delete', 'b/' + bucket)
         self.invalidate_cache(bucket)
 
@@ -680,7 +677,10 @@ class GCSFileSystem(object):
         path = norm_path(path)
 
         if path in ['/', '']:
-            return self.buckets
+            if detail:
+                return self._list_buckets()
+            else:
+                return self.buckets
         elif path.endswith("/"):
             return self._ls(path, detail)
         else:
@@ -688,7 +688,7 @@ class GCSFileSystem(object):
                                                                  detail)
             if detail:
                 combined_entries = dict(
-                    (l["path"], l) for l in combined_listing)
+                    (l["name"], l) for l in combined_listing)
                 combined_entries.pop(path + "/", None)
                 return list(combined_entries.values())
             else:
@@ -699,191 +699,37 @@ class GCSFileSystem(object):
         listing = self._list_objects(path)
         bucket, key = split_path(path)
 
-        if not detail:
+        item_details = listing["items"]
 
-            # Convert item listing into list of 'item' and 'subdir/'
-            # entries. Items may be of form "key/", in which case there
-            # will be duplicate entries in prefix and item_names.
-            item_names = [f["name"] for f in listing["items"] if f["name"]]
-            prefixes = [p for p in listing["prefixes"]]
-
-            return [
-                posixpath.join(bucket, n) for n in set(item_names + prefixes)
-            ]
-
-        else:
-            item_details = listing["items"]
-
-            pseudodirs = [{
-                    'bucket': bucket,
-                    'name': prefix,
-                    'path': bucket + "/" + prefix,
-                    'kind': 'storage#object',
-                    'size': 0,
-                    'storageClass': 'DIRECTORY',
-                }
-                for prefix in listing["prefixes"]
-            ]
-
-            return item_details + pseudodirs
-
-    @_tracemethod
-    def walk(self, path, detail=False):
-        """ Return all real keys belows path. """
-        path = norm_path(path)
-
-        if path in ("/", ""):
-            raise ValueError("path must include at least target bucket")
-
-        if path.endswith('/'):
-            listing = self.ls(path, detail=True)
-
-            files = [l for l in listing if l["storageClass"] != "DIRECTORY"]
-            dirs = [l for l in listing if l["storageClass"] == "DIRECTORY"]
-            for d in dirs:
-                files.extend(self.walk(d["path"], detail=True))
-        else:
-            files = self.walk(path + "/", detail=True)
-
-            try:
-                obj = self.info(path)
-                if obj["storageClass"] != "DIRECTORY":
-                    files.append(obj)
-            except FileNotFoundError:
-                pass
-
-        if detail:
-            return files
-        else:
-            return [f["path"] for f in files]
-
-    @_tracemethod
-    def du(self, path, total=False, deep=False):
-        """Bytes used by keys at the given path
-
-        Parameters
-        ----------
-        total: bool
-            If True, returns a single integer which is the sum of the file
-            sizes; otherwise returns a {key: size} dictionary
-        deep: bool
-            Whether to descend into child directories
-        """
-        if deep:
-            files = self.walk(path, True)
-        else:
-            files = [f for f in self.ls(path, True)]
-        if total:
-            return sum(f['size'] for f in files)
-        return {f['path']: f['size'] for f in files}
-
-    @_tracemethod
-    def glob(self, path):
-        """
-        Find files by glob-matching.
-
-        Note that the bucket part of the path must not contain a "*"
-        """
-        path = path.rstrip('/')
-        bucket, key = split_path(path)
-        path = '/'.join([bucket, key])
-        if "*" in bucket:
-            raise ValueError('Bucket cannot contain a "*"')
-        if '*' not in path:
-            path = path.rstrip('/') + '/*'
-        if '/' in path[:path.index('*')]:
-            ind = path[:path.index('*')].rindex('/')
-            root = path[:ind + 1]
-        else:
-            root = ''
-        allfiles = self.walk(root)
-        pattern = re.compile("^" + path.replace('//', '/')
-                             .rstrip('/').replace('**', '.+')
-                             .replace('*', '[^/]+')
-                             .replace('?', '.') + "$")
-        out = [f for f in allfiles if re.match(pattern,
-               f.replace('//', '/').rstrip('/'))]
-        return out
-
-    @_tracemethod
-    def exists(self, path):
-        """Is there a key at the given path?"""
-        bucket, key = split_path(path)
-        try:
-            if key:
-                return bool(self.info(path))
-            else:
-                if bucket in self.buckets:
-                    return True
-                else:
-                    try:
-                        # Bucket may be present & viewable, but not owned by
-                        # the current project. Attempt to list.
-                        self._list_objects(path)
-                        return True
-                    except (FileNotFoundError, IOError, ValueError):
-                        # bucket listing failed as it doesn't exist or we can't
-                        # see it
-                        return False
-        except FileNotFoundError:
-            return False
-
-    @_tracemethod
-    def info(self, path):
-        """Get information about specific key
-
-        Returns a dictionary with the full name, size and type of the key.
-        The path will be labeled as directory-type if it doesn't exist as a
-        key, but there are sub-keys to the given path
-        """
-        bucket, key = split_path(path)
-        if not key:
-            # Return a pseudo dir for the bucket root
-            # TODO: check that it exists (either is in bucket list,
-            # or can list it)
-            return {
+        pseudodirs = [{
                 'bucket': bucket,
-                'name': "/",
-                'path': bucket + "/",
+                'name': bucket + "/" + prefix,
                 'kind': 'storage#object',
                 'size': 0,
                 'storageClass': 'DIRECTORY',
+                'type': 'directory'
             }
+            for prefix in listing["prefixes"]
+        ]
+        out = item_details + pseudodirs
+        if detail:
+            return out
+        else:
+            return sorted([o['name'] for o in out])
 
-        try:
-            return self._get_object(path)
-        except FileNotFoundError:
-            logger.debug("info FileNotFound at path: %s", path)
-            # ls containing directory of path to determine
-            # if a pseudodirectory is needed for this entry.
-            ikey = key.rstrip("/")
-            dkey = ikey + "/"
-            assert ikey, "Stripped path resulted in root object."
-
-            parent_listing = self.ls(
-                posixpath.join(bucket, posixpath.dirname(ikey)), detail=True)
-            pseudo_listing = [
-                i for i in parent_listing
-                if i["storageClass"] == "DIRECTORY" and i["name"] == dkey ]
-
-            if pseudo_listing:
-                return pseudo_listing[0]
-            else:
-                raise
-
-    @_tracemethod
-    def url(self, path):
-        """ Get HTTP URL of the given path from info entry """
+    @staticmethod
+    def url(path):
+        """ Get HTTP URL of the given path """
         # TODO: could be implemented without info call, see cat()
-        return self.info(path)['mediaLink']
+        u = 'https://www.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media'
+        bucket, object = split_path(path)
+        object = quote_plus(object)
+        return u.format(bucket, object)
 
     @_tracemethod
     def cat(self, path):
         """ Simple one-shot get of file data """
-        u = 'https://www.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media'
-        bucket, object = split_path(path)
-        object = quote_plus(object)
-        u2 = u.format(bucket, object)
+        u2 = self.url(path)
         r = self.session.get(u2)
         r.raise_for_status()
         if 'X-Goog-Hash' in r.headers:
@@ -895,89 +741,6 @@ class GCSFileSystem(object):
                     md = b64decode(val)
                     assert md5(r.content).digest() == md, "Checksum failure"
         return r.content
-
-    @_tracemethod
-    def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
-        """Download remote files to local
-
-        Parameters
-        ----------
-        rpath: str
-            Remote location
-        lpath: str
-            Local location
-        blocksize: int
-            Chunks in which the data is fetched
-        """
-        with self.open(rpath, 'rb', block_size=blocksize) as f1:
-            with open(lpath, 'wb') as f2:
-                while True:
-                    d = f1.read(blocksize)
-                    if not d:
-                        break
-                    f2.write(d)
-
-    @_tracemethod
-    def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None):
-        """Upload local file to remote
-
-        Parameters
-        ----------
-        lpath: str
-            Local location
-        rpath: str
-            Remote location
-        blocksize: int
-            Chunks in which the data is sent
-        acl: str or None
-            Optional access control to apply to the created object
-        """
-        with self.open(rpath, 'wb', block_size=blocksize, acl=acl) as f1:
-            with open(lpath, 'rb') as f2:
-                while True:
-                    d = f2.read(blocksize)
-                    if not d:
-                        break
-                    f1.write(d)
-
-    @_tracemethod
-    def head(self, path, size=1024):
-        """ Fetch start of file
-
-        Parameters
-        ----------
-        path: str
-            File location
-        size: int
-            Number of bytes to fetch
-
-        Returns
-        -------
-        Up to "size" number of bytes
-        """
-        with self.open(path, 'rb') as f:
-            return f.read(size)
-
-    @_tracemethod
-    def tail(self, path, size=1024):
-        """ Fetch end of file
-
-        Parameters
-        ----------
-        path: str
-            File location
-        size: int
-            Number of bytes to fetch
-
-        Returns
-        -------
-        Up to "size" number of bytes
-        """
-        if size > self.info(path)['size']:
-            return self.cat(path)
-        with self.open(path, 'rb') as f:
-            f.seek(-size, 2)
-            return f.read()
 
     @_tracemethod
     def merge(self, path, paths, acl=None):
@@ -1002,12 +765,6 @@ class GCSFileSystem(object):
             out = self._call('post', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1,
                              b2, k2, rewriteToken=out['rewriteToken'],
                              destinationPredefinedAcl=acl)
-
-    @_tracemethod
-    def mv(self, path1, path2, acl=None):
-        """Simulate file move by copy and remove"""
-        self.copy(path1, path2, acl)
-        self.rm(path1)
 
     @_tracemethod
     def rm(self, path, recursive=False):
@@ -1052,8 +809,8 @@ class GCSFileSystem(object):
             return True
 
     @_tracemethod
-    def open(self, path, mode='rb', block_size=None, acl=None,
-             consistency=None, metadata=None):
+    def _open(self, path, mode='rb', block_size=None, acl=None,
+              consistency=None, metadata=None):
         """
         See ``GCSFile``.
 
@@ -1063,77 +820,8 @@ class GCSFileSystem(object):
         if block_size is None:
             block_size = self.default_block_size
         const = consistency or self.consistency
-        if 'b' in mode:
-            return GCSFile(self, path, mode, block_size, consistency=const,
-                           metadata=metadata)
-        else:
-            mode = mode.replace('t', '') + 'b'
-            return io.TextIOWrapper(
-                GCSFile(self, path, mode, block_size, consistency=const,
-                        metadata=metadata))
-
-    @_tracemethod
-    def touch(self, path):
-        """Create empty file"""
-        with self.open(path, 'wb'):
-            pass
-
-    @_tracemethod
-    def read_block(self, fn, offset, length, delimiter=None):
-        """ Read a block of bytes from a GCS file
-
-        Starting at ``offset`` of the file, read ``length`` bytes.  If
-        ``delimiter`` is set then we ensure that the read starts and stops at
-        delimiter boundaries that follow the locations ``offset`` and ``offset
-        + length``.  If ``offset`` is zero then we start at zero.  The
-        bytestring returned WILL include the end delimiter string.
-
-        If offset+length is beyond the eof, reads to eof.
-
-        Parameters
-        ----------
-        fn: string
-            Path to filename on GCS
-        offset: int
-            Byte offset to start read
-        length: int
-            Number of bytes to read
-        delimiter: bytes (optional)
-            Ensure reading starts and stops at delimiter bytestring
-
-        Examples
-        --------
-        >>> gcs.read_block('data/file.csv', 0, 13)  # doctest: +SKIP
-        b'Alice, 100\\nBo'
-        >>> gcs.read_block('data/file.csv', 0, 13, delimiter=b'\\n')  # doctest: +SKIP
-        b'Alice, 100\\nBob, 200\\n'
-
-        Use ``length=None`` to read to the end of the file.
-        >>> gcs.read_block('data/file.csv', 0, None, delimiter=b'\\n')  # doctest: +SKIP
-        b'Alice, 100\\nBob, 200\\nCharlie, 300'
-
-        See Also
-        --------
-        distributed.utils.read_block
-        """
-        with self.open(fn, 'rb') as f:
-            size = f.size
-            if length is None:
-                length = size
-            if offset + length > size:
-                length = size - offset
-            bytes = read_block(f, offset, length, delimiter)
-        return bytes
-
-    def __getstate__(self):
-        d = self.__dict__.copy()
-        d["_listing_cache"] = {}
-        logger.debug("Serialize with state: %s", d)
-        return d
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.connect(self.token)
+        return GCSFile(self, path, mode, block_size, consistency=const,
+                       metadata=metadata, acl=acl)
 
 
 GCSFileSystem.load_tokens()
