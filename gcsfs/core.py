@@ -810,7 +810,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
     @_tracemethod
     def _open(self, path, mode='rb', block_size=None, acl=None,
-              consistency=None, metadata=None):
+              consistency=None, metadata=None, **kwargs):
         """
         See ``GCSFile``.
 
@@ -1040,7 +1040,13 @@ class GCSFile:
 
     @_tracemethod
     def _upload_chunk(self, final=False):
-        """ Write one part of a multi-block file upload """
+        """ Write one part of a multi-block file upload
+
+        Parameters
+        ----------
+        final: bool
+            Complete and commit upload
+        """
         self.buffer.seek(0)
         data = self.buffer.read()
         head = {}
@@ -1096,7 +1102,27 @@ class GCSFile:
             % quote_plus(self.bucket),
             params={'uploadType': 'resumable'},
             json={'name': self.key, 'metadata': self.metadata})
+        r.raise_for_status()
         self.location = r.headers['Location']
+
+    @_tracemethod
+    def _discard_upload(self):
+        """Cancel in-progress multi-upload
+
+        Should only happen during discarding this write-mode file
+        """
+        if self.location is None:
+            raise ValueError('Cannot cancel upload which has not started')
+        uid = re.findall('upload_id=([^&=?]+)', self.location)
+        r = self.gcsfs.session.delete(
+            'https://www.googleapis.com/upload/storage/v1/b/%s/o'
+            % quote_plus(self.bucket),
+            params={'uploadType': 'resumable', 'upload_id': uid})
+        r.raise_for_status()
+
+    # TODO: implement info that checks for cached listing of parent
+    # def info(self, path):
+    #
 
     @_tracemethod
     def _simple_upload(self):
