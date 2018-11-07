@@ -694,6 +694,10 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             else:
                 return list(set(combined_listing) - {path + "/"})
 
+    # TODO: implement info that checks for cached listing of parent
+    # def info(self, path):
+    #
+
     @_tracemethod
     def _ls(self, path, detail=False):
         listing = self._list_objects(path)
@@ -1119,10 +1123,6 @@ class GCSFile:
             % quote_plus(self.bucket),
             params={'uploadType': 'resumable', 'upload_id': uid})
         r.raise_for_status()
-
-    # TODO: implement info that checks for cached listing of parent
-    # def info(self, path):
-    #
 
     @_tracemethod
     def _simple_upload(self):
