@@ -679,3 +679,25 @@ def test_array(token_restore):
         with gcs.open(a, 'rb') as f:
             out = f.read()
             assert out == b'A' * 1000
+
+
+@my_vcr.use_cassette(match=['all'])
+def test_attrs(token_restore):
+    with gcs_maker() as gcs:
+        gcs.touch(a)
+        assert 'metadata' not in gcs.info(a)
+        with pytest.raises(KeyError):
+            gcs.getxattr(a, 'foo')
+
+        gcs.touch(a, metadata={'foo': 'blob'})
+        assert gcs.getxattr(a, 'foo') == 'blob'
+
+        gcs.setxattrs(a, foo='blah')
+        assert gcs.getxattr(a, 'foo') == 'blah'
+
+        with gcs.open(a, 'wb') as f:
+            f.metadata = {'something': 'not'}
+
+        with pytest.raises(KeyError):
+            gcs.getxattr(a, 'foo')
+        assert gcs.getxattr(a, 'something') == 'not'

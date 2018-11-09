@@ -1094,9 +1094,12 @@ class GCSFileSystem(object):
                         metadata=metadata))
 
     @_tracemethod
-    def touch(self, path):
-        """Create empty file"""
-        with self.open(path, 'wb'):
+    def touch(self, path, acl=None, metadata=None):
+        """Create empty file
+
+        acl, metadata: passed on to open() and then GCSFile
+        """
+        with self.open(path, 'wb', acl=acl, metadata=metadata):
             pass
 
     @_tracemethod
