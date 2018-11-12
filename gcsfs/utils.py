@@ -100,6 +100,7 @@ class HtmlError(Exception):
         # Call the base class constructor with the parameters it needs
         super(HtmlError, self).__init__(self.message)
 
+
 RETRIABLE_EXCEPTIONS = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,

@@ -467,12 +467,13 @@ class GCSFileSystem(object):
                 validate_response(r, path)
                 break
             except (HtmlError, RequestException, GoogleAuthError) as e:
-                logger.exception("_call exception: %s", e)
                 if retry == self.retries - 1:
+                    logger.exception("_call out of retries on exception: %s", e)
                     raise e
                 if is_retriable(e):
-                    # retry
+                    logger.debug("_call retrying after exception: %s", e)
                     continue
+                logger.exception("_call non-retriable exception: %s", e)
                 raise e
         try:
             out = r.json()
@@ -918,7 +919,8 @@ class GCSFileSystem(object):
                     f2.write(d)
 
     @_tracemethod
-    def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None):
+    def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None,
+            metadata=None):
         """Upload local file to remote
 
         Parameters
@@ -931,14 +933,34 @@ class GCSFileSystem(object):
             Chunks in which the data is sent
         acl: str or None
             Optional access control to apply to the created object
+        metadata: None or dict
+            Gets added to object metadata on server
         """
-        with self.open(rpath, 'wb', block_size=blocksize, acl=acl) as f1:
+        with self.open(rpath, 'wb', block_size=blocksize, acl=acl,
+                       metadata=metadata) as f1:
             with open(lpath, 'rb') as f2:
                 while True:
                     d = f2.read(blocksize)
                     if not d:
                         break
                     f1.write(d)
+
+    def getxattr(self, path, attr):
+        """Get user-defined metadata attribute"""
+        meta = self.info(path).get('metadata', {})
+        return meta[attr]
+
+    def setxattrs(self, path, **kwargs):
+        """ Set user-defined metadata attributes
+
+        Parameters
+        ---------
+        kw_args : key-value pairs like field="value", where the values must be
+            strings. Replaces existing metadata.
+        """
+        bucket, key = split_path(path)
+        self._call('put', "b/{}/o/{}", bucket, key,
+                   json={'metadata': kwargs})
 
     @_tracemethod
     def head(self, path, size=1024):
@@ -1073,9 +1095,12 @@ class GCSFileSystem(object):
                         metadata=metadata))
 
     @_tracemethod
-    def touch(self, path):
-        """Create empty file"""
-        with self.open(path, 'wb'):
+    def touch(self, path, acl=None, metadata=None):
+        """Create empty file
+
+        acl, metadata: passed on to open() and then GCSFile
+        """
+        with self.open(path, 'wb', acl=acl, metadata=metadata):
             pass
 
     @_tracemethod
@@ -1417,8 +1442,21 @@ class GCSFile:
         data = self.buffer.read()
         path = ('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                 % quote_plus(self.bucket))
-        r = self.gcsfs.session.post(
-            path, params={'uploadType': 'media', 'name': self.key}, data=data)
+        metadata = {'name': self.key}
+        if self.metadata is not None:
+            metadata['metadata'] = self.metadata
+        metadata = json.dumps(metadata)
+        data = ('--==0=='
+                '\nContent-Type: application/json; charset=UTF-8'
+                '\n\n' + metadata +
+                '\n--==0=='
+                '\nContent-Type: application/octet-stream'
+                '\n\n').encode() + data + b'\n--==0==--'
+        r = self.gcsfs.session.post(path,
+                                    headers={
+                                        'Content-Type': 'multipart/related; boundary="==0=="'},
+                                    params={'uploadType': 'multipart'},
+                                    data=data)
         validate_response(r, path)
         size, md5 = int(r.json()['size']), r.json()['md5Hash']
         if self.consistency == 'size':
