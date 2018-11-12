@@ -467,12 +467,13 @@ class GCSFileSystem(object):
                 validate_response(r, path)
                 break
             except (HtmlError, RequestException, GoogleAuthError) as e:
-                logger.exception("_call exception: %s", e)
                 if retry == self.retries - 1:
+                    logger.exception("_call out of retries on exception: %s", e)
                     raise e
                 if is_retriable(e):
-                    # retry
+                    logger.debug("_call retrying after exception: %s", e)
                     continue
+                logger.exception("_call non-retriable exception: %s", e)
                 raise e
         try:
             out = r.json()
