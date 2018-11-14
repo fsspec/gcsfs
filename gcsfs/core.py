@@ -350,13 +350,18 @@ class GCSFileSystem(object):
 
         Does not preserve access token itself, assumes refresh required.
         """
-        return Credentials(
-            None, refresh_token=token['refresh_token'],
-            client_secret=token['client_secret'],
-            client_id=token['client_id'],
-            token_uri='https://www.googleapis.com/oauth2/v4/token',
-            scopes=[self.scope]
-        )
+        try:
+            token = service_account.Credentials.from_service_account_info(
+                    token, scopes=[self.scope])
+        except:
+            token = Credentials(
+                None, refresh_token=token['refresh_token'],
+                client_secret=token['client_secret'],
+                client_id=token['client_id'],
+                token_uri='https://www.googleapis.com/oauth2/v4/token',
+                scopes=[self.scope]
+            )
+        return token
 
     def _connect_token(self, token):
         """
