@@ -5,7 +5,6 @@ language: python
 matrix:
   include:
     - python: 2.7
-    - python: 3.5
     - python: 3.6
 
 install:
@@ -21,9 +20,9 @@ install:
   - conda update conda
 
   # Install dependencies
-  - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests pandas decorator
+  - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests pandas decorator -y
   - source activate test
-  - conda install -c conda-forge google-auth google-auth-oauthlib
+  - conda install -c conda-forge google-auth google-auth-oauthlib -y
   - pip install vcrpy fusepy
 
 script:
