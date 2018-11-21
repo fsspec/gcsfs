@@ -352,7 +352,7 @@ class GCSFileSystem(object):
         """
         try:
             token = service_account.Credentials.from_service_account_info(
-                    token, scopes=[self.scope])
+                token, scopes=[self.scope])
         except:
             token = Credentials(
                 None, refresh_token=token['refresh_token'],
