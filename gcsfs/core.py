@@ -273,7 +273,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                  token=None, block_size=None, consistency='none',
                  cache_timeout=None, secure_serialize=True,
                  check_connection=True, **kwargs):
-        super(GCSFileSystem, self).__init__(self, **kwargs)
+        super().__init__(self, **kwargs)
         pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
@@ -288,19 +288,10 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.token = token
         self.cache_timeout = cache_timeout
         self.check_credentials = check_connection
-        if pars == self._singleton_pars[0]:
-            inst = self._singleton[0]
-            self.session = inst.session
-            self._listing_cache = inst._listing_cache
-            self.token = inst.token
+        self._listing_cache = {}
+        self.session = None
+        self.connect(method=token)
 
-        else:
-            self._listing_cache = {}
-            self.session = None
-            self.connect(method=token)
-
-        self._singleton[0] = self
-        self._singleton_pars[0] = pars
         if not secure_serialize:
             self.token = self.session.credentials
 
@@ -806,7 +797,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             return ['200 OK' in c or '204 No Content' in c for c in
                     r.text.split(boundary)][1:-1]
         elif recursive:
-            return self.rm(self.walk(path))
+            return self.rm(self.find(path))
         else:
             bucket, key = split_path(path)
             self._call('delete', "b/{}/o/{}", bucket, key)
@@ -827,6 +818,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         const = consistency or self.consistency
         return GCSFile(self, path, mode, block_size, consistency=const,
                        metadata=metadata, acl=acl, autocommit=autocommit)
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.dircache = {}
+        self.connect(self.token)
 
 
 GCSFileSystem.load_tokens()

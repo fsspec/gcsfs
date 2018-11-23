@@ -60,7 +60,7 @@ def test_info(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_ls2(token_restore):
     with gcs_maker() as gcs:
-        assert TEST_BUCKET in gcs.ls('')
+        assert TEST_BUCKET +'/' in gcs.ls('')
         with pytest.raises((OSError, IOError)):
             gcs.ls('nonexistent')
         fn = TEST_BUCKET+'/test/accounts.1.json'
@@ -74,7 +74,6 @@ def test_pickle(token_restore):
 
         # Write data to distinct filename
         fn = TEST_BUCKET+'/nested/abcdefg'
-        data = b'hello\n'
         with gcs.open(fn, 'wb') as f:
             f.write(b'1234567')
 
