@@ -339,13 +339,18 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         Does not preserve access token itself, assumes refresh required.
         """
-        return Credentials(
-            None, refresh_token=token['refresh_token'],
-            client_secret=token['client_secret'],
-            client_id=token['client_id'],
-            token_uri='https://www.googleapis.com/oauth2/v4/token',
-            scopes=[self.scope]
-        )
+        try:
+            token = service_account.Credentials.from_service_account_info(
+                token, scopes=[self.scope])
+        except:
+            token = Credentials(
+                None, refresh_token=token['refresh_token'],
+                client_secret=token['client_secret'],
+                client_id=token['client_id'],
+                token_uri='https://www.googleapis.com/oauth2/v4/token',
+                scopes=[self.scope]
+            )
+        return token
 
     def _connect_token(self, token):
         """
@@ -456,12 +461,13 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 validate_response(r, path)
                 break
             except (HtmlError, RequestException, GoogleAuthError) as e:
-                logger.exception("_call exception: %s", e)
                 if retry == self.retries - 1:
+                    logger.exception("_call out of retries on exception: %s", e)
                     raise e
                 if is_retriable(e):
-                    # retry
+                    logger.debug("_call retrying after exception: %s", e)
                     continue
+                logger.exception("_call non-retriable exception: %s", e)
                 raise e
         try:
             out = r.json()
@@ -694,10 +700,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             else:
                 return list(set(combined_listing) - {path + "/"})
 
-    # TODO: implement info that checks for cached listing of parent
-    # def info(self, path):
-    #
-
     @_tracemethod
     def _ls(self, path, detail=False):
         listing = self._list_objects(path)
@@ -724,7 +726,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     @staticmethod
     def url(path):
         """ Get HTTP URL of the given path """
-        # TODO: could be implemented without info call, see cat()
         u = 'https://www.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media'
         bucket, object = split_path(path)
         object = quote_plus(object)
@@ -814,7 +815,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
     @_tracemethod
     def _open(self, path, mode='rb', block_size=None, acl=None,
-              consistency=None, metadata=None, **kwargs):
+              consistency=None, metadata=None, autocommit=True, **kwargs):
         """
         See ``GCSFile``.
 
@@ -825,17 +826,17 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             block_size = self.default_block_size
         const = consistency or self.consistency
         return GCSFile(self, path, mode, block_size, consistency=const,
-                       metadata=metadata, acl=acl)
+                       metadata=metadata, acl=acl, autocommit=autocommit)
 
 
 GCSFileSystem.load_tokens()
 
 
-class GCSFile:
+class GCSFile(fsspec.spec.AbstractBufferedFile):
 
-    @_tracemethod
     def __init__(self, gcsfs, path, mode='rb', block_size=DEFAULT_BLOCK_SIZE,
-                 acl=None, consistency='md5', metadata=None):
+                 acl=None, consistency='md5', metadata=None,
+                 autocommit=True):
         """
         Open a file.
 
@@ -860,6 +861,7 @@ class GCSFile:
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
         """
+        super().__init__(gcsfs, path, mode, block_size, autocommit=autocommit)
         bucket, key = split_path(path)
         if not key:
             raise OSError('Attempt to open a bucket')
@@ -867,30 +869,15 @@ class GCSFile:
         self.bucket = bucket
         self.key = key
         self.metadata = metadata
-        self.mode = mode
-        self.blocksize = block_size
-        self.cache = b""
-        self.loc = 0
         self.acl = acl
-        self.end = None
-        self.start = None
-        self.closed = False
         self.trim = True
         self.consistency = consistency
         if self.consistency == 'md5':
             self.md5 = md5()
-        if mode not in {'rb', 'wb'}:
-            raise NotImplementedError('File mode not supported')
-        if mode == 'rb':
-            self.details = gcsfs.info(path)
-            self.size = self.details['size']
-        else:
+        if mode == 'wb':
             if block_size < GCS_MIN_BLOCK_SIZE:
                 warnings.warn('Setting block size to minimum value, 2**18')
                 self.blocksize = GCS_MIN_BLOCK_SIZE
-            self.buffer = io.BytesIO()
-            self.offset = 0
-            self.forced = False
             self.location = None
 
     def info(self):
@@ -900,147 +887,6 @@ class GCSFile:
     def url(self):
         """ HTTP link to this file's data """
         return self.details['mediaLink']
-
-    def tell(self):
-        """ Current file location """
-        return self.loc
-
-    @_tracemethod
-    def seek(self, loc, whence=0):
-        """ Set current file location
-
-        Parameters
-        ----------
-        loc : int
-            byte location
-        whence : {0, 1, 2}
-            from start of file, current location or end of file, resp.
-        """
-        if not self.mode == 'rb':
-            raise ValueError('Seek only available in read mode')
-        if whence == 0:
-            nloc = loc
-        elif whence == 1:
-            nloc = self.loc + loc
-        elif whence == 2:
-            nloc = self.size + loc
-        else:
-            raise ValueError(
-                "invalid whence (%s, should be 0, 1 or 2)" % whence)
-        if nloc < 0:
-            raise ValueError('Seek before start of file')
-        self.loc = nloc
-        return self.loc
-
-    def readline(self, length=-1):
-        """
-        Read and return a line from the stream.
-
-        If length is specified, at most size bytes will be read.
-        """
-        self._fetch(self.loc, self.loc + 1)
-        while True:
-            found = self.cache[self.loc - self.start:].find(b'\n') + 1
-            if 0 < length < found:
-                return self.read(length)
-            if found:
-                return self.read(found)
-            if self.end > self.size:
-                return self.read(length)
-            self._fetch(self.start, self.end + self.blocksize)
-
-    def __next__(self):
-        """ Simulate iterating over lines """
-        data = self.readline()
-        if data:
-            return data
-        else:
-            raise StopIteration
-
-    next = __next__
-
-    def __iter__(self):
-        return self
-
-    def readlines(self):
-        """ Return all lines in a file as a list """
-        return list(self)
-
-    def write(self, data):
-        """
-        Write data to buffer.
-
-        Buffer only sent to GCS on flush() or if buffer is greater than
-        or equal to blocksize.
-
-        Parameters
-        ----------
-        data : bytes
-            Set of bytes to be written.
-        """
-        if self.mode not in {'wb', 'ab'}:
-            raise ValueError('File not in write mode')
-        if self.closed:
-            raise ValueError('I/O operation on closed file.')
-        if self.forced:
-            raise ValueError('This file has been force-flushed, can only close')
-        out = self.buffer.write(ensure_writable(data))
-        self.loc += out
-        if self.buffer.tell() >= self.blocksize:
-            self.flush()
-        return out
-
-    @_tracemethod
-    def flush(self, force=False):
-        """
-        Write buffered data to GCS.
-
-        Uploads the current buffer, if it is larger than the block-size, or if
-        the file is being closed.
-
-        Parameters
-        ----------
-        force : bool
-            When closing, write the last block even if it is smaller than
-            blocks are allowed to be. Disallows further writing to this file.
-        """
-
-        if self.closed:
-            raise ValueError('Flush on closed file')
-        if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once")
-
-        if self.mode not in {'wb', 'ab'}:
-            assert not hasattr(self, "buffer"), "flush on read-mode file with non-empty buffer"
-            return
-        if self.buffer.tell() == 0 and not force:
-            # no data in the buffer to write
-            return
-        if self.buffer.tell() < GCS_MIN_BLOCK_SIZE and not force:
-            logger.debug(
-                "flush(force=False) with buffer (%i) < min size (2 ** 18), "
-                "skipping block upload.", self.buffer.tell()
-            )
-            return
-
-        if not self.offset:
-            if force and self.buffer.tell() <= self.blocksize:
-                # Force-write a buffer below blocksize with a single write
-                self._simple_upload()
-            elif not force and self.buffer.tell() <= self.blocksize:
-                # Defer initialization of multipart upload, *may* still
-                # be able to simple upload.
-                return
-            else:
-                # At initialize a multipart upload, setting self.location
-                self._initiate_upload()
-
-        if self.location is not None:
-            # Continue with multipart upload has been initialized
-            self._upload_chunk(final=force)
-
-        if force:
-            self.forced = True
 
     @_tracemethod
     def _upload_chunk(self, final=False):
@@ -1052,10 +898,10 @@ class GCSFile:
             Complete and commit upload
         """
         self.buffer.seek(0)
-        data = self.buffer.read()
+        data = self.buffer.getvalue()
         head = {}
-        l = self.buffer.tell()
-        if final:
+        l = len(data)
+        if final and self.autocommit:
             if l:
                 head['Content-Range'] = 'bytes %i-%i/%i' % (
                     self.offset, self.offset + l - 1, self.offset + l)
@@ -1064,7 +910,11 @@ class GCSFile:
                 head['Content-Range'] = 'bytes */%i' % self.offset
                 data = None
         else:
-            assert l >= GCS_MIN_BLOCK_SIZE, "Non-final chunk write below min size."
+            if l < GCS_MIN_BLOCK_SIZE:
+                if not self.autocommit:
+                    return
+                elif not final:
+                    raise ValueError("Non-final chunk write below min size.")
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
@@ -1082,12 +932,13 @@ class GCSFile:
                     self.md5.update(data[:-shortfall])
                 self.buffer = io.BytesIO(data[-shortfall:])
                 self.buffer.seek(shortfall)
+                self.offset += l - shortfall
+                return False
             else:
                 if self.consistency == 'md5':
                     self.md5.update(data)
-                self.buffer = io.BytesIO()
-            self.offset += l - shortfall
-        else:
+        elif l:
+            #
             assert final, "Response looks like upload is over"
             size, md5 = int(r.json()['size']), r.json()['md5Hash']
             if self.consistency == 'size':
@@ -1095,8 +946,14 @@ class GCSFile:
             if self.consistency == 'md5':
                 assert b64encode(
                     self.md5.digest()) == md5.encode(), "MD5 checksum failed"
-            self.buffer = io.BytesIO()
-            self.offset += l
+        else:
+            assert final, "Response looks like upload is over"
+        return True
+
+    def commit(self):
+        """If not auto-committing, finalize file"""
+        self.autocommit = True
+        self._upload_chunk(final=True)
 
     @_tracemethod
     def _initiate_upload(self):
@@ -1110,7 +967,7 @@ class GCSFile:
         self.location = r.headers['Location']
 
     @_tracemethod
-    def _discard_upload(self):
+    def discard(self):
         """Cancel in-progress multi-upload
 
         Should only happen during discarding this write-mode file
@@ -1131,8 +988,21 @@ class GCSFile:
         data = self.buffer.read()
         path = ('https://www.googleapis.com/upload/storage/v1/b/%s/o'
                 % quote_plus(self.bucket))
-        r = self.gcsfs.session.post(
-            path, params={'uploadType': 'media', 'name': self.key}, data=data)
+        metadata = {'name': self.key}
+        if self.metadata is not None:
+            metadata['metadata'] = self.metadata
+        metadata = json.dumps(metadata)
+        data = ('--==0=='
+                '\nContent-Type: application/json; charset=UTF-8'
+                '\n\n' + metadata +
+                '\n--==0=='
+                '\nContent-Type: application/octet-stream'
+                '\n\n').encode() + data + b'\n--==0==--'
+        r = self.gcsfs.session.post(path,
+                                    headers={
+                                        'Content-Type': 'multipart/related; boundary="==0=="'},
+                                    params={'uploadType': 'multipart'},
+                                    data=data)
         validate_response(r, path)
         size, md5 = int(r.json()['size']), r.json()['md5Hash']
         if self.consistency == 'size':
@@ -1178,82 +1048,6 @@ class GCSFile:
                 self.end = end + self.blocksize
                 self.cache = self.cache + new
 
-    def read(self, length=-1):
-        """
-        Return data from cache, or fetch pieces as necessary
-
-        Parameters
-        ----------
-        length : int (-1)
-            Number of bytes to read; if <0, all remaining bytes.
-        """
-        if self.mode != 'rb':
-            raise ValueError('File not in read mode')
-        if length < 0:
-            length = self.size
-        if self.closed:
-            raise ValueError('I/O operation on closed file.')
-        self._fetch(self.loc, self.loc + length)
-        out = self.cache[self.loc - self.start:
-                         self.loc - self.start + length]
-        self.loc += len(out)
-        if self.trim:
-            num = (self.loc - self.start) // self.blocksize - 1
-            if num > 0:
-                self.start += self.blocksize * num
-                self.cache = self.cache[self.blocksize * num:]
-        return out
-
-    @_tracemethod
-    def close(self):
-        """ Close file
-
-        Finalizes writes, discards cache
-        """
-        if self.closed:
-            return
-        if self.mode == 'rb':
-            self.cache = None
-        else:
-            if not self.forced:
-                self.flush(force=True)
-            else:
-                logger.debug("close with forced=True, bypassing final flush.")
-                assert self.buffer.tell() == 0
-
-            self.gcsfs.invalidate_cache(
-                posixpath.dirname("/".join([self.bucket, self.key])))
-        self.closed = True
-
-    def readable(self):
-        """Return whether the GCSFile was opened for reading"""
-        return self.mode == 'rb'
-
-    def seekable(self):
-        """Return whether the GCSFile is seekable (only in read mode)"""
-        return self.readable()
-
-    def writable(self):
-        """Return whether the GCSFile was opened for writing"""
-        return self.mode in {'wb', 'ab'}
-
-    @_tracemethod
-    def __del__(self):
-        self.close()
-
-    def __str__(self):
-        return "<GCSFile %s/%s>" % (self.bucket, self.key)
-
-    __repr__ = __str__
-
-    @_tracemethod
-    def __enter__(self):
-        return self
-
-    @_tracemethod
-    def __exit__(self, *args):
-        self.close()
-
 
 @_tracemethod
 def _fetch_range(obj_dict, session, start=None, end=None):
@@ -1276,28 +1070,3 @@ def _fetch_range(obj_dict, session, start=None, end=None):
         return b''
     r.raise_for_status()
     return data
-
-
-def put_object(credentials, bucket, name, data, session):
-    """ Simple put, up to 5MB of data
-
-    credentials : from auth()
-    bucket : string
-    name : object name
-    data : binary
-    session: requests.Session instance
-    """
-    out = session.post('https://www.googleapis.com/upload/storage/'
-                       'v1/b/%s/o?uploadType=media&name=%s' % (
-                           quote_plus(bucket), quote_plus(name)),
-                       headers={'Authorization': 'Bearer ' +
-                                                 credentials.access_token,
-                                'Content-Type': 'application/octet-stream',
-                                'Content-Length': len(data)}, data=data)
-    assert out.status_code == 200
-
-
-def ensure_writable(b):
-    if PY2 and isinstance(b, array.array):
-        return b.tostring()
-    return b
