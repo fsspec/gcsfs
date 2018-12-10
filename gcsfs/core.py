@@ -903,7 +903,7 @@ class GCSFileSystem(object):
         return r.content
 
     @_tracemethod
-    def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
+    def get(self, rpath, lpath, blocksize=5 * 2 ** 20, overwrite=True):
         """Download remote files to local
 
         Parameters
@@ -914,7 +914,11 @@ class GCSFileSystem(object):
             Local location
         blocksize: int
             Chunks in which the data is fetched
+        overwrite: bool
+            If False, download the file only if local path doesn't exist
         """
+        if not overwrite and os.path.exists(lpath):
+            return
         with self.open(rpath, 'rb', block_size=blocksize) as f1:
             with open(lpath, 'wb') as f2:
                 while True:
