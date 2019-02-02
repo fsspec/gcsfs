@@ -1080,7 +1080,7 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def open(self, path, mode='rb', block_size=None, acl=None,
-             consistency=None, metadata=None):
+             consistency=None, content_type='application/octet-stream', metadata=None):
         """
         See ``GCSFile``.
 
@@ -1092,12 +1092,12 @@ class GCSFileSystem(object):
         const = consistency or self.consistency
         if 'b' in mode:
             return GCSFile(self, path, mode, block_size, consistency=const,
-                           metadata=metadata)
+                           content_type=content_type, metadata=metadata)
         else:
             mode = mode.replace('t', '') + 'b'
             return io.TextIOWrapper(
                 GCSFile(self, path, mode, block_size, consistency=const,
-                        metadata=metadata))
+                        content_type=content_type, metadata=metadata))
 
     @_tracemethod
     def touch(self, path, acl=None, metadata=None):
@@ -1173,7 +1173,7 @@ class GCSFile:
 
     @_tracemethod
     def __init__(self, gcsfs, path, mode='rb', block_size=DEFAULT_BLOCK_SIZE,
-                 acl=None, consistency='md5', metadata=None):
+                 acl=None, consistency='md5', content_type='application/octet-stream', metadata=None):
         """
         Open a file.
 
@@ -1195,6 +1195,9 @@ class GCSFile:
             'size' ensures that the number of bytes reported by GCS matches
             the number we wrote; 'md5' does a full checksum. Any value other
             than 'size' or 'md5' is assumed to mean no checking.
+        content_type: str
+            default is `application/octet-stream`. See the list of available
+            content types at https://www.iana.org/assignments/media-types/media-types.txt
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
         """
@@ -1215,6 +1218,7 @@ class GCSFile:
         self.closed = False
         self.trim = True
         self.consistency = consistency
+        self.content_type = content_type
         if self.consistency == 'md5':
             self.md5 = md5()
         if mode not in {'rb', 'wb'}:
@@ -1399,7 +1403,7 @@ class GCSFile:
             assert l >= GCS_MIN_BLOCK_SIZE, "Non-final chunk write below min size."
             head['Content-Range'] = 'bytes %i-%i/*' % (
                 self.offset, self.offset + l - 1)
-        head.update({'Content-Type': 'application/octet-stream',
+        head.update({'Content-Type': self.content_type,
                      'Content-Length': str(l)})
         r = self.gcsfs.session.post(
             self.location, params={'uploadType': 'resumable'},
@@ -1437,6 +1441,7 @@ class GCSFile:
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
             % quote_plus(self.bucket),
             params={'uploadType': 'resumable'},
+            headers={'X-Upload-Content-Type': self.content_type},
             json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
@@ -1455,8 +1460,8 @@ class GCSFile:
                 '\nContent-Type: application/json; charset=UTF-8'
                 '\n\n' + metadata +
                 '\n--==0=='
-                '\nContent-Type: application/octet-stream'
-                '\n\n').encode() + data + b'\n--==0==--'
+                '\nContent-Type: {0}'
+                '\n\n'.format(self.content_type)).encode() + data + b'\n--==0==--'
         r = self.gcsfs.session.post(path,
                                     headers={
                                         'Content-Type': 'multipart/related; boundary="==0=="'},
