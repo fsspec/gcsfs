@@ -91,12 +91,8 @@ def read_block(f, offset, length, delimiter=None):
 class RateLimitException(Exception):
     """Holds the message and code from cloud errors."""
     def __init__(self, error_response=None):
-        if error_response:
-            self.message = error_response.get('message', '')
-            self.code = error_response.get('code', None)
-        else:
-            self.message = ''
-            self.code = None
+        self.message = error_response.get('message', '')
+        self.code = error_response.get('code', None)
         # Call the base class constructor with the parameters it needs
         super(RateLimitException, self).__init__(self.message)
 
@@ -132,6 +128,7 @@ def is_retriable(exception):
     errs += [str(e) for e in errs]
     if isinstance(exception, HtmlError):
         return exception.code in errs
+    # https://cloud.google.com/storage/docs/key-terms#immutability
     if isinstance(exception, RateLimitException):
         return exception.code in errs
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
