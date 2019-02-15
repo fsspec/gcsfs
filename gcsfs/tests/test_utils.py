@@ -1,7 +1,8 @@
 import io
 import os
 import requests
-from gcsfs.utils import read_block, seek_delimiter, HtmlError, is_retriable
+from gcsfs.utils import read_block, seek_delimiter, HtmlError, \
+    RateLimitException, is_retriable
 from gcsfs.tests.utils import tmpfile
 
 
@@ -72,6 +73,14 @@ def retriable_exception():
     e = HtmlError({'message': '', 'code': '500'})
     assert is_retriable(e)
     e = HtmlError({'message': '', 'code': 400})
-    assert notis_retriable(e)
+    assert not is_retriable(e)
     e = HtmlError()
+    assert not is_retriable(e)
+    e = RateLimitException()
+    assert not is_retriable(e)
+    e = RateLimitException({'message': '', 'code': 501})
+    assert is_retriable(e)
+    e = RateLimitException({'message': '', 'code': '501'})
+    assert is_retriable(e)
+    e = RateLimitException({'message': '', 'code': 400})
     assert not is_retriable(e)
