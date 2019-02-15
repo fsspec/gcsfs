@@ -88,6 +88,19 @@ def read_block(f, offset, length, delimiter=None):
     return bytes
 
 
+class RateLimitException(Exception):
+    """Holds the message and code from cloud errors."""
+    def __init__(self, error_response=None):
+        if error_response:
+            self.message = error_response.get('message', '')
+            self.code = error_response.get('code', None)
+        else:
+            self.message = ''
+            self.code = None
+        # Call the base class constructor with the parameters it needs
+        super(RateLimitException, self).__init__(self.message)
+
+
 class HtmlError(Exception):
     """Holds the message and code from cloud errors."""
     def __init__(self, error_response=None):
@@ -118,5 +131,7 @@ def is_retriable(exception):
     errs = list(range(500, 505))
     errs += [str(e) for e in errs]
     if isinstance(exception, HtmlError):
+        return exception.code in errs
+    if isinstance(exception, RateLimitException):
         return exception.code in errs
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
