@@ -31,7 +31,7 @@ import time
 import warnings
 
 from requests.exceptions import RequestException
-from .utils import HtmlError, is_retriable, read_block
+from .utils import HtmlError, RateLimitException, is_retriable, read_block
 
 PY2 = sys.version_info.major == 2
 
@@ -159,6 +159,8 @@ def validate_response(r, path):
             raise FileNotFoundError(path)
         elif r.status_code == 403:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
+        elif r.status_code == 429:
+            raise RateLimitException(error)
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         elif error:
