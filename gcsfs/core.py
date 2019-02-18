@@ -463,7 +463,6 @@ class GCSFileSystem(object):
             # only pass parameters that have values, except for PATCH (to Delete a field)
             # see https://cloud.google.com/storage/docs/json_api/v1/how-tos/performance#patch
             for k, v in list(kwargs.items()):
-
                 if v is None:
                     del kwargs[k]
         json = kwargs.pop('json', None)
@@ -979,15 +978,15 @@ class GCSFileSystem(object):
         meta = self.info(path).get('metadata', {})
         return meta[attr]
 
-    def setxattrs(self, path, content_type = None, content_encoding=None, **kwargs):
+    def setxattrs(self, path, content_type=None, content_encoding=None, **kwargs):
         """ Set/delete/add writable metadata attributes
 
         Parameters
         ---------
         content_type: str
-            Sets the Content-Type. Note: gcsfs defaults to 'application/octet-stream' on uploads
+            If not None, set the content-type to this value
         content_encoding: str
-            set 'gzip' + content_type 'text/plain' for transcoding (https://cloud.google.com/storage/docs/transcoding)
+            If not None, set the content-encoding. See https://cloud.google.com/storage/docs/transcoding
         kw_args: key-value pairs like field="value" or field=None
             value must be string to add or modify, or None to delete
 
@@ -999,7 +998,7 @@ class GCSFileSystem(object):
         metadata = self._call('patch', "b/{}/o/{}", bucket, key,
                               fields='metadata',
                               json={'contentType':content_type,
-                                    'contentEncoding':content_encoding,
+                                    'contentEncoding': content_encoding,
                                     'metadata': kwargs})
         return metadata
 
