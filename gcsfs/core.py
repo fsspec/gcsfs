@@ -459,10 +459,13 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def _call(self, method, path, *args, **kwargs):
-        for k, v in list(kwargs.items()):
-            # only pass parameters that have values
-            if v is None:
-                del kwargs[k]
+        if method != 'patch':
+            # only pass parameters that have values, except for PATCH (to Delete a field)
+            # see https://cloud.google.com/storage/docs/json_api/v1/how-tos/performance#patch
+            for k, v in list(kwargs.items()):
+
+                if v is None:
+                    del kwargs[k]
         json = kwargs.pop('json', None)
         meth = getattr(self.session, method)
         if args:
@@ -487,6 +490,25 @@ class GCSFileSystem(object):
         except ValueError:
             out = r.content
         return out
+
+    @_tracemethod
+    def _post(self, path, **kwargs):
+
+        for retry in range(self.retries):
+            try:
+                time.sleep(2**retry - 1)
+                r = self.session.post(path, **kwargs)
+                break
+            except (HtmlError, RequestException, GoogleAuthError) as e:
+                if retry == self.retries - 1:
+                    logger.exception("_post out of retries on exception: %s", e)
+                    raise e
+                if is_retriable(e):
+                    logger.debug("_post retrying after exception: %s", e)
+                    continue
+                logger.exception("_post non-retriable exception: %s", e)
+                raise e
+        return r
 
     @property
     def buckets(self):
@@ -619,7 +641,7 @@ class GCSFileSystem(object):
 
         while next_page_token is not None:
             page = self._call(
-                'get', 'b/', project=self.roject, pageToken=next_page_token)
+                'get', 'b/', project=self.project, pageToken=next_page_token)
 
             assert page["kind"] == "storage#buckets"
             items.extend(page.get("items", []))
@@ -957,17 +979,29 @@ class GCSFileSystem(object):
         meta = self.info(path).get('metadata', {})
         return meta[attr]
 
-    def setxattrs(self, path, **kwargs):
-        """ Set user-defined metadata attributes
+    def setxattrs(self, path, content_type = None, content_encoding=None, **kwargs):
+        """ Set/delete/add writable metadata attributes
 
         Parameters
         ---------
-        kw_args : key-value pairs like field="value", where the values must be
-            strings. Replaces existing metadata.
+        content_type: str
+            Sets the Content-Type. Note: gcsfs defaults to 'application/octet-stream' on uploads
+        content_encoding: str
+            set 'gzip' + content_type 'text/plain' for transcoding (https://cloud.google.com/storage/docs/transcoding)
+        kw_args: key-value pairs like field="value" or field=None
+            value must be string to add or modify, or None to delete
+
+        Returns
+        -------
+        Entire metadata after update (even if only path is passed)
         """
         bucket, key = split_path(path)
-        self._call('put', "b/{}/o/{}", bucket, key,
-                   json={'metadata': kwargs})
+        metadata = self._call('patch', "b/{}/o/{}", bucket, key,
+                              fields='metadata',
+                              json={'contentType':content_type,
+                                    'contentEncoding':content_encoding,
+                                    'metadata': kwargs})
+        return metadata
 
     @_tracemethod
     def head(self, path, size=1024):
@@ -1059,7 +1093,7 @@ class GCSFileSystem(object):
             body = "".join([template.format(i=i+1, bucket=p.split('/', 1)[0],
                             key=quote_plus(p.split('/', 1)[1]))
                             for i, p in enumerate(path)])
-            r = self.session.post('https://www.googleapis.com/batch', headers={
+            r = self._post('https://www.googleapis.com/batch', headers={
                 'Content-Type':
                     'multipart/mixed; boundary="==============='
                     '7330845974216740156=="'},
@@ -1403,7 +1437,7 @@ class GCSFile:
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
                      'Content-Length': str(l)})
-        r = self.gcsfs.session.post(
+        r = self.gcsfs._post(
             self.location, params={'uploadType': 'resumable'},
             headers=head, data=data)
         validate_response(r, self.location)
@@ -1435,7 +1469,7 @@ class GCSFile:
     @_tracemethod
     def _initiate_upload(self):
         """ Create multi-upload """
-        r = self.gcsfs.session.post(
+        r = self.gcsfs._post(
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
             % quote_plus(self.bucket),
             params={'uploadType': 'resumable'},
@@ -1459,7 +1493,7 @@ class GCSFile:
                 '\n--==0=='
                 '\nContent-Type: application/octet-stream'
                 '\n\n').encode() + data + b'\n--==0==--'
-        r = self.gcsfs.session.post(path,
+        r = self.gcsfs._post(path,
                                     headers={
                                         'Content-Type': 'multipart/related; boundary="==0=="'},
                                     params={'uploadType': 'multipart'},
