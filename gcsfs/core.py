@@ -459,12 +459,9 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def _call(self, method, path, *args, **kwargs):
-        if method != 'PATCH':
-            # only pass parameters that have values, except for PATCH (to Delete a field)
-            # see https://cloud.google.com/storage/docs/json_api/v1/how-tos/performance#patch
-            for k, v in list(kwargs.items()):
-                if v is None:
-                    del kwargs[k]
+        for k, v in list(kwargs.items()):
+            if v is None:
+                del kwargs[k]
         json = kwargs.pop('json', None)
         headers = kwargs.pop('headers', None)
         data = kwargs.pop('data', None)
@@ -975,12 +972,17 @@ class GCSFileSystem(object):
         -------
         Entire metadata after update (even if only path is passed)
         """
+        i_json = {'metadata': kwargs}
+        if content_type is not None:
+            i_json['contentType'] = content_type
+        if content_encoding is not None:
+            i_json['contentEncoding'] = content_encoding
+
         bucket, key = split_path(path)
-        json = self._call('PATCH', "b/{}/o/{}", bucket, key,
-                          fields='metadata', json={'contentType': content_type, 'contentEncoding': content_encoding,
-                                                   'metadata': kwargs})\
+        o_json = self._call('PATCH', "b/{}/o/{}", bucket, key,
+                            fields='metadata', json=i_json)\
             .json()
-        return json['metadata']
+        return o_json['metadata']
 
     @_tracemethod
     def head(self, path, size=1024):
