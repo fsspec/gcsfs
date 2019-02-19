@@ -976,12 +976,11 @@ class GCSFileSystem(object):
         Entire metadata after update (even if only path is passed)
         """
         bucket, key = split_path(path)
-        metadata = self._call('PATCH', "b/{}/o/{}", bucket, key,
-                              fields='metadata', json={'contentType': content_type,
-                                                       'contentEncoding': content_encoding,
-                                                       'metadata': kwargs})\
+        json = self._call('PATCH', "b/{}/o/{}", bucket, key,
+                          fields='metadata', json={'contentType': content_type, 'contentEncoding': content_encoding,
+                                                   'metadata': kwargs})\
             .json()
-        return metadata
+        return json['metadata']
 
     @_tracemethod
     def head(self, path, size=1024):
