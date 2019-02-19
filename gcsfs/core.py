@@ -982,7 +982,7 @@ class GCSFileSystem(object):
         o_json = self._call('PATCH', "b/{}/o/{}", bucket, key,
                             fields='metadata', json=i_json)\
             .json()
-        return o_json['metadata']
+        return o_json.get('metadata', {})
 
     @_tracemethod
     def head(self, path, size=1024):
