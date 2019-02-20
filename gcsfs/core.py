@@ -475,7 +475,8 @@ class GCSFileSystem(object):
 
         for retry in range(self.retries):
             try:
-                time.sleep(min(random.random() + (2**retry-1), 32))
+                if retry > 0:
+                    time.sleep(min(random.random() + 2**(retry-1), 32))
                 r = self.session.request(method, path,
                                          params=kwargs, json=json, headers=headers, data=data)
                 validate_response(r, path)
