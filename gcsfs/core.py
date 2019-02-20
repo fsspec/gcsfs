@@ -28,6 +28,7 @@ import requests
 import sys
 import time
 import warnings
+import random
 
 from requests.exceptions import RequestException
 from .utils import HtmlError, RateLimitException, is_retriable, read_block
@@ -265,7 +266,7 @@ class GCSFileSystem(object):
         attempted before deciding that credentials are valid.
     """
     scopes = {'read_only', 'read_write', 'full_control'}
-    retries = 4  # number of retries on http failure
+    retries = 6  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
     _singleton_pars = [None]
@@ -474,7 +475,7 @@ class GCSFileSystem(object):
 
         for retry in range(self.retries):
             try:
-                time.sleep(2**retry - 1)
+                time.sleep(min(random.random() + (2**retry-1), 32))
                 r = self.session.request(method, path,
                                          params=kwargs, json=json, headers=headers, data=data)
                 validate_response(r, path)
