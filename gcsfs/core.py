@@ -480,8 +480,6 @@ class GCSFileSystem(object):
                 validate_response(r, path)
                 break
             except (HtmlError, RequestException, RateLimitException, GoogleAuthError) as e:
-                print(r.content)
-                print(r.json())
                 if retry == self.retries - 1:
                     logger.exception("_call out of retries on exception: %s", e)
                     raise e
