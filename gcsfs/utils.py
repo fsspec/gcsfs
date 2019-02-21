@@ -96,7 +96,7 @@ class RateLimitException(Exception):
         super(RateLimitException, self).__init__(self.message)
 
 
-class HtmlError(Exception):
+class HttpError(Exception):
     """Holds the message and code from cloud errors."""
     def __init__(self, error_response=None):
         if error_response:
@@ -106,7 +106,7 @@ class HtmlError(Exception):
             self.message = ''
             self.code = None
         # Call the base class constructor with the parameters it needs
-        super(HtmlError, self).__init__(self.message)
+        super(HttpError, self).__init__(self.message)
 
 
 RETRIABLE_EXCEPTIONS = (
@@ -125,7 +125,7 @@ def is_retriable(exception):
     """Returns True if this exception is retriable."""
     errs = [*range(500, 505), 429]
     errs += [str(e) for e in errs]
-    if isinstance(exception, HtmlError):
+    if isinstance(exception, HttpError):
         return exception.code in errs
     # https://cloud.google.com/storage/docs/key-terms#immutability
     if isinstance(exception, RateLimitException):

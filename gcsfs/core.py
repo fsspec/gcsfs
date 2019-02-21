@@ -31,7 +31,7 @@ import warnings
 import random
 
 from requests.exceptions import RequestException
-from .utils import HtmlError, RateLimitException, is_retriable, read_block
+from .utils import HttpError, RateLimitException, is_retriable, read_block
 
 PY2 = sys.version_info.major == 2
 
@@ -162,7 +162,7 @@ def validate_response(r, path):
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         elif error:
-            raise HtmlError(error)
+            raise HttpError(error)
         else:
             raise RuntimeError(m)
 
@@ -481,7 +481,7 @@ class GCSFileSystem(object):
                                          params=kwargs, json=json, headers=headers, data=data)
                 validate_response(r, path)
                 break
-            except (HtmlError, RequestException, RateLimitException, GoogleAuthError) as e:
+            except (HttpError, RequestException, RateLimitException, GoogleAuthError) as e:
                 if retry == self.retries - 1:
                     logger.exception("_call out of retries on exception: %s", e)
                     raise e
