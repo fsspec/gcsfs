@@ -6,6 +6,7 @@ matrix:
   include:
     - python: 2.7
     - python: 3.6
+    - python: 3.7
 
 install:
   # install fuse libs
@@ -22,8 +23,8 @@ install:
   # Install dependencies
   - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests pandas decorator -y
   - source activate test
-  - conda install -c conda-forge google-auth google-auth-oauthlib -y
-  - pip install vcrpy fusepy
+  - conda install -c conda-forge google-auth -y
+  - pip install vcrpy fusepy google-auth-oauthlib
 
 script:
   - GCSFS_RECORD_MODE=none py.test -vv -x  gcsfs
