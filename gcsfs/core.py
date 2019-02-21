@@ -1214,6 +1214,11 @@ class GCSFile:
         bucket, key = split_path(path)
         if not key:
             raise OSError('Attempt to open a bucket')
+        elif not gcsfs.exists(bucket):
+            raise OSError(f'Bucket {bucket} does not exist')
+        elif mode not in {'rb', 'wb'}:
+            raise NotImplementedError('File mode not supported')
+
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
@@ -1230,8 +1235,6 @@ class GCSFile:
         self.consistency = consistency
         if self.consistency == 'md5':
             self.md5 = md5()
-        if mode not in {'rb', 'wb'}:
-            raise NotImplementedError('File mode not supported')
         if mode == 'rb':
             self.details = gcsfs.info(path)
             self.size = self.details['size']
