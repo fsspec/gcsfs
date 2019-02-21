@@ -1,5 +1,32 @@
 interactions:
 - request:
+    body: grant_type=refresh_token&client_id=xxx&client_secret=xxx&refresh_token=xxx
+    headers:
+      Accept: ['*/*']
+      Accept-Encoding: ['gzip, deflate']
+      Connection: [keep-alive]
+      Content-Length: ['229']
+      content-type: [application/x-www-form-urlencoded]
+    method: POST
+    uri: https://www.googleapis.com/oauth2/v4/token
+  response:
+    body:
+      string: !!binary |
+        H4sIAFEiblwC/4WOQQoCMQxFr1KylnZAcDFLL1JKjZ1inZQkM62Id9fqAdw+3uf9J4QYUcQr3XCF
+        2UDvHQ4GsNfMKD4PeDxN04dJpIrDWVSrzM611mwiSgVDzWIj3V3YdHEX3EWJQ0J73UrxkVZlKubv
+        jvOOo/594/Xxy50xMDK83tzjrvutAAAA
+    headers:
+      Cache-Control: [private]
+      Content-Encoding: [gzip]
+      Content-Type: [application/json; charset=utf-8]
+      Server: [ESF]
+      Transfer-Encoding: [chunked]
+      Vary: [Origin, X-Origin, Referer]
+      X-Content-Type-Options: [nosniff]
+      X-Frame-Options: [SAMEORIGIN]
+      X-XSS-Protection: [1; mode=block]
+    status: {code: 200, message: OK}
+- request:
     body: null
     headers:
       Accept: ['*/*']
@@ -37,17 +64,26 @@ interactions:
         \"MULTI_REGIONAL\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
         \  \"id\": \"gcsfs-testing\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n
         \  \"projectNumber\": \"586241054156\",\n   \"name\": \"gcsfs-testing\",\n
-        \  \"timeCreated\": \"2018-10-22T19:41:33.096Z\",\n   \"updated\": \"2018-10-22T19:41:33.096Z\",\n
-        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
-        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"timeCreated\": \"2019-02-21T03:27:53.591Z\",\n   \"updated\": \"2019-02-21T03:27:53.591Z\",\n
+        \  \"metageneration\": \"1\",\n   \"iamConfiguration\": {\n    \"bucketPolicyOnly\":
+        {\n     \"enabled\": true,\n     \"lockedTime\": \"2019-05-22T03:27:53.591Z\"\n
+        \   }\n   },\n   \"location\": \"US\",\n   \"storageClass\": \"MULTI_REGIONAL\",\n
+        \  \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n   \"id\":
+        \"kubeflow-anaconda-test\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/kubeflow-anaconda-test\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"kubeflow-anaconda-test\",\n
+        \  \"timeCreated\": \"2018-11-12T18:18:30.094Z\",\n   \"updated\": \"2018-11-12T18:18:30.094Z\",\n
+        \  \"metageneration\": \"1\",\n   \"iamConfiguration\": {\n    \"bucketPolicyOnly\":
+        {\n     \"enabled\": false\n    }\n   },\n   \"location\": \"US\",\n   \"storageClass\":
+        \"MULTI_REGIONAL\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
         \  \"id\": \"mdtemp\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/mdtemp\",\n
         \  \"projectNumber\": \"586241054156\",\n   \"name\": \"mdtemp\",\n   \"timeCreated\":
         \"2018-04-10T01:17:29.182Z\",\n   \"updated\": \"2018-05-10T16:59:01.351Z\",\n
-        \  \"metageneration\": \"2\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \  \"metageneration\": \"2\",\n   \"iamConfiguration\": {\n    \"bucketPolicyOnly\":
+        {\n     \"enabled\": false\n    }\n   },\n   \"location\": \"US\",\n   \"storageClass\":
         \"STANDARD\",\n   \"etag\": \"CAI=\"\n  }\n ]\n}\n"}
     headers:
       Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
-      Content-Length: ['2944']
+      Content-Length: ['3650']
       Content-Type: [application/json; charset=UTF-8]
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
@@ -68,7 +104,7 @@ interactions:
         }\n}\n"}
     headers:
       Cache-Control: ['private, max-age=0']
-      Content-Length: ['237']
+      Content-Length: ['225']
       Content-Type: [application/json; charset=UTF-8]
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
@@ -89,7 +125,7 @@ interactions:
         }\n}\n"}
     headers:
       Cache-Control: ['private, max-age=0']
-      Content-Length: ['237']
+      Content-Length: ['225']
       Content-Type: [application/json; charset=UTF-8]
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
@@ -110,7 +146,7 @@ interactions:
         }\n}\n"}
     headers:
       Cache-Control: ['private, max-age=0']
-      Content-Length: ['237']
+      Content-Length: ['225']
       Content-Type: [application/json; charset=UTF-8]
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
@@ -131,7 +167,7 @@ interactions:
         }\n}\n"}
     headers:
       Cache-Control: ['private, max-age=0']
-      Content-Length: ['237']
+      Content-Length: ['225']
       Content-Type: [application/json; charset=UTF-8]
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
@@ -194,17 +230,26 @@ interactions:
         \"MULTI_REGIONAL\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
         \  \"id\": \"gcsfs-testing\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n
         \  \"projectNumber\": \"586241054156\",\n   \"name\": \"gcsfs-testing\",\n
-        \  \"timeCreated\": \"2018-10-22T19:41:33.096Z\",\n   \"updated\": \"2018-10-22T19:41:33.096Z\",\n
-        \  \"metageneration\": \"1\",\n   \"location\": \"US\",\n   \"storageClass\":
-        \"STANDARD\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
+        \  \"timeCreated\": \"2019-02-21T03:27:53.591Z\",\n   \"updated\": \"2019-02-21T03:27:53.591Z\",\n
+        \  \"metageneration\": \"1\",\n   \"iamConfiguration\": {\n    \"bucketPolicyOnly\":
+        {\n     \"enabled\": true,\n     \"lockedTime\": \"2019-05-22T03:27:53.591Z\"\n
+        \   }\n   },\n   \"location\": \"US\",\n   \"storageClass\": \"MULTI_REGIONAL\",\n
+        \  \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n   \"id\":
+        \"kubeflow-anaconda-test\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/kubeflow-anaconda-test\",\n
+        \  \"projectNumber\": \"586241054156\",\n   \"name\": \"kubeflow-anaconda-test\",\n
+        \  \"timeCreated\": \"2018-11-12T18:18:30.094Z\",\n   \"updated\": \"2018-11-12T18:18:30.094Z\",\n
+        \  \"metageneration\": \"1\",\n   \"iamConfiguration\": {\n    \"bucketPolicyOnly\":
+        {\n     \"enabled\": false\n    }\n   },\n   \"location\": \"US\",\n   \"storageClass\":
+        \"MULTI_REGIONAL\",\n   \"etag\": \"CAE=\"\n  },\n  {\n   \"kind\": \"storage#bucket\",\n
         \  \"id\": \"mdtemp\",\n   \"selfLink\": \"https://www.googleapis.com/storage/v1/b/mdtemp\",\n
         \  \"projectNumber\": \"586241054156\",\n   \"name\": \"mdtemp\",\n   \"timeCreated\":
         \"2018-04-10T01:17:29.182Z\",\n   \"updated\": \"2018-05-10T16:59:01.351Z\",\n
-        \  \"metageneration\": \"2\",\n   \"location\": \"US\",\n   \"storageClass\":
+        \  \"metageneration\": \"2\",\n   \"iamConfiguration\": {\n    \"bucketPolicyOnly\":
+        {\n     \"enabled\": false\n    }\n   },\n   \"location\": \"US\",\n   \"storageClass\":
         \"STANDARD\",\n   \"etag\": \"CAI=\"\n  }\n ]\n}\n"}
     headers:
       Cache-Control: ['private, max-age=0, must-revalidate, no-transform']
-      Content-Length: ['2944']
+      Content-Length: ['3650']
       Content-Type: [application/json; charset=UTF-8]
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
@@ -234,7 +279,7 @@ interactions:
       Accept: ['*/*']
       Accept-Encoding: ['gzip, deflate']
       Connection: [keep-alive]
-      Content-Length: ['40']
+      Content-Length: ['34']
       Content-Type: [application/json]
     method: POST
     uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=projectPrivate&predefinedDefaultObjectAcl=bucketOwnerFullControl&project=test_project
@@ -242,7 +287,7 @@ interactions:
     body: {string: "{\n \"kind\": \"storage#bucket\",\n \"id\": \"gcsfs-testingnew-bucket\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket\",\n
         \"projectNumber\": \"586241054156\",\n \"name\": \"gcsfs-testingnew-bucket\",\n
-        \"timeCreated\": \"2018-11-09T14:47:30.597Z\",\n \"updated\": \"2018-11-09T14:47:30.597Z\",\n
+        \"timeCreated\": \"2019-02-21T04:00:18.896Z\",\n \"updated\": \"2019-02-21T04:00:18.896Z\",\n
         \"metageneration\": \"1\",\n \"acl\": [\n  {\n   \"kind\": \"storage#bucketAccessControl\",\n
         \  \"id\": \"gcsfs-testingnew-bucket/project-owners-586241054156\",\n   \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/acl/project-owners-586241054156\",\n
@@ -261,12 +306,13 @@ interactions:
         \   \"team\": \"viewers\"\n   },\n   \"etag\": \"CAE=\"\n  }\n ],\n \"defaultObjectAcl\":
         [\n  {\n   \"kind\": \"storage#objectAccessControl\",\n   \"entity\": \"project-owners-586241054156\",\n
         \  \"role\": \"OWNER\",\n   \"projectTeam\": {\n    \"projectNumber\": \"586241054156\",\n
-        \   \"team\": \"owners\"\n   },\n   \"etag\": \"CAE=\"\n  }\n ],\n \"owner\":
+        \   \"team\": \"owners\"\n   },\n   \"etag\": \"CAE=\"\n  }\n ],\n \"iamConfiguration\":
+        {\n  \"bucketPolicyOnly\": {\n   \"enabled\": false\n  }\n },\n \"owner\":
         {\n  \"entity\": \"project-owners-586241054156\"\n },\n \"location\": \"US\",\n
         \"storageClass\": \"STANDARD\",\n \"etag\": \"CAE=\"\n}\n"}
     headers:
       Cache-Control: ['no-cache, no-store, max-age=0, must-revalidate']
-      Content-Length: ['2075']
+      Content-Length: ['2078']
       Content-Type: [application/json; charset=UTF-8]
       ETag: [CAE=]
       Pragma: [no-cache]
@@ -322,7 +368,7 @@ interactions:
         }\n}\n"}
     headers:
       Cache-Control: ['private, max-age=0']
-      Content-Length: ['263']
+      Content-Length: ['251']
       Content-Type: [application/json; charset=UTF-8]
       Server: [UploadServer]
       Vary: [Origin, X-Origin]
