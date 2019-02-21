@@ -1,4 +1,8 @@
+import logging
+
 from .core import GCSFileSystem
+
+logger = logging.getLogger('gcsfs')
 
 
 def register():
@@ -121,4 +125,4 @@ def register():
 try:
     register()
 except ImportError as e:
-    print(e)
+    logger.debug(e)
