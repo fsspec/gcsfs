@@ -251,7 +251,7 @@ class GCSFS(Operations):
             self.cache.open(fn)
         else:
             # write (but ignore creation flags)
-            self.gcs.open(fn, 'wb')
+            f = self.gcs.open(fn, 'wb')
             self.write_cache[self.counter] = f
         logger.info('-> fh #{}'.format(self.counter))
         self.counter += 1
