@@ -28,9 +28,10 @@ import requests
 import sys
 import time
 import warnings
+import random
 
 from requests.exceptions import RequestException
-from .utils import HtmlError, RateLimitException, is_retriable, read_block
+from .utils import HttpError, RateLimitException, is_retriable, read_block
 
 PY2 = sys.version_info.major == 2
 
@@ -161,7 +162,7 @@ def validate_response(r, path):
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         elif error:
-            raise HtmlError(error)
+            raise HttpError(error)
         else:
             raise RuntimeError(m)
 
@@ -265,7 +266,7 @@ class GCSFileSystem(object):
         attempted before deciding that credentials are valid.
     """
     scopes = {'read_only', 'read_write', 'full_control'}
-    retries = 4  # number of retries on http failure
+    retries = 6  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
     _singleton = [None]
     _singleton_pars = [None]
@@ -460,20 +461,27 @@ class GCSFileSystem(object):
     @_tracemethod
     def _call(self, method, path, *args, **kwargs):
         for k, v in list(kwargs.items()):
-            # only pass parameters that have values
             if v is None:
                 del kwargs[k]
         json = kwargs.pop('json', None)
-        meth = getattr(self.session, method)
+        headers = kwargs.pop('headers', None)
+        data = kwargs.pop('data', None)
+
+        if not path.startswith('http'):
+            path = self.base + path
+
         if args:
             path = path.format(*[quote_plus(p) for p in args])
+
         for retry in range(self.retries):
             try:
-                time.sleep(2**retry - 1)
-                r = meth(self.base + path, params=kwargs, json=json)
+                if retry > 0:
+                    time.sleep(min(random.random() + 2**(retry-1), 32))
+                r = self.session.request(method, path,
+                                         params=kwargs, json=json, headers=headers, data=data)
                 validate_response(r, path)
                 break
-            except (HtmlError, RequestException, GoogleAuthError) as e:
+            except (HttpError, RequestException, RateLimitException, GoogleAuthError) as e:
                 if retry == self.retries - 1:
                     logger.exception("_call out of retries on exception: %s", e)
                     raise e
@@ -482,11 +490,8 @@ class GCSFileSystem(object):
                     continue
                 logger.exception("_call non-retriable exception: %s", e)
                 raise e
-        try:
-            out = r.json()
-        except ValueError:
-            out = r.content
-        return out
+
+        return r
 
     @property
     def buckets(self):
@@ -531,8 +536,7 @@ class GCSFileSystem(object):
             # listing.
             raise FileNotFoundError(path)
 
-        result = self._process_object(bucket, self._call('get', 'b/{}/o/{}',
-                                                         bucket, key))
+        result = self._process_object(bucket, self._call('GET', 'b/{}/o/{}', bucket, key).json())
 
         return result
 
@@ -570,7 +574,7 @@ class GCSFileSystem(object):
         return listing
 
     @_tracemethod
-    def _do_list_objects(self, path, max_results = None):
+    def _do_list_objects(self, path, max_results=None):
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, prefix = split_path(path)
         if not prefix:
@@ -578,9 +582,8 @@ class GCSFileSystem(object):
 
         prefixes = []
         items = []
-        page = self._call(
-            'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix,
-            maxResults=max_results)
+        page = self._call('GET', 'b/{}/o/', bucket,
+                          delimiter="/", prefix=prefix, maxResults=max_results).json()
 
         assert page["kind"] == "storage#objects"
         prefixes.extend(page.get("prefixes", []))
@@ -588,9 +591,8 @@ class GCSFileSystem(object):
         next_page_token = page.get('nextPageToken', None)
 
         while next_page_token is not None:
-            page = self._call(
-                'get', 'b/{}/o/', bucket, delimiter="/", prefix=prefix,
-                maxResults=max_results, pageToken=next_page_token)
+            page = self._call('GET', 'b/{}/o/', bucket,
+                              delimiter="/", prefix=prefix, maxResults=max_results, pageToken=next_page_token).json()
 
             assert page["kind"] == "storage#objects"
             prefixes.extend(page.get("prefixes", []))
@@ -609,9 +611,8 @@ class GCSFileSystem(object):
     def _list_buckets(self):
         """Return list of all buckets under the current project."""
         items = []
-        page = self._call(
-            'get', 'b/', project=self.project
-        )
+        page = self._call('GET', 'b/',
+                          project=self.project).json()
 
         assert page["kind"] == "storage#buckets"
         items.extend(page.get("items", []))
@@ -619,7 +620,7 @@ class GCSFileSystem(object):
 
         while next_page_token is not None:
             page = self._call(
-                'get', 'b/', project=self.roject, pageToken=next_page_token)
+                'GET', 'b/', project=self.project, pageToken=next_page_token).json()
 
             assert page["kind"] == "storage#buckets"
             items.extend(page.get("items", []))
@@ -671,15 +672,15 @@ class GCSFileSystem(object):
         default_acl: str, one of ACLs
             default ACL for objects created in this bucket
         """
-        self._call('post', 'b/', predefinedAcl=acl, project=self.project,
-                   predefinedDefaultObjectAcl=default_acl,
+        self._call('POST', 'b/',
+                   predefinedAcl=acl, project=self.project, predefinedDefaultObjectAcl=default_acl,
                    json={"name": bucket})
         self.invalidate_cache(bucket)
 
     @_tracemethod
     def rmdir(self, bucket):
         """Delete an empty bucket"""
-        self._call('delete', 'b/' + bucket)
+        self._call('DELETE', 'b/' + bucket)
         self.invalidate_cache(bucket)
 
     @_tracemethod
@@ -957,17 +958,33 @@ class GCSFileSystem(object):
         meta = self.info(path).get('metadata', {})
         return meta[attr]
 
-    def setxattrs(self, path, **kwargs):
-        """ Set user-defined metadata attributes
+    def setxattrs(self, path, content_type=None, content_encoding=None, **kwargs):
+        """ Set/delete/add writable metadata attributes
 
         Parameters
         ---------
-        kw_args : key-value pairs like field="value", where the values must be
-            strings. Replaces existing metadata.
+        content_type: str
+            If not None, set the content-type to this value
+        content_encoding: str
+            If not None, set the content-encoding. See https://cloud.google.com/storage/docs/transcoding
+        kw_args: key-value pairs like field="value" or field=None
+            value must be string to add or modify, or None to delete
+
+        Returns
+        -------
+        Entire metadata after update (even if only path is passed)
         """
+        i_json = {'metadata': kwargs}
+        if content_type is not None:
+            i_json['contentType'] = content_type
+        if content_encoding is not None:
+            i_json['contentEncoding'] = content_encoding
+
         bucket, key = split_path(path)
-        self._call('put', "b/{}/o/{}", bucket, key,
-                   json={'metadata': kwargs})
+        o_json = self._call('PATCH', "b/{}/o/{}", bucket, key,
+                            fields='metadata', json=i_json)\
+            .json()
+        return o_json.get('metadata', {})
 
     @_tracemethod
     def head(self, path, size=1024):
@@ -1013,11 +1030,10 @@ class GCSFileSystem(object):
         """Concatenate objects within a single bucket"""
         bucket, key = split_path(path)
         source = [{'name': split_path(p)[1]} for p in paths]
-        self._call('post', 'b/{}/o/{}/compose', bucket, key,
-                   destinationPredefinedAcl=acl,
-                   json={'sourceObjects': source,
-                         "kind": "storage#composeRequest",
-                         'destination': {'name': key, 'bucket': bucket}})
+        self._call('POST', 'b/{}/o/{}/compose', bucket, key,
+                   destinationPredefinedAcl=acl, json={'sourceObjects': source,
+                                                       "kind": "storage#composeRequest",
+                                                       'destination': {'name': key, 'bucket': bucket}})
 
     @_tracemethod
     def copy(self, path1, path2, acl=None):
@@ -1025,12 +1041,11 @@ class GCSFileSystem(object):
         """
         b1, k1 = split_path(path1)
         b2, k2 = split_path(path2)
-        out = self._call('post', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2,
-                         k2, destinationPredefinedAcl=acl)
-        while out['done'] is not True:
-            out = self._call('post', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1,
-                             b2, k2, rewriteToken=out['rewriteToken'],
-                             destinationPredefinedAcl=acl)
+        out = self._call('POST', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2, k2,
+                         destinationPredefinedAcl=acl)
+        while out.json()['done'] is not True:
+            out = self._call('POST', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2, k2,
+                             rewriteToken=out['rewriteToken'], destinationPredefinedAcl=acl)
 
     @_tracemethod
     def mv(self, path1, path2, acl=None):
@@ -1059,14 +1074,10 @@ class GCSFileSystem(object):
             body = "".join([template.format(i=i+1, bucket=p.split('/', 1)[0],
                             key=quote_plus(p.split('/', 1)[1]))
                             for i, p in enumerate(path)])
-            r = self.session.post('https://www.googleapis.com/batch', headers={
-                'Content-Type':
-                    'multipart/mixed; boundary="==============='
-                    '7330845974216740156=="'},
-                              data=body + "\n--==============="
-                                          "7330845974216740156==--")
-            # actually can have some succeed and some fail
-            validate_response(r, path)
+            r = self._call('POST', 'https://www.googleapis.com/batch',
+                           headers={'Content-Type': 'multipart/mixed; boundary="===============7330845974216740156=="'},
+                           data=body + "\n--===============7330845974216740156==--")
+
             boundary = r.headers['Content-Type'].split('=', 1)[1]
             parents = {posixpath.dirname(norm_path(p)) for p in path}
             [self.invalidate_cache(parent) for parent in parents]
@@ -1076,7 +1087,7 @@ class GCSFileSystem(object):
             return self.rm(self.walk(path))
         else:
             bucket, key = split_path(path)
-            self._call('delete', "b/{}/o/{}", bucket, key)
+            self._call('DELETE', "b/{}/o/{}", bucket, key)
             self.invalidate_cache(posixpath.dirname(norm_path(path)))
             return True
 
@@ -1403,10 +1414,8 @@ class GCSFile:
                 self.offset, self.offset + l - 1)
         head.update({'Content-Type': 'application/octet-stream',
                      'Content-Length': str(l)})
-        r = self.gcsfs.session.post(
-            self.location, params={'uploadType': 'resumable'},
-            headers=head, data=data)
-        validate_response(r, self.location)
+        r = self.gcsfs._call('POST', self.location,
+                             uploadType='resumable', headers=head, data=data)
         if 'Range' in r.headers:
             assert not final, "Response looks like upload is partial"
             shortfall = (self.offset + l - 1) - int(
@@ -1435,11 +1444,9 @@ class GCSFile:
     @_tracemethod
     def _initiate_upload(self):
         """ Create multi-upload """
-        r = self.gcsfs.session.post(
-            'https://www.googleapis.com/upload/storage/v1/b/%s/o'
-            % quote_plus(self.bucket),
-            params={'uploadType': 'resumable'},
-            json={'name': self.key, 'metadata': self.metadata})
+        r = self.gcsfs._call('POST', 'https://www.googleapis.com/upload/storage/v1/b/%s/o' % quote_plus(self.bucket),
+                             uploadType='resumable', json={'name': self.key,
+                                                           'metadata': self.metadata})
         self.location = r.headers['Location']
 
     @_tracemethod
@@ -1459,12 +1466,10 @@ class GCSFile:
                 '\n--==0=='
                 '\nContent-Type: application/octet-stream'
                 '\n\n').encode() + data + b'\n--==0==--'
-        r = self.gcsfs.session.post(path,
-                                    headers={
-                                        'Content-Type': 'multipart/related; boundary="==0=="'},
-                                    params={'uploadType': 'multipart'},
-                                    data=data)
-        validate_response(r, path)
+        r = self.gcsfs._call('POST', path,
+                             uploadType='multipart',
+                             headers={'Content-Type': 'multipart/related; boundary="==0=="'},
+                             data=data)
         size, md5 = int(r.json()['size']), r.json()['md5Hash']
         if self.consistency == 'size':
             assert size == self.buffer.tell(), "Size mismatch"
@@ -1482,17 +1487,14 @@ class GCSFile:
             # First read
             self.start = start
             self.end = end + self.blocksize
-            self.cache = _fetch_range(self.details, self.gcsfs.session,
-                                      self.start, self.end)
+            self.cache = self._fetch_range(self.details, self.start, self.end)
         if start < self.start:
             if self.end - end > self.blocksize:
                 self.start = start
                 self.end = end + self.blocksize
-                self.cache = _fetch_range(self.details, self.gcsfs.session,
-                                          self.start, self.end)
+                self.cache = self._fetch_range(self.details, self.start, self.end)
             else:
-                new = _fetch_range(self.details, self.gcsfs.session,
-                                   start, self.start)
+                new = self._fetch_range(self.details, start, self.start)
                 self.start = start
                 self.cache = new + self.cache
         if end > self.end:
@@ -1501,11 +1503,9 @@ class GCSFile:
             if end - self.end > self.blocksize:
                 self.start = start
                 self.end = end + self.blocksize
-                self.cache = _fetch_range(self.details, self.gcsfs.session,
-                                          self.start, self.end)
+                self.cache = self._fetch_range(self.details, self.start, self.end)
             else:
-                new = _fetch_range(self.details, self.gcsfs.session, self.end,
-                                   end + self.blocksize)
+                new = self._fetch_range(self.details, self.end, end + self.blocksize)
                 self.end = end + self.blocksize
                 self.cache = self.cache + new
 
@@ -1586,27 +1586,28 @@ class GCSFile:
         self.close()
 
 
-@_tracemethod
-def _fetch_range(obj_dict, session, start=None, end=None):
-    """ Get data from GCS
+    @_tracemethod
+    def _fetch_range(self, obj_dict, start=None, end=None):
+        """ Get data from GCS
 
-    obj_dict : an entry from ls() or info()
-    session: requests.Session instance
-    start, end : None or integers
-        if not both None, fetch only given range
-    """
-    if start is not None or end is not None:
-        start = start or 0
-        end = end or 0
-        head = {'Range': 'bytes=%i-%i' % (start, end - 1)}
-    else:
-        head = None
-    r = session.get(obj_dict['mediaLink'], headers=head)
-    data = r.content
-    if data == b'Request range not satisfiable':
-        return b''
-    r.raise_for_status()
-    return data
+        obj_dict : an entry from ls() or info()
+        start, end : None or integers
+            if not both None, fetch only given range
+        """
+        if start is not None or end is not None:
+            start = start or 0
+            end = end or 0
+            head = {'Range': 'bytes=%i-%i' % (start, end - 1)}
+        else:
+            head = None
+        try:
+            r = self.gcsfs._call('GET', obj_dict['mediaLink'],
+                             headers=head)
+            data = r.content
+            return data
+        except RuntimeError as e:
+            if 'not satisfiable' in str(e):
+                return b''
 
 
 def put_object(credentials, bucket, name, data, session):
