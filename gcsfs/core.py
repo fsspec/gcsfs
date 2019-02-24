@@ -53,9 +53,9 @@ def _tracemethod(f, self, *args, **kwargs):
 
 
 # client created 2018-01-16
-not_secret = {"client_id": "586241054156-ls4nduknhnelm2u6jtdgii15gsa3iv4v"
+not_secret = {"client_id": "586241054156-8986sjc0h0683jmpb150i0m8cucrttds"
                            ".apps.googleusercontent.com",
-              "client_secret": "YoiJ6OmFFiJ_5vx-el8HQqKa"}
+              "client_secret": "8_Gk27xMtJzX6tkViMGF2K1B"}
 client_config = {'installed': {
     'client_id': not_secret['client_id'],
     'client_secret': not_secret['client_secret'],
