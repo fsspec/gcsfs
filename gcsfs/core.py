@@ -906,6 +906,31 @@ class GCSFileSystem(object):
         return r.content
 
     @_tracemethod
+    def get_dir(self, rpath, lpath, blocksize=5 * 2 ** 20):
+        """Download remote directory to local
+
+        Parameters
+        ----------
+        rpath: str
+            Remote location
+        lpath: str
+            Local location
+        blocksize: int
+            Chunks in which the data is fetched
+        """
+        os.mkdir(lpath)
+        if not rpath.endswith('/'):
+            rpath += '/'
+        rls = self.ls(rpath)
+        for rsubpath in rls:
+            if rsubpath.endswith('/'):
+                lname = os.path.basename(rsubpath[:-1])
+                self.get_dir(rsubpath, f'{lpath}/{lname}')
+            else:
+                lname = os.path.basename(rsubpath)
+                self.get(rsubpath, f'{lpath}/{lname}', blocksize)
+
+    @_tracemethod
     def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
         """Download remote files to local
 
