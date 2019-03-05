@@ -9,7 +9,6 @@ API
    GCSFileSystem.du
    GCSFileSystem.exists
    GCSFileSystem.get
-   GCSFileSystem.get_dir
    GCSFileSystem.glob
    GCSFileSystem.info
    GCSFileSystem.ls

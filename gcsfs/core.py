@@ -906,32 +906,7 @@ class GCSFileSystem(object):
         return r.content
 
     @_tracemethod
-    def get_dir(self, rpath, lpath, blocksize=5 * 2 ** 20):
-        """Download remote directory to local
-
-        Parameters
-        ----------
-        rpath: str
-            Remote location
-        lpath: str
-            Local location
-        blocksize: int
-            Chunks in which the data is fetched
-        """
-        os.mkdir(lpath)
-        if not rpath.endswith('/'):
-            rpath += '/'
-        rls = self.ls(rpath)
-        for rsubpath in rls:
-            if rsubpath.endswith('/'):
-                lname = os.path.basename(rsubpath[:-1])
-                self.get_dir(rsubpath, f'{lpath}/{lname}')
-            else:
-                lname = os.path.basename(rsubpath)
-                self.get(rsubpath, f'{lpath}/{lname}', blocksize)
-
-    @_tracemethod
-    def get(self, rpath, lpath, blocksize=5 * 2 ** 20):
+    def get(self, rpath, lpath, blocksize=5 * 2 ** 20, recursive=False):
         """Download remote files to local
 
         Parameters
@@ -942,14 +917,31 @@ class GCSFileSystem(object):
             Local location
         blocksize: int
             Chunks in which the data is fetched
+        recursive: bool
+            If true, recursively download files in subdirectories. "rpath" must
+            be a directory.
         """
-        with self.open(rpath, 'rb', block_size=blocksize) as f1:
-            with open(lpath, 'wb') as f2:
-                while True:
-                    d = f1.read(blocksize)
-                    if not d:
-                        break
-                    f2.write(d)
+        if recursive:
+            rpath = os.path.join(rpath, '') # add trailing slash
+            subpaths = [key[len(rpath):] for key in self.walk(rpath)]
+        else:
+            subpaths = ['']
+        for subpath in subpaths:
+            if subpath:
+                lsubpath = os.path.join(lpath, subpath)
+                rsubpath = os.path.join(rpath, subpath)
+                ldirname = os.path.dirname(lsubpath)
+                os.makedirs(ldirname, exist_ok=True)
+            else:
+                rsubpath = rpath
+                lsubpath = lpath
+            with self.open(rsubpath, 'rb', block_size=blocksize) as f1:
+                with open(lsubpath, 'wb') as f2:
+                    while True:
+                        d = f1.read(blocksize)
+                        if not d:
+                            break
+                        f2.write(d)
 
     @_tracemethod
     def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None,
