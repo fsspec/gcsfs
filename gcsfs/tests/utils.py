@@ -144,7 +144,7 @@ def ignoring(*exceptions):
         pass
 
 
-@pytest.yield_fixture()
+@contextmanager
 def tempdir():
     d = tempfile.mkdtemp()
     yield d

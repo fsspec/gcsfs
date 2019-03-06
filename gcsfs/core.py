@@ -922,7 +922,8 @@ class GCSFileSystem(object):
             be a directory.
         """
         if recursive:
-            rpath = os.path.join(rpath, '') # add trailing slash
+            if not rpath.endswith('/'):
+                rpath += '/'
             subpaths = [key[len(rpath):] for key in self.walk(rpath)]
         else:
             subpaths = ['']
