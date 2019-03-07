@@ -932,7 +932,9 @@ class GCSFileSystem(object):
                 lsubpath = os.path.join(lpath, subpath)
                 rsubpath = os.path.join(rpath, subpath)
                 ldirname = os.path.dirname(lsubpath)
-                os.makedirs(ldirname, exist_ok=True)
+                if not os.path.exists(ldirname):
+                    # python2 doesn't have exist_ok argument in makedirs
+                    os.makedirs(ldirname)
             else:
                 rsubpath = rpath
                 lsubpath = lpath
