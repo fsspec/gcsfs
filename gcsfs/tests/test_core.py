@@ -309,6 +309,25 @@ def test_get_put(token_restore):
 
 
 @my_vcr.use_cassette(match=['all'])
+def test_get_put_recursive(token_restore):
+    with gcs_maker(True) as gcs:
+        with tempdir() as dn:
+            gcs.get(TEST_BUCKET+'/test', dn, recursive=True)
+            data1 = files['test/accounts.1.json']
+            data2 = files['test/accounts.2.json']
+            assert open(dn+'/accounts.1.json', 'rb').read() == data1
+            assert open(dn+'/accounts.2.json', 'rb').read() == data2
+            gcs.put(dn+'/accounts.1.json', TEST_BUCKET+'/temp')
+            assert gcs.du(TEST_BUCKET+'/temp')[
+                       TEST_BUCKET+'/temp'] == len(data1)
+            assert gcs.cat(TEST_BUCKET+'/temp') == data1
+            gcs.put(dn+'/accounts.2.json', TEST_BUCKET+'/temp')
+            assert gcs.du(TEST_BUCKET+'/temp')[
+                       TEST_BUCKET+'/temp'] == len(data2)
+            assert gcs.cat(TEST_BUCKET+'/temp') == data2
+
+
+@my_vcr.use_cassette(match=['all'])
 def test_errors(token_restore):
     with gcs_maker() as gcs:
         with pytest.raises((IOError, OSError)):

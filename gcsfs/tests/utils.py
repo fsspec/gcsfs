@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import gzip
 import json
 import os
+import shutil
 import re
 import pytest
 import pickle
@@ -144,12 +145,16 @@ def ignoring(*exceptions):
         pass
 
 
-@pytest.yield_fixture()
-def tempdir():
-    d = tempfile.mkdtemp()
-    yield d
-    if os.path.exists(d):
-        shutil.rmtree(d, ignore_errors=True)
+@contextmanager
+def tempdir(dir=None):
+    dirname = tempfile.mkdtemp(dir=dir)
+    shutil.rmtree(dirname, ignore_errors=True)
+
+    try:
+        yield dirname
+    finally:
+        if os.path.exists(dirname):
+            shutil.rmtree(dirname, ignore_errors=True)
 
 
 @contextmanager
