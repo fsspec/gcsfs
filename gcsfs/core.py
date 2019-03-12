@@ -948,8 +948,8 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None,
-            metadata=None):
-        """Upload local file to remote
+            metadata=None, recursive=False):
+        """Upload local files to remote
 
         Parameters
         ----------
@@ -963,15 +963,31 @@ class GCSFileSystem(object):
             Optional access control to apply to the created object
         metadata: None or dict
             Gets added to object metadata on server
+        recursive: bool
+            If true, recursively upload local directory and its contents
         """
-        with self.open(rpath, 'wb', block_size=blocksize, acl=acl,
-                       metadata=metadata) as f1:
-            with open(lpath, 'rb') as f2:
-                while True:
-                    d = f2.read(blocksize)
-                    if not d:
-                        break
-                    f1.write(d)
+        if recursive:
+            while lpath.endswith('/'):
+                lpath = lpath[:-1]
+            if not rpath.endswith('/'):
+                rpath += '/'
+            rootdir = os.path.basename(lpath)
+            rpath += rootdir
+            subpaths = []
+            for dirname, subdirlist, filelist in os.walk(lpath):
+                subdirname = dirname[len(lpath):]
+                subpaths += [subdirname+'/'+filename for filename in filelist]
+        else:
+            subpaths = ['']
+        for subpath in subpaths:
+            with self.open(rpath+subpath, 'wb', block_size=blocksize, acl=acl,
+                           metadata=metadata) as f1:
+                with open(lpath+subpath, 'rb') as f2:
+                    while True:
+                        d = f2.read(blocksize)
+                        if not d:
+                            break
+                        f1.write(d)
 
     def getxattr(self, path, attr):
         """Get user-defined metadata attribute"""
