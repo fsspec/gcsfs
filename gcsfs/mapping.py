@@ -32,7 +32,7 @@ class GCSMap(MutableMapping):
 
     def __init__(self, root, gcs=None, check=False, create=False):
         self.gcs = gcs or GCSFileSystem.current()
-        self.root = root.rstrip('/')
+        self.root = root.rstrip('/').lstrip('/')
         bucket = split_path(root)[0]
         if create:
             self.gcs.mkdir(bucket)
