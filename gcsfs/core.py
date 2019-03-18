@@ -918,28 +918,28 @@ class GCSFileSystem(object):
         blocksize: int
             Chunks in which the data is fetched
         recursive: bool
-            If true, recursively download files in subdirectories. "rpath" must
-            be a directory.
+            If true, recursively download files in subdirectories.
         """
         if recursive:
-            if not rpath.endswith('/'):
-                rpath += '/'
-            subpaths = [key[len(rpath):] for key in self.walk(rpath)]
-        else:
-            subpaths = ['']
-        for subpath in subpaths:
-            if subpath:
-                lsubpath = os.path.join(lpath, subpath)
-                rsubpath = os.path.join(rpath, subpath)
-                ldirname = os.path.dirname(lsubpath)
-                if not os.path.exists(ldirname):
-                    # python2 doesn't have exist_ok argument in makedirs
-                    os.makedirs(ldirname)
+            rpaths = self.walk(rpath)
+            rootdir = os.path.basename(rpath.rstrip('/'))
+            if os.path.isdir(lpath):
+                # copy rpath inside lpath directory
+                lpath2 = os.path.join(lpath, rootdir)
             else:
-                rsubpath = rpath
-                lsubpath = lpath
-            with self.open(rsubpath, 'rb', block_size=blocksize) as f1:
-                with open(lsubpath, 'wb') as f2:
+                # copy rpath as lpath directory
+                lpath2 = lpath
+            lpaths = [os.path.join(lpath2, path[len(rpath):].lstrip('/')) for path in rpaths]
+            for lpath in lpaths:
+                dirname = os.path.dirname(lpath)
+                if not os.path.isdir(dirname):
+                    os.makedirs(dirname)
+        else:
+            rpaths = [rpath]
+            lpaths = [lpath]
+        for rpath, lpath in zip(rpaths, lpaths):
+            with self.open(rpath, 'rb', block_size=blocksize) as f1:
+                with open(lpath, 'wb') as f2:
                     while True:
                         d = f1.read(blocksize)
                         if not d:
@@ -948,8 +948,8 @@ class GCSFileSystem(object):
 
     @_tracemethod
     def put(self, lpath, rpath, blocksize=5 * 2 ** 20, acl=None,
-            metadata=None):
-        """Upload local file to remote
+            metadata=None, recursive=False):
+        """Upload local files to remote
 
         Parameters
         ----------
@@ -963,15 +963,33 @@ class GCSFileSystem(object):
             Optional access control to apply to the created object
         metadata: None or dict
             Gets added to object metadata on server
+        recursive: bool
+            If true, recursively upload files in subdirectories
         """
-        with self.open(rpath, 'wb', block_size=blocksize, acl=acl,
-                       metadata=metadata) as f1:
-            with open(lpath, 'rb') as f2:
-                while True:
-                    d = f2.read(blocksize)
-                    if not d:
-                        break
-                    f1.write(d)
+        if recursive:
+            lpaths = []
+            for dirname, subdirlist, filelist in os.walk(lpath):
+                lpaths += [os.path.join(dirname, filename) for filename in filelist]
+            rootdir = os.path.basename(lpath.rstrip('/'))
+            if self.exists(rpath):
+                # copy lpath inside rpath directory
+                rpath2 = os.path.join(rpath, rootdir)
+            else:
+                # copy lpath as rpath directory
+                rpath2 = rpath
+            rpaths = [os.path.join(rpath2, path[len(lpath):].lstrip('/')) for path in lpaths]
+        else:
+            lpaths = [lpath]
+            rpaths = [rpath]
+        for lpath, rpath in zip(lpaths, rpaths):
+            with self.open(rpath, 'wb', block_size=blocksize, acl=acl,
+                           metadata=metadata) as f1:
+                with open(lpath, 'rb') as f2:
+                    while True:
+                        d = f2.read(blocksize)
+                        if not d:
+                            break
+                        f1.write(d)
 
     def getxattr(self, path, attr):
         """Get user-defined metadata attribute"""
