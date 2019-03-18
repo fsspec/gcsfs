@@ -312,7 +312,7 @@ def test_get_put(token_restore):
 def test_get_put_recursive(token_restore):
     with gcs_maker(True) as gcs:
         with tempdir() as dn:
-            gcs.get(TEST_BUCKET+'/test', dn+'/temp_dir', recursive=True)
+            gcs.get(TEST_BUCKET+'/test/', dn+'/temp_dir', recursive=True)
             # there is now in local directory:
             # dn+'/temp_dir/accounts.1.json'
             # dn+'/temp_dir/accounts.2.json'
@@ -320,7 +320,7 @@ def test_get_put_recursive(token_restore):
             data2 = files['test/accounts.2.json']
             assert open(dn+'/temp_dir/accounts.1.json', 'rb').read() == data1
             assert open(dn+'/temp_dir/accounts.2.json', 'rb').read() == data2
-            gcs.put(dn+'/temp_dir', TEST_BUCKET, recursive=True)
+            gcs.put(dn+'/temp_dir', TEST_BUCKET+'/temp_dir', recursive=True)
             # there is now in remote directory:
             # TEST_BUCKET+'/temp_dir/accounts.1.json'
             # TEST_BUCKET+'/temp_dir/accounts.2.json'

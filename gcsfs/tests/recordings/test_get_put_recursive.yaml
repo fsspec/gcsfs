@@ -675,6 +675,27 @@ interactions:
       X-Goog-Storage-Class: [STANDARD]
     status: {code: 206, message: Partial Content}
 - request:
+    body: null
+    headers:
+      Accept: ['*/*']
+      Accept-Encoding: ['gzip, deflate']
+      Connection: [keep-alive]
+      Content-Length: ['0']
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/temp_dir
+  response:
+    body: {string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
+        \   \"reason\": \"notFound\",\n    \"message\": \"No such object: gcsfs-testing/temp_dir\"\n
+        \  }\n  ],\n  \"code\": 404,\n  \"message\": \"No such object: gcsfs-testing/temp_dir\"\n
+        }\n}\n"}
+    headers:
+      Cache-Control: ['private, max-age=0']
+      Content-Length: ['237']
+      Content-Type: [application/json; charset=UTF-8]
+      Server: [UploadServer]
+      Vary: [Origin, X-Origin]
+    status: {code: 404, message: Not Found}
+- request:
     body: '--==0==
 
       Content-Type: application/json; charset=UTF-8
