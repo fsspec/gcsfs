@@ -1464,9 +1464,10 @@ class GCSFile:
     @_tracemethod
     def _initiate_upload(self):
         """ Create multi-upload """
-        r = self.gcsfs._call('POST', 'https://www.googleapis.com/upload/storage/v1/b/%s/o' % quote_plus(self.bucket),
-                             uploadType='resumable', json={'name': self.key,
-                                                           'metadata': self.metadata})
+        r = self.gcsfs._call('POST', 'https://www.googleapis.com/upload/storage'
+                                     '/v1/b/%s/o' % quote_plus(self.bucket),
+                             uploadType='resumable',
+                             json={'name': self.key, 'metadata': self.metadata})
         self.location = r.headers['Location']
 
     @_tracemethod
