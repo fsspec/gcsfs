@@ -98,6 +98,9 @@ Several modes of authentication are supported:
     - you can also generate tokens via Oauth2 in the browser using ``token='browser'``,
       which gcsfs then caches in a special file, ~/.gcs_tokens, and can subsequently be accessed with ``token='cache'``.
 
+    - anonymous only access can be selected using ``token='anon'``, e.g. to access
+      public resources such as 'anaconda-public-data'.
+
 The acquired session tokens are *not* preserved when serializing the instances, so
 it is safe to pass them to worker processes on other machines if using in a
 distributed computation context. If credentials are given by a file path, however,

@@ -426,7 +426,7 @@ class GCSFileSystem(object):
                           'browser', None]:
             self._connect_token(method)
         elif method is None:
-            for meth in ['google_default', 'cache', 'cloud', 'anon']:
+            for meth in ['google_default', 'cache', 'anon']:
                 try:
                     self.connect(method=meth)
                     if self.check_credentials and meth != 'anon':
