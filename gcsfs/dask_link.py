@@ -85,7 +85,7 @@ def register():
                     except OSError:
                         return False
 
-                def walk(self, path, refresh=False):
+                def walk(self, path, refresh=False, maxdepth=5):
                     """
                     Directory tree generator, like os.walk
 
