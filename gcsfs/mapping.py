@@ -67,7 +67,6 @@ class GCSMap(MutableMapping):
             return self.gcs.cat(key)
         except (IOError, OSError):
             raise KeyError(key)
-        return result
 
     def __setitem__(self, key, value):
         key = self._key_to_str(key)
