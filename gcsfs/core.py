@@ -920,6 +920,8 @@ class GCSFileSystem(object):
         recursive: bool
             If true, recursively download files in subdirectories.
         """
+        rpath = norm_path(rpath)
+
         if recursive:
             rpaths = self.walk(rpath)
             rootdir = os.path.basename(rpath.rstrip('/'))

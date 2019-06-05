@@ -308,11 +308,12 @@ def test_get_put(token_restore):
             assert gcs.cat(TEST_BUCKET+'/temp') == data
 
 
+@pytest.mark.parametrize("protocol", ['', 'gs://', 'gcs://'])
 @my_vcr.use_cassette(match=['all'])
-def test_get_put_recursive(token_restore):
+def test_get_put_recursive(token_restore, protocol):
     with gcs_maker(True) as gcs:
         with tempdir() as dn:
-            gcs.get(TEST_BUCKET+'/test/', dn+'/temp_dir', recursive=True)
+            gcs.get(protocol+TEST_BUCKET+'/test/', dn+'/temp_dir', recursive=True)
             # there is now in local directory:
             # dn+'/temp_dir/accounts.1.json'
             # dn+'/temp_dir/accounts.2.json'
@@ -320,16 +321,16 @@ def test_get_put_recursive(token_restore):
             data2 = files['test/accounts.2.json']
             assert open(dn+'/temp_dir/accounts.1.json', 'rb').read() == data1
             assert open(dn+'/temp_dir/accounts.2.json', 'rb').read() == data2
-            gcs.put(dn+'/temp_dir', TEST_BUCKET+'/temp_dir', recursive=True)
+            gcs.put(dn+'/temp_dir', protocol+TEST_BUCKET+'/temp_dir', recursive=True)
             # there is now in remote directory:
-            # TEST_BUCKET+'/temp_dir/accounts.1.json'
-            # TEST_BUCKET+'/temp_dir/accounts.2.json'
-            assert gcs.du(TEST_BUCKET+'/temp_dir/accounts.1.json')[
+            # protocol+TEST_BUCKET+'/temp_dir/accounts.1.json'
+            # protocol+TEST_BUCKET+'/temp_dir/accounts.2.json'
+            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json')[
                        TEST_BUCKET+'/temp_dir/accounts.1.json'] == len(data1)
-            assert gcs.cat(TEST_BUCKET+'/temp_dir/accounts.1.json') == data1
-            assert gcs.du(TEST_BUCKET+'/temp_dir/accounts.2.json')[
+            assert gcs.cat(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json') == data1
+            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json')[
                        TEST_BUCKET+'/temp_dir/accounts.2.json'] == len(data2)
-            assert gcs.cat(TEST_BUCKET+'/temp_dir/accounts.2.json') == data2
+            assert gcs.cat(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json') == data2
 
 
 @my_vcr.use_cassette(match=['all'])
