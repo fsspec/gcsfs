@@ -389,7 +389,7 @@ class GCSFileSystem(object):
                 token = json.load(open(token))
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
-        elif isinstance(token, Credentials):
+        elif isinstance(token, gauth.credentials.Credentials):
             credentials = token
         else:
             raise ValueError('Token format no understood')
