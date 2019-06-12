@@ -10,6 +10,7 @@ import array
 from base64 import b64encode, b64decode
 import google.auth as gauth
 import google.auth.compute_engine
+import google.auth.credentials
 from google.auth.transport.requests import AuthorizedSession
 from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
@@ -389,10 +390,10 @@ class GCSFileSystem(object):
                 token = json.load(open(token))
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
-        elif isinstance(token, Credentials):
+        elif isinstance(token, google.auth.credentials.Credentials):
             credentials = token
         else:
-            raise ValueError('Token format no understood')
+            raise ValueError('Token format not understood')
         self.session = AuthorizedSession(credentials)
 
     def _connect_service(self, fn):
