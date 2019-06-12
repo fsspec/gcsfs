@@ -276,7 +276,7 @@ class GCSFileSystem(object):
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
                  cache_timeout=None, secure_serialize=True,
-                 check_connection=True):
+                 check_connection=True, requests_timeout=None):
         pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
@@ -290,6 +290,7 @@ class GCSFileSystem(object):
         self.consistency = consistency
         self.token = token
         self.cache_timeout = cache_timeout
+        self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         if pars == self._singleton_pars[0]:
             inst = self._singleton[0]
@@ -479,7 +480,7 @@ class GCSFileSystem(object):
                 if retry > 0:
                     time.sleep(min(random.random() + 2**(retry-1), 32))
                 r = self.session.request(method, path,
-                                         params=kwargs, json=json, headers=headers, data=data)
+                                         params=kwargs, json=json, headers=headers, data=data, timeout=self.requests_timeout)
                 validate_response(r, path)
                 break
             except (HttpError, RequestException, RateLimitException, GoogleAuthError) as e:
