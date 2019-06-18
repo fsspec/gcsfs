@@ -16,7 +16,7 @@ The GCSFS library can be installed using ``conda`` or ``pip``:
 
 .. code-block:: bash
 
-   conda install gcsfs
+   conda install -c conda-forge gcsfs
    or
    pip install gcsfs
 
