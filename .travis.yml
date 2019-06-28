@@ -23,6 +23,7 @@ install:
   - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests pandas decorator -y
   - source activate test
   - conda install -c conda-forge google-auth -y
+  - pip install git+https://github.com/intake/filesystem_spec
   - pip install vcrpy fusepy google-auth-oauthlib
 
 script:
