@@ -191,8 +191,11 @@ def gcs_maker(populate=False):
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
     gcs.invalidate_cache()
     try:
-        if not gcs.exists(TEST_BUCKET):
-            gcs.mkdir(TEST_BUCKET)
+        try:
+            gcs.mkdir(TEST_BUCKET, default_acl="authenticatedread",
+                      acl="publicReadWrite")
+        except:
+            pass
         for k in [a, b, c, d]:
             try:
                 gcs.rm(k)
@@ -206,6 +209,6 @@ def gcs_maker(populate=False):
         yield gcs
     finally:
         try:
-            [gcs.rm(f) for f in gcs.walk(TEST_BUCKET)]
+            [gcs.rm(f) for f in gcs.find(TEST_BUCKET)]
         except:
             pass

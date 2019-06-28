@@ -299,8 +299,7 @@ def test_get_put(token_restore):
             data = files['test/accounts.1.json']
             assert open(fn, 'rb').read() == data
             gcs.put(fn, TEST_BUCKET+'/temp')
-            assert gcs.du(TEST_BUCKET+'/temp')[
-                       TEST_BUCKET+'/temp'] == len(data)
+            assert gcs.du(TEST_BUCKET+'/temp') == len(data)
             assert gcs.cat(TEST_BUCKET+'/temp') == data
 
 
@@ -321,11 +320,11 @@ def test_get_put_recursive(token_restore, protocol):
             # there is now in remote directory:
             # protocol+TEST_BUCKET+'/temp_dir/accounts.1.json'
             # protocol+TEST_BUCKET+'/temp_dir/accounts.2.json'
-            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json')[
-                       TEST_BUCKET+'/temp_dir/accounts.1.json'] == len(data1)
+            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json'
+                          ) == len(data1)
             assert gcs.cat(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json') == data1
-            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json')[
-                       TEST_BUCKET+'/temp_dir/accounts.2.json'] == len(data2)
+            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json'
+                          ) == len(data2)
             assert gcs.cat(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json') == data2
 
 

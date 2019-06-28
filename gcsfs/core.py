@@ -2,7 +2,6 @@
 """
 Google Cloud Storage pythonic interface
 """
-from __future__ import print_function
 import fsspec
 
 import decorator
@@ -272,6 +271,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     _singleton = [None]
     _singleton_pars = [None]
     default_block_size = DEFAULT_BLOCK_SIZE
+    protocol = 'gcs', 'gs'
 
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
@@ -566,20 +566,28 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         prefixes = []
         items = []
         page = self._call('GET', 'b/{}/o/', bucket,
-                          delimiter="/", prefix=prefix, maxResults=max_results).json()
+                          delimiter="/", prefix=prefix, maxResults=max_results
+                          ).json()
 
         assert page["kind"] == "storage#objects"
         prefixes.extend(page.get("prefixes", []))
-        items.extend(page.get("items", []))
+        items.extend([i for i in page.get("items", [])
+                      if prefix is None
+                      or i['name'].rstrip('/') == prefix.rstrip('/')
+                      or i['name'].startswith(prefix.rstrip('/') + '/')])
         next_page_token = page.get('nextPageToken', None)
 
         while next_page_token is not None:
             page = self._call('GET', 'b/{}/o/', bucket,
-                              delimiter="/", prefix=prefix, maxResults=max_results, pageToken=next_page_token).json()
+                              delimiter="/", prefix=prefix,
+                              maxResults=max_results, pageToken=next_page_token
+                              ).json()
 
             assert page["kind"] == "storage#objects"
             prefixes.extend(page.get("prefixes", []))
-            items.extend(page.get("items", []))
+            items.extend([
+                i for i in page.get("items", [])
+            ])
             next_page_token = page.get('nextPageToken', None)
 
         result = {
@@ -622,7 +630,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             If None, clear all listings cached else listings at or under given
             path.
         """
-
         if not path:
             logger.debug("invalidate_cache clearing cache")
             self._listing_cache.clear()
