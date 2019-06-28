@@ -276,7 +276,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
                  cache_timeout=None, secure_serialize=True,
-                 check_connection=True, **kwargs):
+                 check_connection=True, requests_timeout=None, **kwargs):
         super().__init__(self, **kwargs)
         pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
@@ -291,6 +291,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.consistency = consistency
         self.token = token
         self.cache_timeout = cache_timeout
+        self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         self._listing_cache = {}
         self.session = None
@@ -460,7 +461,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 if retry > 0:
                     time.sleep(min(random.random() + 2**(retry-1), 32))
                 r = self.session.request(method, path,
-                                         params=kwargs, json=json, headers=headers, data=data)
+                                         params=kwargs, json=json, headers=headers, data=data, timeout=self.requests_timeout)
                 validate_response(r, path)
                 break
             except (HttpError, RequestException, RateLimitException, GoogleAuthError) as e:
