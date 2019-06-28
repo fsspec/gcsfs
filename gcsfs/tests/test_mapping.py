@@ -2,37 +2,36 @@ import pytest
 from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
 from gcsfs.tests.utils import (tempdir, token_restore, my_vcr, gcs_maker,
                                files, csv_files, text_files, a, b, c, d)
-from gcsfs import GCSMap, GCSFileSystem, core
+from gcsfs import GCSFileSystem, core
 
 root = TEST_BUCKET+'/mapping'
 
 @my_vcr.use_cassette(match=['all'])
 def test_map_simple(token_restore):
     with gcs_maker() as gcs:
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         assert not d
 
         assert list(d) == list(d.keys()) == []
         assert list(d.values()) == []
         assert list(d.items()) == []
-        d = GCSMap(root, gcs, check=True)
 
 
 @my_vcr.use_cassette(match=['all'])
 def test_map_default_gcsfilesystem(token_restore):
     with gcs_maker() as gcs:
-        d = GCSMap(root)
-        assert d.gcs is gcs
+        d = gcs.get_mapper(root)
+        assert d.fs is gcs
 
 
 @my_vcr.use_cassette(match=['all'])
 def test_map_errors(token_restore):
     with gcs_maker() as gcs:
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         with pytest.raises(KeyError):
             d['nonexistent']
         try:
-            GCSMap('does-not-exist')
+            gcs.get_mapper('does-not-exist')
         except Exception as e:
             assert 'does-not-exist' in str(e)
 
@@ -40,7 +39,7 @@ def test_map_errors(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_map_with_data(token_restore):
     with gcs_maker() as gcs:
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         d['x'] = b'123'
         assert list(d) == list(d.keys()) == ['x']
         assert list(d.values()) == [b'123']
@@ -48,7 +47,7 @@ def test_map_with_data(token_restore):
         assert d['x'] == b'123'
         assert bool(d)
 
-        assert gcs.walk(root) == [TEST_BUCKET+'/mapping/x']
+        assert gcs.find(root) == [TEST_BUCKET+'/mapping/x']
         d['x'] = b'000'
         assert d['x'] == b'000'
 
@@ -63,7 +62,7 @@ def test_map_with_data(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_map_complex_keys(token_restore):
     with gcs_maker() as gcs:
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         d[1] = b'hello'
         assert d[1] == b'hello'
         del d[1]
@@ -81,7 +80,7 @@ def test_map_complex_keys(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_map_clear_empty(token_restore):
     with gcs_maker() as gcs:
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         d.clear()
         assert list(d) == []
         d[1] = b'1'
@@ -93,7 +92,7 @@ def test_map_clear_empty(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_map_pickle(token_restore):
     with gcs_maker() as gcs:
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         d['x'] = b'1'
         assert d['x'] == b'1'
 
@@ -107,7 +106,7 @@ def test_map_pickle(token_restore):
 def test_map_array(token_restore):
     with gcs_maker() as gcs:
         from array import array
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         d['x'] = array('B', [65] * 1000)
 
         assert d['x'] == b'A' * 1000
@@ -117,7 +116,7 @@ def test_map_array(token_restore):
 def test_map_bytearray(token_restore):
     with gcs_maker() as gcs:
         from array import array
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         d['x'] = bytearray(b'123')
 
         assert d['x'] == b'123'
@@ -132,14 +131,14 @@ def test_new_bucket(token_restore):
         except:
             pass
         with pytest.raises(Exception) as e:
-            d = GCSMap(new_bucket, gcs, check=True)
+            d = gcs.get_mapper(new_bucket, check=True)
         assert 'create=True' in str(e)
 
         try:
-            d = GCSMap(new_bucket, gcs, create=True)
+            d = gcs.get_mapper(new_bucket, create=True)
             assert not d
 
-            d = GCSMap(new_bucket + '/new-directory', gcs)
+            d = gcs.get_mapper(new_bucket + '/new-directory')
             assert not d
         finally:
             gcs.rmdir(new_bucket)
@@ -149,7 +148,7 @@ def test_new_bucket(token_restore):
 def test_map_pickle(token_restore):
     import pickle
     with gcs_maker() as gcs:
-        d = GCSMap(root, gcs)
+        d = gcs.get_mapper(root)
         d['x'] = b'1234567890'
 
         b = pickle.dumps(d)
