@@ -101,7 +101,7 @@ def test_ls_touch(token_restore):
         assert set(L) == set([a, b])
 
         L_d = gcs.ls(TEST_BUCKET+'/tmp/test', True)
-        assert set(d['path'] for d in L_d) == set([a, b])
+        assert set(d['name'] for d in L_d) == set([a, b])
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -123,11 +123,11 @@ def test_rm_batch(token_restore):
     with gcs_maker() as gcs:
         gcs.touch(a)
         gcs.touch(b)
-        assert a in gcs.walk(TEST_BUCKET)
-        assert b in gcs.walk(TEST_BUCKET)
+        assert a in gcs.find(TEST_BUCKET)
+        assert b in gcs.find(TEST_BUCKET)
         gcs.rm([a, b])
-        assert a not in gcs.walk(TEST_BUCKET)
-        assert b not in gcs.walk(TEST_BUCKET)
+        assert a not in gcs.find(TEST_BUCKET)
+        assert b not in gcs.find(TEST_BUCKET)
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -203,15 +203,13 @@ def test_gcs_glob(token_restore):
         fn = TEST_BUCKET+'/nested/file1'
         assert fn not in gcs.glob(TEST_BUCKET+'/')
         assert fn not in gcs.glob(TEST_BUCKET+'/*')
-        assert fn in gcs.glob(TEST_BUCKET+'/nested')
+        assert fn in gcs.glob(TEST_BUCKET+'/nested/')
         assert fn in gcs.glob(TEST_BUCKET+'/nested/*')
         assert fn in gcs.glob(TEST_BUCKET+'/nested/file*')
         assert fn in gcs.glob(TEST_BUCKET+'/*/*')
         assert fn in gcs.glob(TEST_BUCKET+'/**')
-        assert all(f in gcs.walk(TEST_BUCKET) for f in
+        assert all(f in gcs.find(TEST_BUCKET) for f in
                    gcs.glob(TEST_BUCKET+'/nested/*'))
-        with pytest.raises(ValueError):
-            gcs.glob('*')
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -362,12 +360,6 @@ def test_errors(token_restore):
         with pytest.raises(ValueError) as e:
             gcs.mkdir('/')
             assert 'bucket' in str(e)
-
-        with pytest.raises(ValueError):
-            gcs.walk('')
-
-        with pytest.raises(ValueError):
-            gcs.walk('gcs://')
 
 
 @my_vcr.use_cassette(match=['all'])

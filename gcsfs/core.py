@@ -656,6 +656,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         default_acl: str, one of ACLs
             default ACL for objects created in this bucket
         """
+        if bucket in ['', '/']:
+            raise ValueError('Cannot create root bucket')
         if '/' in bucket:
             return
         self._call('post', 'b/', predefinedAcl=acl, project=self.project,
@@ -781,6 +783,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         o_json = self._call('PATCH', "b/{}/o/{}", bucket, key,
                             fields='metadata', json=i_json
                             ).json()
+        self.info(path)['metadata'] = o_json.get('metadata', {})
         return o_json.get('metadata', {})
 
     @_tracemethod
@@ -815,7 +818,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         Returns whether operation succeeded (a list if input was a list)
 
-        If recursive, delete all keys given by walk(path)
+        If recursive, delete all keys given by find(path)
         """
         if isinstance(path, (tuple, list)):
             template = ('\n--===============7330845974216740156==\n'
@@ -875,7 +878,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def __init__(self, gcsfs, path, mode='rb', block_size=DEFAULT_BLOCK_SIZE,
                  acl=None, consistency='md5', metadata=None,
-                 autocommit=True):
+                 autocommit=True, **kwargs):
         """
         Open a file.
 
@@ -900,7 +903,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
         """
-        super().__init__(gcsfs, path, mode, block_size, autocommit=autocommit)
+        super().__init__(gcsfs, path, mode, block_size, autocommit=autocommit,
+                         **kwargs)
         bucket, key = split_path(path)
         if not key:
             raise OSError('Attempt to open a bucket')
@@ -961,9 +965,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         r = self.gcsfs._call('POST', self.location,
                              uploadType='resumable', headers=head, data=data)
         if 'Range' in r.headers:
-            assert not final, "Response looks like upload is partial"
-            shortfall = (self.offset + l - 1) - int(
-                    r.headers['Range'].split('-')[1])
+            end = int(r.headers['Range'].split('-')[1])
+            shortfall = (self.offset + l - 1) - end
             if shortfall:
                 if self.consistency == 'md5':
                     self.md5.update(data[:-shortfall])
@@ -1033,49 +1036,17 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 '\n--==0=='
                 '\nContent-Type: application/octet-stream'
                 '\n\n').encode() + data + b'\n--==0==--'
-        r = self.gcsfs._call('POST', path,
-                             uploadType='multipart',
-                             headers={'Content-Type': 'multipart/related; boundary="==0=="'},
-                             data=data)
+        r = self.gcsfs._call(
+            'POST', path,
+            uploadType='multipart',
+            headers={'Content-Type': 'multipart/related; boundary="==0=="'},
+            data=data)
         size, md5 = int(r.json()['size']), r.json()['md5Hash']
         if self.consistency == 'size':
             assert size == self.buffer.tell(), "Size mismatch"
         if self.consistency == 'md5':
             self.md5.update(data)
             assert b64encode(self.md5.digest()) == md5.encode(), "MD5 checksum failed"
-
-    @_tracemethod
-    def _fetch(self, start, end):
-        """ Get bytes between start and end, if not already in cache
-
-        Will read ahead by blocksize bytes.
-        """
-        if self.start is None and self.end is None:
-            # First read
-            self.start = start
-            self.end = end + self.blocksize
-            self.cache = self._fetch_range(self.details, self.start, self.end)
-        if start < self.start:
-            if self.end - end > self.blocksize:
-                self.start = start
-                self.end = end + self.blocksize
-                self.cache = self._fetch_range(self.details, self.start, self.end)
-            else:
-                new = self._fetch_range(self.details, start, self.start)
-                self.start = start
-                self.cache = new + self.cache
-        if end > self.end:
-            if self.end > self.size:
-                return
-            if end - self.end > self.blocksize:
-                self.start = start
-                self.end = end + self.blocksize
-                self.cache = self._fetch_range(self.details, self.start, self.end)
-            else:
-                new = self._fetch_range(self.details, self.end, end + self.blocksize)
-                self.end = end + self.blocksize
-                self.cache = self.cache + new
-
 
     @_tracemethod
     def _fetch_range(self, start=None, end=None):
@@ -1092,7 +1063,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             head = None
         try:
             r = self.gcsfs._call('GET', self.details['mediaLink'],
-                             headers=head)
+                                 headers=head)
             data = r.content
             return data
         except RuntimeError as e:
