@@ -1,11 +1,10 @@
 import os
 import pytest
 fuse = pytest.importorskip('fuse')
-from gcsfs.gcsfuse import GCSFS
 import tempfile
 import sys
-from gcsfs.tests.settings import (TEST_BUCKET, TEST_PROJECT, RECORD_MODE,
-                                  GOOGLE_TOKEN, FAKE_GOOGLE_TOKEN, DEBUG)
+from fsspec.fuse import run
+from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.tests.utils import gcs_maker, token_restore, my_vcr
 import gcsfs
 import threading
@@ -22,12 +21,23 @@ def test_fuse(token_restore):
     mountpath = tempfile.mkdtemp()
     with gcs_maker() as gcs:
         th = threading.Thread(
-            target=lambda: fuse.FUSE(
-                GCSFS(TEST_BUCKET, gcs=gcs), mountpath, nothreads=False,
-                foreground=True))
+            target=lambda: run(gcs, TEST_BUCKET + '/', mountpath)
+        )
         th.daemon = True
         th.start()
-        time.sleep(2)
+
+        time.sleep(5)
+        timeout = 20
+        while True:
+            try:
+                open(os.path.join(mountpath, 'lock'), 'w').close()
+                os.remove(os.path.join(mountpath, 'lock'))
+                break
+            except:
+                time.sleep(0.5)
+            timeout -= 0.5
+            assert timeout > 0
+
         with open(os.path.join(mountpath, 'hello'), 'w') as f:
             # NB this is in TEXT mode
             f.write('hello')

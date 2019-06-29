@@ -208,7 +208,8 @@ def gcs_maker(populate=False):
                         f.write(data)
         yield gcs
     finally:
-        try:
-            [gcs.rm(f) for f in gcs.find(TEST_BUCKET)]
-        except:
-            pass
+        for f in gcs.find(TEST_BUCKET):
+            try:
+                gcs.rm(f)
+            except:
+                pass

@@ -74,9 +74,6 @@ DEFAULT_PROJECT = os.environ.get('GCSFS_DEFAULT_PROJECT', '')
 GCS_MIN_BLOCK_SIZE = 2 ** 18
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
-if PY2:
-    FileNotFoundError = IOError
-
 
 def quote_plus(s):
     """
@@ -157,7 +154,7 @@ def validate_response(r, path):
             msg = str(r.content)
 
         if r.status_code == 404:
-            raise FileNotFoundError(path)
+            raise FileNotFoundError
         elif r.status_code == 403:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
         elif r.status_code == 429:
@@ -782,8 +779,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         bucket, key = split_path(path)
         o_json = self._call('PATCH', "b/{}/o/{}", bucket, key,
-                            fields='metadata', json=i_json)\
-            .json()
+                            fields='metadata', json=i_json
+                            ).json()
         return o_json.get('metadata', {})
 
     @_tracemethod
