@@ -863,7 +863,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             block_size = self.default_block_size
         const = consistency or self.consistency
         return GCSFile(self, path, mode, block_size, consistency=const,
-                       metadata=metadata, acl=acl, autocommit=autocommit)
+                       metadata=metadata, acl=acl, autocommit=autocommit,
+                       **kwargs)
 
     def __setstate__(self, state):
         self.__dict__.update(state)
