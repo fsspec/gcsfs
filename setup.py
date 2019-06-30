@@ -11,8 +11,16 @@ setup(name='gcsfs',
       description='Convenient Filesystem interface over GCS',
       url='https://github.com/dask/gcsfs',
       maintainer='Martin Durant',
-      maintainer_email='mdurant@continuum.io',
+      maintainer_email='mdurant@anaconda.com',
       license='BSD',
+      classifiers=[
+          'Development Status :: 4 - Beta',
+          'Intended Audience :: Developers',
+          'License :: OSI Approved :: BSD License',
+          'Operating System :: OS Independent',
+          'Programming Language :: Python :: 3.6',
+          'Programming Language :: Python :: 3.7',
+      ],
       keywords=['google-cloud-storage', 'gcloud', 'file-system'],
       packages=['gcsfs', 'gcsfs.cli'],
       install_requires=[open('requirements.txt').read().strip().split('\n')],
@@ -21,8 +29,5 @@ setup(name='gcsfs',
       extras_require={
           "gcsfuse": ["fusepy"]
       },
-      entry_points='''
-        [console_scripts]
-        gcsfuse=gcsfs.cli.gcsfuse:main
-      ''',
+      python_requires='>=3.6',
       zip_safe=False)
