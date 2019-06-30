@@ -60,7 +60,7 @@ def test_info(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_ls2(token_restore):
     with gcs_maker() as gcs:
-        assert TEST_BUCKET in gcs.ls('')
+        assert TEST_BUCKET +'/' in gcs.ls('')
         with pytest.raises((OSError, IOError)):
             gcs.ls('nonexistent')
         fn = TEST_BUCKET+'/test/accounts.1.json'
@@ -74,7 +74,6 @@ def test_pickle(token_restore):
 
         # Write data to distinct filename
         fn = TEST_BUCKET+'/nested/abcdefg'
-        data = b'hello\n'
         with gcs.open(fn, 'wb') as f:
             f.write(b'1234567')
 
@@ -102,7 +101,7 @@ def test_ls_touch(token_restore):
         assert set(L) == set([a, b])
 
         L_d = gcs.ls(TEST_BUCKET+'/tmp/test', True)
-        assert set(d['path'] for d in L_d) == set([a, b])
+        assert set(d['name'] for d in L_d) == set([a, b])
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -124,11 +123,11 @@ def test_rm_batch(token_restore):
     with gcs_maker() as gcs:
         gcs.touch(a)
         gcs.touch(b)
-        assert a in gcs.walk(TEST_BUCKET)
-        assert b in gcs.walk(TEST_BUCKET)
+        assert a in gcs.find(TEST_BUCKET)
+        assert b in gcs.find(TEST_BUCKET)
         gcs.rm([a, b])
-        assert a not in gcs.walk(TEST_BUCKET)
-        assert b not in gcs.walk(TEST_BUCKET)
+        assert a not in gcs.find(TEST_BUCKET)
+        assert b not in gcs.find(TEST_BUCKET)
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -161,7 +160,7 @@ def test_file_info(token_restore):
         data = b'hello\n'
         with gcs.open(fn, 'wb') as f:
             f.write(data)
-        assert fn in gcs.walk(TEST_BUCKET)
+        assert fn in gcs.find(TEST_BUCKET)
         assert gcs.exists(fn)
         assert not gcs.exists(fn+'another')
         assert gcs.info(fn)['size'] == len(data)
@@ -172,13 +171,12 @@ def test_file_info(token_restore):
 @my_vcr.use_cassette(match=['all'])
 def test_du(token_restore):
     with gcs_maker(True) as gcs:
-        d = gcs.du(TEST_BUCKET, deep=True)
+        d = gcs.du(TEST_BUCKET, total=False)
         assert all(isinstance(v, int) and v >= 0 for v in d.values())
         assert TEST_BUCKET+'/nested/file1' in d
 
         assert gcs.du(TEST_BUCKET + '/test/', total=True) == sum(
                 map(len, files.values()))
-        assert gcs.du(TEST_BUCKET) == gcs.du('gcs://'+TEST_BUCKET)
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -190,8 +188,6 @@ def test_ls(token_restore):
         assert fn not in gcs.ls(TEST_BUCKET+'/')
         assert fn in gcs.ls(TEST_BUCKET+'/nested/')
         assert fn in gcs.ls(TEST_BUCKET+'/nested')
-        assert list(sorted(gcs.ls('gcs://'+TEST_BUCKET+'/nested/'))) == \
-               list(sorted(gcs.ls(TEST_BUCKET+'/nested')))
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -207,15 +203,13 @@ def test_gcs_glob(token_restore):
         fn = TEST_BUCKET+'/nested/file1'
         assert fn not in gcs.glob(TEST_BUCKET+'/')
         assert fn not in gcs.glob(TEST_BUCKET+'/*')
-        assert fn in gcs.glob(TEST_BUCKET+'/nested')
+        assert fn in gcs.glob(TEST_BUCKET+'/nested/')
         assert fn in gcs.glob(TEST_BUCKET+'/nested/*')
         assert fn in gcs.glob(TEST_BUCKET+'/nested/file*')
         assert fn in gcs.glob(TEST_BUCKET+'/*/*')
         assert fn in gcs.glob(TEST_BUCKET+'/**')
-        assert all(f in gcs.walk(TEST_BUCKET) for f in
+        assert all(f in gcs.find(TEST_BUCKET) for f in
                    gcs.glob(TEST_BUCKET+'/nested/*'))
-        with pytest.raises(ValueError):
-            gcs.glob('*')
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -303,8 +297,7 @@ def test_get_put(token_restore):
             data = files['test/accounts.1.json']
             assert open(fn, 'rb').read() == data
             gcs.put(fn, TEST_BUCKET+'/temp')
-            assert gcs.du(TEST_BUCKET+'/temp')[
-                       TEST_BUCKET+'/temp'] == len(data)
+            assert gcs.du(TEST_BUCKET+'/temp') == len(data)
             assert gcs.cat(TEST_BUCKET+'/temp') == data
 
 
@@ -325,11 +318,11 @@ def test_get_put_recursive(token_restore, protocol):
             # there is now in remote directory:
             # protocol+TEST_BUCKET+'/temp_dir/accounts.1.json'
             # protocol+TEST_BUCKET+'/temp_dir/accounts.2.json'
-            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json')[
-                       TEST_BUCKET+'/temp_dir/accounts.1.json'] == len(data1)
+            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json'
+                          ) == len(data1)
             assert gcs.cat(protocol+TEST_BUCKET+'/temp_dir/accounts.1.json') == data1
-            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json')[
-                       TEST_BUCKET+'/temp_dir/accounts.2.json'] == len(data2)
+            assert gcs.du(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json'
+                          ) == len(data2)
             assert gcs.cat(protocol+TEST_BUCKET+'/temp_dir/accounts.2.json') == data2
 
 
@@ -368,12 +361,6 @@ def test_errors(token_restore):
             gcs.mkdir('/')
             assert 'bucket' in str(e)
 
-        with pytest.raises(ValueError):
-            gcs.walk('')
-
-        with pytest.raises(ValueError):
-            gcs.walk('gcs://')
-
 
 @my_vcr.use_cassette(match=['all'])
 def test_read_small(token_restore):
@@ -388,7 +375,7 @@ def test_read_small(token_restore):
                 out.append(data)
             assert gcs.cat(fn) == b''.join(out)
             # cache drop
-            assert len(f.cache) < len(out)
+            assert len(f.cache.cache) < len(out)
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -529,34 +516,17 @@ def test_readline_from_cache(token_restore):
             result = f.readline()
             assert result == b'a,b\n'
             assert f.loc == 4
-            assert f.cache == data
+            assert f.cache.cache == data
 
             result = f.readline()
             assert result == b'11,22\n'
             assert f.loc == 10
-            assert f.cache == data
+            assert f.cache.cache == data
 
             result = f.readline()
             assert result == b'3,4'
             assert f.loc == 13
-            assert f.cache == data
-
-
-@my_vcr.use_cassette(match=['all'])
-def test_readline_partial(token_restore):
-    with gcs_maker() as gcs:
-        data = b'aaaaa,bbbbb\n12345,6789\n'
-        with gcs.open(a, 'wb') as f:
-            f.write(data)
-        with gcs.open(a, 'rb') as f:
-            result = f.readline(5)
-            assert result == b'aaaaa'
-            result = f.readline(5)
-            assert result == b',bbbb'
-            result = f.readline(5)
-            assert result == b'b\n'
-            result = f.readline()
-            assert result == b'12345,6789\n'
+            assert f.cache.cache == data
 
 
 @my_vcr.use_cassette(match=['all'])
@@ -613,8 +583,6 @@ def test_iterable(token_restore):
             assert f.readline() == b'123'
             f.seek(1)
             assert f.readline() == b'bc\n'
-            assert f.readline(1) == b'1'
-            assert f.readline() == b'23'
 
         with gcs.open(a) as f:
             out = list(f)

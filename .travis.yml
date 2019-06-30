@@ -4,29 +4,24 @@ language: python
 
 matrix:
   include:
-    - python: 2.7
     - python: 3.6
 
 install:
-  # install fuse libs
-  - sudo apt-get update
-  - sudo apt-get install libfuse-dev
-
   # Install conda
   - wget http://repo.continuum.io/miniconda/Miniconda-latest-Linux-x86_64.sh -O miniconda.sh
   - bash miniconda.sh -b -p $HOME/miniconda
   - export PATH="$HOME/miniconda/bin:$PATH"
   - conda config --set always_yes yes --set changeps1 no
-  - conda update conda
 
   # Install dependencies
-  - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests pandas decorator -y
+  - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests decorator -y
   - source activate test
   - conda install -c conda-forge google-auth -y
-  - pip install vcrpy fusepy google-auth-oauthlib
+  - pip install git+https://github.com/intake/filesystem_spec
+  - pip install vcrpy google-auth-oauthlib
 
 script:
-  - GCSFS_RECORD_MODE=none py.test -vv -x  gcsfs
+  - GCSFS_RECORD_MODE=none py.test -vv  gcsfs
 
 notifications:
   email: false

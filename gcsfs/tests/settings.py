@@ -21,4 +21,5 @@ FAKE_GOOGLE_TOKEN = {
   "type": "authorized_user"
 }
 GOOGLE_TOKEN = os.environ.get('GCSFS_GOOGLE_TOKEN', FAKE_GOOGLE_TOKEN)
+# /Users/mdurant/.config/gcloud/application_default_credentials.json
 DEBUG = os.environ.get('GCSFS_DEBUG', False)
