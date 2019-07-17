@@ -919,7 +919,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if self.consistency == 'md5':
             self.md5 = md5()
         if mode == 'wb':
-            if block_size < GCS_MIN_BLOCK_SIZE:
+            if self.blocksize < GCS_MIN_BLOCK_SIZE:
                 warnings.warn('Setting block size to minimum value, 2**18')
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
