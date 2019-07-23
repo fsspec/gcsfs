@@ -9,6 +9,13 @@ Please file issues and requests on github_ and we welcome pull requests.
 
 .. _github: https://github.com/dask/gcsfs/issues
 
+
+This package depends on fsspec_ , and inherits many useful behaviours from there,
+including integration with Dask, and the facility for key-value dict-like
+objects of the type used by zarr.
+
+.. _fsspec: https://filesystem-spec.readthedocs.io/en/latest/
+
 Installation
 ------------
 
@@ -106,14 +113,6 @@ it is safe to pass them to worker processes on other machines if using in a
 distributed computation context. If credentials are given by a file path, however,
 then this file must exist on every machine.
 
-Connection with Dask and Zarr
------------------------------
-
-Importing gcsfs will make this file-system backend available to dask_ for
-parallel data ingestion using URLs
-something like ``gcs://mybucket/myfiles/*.csv``; both ``gcs:`` and ``gs:`` work.
-
-Similarly, ``GCSMap`` is a valid mutable-mapping, which can be used with zarr_.
 
 Contents
 ========
