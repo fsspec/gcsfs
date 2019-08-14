@@ -31,29 +31,14 @@ In addition to a standard installation of GCSFS, you also need:
 Usage
 -----
 
-Installation of GCSFS will make the command ``gcsfuse``. Use the flag ``--help``
-to display the usage message.
+FUSE functionality is available via the ``fsspec.fuse`` module. See the
+docstrings for further details.
 
-You must provide a path on GCS to regard as the root directory for your data, and
-a `mount point`, a location on your local file-system in which you want the remote
-data to appear. For example, lets consider that the bucket ``mybucket`` contains a
-key ``path/key``,
-(full path ``mybucket/path/key``). If the remote root is set to ``mybucket/path``
-and the mount point is ``~/gcs`` then after
-mounting, listing the contents of ``~/gcs`` will show a file called ``key``.
+.. code-block:: python
 
-.. code-block::bash
-
-   $ gcsfuse mybucket/path ~/fuse
-   $ ls ~/fuse
-   key
-
-Starting the process in foreground mode will give some debug information on which
-bytes in which keys are being read.
-
-To stop the process, either use ^C (if in foreground mode), explicitly terminate
-the process, or use the command ``umount`` with the mount point (in this example
-``umount ~/gcs``).
+    gcs = gcsfs.GCSFileSystem(..)
+    from fsspec.fuse import run
+    run(gcs, "bucket/path", "local/path", foreground=True, threads=False)
 
 Caveats
 -------
