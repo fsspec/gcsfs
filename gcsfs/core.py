@@ -273,7 +273,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     def __init__(self, project=DEFAULT_PROJECT, access='full_control',
                  token=None, block_size=None, consistency='none',
                  cache_timeout=None, secure_serialize=True,
-                 check_connection=True, requests_timeout=None, **kwargs):
+                 check_connection=False, requests_timeout=None, **kwargs):
         super().__init__(self, **kwargs)
         pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
