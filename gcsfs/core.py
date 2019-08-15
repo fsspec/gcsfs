@@ -257,7 +257,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         across an insecure network.
     check_connection: bool
         When token=None, gcsfs will attempt various methods of establishing
-        credentials, falling back to anon. It is possible for a methoc to
+        credentials, falling back to anon. It is possible for a method to
         find credentials in the system that turn out not to be valid. Setting
         this parameter to True will ensure that an actual operation is
         attempted before deciding that credentials are valid.
