@@ -209,7 +209,7 @@ def test_gcs_glob(token_restore):
         assert fn in gcs.glob(TEST_BUCKET+'/*/*')
         assert fn in gcs.glob(TEST_BUCKET+'/**')
         assert all(f in gcs.find(TEST_BUCKET) for f in
-                   gcs.glob(TEST_BUCKET+'/nested/*'))
+                   gcs.glob(TEST_BUCKET+'/nested/*') if gcs.isfile(f))
 
 
 @my_vcr.use_cassette(match=['all'])

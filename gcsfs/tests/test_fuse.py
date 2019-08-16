@@ -11,9 +11,6 @@ import threading
 import time
 
 
-PY2 = sys.version_info.major < 3
-
-
 @pytest.mark.xfail
 @pytest.mark.skipif("TRAVIS" in os.environ and os.environ["TRAVIS"] == "true",
                     reason="Skipping this test on Travis CI.")
