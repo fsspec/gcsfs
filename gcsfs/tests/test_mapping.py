@@ -132,7 +132,7 @@ def test_new_bucket(token_restore):
             pass
         with pytest.raises(Exception) as e:
             d = gcs.get_mapper(new_bucket, check=True)
-        assert 'create=True' in str(e)
+        assert 'create=True' in str(e.value)
 
         try:
             d = gcs.get_mapper(new_bucket, create=True)
