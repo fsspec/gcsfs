@@ -7,6 +7,13 @@ from gcsfs import GCSFileSystem, core
 root = TEST_BUCKET+'/mapping'
 
 
+def test_api():
+    import gcsfs
+
+    assert 'GCSMap' in dir(gcsfs)
+    assert 'mapping' in dir(gcsfs)
+
+
 @my_vcr.use_cassette(match=['all'])
 def test_map_simple(token_restore):
     with gcs_maker() as gcs:
