@@ -55,9 +55,9 @@ def _tracemethod(f, self, *args, **kwargs):
 
 
 # client created 2018-01-16
-not_secret = {"client_id": "586241054156-8986sjc0h0683jmpb150i0m8cucrttds"
+not_secret = {"client_id": "586241054156-9kst7ltfj66svc342pcn43vp6ta3idin"
                            ".apps.googleusercontent.com",
-              "client_secret": "8_Gk27xMtJzX6tkViMGF2K1B"}
+              "client_secret": "xto0LIFYX35mmHF9T1R2QBqT"}
 client_config = {'installed': {
     'client_id': not_secret['client_id'],
     'client_secret': not_secret['client_secret'],
@@ -1070,3 +1070,4 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         except RuntimeError as e:
             if 'not satisfiable' in str(e):
                 return b''
+            raise
