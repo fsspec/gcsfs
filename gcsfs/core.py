@@ -31,7 +31,7 @@ import time
 import warnings
 import random
 
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, ProxyError
 from .utils import HttpError, RateLimitException, is_retriable, read_block
 
 PY2 = sys.version_info.major == 2
@@ -159,6 +159,8 @@ def validate_response(r, path):
             raise IOError("Forbidden: %s\n%s" % (path, msg))
         elif r.status_code == 429:
             raise RateLimitException(error)
+        elif r.status_code == 502:
+            raise ProxyError()
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         elif error:
