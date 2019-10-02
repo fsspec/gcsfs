@@ -590,6 +590,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             ])
             next_page_token = page.get('nextPageToken', None)
 
+        prefixes = [p for p in prefixes
+                    if prefix is None or prefix.rstrip('/') + '/' in p]
         result = {
             "kind": "storage#objects",
             "prefixes": prefixes,
