@@ -81,10 +81,12 @@ def test_pickle(token_restore):
         b = pickle.dumps(gcs)
         assert b'abcdefg' not in b
         assert b'1234567' not in b
+        assert b'listing_cache' not in b
 
         gcs2 = pickle.loads(b)
 
         assert gcs.session is not gcs2.session
+        assert gcs2._listing_cache == {}
         gcs.touch(a)
         assert gcs.ls(TEST_BUCKET) == gcs2.ls(TEST_BUCKET)
 

@@ -201,7 +201,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
       ``~\AppData\Roaming\gcloud\credentials``, etc.
 
     Specific methods, (eg. `ls`, `info`, ...) may return object details from GCS.
-    These detailed listings include the 
+    These detailed listings include the
     [object resource](https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
 
     GCS *does not* include  "directory" objects but instead generates
@@ -483,7 +483,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     @staticmethod
     def _process_object(bucket, object_metadata):
         """Process object resource into gcsfs object information format.
-        
+
         Process GCS object resource via type casting and attribute updates to
         the cache-able gcsfs object information format. Returns an updated copy
         of the object resource.
@@ -870,9 +870,14 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                        metadata=metadata, acl=acl, autocommit=autocommit,
                        **kwargs)
 
+    def __getstate__(self):
+        d = super().__getstate__()
+        d.pop("_listing_cache")
+        return d
+
     def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.dircache = {}
+        super().__setstate__(state)
+        self._listing_cache = {}
         self.connect(self.token)
 
 
