@@ -276,8 +276,9 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                  token=None, block_size=None, consistency='none',
                  cache_timeout=None, secure_serialize=True,
                  check_connection=False, requests_timeout=None, **kwargs):
+        if self._cached:
+            return
         super().__init__(self, **kwargs)
-        pars = (project, access, token, block_size, consistency, cache_timeout)
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
@@ -869,16 +870,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         return GCSFile(self, path, mode, block_size, consistency=const,
                        metadata=metadata, acl=acl, autocommit=autocommit,
                        **kwargs)
-
-    def __getstate__(self):
-        d = super().__getstate__()
-        d.pop("_listing_cache")
-        return d
-
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        self._listing_cache = {}
-        self.connect(self.token)
 
 
 GCSFileSystem.load_tokens()
