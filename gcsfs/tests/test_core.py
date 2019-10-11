@@ -85,8 +85,8 @@ def test_pickle(token_restore):
 
         gcs2 = pickle.loads(b)
 
-        assert gcs.session is not gcs2.session
-        assert gcs2._listing_cache == {}
+        # since https://github.com/intake/filesystem_spec/pull/155
+        assert gcs.session is gcs2.session
         gcs.touch(a)
         assert gcs.ls(TEST_BUCKET) == gcs2.ls(TEST_BUCKET)
 
