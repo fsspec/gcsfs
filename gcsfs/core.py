@@ -685,6 +685,16 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self._call('delete', 'b/' + bucket)
         self.invalidate_cache(bucket)
 
+    def info(self, path, **kwargs):
+        """File information about this path."""
+        path = self._strip_protocol(path)
+        out = self.ls(path, detail=True, **kwargs)
+        if out:
+            return out[0]
+        else:
+            raise FileNotFoundError(path)
+
+
     @_tracemethod
     def ls(self, path, detail=False):
         """List objects under the given '/{bucket}/{prefix} path."""
