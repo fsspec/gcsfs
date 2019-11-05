@@ -809,11 +809,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         b1, k1 = split_path(path1)
         b2, k2 = split_path(path2)
         out = self._call('POST', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2, k2,
-                         destinationPredefinedAcl=acl)
-        while out.json()['done'] is not True:
+                         destinationPredefinedAcl=acl).json()
+        while out['done'] is not True:
             out = self._call(
                 'POST', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2, k2,
-                rewriteToken=out['rewriteToken'], destinationPredefinedAcl=acl)
+                rewriteToken=out['rewriteToken'], destinationPredefinedAcl=acl).json()
 
     @_tracemethod
     def rm(self, path, recursive=False):
