@@ -156,19 +156,17 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fd
   response:
     body:
-      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
-        gcsfs-testing/tmp/test/d\",\n    \"errors\": [\n      {\n        \"message\":
-        \"No such object: gcsfs-testing/tmp/test/d\",\n        \"domain\": \"global\",\n
-        \       \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
+      string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
+        \   \"reason\": \"notFound\",\n    \"message\": \"No such object: gcsfs-testing/tmp/test/d\"\n
+        \  }\n  ],\n  \"code\": 404,\n  \"message\": \"No such object: gcsfs-testing/tmp/test/d\"\n
+        }\n}\n"
     headers:
       Cache-Control:
-      - no-cache, no-store, max-age=0, must-revalidate
+      - private, max-age=0
       Content-Length:
-      - '253'
+      - '225'
       Content-Type:
       - application/json; charset=UTF-8
-      Pragma:
-      - no-cache
       Server:
       - UploadServer
       Vary:
@@ -510,7 +508,7 @@ interactions:
       string: "{\n \"kind\": \"storage#bucket\",\n \"id\": \"gcsfs-testingnew-bucket\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket\",\n
         \"projectNumber\": \"586241054156\",\n \"name\": \"gcsfs-testingnew-bucket\",\n
-        \"timeCreated\": \"2019-11-06T20:31:43.557Z\",\n \"updated\": \"2019-11-06T20:31:43.557Z\",\n
+        \"timeCreated\": \"2019-11-06T20:49:37.827Z\",\n \"updated\": \"2019-11-06T20:49:37.827Z\",\n
         \"metageneration\": \"1\",\n \"acl\": [\n  {\n   \"kind\": \"storage#bucketAccessControl\",\n
         \  \"id\": \"gcsfs-testingnew-bucket/project-owners-586241054156\",\n   \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/acl/project-owners-586241054156\",\n
@@ -662,7 +660,7 @@ interactions:
         \       \"bucketPolicyOnly\": {\n          \"enabled\": false\n        },\n
         \       \"uniformBucketLevelAccess\": {\n          \"enabled\": false\n        }\n
         \     },\n      \"locationType\": \"multi-region\",\n      \"timeCreated\":
-        \"2019-11-06T20:31:43.557Z\",\n      \"updated\": \"2019-11-06T20:31:43.557Z\"\n
+        \"2019-11-06T20:49:37.827Z\",\n      \"updated\": \"2019-11-06T20:49:37.827Z\"\n
         \   },\n    {\n      \"kind\": \"storage#bucket\",\n      \"id\": \"kubeflow-anaconda-test\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/kubeflow-anaconda-test\",\n
         \     \"projectNumber\": \"586241054156\",\n      \"name\": \"kubeflow-anaconda-test\",\n
