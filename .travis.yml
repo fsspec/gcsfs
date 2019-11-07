@@ -22,6 +22,8 @@ install:
 
 script:
   - GCSFS_RECORD_MODE=none py.test -vv  gcsfs
+  - pip install flake8 ; flake8 dask; fi
+  - pip install git+https://github.com/psf/black@cad4138050b86d1c8570b926883e32f7465c2880; black dask --check; fi
 
 notifications:
   email: false
