@@ -6,7 +6,6 @@ import fsspec
 
 import decorator
 
-import array
 from base64 import b64encode, b64decode
 import google.auth as gauth
 import google.auth.compute_engine
@@ -32,7 +31,7 @@ import warnings
 import random
 
 from requests.exceptions import RequestException, ProxyError
-from .utils import HttpError, RateLimitException, is_retriable, read_block
+from .utils import HttpError, RateLimitException, is_retriable
 
 PY2 = sys.version_info.major == 2
 
