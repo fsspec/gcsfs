@@ -1,4 +1,3 @@
-
 def register():
     """
     Backward compatibility

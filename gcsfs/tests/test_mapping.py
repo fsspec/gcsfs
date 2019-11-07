@@ -1,20 +1,18 @@
 import pytest
-from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
-from gcsfs.tests.utils import (tempdir, token_restore, my_vcr, gcs_maker,
-                               files, csv_files, text_files, a, b, c, d)
-from gcsfs import GCSFileSystem, core
+from gcsfs.tests.settings import TEST_BUCKET
+from gcsfs.tests.utils import my_vcr, gcs_maker
 
-root = TEST_BUCKET+'/mapping'
+root = TEST_BUCKET + "/mapping"
 
 
 def test_api():
     import gcsfs
 
-    assert 'GCSMap' in dir(gcsfs)
-    assert 'mapping' in dir(gcsfs)
+    assert "GCSMap" in dir(gcsfs)
+    assert "mapping" in dir(gcsfs)
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_simple(token_restore):
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
@@ -25,143 +23,145 @@ def test_map_simple(token_restore):
         assert list(d.items()) == []
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_default_gcsfilesystem(token_restore):
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
         assert d.fs is gcs
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_errors(token_restore):
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
         with pytest.raises(KeyError):
-            d['nonexistent']
+            d["nonexistent"]
         try:
-            gcs.get_mapper('does-not-exist')
+            gcs.get_mapper("does-not-exist")
         except Exception as e:
-            assert 'does-not-exist' in str(e)
+            assert "does-not-exist" in str(e)
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_with_data(token_restore):
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
-        d['x'] = b'123'
-        assert list(d) == list(d.keys()) == ['x']
-        assert list(d.values()) == [b'123']
-        assert list(d.items()) == [('x', b'123')]
-        assert d['x'] == b'123'
+        d["x"] = b"123"
+        assert list(d) == list(d.keys()) == ["x"]
+        assert list(d.values()) == [b"123"]
+        assert list(d.items()) == [("x", b"123")]
+        assert d["x"] == b"123"
         assert bool(d)
 
-        assert gcs.find(root) == [TEST_BUCKET+'/mapping/x']
-        d['x'] = b'000'
-        assert d['x'] == b'000'
+        assert gcs.find(root) == [TEST_BUCKET + "/mapping/x"]
+        d["x"] = b"000"
+        assert d["x"] == b"000"
 
-        d['y'] = b'456'
-        assert d['y'] == b'456'
-        assert set(d) == {'x', 'y'}
+        d["y"] = b"456"
+        assert d["y"] == b"456"
+        assert set(d) == {"x", "y"}
 
         d.clear()
         assert list(d) == []
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_complex_keys(token_restore):
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
-        d[1] = b'hello'
-        assert d[1] == b'hello'
+        d[1] = b"hello"
+        assert d[1] == b"hello"
         del d[1]
 
-        d[1, 2] = b'world'
-        assert d[1, 2] == b'world'
+        d[1, 2] = b"world"
+        assert d[1, 2] == b"world"
         del d[1, 2]
 
-        d['x', 1, 2] = b'hello world'
-        assert d['x', 1, 2] == b'hello world'
+        d["x", 1, 2] = b"hello world"
+        assert d["x", 1, 2] == b"hello world"
 
-        assert ('x', 1, 2) in d
+        assert ("x", 1, 2) in d
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_clear_empty(token_restore):
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
         d.clear()
         assert list(d) == []
-        d[1] = b'1'
-        assert list(d) == ['1']
+        d[1] = b"1"
+        assert list(d) == ["1"]
         d.clear()
         assert list(d) == []
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_pickle(token_restore):
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
-        d['x'] = b'1'
-        assert d['x'] == b'1'
+        d["x"] = b"1"
+        assert d["x"] == b"1"
 
         import pickle
+
         d2 = pickle.loads(pickle.dumps(d))
 
-        assert d2['x'] == b'1'
+        assert d2["x"] == b"1"
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_array(token_restore):
     with gcs_maker() as gcs:
         from array import array
+
         d = gcs.get_mapper(root)
-        d['x'] = array('B', [65] * 1000)
+        d["x"] = array("B", [65] * 1000)
 
-        assert d['x'] == b'A' * 1000
+        assert d["x"] == b"A" * 1000
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_bytearray(token_restore):
     with gcs_maker() as gcs:
-        from array import array
         d = gcs.get_mapper(root)
-        d['x'] = bytearray(b'123')
+        d["x"] = bytearray(b"123")
 
-        assert d['x'] == b'123'
+        assert d["x"] == b"123"
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_new_bucket(token_restore):
     with gcs_maker() as gcs:
-        new_bucket = TEST_BUCKET + 'new-bucket'
+        new_bucket = TEST_BUCKET + "new-bucket"
         try:
             gcs.rmdir(new_bucket)
-        except:
+        except:  # noqa: E722
             pass
         with pytest.raises(Exception) as e:
             d = gcs.get_mapper(new_bucket, check=True)
-        assert 'create=True' in str(e.value)
+        assert "create=True" in str(e.value)
 
         try:
             d = gcs.get_mapper(new_bucket, create=True)
             assert not d
 
-            d = gcs.get_mapper(new_bucket + '/new-directory')
+            d = gcs.get_mapper(new_bucket + "/new-directory")
             assert not d
         finally:
             gcs.rmdir(new_bucket)
 
 
-@my_vcr.use_cassette(match=['all'])
+@my_vcr.use_cassette(match=["all"])
 def test_map_pickle(token_restore):
     import pickle
+
     with gcs_maker() as gcs:
         d = gcs.get_mapper(root)
-        d['x'] = b'1234567890'
+        d["x"] = b"1234567890"
 
         b = pickle.dumps(d)
-        assert b'1234567890' not in b
+        assert b"1234567890" not in b
 
         e = pickle.loads(b)
 
-        assert dict(e) == {'x': b'1234567890'}
+        assert dict(e) == {"x": b"1234567890"}

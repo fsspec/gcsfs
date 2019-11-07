@@ -20,7 +20,7 @@ def seek_delimiter(file, delimiter, blocksize):
     if file.tell() == 0:
         return
 
-    last = b''
+    last = b""
     while True:
         current = file.read(blocksize)
         if not current:
@@ -32,7 +32,7 @@ def seek_delimiter(file, delimiter, blocksize):
             return
         except ValueError:
             pass
-        last = full[-len(delimiter):]
+        last = full[-len(delimiter) :]
 
 
 def read_block(f, offset, length, delimiter=None):
@@ -71,12 +71,12 @@ def read_block(f, offset, length, delimiter=None):
     """
     if delimiter:
         f.seek(offset)
-        seek_delimiter(f, delimiter, 2**16)
+        seek_delimiter(f, delimiter, 2 ** 16)
         start = f.tell()
         length -= start - offset
 
         f.seek(start + length)
-        seek_delimiter(f, delimiter, 2**16)
+        seek_delimiter(f, delimiter, 2 ** 16)
         end = f.tell()
 
         offset = start
@@ -89,21 +89,23 @@ def read_block(f, offset, length, delimiter=None):
 
 class RateLimitException(Exception):
     """Holds the message and code from cloud errors."""
+
     def __init__(self, error_response=None):
-        self.message = error_response.get('message', '')
-        self.code = error_response.get('code', None)
+        self.message = error_response.get("message", "")
+        self.code = error_response.get("code", None)
         # Call the base class constructor with the parameters it needs
         super(RateLimitException, self).__init__(self.message)
 
 
 class HttpError(Exception):
     """Holds the message and code from cloud errors."""
+
     def __init__(self, error_response=None):
         if error_response:
-            self.message = error_response.get('message', '')
-            self.code = error_response.get('code', None)
+            self.message = error_response.get("message", "")
+            self.code = error_response.get("code", None)
         else:
-            self.message = ''
+            self.message = ""
             self.code = None
         # Call the base class constructor with the parameters it needs
         super(HttpError, self).__init__(self.message)
