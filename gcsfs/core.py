@@ -278,7 +278,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                  check_connection=False, requests_timeout=None, **kwargs):
         if self._cached:
             return
-        super().__init__(self, **kwargs)
         if access not in self.scopes:
             raise ValueError('access must be one of {}', self.scopes)
         if project is None:
@@ -294,8 +293,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         self._listing_cache = {}
-        self.session = None
         self.connect(method=token)
+        super().__init__(self, **kwargs)
 
         if not secure_serialize:
             self.token = self.session.credentials
@@ -1012,11 +1011,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         Should only happen during discarding this write-mode file
         """
         if self.location is None:
-            raise ValueError('Cannot cancel upload which has not started')
+            return
         uid = re.findall('upload_id=([^&=?]+)', self.location)
-        r = self.gcsfs._call('DELETE',
+        r = self.gcsfs._call(
+            'DELETE',
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
-            % quote_plus(self.bucket),
+            '' % quote_plus(self.bucket),
             params={'uploadType': 'resumable', 'upload_id': uid})
         r.raise_for_status()
 
