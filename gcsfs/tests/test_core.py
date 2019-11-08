@@ -21,6 +21,22 @@ def test_simple(token_restore):
     gcs.ls('/' + TEST_BUCKET)  # OK to lead with '/'
 
 
+@pytest.mark.xfail(reason="should pass for real google, but not VCR")
+@my_vcr.use_cassette(match=['all'])
+def test_many_connect(token_restore):
+    from multiprocessing.pool import ThreadPool
+
+    def task(i):
+        GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN).ls("")
+        return True
+
+    pool = ThreadPool(processes=20)
+    out = pool.map(task, range(40))
+    assert all(out)
+    pool.close()
+    pool.join()
+
+
 @my_vcr.use_cassette(match=['all'])
 def test_simple_upload(token_restore):
     with gcs_maker() as gcs:
