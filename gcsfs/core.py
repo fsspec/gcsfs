@@ -267,8 +267,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     scopes = {'read_only', 'read_write', 'full_control'}
     retries = 6  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
-    _singleton = [None]
-    _singleton_pars = [None]
     default_block_size = DEFAULT_BLOCK_SIZE
     protocol = 'gcs', 'gs'
 
