@@ -267,8 +267,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     scopes = {'read_only', 'read_write', 'full_control'}
     retries = 6  # number of retries on http failure
     base = "https://www.googleapis.com/storage/v1/"
-    _singleton = [None]
-    _singleton_pars = [None]
     default_block_size = DEFAULT_BLOCK_SIZE
     protocol = 'gcs', 'gs'
 
@@ -831,11 +829,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         b1, k1 = split_path(path1)
         b2, k2 = split_path(path2)
         out = self._call('POST', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2, k2,
-                         destinationPredefinedAcl=acl)
-        while out.json()['done'] is not True:
+                         destinationPredefinedAcl=acl).json()
+        while out['done'] is not True:
             out = self._call(
                 'POST', 'b/{}/o/{}/rewriteTo/b/{}/o/{}', b1, k1, b2, k2,
-                rewriteToken=out['rewriteToken'], destinationPredefinedAcl=acl)
+                rewriteToken=out['rewriteToken'], destinationPredefinedAcl=acl).json()
 
     @_tracemethod
     def rm(self, path, recursive=False):
@@ -1034,11 +1032,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         Should only happen during discarding this write-mode file
         """
         if self.location is None:
-            raise ValueError('Cannot cancel upload which has not started')
+            return
         uid = re.findall('upload_id=([^&=?]+)', self.location)
-        r = self.gcsfs._call('DELETE',
+        r = self.gcsfs._call(
+            'DELETE',
             'https://www.googleapis.com/upload/storage/v1/b/%s/o'
-            % quote_plus(self.bucket),
+            '' % quote_plus(self.bucket),
             params={'uploadType': 'resumable', 'upload_id': uid})
         r.raise_for_status()
 
