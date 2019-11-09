@@ -18,6 +18,7 @@ so all tests must have unique names, across all test files.
 
 The process is as follows:
 
+-   Create a bucket for testing
 -   Set environment variables so that the tests run against your GCS
     credentials, and recording occurs
 
@@ -25,6 +26,7 @@ The process is as follows:
 
        export GCSFS_RECORD_MODE=all
        export GCSFS_TEST_PROJECT='...'
+       export GCSFS_TEST_BUCKET='...'  # the bucket from step 1.
        export GCSFS_GOOGLE_TOKEN=~/.config/gcloud/application_default_credentials.json
        py.test -vv -x -s gcsfs
 
