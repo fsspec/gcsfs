@@ -10,6 +10,7 @@ import sys
 import tempfile
 import vcr
 
+import gcsfs.utils
 from gcsfs.core import GCSFileSystem
 from gcsfs.tests.settings import (TEST_BUCKET, TEST_PROJECT, RECORD_MODE,
                                   GOOGLE_TOKEN, FAKE_GOOGLE_TOKEN, DEBUG)
@@ -194,7 +195,7 @@ def gcs_maker(populate=False):
         try:
             gcs.mkdir(TEST_BUCKET, default_acl="authenticatedread",
                       acl="publicReadWrite")
-        except:
+        except gcsfs.utils.HttpError:
             pass
 
         # ensure we're empty.
@@ -203,13 +204,14 @@ def gcs_maker(populate=False):
         for k in [a, b, c, d]:
             try:
                 gcs.rm(k)
-            except:
+            except FileNotFoundError:
                 pass
         if populate:
             for flist in [files, csv_files, text_files]:
                 for fname, data in flist.items():
                     with gcs.open(TEST_BUCKET+'/'+fname, 'wb') as f:
                         f.write(data)
+        gcs.invalidate_cache()
         yield gcs
     finally:
         for f in gcs.find(TEST_BUCKET):
