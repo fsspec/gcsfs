@@ -46,12 +46,12 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
   response:
     body:
-      string: "{\n  \"kind\": \"storage#objects\"\n}\n"
+      string: "{\n \"kind\": \"storage#objects\"\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '32'
+      - '31'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -110,8 +110,8 @@ interactions:
         \     \"projectNumber\": \"335349516259\",\n      \"name\": \"dask-demo-benchmarks\",\n
         \     \"metageneration\": \"1\",\n      \"location\": \"US-EAST1\",\n      \"storageClass\":
         \"REGIONAL\",\n      \"etag\": \"CAE=\",\n      \"locationType\": \"region\",\n
-        \     \"labels\": {\n        \"owner\": \"taugspurger\",\n        \"billing-project\":
-        \"dask\"\n      },\n      \"timeCreated\": \"2017-10-13T13:41:16.398Z\",\n
+        \     \"labels\": {\n        \"billing-project\": \"dask\",\n        \"owner\":
+        \"taugspurger\"\n      },\n      \"timeCreated\": \"2017-10-13T13:41:16.398Z\",\n
         \     \"updated\": \"2017-10-13T13:41:16.398Z\"\n    },\n    {\n      \"kind\":
         \"storage#bucket\",\n      \"id\": \"dask-nyc-taxi\",\n      \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/dask-nyc-taxi\",\n      \"projectNumber\":
@@ -178,14 +178,14 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAAANPVTUosSc6INwh1cUv1KjMoMsyOd3T0cC830fX0cTbQ1eXlAgBfB/tjIwAAAA==
+        H4sIAAAAAAAAANPVTUosSc6I90spDHMp9Q6uMEiPd3R0rfAr0o3PcbHQ1eXlAgAaDYV4IwAAAA==
     headers:
       Cache-Control:
       - private, max-age=0
       Content-Encoding:
       - gzip
       Content-Type:
-      - multipart/mixed; boundary=batch_0UDFeJv0r1k_AAHGw4-ILC0
+      - multipart/mixed; boundary=batch_NdqVDuKSx0g_AAExNr-_lD8
       Server:
       - GSE
       Transfer-Encoding:
@@ -289,19 +289,17 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fc
   response:
     body:
-      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
-        gcsfs-testing/tmp/test/c\",\n    \"errors\": [\n      {\n        \"message\":
-        \"No such object: gcsfs-testing/tmp/test/c\",\n        \"domain\": \"global\",\n
-        \       \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
+      string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
+        \   \"reason\": \"notFound\",\n    \"message\": \"No such object: gcsfs-testing/tmp/test/c\"\n
+        \  }\n  ],\n  \"code\": 404,\n  \"message\": \"No such object: gcsfs-testing/tmp/test/c\"\n
+        }\n}\n"
     headers:
       Cache-Control:
-      - no-cache, no-store, max-age=0, must-revalidate
+      - private, max-age=0
       Content-Length:
-      - '279'
+      - '251'
       Content-Type:
       - application/json; charset=UTF-8
-      Pragma:
-      - no-cache
       Server:
       - UploadServer
       Vary:
@@ -467,7 +465,7 @@ interactions:
       string: "{\n \"kind\": \"storage#bucket\",\n \"id\": \"gcsfs-testingnew-bucket\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket\",\n
         \"projectNumber\": \"335349516259\",\n \"name\": \"gcsfs-testingnew-bucket\",\n
-        \"timeCreated\": \"2019-11-11T19:51:26.050Z\",\n \"updated\": \"2019-11-11T19:51:26.050Z\",\n
+        \"timeCreated\": \"2019-11-11T22:31:39.003Z\",\n \"updated\": \"2019-11-11T22:31:39.003Z\",\n
         \"metageneration\": \"1\",\n \"acl\": [\n  {\n   \"kind\": \"storage#bucketAccessControl\",\n
         \  \"id\": \"gcsfs-testingnew-bucket/project-owners-335349516259\",\n   \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/acl/project-owners-335349516259\",\n
@@ -587,8 +585,8 @@ interactions:
         \     \"projectNumber\": \"335349516259\",\n      \"name\": \"dask-demo-benchmarks\",\n
         \     \"metageneration\": \"1\",\n      \"location\": \"US-EAST1\",\n      \"storageClass\":
         \"REGIONAL\",\n      \"etag\": \"CAE=\",\n      \"locationType\": \"region\",\n
-        \     \"labels\": {\n        \"billing-project\": \"dask\",\n        \"owner\":
-        \"taugspurger\"\n      },\n      \"timeCreated\": \"2017-10-13T13:41:16.398Z\",\n
+        \     \"labels\": {\n        \"owner\": \"taugspurger\",\n        \"billing-project\":
+        \"dask\"\n      },\n      \"timeCreated\": \"2017-10-13T13:41:16.398Z\",\n
         \     \"updated\": \"2017-10-13T13:41:16.398Z\"\n    },\n    {\n      \"kind\":
         \"storage#bucket\",\n      \"id\": \"dask-nyc-taxi\",\n      \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/dask-nyc-taxi\",\n      \"projectNumber\":
@@ -627,7 +625,7 @@ interactions:
         \       \"bucketPolicyOnly\": {\n          \"enabled\": false\n        },\n
         \       \"uniformBucketLevelAccess\": {\n          \"enabled\": false\n        }\n
         \     },\n      \"locationType\": \"multi-region\",\n      \"timeCreated\":
-        \"2019-11-11T19:51:26.050Z\",\n      \"updated\": \"2019-11-11T19:51:26.050Z\"\n
+        \"2019-11-11T22:31:39.003Z\",\n      \"updated\": \"2019-11-11T22:31:39.003Z\"\n
         \   }\n  ]\n}\n"
     headers:
       Cache-Control:
