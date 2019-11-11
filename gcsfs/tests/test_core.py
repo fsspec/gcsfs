@@ -109,7 +109,7 @@ def test_pickle(token_restore):
 
 @my_vcr.use_cassette(match=['all'])
 def test_ls_touch(token_restore):
-    with gcs_maker() as gcs:
+    with gcs_maker(populate=False) as gcs:
         assert not gcs.exists(TEST_BUCKET+'/tmp/test')
 
         gcs.touch(a)

@@ -196,6 +196,10 @@ def gcs_maker(populate=False):
                       acl="publicReadWrite")
         except:
             pass
+
+        # ensure we're empty.
+        gcs.rm(TEST_BUCKET, recursive=True)
+
         for k in [a, b, c, d]:
             try:
                 gcs.rm(k)
