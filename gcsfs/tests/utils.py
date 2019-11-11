@@ -7,13 +7,13 @@ import re
 import pickle
 import tempfile
 
+import gcsfs.utils
 from gcsfs.core import GCSFileSystem
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_PROJECT,
     RECORD_MODE,
     GOOGLE_TOKEN,
-    FAKE_GOOGLE_TOKEN,
     DEBUG,
 )
 
@@ -68,8 +68,8 @@ def before_record(request):
         TEST_BUCKET, "gcsfs-testing"
     )
     if r.body:
-        for field in FAKE_GOOGLE_TOKEN:
-            r.body = r.body.replace(FAKE_GOOGLE_TOKEN[field].encode(), b"xxx")
+        for field in GOOGLE_TOKEN:
+            r.body = r.body.replace(GOOGLE_TOKEN[field].encode(), b"xxx")
         r.body = r.body.replace(TEST_PROJECT.encode(), b"test_project").replace(
             TEST_BUCKET.encode(), b"gcsfs-testing"
         )
@@ -205,18 +205,23 @@ def gcs_maker(populate=False):
             gcs.mkdir(
                 TEST_BUCKET, default_acl="authenticatedread", acl="publicReadWrite"
             )
-        except:  # noqa: E722
+        except gcsfs.utils.HttpError:
             pass
+
+        # ensure we're empty.
+        gcs.rm(TEST_BUCKET, recursive=True)
+
         for k in [a, b, c, d]:
             try:
                 gcs.rm(k)
-            except:  # noqa: E722
+            except FileNotFoundError:
                 pass
         if populate:
             for flist in [files, csv_files, text_files]:
                 for fname, data in flist.items():
                     with gcs.open(TEST_BUCKET + "/" + fname, "wb") as f:
                         f.write(data)
+        gcs.invalidate_cache()
         yield gcs
     finally:
         for f in gcs.find(TEST_BUCKET):
