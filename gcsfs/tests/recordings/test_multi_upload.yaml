@@ -46,12 +46,12 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
   response:
     body:
-      string: "{\n \"kind\": \"storage#objects\"\n}\n"
+      string: "{\n  \"kind\": \"storage#objects\"\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '31'
+      - '32'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -76,71 +76,73 @@ interactions:
   response:
     body:
       string: "{\n  \"kind\": \"storage#buckets\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#bucket\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/anaconda-flights\",\n
-        \     \"id\": \"anaconda-flights\",\n      \"name\": \"anaconda-flights\",\n
-        \     \"projectNumber\": \"335349516259\",\n      \"metageneration\": \"9\",\n
-        \     \"location\": \"US-CENTRAL1\",\n      \"storageClass\": \"STANDARD\",\n
-        \     \"etag\": \"CAk=\",\n      \"defaultEventBasedHold\": false,\n      \"timeCreated\":
-        \"2019-10-02T13:55:35.896Z\",\n      \"updated\": \"2019-11-08T22:34:17.727Z\",\n
+        \"storage#bucket\",\n      \"id\": \"anaconda-flights\",\n      \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/anaconda-flights\",\n      \"projectNumber\":
+        \"335349516259\",\n      \"name\": \"anaconda-flights\",\n      \"metageneration\":
+        \"9\",\n      \"location\": \"US-CENTRAL1\",\n      \"defaultEventBasedHold\":
+        false,\n      \"storageClass\": \"STANDARD\",\n      \"etag\": \"CAk=\",\n
         \     \"iamConfiguration\": {\n        \"bucketPolicyOnly\": {\n          \"enabled\":
         true,\n          \"lockedTime\": \"2019-12-31T14:32:56.417Z\"\n        },\n
         \       \"uniformBucketLevelAccess\": {\n          \"enabled\": true,\n          \"lockedTime\":
         \"2019-12-31T14:32:56.417Z\"\n        }\n      },\n      \"locationType\":
-        \"region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
+        \"region\",\n      \"timeCreated\": \"2019-10-02T13:55:35.896Z\",\n      \"updated\":
+        \"2019-11-08T22:34:17.727Z\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n
+        \     \"id\": \"artifacts.test_project.appspot.com\",\n      \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/artifacts.test_project.appspot.com\",\n
-        \     \"id\": \"artifacts.test_project.appspot.com\",\n      \"name\": \"artifacts.test_project.appspot.com\",\n
-        \     \"projectNumber\": \"335349516259\",\n      \"metageneration\": \"1\",\n
-        \     \"location\": \"US\",\n      \"storageClass\": \"STANDARD\",\n      \"etag\":
-        \"CAE=\",\n      \"timeCreated\": \"2019-10-25T18:40:56.008Z\",\n      \"updated\":
-        \"2019-10-25T18:40:56.008Z\",\n      \"iamConfiguration\": {\n        \"bucketPolicyOnly\":
-        {\n          \"enabled\": false\n        },\n        \"uniformBucketLevelAccess\":
-        {\n          \"enabled\": false\n        }\n      },\n      \"locationType\":
-        \"multi-region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
-        \"https://www.googleapis.com/storage/v1/b/test_project_cloudbuild\",\n      \"id\":
-        \"test_project_cloudbuild\",\n      \"name\": \"test_project_cloudbuild\",\n
-        \     \"projectNumber\": \"335349516259\",\n      \"metageneration\": \"1\",\n
-        \     \"location\": \"US\",\n      \"storageClass\": \"STANDARD\",\n      \"etag\":
-        \"CAE=\",\n      \"timeCreated\": \"2018-06-08T16:54:18.390Z\",\n      \"updated\":
-        \"2018-06-08T16:54:18.390Z\",\n      \"iamConfiguration\": {\n        \"bucketPolicyOnly\":
-        {\n          \"enabled\": false\n        },\n        \"uniformBucketLevelAccess\":
-        {\n          \"enabled\": false\n        }\n      },\n      \"locationType\":
-        \"multi-region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
-        \"https://www.googleapis.com/storage/v1/b/dask-demo-benchmarks\",\n      \"id\":
-        \"dask-demo-benchmarks\",\n      \"name\": \"dask-demo-benchmarks\",\n      \"projectNumber\":
-        \"335349516259\",\n      \"metageneration\": \"1\",\n      \"location\": \"US-EAST1\",\n
-        \     \"storageClass\": \"REGIONAL\",\n      \"etag\": \"CAE=\",\n      \"timeCreated\":
-        \"2017-10-13T13:41:16.398Z\",\n      \"updated\": \"2017-10-13T13:41:16.398Z\",\n
-        \     \"labels\": {\n        \"billing-project\": \"dask\",\n        \"owner\":
-        \"taugspurger\"\n      },\n      \"locationType\": \"region\"\n    },\n    {\n
-        \     \"kind\": \"storage#bucket\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask-nyc-taxi\",\n
-        \     \"id\": \"dask-nyc-taxi\",\n      \"name\": \"dask-nyc-taxi\",\n      \"projectNumber\":
-        \"335349516259\",\n      \"metageneration\": \"12\",\n      \"location\":
-        \"US-CENTRAL1\",\n      \"storageClass\": \"STANDARD\",\n      \"etag\": \"CAw=\",\n
-        \     \"defaultEventBasedHold\": false,\n      \"timeCreated\": \"2019-10-25T19:33:44.397Z\",\n
-        \     \"updated\": \"2019-10-28T20:06:01.158Z\",\n      \"iamConfiguration\":
-        {\n        \"bucketPolicyOnly\": {\n          \"enabled\": true,\n          \"lockedTime\":
-        \"2020-01-23T19:33:44.397Z\"\n        },\n        \"uniformBucketLevelAccess\":
-        {\n          \"enabled\": true,\n          \"lockedTime\": \"2020-01-23T19:33:44.397Z\"\n
-        \       }\n      },\n      \"locationType\": \"region\"\n    },\n    {\n      \"kind\":
-        \"storage#bucket\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask-tutorial-data\",\n
-        \     \"id\": \"dask-tutorial-data\",\n      \"name\": \"dask-tutorial-data\",\n
-        \     \"projectNumber\": \"335349516259\",\n      \"metageneration\": \"1\",\n
-        \     \"location\": \"US-CENTRAL1\",\n      \"storageClass\": \"REGIONAL\",\n
-        \     \"etag\": \"CAE=\",\n      \"timeCreated\": \"2018-05-03T19:57:52.679Z\",\n
-        \     \"updated\": \"2018-05-03T19:57:52.679Z\",\n      \"labels\": {\n        \"owner\":
-        \"taugspurger\"\n      },\n      \"iamConfiguration\": {\n        \"bucketPolicyOnly\":
-        {\n          \"enabled\": false\n        },\n        \"uniformBucketLevelAccess\":
-        {\n          \"enabled\": false\n        }\n      },\n      \"locationType\":
-        \"region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
-        \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n      \"id\":
-        \"gcsfs-testing\",\n      \"name\": \"gcsfs-testing\",\n      \"projectNumber\":
-        \"335349516259\",\n      \"metageneration\": \"1\",\n      \"location\": \"US-CENTRAL1\",\n
-        \     \"storageClass\": \"STANDARD\",\n      \"etag\": \"CAE=\",\n      \"defaultEventBasedHold\":
-        false,\n      \"timeCreated\": \"2019-11-09T03:02:21.312Z\",\n      \"updated\":
-        \"2019-11-09T03:02:21.312Z\",\n      \"iamConfiguration\": {\n        \"bucketPolicyOnly\":
-        {\n          \"enabled\": false\n        },\n        \"uniformBucketLevelAccess\":
-        {\n          \"enabled\": false\n        }\n      },\n      \"locationType\":
-        \"region\"\n    }\n  ]\n}\n"
+        \     \"projectNumber\": \"335349516259\",\n      \"name\": \"artifacts.test_project.appspot.com\",\n
+        \     \"metageneration\": \"1\",\n      \"location\": \"US\",\n      \"storageClass\":
+        \"STANDARD\",\n      \"etag\": \"CAE=\",\n      \"iamConfiguration\": {\n
+        \       \"bucketPolicyOnly\": {\n          \"enabled\": false\n        },\n
+        \       \"uniformBucketLevelAccess\": {\n          \"enabled\": false\n        }\n
+        \     },\n      \"locationType\": \"multi-region\",\n      \"timeCreated\":
+        \"2019-10-25T18:40:56.008Z\",\n      \"updated\": \"2019-10-25T18:40:56.008Z\"\n
+        \   },\n    {\n      \"kind\": \"storage#bucket\",\n      \"id\": \"test_project_cloudbuild\",\n
+        \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/test_project_cloudbuild\",\n
+        \     \"projectNumber\": \"335349516259\",\n      \"name\": \"test_project_cloudbuild\",\n
+        \     \"metageneration\": \"1\",\n      \"location\": \"US\",\n      \"storageClass\":
+        \"STANDARD\",\n      \"etag\": \"CAE=\",\n      \"iamConfiguration\": {\n
+        \       \"bucketPolicyOnly\": {\n          \"enabled\": false\n        },\n
+        \       \"uniformBucketLevelAccess\": {\n          \"enabled\": false\n        }\n
+        \     },\n      \"locationType\": \"multi-region\",\n      \"timeCreated\":
+        \"2018-06-08T16:54:18.390Z\",\n      \"updated\": \"2018-06-08T16:54:18.390Z\"\n
+        \   },\n    {\n      \"kind\": \"storage#bucket\",\n      \"id\": \"dask-demo-benchmarks\",\n
+        \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask-demo-benchmarks\",\n
+        \     \"projectNumber\": \"335349516259\",\n      \"name\": \"dask-demo-benchmarks\",\n
+        \     \"metageneration\": \"1\",\n      \"location\": \"US-EAST1\",\n      \"storageClass\":
+        \"REGIONAL\",\n      \"etag\": \"CAE=\",\n      \"locationType\": \"region\",\n
+        \     \"labels\": {\n        \"owner\": \"taugspurger\",\n        \"billing-project\":
+        \"dask\"\n      },\n      \"timeCreated\": \"2017-10-13T13:41:16.398Z\",\n
+        \     \"updated\": \"2017-10-13T13:41:16.398Z\"\n    },\n    {\n      \"kind\":
+        \"storage#bucket\",\n      \"id\": \"dask-nyc-taxi\",\n      \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/dask-nyc-taxi\",\n      \"projectNumber\":
+        \"335349516259\",\n      \"name\": \"dask-nyc-taxi\",\n      \"metageneration\":
+        \"12\",\n      \"location\": \"US-CENTRAL1\",\n      \"defaultEventBasedHold\":
+        false,\n      \"storageClass\": \"STANDARD\",\n      \"etag\": \"CAw=\",\n
+        \     \"iamConfiguration\": {\n        \"bucketPolicyOnly\": {\n          \"enabled\":
+        true,\n          \"lockedTime\": \"2020-01-23T19:33:44.397Z\"\n        },\n
+        \       \"uniformBucketLevelAccess\": {\n          \"enabled\": true,\n          \"lockedTime\":
+        \"2020-01-23T19:33:44.397Z\"\n        }\n      },\n      \"locationType\":
+        \"region\",\n      \"timeCreated\": \"2019-10-25T19:33:44.397Z\",\n      \"updated\":
+        \"2019-10-28T20:06:01.158Z\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n
+        \     \"id\": \"dask-tutorial-data\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask-tutorial-data\",\n
+        \     \"projectNumber\": \"335349516259\",\n      \"name\": \"dask-tutorial-data\",\n
+        \     \"metageneration\": \"1\",\n      \"location\": \"US-CENTRAL1\",\n      \"storageClass\":
+        \"REGIONAL\",\n      \"etag\": \"CAE=\",\n      \"iamConfiguration\": {\n
+        \       \"bucketPolicyOnly\": {\n          \"enabled\": false\n        },\n
+        \       \"uniformBucketLevelAccess\": {\n          \"enabled\": false\n        }\n
+        \     },\n      \"locationType\": \"region\",\n      \"labels\": {\n        \"owner\":
+        \"taugspurger\"\n      },\n      \"timeCreated\": \"2018-05-03T19:57:52.679Z\",\n
+        \     \"updated\": \"2018-05-03T19:57:52.679Z\"\n    },\n    {\n      \"kind\":
+        \"storage#bucket\",\n      \"id\": \"gcsfs-testing\",\n      \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/gcsfs-testing\",\n      \"projectNumber\":
+        \"335349516259\",\n      \"name\": \"gcsfs-testing\",\n      \"metageneration\":
+        \"1\",\n      \"location\": \"US-CENTRAL1\",\n      \"defaultEventBasedHold\":
+        false,\n      \"storageClass\": \"STANDARD\",\n      \"etag\": \"CAE=\",\n
+        \     \"iamConfiguration\": {\n        \"bucketPolicyOnly\": {\n          \"enabled\":
+        false\n        },\n        \"uniformBucketLevelAccess\": {\n          \"enabled\":
+        false\n        }\n      },\n      \"locationType\": \"region\",\n      \"timeCreated\":
+        \"2019-11-09T03:02:21.312Z\",\n      \"updated\": \"2019-11-09T03:02:21.312Z\"\n
+        \   }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
@@ -176,14 +178,14 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAAANPVTUosSc6IjzL1y43ILyzyM8qOd3R0Lw1OjQ9OdEvX1eXlAgAaVIjrIwAAAA==
+        H4sIAAAAAAAAANPVTUosSc6IL84IK3O2zHJ084iMd3SMMHMLDS7XLcrX1eXlAgD4VbxBIwAAAA==
     headers:
       Cache-Control:
       - private, max-age=0
       Content-Encoding:
       - gzip
       Content-Type:
-      - multipart/mixed; boundary=batch_Z5NmXoqrN2k_AAGuSe_SaFg
+      - multipart/mixed; boundary=batch_shVvC9jAFHY_AAX6FUSw-ro
       Server:
       - GSE
       Transfer-Encoding:
@@ -368,7 +370,7 @@ interactions:
       Content-Type:
       - text/plain; charset=utf-8
       Location:
-      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2UoLXJnxnHGIC1LuGpk82qJg5vWSuYYwLHaitgbbbxcoZ67HUQ7mXuZE1zd5yoHE3OoIsAuciML4pW70BKj6SJsRZPy_7w
+      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2UqXq8p7RIAnqf8A-6oKJGJgZKcUREwGlxLaNZtW3jyRHo1b1SZJKurFR_jEj5822QO1LzXO96W65xoNpFH40-oxTLiisw
       Pragma:
       - no-cache
       Server:
@@ -395,7 +397,7 @@ interactions:
       Content-Type:
       - application/octet-stream
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UoLXJnxnHGIC1LuGpk82qJg5vWSuYYwLHaitgbbbxcoZ67HUQ7mXuZE1zd5yoHE3OoIsAuciML4pW70BKj6SJsRZPy_7w
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UqXq8p7RIAnqf8A-6oKJGJgZKcUREwGlxLaNZtW3jyRHo1b1SZJKurFR_jEj5822QO1LzXO96W65xoNpFH40-oxTLiisw
   response:
     body:
       string: ''
@@ -429,17 +431,17 @@ interactions:
       Content-Type:
       - application/octet-stream
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UoLXJnxnHGIC1LuGpk82qJg5vWSuYYwLHaitgbbbxcoZ67HUQ7mXuZE1zd5yoHE3OoIsAuciML4pW70BKj6SJsRZPy_7w
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UqXq8p7RIAnqf8A-6oKJGJgZKcUREwGlxLaNZtW3jyRHo1b1SZJKurFR_jEj5822QO1LzXO96W65xoNpFH40-oxTLiisw
   response:
     body:
-      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/test/1573501701390865\",\n
+      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/test/1573591213004854\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/test\",\n
-        \"name\": \"test\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\": \"1573501701390865\",\n
-        \"metageneration\": \"1\",\n \"timeCreated\": \"2019-11-11T19:48:21.390Z\",\n
-        \"updated\": \"2019-11-11T19:48:21.390Z\",\n \"storageClass\": \"STANDARD\",\n
-        \"timeStorageClassUpdated\": \"2019-11-11T19:48:21.390Z\",\n \"size\": \"262146\",\n
-        \"md5Hash\": \"CrZCnRosp/P9qFxfaMsuLQ==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/test?generation=1573501701390865&alt=media\",\n
-        \"crc32c\": \"1JCIRw==\",\n \"etag\": \"CJGE3M/24uUCEAE=\"\n}\n"
+        \"name\": \"test\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\": \"1573591213004854\",\n
+        \"metageneration\": \"1\",\n \"timeCreated\": \"2019-11-12T20:40:13.004Z\",\n
+        \"updated\": \"2019-11-12T20:40:13.004Z\",\n \"storageClass\": \"STANDARD\",\n
+        \"timeStorageClassUpdated\": \"2019-11-12T20:40:13.004Z\",\n \"size\": \"262146\",\n
+        \"md5Hash\": \"CrZCnRosp/P9qFxfaMsuLQ==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/test?generation=1573591213004854&alt=media\",\n
+        \"crc32c\": \"1JCIRw==\",\n \"etag\": \"CLawl4rE5eUCEAE=\"\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -448,7 +450,7 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       ETag:
-      - CJGE3M/24uUCEAE=
+      - CLawl4rE5eUCEAE=
       Pragma:
       - no-cache
       Server:
@@ -482,8 +484,8 @@ interactions:
       - '262146'
       Content-Type:
       - application/octet-stream
-      Etag:
-      - CJGE3M/24uUCEAE=
+      ETag:
+      - CLawl4rE5eUCEAE=
       Pragma:
       - no-cache
       Server:
@@ -492,7 +494,7 @@ interactions:
       - Origin
       - X-Origin
       X-Goog-Generation:
-      - '1573501701390865'
+      - '1573591213004854'
       X-Goog-Hash:
       - crc32c=1JCIRw==,md5=CrZCnRosp/P9qFxfaMsuLQ==
       X-Goog-Metageneration:
@@ -528,7 +530,7 @@ interactions:
       Content-Type:
       - text/plain; charset=utf-8
       Location:
-      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2Urs628lcg8HJN7l18DYpw5IO-TEdXMjIGJ_7xxKlyrDenFAc8mtIHaQl3AfqWtFl3RO3HQQQ6R-INRJLYkEVK8e_Vi-Og
+      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2Upes6Wi8IpLxpd3cahk7aNBK_8XMumoP7qAX1t52P1Usz9qYM9J1-icfEzNZVKvbQaAi6PqDSrfhbsPhm-ySVn_p96iscRxA_USmmCYyAWVc5xgWtw
       Pragma:
       - no-cache
       Server:
@@ -555,7 +557,7 @@ interactions:
       Content-Type:
       - application/octet-stream
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2Urs628lcg8HJN7l18DYpw5IO-TEdXMjIGJ_7xxKlyrDenFAc8mtIHaQl3AfqWtFl3RO3HQQQ6R-INRJLYkEVK8e_Vi-Og
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2Upes6Wi8IpLxpd3cahk7aNBK_8XMumoP7qAX1t52P1Usz9qYM9J1-icfEzNZVKvbQaAi6PqDSrfhbsPhm-ySVn_p96iscRxA_USmmCYyAWVc5xgWtw
   response:
     body:
       string: ''
@@ -589,17 +591,17 @@ interactions:
       Content-Type:
       - application/octet-stream
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2Urs628lcg8HJN7l18DYpw5IO-TEdXMjIGJ_7xxKlyrDenFAc8mtIHaQl3AfqWtFl3RO3HQQQ6R-INRJLYkEVK8e_Vi-Og
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2Upes6Wi8IpLxpd3cahk7aNBK_8XMumoP7qAX1t52P1Usz9qYM9J1-icfEzNZVKvbQaAi6PqDSrfhbsPhm-ySVn_p96iscRxA_USmmCYyAWVc5xgWtw
   response:
     body:
-      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/test/1573501702255853\",\n
+      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/test/1573591216215648\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/test\",\n
-        \"name\": \"test\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\": \"1573501702255853\",\n
-        \"metageneration\": \"1\",\n \"timeCreated\": \"2019-11-11T19:48:22.255Z\",\n
-        \"updated\": \"2019-11-11T19:48:22.255Z\",\n \"storageClass\": \"STANDARD\",\n
-        \"timeStorageClassUpdated\": \"2019-11-11T19:48:22.255Z\",\n \"size\": \"524290\",\n
-        \"md5Hash\": \"QacmS2pIJaTa732O7aJBDA==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/test?generation=1573501702255853&alt=media\",\n
-        \"crc32c\": \"hcyHHw==\",\n \"etag\": \"CO3pkND24uUCEAE=\"\n}\n"
+        \"name\": \"test\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\": \"1573591216215648\",\n
+        \"metageneration\": \"1\",\n \"timeCreated\": \"2019-11-12T20:40:16.215Z\",\n
+        \"updated\": \"2019-11-12T20:40:16.215Z\",\n \"storageClass\": \"STANDARD\",\n
+        \"timeStorageClassUpdated\": \"2019-11-12T20:40:16.215Z\",\n \"size\": \"524290\",\n
+        \"md5Hash\": \"QacmS2pIJaTa732O7aJBDA==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/test?generation=1573591216215648&alt=media\",\n
+        \"crc32c\": \"hcyHHw==\",\n \"etag\": \"COCs24vE5eUCEAE=\"\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -608,7 +610,7 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       ETag:
-      - CO3pkND24uUCEAE=
+      - COCs24vE5eUCEAE=
       Pragma:
       - no-cache
       Server:
@@ -643,7 +645,7 @@ interactions:
       Content-Type:
       - application/octet-stream
       ETag:
-      - CO3pkND24uUCEAE=
+      - COCs24vE5eUCEAE=
       Pragma:
       - no-cache
       Server:
@@ -652,7 +654,7 @@ interactions:
       - Origin
       - X-Origin
       X-Goog-Generation:
-      - '1573501702255853'
+      - '1573591216215648'
       X-Goog-Hash:
       - crc32c=hcyHHw==,md5=QacmS2pIJaTa732O7aJBDA==
       X-Goog-Metageneration:
@@ -676,15 +678,15 @@ interactions:
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/test/1573501702255853\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/test/1573591216215648\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/test\",\n
         \     \"name\": \"test\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1573501702255853\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
+        \"1573591216215648\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
         \"STANDARD\",\n      \"size\": \"524290\",\n      \"md5Hash\": \"QacmS2pIJaTa732O7aJBDA==\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/test?generation=1573501702255853&alt=media\",\n
-        \     \"crc32c\": \"hcyHHw==\",\n      \"etag\": \"CO3pkND24uUCEAE=\",\n      \"timeCreated\":
-        \"2019-11-11T19:48:22.255Z\",\n      \"updated\": \"2019-11-11T19:48:22.255Z\",\n
-        \     \"timeStorageClassUpdated\": \"2019-11-11T19:48:22.255Z\"\n    }\n  ]\n}\n"
+        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/test?generation=1573591216215648&alt=media\",\n
+        \     \"crc32c\": \"hcyHHw==\",\n      \"etag\": \"COCs24vE5eUCEAE=\",\n      \"timeCreated\":
+        \"2019-11-12T20:40:16.215Z\",\n      \"updated\": \"2019-11-12T20:40:16.215Z\",\n
+        \     \"timeStorageClassUpdated\": \"2019-11-12T20:40:16.215Z\"\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
@@ -748,8 +750,8 @@ interactions:
         \     \"projectNumber\": \"335349516259\",\n      \"name\": \"dask-demo-benchmarks\",\n
         \     \"metageneration\": \"1\",\n      \"location\": \"US-EAST1\",\n      \"storageClass\":
         \"REGIONAL\",\n      \"etag\": \"CAE=\",\n      \"locationType\": \"region\",\n
-        \     \"labels\": {\n        \"owner\": \"taugspurger\",\n        \"billing-project\":
-        \"dask\"\n      },\n      \"timeCreated\": \"2017-10-13T13:41:16.398Z\",\n
+        \     \"labels\": {\n        \"billing-project\": \"dask\",\n        \"owner\":
+        \"taugspurger\"\n      },\n      \"timeCreated\": \"2017-10-13T13:41:16.398Z\",\n
         \     \"updated\": \"2017-10-13T13:41:16.398Z\"\n    },\n    {\n      \"kind\":
         \"storage#bucket\",\n      \"id\": \"dask-nyc-taxi\",\n      \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/dask-nyc-taxi\",\n      \"projectNumber\":
