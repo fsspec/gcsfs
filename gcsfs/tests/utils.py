@@ -61,8 +61,8 @@ def before_record(request):
     r.uri = request.uri.replace(TEST_PROJECT, 'test_project').replace(
         TEST_BUCKET, 'gcsfs-testing')
     if r.body:
-        for field in FAKE_GOOGLE_TOKEN:
-            r.body = r.body.replace(FAKE_GOOGLE_TOKEN[field].encode(), b'xxx')
+        for field in GOOGLE_TOKEN:
+            r.body = r.body.replace(GOOGLE_TOKEN[field].encode(), b'xxx')
         r.body = r.body.replace(TEST_PROJECT.encode(), b'test_project').replace(
                         TEST_BUCKET.encode(), b'gcsfs-testing')
         r.body = re.sub(b'refresh_token=[^&]+', b'refresh_token=xxx', r.body)

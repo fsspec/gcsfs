@@ -1,4 +1,4 @@
-
+import json
 import os
 import gcsfs.core
 
@@ -21,5 +21,11 @@ FAKE_GOOGLE_TOKEN = {
   "type": "authorized_user"
 }
 GOOGLE_TOKEN = os.environ.get('GCSFS_GOOGLE_TOKEN', FAKE_GOOGLE_TOKEN)
+
+if isinstance(GOOGLE_TOKEN, str) and os.path.exists(GOOGLE_TOKEN):
+    with open(GOOGLE_TOKEN) as f:
+        GOOGLE_TOKEN = json.load(f)
+
+
 # /Users/mdurant/.config/gcloud/application_default_credentials.json
 DEBUG = os.environ.get('GCSFS_DEBUG', False)
