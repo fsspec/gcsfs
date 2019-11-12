@@ -4,6 +4,8 @@ import io
 from itertools import chain
 import pytest
 
+from fsspec.utils import seek_delimiter
+
 from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
 from gcsfs.tests.utils import (
     tempdir,
@@ -17,7 +19,6 @@ from gcsfs.tests.utils import (
     tmpfile,
 )
 from gcsfs.core import GCSFileSystem, quote_plus
-from gcsfs.utils import seek_delimiter
 
 
 @my_vcr.use_cassette(match=["all"])
