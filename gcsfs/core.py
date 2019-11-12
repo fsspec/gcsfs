@@ -25,15 +25,12 @@ import posixpath
 import pickle
 import re
 import requests
-import sys
 import time
 import warnings
 import random
 
 from requests.exceptions import RequestException, ProxyError
 from .utils import HttpError, RateLimitException, is_retriable
-
-PY2 = sys.version_info.major == 2
 
 logger = logging.getLogger(__name__)
 
@@ -299,8 +296,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         requests_timeout=None,
         **kwargs
     ):
-        if self._cached:
-            return
         if access not in self.scopes:
             raise ValueError("access must be one of {}", self.scopes)
         if project is None:
