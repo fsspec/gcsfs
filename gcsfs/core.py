@@ -993,6 +993,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         path,
         mode="rb",
         block_size=None,
+        cache_options=None,
         acl=None,
         consistency=None,
         metadata=None,
@@ -1013,6 +1014,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             path,
             mode,
             block_size,
+            cache_options=cache_options,
             consistency=const,
             metadata=metadata,
             acl=acl,
@@ -1031,10 +1033,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         path,
         mode="rb",
         block_size=DEFAULT_BLOCK_SIZE,
+        autocommit=True,
+        cache_type="readahead",
+        cache_options=None,
         acl=None,
         consistency="md5",
         metadata=None,
-        autocommit=True,
         **kwargs
     ):
         """
@@ -1061,7 +1065,16 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
         """
-        super().__init__(gcsfs, path, mode, block_size, autocommit=autocommit, **kwargs)
+        super().__init__(
+            gcsfs,
+            path,
+            mode,
+            block_size,
+            autocommit=autocommit,
+            cache_type=cache_type,
+            cache_options=cache_options,
+            **kwargs
+        )
         bucket, key = split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
@@ -1070,7 +1083,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.key = key
         self.metadata = metadata
         self.acl = acl
-        self.trim = True
         self.consistency = consistency
         if self.consistency == "md5":
             self.md5 = md5()
@@ -1079,6 +1091,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
+
+    @property
+    def trim(self):
+        warnings.warn(
+            "GCSFSFile.trim has not effect and will be removed in a future version. "
+            "Access cache settings from GCSFSFile.cache.",
+            FutureWarning,
+        )
+        return True
 
     def info(self):
         """ File information about this path """
