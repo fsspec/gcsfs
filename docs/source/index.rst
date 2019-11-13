@@ -121,6 +121,7 @@ Contents
    api
    developer
    fuse
+   changelog
    :maxdepth: 2
 
 
