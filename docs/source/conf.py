@@ -35,6 +35,7 @@ extensions = [
     "sphinx.ext.ifconfig",
     "sphinx.ext.viewcode",
     "sphinx.ext.autosummary",
+    "sphinx.ext.extlinks",
     "numpydoc",
 ]
 
@@ -296,3 +297,5 @@ texinfo_documents = [
 
 # If true, do not generate a @detailmenu in the "Top" node's menu.
 # texinfo_no_detailmenu = False
+
+extlinks = {"pr": ("https://github.com/dask/gcsfs/pull/%s", "PR #")}
