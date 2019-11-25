@@ -306,7 +306,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if block_size is not None:
             self.default_block_size = block_size
         self.project = project
-        self.user_project = user_project or self.project
+        self.user_project = user_project
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
@@ -497,8 +497,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         # needed for requester pays buckets
         if self.user_project:
-            kwargs.update({'userProject': self.user_project})
-            
+            kwargs.update({"userProject": self.user_project})
+
         for retry in range(self.retries):
             try:
                 if retry > 0:
