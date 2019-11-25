@@ -497,7 +497,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         # needed for requester pays buckets
         if self.user_project:
-            kwargs.update({"userProject": self.user_project})
+            kwargs["userProject"] = self.user_project
 
         for retry in range(self.retries):
             try:
