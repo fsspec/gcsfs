@@ -306,7 +306,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if block_size is not None:
             self.default_block_size = block_size
         self.project = project
-        self.user_project = user_project
+        self.user_project = user_project or project
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
