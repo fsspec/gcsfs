@@ -276,7 +276,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         this parameter to True will ensure that an actual operation is
         attempted before deciding that credentials are valid.
     user_project : string
-        project_id to use for requester-pays buckets.
+        project_id to use for requester-pays buckets. This is included as
+        the ``userProject`` parameter in requests made to Google Cloud Storage.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
