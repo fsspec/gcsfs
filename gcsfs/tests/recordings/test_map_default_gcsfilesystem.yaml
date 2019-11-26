@@ -16,76 +16,6 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
   response:
     body:
-      string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"usageLimits\",\n
-        \   \"reason\": \"rateLimitExceeded\",\n    \"message\": \"The project exceeded
-        the rate limit for creating and deleting buckets.\"\n   }\n  ],\n  \"code\":
-        429,\n  \"message\": \"The project exceeded the rate limit for creating and
-        deleting buckets.\"\n }\n}\n"
-    headers:
-      Content-Length:
-      - '301'
-      Content-Type:
-      - application/json; charset=UTF-8
-      Server:
-      - UploadServer
-      Vary:
-      - Origin
-      - X-Origin
-    status:
-      code: 429
-      message: Too Many Requests
-- request:
-    body: '{"name": "gcsfs-testing"}'
-    headers:
-      Accept:
-      - '*/*'
-      Accept-Encoding:
-      - gzip, deflate
-      Connection:
-      - keep-alive
-      Content-Length:
-      - '37'
-      Content-Type:
-      - application/json
-    method: POST
-    uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
-  response:
-    body:
-      string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"usageLimits\",\n
-        \   \"reason\": \"rateLimitExceeded\",\n    \"message\": \"The project exceeded
-        the rate limit for creating and deleting buckets.\"\n   }\n  ],\n  \"code\":
-        429,\n  \"message\": \"The project exceeded the rate limit for creating and
-        deleting buckets.\"\n }\n}\n"
-    headers:
-      Content-Length:
-      - '301'
-      Content-Type:
-      - application/json; charset=UTF-8
-      Server:
-      - UploadServer
-      Vary:
-      - Origin
-      - X-Origin
-    status:
-      code: 429
-      message: Too Many Requests
-- request:
-    body: '{"name": "gcsfs-testing"}'
-    headers:
-      Accept:
-      - '*/*'
-      Accept-Encoding:
-      - gzip, deflate
-      Connection:
-      - keep-alive
-      Content-Length:
-      - '37'
-      Content-Type:
-      - application/json
-    method: POST
-    uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
-  response:
-    body:
       string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
         \   \"reason\": \"conflict\",\n    \"message\": \"Sorry, that name is not
         available. Please try a different one.\"\n   }\n  ],\n  \"code\": 409,\n  \"message\":
@@ -210,12 +140,23 @@ interactions:
         \"2019-11-09T03:02:21.312Z\",\n      \"iamConfiguration\": {\n        \"bucketPolicyOnly\":
         {\n          \"enabled\": false\n        },\n        \"uniformBucketLevelAccess\":
         {\n          \"enabled\": false\n        }\n      },\n      \"locationType\":
-        \"region\"\n    }\n  ]\n}\n"
+        \"region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/gcsfs-testing-requester\",\n      \"id\":
+        \"gcsfs-testing-requester\",\n      \"name\": \"gcsfs-testing-requester\",\n
+        \     \"projectNumber\": \"335349516259\",\n      \"metageneration\": \"3\",\n
+        \     \"location\": \"US-CENTRAL1\",\n      \"storageClass\": \"STANDARD\",\n
+        \     \"etag\": \"CAM=\",\n      \"defaultEventBasedHold\": false,\n      \"timeCreated\":
+        \"2019-11-26T14:57:05.059Z\",\n      \"updated\": \"2019-11-26T15:00:27.730Z\",\n
+        \     \"billing\": {\n        \"requesterPays\": true\n      },\n      \"iamConfiguration\":
+        {\n        \"bucketPolicyOnly\": {\n          \"enabled\": true,\n          \"lockedTime\":
+        \"2020-02-24T14:57:05.059Z\"\n        },\n        \"uniformBucketLevelAccess\":
+        {\n          \"enabled\": true,\n          \"lockedTime\": \"2020-02-24T14:57:05.059Z\"\n
+        \       }\n      },\n      \"locationType\": \"region\"\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '5022'
+      - '5928'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -246,14 +187,14 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAAANPVTUosSc6Id3FyDw1J9AqLyAqMd3R0qfRL9fHz9EzX1eXlAgAYVWWRIwAAAA==
+        H4sIAAAAAAAAANPVTUosSc6Iz8tOdvGPcHd2CsmPd3R0rywPDi7xLXbU1eXlAgDuI4iuIwAAAA==
     headers:
       Cache-Control:
       - private, max-age=0
       Content-Encoding:
       - gzip
       Content-Type:
-      - multipart/mixed; boundary=batch_DBGUTaJVXjQ_AADyNeLNIIg
+      - multipart/mixed; boundary=batch_nkcDOXGCBTo_AAGywSStMsA
       Server:
       - GSE
       Transfer-Encoding:
@@ -491,9 +432,9 @@ interactions:
         \"335349516259\",\n      \"metageneration\": \"1\",\n      \"location\": \"US-EAST1\",\n
         \     \"storageClass\": \"REGIONAL\",\n      \"etag\": \"CAE=\",\n      \"timeCreated\":
         \"2017-10-13T13:41:16.398Z\",\n      \"updated\": \"2017-10-13T13:41:16.398Z\",\n
-        \     \"labels\": {\n        \"billing-project\": \"dask\",\n        \"owner\":
-        \"taugspurger\"\n      },\n      \"locationType\": \"region\"\n    },\n    {\n
-        \     \"kind\": \"storage#bucket\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask-nyc-taxi\",\n
+        \     \"labels\": {\n        \"owner\": \"taugspurger\",\n        \"billing-project\":
+        \"dask\"\n      },\n      \"locationType\": \"region\"\n    },\n    {\n      \"kind\":
+        \"storage#bucket\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/dask-nyc-taxi\",\n
         \     \"id\": \"dask-nyc-taxi\",\n      \"name\": \"dask-nyc-taxi\",\n      \"projectNumber\":
         \"335349516259\",\n      \"metageneration\": \"12\",\n      \"location\":
         \"US-CENTRAL1\",\n      \"storageClass\": \"STANDARD\",\n      \"etag\": \"CAw=\",\n
@@ -521,12 +462,23 @@ interactions:
         \"2019-11-09T03:02:21.312Z\",\n      \"iamConfiguration\": {\n        \"bucketPolicyOnly\":
         {\n          \"enabled\": false\n        },\n        \"uniformBucketLevelAccess\":
         {\n          \"enabled\": false\n        }\n      },\n      \"locationType\":
-        \"region\"\n    }\n  ]\n}\n"
+        \"region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/gcsfs-testing-requester\",\n      \"id\":
+        \"gcsfs-testing-requester\",\n      \"name\": \"gcsfs-testing-requester\",\n
+        \     \"projectNumber\": \"335349516259\",\n      \"metageneration\": \"3\",\n
+        \     \"location\": \"US-CENTRAL1\",\n      \"storageClass\": \"STANDARD\",\n
+        \     \"etag\": \"CAM=\",\n      \"defaultEventBasedHold\": false,\n      \"timeCreated\":
+        \"2019-11-26T14:57:05.059Z\",\n      \"updated\": \"2019-11-26T15:00:27.730Z\",\n
+        \     \"billing\": {\n        \"requesterPays\": true\n      },\n      \"iamConfiguration\":
+        {\n        \"bucketPolicyOnly\": {\n          \"enabled\": true,\n          \"lockedTime\":
+        \"2020-02-24T14:57:05.059Z\"\n        },\n        \"uniformBucketLevelAccess\":
+        {\n          \"enabled\": true,\n          \"lockedTime\": \"2020-02-24T14:57:05.059Z\"\n
+        \       }\n      },\n      \"locationType\": \"region\"\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '5022'
+      - '5928'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
