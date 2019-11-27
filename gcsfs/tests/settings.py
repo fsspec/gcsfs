@@ -6,6 +6,9 @@ RECORD_MODE = os.environ.get("GCSFS_RECORD_MODE", "none")
 TEST_PROJECT = os.environ.get("GCSFS_TEST_PROJECT", "test_project")
 
 TEST_BUCKET = os.environ.get("GCSFS_TEST_BUCKET", "gcsfs-testing")
+TEST_REQUESTER_PAYS_BUCKET = os.environ.get(
+    "GCSFS_TEST_REQUESTER_PAYS_BUCKET", "gcsfs-testing-requesterpays"
+)
 
 FAKE_TOKEN = {
     "access_token": "xxx",

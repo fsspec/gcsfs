@@ -2,11 +2,17 @@
 
 import io
 from itertools import chain
+from urllib.parse import urlparse, parse_qs
 import pytest
 
 from fsspec.utils import seek_delimiter
 
-from gcsfs.tests.settings import TEST_PROJECT, GOOGLE_TOKEN, TEST_BUCKET
+from gcsfs.tests.settings import (
+    TEST_PROJECT,
+    GOOGLE_TOKEN,
+    TEST_BUCKET,
+    TEST_REQUESTER_PAYS_BUCKET,
+)
 from gcsfs.tests.utils import (
     tempdir,
     my_vcr,
@@ -733,3 +739,21 @@ def test_attrs(token_restore):
         with pytest.raises(KeyError):
             gcs.getxattr(a, "foo")
         assert gcs.getxattr(a, "something") == "not"
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_request_user_project(token_restore):
+    with gcs_maker():
+        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, user_project=TEST_PROJECT)
+        # test directly against `_call` to inspect the result
+        r = gcs._call(
+            "GET",
+            "b/{}/o/",
+            TEST_REQUESTER_PAYS_BUCKET,
+            delimiter="/",
+            prefix="test",
+            maxResults=100,
+        )
+        qs = urlparse(r.request.url).query
+        result = parse_qs(qs)
+        assert result["userProject"] == [TEST_PROJECT]

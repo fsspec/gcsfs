@@ -275,6 +275,9 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         find credentials in the system that turn out not to be valid. Setting
         this parameter to True will ensure that an actual operation is
         attempted before deciding that credentials are valid.
+    user_project : string
+        project_id to use for requester-pays buckets. This is included as
+        the ``userProject`` parameter in requests made to Google Cloud Storage.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -294,6 +297,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         secure_serialize=True,
         check_connection=False,
         requests_timeout=None,
+        user_project=None,
         **kwargs
     ):
         if access not in self.scopes:
@@ -303,6 +307,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if block_size is not None:
             self.default_block_size = block_size
         self.project = project
+        self.user_project = user_project
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
@@ -490,6 +495,10 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         if args:
             path = path.format(*[quote_plus(p) for p in args])
+
+        # needed for requester pays buckets
+        if self.user_project:
+            kwargs["userProject"] = self.user_project
 
         for retry in range(self.retries):
             try:
