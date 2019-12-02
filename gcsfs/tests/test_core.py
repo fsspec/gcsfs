@@ -2,8 +2,10 @@
 
 import io
 from itertools import chain
+from unittest import mock
 from urllib.parse import urlparse, parse_qs
 import pytest
+import requests
 
 from fsspec.utils import seek_delimiter
 
@@ -764,3 +766,11 @@ def test_request_user_project():
 def test_user_project_fallback():
     gcs = GCSFileSystem(project="myproject", token="anon")
     assert gcs.user_project == "myproject"
+
+
+@mock.patch("gcsfs.core.gauth")
+def test_user_project_fallback_google_default(mock_auth):
+    mock_auth.default.return_value = (requests.Session(), "my_default_project")
+    fs = GCSFileSystem(token="google_default")
+    assert fs.project == "my_default_project"
+    assert fs.user_project == "my_default_project"
