@@ -181,6 +181,94 @@ def validate_response(r, path):
             raise RuntimeError(m)
 
 
+def _dict_to_credentials(token, scopes):
+    """
+    Convert old dict-style token.
+
+    Does not preserve access token itself, assumes refresh required.
+    """
+    try:
+        token = service_account.Credentials.from_service_account_info(
+            token, scopes=scopes
+        )
+    except:  # noqa: E722
+        # TODO: catch specific exceptions
+        token = Credentials(
+            None,
+            refresh_token=token["refresh_token"],
+            client_secret=token["client_secret"],
+            client_id=token["client_id"],
+            token_uri="https://www.googleapis.com/oauth2/v4/token",
+            scopes=scopes,
+        )
+    return token
+
+
+def _connect_token(token, scopes):
+    if isinstance(token, str):
+        if not os.path.exists(token):
+            raise FileNotFoundError(token)
+        try:
+            # is this a "service" token?
+            session, project = _connect_service(token)
+            return session, project
+        except:  # noqa: E722
+            # TODO: catch specific exceptions
+            # some other kind of token file
+            # will raise exception if is not json
+            token = json.load(open(token))
+    if isinstance(token, dict):
+        credentials = _dict_to_credentials(token, scopes)
+    elif isinstance(token, google.auth.credentials.Credentials):
+        credentials = token
+    else:
+        raise ValueError("Token format not understood")
+    session = AuthorizedSession(credentials)
+    return session, None
+
+
+def _connect_google_default(scopes):
+    credentials, project = gauth.default(scopes=scopes)
+    session = AuthorizedSession(credentials)
+    return session, project
+
+
+def _connect_cloud():
+    credentials = gauth.compute_engine.Credentials()
+    session = AuthorizedSession(credentials)
+    return session, None
+
+
+def _connect_service(scopes, fn):
+    # raises exception if file does not match expectation
+    credentials = service_account.Credentials.from_service_account_file(
+        fn, scopes=scopes
+    )
+    session = AuthorizedSession(credentials)
+    return session, None
+
+
+def _connect_cache(project, access, tokens):
+    if (project, access) in tokens:
+        credentials = tokens[(project, access)]
+        session = AuthorizedSession(credentials)
+        return session, None
+
+
+def _connect_anon():
+    return requests.Session(), None
+
+
+def _connect_browser(project, access, scopes):
+    flow = InstalledAppFlow.from_client_config(client_config, scopes)
+    credentials = flow.run_console()
+    # XXX: tokens
+    # self.tokens[(project, access)] = credentials
+    # self._save_tokens()
+    session = AuthorizedSession(credentials)
+    return session, None
+
+
 class GCSFileSystem(fsspec.AbstractFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -307,8 +395,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
-        self.project = project
-        self.user_project = user_project or project
+
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
@@ -317,11 +404,23 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         self._listing_cache = {}
-        self.connect(method=token)
+
+        session, new_project = self.connect(method=token, project=project)
+
+        self.session = session
+        if new_project and new_project != project:
+            project = new_project
+
+        self.project = project
+        self.user_project = user_project or project
+
         super().__init__(self, **kwargs)
 
         if not secure_serialize:
             self.token = self.session.credentials
+
+        if check_connection and isinstance(session, AuthorizedSession):
+            self.ls("anaconda-public-data")
 
     @staticmethod
     def load_tokens():
@@ -338,91 +437,13 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             tokens = {}
         GCSFileSystem.tokens = tokens
 
-    def _connect_google_default(self):
-        credentials, project = gauth.default(scopes=[self.scope])
-        self.project = project
-        self.session = AuthorizedSession(credentials)
-
-    def _connect_cloud(self):
-        credentials = gauth.compute_engine.Credentials()
-        self.session = AuthorizedSession(credentials)
-
     def _connect_cache(self):
         project, access = self.project, self.access
         if (project, access) in self.tokens:
             credentials = self.tokens[(project, access)]
             self.session = AuthorizedSession(credentials)
 
-    def _dict_to_credentials(self, token):
-        """
-        Convert old dict-style token.
-
-        Does not preserve access token itself, assumes refresh required.
-        """
-        try:
-            token = service_account.Credentials.from_service_account_info(
-                token, scopes=[self.scope]
-            )
-        except:  # noqa: E722
-            # TODO: catch specific exceptions
-            token = Credentials(
-                None,
-                refresh_token=token["refresh_token"],
-                client_secret=token["client_secret"],
-                client_id=token["client_id"],
-                token_uri="https://www.googleapis.com/oauth2/v4/token",
-                scopes=[self.scope],
-            )
-        return token
-
-    def _connect_token(self, token):
-        """
-        Connect using a concrete token
-
-        Parameters
-        ----------
-        token: str, dict or Credentials
-            If a str, try to load as a Service file, or next as a JSON; if
-            dict, try to interpret as credentials; if Credentials, use directly.
-        """
-        if isinstance(token, str):
-            if not os.path.exists(token):
-                raise FileNotFoundError(token)
-            try:
-                # is this a "service" token?
-                self._connect_service(token)
-                return
-            except:  # noqa: E722
-                # TODO: catch specific exceptions
-                # some other kind of token file
-                # will raise exception if is not json
-                token = json.load(open(token))
-        if isinstance(token, dict):
-            credentials = self._dict_to_credentials(token)
-        elif isinstance(token, google.auth.credentials.Credentials):
-            credentials = token
-        else:
-            raise ValueError("Token format not understood")
-        self.session = AuthorizedSession(credentials)
-
-    def _connect_service(self, fn):
-        # raises exception if file does not match expectation
-        credentials = service_account.Credentials.from_service_account_file(
-            fn, scopes=[self.scope]
-        )
-        self.session = AuthorizedSession(credentials)
-
-    def _connect_anon(self):
-        self.session = requests.Session()
-
-    def _connect_browser(self):
-        flow = InstalledAppFlow.from_client_config(client_config, [self.scope])
-        credentials = flow.run_console()
-        self.tokens[(self.project, self.access)] = credentials
-        self._save_tokens()
-        self.session = AuthorizedSession(credentials)
-
-    def connect(self, method=None):
+    def connect(self, method=None, project=None):
         """
         Establish session token. A new token will be requested if the current
         one is within 100s of expiry.
@@ -432,7 +453,17 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         method: str (google_default|cache|cloud|token|anon|browser) or None
             Type of authorisation to implement - calls `_connect_*` methods.
             If None, will try sequence of methods.
+        project : str, optional
         """
+        # Note: `self` is not fully initialized yet! This method is used to
+        # initalize session, project, and user_project, so those values should
+        # not be accessed here. Keep all the references to self at the top
+        # to help validate that.
+        scopes = [self.scope]
+        access = self.access
+        tokens = GCSFileSystem.tokens
+
+        session = None
         if method not in [
             "google_default",
             "cache",
@@ -442,23 +473,33 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             "browser",
             None,
         ]:
-            self._connect_token(method)
+            session, project2 = _connect_token(method, scopes)
+        elif method == "google_default":
+            session, project2 = _connect_google_default(scopes)
+        elif method == "cache":
+            session, project2 = _connect_cache(project, access, tokens)
+        elif method == "cloud":
+            session, project2 = _connect_cloud()
+        elif method == "token":
+            session, project2 = _connect_token(method, scopes)
+        elif method == "browser":
+            session, project2 = _connect_browser(project, access, scopes)
+        elif method == "anon":
+            session, project2 = _connect_anon()
         elif method is None:
-            for meth in ["google_default", "cache", "anon"]:
+            methods = [
+                lambda: _connect_google_default(scopes),
+                lambda: _connect_cache(project, access, tokens),
+                _connect_anon,
+            ]
+            for meth in methods:
                 try:
-                    self.connect(method=meth)
-                    if self.check_credentials and meth != "anon":
-                        self.ls("anaconda-public-data")
-                except:  # noqa: E722
+                    session, project2 = meth()
+                except Exception:  # noqa: E722
                     # TODO: catch specific exceptions
-                    self.session = None
                     logger.debug('Connection with method "%s" failed' % meth)
-                if self.session:
-                    break
-        else:
-            self.__getattribute__("_connect_" + method)()
-            self.method = method
-        if self.session is None:
+
+        if session is None:
             if method is None:
                 msg = (
                     "Automatic authentication failed, you should try "
@@ -472,6 +513,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                     "api.html#gcsfs.core.GCSFileSystem" % method
                 )
             raise RuntimeError(msg)
+        return session, project2
 
     @staticmethod
     def _save_tokens():
