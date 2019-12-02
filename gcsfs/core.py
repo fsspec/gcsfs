@@ -262,9 +262,8 @@ def _connect_anon():
 def _connect_browser(project, access, scopes):
     flow = InstalledAppFlow.from_client_config(client_config, scopes)
     credentials = flow.run_console()
-    # XXX: tokens
-    # self.tokens[(project, access)] = credentials
-    # self._save_tokens()
+    GCSFileSystem.tokens[(project, access)] = credentials
+    GCSFileSystem._save_tokens()
     session = AuthorizedSession(credentials)
     return session, None
 
