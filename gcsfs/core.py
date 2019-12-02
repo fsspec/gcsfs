@@ -340,7 +340,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
     def _connect_google_default(self):
         credentials, project = gauth.default(scopes=[self.scope])
-        self.project = project
+        self.project = self.user_project = project
         self.session = AuthorizedSession(credentials)
 
     def _connect_cloud(self):
