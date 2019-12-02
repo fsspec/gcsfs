@@ -32,7 +32,9 @@ def before_record_response(response):
         r["headers"].pop(field, None)
     if "Location" in r["headers"]:
         r["headers"]["Location"] = [
-            r["headers"]["Location"][0].replace(TEST_BUCKET, "gcsfs-testing")
+            r["headers"]["Location"][0]
+            .replace(TEST_BUCKET, "gcsfs-testing")
+            .replace(TEST_PROJECT, "test_project")
         ]
     try:
         try:

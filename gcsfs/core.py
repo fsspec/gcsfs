@@ -248,7 +248,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     Parameters
     ----------
     project : string
-        project_id to work under. Note that this is not the same as, but ofter
+        project_id to work under. Note that this is not the same as, but often
         very similar to, the project name.
         This is required in order
         to list all the buckets you have access to within a project and to
@@ -278,6 +278,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     user_project : string
         project_id to use for requester-pays buckets. This is included as
         the ``userProject`` parameter in requests made to Google Cloud Storage.
+        If not provided, this falls back to ``project`` when that is specified.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -307,7 +308,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if block_size is not None:
             self.default_block_size = block_size
         self.project = project
-        self.user_project = user_project
+        self.user_project = user_project or project
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency

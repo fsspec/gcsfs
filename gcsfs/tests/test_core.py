@@ -759,3 +759,8 @@ def test_request_user_project():
         qs = urlparse(r.request.url).query
         result = parse_qs(qs)
         assert result["userProject"] == [TEST_PROJECT]
+
+
+def test_user_project_fallback():
+    gcs = GCSFileSystem(project="myproject", token="anon")
+    assert gcs.user_project == "myproject"
