@@ -12,3 +12,4 @@ def token_restore():
     finally:
         GCSFileSystem.tokens = cache
         GCSFileSystem._save_tokens()
+        GCSFileSystem.clear_instance_cache()

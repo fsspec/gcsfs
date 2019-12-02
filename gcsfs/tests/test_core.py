@@ -26,9 +26,11 @@ from gcsfs.tests.utils import (
 )
 from gcsfs.core import GCSFileSystem, quote_plus
 
+pytestmark = pytest.mark.usefixtures("token_restore")
+
 
 @my_vcr.use_cassette(match=["all"])
-def test_simple(token_restore):
+def test_simple():
     assert not GCSFileSystem.tokens
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
     gcs.ls(TEST_BUCKET)  # no error
@@ -37,7 +39,7 @@ def test_simple(token_restore):
 
 @pytest.mark.xfail(reason="should pass for real google, but not VCR")
 @my_vcr.use_cassette(match=["all"])
-def test_many_connect(token_restore):
+def test_many_connect():
     from multiprocessing.pool import ThreadPool
 
     def task(i):
@@ -52,7 +54,7 @@ def test_many_connect(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_simple_upload(token_restore):
+def test_simple_upload():
     with gcs_maker() as gcs:
         fn = TEST_BUCKET + "/test"
         with gcs.open(fn, "wb") as f:
@@ -61,7 +63,7 @@ def test_simple_upload(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_multi_upload(token_restore):
+def test_multi_upload():
     with gcs_maker() as gcs:
         fn = TEST_BUCKET + "/test"
         d = b"01234567" * 2 ** 15
@@ -81,14 +83,14 @@ def test_multi_upload(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_info(token_restore):
+def test_info():
     with gcs_maker() as gcs:
         gcs.touch(a)
         assert gcs.info(a) == gcs.ls(a, detail=True)[0]
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_ls2(token_restore):
+def test_ls2():
     with gcs_maker() as gcs:
         assert TEST_BUCKET + "/" in gcs.ls("")
         with pytest.raises((OSError, IOError)):
@@ -99,7 +101,7 @@ def test_ls2(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_pickle(token_restore):
+def test_pickle():
     import pickle
 
     with gcs_maker() as gcs:
@@ -124,7 +126,7 @@ def test_pickle(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_ls_touch(token_restore):
+def test_ls_touch():
     with gcs_maker() as gcs:
         assert not gcs.exists(TEST_BUCKET + "/tmp/test")
 
@@ -139,7 +141,7 @@ def test_ls_touch(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_rm(token_restore):
+def test_rm():
     with gcs_maker() as gcs:
         assert not gcs.exists(a)
         gcs.touch(a)
@@ -153,7 +155,7 @@ def test_rm(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_rm_batch(token_restore):
+def test_rm_batch():
     with gcs_maker() as gcs:
         gcs.touch(a)
         gcs.touch(b)
@@ -165,7 +167,7 @@ def test_rm_batch(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_rm_recursive(token_restore):
+def test_rm_recursive():
     files = ["/a", "/a/b", "/a/c"]
     with gcs_maker() as gcs:
         for fn in files:
@@ -175,7 +177,7 @@ def test_rm_recursive(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_file_access(token_restore):
+def test_file_access():
     with gcs_maker() as gcs:
         fn = TEST_BUCKET + "/nested/file1"
         data = b"hello\n"
@@ -188,7 +190,7 @@ def test_file_access(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_file_info(token_restore):
+def test_file_info():
     with gcs_maker() as gcs:
         fn = TEST_BUCKET + "/nested/file1"
         data = b"hello\n"
@@ -203,7 +205,7 @@ def test_file_info(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_du(token_restore):
+def test_du():
     with gcs_maker(True) as gcs:
         d = gcs.du(TEST_BUCKET, total=False)
         assert all(isinstance(v, int) and v >= 0 for v in d.values())
@@ -215,7 +217,7 @@ def test_du(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_ls(token_restore):
+def test_ls():
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET + "/nested/file1"
         gcs.touch(fn)
@@ -226,14 +228,14 @@ def test_ls(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_ls_detail(token_restore):
+def test_ls_detail():
     with gcs_maker(True) as gcs:
         L = gcs.ls(TEST_BUCKET + "/nested", detail=True)
         assert all(isinstance(item, dict) for item in L)
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_gcs_glob(token_restore):
+def test_gcs_glob():
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET + "/nested/file1"
         assert fn not in gcs.glob(TEST_BUCKET + "/")
@@ -251,7 +253,7 @@ def test_gcs_glob(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_read_keys_from_bucket(token_restore):
+def test_read_keys_from_bucket():
     with gcs_maker(True) as gcs:
         for k, data in files.items():
             file_contents = gcs.cat("/".join([TEST_BUCKET, k]))
@@ -265,7 +267,7 @@ def test_read_keys_from_bucket(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_url(token_restore):
+def test_url():
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET + "/nested/file1"
         url = gcs.url(fn)
@@ -276,7 +278,7 @@ def test_url(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_seek(token_restore):
+def test_seek():
     with gcs_maker(True) as gcs:
         with gcs.open(a, "wb") as f:
             f.write(b"123")
@@ -305,14 +307,14 @@ def test_seek(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_bad_open(token_restore):
+def test_bad_open():
     with gcs_maker() as gcs:
         with pytest.raises((IOError, OSError)):
             gcs.open("")
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_copy(token_restore):
+def test_copy():
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET + "/test/accounts.1.json"
         gcs.copy(fn, fn + "2")
@@ -320,7 +322,7 @@ def test_copy(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_move(token_restore):
+def test_move():
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET + "/test/accounts.1.json"
         data = gcs.cat(fn)
@@ -330,7 +332,7 @@ def test_move(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_get_put(token_restore):
+def test_get_put():
     with gcs_maker(True) as gcs:
         with tmpfile() as fn:
             gcs.get(TEST_BUCKET + "/test/accounts.1.json", fn)
@@ -343,7 +345,7 @@ def test_get_put(token_restore):
 
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
 @my_vcr.use_cassette(match=["all"])
-def test_get_put_recursive(token_restore, protocol):
+def test_get_put_recursive(protocol):
     with gcs_maker(True) as gcs:
         with tempdir() as dn:
             gcs.get(protocol + TEST_BUCKET + "/test/", dn + "/temp_dir", recursive=True)
@@ -375,7 +377,7 @@ def test_get_put_recursive(token_restore, protocol):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_errors(token_restore):
+def test_errors():
     with gcs_maker() as gcs:
         with pytest.raises((IOError, OSError)):
             gcs.open(TEST_BUCKET + "/tmp/test/shfoshf", "rb")
@@ -411,7 +413,7 @@ def test_errors(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_read_small(token_restore):
+def test_read_small():
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET + "/2014-01-01.csv"
         with gcs.open(fn, "rb", block_size=10) as f:
@@ -427,7 +429,7 @@ def test_read_small(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_seek_delimiter(token_restore):
+def test_seek_delimiter():
     with gcs_maker(True) as gcs:
         fn = "test/accounts.1.json"
         data = files[fn]
@@ -446,7 +448,7 @@ def test_seek_delimiter(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_read_block(token_restore):
+def test_read_block():
     with gcs_maker(True) as gcs:
         data = files["test/accounts.1.json"]
         lines = io.BytesIO(data).readlines()
@@ -464,7 +466,7 @@ def test_read_block(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_flush(token_restore):
+def test_flush():
     with gcs_maker() as gcs:
         gcs.touch(a)
         with gcs.open(a, "rb") as ro:
@@ -484,7 +486,7 @@ def test_flush(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_write_fails(token_restore):
+def test_write_fails():
     with gcs_maker() as gcs:
         with pytest.raises(ValueError):
             gcs.touch(TEST_BUCKET + "/temp")
@@ -505,7 +507,7 @@ def test_write_fails(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def text_mode(token_restore):
+def text_mode():
     text = "Hello µ"
     with gcs_maker() as gcs:
         with gcs.open(TEST_BUCKET + "/temp", "w") as f:
@@ -515,7 +517,7 @@ def text_mode(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_write_blocks(token_restore):
+def test_write_blocks():
     with gcs_maker() as gcs:
         with gcs.open(TEST_BUCKET + "/temp", "wb", block_size=2 ** 18) as f:
             f.write(b"a" * 100000)
@@ -528,7 +530,7 @@ def test_write_blocks(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_write_blocks2(token_restore):
+def test_write_blocks2():
     with gcs_maker() as gcs:
         with gcs.open(TEST_BUCKET + "/temp1", "wb", block_size=2 ** 18) as f:
             f.write(b"a" * (2 ** 18 + 1))
@@ -538,7 +540,7 @@ def test_write_blocks2(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_readline(token_restore):
+def test_readline():
     with gcs_maker(True) as gcs:
         all_items = chain.from_iterable(
             [files.items(), csv_files.items(), text_files.items()]
@@ -551,7 +553,7 @@ def test_readline(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_readline_from_cache(token_restore):
+def test_readline_from_cache():
     with gcs_maker() as gcs:
         data = b"a,b\n11,22\n3,4"
         with gcs.open(a, "wb") as f:
@@ -575,7 +577,7 @@ def test_readline_from_cache(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_readline_empty(token_restore):
+def test_readline_empty():
     with gcs_maker() as gcs:
         data = b""
         with gcs.open(a, "wb") as f:
@@ -586,7 +588,7 @@ def test_readline_empty(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_readline_blocksize(token_restore):
+def test_readline_blocksize():
     with gcs_maker() as gcs:
         data = b"ab\n" + b"a" * (2 ** 18) + b"\nab"
         with gcs.open(a, "wb") as f:
@@ -606,7 +608,7 @@ def test_readline_blocksize(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_next(token_restore):
+def test_next():
     with gcs_maker(True) as gcs:
         expected = csv_files["2014-01-01.csv"].split(b"\n")[0] + b"\n"
         with gcs.open(TEST_BUCKET + "/2014-01-01.csv") as f:
@@ -615,7 +617,7 @@ def test_next(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_iterable(token_restore):
+def test_iterable():
     with gcs_maker() as gcs:
         data = b"abc\n123"
         with gcs.open(a, "wb") as f:
@@ -638,7 +640,7 @@ def test_iterable(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_readable(token_restore):
+def test_readable():
     with gcs_maker() as gcs:
         with gcs.open(a, "wb") as f:
             assert not f.readable()
@@ -648,7 +650,7 @@ def test_readable(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_seekable(token_restore):
+def test_seekable():
     with gcs_maker() as gcs:
         with gcs.open(a, "wb") as f:
             assert not f.seekable()
@@ -658,7 +660,7 @@ def test_seekable(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_writable(token_restore):
+def test_writable():
     with gcs_maker() as gcs:
         with gcs.open(a, "wb") as f:
             assert f.writable()
@@ -668,7 +670,7 @@ def test_writable(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_merge(token_restore):
+def test_merge():
     with gcs_maker() as gcs:
         with gcs.open(a, "wb") as f:
             f.write(b"a" * 100)
@@ -680,7 +682,7 @@ def test_merge(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_bigger_than_block_read(token_restore):
+def test_bigger_than_block_read():
     with gcs_maker(True) as gcs:
         with gcs.open(TEST_BUCKET + "/2014-01-01.csv", "rb", block_size=3) as f:
             out = []
@@ -693,7 +695,7 @@ def test_bigger_than_block_read(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_current(token_restore):
+def test_current():
     from google.auth import credentials
 
     with gcs_maker() as gcs:
@@ -705,7 +707,7 @@ def test_current(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_array(token_restore):
+def test_array():
     with gcs_maker() as gcs:
         from array import array
 
@@ -720,7 +722,7 @@ def test_array(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_attrs(token_restore):
+def test_attrs():
     with gcs_maker() as gcs:
         gcs.touch(a)
         assert "metadata" not in gcs.info(a)
@@ -742,7 +744,7 @@ def test_attrs(token_restore):
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_request_user_project(token_restore):
+def test_request_user_project():
     with gcs_maker():
         gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, user_project=TEST_PROJECT)
         # test directly against `_call` to inspect the result
