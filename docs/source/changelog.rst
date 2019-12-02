@@ -1,6 +1,16 @@
 Changelog
 =========
 
+Version 0.5.1
+=============
+
+* ``user_project`` now falls back to the ``project`` if provided (:pr:`208`)
+
+Version 0.5.0
+=============
+
+* Added the ability to make requester-pays requests with the ``user_project`` parameter (:pr:`206`)
+
 Version 0.4.0
 =============
 
