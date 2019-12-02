@@ -1,5 +1,50 @@
 interactions:
 - request:
+    body: grant_type=refresh_token&client_id=xxx&client_secret=xxx&refresh_token=xxx&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdevstorage.full_control
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '340'
+      content-type:
+      - application/x-www-form-urlencoded
+    method: POST
+    uri: https://www.googleapis.com/oauth2/v4/token
+  response:
+    body:
+      string: !!binary |
+        H4sIAHkv5V0C/yWNQQoCMQwAv7LkLO2C4GGPfqSEGrvFuilJ1lbEv2v1OgwzL8AYSTUY32iDZYLe
+        OxwmoF6zkIY84PE0z1+mkSsNZzWrunjfWnOJORXCmtVFvnvcbfUXeqixYCJ33UsJkTcTLqP7+wR7
+        /kNnQiGB9we3u8nlhwAAAA==
+    headers:
+      Cache-Control:
+      - private
+      Content-Encoding:
+      - gzip
+      Content-Type:
+      - application/json; charset=utf-8
+      Server:
+      - scaffolding on HTTPServer2
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Origin
+      - X-Origin
+      - Referer
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+      X-XSS-Protection:
+      - '0'
+    status:
+      code: 200
+      message: OK
+- request:
     body: '{"name": "gcsfs-testing"}'
     headers:
       Accept:
@@ -187,14 +232,14 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAAANPVTUosSc6I1zUIDU83y4jIcnONd3RMDPQvMfDKLgzV1eXlAgAByLf7IwAAAA==
+        H4sIAAAAAAAAANPVTUosSc6IT4l09ytyLcuuDDeId3R08SswqsgzrCzW1eXlAgA38r1JIwAAAA==
     headers:
       Cache-Control:
       - private, max-age=0
       Content-Encoding:
       - gzip
       Content-Type:
-      - multipart/mixed; boundary=batch_-0UWg6hXjFE_AAaQOt0JkqU
+      - multipart/mixed; boundary=batch_dYGNrEvkyW0_AADNp2xn1ys
       Server:
       - GSE
       Transfer-Encoding:
@@ -334,19 +379,17 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fd
   response:
     body:
-      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
-        gcsfs-testing/tmp/test/d\",\n    \"errors\": [\n      {\n        \"message\":
-        \"No such object: gcsfs-testing/tmp/test/d\",\n        \"domain\": \"global\",\n
-        \       \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
+      string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
+        \   \"reason\": \"notFound\",\n    \"message\": \"No such object: gcsfs-testing/tmp/test/d\"\n
+        \  }\n  ],\n  \"code\": 404,\n  \"message\": \"No such object: gcsfs-testing/tmp/test/d\"\n
+        }\n}\n"
     headers:
       Cache-Control:
-      - no-cache, no-store, max-age=0, must-revalidate
+      - private, max-age=0
       Content-Length:
-      - '279'
+      - '251'
       Content-Type:
       - application/json; charset=UTF-8
-      Pragma:
-      - no-cache
       Server:
       - UploadServer
       Vary:
@@ -381,7 +424,7 @@ interactions:
       Content-Type:
       - text/plain; charset=utf-8
       Location:
-      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2UodmOaBwiJuyAu7Viiyddwl-pCZwu2pWSL-GZD0BuInbvs0NY9TSkBsQQX_ZZhd9v1t3HmDmhjeQP2Gf_b8L75kni80Eg
+      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2UqzuUCQ8Yj5eQAJlmzwgMchEO4clwBU4E4a-usbz-Skhvc4LOF7hYqIql8EyFEfQcK9x4OVAxp8huYpFQ2OoP7ljiGdEg
       Pragma:
       - no-cache
       Server:
@@ -408,17 +451,17 @@ interactions:
       Content-Type:
       - application/octet-stream
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UodmOaBwiJuyAu7Viiyddwl-pCZwu2pWSL-GZD0BuInbvs0NY9TSkBsQQX_ZZhd9v1t3HmDmhjeQP2Gf_b8L75kni80Eg
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UqzuUCQ8Yj5eQAJlmzwgMchEO4clwBU4E4a-usbz-Skhvc4LOF7hYqIql8EyFEfQcK9x4OVAxp8huYpFQ2OoP7ljiGdEg
   response:
     body:
-      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/tmp/test/a/1574803684235120\",\n
+      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/tmp/test/a/1575300986933001\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
         \"name\": \"tmp/test/a\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\":
-        \"1574803684235120\",\n \"metageneration\": \"1\",\n \"timeCreated\": \"2019-11-26T21:28:04.234Z\",\n
-        \"updated\": \"2019-11-26T21:28:04.234Z\",\n \"storageClass\": \"STANDARD\",\n
-        \"timeStorageClassUpdated\": \"2019-11-26T21:28:04.234Z\",\n \"size\": \"0\",\n
-        \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1574803684235120&alt=media\",\n
-        \"crc32c\": \"AAAAAA==\",\n \"etag\": \"CPCuwvHoiOYCEAE=\"\n}\n"
+        \"1575300986933001\",\n \"metageneration\": \"1\",\n \"timeCreated\": \"2019-12-02T15:36:26.932Z\",\n
+        \"updated\": \"2019-12-02T15:36:26.932Z\",\n \"storageClass\": \"STANDARD\",\n
+        \"timeStorageClassUpdated\": \"2019-12-02T15:36:26.932Z\",\n \"size\": \"0\",\n
+        \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1575300986933001&alt=media\",\n
+        \"crc32c\": \"AAAAAA==\",\n \"etag\": \"CIme9r2ll+YCEAE=\"\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -427,7 +470,7 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       ETag:
-      - CPCuwvHoiOYCEAE=
+      - CIme9r2ll+YCEAE=
       Pragma:
       - no-cache
       Server:
@@ -451,21 +494,21 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=tmp%2Ftest%2Fa
   response:
     body:
-      string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/tmp/test/a/1574803684235120\",\n
-        \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1574803684235120&alt=media\",\n
-        \     \"name\": \"tmp/test/a\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1574803684235120\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
-        \"STANDARD\",\n      \"size\": \"0\",\n      \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n
-        \     \"crc32c\": \"AAAAAA==\",\n      \"etag\": \"CPCuwvHoiOYCEAE=\",\n      \"timeCreated\":
-        \"2019-11-26T21:28:04.234Z\",\n      \"updated\": \"2019-11-26T21:28:04.234Z\",\n
-        \     \"timeStorageClassUpdated\": \"2019-11-26T21:28:04.234Z\"\n    }\n  ]\n}\n"
+      string: "{\n \"kind\": \"storage#objects\",\n \"items\": [\n  {\n   \"kind\":
+        \"storage#object\",\n   \"id\": \"gcsfs-testing/tmp/test/a/1575300986933001\",\n
+        \  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
+        \  \"name\": \"tmp/test/a\",\n   \"bucket\": \"gcsfs-testing\",\n   \"generation\":
+        \"1575300986933001\",\n   \"metageneration\": \"1\",\n   \"timeCreated\":
+        \"2019-12-02T15:36:26.932Z\",\n   \"updated\": \"2019-12-02T15:36:26.932Z\",\n
+        \  \"storageClass\": \"STANDARD\",\n   \"timeStorageClassUpdated\": \"2019-12-02T15:36:26.932Z\",\n
+        \  \"size\": \"0\",\n   \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n   \"mediaLink\":
+        \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1575300986933001&alt=media\",\n
+        \  \"crc32c\": \"AAAAAA==\",\n   \"etag\": \"CIme9r2ll+YCEAE=\"\n  }\n ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '875'
+      - '820'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -531,7 +574,7 @@ interactions:
       Content-Type:
       - text/plain; charset=utf-8
       Location:
-      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2Upa5lXVQMsTtDJcLiOKtgExVyQ5Z4JrFaUP_ctoFdoLUVxAn4JpZyIUsHWjKb6fZo-s_vqYaKfVX5uIjdt1_5Co9n72ww
+      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2Uo62H_aAE8RzwU_rWLMjjTgPEaKBeDgvFbZv75ky7CkiqCXudap9pHyvintLpp9Grm3lq2Edigc_B5nbpSHcvrpuWjDvg
       Pragma:
       - no-cache
       Server:
@@ -558,18 +601,18 @@ interactions:
       Content-Type:
       - application/octet-stream
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2Upa5lXVQMsTtDJcLiOKtgExVyQ5Z4JrFaUP_ctoFdoLUVxAn4JpZyIUsHWjKb6fZo-s_vqYaKfVX5uIjdt1_5Co9n72ww
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2Uo62H_aAE8RzwU_rWLMjjTgPEaKBeDgvFbZv75ky7CkiqCXudap9pHyvintLpp9Grm3lq2Edigc_B5nbpSHcvrpuWjDvg
   response:
     body:
-      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/tmp/test/a/1574803684586219\",\n
+      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/tmp/test/a/1575300987333638\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
         \"name\": \"tmp/test/a\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\":
-        \"1574803684586219\",\n \"metageneration\": \"1\",\n \"timeCreated\": \"2019-11-26T21:28:04.586Z\",\n
-        \"updated\": \"2019-11-26T21:28:04.586Z\",\n \"storageClass\": \"STANDARD\",\n
-        \"timeStorageClassUpdated\": \"2019-11-26T21:28:04.586Z\",\n \"size\": \"0\",\n
-        \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1574803684586219&alt=media\",\n
+        \"1575300987333638\",\n \"metageneration\": \"1\",\n \"timeCreated\": \"2019-12-02T15:36:27.333Z\",\n
+        \"updated\": \"2019-12-02T15:36:27.333Z\",\n \"storageClass\": \"STANDARD\",\n
+        \"timeStorageClassUpdated\": \"2019-12-02T15:36:27.333Z\",\n \"size\": \"0\",\n
+        \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1575300987333638&alt=media\",\n
         \"metadata\": {\n  \"foo\": \"blob\"\n },\n \"crc32c\": \"AAAAAA==\",\n \"etag\":
-        \"COvl1/HoiOYCEAE=\"\n}\n"
+        \"CIbYjr6ll+YCEAE=\"\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -578,7 +621,7 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       ETag:
-      - COvl1/HoiOYCEAE=
+      - CIbYjr6ll+YCEAE=
       Pragma:
       - no-cache
       Server:
@@ -603,15 +646,15 @@ interactions:
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/tmp/test/a/1574803684586219\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/tmp/test/a/1575300987333638\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1574803684586219&alt=media\",\n
+        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1575300987333638&alt=media\",\n
         \     \"name\": \"tmp/test/a\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1574803684586219\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
+        \"1575300987333638\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
         \"STANDARD\",\n      \"size\": \"0\",\n      \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n
-        \     \"crc32c\": \"AAAAAA==\",\n      \"etag\": \"COvl1/HoiOYCEAE=\",\n      \"timeCreated\":
-        \"2019-11-26T21:28:04.586Z\",\n      \"updated\": \"2019-11-26T21:28:04.586Z\",\n
-        \     \"timeStorageClassUpdated\": \"2019-11-26T21:28:04.586Z\",\n      \"metadata\":
+        \     \"crc32c\": \"AAAAAA==\",\n      \"etag\": \"CIbYjr6ll+YCEAE=\",\n      \"timeCreated\":
+        \"2019-12-02T15:36:27.333Z\",\n      \"updated\": \"2019-12-02T15:36:27.333Z\",\n
+        \     \"timeStorageClassUpdated\": \"2019-12-02T15:36:27.333Z\",\n      \"metadata\":
         {\n        \"foo\": \"blob\"\n      }\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
@@ -683,7 +726,7 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       Etag:
-      - COvl1/HoiOYCEAI=
+      - CIbYjr6ll+YCEAI=
       Pragma:
       - no-cache
       Server:
@@ -720,7 +763,7 @@ interactions:
       Content-Type:
       - text/plain; charset=utf-8
       Location:
-      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2Upvnj01zNwrigse8MnY9Ej7KoqOexZZJgIKTP_n046AEk0pgm9R8Lo_F4-AOvTRu6eRaLhWVqtGQkGRS_y78Nfz4Kw2xw
+      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2UqDY56uUmB6HYA9XPIkKqzLeNEFTZMUID8fJ4VJbiJtaLDZF988fKOke2bJrPEpKopPmop4LCN7PA4E9TqfceWPtBkc-tze52vnqnG1z0GbfFkLWZ8
       Pragma:
       - no-cache
       Server:
@@ -747,18 +790,18 @@ interactions:
       Content-Type:
       - application/octet-stream
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2Upvnj01zNwrigse8MnY9Ej7KoqOexZZJgIKTP_n046AEk0pgm9R8Lo_F4-AOvTRu6eRaLhWVqtGQkGRS_y78Nfz4Kw2xw
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UqDY56uUmB6HYA9XPIkKqzLeNEFTZMUID8fJ4VJbiJtaLDZF988fKOke2bJrPEpKopPmop4LCN7PA4E9TqfceWPtBkc-tze52vnqnG1z0GbfFkLWZ8
   response:
     body:
-      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/tmp/test/a/1574803685024857\",\n
+      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/tmp/test/a/1575300987735014\",\n
         \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
         \"name\": \"tmp/test/a\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\":
-        \"1574803685024857\",\n \"metageneration\": \"1\",\n \"timeCreated\": \"2019-11-26T21:28:05.024Z\",\n
-        \"updated\": \"2019-11-26T21:28:05.024Z\",\n \"storageClass\": \"STANDARD\",\n
-        \"timeStorageClassUpdated\": \"2019-11-26T21:28:05.024Z\",\n \"size\": \"0\",\n
-        \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1574803685024857&alt=media\",\n
+        \"1575300987735014\",\n \"metageneration\": \"1\",\n \"timeCreated\": \"2019-12-02T15:36:27.734Z\",\n
+        \"updated\": \"2019-12-02T15:36:27.734Z\",\n \"storageClass\": \"STANDARD\",\n
+        \"timeStorageClassUpdated\": \"2019-12-02T15:36:27.734Z\",\n \"size\": \"0\",\n
+        \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1575300987735014&alt=media\",\n
         \"metadata\": {\n  \"something\": \"not\"\n },\n \"crc32c\": \"AAAAAA==\",\n
-        \"etag\": \"CNnI8vHoiOYCEAE=\"\n}\n"
+        \"etag\": \"COaXp76ll+YCEAE=\"\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -767,7 +810,7 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       ETag:
-      - CNnI8vHoiOYCEAE=
+      - COaXp76ll+YCEAE=
       Pragma:
       - no-cache
       Server:
@@ -792,15 +835,15 @@ interactions:
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/tmp/test/a/1574803685024857\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/tmp/test/a/1575300987735014\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1574803685024857&alt=media\",\n
+        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1575300987735014&alt=media\",\n
         \     \"name\": \"tmp/test/a\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1574803685024857\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
+        \"1575300987735014\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
         \"STANDARD\",\n      \"size\": \"0\",\n      \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n
-        \     \"crc32c\": \"AAAAAA==\",\n      \"etag\": \"CNnI8vHoiOYCEAE=\",\n      \"timeCreated\":
-        \"2019-11-26T21:28:05.024Z\",\n      \"updated\": \"2019-11-26T21:28:05.024Z\",\n
-        \     \"timeStorageClassUpdated\": \"2019-11-26T21:28:05.024Z\",\n      \"metadata\":
+        \     \"crc32c\": \"AAAAAA==\",\n      \"etag\": \"COaXp76ll+YCEAE=\",\n      \"timeCreated\":
+        \"2019-12-02T15:36:27.734Z\",\n      \"updated\": \"2019-12-02T15:36:27.734Z\",\n
+        \     \"timeStorageClassUpdated\": \"2019-12-02T15:36:27.734Z\",\n      \"metadata\":
         {\n        \"something\": \"not\"\n      }\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
@@ -980,15 +1023,15 @@ interactions:
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/tmp/test/a/1574803685024857\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/tmp/test/a/1575300987735014\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1574803685024857&alt=media\",\n
+        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa?generation=1575300987735014&alt=media\",\n
         \     \"name\": \"tmp/test/a\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1574803685024857\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
+        \"1575300987735014\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
         \"STANDARD\",\n      \"size\": \"0\",\n      \"md5Hash\": \"1B2M2Y8AsgTpgAmY7PhCfg==\",\n
-        \     \"crc32c\": \"AAAAAA==\",\n      \"etag\": \"CNnI8vHoiOYCEAE=\",\n      \"timeCreated\":
-        \"2019-11-26T21:28:05.024Z\",\n      \"updated\": \"2019-11-26T21:28:05.024Z\",\n
-        \     \"timeStorageClassUpdated\": \"2019-11-26T21:28:05.024Z\",\n      \"metadata\":
+        \     \"crc32c\": \"AAAAAA==\",\n      \"etag\": \"COaXp76ll+YCEAE=\",\n      \"timeCreated\":
+        \"2019-12-02T15:36:27.734Z\",\n      \"updated\": \"2019-12-02T15:36:27.734Z\",\n
+        \     \"timeStorageClassUpdated\": \"2019-12-02T15:36:27.734Z\",\n      \"metadata\":
         {\n        \"something\": \"not\"\n      }\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
