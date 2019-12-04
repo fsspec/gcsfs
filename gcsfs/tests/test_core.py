@@ -774,3 +774,9 @@ def test_user_project_fallback_google_default(mock_auth):
     fs = GCSFileSystem(token="google_default")
     assert fs.project == "my_default_project"
     assert fs.user_project == "my_default_project"
+
+
+def test_user_project_cat():
+    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
+    result = gcs.cat("gcsfs-testing-requesterpays/foo.csv")
+    assert len(result)
