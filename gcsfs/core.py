@@ -740,7 +740,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             raise ValueError("Cannot create root bucket")
         if "/" in bucket:
             return
-        self._call(
+        r = self._call(
             "post",
             "b/",
             predefinedAcl=acl,
@@ -748,6 +748,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             predefinedDefaultObjectAcl=default_acl,
             json={"name": bucket},
         )
+        r.raise_for_status()
         self.invalidate_cache(bucket)
 
     @_tracemethod
