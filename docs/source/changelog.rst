@@ -1,6 +1,11 @@
 Changelog
 =========
 
+Version 0.5.2
+=============
+
+* Fixed bug in ``user_project`` fallback for default Google authentication (:pr:`213`)
+
 Version 0.5.1
 =============
 
