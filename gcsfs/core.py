@@ -462,6 +462,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                     self.connect(method=meth)
                     if self.check_credentials and meth != "anon":
                         self.ls("anaconda-public-data")
+                    logger.debug("Connected with method %s", meth)
                 except:  # noqa: E722
                     # TODO: catch specific exceptions
                     self.session = None
@@ -753,7 +754,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             raise ValueError("Cannot create root bucket")
         if "/" in bucket:
             return
-        self._call(
+        r = self._call(
             "post",
             "b/",
             predefinedAcl=acl,
@@ -761,6 +762,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             predefinedDefaultObjectAcl=default_acl,
             json={"name": bucket},
         )
+        r.raise_for_status()
         self.invalidate_cache(bucket)
 
     @_tracemethod
@@ -864,7 +866,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     def cat(self, path):
         """ Simple one-shot get of file data """
         u2 = self.url(path)
-        r = self.session.get(u2)
+        r = self._call("GET", u2)
         r.raise_for_status()
         if "X-Goog-Hash" in r.headers:
             # if header includes md5 hash, check that data matches

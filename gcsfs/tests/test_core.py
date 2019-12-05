@@ -776,6 +776,13 @@ def test_user_project_fallback_google_default(mock_auth):
     assert fs.user_project == "my_default_project"
 
 
+@my_vcr.use_cassette(match=["all"])
+def test_user_project_cat():
+    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
+    result = gcs.cat(TEST_REQUESTER_PAYS_BUCKET + "/foo.csv")
+    assert len(result)
+
+
 @mock.patch("gcsfs.core.gauth")
 def test_raise_on_project_mismatch(mock_auth):
     mock_auth.default.return_value = (requests.Session(), "my_other_project")
