@@ -1,6 +1,12 @@
 Changelog
 =========
 
+Version 0.5.3
+=============
+
+* ``GCSFileSystem`` now validates that the ``project`` provided, if any, matches the
+  Google default project when using ``token='google_default'`` to authenticate.
+
 Version 0.5.2
 =============
 
