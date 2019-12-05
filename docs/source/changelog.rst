@@ -5,7 +5,8 @@ Version 0.5.3
 =============
 
 * ``GCSFileSystem`` now validates that the ``project`` provided, if any, matches the
-  Google default project when using ``token='google_default'`` to authenticate.
+  Google default project when using ``token='google_default'`` to authenticate (:pr:`219`).
+* Fixed bug in ``GCSFileSystem.cat`` on objects in requester-pays buckets (:pr:`217`).
 
 Version 0.5.2
 =============
