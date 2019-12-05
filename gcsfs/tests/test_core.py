@@ -774,3 +774,14 @@ def test_user_project_fallback_google_default(mock_auth):
     fs = GCSFileSystem(token="google_default")
     assert fs.project == "my_default_project"
     assert fs.user_project == "my_default_project"
+
+
+@mock.patch("gcsfs.core.gauth")
+def test_raise_on_project_mismatch(mock_auth):
+    mock_auth.default.return_value = (requests.Session(), "my_other_project")
+    match = "'my_project' does not match the google default project 'my_other_project'"
+    with pytest.raises(ValueError, match=match):
+        GCSFileSystem(project="my_project", token="google_default")
+
+    result = GCSFileSystem(token="google_default")
+    assert result.project == "my_other_project"
