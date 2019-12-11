@@ -277,10 +277,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         find credentials in the system that turn out not to be valid. Setting
         this parameter to True will ensure that an actual operation is
         attempted before deciding that credentials are valid.
-    requester_pays : bool, default False
+    requester_pays : bool, or str default False
         Whether to use requester-pays requests. This will include your
-        project ID `project` in requests, and you'll be billed for accessing
-        data from requester-pays buckets.
+        project ID `project` in requests as the `userPorject`, and you'll be
+        billed for accessing data from requester-pays buckets. Optionally,
+        pass a project-id here as a string to use that as the `userProject`.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -513,7 +514,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         # needed for requester pays buckets
         if self.requester_pays:
-            kwargs["userProject"] = self.project
+            if isinstance(self.requester_pays, str):
+                user_project = self.requester_pays
+            else:
+                user_project = self.project
+            kwargs["userProject"] = user_project
 
         for retry in range(self.retries):
             try:

@@ -763,6 +763,27 @@ def test_request_user_project():
         assert result["userProject"] == [TEST_PROJECT]
 
 
+@my_vcr.use_cassette(match=["all"])
+def test_request_user_project_string():
+    with gcs_maker():
+        gcs = GCSFileSystem(
+            TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=TEST_PROJECT
+        )
+        assert gcs.requester_pays == TEST_PROJECT
+        # test directly against `_call` to inspect the result
+        r = gcs._call(
+            "GET",
+            "b/{}/o/",
+            TEST_REQUESTER_PAYS_BUCKET,
+            delimiter="/",
+            prefix="test",
+            maxResults=100,
+        )
+        qs = urlparse(r.request.url).query
+        result = parse_qs(qs)
+        assert result["userProject"] == [TEST_PROJECT]
+
+
 @mock.patch("gcsfs.core.gauth")
 def test_user_project_fallback_google_default(mock_auth):
     mock_auth.default.return_value = (requests.Session(), "my_default_project")
