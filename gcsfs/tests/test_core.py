@@ -748,7 +748,7 @@ def test_attrs():
 @my_vcr.use_cassette(match=["all"])
 def test_request_user_project():
     with gcs_maker():
-        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, user_project=TEST_PROJECT)
+        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
         # test directly against `_call` to inspect the result
         r = gcs._call(
             "GET",
@@ -763,17 +763,11 @@ def test_request_user_project():
         assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_user_project_fallback():
-    gcs = GCSFileSystem(project="myproject", token="anon")
-    assert gcs.user_project == "myproject"
-
-
 @mock.patch("gcsfs.core.gauth")
 def test_user_project_fallback_google_default(mock_auth):
     mock_auth.default.return_value = (requests.Session(), "my_default_project")
     fs = GCSFileSystem(token="google_default")
     assert fs.project == "my_default_project"
-    assert fs.user_project == "my_default_project"
 
 
 @my_vcr.use_cassette(match=["all"])

@@ -277,10 +277,10 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         find credentials in the system that turn out not to be valid. Setting
         this parameter to True will ensure that an actual operation is
         attempted before deciding that credentials are valid.
-    user_project : string
-        project_id to use for requester-pays buckets. This is included as
-        the ``userProject`` parameter in requests made to Google Cloud Storage.
-        If not provided, this falls back to ``project`` when that is specified.
+    requester_pays : bool, default False
+        Whether to use requester-pays requests. This will include your
+        project ID `project` in requests, and you'll be billed for accessing
+        data from requester-pays buckets.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -300,7 +300,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         secure_serialize=True,
         check_connection=False,
         requests_timeout=None,
-        user_project=None,
+        requester_pays=False,
         **kwargs
     ):
         if access not in self.scopes:
@@ -310,7 +310,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if block_size is not None:
             self.default_block_size = block_size
         self.project = project
-        self.user_project = user_project or project
+        self.requester_pays = requester_pays
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
@@ -353,7 +353,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         )
         if self.project and self.project != project:
             raise ValueError(msg.format(self.project, project))
-        self.project = self.user_project = project
+        self.project = project
         self.session = AuthorizedSession(credentials)
 
     def _connect_cloud(self):
@@ -512,8 +512,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             path = path.format(*[quote_plus(p) for p in args])
 
         # needed for requester pays buckets
-        if self.user_project:
-            kwargs["userProject"] = self.user_project
+        if self.requester_pays:
+            kwargs["userProject"] = self.project
 
         for retry in range(self.retries):
             try:
@@ -536,6 +536,13 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 RateLimitException,
                 GoogleAuthError,
             ) as e:
+                if (
+                    isinstance(e, HttpError)
+                    and e.code == 400
+                    and "requester pays" in e.message
+                ):
+                    msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
+                    raise ValueError(msg) from e
                 if retry == self.retries - 1:
                     logger.exception("_call out of retries on exception: %s", e)
                     raise e
