@@ -772,7 +772,7 @@ def test_user_project_fallback_google_default(mock_auth):
 
 @my_vcr.use_cassette(match=["all"])
 def test_user_project_cat():
-    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
+    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
     result = gcs.cat(TEST_REQUESTER_PAYS_BUCKET + "/foo.csv")
     assert len(result)
 
