@@ -748,7 +748,7 @@ def test_attrs():
 @my_vcr.use_cassette(match=["all"])
 def test_request_user_project():
     with gcs_maker():
-        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, user_project=TEST_PROJECT)
+        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
         # test directly against `_call` to inspect the result
         r = gcs._call(
             "GET",
@@ -763,9 +763,25 @@ def test_request_user_project():
         assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_user_project_fallback():
-    gcs = GCSFileSystem(project="myproject", token="anon")
-    assert gcs.user_project == "myproject"
+@my_vcr.use_cassette(match=["all"])
+def test_request_user_project_string():
+    with gcs_maker():
+        gcs = GCSFileSystem(
+            TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=TEST_PROJECT
+        )
+        assert gcs.requester_pays == TEST_PROJECT
+        # test directly against `_call` to inspect the result
+        r = gcs._call(
+            "GET",
+            "b/{}/o/",
+            TEST_REQUESTER_PAYS_BUCKET,
+            delimiter="/",
+            prefix="test",
+            maxResults=100,
+        )
+        qs = urlparse(r.request.url).query
+        result = parse_qs(qs)
+        assert result["userProject"] == [TEST_PROJECT]
 
 
 @mock.patch("gcsfs.core.gauth")
@@ -773,12 +789,11 @@ def test_user_project_fallback_google_default(mock_auth):
     mock_auth.default.return_value = (requests.Session(), "my_default_project")
     fs = GCSFileSystem(token="google_default")
     assert fs.project == "my_default_project"
-    assert fs.user_project == "my_default_project"
 
 
 @my_vcr.use_cassette(match=["all"])
 def test_user_project_cat():
-    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
+    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
     result = gcs.cat(TEST_REQUESTER_PAYS_BUCKET + "/foo.csv")
     assert len(result)
 
