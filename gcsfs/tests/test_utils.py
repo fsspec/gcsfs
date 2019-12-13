@@ -1,6 +1,8 @@
 import os
 import requests
-from gcsfs.utils import HttpError, RateLimitException, is_retriable
+from requests.exceptions import ProxyError
+
+from gcsfs.utils import HttpError, is_retriable
 from gcsfs.tests.utils import tmpfile
 
 
@@ -12,24 +14,23 @@ def test_tempfile():
     assert not os.path.exists(fn)
 
 
-def retriable_exception():
+def test_retriable_exception():
     e = requests.exceptions.Timeout()
     assert is_retriable(e)
     e = ValueError
     assert not is_retriable(e)
+
     e = HttpError({"message": "", "code": 500})
     assert is_retriable(e)
+
     e = HttpError({"message": "", "code": "500"})
     assert is_retriable(e)
+
     e = HttpError({"message": "", "code": 400})
     assert not is_retriable(e)
-    e = HttpError()
-    assert not is_retriable(e)
-    e = RateLimitException()
-    assert not is_retriable(e)
-    e = RateLimitException({"message": "", "code": 501})
+
+    e = HttpError({"code": "429"})
     assert is_retriable(e)
-    e = RateLimitException({"message": "", "code": "501"})
+
+    e = ProxyError()
     assert is_retriable(e)
-    e = RateLimitException({"message": "", "code": 400})
-    assert not is_retriable(e)
