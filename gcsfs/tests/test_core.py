@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
 import io
+import json
+from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
 from urllib.parse import urlparse, parse_qs
@@ -8,6 +10,9 @@ import pytest
 import requests
 
 from fsspec.utils import seek_delimiter
+from requests.exceptions import ProxyError
+
+from gcsfs.utils import HttpError
 
 from gcsfs.tests.settings import (
     TEST_PROJECT,
@@ -26,7 +31,7 @@ from gcsfs.tests.utils import (
     b,
     tmpfile,
 )
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.core import GCSFileSystem, quote_plus, validate_response
 
 pytestmark = pytest.mark.usefixtures("token_restore")
 
@@ -807,3 +812,49 @@ def test_raise_on_project_mismatch(mock_auth):
 
     result = GCSFileSystem(token="google_default")
     assert result.project == "my_other_project"
+
+
+def test_validate_response():
+    r = requests.Response()
+    r.status_code = 200
+
+    validate_response(r, "/path")
+
+    # HttpError with no JSON body
+    r = requests.Response()
+    r.status_code = 503
+
+    with pytest.raises(HttpError) as e:
+        validate_response(r, "/path")
+    assert e.value.code == 503
+    assert e.value.message == ""
+
+    # HttpError with JSON body
+    r = requests.Response()
+    r.status_code = 503
+    r._content = json.dumps(
+        {"error": {"code": 503, "message": "Service Unavailable"}}
+    ).encode()
+    with pytest.raises(HttpError) as e:
+        validate_response(r, "/path")
+    assert e.value.code == 503
+    assert e.value.message == "Service Unavailable"
+
+    # 403
+    r = requests.Response()
+    r.status_code = 403
+    r._content = json.dumps({"error": {"message": "Not ok"}}).encode()
+    with pytest.raises(IOError, match="Forbidden.*\nNot ok"):
+        validate_response(r, "/path")
+
+    # 404
+    r = requests.Response()
+    r.status_code = 404
+    with pytest.raises(FileNotFoundError):
+        validate_response(r, "/path")
+
+    # 502
+    r = requests.Response()
+    r.status_code = 502
+    with pytest.raises(ProxyError):
+        validate_response(r, "/path")

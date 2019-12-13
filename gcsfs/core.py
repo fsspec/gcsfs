@@ -32,7 +32,7 @@ import warnings
 import random
 
 from requests.exceptions import RequestException, ProxyError
-from .utils import HttpError, RateLimitException, is_retriable
+from .utils import HttpError, is_retriable
 
 logger = logging.getLogger(__name__)
 
@@ -171,14 +171,14 @@ def validate_response(r, path):
             raise FileNotFoundError
         elif r.status_code == 403:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
-        elif r.status_code == 429:
-            raise RateLimitException(error)
         elif r.status_code == 502:
             raise ProxyError()
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         elif error:
             raise HttpError(error)
+        elif r.status_code:
+            raise HttpError({"code": r.status_code})
         else:
             raise RuntimeError(m)
 
@@ -535,12 +535,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 )
                 validate_response(r, path)
                 break
-            except (
-                HttpError,
-                RequestException,
-                RateLimitException,
-                GoogleAuthError,
-            ) as e:
+            except (HttpError, RequestException, GoogleAuthError) as e:
                 if (
                     isinstance(e, HttpError)
                     and e.code == 400
