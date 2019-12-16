@@ -17,7 +17,7 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIADep910C/yWNQQoCMQwAv7LkLO2C4GGPfqSEGrvFuilJ1lbEv2v1OgwzL8AYSTUY32iDZYLe
+        H4sIADmp910C/yWNQQoCMQwAv7LkLO2C4GGPfqSEGrvFuilJ1lbEv2v1OgwzL8AYSTUY32iDZYLe
         OxwmoF6zkIY84PE0z1+mkSsNZzWrunjfWnOJORXCmtVFvnvcbfUXeqixYCJ33UsJkTcTLqP7+wR7
         /kNnQiGB9we3u8nlhwAAAA==
     headers:
@@ -232,14 +232,14 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAAANPVTUosSc6IT7EMzLH0NAspKzSJd3QMz8vzjzT3ci/W1eXlAgBxlTlwIwAAAA==
+        H4sIAAAAAAAAANPVTUosSc6Iz0x29i2OSizJLs+Od3QMryqPqHBPrDTR1eXlAgCL8v8JIwAAAA==
     headers:
       Cache-Control:
       - private, max-age=0
       Content-Encoding:
       - gzip
       Content-Type:
-      - multipart/mixed; boundary=batch_d9Ql9I6Tvq4_AAWnnOY7JGs
+      - multipart/mixed; boundary=batch_icCMsZatkwk_AAWzwXxGay4
       Server:
       - GSE
       Transfer-Encoding:
@@ -401,7 +401,7 @@ interactions:
       code: 404
       message: Not Found
 - request:
-    body: grant_type=refresh_token&client_id=xxx&client_secret=xxx&refresh_token=xxx&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdevstorage.full_control
+    body: null
     headers:
       Accept:
       - '*/*'
@@ -409,39 +409,23 @@ interactions:
       - gzip, deflate
       Connection:
       - keep-alive
-      Content-Length:
-      - '340'
-      content-type:
-      - application/x-www-form-urlencoded
-    method: POST
-    uri: https://www.googleapis.com/oauth2/v4/token
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping
   response:
     body:
-      string: !!binary |
-        H4sIADip910C/yWNQQoCMQwAv7LkLO2C4GGPfqSEGrvFuilJ1lbEv2v1OgwzL8AYSTUY32iDZYLe
-        OxwmoF6zkIY84PE0z1+mkSsNZzWrunjfWnOJORXCmtVFvnvcbfUXeqixYCJ33UsJkTcTLqP7+wR7
-        /kNnQiGB9we3u8nlhwAAAA==
+      string: "{\n  \"kind\": \"storage#objects\"\n}\n"
     headers:
       Cache-Control:
-      - private
-      Content-Encoding:
-      - gzip
+      - private, max-age=0, must-revalidate, no-transform
+      Content-Length:
+      - '32'
       Content-Type:
-      - application/json; charset=utf-8
+      - application/json; charset=UTF-8
       Server:
-      - scaffolding on HTTPServer2
-      Transfer-Encoding:
-      - chunked
+      - UploadServer
       Vary:
       - Origin
       - X-Origin
-      - Referer
-      X-Content-Type-Options:
-      - nosniff
-      X-Frame-Options:
-      - SAMEORIGIN
-      X-XSS-Protection:
-      - '0'
     status:
       code: 200
       message: OK
@@ -455,7 +439,7 @@ interactions:
       Connection:
       - keep-alive
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing-requesterpays/o/?delimiter=%2F&maxResults=100&prefix=test&userProject=test_project
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"

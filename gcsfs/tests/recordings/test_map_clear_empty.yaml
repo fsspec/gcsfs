@@ -17,7 +17,7 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIADep910C/yWNQQoCMQwAv7LkLO2C4GGPfqSEGrvFuilJ1lbEv2v1OgwzL8AYSTUY32iDZYLe
+        H4sIAFip910C/yWNQQoCMQwAv7LkLO2C4GGPfqSEGrvFuilJ1lbEv2v1OgwzL8AYSTUY32iDZYLe
         OxwmoF6zkIY84PE0z1+mkSsNZzWrunjfWnOJORXCmtVFvnvcbfUXeqixYCJ33UsJkTcTLqP7+wR7
         /kNnQiGB9we3u8nlhwAAAA==
     headers:
@@ -232,14 +232,14 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAAANPVTUosSc6IT7EMzLH0NAspKzSJd3QMz8vzjzT3ci/W1eXlAgBxlTlwIwAAAA==
+        H4sIAAAAAAAAANPVTUosSc6IL/Dx8vHy9qjS1c2Od3T0zfM0NPYPyAjV1eXlAgAJDbyOIwAAAA==
     headers:
       Cache-Control:
       - private, max-age=0
       Content-Encoding:
       - gzip
       Content-Type:
-      - multipart/mixed; boundary=batch_d9Ql9I6Tvq4_AAWnnOY7JGs
+      - multipart/mixed; boundary=batch_pLJLJKHz--k_AAMnI13OPhU
       Server:
       - GSE
       Transfer-Encoding:
@@ -401,7 +401,7 @@ interactions:
       code: 404
       message: Not Found
 - request:
-    body: grant_type=refresh_token&client_id=xxx&client_secret=xxx&refresh_token=xxx&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdevstorage.full_control
+    body: null
     headers:
       Accept:
       - '*/*'
@@ -409,39 +409,23 @@ interactions:
       - gzip, deflate
       Connection:
       - keep-alive
-      Content-Length:
-      - '340'
-      content-type:
-      - application/x-www-form-urlencoded
-    method: POST
-    uri: https://www.googleapis.com/oauth2/v4/token
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping
   response:
     body:
-      string: !!binary |
-        H4sIADip910C/yWNQQoCMQwAv7LkLO2C4GGPfqSEGrvFuilJ1lbEv2v1OgwzL8AYSTUY32iDZYLe
-        OxwmoF6zkIY84PE0z1+mkSsNZzWrunjfWnOJORXCmtVFvnvcbfUXeqixYCJ33UsJkTcTLqP7+wR7
-        /kNnQiGB9we3u8nlhwAAAA==
+      string: "{\n  \"kind\": \"storage#objects\"\n}\n"
     headers:
       Cache-Control:
-      - private
-      Content-Encoding:
-      - gzip
+      - private, max-age=0, must-revalidate, no-transform
+      Content-Length:
+      - '32'
       Content-Type:
-      - application/json; charset=utf-8
+      - application/json; charset=UTF-8
       Server:
-      - scaffolding on HTTPServer2
-      Transfer-Encoding:
-      - chunked
+      - UploadServer
       Vary:
       - Origin
       - X-Origin
-      - Referer
-      X-Content-Type-Options:
-      - nosniff
-      X-Frame-Options:
-      - SAMEORIGIN
-      X-XSS-Protection:
-      - '0'
     status:
       code: 200
       message: OK
@@ -455,7 +439,7 @@ interactions:
       Connection:
       - keep-alive
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing-requesterpays/o/?delimiter=%2F&maxResults=100&prefix=test&userProject=test_project
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -485,6 +469,326 @@ interactions:
       - keep-alive
     method: GET
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
+  response:
+    body:
+      string: "{\n  \"kind\": \"storage#objects\"\n}\n"
+    headers:
+      Cache-Control:
+      - private, max-age=0, must-revalidate, no-transform
+      Content-Length:
+      - '32'
+      Content-Type:
+      - application/json; charset=UTF-8
+      Server:
+      - UploadServer
+      Vary:
+      - Origin
+      - X-Origin
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '
+
+      --===============7330845974216740156==--'
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '41'
+      Content-Type:
+      - multipart/mixed; boundary="===============7330845974216740156=="
+    method: POST
+    uri: https://www.googleapis.com/batch/storage/v1
+  response:
+    body:
+      string: !!binary |
+        H4sIAAAAAAAAANPVTUosSc6ITw7xNQ1y9vd2c8+Od3QMTtdN8wktL87X1eXlAgD3Fk/+IwAAAA==
+    headers:
+      Cache-Control:
+      - private, max-age=0
+      Content-Encoding:
+      - gzip
+      Content-Type:
+      - multipart/mixed; boundary=batch_cTM5RCOKFGk_AASg-fLUwso
+      Server:
+      - GSE
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Origin
+      - X-Origin
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+      X-XSS-Protection:
+      - 1; mode=block
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '{"name": "mapping/1", "metadata": null}'
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '39'
+      Content-Type:
+      - application/json
+    method: POST
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable
+  response:
+    body:
+      string: ''
+    headers:
+      Cache-Control:
+      - no-cache, no-store, max-age=0, must-revalidate
+      Content-Length:
+      - '0'
+      Content-Type:
+      - text/plain; charset=utf-8
+      Location:
+      - https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&upload_id=AEnB2UrphUoR4CQH3F4Yk7p7ldBBZKARdWWgErMjWqFP8f0LAyKXniKNmLo4JeIEdVC1zo3oERdW8fQPZWi_PPv9M-owjGMNzBKKr1uFjumbIbG3pelpkBQ
+      Pragma:
+      - no-cache
+      Server:
+      - UploadServer
+      Vary:
+      - Origin
+      - X-Origin
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '1'
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '1'
+      Content-Range:
+      - bytes 0-0/1
+      Content-Type:
+      - application/octet-stream
+    method: POST
+    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=resumable&uploadType=resumable&upload_id=AEnB2UrphUoR4CQH3F4Yk7p7ldBBZKARdWWgErMjWqFP8f0LAyKXniKNmLo4JeIEdVC1zo3oERdW8fQPZWi_PPv9M-owjGMNzBKKr1uFjumbIbG3pelpkBQ
+  response:
+    body:
+      string: "{\n \"kind\": \"storage#object\",\n \"id\": \"gcsfs-testing/mapping/1/1576511834344489\",\n
+        \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2F1\",\n
+        \"name\": \"mapping/1\",\n \"bucket\": \"gcsfs-testing\",\n \"generation\":
+        \"1576511834344489\",\n \"metageneration\": \"1\",\n \"timeCreated\": \"2019-12-16T15:57:14.344Z\",\n
+        \"updated\": \"2019-12-16T15:57:14.344Z\",\n \"storageClass\": \"STANDARD\",\n
+        \"timeStorageClassUpdated\": \"2019-12-16T15:57:14.344Z\",\n \"size\": \"1\",\n
+        \"md5Hash\": \"xMpCOKC5I4INzFCab3WEmw==\",\n \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1576511834344489&alt=media\",\n
+        \"crc32c\": \"kPWZ4w==\",\n \"etag\": \"CKmY+57EuuYCEAE=\"\n}\n"
+    headers:
+      Cache-Control:
+      - no-cache, no-store, max-age=0, must-revalidate
+      Content-Length:
+      - '729'
+      Content-Type:
+      - application/json; charset=UTF-8
+      ETag:
+      - CKmY+57EuuYCEAE=
+      Pragma:
+      - no-cache
+      Server:
+      - UploadServer
+      Vary:
+      - Origin
+      - X-Origin
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping
+  response:
+    body:
+      string: "{\n  \"kind\": \"storage#objects\",\n  \"prefixes\": [\n    \"mapping/\"\n
+        \ ]\n}\n"
+    headers:
+      Cache-Control:
+      - private, max-age=0, must-revalidate, no-transform
+      Content-Length:
+      - '68'
+      Content-Type:
+      - application/json; charset=UTF-8
+      Server:
+      - UploadServer
+      Vary:
+      - Origin
+      - X-Origin
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping%2F
+  response:
+    body:
+      string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1576511834344489\",\n
+        \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2F1\",\n
+        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1576511834344489&alt=media\",\n
+        \     \"name\": \"mapping/1\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
+        \"1576511834344489\",\n      \"metageneration\": \"1\",\n      \"storageClass\":
+        \"STANDARD\",\n      \"size\": \"1\",\n      \"md5Hash\": \"xMpCOKC5I4INzFCab3WEmw==\",\n
+        \     \"crc32c\": \"kPWZ4w==\",\n      \"etag\": \"CKmY+57EuuYCEAE=\",\n      \"timeCreated\":
+        \"2019-12-16T15:57:14.344Z\",\n      \"updated\": \"2019-12-16T15:57:14.344Z\",\n
+        \     \"timeStorageClassUpdated\": \"2019-12-16T15:57:14.344Z\"\n    }\n  ]\n}\n"
+    headers:
+      Cache-Control:
+      - private, max-age=0, must-revalidate, no-transform
+      Content-Length:
+      - '867'
+      Content-Type:
+      - application/json; charset=UTF-8
+      Server:
+      - UploadServer
+      Vary:
+      - Origin
+      - X-Origin
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '
+
+      --===============7330845974216740156==
+
+      Content-Type: application/http
+
+      Content-Transfer-Encoding: binary
+
+      Content-ID: <b29c5de2-0db4-490b-b421-6a51b598bd11+1>
+
+
+      DELETE /storage/v1/b/gcsfs-testing/o/mapping%2F1 HTTP/1.1
+
+      Content-Type: application/json
+
+      accept: application/json
+
+      content-length: 0
+
+
+      --===============7330845974216740156==--'
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '344'
+      Content-Type:
+      - multipart/mixed; boundary="===============7330845974216740156=="
+    method: POST
+    uri: https://www.googleapis.com/batch/storage/v1
+  response:
+    body:
+      string: !!binary |
+        H4sIAAAAAAAAAH2PwWrDMBBE7wL9w97Trb1CiiMTAkkd2h5cHPAhtyDJAhsnkkgEof36plDoreeZ
+        N49BtCa78dR1wh10hV/H/Wm7bavLfTer+8zZSwzZh4z9Z/I1mJTOkzN5iqEYc05/+XtTw/rqbymG
+        m0crtFODF1gOVqLUpUUrBeHSKLJKr+xAtKANZ5y99X1X0DOBKCV8RPgd5Kwx+WFsY3gCWkLj3aNB
+        GkjVqqpJwmvb//Cc4f8fEDn7BvwgCcPnAAAA
+    headers:
+      Cache-Control:
+      - no-cache, no-store, max-age=0, must-revalidate
+      Content-Encoding:
+      - gzip
+      Content-Type:
+      - multipart/mixed; boundary=batch_PP2cQ97-zXE_AAM7mwBk5wk
+      Pragma:
+      - no-cache
+      Server:
+      - GSE
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Origin
+      - X-Origin
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+      X-XSS-Protection:
+      - 1; mode=block
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping
+  response:
+    body:
+      string: "{\n  \"kind\": \"storage#objects\"\n}\n"
+    headers:
+      Cache-Control:
+      - private, max-age=0, must-revalidate, no-transform
+      Content-Length:
+      - '32'
+      Content-Type:
+      - application/json; charset=UTF-8
+      Server:
+      - UploadServer
+      Vary:
+      - Origin
+      - X-Origin
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+    method: GET
+    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
