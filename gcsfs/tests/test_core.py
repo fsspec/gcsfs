@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
 import io
+import json
+from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
 from urllib.parse import urlparse, parse_qs
@@ -8,6 +10,9 @@ import pytest
 import requests
 
 from fsspec.utils import seek_delimiter
+from requests.exceptions import ProxyError
+
+from gcsfs.utils import HttpError
 
 from gcsfs.tests.settings import (
     TEST_PROJECT,
@@ -26,7 +31,7 @@ from gcsfs.tests.utils import (
     b,
     tmpfile,
 )
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.core import GCSFileSystem, quote_plus, validate_response
 
 pytestmark = pytest.mark.usefixtures("token_restore")
 
@@ -748,7 +753,7 @@ def test_attrs():
 @my_vcr.use_cassette(match=["all"])
 def test_request_user_project():
     with gcs_maker():
-        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, user_project=TEST_PROJECT)
+        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
         # test directly against `_call` to inspect the result
         r = gcs._call(
             "GET",
@@ -763,9 +768,25 @@ def test_request_user_project():
         assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_user_project_fallback():
-    gcs = GCSFileSystem(project="myproject", token="anon")
-    assert gcs.user_project == "myproject"
+@my_vcr.use_cassette(match=["all"])
+def test_request_user_project_string():
+    with gcs_maker():
+        gcs = GCSFileSystem(
+            TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=TEST_PROJECT
+        )
+        assert gcs.requester_pays == TEST_PROJECT
+        # test directly against `_call` to inspect the result
+        r = gcs._call(
+            "GET",
+            "b/{}/o/",
+            TEST_REQUESTER_PAYS_BUCKET,
+            delimiter="/",
+            prefix="test",
+            maxResults=100,
+        )
+        qs = urlparse(r.request.url).query
+        result = parse_qs(qs)
+        assert result["userProject"] == [TEST_PROJECT]
 
 
 @mock.patch("gcsfs.core.gauth")
@@ -773,4 +794,67 @@ def test_user_project_fallback_google_default(mock_auth):
     mock_auth.default.return_value = (requests.Session(), "my_default_project")
     fs = GCSFileSystem(token="google_default")
     assert fs.project == "my_default_project"
-    assert fs.user_project == "my_default_project"
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_user_project_cat():
+    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
+    result = gcs.cat(TEST_REQUESTER_PAYS_BUCKET + "/foo.csv")
+    assert len(result)
+
+
+@mock.patch("gcsfs.core.gauth")
+def test_raise_on_project_mismatch(mock_auth):
+    mock_auth.default.return_value = (requests.Session(), "my_other_project")
+    match = "'my_project' does not match the google default project 'my_other_project'"
+    with pytest.raises(ValueError, match=match):
+        GCSFileSystem(project="my_project", token="google_default")
+
+    result = GCSFileSystem(token="google_default")
+    assert result.project == "my_other_project"
+
+
+def test_validate_response():
+    r = requests.Response()
+    r.status_code = 200
+
+    validate_response(r, "/path")
+
+    # HttpError with no JSON body
+    r = requests.Response()
+    r.status_code = 503
+
+    with pytest.raises(HttpError) as e:
+        validate_response(r, "/path")
+    assert e.value.code == 503
+    assert e.value.message == ""
+
+    # HttpError with JSON body
+    r = requests.Response()
+    r.status_code = 503
+    r._content = json.dumps(
+        {"error": {"code": 503, "message": "Service Unavailable"}}
+    ).encode()
+    with pytest.raises(HttpError) as e:
+        validate_response(r, "/path")
+    assert e.value.code == 503
+    assert e.value.message == "Service Unavailable"
+
+    # 403
+    r = requests.Response()
+    r.status_code = 403
+    r._content = json.dumps({"error": {"message": "Not ok"}}).encode()
+    with pytest.raises(IOError, match="Forbidden.*\nNot ok"):
+        validate_response(r, "/path")
+
+    # 404
+    r = requests.Response()
+    r.status_code = 404
+    with pytest.raises(FileNotFoundError):
+        validate_response(r, "/path")
+
+    # 502
+    r = requests.Response()
+    r.status_code = 502
+    with pytest.raises(ProxyError):
+        validate_response(r, "/path")

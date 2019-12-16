@@ -2,6 +2,8 @@
 """
 Google Cloud Storage pythonic interface
 """
+import textwrap
+
 import fsspec
 
 import decorator
@@ -30,7 +32,7 @@ import warnings
 import random
 
 from requests.exceptions import RequestException, ProxyError
-from .utils import HttpError, RateLimitException, is_retriable
+from .utils import HttpError, is_retriable
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +171,14 @@ def validate_response(r, path):
             raise FileNotFoundError
         elif r.status_code == 403:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
-        elif r.status_code == 429:
-            raise RateLimitException(error)
         elif r.status_code == 502:
             raise ProxyError()
         elif "invalid" in m:
             raise ValueError("Bad Request: %s\n%s" % (path, msg))
         elif error:
             raise HttpError(error)
+        elif r.status_code:
+            raise HttpError({"code": r.status_code})
         else:
             raise RuntimeError(m)
 
@@ -275,10 +277,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         find credentials in the system that turn out not to be valid. Setting
         this parameter to True will ensure that an actual operation is
         attempted before deciding that credentials are valid.
-    user_project : string
-        project_id to use for requester-pays buckets. This is included as
-        the ``userProject`` parameter in requests made to Google Cloud Storage.
-        If not provided, this falls back to ``project`` when that is specified.
+    requester_pays : bool, or str default False
+        Whether to use requester-pays requests. This will include your
+        project ID `project` in requests as the `userPorject`, and you'll be
+        billed for accessing data from requester-pays buckets. Optionally,
+        pass a project-id here as a string to use that as the `userProject`.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -298,7 +301,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         secure_serialize=True,
         check_connection=False,
         requests_timeout=None,
-        user_project=None,
+        requester_pays=False,
         **kwargs
     ):
         if access not in self.scopes:
@@ -308,7 +311,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if block_size is not None:
             self.default_block_size = block_size
         self.project = project
-        self.user_project = user_project or project
+        self.requester_pays = requester_pays
         self.access = access
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
@@ -340,7 +343,18 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
     def _connect_google_default(self):
         credentials, project = gauth.default(scopes=[self.scope])
-        self.project = self.user_project = project
+        msg = textwrap.dedent(
+            """\
+        User-provided project '{}' does not match the google default project '{}'. Either
+
+          1. Accept the google-default project by not passing a `project` to GCSFileSystem
+          2. Configure the default project to match the user-provided project (gcloud config set project)
+          3. Use an authorization method other than 'google_default' by providing 'token=...'
+        """
+        )
+        if self.project and self.project != project:
+            raise ValueError(msg.format(self.project, project))
+        self.project = project
         self.session = AuthorizedSession(credentials)
 
     def _connect_cloud(self):
@@ -449,6 +463,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                     self.connect(method=meth)
                     if self.check_credentials and meth != "anon":
                         self.ls("anaconda-public-data")
+                    logger.debug("Connected with method %s", meth)
                 except:  # noqa: E722
                     # TODO: catch specific exceptions
                     self.session = None
@@ -498,8 +513,12 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             path = path.format(*[quote_plus(p) for p in args])
 
         # needed for requester pays buckets
-        if self.user_project:
-            kwargs["userProject"] = self.user_project
+        if self.requester_pays:
+            if isinstance(self.requester_pays, str):
+                user_project = self.requester_pays
+            else:
+                user_project = self.project
+            kwargs["userProject"] = user_project
 
         for retry in range(self.retries):
             try:
@@ -516,12 +535,14 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 )
                 validate_response(r, path)
                 break
-            except (
-                HttpError,
-                RequestException,
-                RateLimitException,
-                GoogleAuthError,
-            ) as e:
+            except (HttpError, RequestException, GoogleAuthError) as e:
+                if (
+                    isinstance(e, HttpError)
+                    and e.code == 400
+                    and "requester pays" in e.message
+                ):
+                    msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
+                    raise ValueError(msg) from e
                 if retry == self.retries - 1:
                     logger.exception("_call out of retries on exception: %s", e)
                     raise e
@@ -740,7 +761,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             raise ValueError("Cannot create root bucket")
         if "/" in bucket:
             return
-        self._call(
+        r = self._call(
             "post",
             "b/",
             predefinedAcl=acl,
@@ -748,6 +769,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             predefinedDefaultObjectAcl=default_acl,
             json={"name": bucket},
         )
+        r.raise_for_status()
         self.invalidate_cache(bucket)
 
     @_tracemethod
@@ -851,7 +873,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     def cat(self, path):
         """ Simple one-shot get of file data """
         u2 = self.url(path)
-        r = self.session.get(u2)
+        r = self._call("GET", u2)
         r.raise_for_status()
         if "X-Goog-Hash" in r.headers:
             # if header includes md5 hash, check that data matches
