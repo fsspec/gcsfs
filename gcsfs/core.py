@@ -997,7 +997,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             )
             r = self._call(
                 "POST",
-                "https://www.googleapis.com/batch",
+                "https://www.googleapis.com/batch/storage/v1",
                 headers={
                     "Content-Type": 'multipart/mixed; boundary="=========='
                     '=====7330845974216740156=="'
