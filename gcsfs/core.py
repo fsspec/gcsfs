@@ -1194,6 +1194,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         elif l:
             #
             assert final, "Response looks like upload is over"
+            # update md5 with final chunk of data
+            if self.consistency == "md5":
+                self.md5.update(data)
             size, md5 = int(r.json()["size"]), r.json()["md5Hash"]
             if self.consistency == "size":
                 assert size == self.buffer.tell() + self.offset, "Size mismatch"
