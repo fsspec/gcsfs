@@ -1194,13 +1194,14 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         elif l:
             #
             assert final, "Response looks like upload is over"
-            # update md5 with final chunk of data
-            if self.consistency == "md5":
-                self.md5.update(data)
             size, md5 = int(r.json()["size"]), r.json()["md5Hash"]
             if self.consistency == "size":
+                # update offset with final chunk of data
+                self.offset += l
                 assert size == self.buffer.tell() + self.offset, "Size mismatch"
             if self.consistency == "md5":
+                # update md5 with final chunk of data
+                self.md5.update(data)
                 assert (
                     b64encode(self.md5.digest()) == md5.encode()
                 ), "MD5 checksum failed"
