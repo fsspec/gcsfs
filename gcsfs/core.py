@@ -1168,7 +1168,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         else:
             if l < GCS_MIN_BLOCK_SIZE:
                 if not self.autocommit:
-                    return
+                    return False
                 elif not final:
                     raise ValueError("Non-final chunk write below min size.")
             head["Content-Range"] = "bytes %i-%i/*" % (self.offset, self.offset + l - 1)
