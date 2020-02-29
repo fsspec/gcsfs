@@ -619,7 +619,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                     cache_age,
                     self.cache_timeout,
                 )
-                del self._listing_cache[path]
+                self._listing_cache.pop(path, None)
                 return None
 
             return listing
