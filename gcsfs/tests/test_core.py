@@ -64,6 +64,8 @@ def test_many_connect():
 def test_simple_upload():
     with gcs_maker() as gcs:
         fn = TEST_BUCKET + "/test"
+        with gcs.open(fn, "wb", content_type="text/plain") as f:
+            f.write(b"zz")
         with gcs.open(fn, "wb") as f:
             f.write(b"zz")
         assert gcs.cat(fn) == b"zz"
@@ -76,17 +78,37 @@ def test_multi_upload():
         d = b"01234567" * 2 ** 15
 
         # something to write on close
+        with gcs.open(fn, "wb", content_type="text/plain", block_size=2 ** 18) as f:
+            f.write(d)
+            f.write(b"xx")
+        assert gcs.cat(fn) == d + b"xx"
+        assert gcs.info(fn)["contentType"] == "text/plain"
+        # empty buffer on close
+        with gcs.open(fn, "wb", content_type="text/plain", block_size=2 ** 19) as f:
+            f.write(d)
+            f.write(b"xx")
+            f.write(d)
+        assert gcs.cat(fn) == d + b"xx" + d
+        assert gcs.info(fn)["contentType"] == "text/plain"
+
+    # if content-type is not provided then default should be application/octet-stream
+    with gcs_maker() as gcs:
+        fn = TEST_BUCKET + "/test"
+        d = b"01234567" * 2 ** 15
+
+        # something to write on close
         with gcs.open(fn, "wb", block_size=2 ** 18) as f:
             f.write(d)
             f.write(b"xx")
         assert gcs.cat(fn) == d + b"xx"
-
+        assert gcs.info(fn)["contentType"] == "application/octet-stream"
         # empty buffer on close
         with gcs.open(fn, "wb", block_size=2 ** 19) as f:
             f.write(d)
             f.write(b"xx")
             f.write(d)
         assert gcs.cat(fn) == d + b"xx" + d
+        assert gcs.info(fn)["contentType"] == "application/octet-stream"
 
 
 @my_vcr.use_cassette(match=["all"])
