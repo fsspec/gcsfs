@@ -20,6 +20,7 @@ API
    GCSFileSystem.rm
    GCSFileSystem.tail
    GCSFileSystem.touch
+   GCSFileSystem.get_mapper
 
 .. autosummary::
    GCSFile
@@ -33,9 +34,6 @@ API
 
 .. currentmodule:: gcsfs.mapping
 
-.. autosummary::
-   GCSMap
-
 .. currentmodule:: gcsfs.core
 
 .. autoclass:: GCSFileSystem
@@ -45,5 +43,3 @@ API
    :members:
 
 .. currentmodule:: gcsfs.mapping
-
-.. autoclass:: GCSMap

@@ -9,6 +9,13 @@ Please file issues and requests on github_ and we welcome pull requests.
 
 .. _github: https://github.com/dask/gcsfs/issues
 
+
+This package depends on fsspec_ , and inherits many useful behaviours from there,
+including integration with Dask, and the facility for key-value dict-like
+objects of the type used by zarr.
+
+.. _fsspec: https://filesystem-spec.readthedocs.io/en/latest/
+
 Installation
 ------------
 
@@ -16,7 +23,7 @@ The GCSFS library can be installed using ``conda`` or ``pip``:
 
 .. code-block:: bash
 
-   conda install gcsfs
+   conda install -c conda-forge gcsfs
    or
    pip install gcsfs
 
@@ -98,19 +105,14 @@ Several modes of authentication are supported:
     - you can also generate tokens via Oauth2 in the browser using ``token='browser'``,
       which gcsfs then caches in a special file, ~/.gcs_tokens, and can subsequently be accessed with ``token='cache'``.
 
+    - anonymous only access can be selected using ``token='anon'``, e.g. to access
+      public resources such as 'anaconda-public-data'.
+
 The acquired session tokens are *not* preserved when serializing the instances, so
 it is safe to pass them to worker processes on other machines if using in a
 distributed computation context. If credentials are given by a file path, however,
 then this file must exist on every machine.
 
-Connection with Dask and Zarr
------------------------------
-
-Importing gcsfs will make this file-system backend available to dask_ for
-parallel data ingestion using URLs
-something like ``gcs://mybucket/myfiles/*.csv``; both ``gcs:`` and ``gs:`` work.
-
-Similarly, ``GCSMap`` is a valid mutable-mapping, which can be used with zarr_.
 
 Contents
 ========
@@ -119,6 +121,7 @@ Contents
    api
    developer
    fuse
+   changelog
    :maxdepth: 2
 
 
