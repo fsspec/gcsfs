@@ -180,7 +180,7 @@ def test_rm_recursive():
         for fn in files:
             gcs.touch(TEST_BUCKET + fn)
         gcs.rm(TEST_BUCKET + files[0], True)
-        assert gcs.ls(TEST_BUCKET) == []
+        assert not gcs.exists(TEST_BUCKET + files[-1])
 
 
 @my_vcr.use_cassette(match=["all"])
