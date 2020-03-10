@@ -260,11 +260,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.token = token
-        self.cache_timeout = cache_timeout
+        self.cache_timeout = cache_timeout or kwargs.pop('listings_expiry_time', None)
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         self.connect(method=token)
-        super().__init__(self, expiry_time=cache_timeout, **kwargs)
+        super().__init__(self, listings_expiry_time=cache_timeout, **kwargs)
 
         if not secure_serialize:
             self.token = self.session.credentials
