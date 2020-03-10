@@ -1029,8 +1029,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.metadata = metadata
         self.acl = acl
         self.consistency = consistency
-        self.content_type = content_type or 'application/octet-stream'
-        if self.consistency == 'md5':
+        self.content_type = content_type or "application/octet-stream"
+        if self.consistency == "md5":
             self.md5 = md5()
         if mode == "wb":
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
@@ -1076,9 +1076,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 elif not final:
                     raise ValueError("Non-final chunk write below min size.")
             head["Content-Range"] = "bytes %i-%i/*" % (self.offset, self.offset + l - 1)
-        head.update(
-            {"Content-Type": self.content_type, "Content-Length": str(l)}
-        )
+        head.update({"Content-Type": self.content_type, "Content-Length": str(l)})
         r = self.gcsfs._call(
             "POST", self.location, uploadType="resumable", headers=head, data=data
         )
@@ -1126,7 +1124,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             "/v1/b/%s/o" % quote_plus(self.bucket),
             uploadType="resumable",
             json={"name": self.key, "metadata": self.metadata},
-            headers={'X-Upload-Content-Type': self.content_type},
+            headers={"X-Upload-Content-Type": self.content_type},
         )
         self.location = r.headers["Location"]
 
@@ -1164,7 +1162,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 "\n\n" + metadata + "\n--==0=="
                 "\nContent-Type: {0}"
                 "\n\n"
-            ).format(self.content_type).encode()
+            )
+            .format(self.content_type)
+            .encode()
             + data
             + b"\n--==0==--"
         )
