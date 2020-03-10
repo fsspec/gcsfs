@@ -257,7 +257,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.token = token
-        self.cache_timeout = cache_timeout or kwargs.pop('listings_expiry_time', None)
+        self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         self.connect(method=token)
@@ -517,7 +517,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         # Check if parent dir is in listing cache
         listing = self._ls_from_cache(path)
         if listing:
-            f = [f for f in listing if f['type'] == 'file']
+            f = [f for f in listing if f["type"] == "file"]
             if f:
                 return f
             # parent is listed, doesn't contain the path
@@ -536,12 +536,14 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
     def _list_objects(self, path):
         bucket, key = self.split_path(path)
-        path = path.rstrip('/')
+        path = path.rstrip("/")
 
         try:
             clisting = self._ls_from_cache(path)
-            hassubdirs = clisting and any(c['name'].rstrip('/') == path and c['type'] == 'directory'
-                                          for c in clisting)
+            hassubdirs = clisting and any(
+                c["name"].rstrip("/") == path and c["type"] == "directory"
+                for c in clisting
+            )
             if clisting and not hassubdirs:
                 return clisting
         except FileNotFoundError:
@@ -554,14 +556,14 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         pseudodirs = [
             {
                 "bucket": bucket,
-                "name": bucket + "/" + prefix.strip('/'),
+                "name": bucket + "/" + prefix.strip("/"),
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
             }
             for prefix in prefixes
         ]
-        if not(items + pseudodirs):
+        if not (items + pseudodirs):
             if key:
                 return [self._get_object(path)]
             else:
@@ -572,7 +574,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     def _do_list_objects(self, path, max_results=None):
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, prefix = self.split_path(path)
-        prefix = None if not prefix else prefix.rstrip('/') + '/'
+        prefix = None if not prefix else prefix.rstrip("/") + "/"
 
         prefixes = []
         items = []
@@ -628,8 +630,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 next_page_token = page.get("nextPageToken", None)
 
             self.dircache[""] = [
-                {"name": i["name"] + "/", "size": 0, "type": "directory"}
-                for i in items
+                {"name": i["name"] + "/", "size": 0, "type": "directory"} for i in items
             ]
         return self.dircache[""]
 
@@ -647,7 +648,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             logger.debug("invalidate_cache clearing cache")
             self.dircache.clear()
         else:
-            path = self._strip_protocol(path).rstrip('/')
+            path = self._strip_protocol(path).rstrip("/")
 
             while path:
                 self.dircache.pop(path, None)
@@ -699,7 +700,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
     def info(self, path, **kwargs):
         """File information about this path."""
-        path = self._strip_protocol(path).rstrip('/')
+        path = self._strip_protocol(path).rstrip("/")
         # Check directory cache for parent dir
         parent_path = self._parent(path)
         parent_cache = self._ls_from_cache(parent_path)
@@ -712,7 +713,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             # this is a directory
             return {
                 "bucket": bucket,
-                "name": path.rstrip('/'),
+                "name": path.rstrip("/"),
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
@@ -731,7 +732,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             # other stuff - must be a directory
             return {
                 "bucket": bucket,
-                "name": path.rstrip('/'),
+                "name": path.rstrip("/"),
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
@@ -741,7 +742,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
     def ls(self, path, detail=False, **kwargs):
         """List objects under the given '/{bucket}/{prefix} path."""
-        path = self._strip_protocol(path).rstrip('/')
+        path = self._strip_protocol(path).rstrip("/")
 
         if path in ["/", ""]:
             out = self._list_buckets()
@@ -956,7 +957,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         -------
             (bucket, key) tuple
         """
-        path = cls._strip_protocol(path).lstrip('/')
+        path = cls._strip_protocol(path).lstrip("/")
         if "/" not in path:
             return path, ""
         else:
