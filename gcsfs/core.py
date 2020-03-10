@@ -6,8 +6,6 @@ import textwrap
 
 import fsspec
 
-import decorator
-
 from base64 import b64encode, b64decode
 import google.auth as gauth
 import google.auth.compute_engine
@@ -21,7 +19,6 @@ from hashlib import md5
 import io
 import json
 import logging
-import traceback
 import os
 import posixpath
 import pickle
@@ -35,22 +32,6 @@ from requests.exceptions import RequestException, ProxyError
 from .utils import HttpError, is_retriable
 
 logger = logging.getLogger(__name__)
-
-# Allow optional tracing of call locations for api calls.
-# Disabled by default to avoid *massive* test logs.
-_TRACE_METHOD_INVOCATIONS = False
-
-
-@decorator.decorator
-def _tracemethod(f, self, *args, **kwargs):
-    logger.debug("%s(args=%s, kwargs=%s)", f.__name__, args, kwargs)
-    if _TRACE_METHOD_INVOCATIONS and logger.isEnabledFor(logging.DEBUG - 1):
-        tb_io = io.StringIO()
-        traceback.print_stack(file=tb_io)
-        logger.log(logging.DEBUG - 1, tb_io.getvalue())
-
-    return f(self, *args, **kwargs)
-
 
 # client created 2018-01-16
 not_secret = {
@@ -106,46 +87,6 @@ def quote_plus(s):
     s = s.replace("/", "%2F")
     s = s.replace(" ", "%20")
     return s
-
-
-def norm_path(path):
-    """Canonicalize path to '{bucket}/{name}' form."""
-    return "/".join(split_path(path))
-
-
-def split_path(path):
-    """
-    Normalise GCS path string into bucket and key.
-
-    Parameters
-    ----------
-    path : string
-        Input path, like `gcs://mybucket/path/to/file`.
-        Path is of the form: '[gs|gcs://]bucket[/key]'
-
-    Returns
-    -------
-        (bucket, key) tuple
-
-    Examples
-    --------
-    >>> split_path("gcs://mybucket/path/to/file")
-    ['mybucket', 'path/to/file']
-    >>> split_path("mybucket/path/to/file")
-    ['mybucket', 'path/to/file']
-    >>> split_path("gs://mybucket")
-    ['mybucket', '']
-    """
-    if path.startswith("gcs://"):
-        path = path[6:]
-    if path.startswith("gs://"):
-        path = path[5:]
-    if path.startswith("/"):
-        path = path[1:]
-    if "/" not in path:
-        return path, ""
-    else:
-        return path.split("/", 1)
 
 
 def validate_response(r, path):
@@ -316,27 +257,21 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.token = token
-        self.cache_timeout = cache_timeout
+        self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
-        self._listing_cache = {}
         self.connect(method=token)
-        super().__init__(self, **kwargs)
+        super().__init__(self, listings_expiry_time=cache_timeout, **kwargs)
 
         if not secure_serialize:
             self.token = self.session.credentials
 
-    @staticmethod
-    def load_tokens():
+    @classmethod
+    def load_tokens(cls):
         """Get "browser" tokens from disc"""
         try:
             with open(tfile, "rb") as f:
                 tokens = pickle.load(f)
-            # backwards compatability
-            tokens = {
-                k: (GCSFileSystem._dict_to_credentials(v) if isinstance(v, dict) else v)
-                for k, v in tokens.items()
-            }
         except Exception:
             tokens = {}
         GCSFileSystem.tokens = tokens
@@ -496,7 +431,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         except Exception as e:
             warnings.warn("Saving token cache failed: " + str(e))
 
-    @_tracemethod
     def _call(self, method, path, *args, **kwargs):
         for k, v in list(kwargs.items()):
             if v is None:
@@ -576,22 +510,18 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         return result
 
-    @_tracemethod
     def _get_object(self, path):
         """Return object information at the given path."""
-        bucket, key = split_path(path)
+        bucket, key = self.split_path(path)
 
         # Check if parent dir is in listing cache
-        parent = "/".join([bucket, posixpath.dirname(key.rstrip("/"))]) + "/"
-        parent_cache = self._maybe_get_cached_listing(parent)
-        if parent_cache:
-            cached_obj = [o for o in parent_cache["items"] if o["name"] == key]
-            if cached_obj:
-                logger.debug("found cached object: %s", cached_obj)
-                return cached_obj[0]
-            else:
-                logger.debug("object not found cached parent listing")
-                raise FileNotFoundError(path)
+        listing = self._ls_from_cache(path)
+        if listing:
+            f = [f for f in listing if f["type"] == "file"]
+            if f:
+                return f
+            # parent is listed, doesn't contain the path
+            raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -604,48 +534,47 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         return result
 
-    @_tracemethod
-    def _maybe_get_cached_listing(self, path):
-        logger.debug("_maybe_get_cached_listing: %s", path)
-        if path in self._listing_cache:
-            retrieved_time, listing = self._listing_cache[path]
-            cache_age = time.time() - retrieved_time
-            if self.cache_timeout is not None and cache_age > self.cache_timeout:
-                logger.debug(
-                    "expired cache path: %s retrieved_time: %.3f cache_age: "
-                    "%.3f cache_timeout: %.3f",
-                    path,
-                    retrieved_time,
-                    cache_age,
-                    self.cache_timeout,
-                )
-                self._listing_cache.pop(path, None)
-                return None
-
-            return listing
-
-        return None
-
-    @_tracemethod
     def _list_objects(self, path):
-        path = norm_path(path)
+        bucket, key = self.split_path(path)
+        path = path.rstrip("/")
 
-        clisting = self._maybe_get_cached_listing(path)
-        if clisting:
-            return clisting
+        try:
+            clisting = self._ls_from_cache(path)
+            hassubdirs = clisting and any(
+                c["name"].rstrip("/") == path and c["type"] == "directory"
+                for c in clisting
+            )
+            if clisting and not hassubdirs:
+                return clisting
+        except FileNotFoundError:
+            # not finding a bucket in list of "my" buckets is OK
+            if key:
+                raise
 
-        listing = self._do_list_objects(path)
-        retrieved_time = time.time()
+        items, prefixes = self._do_list_objects(path)
 
-        self._listing_cache[path] = (retrieved_time, listing)
-        return listing
+        pseudodirs = [
+            {
+                "bucket": bucket,
+                "name": bucket + "/" + prefix.strip("/"),
+                "size": 0,
+                "storageClass": "DIRECTORY",
+                "type": "directory",
+            }
+            for prefix in prefixes
+        ]
+        if not (items + pseudodirs):
+            if key:
+                return [self._get_object(path)]
+            else:
+                return []
+        self.dircache[path] = items + pseudodirs
+        return self.dircache[path]
 
-    @_tracemethod
     def _do_list_objects(self, path, max_results=None):
         """Object listing for the given {bucket}/{prefix}/ path."""
-        bucket, prefix = split_path(path)
-        if not prefix:
-            prefix = None
+        bucket, prefix = self.split_path(path)
+        prefix = None if not prefix else prefix.rstrip("/") + "/"
 
         prefixes = []
         items = []
@@ -658,17 +587,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             maxResults=max_results,
         ).json()
 
-        assert page["kind"] == "storage#objects"
         prefixes.extend(page.get("prefixes", []))
-        items.extend(
-            [
-                i
-                for i in page.get("items", [])
-                if prefix is None
-                or i["name"].rstrip("/") == prefix.rstrip("/")
-                or i["name"].startswith(prefix.rstrip("/") + "/")
-            ]
-        )
+        items.extend(page.get("items", []))
         next_page_token = page.get("nextPageToken", None)
 
         while next_page_token is not None:
@@ -684,43 +604,36 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
             assert page["kind"] == "storage#objects"
             prefixes.extend(page.get("prefixes", []))
-            items.extend([i for i in page.get("items", [])])
+            items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
 
-        prefixes = [
-            p for p in prefixes if prefix is None or prefix.rstrip("/") + "/" in p
-        ]
-        result = {
-            "kind": "storage#objects",
-            "prefixes": prefixes,
-            "items": [self._process_object(bucket, i) for i in items],
-        }
-        return result
+        items = [self._process_object(bucket, i) for i in items]
+        return items, prefixes
 
-    @_tracemethod
     def _list_buckets(self):
         """Return list of all buckets under the current project."""
-        items = []
-        page = self._call("GET", "b/", project=self.project).json()
-
-        assert page["kind"] == "storage#buckets"
-        items.extend(page.get("items", []))
-        next_page_token = page.get("nextPageToken", None)
-
-        while next_page_token is not None:
-            page = self._call(
-                "GET", "b/", project=self.project, pageToken=next_page_token
-            ).json()
+        if "" not in self.dircache:
+            items = []
+            page = self._call("GET", "b/", project=self.project).json()
 
             assert page["kind"] == "storage#buckets"
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
 
-        return [
-            {"name": i["name"] + "/", "size": 0, "type": "directory"} for i in items
-        ]
+            while next_page_token is not None:
+                page = self._call(
+                    "GET", "b/", project=self.project, pageToken=next_page_token
+                ).json()
 
-    @_tracemethod
+                assert page["kind"] == "storage#buckets"
+                items.extend(page.get("items", []))
+                next_page_token = page.get("nextPageToken", None)
+
+            self.dircache[""] = [
+                {"name": i["name"] + "/", "size": 0, "type": "directory"} for i in items
+            ]
+        return self.dircache[""]
+
     def invalidate_cache(self, path=None):
         """
         Invalidate listing cache for given path, it is reloaded on next use.
@@ -731,18 +644,16 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             If None, clear all listings cached else listings at or under given
             path.
         """
-        if not path:
+        if path is None:
             logger.debug("invalidate_cache clearing cache")
-            self._listing_cache.clear()
+            self.dircache.clear()
         else:
-            path = norm_path(path)
+            path = self._strip_protocol(path).rstrip("/")
 
-            invalid_keys = [k for k in self._listing_cache if k.startswith(path)]
+            while path:
+                self.dircache.pop(path, None)
+                path = self._parent(path)
 
-            for k in invalid_keys:
-                self._listing_cache.pop(k, None)
-
-    @_tracemethod
     def mkdir(self, bucket, acl="projectPrivate", default_acl="bucketOwnerFullControl"):
         """
         New bucket
@@ -772,7 +683,6 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         r.raise_for_status()
         self.invalidate_cache(bucket)
 
-    @_tracemethod
     def rmdir(self, bucket):
         """Delete an empty bucket
 
@@ -786,90 +696,72 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             return
         self._call("delete", "b/" + bucket)
         self.invalidate_cache(bucket)
+        self.invalidate_cache("")
 
     def info(self, path, **kwargs):
         """File information about this path."""
-        path = self._strip_protocol(path)
+        path = self._strip_protocol(path).rstrip("/")
         # Check directory cache for parent dir
-        parent_path = norm_path(self._parent(path)).rstrip("/")
-        parent_cache = self._maybe_get_cached_listing(parent_path + "/")
+        parent_path = self._parent(path)
+        parent_cache = self._ls_from_cache(parent_path)
+        bucket, key = self.split_path(path)
         if parent_cache:
-            for o in parent_cache["items"]:
+            for o in parent_cache:
                 if o["name"].rstrip("/") == path:
                     return o
-        # Check exact file path
-        out = [
-            o
-            for o in self.ls(path, detail=True, **kwargs)
-            if o["name"].rstrip("/") == path
-        ]
-        if out:
-            return out[0]
-        # Check parent path
-        out = [
-            o
-            for o in self.ls(parent_path, detail=True, **kwargs)
-            if o["name"].rstrip("/") == path
-        ]
-        if out:
-            return out[0]
-        else:
-            raise FileNotFoundError(path)
-
-    @_tracemethod
-    def ls(self, path, detail=False):
-        """List objects under the given '/{bucket}/{prefix} path."""
-        path = norm_path(path)
-
-        if path in ["/", ""]:
-            if detail:
-                return self._list_buckets()
-            else:
-                return self.buckets
-        elif path.endswith("/"):
-            return self._ls(path, detail)
-        else:
-            combined_listing = self._ls(path, detail) + self._ls(path + "/", detail)
-            if detail:
-                combined_entries = dict((l["name"], l) for l in combined_listing)
-                combined_entries.pop(path + "/", None)
-                return list(combined_entries.values())
-            else:
-                return list(set(combined_listing) - {path + "/"})
-
-    @_tracemethod
-    def _ls(self, path, detail=False):
-        listing = self._list_objects(path)
-        bucket, key = split_path(path)
-
-        item_details = listing["items"]
-
-        pseudodirs = [
-            {
+        if self._ls_from_cache(path):
+            # this is a directory
+            return {
                 "bucket": bucket,
-                "name": bucket + "/" + prefix,
-                "kind": "storage#object",
+                "name": path.rstrip("/"),
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
             }
-            for prefix in listing["prefixes"]
-        ]
-        out = item_details + pseudodirs
+        # Check exact file path
+        try:
+            return self._get_object(path)
+        except FileNotFoundError:
+            pass
+        out = self.ls(path, detail=True, **kwargs)
+        out0 = [o for o in out if o["name"].rstrip("/") == path]
+        if out0:
+            # exact hit
+            return out0[0]
+        elif out:
+            # other stuff - must be a directory
+            return {
+                "bucket": bucket,
+                "name": path.rstrip("/"),
+                "size": 0,
+                "storageClass": "DIRECTORY",
+                "type": "directory",
+            }
+        else:
+            raise FileNotFoundError(path)
+
+    def ls(self, path, detail=False, **kwargs):
+        """List objects under the given '/{bucket}/{prefix} path."""
+        path = self._strip_protocol(path).rstrip("/")
+
+        if path in ["/", ""]:
+            out = self._list_buckets()
+        else:
+            out = self._list_objects(path)
+
         if detail:
             return out
         else:
             return sorted([o["name"] for o in out])
 
-    @staticmethod
-    def url(path):
+    @classmethod
+    def url(cls, path):
         """ Get HTTP URL of the given path """
         u = "https://www.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media"
-        bucket, object = split_path(path)
+        bucket, object = cls.split_path(path)
         object = quote_plus(object)
         return u.format(bucket, object)
 
-    @_tracemethod
     def cat(self, path):
         """ Simple one-shot get of file data """
         u2 = self.url(path)
@@ -913,18 +805,17 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if content_encoding is not None:
             i_json["contentEncoding"] = content_encoding
 
-        bucket, key = split_path(path)
+        bucket, key = self.split_path(path)
         o_json = self._call(
             "PATCH", "b/{}/o/{}", bucket, key, fields="metadata", json=i_json
         ).json()
         self.info(path)["metadata"] = o_json.get("metadata", {})
         return o_json.get("metadata", {})
 
-    @_tracemethod
     def merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
-        bucket, key = split_path(path)
-        source = [{"name": split_path(p)[1]} for p in paths]
+        bucket, key = self.split_path(path)
+        source = [{"name": self.split_path(p)[1]} for p in paths]
         self._call(
             "POST",
             "b/{}/o/{}/compose",
@@ -938,12 +829,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             },
         )
 
-    @_tracemethod
     def copy(self, path1, path2, acl=None):
         """Duplicate remote file
         """
-        b1, k1 = split_path(path1)
-        b2, k2 = split_path(path2)
+        b1, k1 = self.split_path(path1)
+        b2, k2 = self.split_path(path2)
         out = self._call(
             "POST",
             "b/{}/o/{}/rewriteTo/b/{}/o/{}",
@@ -965,8 +855,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 destinationPredefinedAcl=acl,
             ).json()
 
-    @_tracemethod
-    def rm(self, path, recursive=False):
+    def rm(self, path, recursive=False, maxdepth=None):
         """Delete keys.
 
         If a list, batch-delete all keys in one go (can span buckets)
@@ -1006,20 +895,19 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             )
 
             boundary = r.headers["Content-Type"].split("=", 1)[1]
-            parents = {posixpath.dirname(norm_path(p)) for p in path}
-            [self.invalidate_cache(parent) for parent in parents]
+            parents = [self._parent(p) for p in path]
+            [self.invalidate_cache(parent) for parent in parents + list(path)]
             return [
                 "200 OK" in c or "204 No Content" in c for c in r.text.split(boundary)
             ][1:-1]
         elif recursive:
-            return self.rm(self.find(path))
+            return self.rm(self.find(path, maxdepth=maxdepth))
         else:
-            bucket, key = split_path(path)
+            bucket, key = self.split_path(path)
             self._call("DELETE", "b/{}/o/{}", bucket, key)
-            self.invalidate_cache(posixpath.dirname(norm_path(path)))
+            self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
             return True
 
-    @_tracemethod
     def _open(
         self,
         path,
@@ -1053,6 +941,27 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             autocommit=autocommit,
             **kwargs
         )
+
+    @classmethod
+    def split_path(cls, path):
+        """
+        Normalise GCS path string into bucket and key.
+
+        Parameters
+        ----------
+        path : string
+            Input path, like `gcs://mybucket/path/to/file`.
+            Path is of the form: '[gs|gcs://]bucket[/key]'
+
+        Returns
+        -------
+            (bucket, key) tuple
+        """
+        path = cls._strip_protocol(path).lstrip("/")
+        if "/" not in path:
+            return path, ""
+        else:
+            return path.split("/", 1)
 
 
 GCSFileSystem.load_tokens()
@@ -1107,7 +1016,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             cache_options=cache_options,
             **kwargs
         )
-        bucket, key = split_path(path)
+        bucket, key = self.fs.split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
         self.gcsfs = gcsfs
@@ -1141,7 +1050,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """ HTTP link to this file's data """
         return self.details["mediaLink"]
 
-    @_tracemethod
     def _upload_chunk(self, final=False):
         """ Write one part of a multi-block file upload
 
@@ -1214,7 +1122,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.autocommit = True
         self._upload_chunk(final=True)
 
-    @_tracemethod
     def _initiate_upload(self):
         """ Create multi-upload """
         r = self.gcsfs._call(
@@ -1226,7 +1133,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
         self.location = r.headers["Location"]
 
-    @_tracemethod
     def discard(self):
         """Cancel in-progress multi-upload
 
@@ -1243,7 +1149,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
         r.raise_for_status()
 
-    @_tracemethod
     def _simple_upload(self):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
@@ -1280,7 +1185,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.md5.update(data)
             assert b64encode(self.md5.digest()) == md5.encode(), "MD5 checksum failed"
 
-    @_tracemethod
     def _fetch_range(self, start=None, end=None):
         """ Get data from GCS
 
