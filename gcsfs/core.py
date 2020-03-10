@@ -6,8 +6,6 @@ import textwrap
 
 import fsspec
 
-import decorator
-
 from base64 import b64encode, b64decode
 import google.auth as gauth
 import google.auth.compute_engine
@@ -21,7 +19,6 @@ from hashlib import md5
 import io
 import json
 import logging
-import traceback
 import os
 import posixpath
 import pickle
@@ -943,18 +940,18 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             autocommit=autocommit,
             **kwargs
         )
-    
+
     @classmethod
     def split_path(cls, path):
         """
         Normalise GCS path string into bucket and key.
-    
+
         Parameters
         ----------
         path : string
             Input path, like `gcs://mybucket/path/to/file`.
             Path is of the form: '[gs|gcs://]bucket[/key]'
-    
+
         Returns
         -------
             (bucket, key) tuple
