@@ -26,7 +26,7 @@ The process is as follows:
 
        export GCSFS_RECORD_MODE=all
        export GCSFS_TEST_PROJECT='...'
-       export GCSFS_TEST_BUCKET='...'  # the bucket from step 1.
+       export GCSFS_TEST_BUCKET='...'  # the bucket from step 1 (without gs:// prefix).
        export GCSFS_GOOGLE_TOKEN=~/.config/gcloud/application_default_credentials.json
        py.test -vv -x -s gcsfs
 

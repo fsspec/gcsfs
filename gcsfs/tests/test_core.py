@@ -8,6 +8,7 @@ from unittest import mock
 from urllib.parse import urlparse, parse_qs
 import pytest
 import requests
+import versioneer
 
 from fsspec.utils import seek_delimiter
 from requests.exceptions import ProxyError
@@ -810,6 +811,20 @@ def test_request_user_project_string():
         result = parse_qs(qs)
         assert result["userProject"] == [TEST_PROJECT]
 
+@my_vcr.use_cassette(match=["all"])
+def test_request_header():
+    with gcs_maker():
+        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
+        # test directly against `_call` to inspect the result
+        r = gcs._call(
+            "GET",
+            "b/{}/o/",
+            TEST_REQUESTER_PAYS_BUCKET,
+            delimiter="/",
+            prefix="test",
+            maxResults=100,
+        )
+        assert r.request.headers["User-Agent"] == "dask-gcsfs/" + versioneer.get_version()
 
 @mock.patch("gcsfs.core.gauth")
 def test_user_project_fallback_google_default(mock_auth):
