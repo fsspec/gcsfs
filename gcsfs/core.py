@@ -89,6 +89,15 @@ def quote_plus(s):
     return s
 
 
+def norm_path(path):
+    """
+    Canonicalize path to '{bucket}/{name}' form.
+    
+    Used by petastorm, do not remove.
+    """
+    return "/".join(GCSFileSystem.split_path(path))
+
+
 def validate_response(r, path):
     """
     Check the requests object r, raise error if it's not ok.
