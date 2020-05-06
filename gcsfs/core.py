@@ -322,7 +322,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 refresh_token=token["refresh_token"],
                 client_secret=token["client_secret"],
                 client_id=token["client_id"],
-                token_uri="https://oauth2.googleapis.com/token"
+                token_uri="https://oauth2.googleapis.com/token",
             )
         return token
 

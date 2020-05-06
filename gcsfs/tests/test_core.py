@@ -118,15 +118,15 @@ def test_info():
         assert gcs.info(a) == gcs.ls(a, detail=True)[0]
 
 
-# @my_vcr.use_cassette(match=["all"])
-# def test_ls2():
-#     with gcs_maker() as gcs:
-#         assert TEST_BUCKET + "/" in gcs.ls("")
-#         with pytest.raises((OSError, IOError)):
-#             gcs.ls("nonexistent")
-#         fn = TEST_BUCKET + "/test/accounts.1.json"
-#         gcs.touch(fn)
-#         assert fn in gcs.ls(TEST_BUCKET + "/test")
+@my_vcr.use_cassette(match=["all"])
+def test_ls2():
+    with gcs_maker() as gcs:
+        assert TEST_BUCKET + "/" in gcs.ls("")
+        with pytest.raises((OSError, IOError)):
+            gcs.ls("nonexistent")
+        fn = TEST_BUCKET + "/test/accounts.1.json"
+        gcs.touch(fn)
+        assert fn in gcs.ls(TEST_BUCKET + "/test")
 
 
 @my_vcr.use_cassette(match=["all"])
