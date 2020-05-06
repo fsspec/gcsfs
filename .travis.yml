@@ -17,8 +17,10 @@ install:
   # Install dependencies
   - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests decorator -y
   - source activate test
-  - conda install -c conda-forge google-auth vcrpy google-auth-oauthlib=0.4.0 google-cloud-core google-api-core google-api-python-client -y
+  - conda install -c conda-forge google-auth vcrpy google-auth-oauthlib google-cloud-core google-api-core google-api-python-client -y
   - pip install git+https://github.com/intake/filesystem_spec --no-deps
+  - conda list
+  - conda --version
 
 script:
   - GCSFS_RECORD_MODE=none py.test -vv  gcsfs
