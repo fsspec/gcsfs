@@ -30,6 +30,7 @@ import random
 
 from requests.exceptions import RequestException, ProxyError
 from .utils import HttpError, is_retriable
+from . import __version__ as version
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +451,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         headers = kwargs.pop("headers", None)
         data = kwargs.pop("data", None)
         r = None
+
+        if headers is None:
+            headers = {}
+        if "User-Agent" not in headers:
+            headers["User-Agent"] = "python-gcsfs/" + version
 
         if not path.startswith("http"):
             path = self.base + path

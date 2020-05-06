@@ -32,6 +32,7 @@ from gcsfs.tests.utils import (
     tmpfile,
 )
 from gcsfs.core import GCSFileSystem, quote_plus, validate_response
+from gcsfs import __version__ as version
 
 pytestmark = pytest.mark.usefixtures("token_restore")
 
@@ -809,6 +810,22 @@ def test_request_user_project_string():
         qs = urlparse(r.request.url).query
         result = parse_qs(qs)
         assert result["userProject"] == [TEST_PROJECT]
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_request_header():
+    with gcs_maker():
+        gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
+        # test directly against `_call` to inspect the result
+        r = gcs._call(
+            "GET",
+            "b/{}/o/",
+            TEST_REQUESTER_PAYS_BUCKET,
+            delimiter="/",
+            prefix="test",
+            maxResults=100,
+        )
+        assert r.request.headers["User-Agent"] == "python-gcsfs/" + version
 
 
 @mock.patch("gcsfs.core.gauth")
