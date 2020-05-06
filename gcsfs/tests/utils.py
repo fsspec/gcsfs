@@ -76,6 +76,7 @@ def before_record(request):
             TEST_BUCKET.encode(), b"gcsfs-testing"
         )
         r.body = re.sub(b"refresh_token=[^&]+", b"refresh_token=xxx", r.body)
+        r.body = re.sub(b"assertion=[^&]+", b"assertion=xxx", r.body)
     return r
 
 
@@ -118,7 +119,7 @@ my_vcr = vcr.VCR(
     record_mode=RECORD_MODE,
     path_transformer=vcr.VCR.ensure_suffix(".yaml"),
     filter_headers=["Authorization"],
-    filter_query_parameters=["refresh_token", "client_id", "client_secret"],
+    filter_query_parameters=["refresh_token", "client_id",  "assertion"], #"client_secret",
     before_record_response=before_record_response,
     before_record=before_record,
 )
