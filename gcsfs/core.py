@@ -30,6 +30,7 @@ import random
 
 from requests.exceptions import RequestException, ProxyError
 from .utils import HttpError, is_retriable
+from ._version import get_versions
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ DEFAULT_PROJECT = os.environ.get("GCSFS_DEFAULT_PROJECT", "")
 
 GCS_MIN_BLOCK_SIZE = 2 ** 18
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
+VERSION = get_versions()["version"]
 
 
 def quote_plus(s):
@@ -441,6 +443,11 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         headers = kwargs.pop("headers", None)
         data = kwargs.pop("data", None)
         r = None
+
+        if headers is None:
+            headers = {}
+        if "User-Agent" not in headers:
+            headers["User-Agent"] = "python-gcsfs/" + VERSION
 
         if not path.startswith("http"):
             path = self.base + path
