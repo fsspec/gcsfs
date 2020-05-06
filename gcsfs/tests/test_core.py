@@ -31,7 +31,8 @@ from gcsfs.tests.utils import (
     b,
     tmpfile,
 )
-from gcsfs.core import GCSFileSystem, quote_plus, validate_response, VERSION
+from gcsfs.core import GCSFileSystem, quote_plus, validate_response
+from gcsfs import __version__ as version
 
 pytestmark = pytest.mark.usefixtures("token_restore")
 
@@ -824,7 +825,7 @@ def test_request_header():
             prefix="test",
             maxResults=100,
         )
-        assert r.request.headers["User-Agent"] == "python-gcsfs/" + VERSION
+        assert r.request.headers["User-Agent"] == "python-gcsfs/" + version
 
 
 @mock.patch("gcsfs.core.gauth")
