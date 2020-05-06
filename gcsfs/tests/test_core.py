@@ -702,12 +702,12 @@ def test_writable():
 def test_merge():
     with gcs_maker() as gcs:
         with gcs.open(a, "wb") as f:
-            f.write(b"a" * 100)
+            f.write(b"a" * 10)
 
         with gcs.open(b, "wb") as f:
-            f.write(b"a" * 100)
+            f.write(b"a" * 10)
         gcs.merge(TEST_BUCKET + "/joined", [a, b])
-        assert gcs.info(TEST_BUCKET + "/joined")["size"] == 200
+        assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
 
 
 @my_vcr.use_cassette(match=["all"])

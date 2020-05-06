@@ -45,6 +45,10 @@ def before_record_response(response):
                 data["id_token"] = "xxx"
             if "refresh_token" in data:
                 data["refresh_token"] = "xxx"
+            if "expires_in" in data:
+                data.pop("expires_in")
+            # If comparing encoded string fails, dump it in a decoded form
+            # to see which value has changed.
             r["body"]["string"] = gzip.compress(
                 json.dumps(data)
                 .replace(TEST_PROJECT, "test_project")
@@ -76,6 +80,7 @@ def before_record(request):
             TEST_BUCKET.encode(), b"gcsfs-testing"
         )
         r.body = re.sub(b"refresh_token=[^&]+", b"refresh_token=xxx", r.body)
+        r.body = re.sub(b"assertion=[^&]+", b"assertion=xxx", r.body)
     return r
 
 
@@ -118,7 +123,12 @@ my_vcr = vcr.VCR(
     record_mode=RECORD_MODE,
     path_transformer=vcr.VCR.ensure_suffix(".yaml"),
     filter_headers=["Authorization"],
-    filter_query_parameters=["refresh_token", "client_id", "client_secret"],
+    filter_query_parameters=[
+        "refresh_token",
+        "client_id",
+        "client_secret",
+        "assertion",
+    ],
     before_record_response=before_record_response,
     before_record=before_record,
 )

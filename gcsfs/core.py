@@ -314,13 +314,15 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             )
         except:  # noqa: E722
             # TODO: catch specific exceptions
+            # According https://github.com/googleapis/python-cloud-core/blob/master/google/cloud/client.py
+            # Scopes required for authenticating with a service. User authentification fails
+            # with invalid_scope if scope is specified.
             token = Credentials(
                 None,
                 refresh_token=token["refresh_token"],
                 client_secret=token["client_secret"],
                 client_id=token["client_id"],
-                token_uri="https://www.googleapis.com/oauth2/v4/token",
-                scopes=[self.scope],
+                token_uri="https://oauth2.googleapis.com/token",
             )
         return token
 
