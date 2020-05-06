@@ -30,6 +30,8 @@ The process is as follows:
        export GCSFS_GOOGLE_TOKEN=~/.config/gcloud/application_default_credentials.json
        py.test -vv -x -s gcsfs
 
+    If ~/.config/gcloud/application_default_credentials.json file does not exist,
+    run ``gcloud auth application-default login``
     These variables can also be set in ``gcsfs/tests/settings.py``
 
 -   Run this again, setting ``GCSFS_RECORD_MODE=once``, which should alert you

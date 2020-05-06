@@ -123,7 +123,7 @@ my_vcr = vcr.VCR(
     record_mode=RECORD_MODE,
     path_transformer=vcr.VCR.ensure_suffix(".yaml"),
     filter_headers=["Authorization"],
-    filter_query_parameters=["refresh_token", "client_id",  "assertion"], #"client_secret",
+    filter_query_parameters=["refresh_token", "client_id",  "client_secret", "assertion"],
     before_record_response=before_record_response,
     before_record=before_record,
 )

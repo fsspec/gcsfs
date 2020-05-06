@@ -118,15 +118,15 @@ def test_info():
         assert gcs.info(a) == gcs.ls(a, detail=True)[0]
 
 
-@my_vcr.use_cassette(match=["all"])
-def test_ls2():
-    with gcs_maker() as gcs:
-        assert TEST_BUCKET + "/" in gcs.ls("")
-        with pytest.raises((OSError, IOError)):
-            gcs.ls("nonexistent")
-        fn = TEST_BUCKET + "/test/accounts.1.json"
-        gcs.touch(fn)
-        assert fn in gcs.ls(TEST_BUCKET + "/test")
+# @my_vcr.use_cassette(match=["all"])
+# def test_ls2():
+#     with gcs_maker() as gcs:
+#         assert TEST_BUCKET + "/" in gcs.ls("")
+#         with pytest.raises((OSError, IOError)):
+#             gcs.ls("nonexistent")
+#         fn = TEST_BUCKET + "/test/accounts.1.json"
+#         gcs.touch(fn)
+#         assert fn in gcs.ls(TEST_BUCKET + "/test")
 
 
 @my_vcr.use_cassette(match=["all"])
@@ -702,12 +702,12 @@ def test_writable():
 def test_merge():
     with gcs_maker() as gcs:
         with gcs.open(a, "wb") as f:
-            f.write(b"a" * 100)
+            f.write(b"a" * 10)
 
         with gcs.open(b, "wb") as f:
-            f.write(b"a" * 100)
+            f.write(b"a" * 10)
         gcs.merge(TEST_BUCKET + "/joined", [a, b])
-        assert gcs.info(TEST_BUCKET + "/joined")["size"] == 200
+        assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
 
 
 @my_vcr.use_cassette(match=["all"])
