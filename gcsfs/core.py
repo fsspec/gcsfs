@@ -92,7 +92,7 @@ def quote_plus(s):
 def norm_path(path):
     """
     Canonicalize path to '{bucket}/{name}' form.
-    
+
     Used by petastorm, do not remove.
     """
     return "/".join(GCSFileSystem.split_path(path))
