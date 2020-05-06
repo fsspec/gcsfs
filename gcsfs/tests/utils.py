@@ -45,6 +45,10 @@ def before_record_response(response):
                 data["id_token"] = "xxx"
             if "refresh_token" in data:
                 data["refresh_token"] = "xxx"
+            if "expires_in" in data:
+                data.pop("expires_in")
+            # If comparing encoded string fails, dump it in a decoded form
+            # to see which value has changed.
             r["body"]["string"] = gzip.compress(
                 json.dumps(data)
                 .replace(TEST_PROJECT, "test_project")
