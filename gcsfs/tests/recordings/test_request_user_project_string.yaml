@@ -17,7 +17,7 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAMgBsl4C/6tWSkxOTi0uji/Jz07NU7JSUKqoqFDSUVBKrSjILEotjs8ECRqbWloCxcBq4ksq
+        H4sIAGcMsl4C/6tWSkxOTi0uji/Jz07NU7JSUKqoqFDSUVBKrSjILEotjs8ECRqbWloCxcBq4ksq
         C1JBCp1SE4tSi5RqAUnahIpDAAAA
     headers:
       Cache-Control:
@@ -60,11 +60,10 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
   response:
     body:
-      string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\"\
-        ,\n    \"reason\": \"conflict\",\n    \"message\": \"You already own this\
-        \ bucket. Please select another name.\"\n   }\n  ],\n  \"code\": 409,\n  \"\
-        message\": \"You already own this bucket. Please select another name.\"\n\
-        \ }\n}\n"
+      string: "{\n \"error\": {\n  \"errors\": [\n   {\n    \"domain\": \"global\",\n
+        \   \"reason\": \"conflict\",\n    \"message\": \"You already own this bucket.
+        Please select another name.\"\n   }\n  ],\n  \"code\": 409,\n  \"message\":
+        \"You already own this bucket. Please select another name.\"\n }\n}\n"
     headers:
       Content-Length:
       - '259'
@@ -156,7 +155,7 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAAANPVTUosSc6IN0zOyU8pza6oMs6Pd3TM8q8KD09KcyvW1eXlAgCtWbe1IwAAAA==
+        H4sIAAAAAAAAANPVTUosSc6IN0z2zij39tG1dMuOd3T01U109fHzMIvU1eXlAgDgebbsIwAAAA==
     headers:
       Cache-Control:
       - private, max-age=0
@@ -165,7 +164,7 @@ interactions:
       Content-Security-Policy:
       - frame-ancestors 'self'
       Content-Type:
-      - multipart/mixed; boundary=batch_1clodukxz3o_AAjOzWWbfFs
+      - multipart/mixed; boundary=batch_1cKhwKL-9Fk_AAM-aELNH6Y
       Server:
       - GSE
       Transfer-Encoding:
@@ -197,50 +196,10 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa
   response:
     body:
-      string: "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"The rate\
-        \ of change requests to the object gcsfs-testing/tmp/test/a exceeds the rate\
-        \ limit. Please reduce the rate of create, update, and delete requests.\"\
-        ,\n    \"errors\": [\n      {\n        \"message\": \"The rate of change requests\
-        \ to the object gcsfs-testing/tmp/test/a exceeds the rate limit. Please reduce\
-        \ the rate of create, update, and delete requests.\",\n        \"domain\"\
-        : \"usageLimits\",\n        \"reason\": \"rateLimitExceeded\"\n      }\n \
-        \   ]\n  }\n}\n"
-    headers:
-      Cache-Control:
-      - no-cache, no-store, max-age=0, must-revalidate
-      Content-Length:
-      - '499'
-      Content-Type:
-      - application/json; charset=UTF-8
-      Pragma:
-      - no-cache
-      Server:
-      - UploadServer
-      Vary:
-      - Origin
-      - X-Origin
-    status:
-      code: 429
-      message: Too Many Requests
-- request:
-    body: null
-    headers:
-      Accept:
-      - '*/*'
-      Accept-Encoding:
-      - gzip, deflate
-      Connection:
-      - keep-alive
-      Content-Length:
-      - '0'
-    method: DELETE
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fa
-  response:
-    body:
-      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:\
-        \ gcsfs-testing/tmp/test/a\",\n    \"errors\": [\n      {\n        \"message\"\
-        : \"No such object: gcsfs-testing/tmp/test/a\",\n        \"domain\": \"global\"\
-        ,\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
+      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
+        gcsfs-testing/tmp/test/a\",\n    \"errors\": [\n      {\n        \"message\":
+        \"No such object: gcsfs-testing/tmp/test/a\",\n        \"domain\": \"global\",\n
+        \       \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -273,10 +232,10 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fb
   response:
     body:
-      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:\
-        \ gcsfs-testing/tmp/test/b\",\n    \"errors\": [\n      {\n        \"message\"\
-        : \"No such object: gcsfs-testing/tmp/test/b\",\n        \"domain\": \"global\"\
-        ,\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
+      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
+        gcsfs-testing/tmp/test/b\",\n    \"errors\": [\n      {\n        \"message\":
+        \"No such object: gcsfs-testing/tmp/test/b\",\n        \"domain\": \"global\",\n
+        \       \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -309,10 +268,10 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fc
   response:
     body:
-      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:\
-        \ gcsfs-testing/tmp/test/c\",\n    \"errors\": [\n      {\n        \"message\"\
-        : \"No such object: gcsfs-testing/tmp/test/c\",\n        \"domain\": \"global\"\
-        ,\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
+      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
+        gcsfs-testing/tmp/test/c\",\n    \"errors\": [\n      {\n        \"message\":
+        \"No such object: gcsfs-testing/tmp/test/c\",\n        \"domain\": \"global\",\n
+        \       \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -345,10 +304,10 @@ interactions:
     uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/tmp%2Ftest%2Fd
   response:
     body:
-      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:\
-        \ gcsfs-testing/tmp/test/d\",\n    \"errors\": [\n      {\n        \"message\"\
-        : \"No such object: gcsfs-testing/tmp/test/d\",\n        \"domain\": \"global\"\
-        ,\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
+      string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
+        gcsfs-testing/tmp/test/d\",\n    \"errors\": [\n      {\n        \"message\":
+        \"No such object: gcsfs-testing/tmp/test/d\",\n        \"domain\": \"global\",\n
+        \       \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -384,7 +343,7 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAMoBsl4C/6tWSkxOTi0uji/Jz07NU7JSUKqoqFDSUVBKrSjILEotjs8ECRqbWloCxcBq4ksq
+        H4sIAGgMsl4C/6tWSkxOTi0uji/Jz07NU7JSUKqoqFDSUVBKrSjILEotjs8ECRqbWloCxcBq4ksq
         C1JBCp1SE4tSi5RqAUnahIpDAAAA
     headers:
       Cache-Control:
