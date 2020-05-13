@@ -585,8 +585,9 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 return [self._get_object(path)]
             else:
                 return []
-        self.dircache[path] = items + pseudodirs
-        return self.dircache[path]
+        out = items + pseudodirs
+        self.dircache[path] = out
+        return out
 
     def _do_list_objects(self, path, max_results=None):
         """Object listing for the given {bucket}/{prefix}/ path."""
