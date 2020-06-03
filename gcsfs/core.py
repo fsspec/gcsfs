@@ -405,7 +405,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         ]:
             self._connect_token(method)
         elif method is None:
-            for meth in ["google_default", "cache", "anon"]:
+            for meth in ["google_default", "cache", "cloud", "anon"]:
                 try:
                     self.connect(method=meth)
                     if self.check_credentials and meth != "anon":
