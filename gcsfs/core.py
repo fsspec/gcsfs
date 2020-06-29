@@ -29,6 +29,8 @@ import warnings
 import random
 
 from requests.exceptions import RequestException, ProxyError
+from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
+from fsspec.implementations.http import get_client
 from .utils import HttpError, is_retriable
 from . import __version__ as version
 
@@ -134,7 +136,7 @@ def validate_response(r, path):
             raise RuntimeError(m)
 
 
-class GCSFileSystem(fsspec.AbstractFileSystem):
+class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
     r"""
     Connect to Google Cloud Storage.
 
@@ -240,6 +242,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     base = "https://www.googleapis.com/storage/v1/"
     default_block_size = DEFAULT_BLOCK_SIZE
     protocol = "gcs", "gs"
+    async_impl = True
 
     def __init__(
         self,
@@ -253,8 +256,12 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         check_connection=False,
         requests_timeout=None,
         requester_pays=False,
+        asynchronous=False,
+        loop=None,
         **kwargs
     ):
+        fsspec.AbstractFileSystem.__init__(self, listings_expiry_time=cache_timeout,
+                                             asynchronous=asynchronous, loop=loop, **kwargs)
         if access not in self.scopes:
             raise ValueError("access must be one of {}", self.scopes)
         if project is None:
@@ -264,17 +271,32 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         self.project = project
         self.requester_pays = requester_pays
         self.access = access
+        self.credentials = None
+        self.head = {}
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
         self.token = token
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
+        if not asynchronous:
+            self._session = sync(self.loop, get_client)
+        else:
+            self._session = None
         self.connect(method=token)
-        super().__init__(self, listings_expiry_time=cache_timeout, **kwargs)
 
         if not secure_serialize:
             self.token = self.session.credentials
+
+    @property
+    def session(self):
+        if self._session is None:
+            raise RuntimeError("please await ``.set_session`` before anything else")
+        return self._session
+
+    async def set_session(self):
+        from fsspec.implementations.http import get_client
+        self._session = await get_client()
 
     @classmethod
     def load_tokens(cls):
@@ -300,17 +322,16 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         if self.project and self.project != project:
             raise ValueError(msg.format(self.project, project))
         self.project = project
-        self.session = AuthorizedSession(credentials)
+        self.credentials = credentials
 
     def _connect_cloud(self):
-        credentials = gauth.compute_engine.Credentials()
-        self.session = AuthorizedSession(credentials)
+        self.credentials = gauth.compute_engine.Credentials()
 
     def _connect_cache(self):
         project, access = self.project, self.access
         if (project, access) in self.tokens:
             credentials = self.tokens[(project, access)]
-            self.session = AuthorizedSession(credentials)
+            self.credentials = credentials
 
     def _dict_to_credentials(self, token):
         """
@@ -364,24 +385,33 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             credentials = token
         else:
             raise ValueError("Token format not understood")
-        self.session = AuthorizedSession(credentials)
+        self.credentials = credentials
+
+    def maybe_refresh(self):
+        # this uses requests and is blocking
+        if self.credentials is None:
+            return  # anon
+        if self.credentials.valid:
+            return  # still good
+        self.credentials.refresh()
+        self.credentials.apply(self.head)
 
     def _connect_service(self, fn):
         # raises exception if file does not match expectation
         credentials = service_account.Credentials.from_service_account_file(
             fn, scopes=[self.scope]
         )
-        self.session = AuthorizedSession(credentials)
+        self.credentials = credentials
 
     def _connect_anon(self):
-        self.session = requests.Session()
+        self.credentials = None
 
     def _connect_browser(self):
         flow = InstalledAppFlow.from_client_config(client_config, [self.scope])
         credentials = flow.run_console()
         self.tokens[(self.project, self.access)] = credentials
         self._save_tokens()
-        self.session = AuthorizedSession(credentials)
+        self.credentials = credentials
 
     def connect(self, method=None):
         """
@@ -443,7 +473,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         except Exception as e:
             warnings.warn("Saving token cache failed: " + str(e))
 
-    def _call(self, method, path, *args, **kwargs):
+    async def _call(self, method, path, *args, **kwargs):
+        self.maybe_refresh()
         for k, v in list(kwargs.items()):
             if v is None:
                 del kwargs[k]
@@ -456,6 +487,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             headers = {}
         if "User-Agent" not in headers:
             headers["User-Agent"] = "python-gcsfs/" + version
+        headers.update(self.head or {})  # add creds
 
         if not path.startswith("http"):
             path = self.base + path
@@ -475,7 +507,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             try:
                 if retry > 0:
                     time.sleep(min(random.random() + 2 ** (retry - 1), 32))
-                r = self.session.request(
+                r = await self.session.request(
                     method,
                     path,
                     params=kwargs,
@@ -504,6 +536,8 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                 raise e
 
         return r
+
+    call = sync_wrapper(_call)
 
     @property
     def buckets(self):
@@ -596,7 +630,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
 
         prefixes = []
         items = []
-        page = self._call(
+        page = self.call(
             "GET",
             "b/{}/o/",
             bucket,
@@ -610,7 +644,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         next_page_token = page.get("nextPageToken", None)
 
         while next_page_token is not None:
-            page = self._call(
+            page = self.call(
                 "GET",
                 "b/{}/o/",
                 bucket,
@@ -632,14 +666,14 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         """Return list of all buckets under the current project."""
         if "" not in self.dircache:
             items = []
-            page = self._call("GET", "b/", project=self.project).json()
+            page = self.call("GET", "b/", project=self.project).json()
 
             assert page["kind"] == "storage#buckets"
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
 
             while next_page_token is not None:
-                page = self._call(
+                page = self.call(
                     "GET", "b/", project=self.project, pageToken=next_page_token
                 ).json()
 
@@ -690,7 +724,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             raise ValueError("Cannot create root bucket")
         if "/" in bucket:
             return
-        r = self._call(
+        r = self.call(
             "post",
             "b/",
             predefinedAcl=acl,
@@ -712,7 +746,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         """
         if "/" in bucket:
             return
-        self._call("delete", "b/" + bucket)
+        self.call("delete", "b/" + bucket)
         self.invalidate_cache(bucket)
         self.invalidate_cache("")
 
@@ -783,7 +817,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
     def cat(self, path):
         """ Simple one-shot get of file data """
         u2 = self.url(path)
-        r = self._call("GET", u2)
+        r = self.call("GET", u2)
         r.raise_for_status()
         if "X-Goog-Hash" in r.headers:
             # if header includes md5 hash, check that data matches
@@ -824,7 +858,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             i_json["contentEncoding"] = content_encoding
 
         bucket, key = self.split_path(path)
-        o_json = self._call(
+        o_json = self.call(
             "PATCH", "b/{}/o/{}", bucket, key, fields="metadata", json=i_json
         ).json()
         self.info(path)["metadata"] = o_json.get("metadata", {})
@@ -834,7 +868,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         """Concatenate objects within a single bucket"""
         bucket, key = self.split_path(path)
         source = [{"name": self.split_path(p)[1]} for p in paths]
-        self._call(
+        self.call(
             "POST",
             "b/{}/o/{}/compose",
             bucket,
@@ -852,7 +886,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
         """
         b1, k1 = self.split_path(path1)
         b2, k2 = self.split_path(path2)
-        out = self._call(
+        out = self.call(
             "POST",
             "b/{}/o/{}/rewriteTo/b/{}/o/{}",
             b1,
@@ -862,7 +896,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             destinationPredefinedAcl=acl,
         ).json()
         while out["done"] is not True:
-            out = self._call(
+            out = self.call(
                 "POST",
                 "b/{}/o/{}/rewriteTo/b/{}/o/{}",
                 b1,
@@ -902,7 +936,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
                     for i, p in enumerate(path)
                 ]
             )
-            r = self._call(
+            r = self.call(
                 "POST",
                 "https://www.googleapis.com/batch/storage/v1",
                 headers={
@@ -922,7 +956,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             return self.rm(self.find(path, maxdepth=maxdepth))
         else:
             bucket, key = self.split_path(path)
-            self._call("DELETE", "b/{}/o/{}", bucket, key)
+            self.call("DELETE", "b/{}/o/{}", bucket, key)
             self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
             return True
 
@@ -1095,7 +1129,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     raise ValueError("Non-final chunk write below min size.")
             head["Content-Range"] = "bytes %i-%i/*" % (self.offset, self.offset + l - 1)
         head.update({"Content-Type": self.content_type, "Content-Length": str(l)})
-        r = self.gcsfs._call(
+        r = self.gcsfs.call(
             "POST", self.location, uploadType="resumable", headers=head, data=data
         )
         if "Range" in r.headers:
@@ -1136,7 +1170,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def _initiate_upload(self):
         """ Create multi-upload """
-        r = self.gcsfs._call(
+        r = self.gcsfs.call(
             "POST",
             "https://www.googleapis.com/upload/storage"
             "/v1/b/%s/o" % quote_plus(self.bucket),
@@ -1154,7 +1188,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if self.location is None:
             return
         uid = re.findall("upload_id=([^&=?]+)", self.location)
-        r = self.gcsfs._call(
+        r = self.gcsfs.call(
             "DELETE",
             "https://www.googleapis.com/upload/storage/v1/b/%s/o"
             "" % quote_plus(self.bucket),
@@ -1186,7 +1220,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             + data
             + b"\n--==0==--"
         )
-        r = self.gcsfs._call(
+        r = self.gcsfs.call(
             "POST",
             path,
             uploadType="multipart",
@@ -1213,7 +1247,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         else:
             head = None
         try:
-            r = self.gcsfs._call("GET", self.details["mediaLink"], headers=head)
+            r = self.gcsfs.call("GET", self.details["mediaLink"], headers=head)
             data = r.content
             return data
         except RuntimeError as e:
