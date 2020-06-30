@@ -847,7 +847,7 @@ class GCSFileSystem(fsspec.AbstractFileSystem):
             },
         )
 
-    def copy(self, path1, path2, acl=None):
+    def copy(self, path1, path2, acl=None, **kwargs):
         """Duplicate remote file
         """
         b1, k1 = self.split_path(path1)
