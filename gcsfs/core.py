@@ -15,12 +15,14 @@ from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
+from google.auth.transport.requests import Request
 from hashlib import md5
 import io
 import json
 import logging
 import os
 import posixpath
+import requests
 import pickle
 import re
 import requests
@@ -101,39 +103,9 @@ def norm_path(path):
     return "/".join(GCSFileSystem.split_path(path))
 
 
-def validate_response(r, path):
-    """
-    Check the requests object r, raise error if it's not ok.
-
-    Parameters
-    ----------
-    r: requests response object
-    path: associated URL path, for error messages
-    """
-    if not r.ok:
-        m = str(r.content)
-        error = None
-        try:
-            error = r.json()["error"]
-            msg = error["message"]
-        except:  # noqa: E722
-            # TODO: limit to appropriate exceptions
-            msg = str(r.content)
-
-        if r.status_code == 404:
-            raise FileNotFoundError
-        elif r.status_code == 403:
-            raise IOError("Forbidden: %s\n%s" % (path, msg))
-        elif r.status_code == 502:
-            raise ProxyError()
-        elif "invalid" in m:
-            raise ValueError("Bad Request: %s\n%s" % (path, msg))
-        elif error:
-            raise HttpError(error)
-        elif r.status_code:
-            raise HttpError({"code": r.status_code})
-        else:
-            raise RuntimeError(m)
+async def _req_to_text(r):
+    async with r:
+        return r.read().decode()
 
 
 class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
@@ -393,7 +365,8 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
             return  # anon
         if self.credentials.valid:
             return  # still good
-        self.credentials.refresh()
+        req = Request(requests.Session())
+        self.credentials.refresh(req)
         self.credentials.apply(self.head)
 
     def _connect_service(self, fn):
@@ -516,7 +489,7 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
                     data=data,
                     timeout=self.requests_timeout,
                 )
-                validate_response(r, path)
+                self.validate_response(r, path)
                 break
             except (HttpError, RequestException, GoogleAuthError) as e:
                 if (
@@ -580,7 +553,7 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
             raise FileNotFoundError(path)
 
         result = self._process_object(
-            bucket, self._call("GET", "b/{}/o/{}", bucket, key).json()
+            bucket, sync(self.loop, self.call("GET", "b/{}/o/{}", bucket, key).json)
         )
 
         return result
@@ -630,21 +603,21 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
 
         prefixes = []
         items = []
-        page = self.call(
+        page = sync(self.loop, self.call(
             "GET",
             "b/{}/o/",
             bucket,
             delimiter="/",
             prefix=prefix,
             maxResults=max_results,
-        ).json()
+        ).json)
 
         prefixes.extend(page.get("prefixes", []))
         items.extend(page.get("items", []))
         next_page_token = page.get("nextPageToken", None)
 
         while next_page_token is not None:
-            page = self.call(
+            page = sync(self.loop, self.call(
                 "GET",
                 "b/{}/o/",
                 bucket,
@@ -652,7 +625,7 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
                 prefix=prefix,
                 maxResults=max_results,
                 pageToken=next_page_token,
-            ).json()
+            ).json)
 
             assert page["kind"] == "storage#objects"
             prefixes.extend(page.get("prefixes", []))
@@ -666,16 +639,16 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
         """Return list of all buckets under the current project."""
         if "" not in self.dircache:
             items = []
-            page = self.call("GET", "b/", project=self.project).json()
+            page = sync(self.loop, self.call("GET", "b/", project=self.project).json)
 
             assert page["kind"] == "storage#buckets"
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
 
             while next_page_token is not None:
-                page = self.call(
+                page = sync(self.loop, self.call(
                     "GET", "b/", project=self.project, pageToken=next_page_token
-                ).json()
+                ).json)
 
                 assert page["kind"] == "storage#buckets"
                 items.extend(page.get("items", []))
@@ -886,7 +859,7 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
         """
         b1, k1 = self.split_path(path1)
         b2, k2 = self.split_path(path2)
-        out = self.call(
+        out = sync(self.loop, self.call(
             "POST",
             "b/{}/o/{}/rewriteTo/b/{}/o/{}",
             b1,
@@ -894,7 +867,7 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
             b2,
             k2,
             destinationPredefinedAcl=acl,
-        ).json()
+        ).json)
         while out["done"] is not True:
             out = self.call(
                 "POST",
@@ -1014,6 +987,40 @@ class GCSFileSystem(AsyncFileSystem, fsspec.AbstractFileSystem):
             return path, ""
         else:
             return path.split("/", 1)
+
+    def validate_response(self, r, path):
+        """
+        Check the requests object r, raise error if it's not ok.
+
+        Parameters
+        ----------
+        r: requests response object
+        path: associated URL path, for error messages
+        """
+        if r.status >= 400:
+            m = sync(self.loop, _req_to_text(r))
+            error = None
+            try:
+                error = sync(self.loop, r.json)["error"]
+                msg = error["message"]
+            except:  # noqa: E722
+                # TODO: limit to appropriate exceptions
+                msg = str(r.content)
+
+            if r.status == 404:
+                raise FileNotFoundError
+            elif r.status == 403:
+                raise IOError("Forbidden: %s\n%s" % (path, msg))
+            elif r.status == 502:
+                raise ProxyError()
+            elif "invalid" in m:
+                raise ValueError("Bad Request: %s\n%s" % (path, msg))
+            elif error:
+                raise HttpError(error)
+            elif r.status:
+                raise HttpError({"code": r.status_})
+            else:
+                raise RuntimeError(m)
 
 
 GCSFileSystem.load_tokens()
