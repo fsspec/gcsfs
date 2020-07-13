@@ -31,7 +31,7 @@ from gcsfs.tests.utils import (
     b,
     tmpfile,
 )
-from gcsfs.core import GCSFileSystem, quote_plus, validate_response
+from gcsfs.core import GCSFileSystem, quote_plus
 from gcsfs import __version__ as version
 
 pytestmark = pytest.mark.usefixtures("token_restore")
@@ -362,8 +362,10 @@ def test_move():
 
 
 @my_vcr.use_cassette(match=["all"])
-def test_get_put():
+@pytest.mark.parametrize('consistency', [None, 'size', 'md5'])
+def test_get_put(consistency):
     with gcs_maker(True) as gcs:
+        gcs.consistency = consistency
         with tmpfile() as fn:
             gcs.get(TEST_BUCKET + "/test/accounts.1.json", fn)
             data = files["test/accounts.1.json"]
@@ -732,8 +734,6 @@ def test_current():
         assert GCSFileSystem.current() is gcs
         gcs2 = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
         assert gcs2.session is gcs.session
-        gcs2 = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, secure_serialize=False)
-        assert isinstance(gcs2.token, credentials.Credentials)
 
 
 @my_vcr.use_cassette(match=["all"])
@@ -778,7 +778,7 @@ def test_request_user_project():
     with gcs_maker():
         gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
         # test directly against `_call` to inspect the result
-        r = gcs._call(
+        head, cont = gcs.call(
             "GET",
             "b/{}/o/",
             TEST_REQUESTER_PAYS_BUCKET,
@@ -855,45 +855,32 @@ def test_raise_on_project_mismatch(mock_auth):
 
 def test_validate_response():
     r = requests.Response()
-    r.status_code = 200
 
-    validate_response(r, "/path")
+    with gcs_maker() as gcs:
+        gcs.validate_response(200, None, None, "/path")
 
-    # HttpError with no JSON body
-    r = requests.Response()
-    r.status_code = 503
+        # HttpError with no JSON body
+        with pytest.raises(HttpError) as e:
+            gcs.validate_response(503, b"", None, "/path")
+        assert e.value.code == 503
+        assert e.value.message == ""
 
-    with pytest.raises(HttpError) as e:
-        validate_response(r, "/path")
-    assert e.value.code == 503
-    assert e.value.message == ""
+        # HttpError with JSON body
+        j = {"error": {"code": 503, "message": b"Service Unavailable"}}
+        with pytest.raises(HttpError) as e:
+            gcs.validate_response(503, None, j, "/path")
+        assert e.value.code == 503
+        assert e.value.message == b"Service Unavailable"
 
-    # HttpError with JSON body
-    r = requests.Response()
-    r.status_code = 503
-    r._content = json.dumps(
-        {"error": {"code": 503, "message": "Service Unavailable"}}
-    ).encode()
-    with pytest.raises(HttpError) as e:
-        validate_response(r, "/path")
-    assert e.value.code == 503
-    assert e.value.message == "Service Unavailable"
+        # 403
+        j = ({"error": {"message": "Not ok"}})
+        with pytest.raises(IOError, match='Forbidden: /path\nNot ok'):
+            gcs.validate_response(403, None, j, "/path")
 
-    # 403
-    r = requests.Response()
-    r.status_code = 403
-    r._content = json.dumps({"error": {"message": "Not ok"}}).encode()
-    with pytest.raises(IOError, match="Forbidden.*\nNot ok"):
-        validate_response(r, "/path")
+        # 404
+        with pytest.raises(FileNotFoundError):
+            gcs.validate_response(404, b"", None, "/path")
 
-    # 404
-    r = requests.Response()
-    r.status_code = 404
-    with pytest.raises(FileNotFoundError):
-        validate_response(r, "/path")
-
-    # 502
-    r = requests.Response()
-    r.status_code = 502
-    with pytest.raises(ProxyError):
-        validate_response(r, "/path")
+        # 502
+        with pytest.raises(ProxyError):
+            gcs.validate_response(502, b"", None, "/path")

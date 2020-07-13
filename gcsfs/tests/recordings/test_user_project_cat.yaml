@@ -17,9 +17,9 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAO1+sl4C/4WPMQ7DIBAEv2JRJ9C7zEesE5xtFOAQdwiiyH+PSapUrla7mmL2rcBaZF6EnpjU
-        PKneu7pNii1lHP2M5N20i2SejWmt6Y1oCwjZs7YUDVTZTWUsPq2kMYIPl7gNVN09B5CVSrzET0mq
-        SVgXHH0IfoUXef0sHwgFy9i9+/9yfAAU05XZ4wAAAA==
+        H4sIAOZlDF8C/4WPsQ7DIBBDfwUxt7Bn7I9EJ7gkqMAh7hCpqvx7Qzt1ymjLlp/fGpxD5lnoiVlP
+        Su/7rm9Ks6OCQ28ihSdre+9mJVojQglsHCULTTbbGGvICxlMEKK6ip9z1LKwqTi0Oldy8Jc1F6n5
+        e4kgC9U0AL/As7x+lA+EinX4wf9/OT5qoa7S4wAAAA==
     headers:
       Cache-Control:
       - private
@@ -46,15 +46,9 @@ interactions:
       message: OK
 - request:
     body: null
-    headers:
-      Accept:
-      - '*/*'
-      Accept-Encoding:
-      - gzip, deflate
-      Connection:
-      - keep-alive
+    headers: {}
     method: GET
-    uri: https://www.googleapis.com/download/storage/v1/b/gcsfs-testing-requesterpays/o/foo.csv?alt=media&userProject=test_project
+    uri: https://www.googleapis.com/download/storage/v1/b/gcsfs-testing-requesterpays/o/foo.csv?userProject=test_project
   response:
     body:
       string: 'a,b,c
@@ -65,32 +59,20 @@ interactions:
 
         '
     headers:
-      Cache-Control:
-      - no-cache, no-store, max-age=0, must-revalidate
-      Content-Disposition:
-      - attachment
-      Content-Length:
-      - '18'
-      Content-Type:
-      - text/csv
-      ETag:
-      - CMmwqaSUiOYCEAE=
-      Pragma:
-      - no-cache
-      Server:
-      - UploadServer
-      Vary:
-      - Origin
-      - X-Origin
-      X-Goog-Generation:
-      - '1574780973766729'
-      X-Goog-Hash:
-      - crc32c=5AzbeQ==,md5=C+xb9vk8VHvJxndKyvheGg==
-      X-Goog-Metageneration:
-      - '1'
-      X-Goog-Storage-Class:
-      - STANDARD
+      Cache-Control: no-cache, no-store, max-age=0, must-revalidate
+      Content-Disposition: attachment
+      Content-Length: '18'
+      Content-Type: text/csv
+      Etag: CMmwqaSUiOYCEAE=
+      Pragma: no-cache
+      Server: UploadServer
+      Vary: X-Origin
+      X-Goog-Generation: '1574780973766729'
+      X-Goog-Hash: crc32c=5AzbeQ==,md5=C+xb9vk8VHvJxndKyvheGg==
+      X-Goog-Metageneration: '1'
+      X-Goog-Storage-Class: STANDARD
     status:
       code: 200
       message: OK
+    url: https://www.googleapis.com/download/storage/v1/b/gcsfs-testing-requesterpays/o/foo.csv?alt=media&userProject=continuum-compute
 version: 1
