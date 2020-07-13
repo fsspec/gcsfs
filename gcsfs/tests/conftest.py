@@ -47,15 +47,16 @@ async def record_response(cassette, vcr_request, response):
         body = {"string": byts}
         if byts:
             if response.content._buffer_offset:
-                response.content._buffer[0] = response.content._buffer[0][
-                                              response.content._buffer_offset :]
+                response.content._buffer[0] = (
+                    response.content._buffer[0][response.content._buffer_offset :]
+                )
                 response.content._buffer_offset = 0
             response.content._size += len(byts)
             response.content._cursor -= len(byts)
             response.content._buffer.appendleft(byts)
             response.content._eof_counter = 0
 
-    except ClientConnectionError:
+    except aios.ClientConnectionError:
         body = {}
 
     vcr_response = {

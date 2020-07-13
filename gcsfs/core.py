@@ -10,7 +10,6 @@ from base64 import b64encode, b64decode
 import google.auth as gauth
 import google.auth.compute_engine
 import google.auth.credentials
-from google.auth.transport.requests import AuthorizedSession
 from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -461,7 +460,8 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
         return path, jsonin, datain, headers, kwargs
 
-    async def _call(self, method, path, *args, json_out=False, **kwargs):
+    async def _call(self, method, path, *args, json_out=False,
+                    info_out=False, **kwargs):
         self.maybe_refresh()
         path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
         # import time
@@ -483,6 +483,7 @@ class GCSFileSystem(AsyncFileSystem):
                     import json
                     status = r.status
                     headers = r.headers
+                    info = r.request_info  # for debug only
                     contents = await r.read()
                     try:
                         json = json.loads(contents)
@@ -511,6 +512,8 @@ class GCSFileSystem(AsyncFileSystem):
                 raise e
         if json_out:
             return json
+        elif info_out:
+            return info
         else:
             return headers, contents
 
@@ -954,14 +957,14 @@ class GCSFileSystem(AsyncFileSystem):
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
         await asyncio.gather(*(
-            [self._rm_files(files[i:i+batchsize])
+            [self._rm_files(files[i:i + batchsize])
                 for i in range(0, len(files), batchsize)] +
             [self._rmdir(d) for d in dirs]
         ))
 
     async def _pipe_file(self, path, data, metadata=None, consistency=None,
                          content_type="application/octet-stream",
-                         chunksize=1*2**20):
+                         chunksize=1 * 2**20):
         consistency = consistency or self.consistency
         bucket, key = self.split_path(path)
         size = len(data)
@@ -972,7 +975,7 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             location = await initiate_upload(self, bucket, key, content_type, metadata)
             for offset in range(0, len(data), chunksize):
-                bit = data[offset:offset+chunksize]
+                bit = data[offset:offset + chunksize]
                 out = await upload_chunk(self, location, bit, offset, size, content_type)
         if consistency == 'size':
             assert int(out['size']) == size
@@ -1143,7 +1146,7 @@ class GCSFileSystem(AsyncFileSystem):
             elif status:
                 raise HttpError({"code": status})
             else:
-                raise RuntimeError(m)
+                raise RuntimeError(msg)
 
 
 GCSFileSystem.load_tokens()

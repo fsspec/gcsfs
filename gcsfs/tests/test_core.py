@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import io
-import json
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
@@ -728,8 +727,6 @@ def test_bigger_than_block_read():
 
 @my_vcr.use_cassette(match=["all"])
 def test_current():
-    from google.auth import credentials
-
     with gcs_maker() as gcs:
         assert GCSFileSystem.current() is gcs
         gcs2 = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
@@ -778,15 +775,16 @@ def test_request_user_project():
     with gcs_maker():
         gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
         # test directly against `_call` to inspect the result
-        head, cont = gcs.call(
+        r = gcs.call(
             "GET",
             "b/{}/o/",
             TEST_REQUESTER_PAYS_BUCKET,
             delimiter="/",
             prefix="test",
             maxResults=100,
+            info_out=True
         )
-        qs = urlparse(r.request.url).query
+        qs = urlparse(r.url.human_repr()).query
         result = parse_qs(qs)
         assert result["userProject"] == [TEST_PROJECT]
 
@@ -799,15 +797,16 @@ def test_request_user_project_string():
         )
         assert gcs.requester_pays == TEST_PROJECT
         # test directly against `_call` to inspect the result
-        r = gcs._call(
+        r = gcs.call(
             "GET",
             "b/{}/o/",
             TEST_REQUESTER_PAYS_BUCKET,
             delimiter="/",
             prefix="test",
             maxResults=100,
+            info_out=True
         )
-        qs = urlparse(r.request.url).query
+        qs = urlparse(r.url.human_repr()).query
         result = parse_qs(qs)
         assert result["userProject"] == [TEST_PROJECT]
 
@@ -817,15 +816,16 @@ def test_request_header():
     with gcs_maker():
         gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
         # test directly against `_call` to inspect the result
-        r = gcs._call(
+        r = gcs.call(
             "GET",
             "b/{}/o/",
             TEST_REQUESTER_PAYS_BUCKET,
             delimiter="/",
             prefix="test",
             maxResults=100,
+            info_out=True
         )
-        assert r.request.headers["User-Agent"] == "python-gcsfs/" + version
+        assert r.headers["User-Agent"] == "python-gcsfs/" + version
 
 
 @mock.patch("gcsfs.core.gauth")
@@ -854,8 +854,6 @@ def test_raise_on_project_mismatch(mock_auth):
 
 
 def test_validate_response():
-    r = requests.Response()
-
     with gcs_maker() as gcs:
         gcs.validate_response(200, None, None, "/path")
 

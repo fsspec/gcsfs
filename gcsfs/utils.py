@@ -1,4 +1,3 @@
-import io
 import requests.exceptions
 import google.auth.exceptions
 
@@ -55,14 +54,14 @@ class FileSender:
 
     async def send(self, pre, f, post):
         yield pre
-        chunk = f.read(64*1024)
+        chunk = f.read(64 * 1024)
         while chunk:
             yield chunk
             if self.consistency == 'size':
                 self.sent += len(chunk)
             elif self.consistency == 'md5':
                 self.md5.update(chunk)
-            chunk = f.read(64*1024)
+            chunk = f.read(64 * 1024)
         yield post
 
     def __len__(self):

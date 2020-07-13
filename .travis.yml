@@ -4,8 +4,8 @@ language: python
 
 matrix:
   include:
-    - python: 3.6
     - python: 3.7
+    - python: 3.8
 
 install:
   # Install conda
@@ -17,7 +17,7 @@ install:
   # Install dependencies
   - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests decorator -y
   - source activate test
-  - conda install -c conda-forge google-auth vcrpy google-auth-oauthlib google-cloud-core google-api-core google-api-python-client -y
+  - conda install -c conda-forge google-auth vcrpy aiohttp google-auth-oauthlib google-cloud-core google-api-core google-api-python-client -y
   - pip install git+https://github.com/intake/filesystem_spec --no-deps
   - conda list
   - conda --version

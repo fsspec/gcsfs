@@ -1,5 +1,3 @@
-import sys, os, webbrowser, json
-
 from tornado.web import RequestHandler, Application
 from tornado.ioloop import IOLoop
 from aiogoogle import Aiogoogle
@@ -28,7 +26,8 @@ aiogoogle = Aiogoogle(client_creds=CLIENT_CREDS)
 class AuthHandle(RequestHandler):
     def get(self):
         uri = aiogoogle.oauth2.authorization_url(
-            client_creds=CLIENT_CREDS, state=state, access_type='offline', include_granted_scopes=True, login_hint=EMAIL, prompt='select_account'
+            client_creds=CLIENT_CREDS, state=state, access_type='offline',
+            include_granted_scopes=True, login_hint=EMAIL, prompt='select_account'
         )
         # Step A
         return self.redirect(uri)
@@ -49,8 +48,8 @@ class CallBackHandle(RequestHandler):
                 raise RuntimeError
             # Step D & E (D send grant code, E receive token info)
             full_user_creds = await aiogoogle.oauth2.build_user_creds(
-                grant = self.args.get('code'),
-                client_creds = CLIENT_CREDS
+                grant=self.args.get('code'),
+                client_creds=CLIENT_CREDS
             )
             self.write(full_user_creds)
         else:

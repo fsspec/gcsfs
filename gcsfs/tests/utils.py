@@ -231,7 +231,7 @@ def gcs_maker(populate=False):
         gcs.invalidate_cache()
         yield gcs
     finally:
-            try:
-                gcs.rm(gcs.find(TEST_BUCKET))
-            except:  # noqa: E722
-                pass
+        try:
+            gcs.rm(gcs.find(TEST_BUCKET))
+        except:  # noqa: E722
+            pass
