@@ -25,7 +25,9 @@ def build_response(vcr_request, vcr_response, history):
         headers=aios.CIMultiDictProxy(aios.CIMultiDict(vcr_request.headers)),
         real_url=aios.URL(vcr_request.url),
     )
-    response = aios.MockClientResponse(vcr_request.method, aios.URL(vcr_request.url), request_info=request_info)
+    response = aios.MockClientResponse(
+        vcr_request.method, aios.URL(vcr_request.url), request_info=request_info
+    )
     response.status = vcr_response["status"]["code"]
     response._body = vcr_response["body"].get("string", b"")
     response.reason = vcr_response["status"]["message"]
@@ -34,6 +36,7 @@ def build_response(vcr_request, vcr_response, history):
 
     response.close()
     return response
+
 
 aios.build_response = build_response
 
@@ -48,9 +51,9 @@ async def record_response(cassette, vcr_request, response):
         body = {"string": byts}
         if byts:
             if response.content._buffer_offset:
-                response.content._buffer[0] = (
-                    response.content._buffer[0][response.content._buffer_offset :]
-                )
+                response.content._buffer[0] = response.content._buffer[0][
+                    response.content._buffer_offset :
+                ]
                 response.content._buffer_offset = 0
             response.content._size += len(byts)
             response.content._cursor -= len(byts)
@@ -64,8 +67,9 @@ async def record_response(cassette, vcr_request, response):
         "status": {"code": response.status, "message": response.reason},
         "headers": aios._serialize_headers(response.headers),
         "body": body,  # NOQA: E999
-        "url": str(response.url).replace(TEST_BUCKET, "gcsfs-testing"
-                                                   ).replace(TEST_PROJECT, "test_project"),
+        "url": str(response.url)
+        .replace(TEST_BUCKET, "gcsfs-testing")
+        .replace(TEST_PROJECT, "test_project"),
     }
 
     cassette.append(vcr_request, vcr_response)
@@ -83,14 +87,20 @@ def play_responses(cassette, vcr_request):
     # our final destination.
     while 300 <= response.status <= 399:
         if "Location" not in response.headers:
+            # Not a redirect, an instruction not to call again
             break
-        next_url = URL(response.url).with_path(response.headers["location"])
+        next_url = aios.URL(response.url).with_path(response.headers["location"])
 
         # Make a stub VCR request that we can then use to look up the recorded
         # VCR request saved to the cassette. This feels a little hacky and
         # may have edge cases based on the headers we're providing (e.g. if
         # there's a matcher that is used to filter by headers).
-        vcr_request = aios.Request("GET", str(next_url), None, aio._serialize_headers(response.request_info.headers))
+        vcr_request = aios.Request(
+            "GET",
+            str(next_url),
+            None,
+            aios._serialize_headers(response.request_info.headers),
+        )
         vcr_request = cassette.find_requests_with_most_matches(vcr_request)[0][0]
 
         # Tack on the response we saw from the redirect into the history

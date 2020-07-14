@@ -24,9 +24,9 @@ import posixpath
 import requests
 import pickle
 import re
+import time
 import requests
 import threading
-import time
 import warnings
 import random
 import weakref
@@ -34,7 +34,7 @@ import weakref
 from requests.exceptions import RequestException, ProxyError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.implementations.http import get_client
-from .utils import HttpError, is_retriable, FileSender
+from .utils import HttpError, is_retriable
 from . import __version__ as version
 
 logger = logging.getLogger(__name__)
@@ -229,10 +229,15 @@ class GCSFileSystem(AsyncFileSystem):
         requester_pays=False,
         asynchronous=False,
         loop=None,
-        **kwargs
+        **kwargs,
     ):
-        super().__init__(self, listings_expiry_time=cache_timeout,
-                         asynchronous=asynchronous, loop=loop, **kwargs)
+        super().__init__(
+            self,
+            listings_expiry_time=cache_timeout,
+            asynchronous=asynchronous,
+            loop=loop,
+            **kwargs,
+        )
         if access not in self.scopes:
             raise ValueError("access must be one of {}", self.scopes)
         if project is None:
@@ -266,6 +271,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def set_session(self):
         from fsspec.implementations.http import get_client
+
         self._session = await get_client()
 
     @classmethod
@@ -460,12 +466,11 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
         return path, jsonin, datain, headers, kwargs
 
-    async def _call(self, method, path, *args, json_out=False,
-                    info_out=False, **kwargs):
+    async def _call(
+        self, method, path, *args, json_out=False, info_out=False, **kwargs
+    ):
         self.maybe_refresh()
         path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
-        import time
-        print(f"{time.time()} - {method}: {path}, {jsonin}, {kwargs} \n{headers} ", end="", flush=True)
 
         for retry in range(self.retries):
             try:
@@ -481,16 +486,16 @@ class GCSFileSystem(AsyncFileSystem):
                     timeout=self.requests_timeout,
                 ) as r:
                     import json
+
                     status = r.status
                     headers = r.headers
                     info = r.request_info  # for debug only
                     contents = await r.read()
                     try:
                         json = json.loads(contents)
-                    except:
+                    except Exception:
                         json = None
 
-                print(r.status)
                 self.validate_response(status, contents, json, path)
                 break
             except (HttpError, RequestException, GoogleAuthError) as e:
@@ -617,7 +622,7 @@ class GCSFileSystem(AsyncFileSystem):
             delimiter="/",
             prefix=prefix,
             maxResults=max_results,
-            json_out=True
+            json_out=True,
         )
 
         prefixes.extend(page.get("prefixes", []))
@@ -633,7 +638,7 @@ class GCSFileSystem(AsyncFileSystem):
                 prefix=prefix,
                 maxResults=max_results,
                 pageToken=next_page_token,
-                json_out=True
+                json_out=True,
             )
 
             assert page["kind"] == "storage#objects"
@@ -656,8 +661,11 @@ class GCSFileSystem(AsyncFileSystem):
 
             while next_page_token is not None:
                 page = await self._call(
-                    "GET", "b/", project=self.project, pageToken=next_page_token,
-                    json_out=True
+                    "GET",
+                    "b/",
+                    project=self.project,
+                    pageToken=next_page_token,
+                    json_out=True,
                 )
 
                 assert page["kind"] == "storage#buckets"
@@ -689,7 +697,9 @@ class GCSFileSystem(AsyncFileSystem):
                 self.dircache.pop(path, None)
                 path = self._parent(path)
 
-    async def _mkdir(self, bucket, acl="projectPrivate", default_acl="bucketOwnerFullControl"):
+    async def _mkdir(
+        self, bucket, acl="projectPrivate", default_acl="bucketOwnerFullControl"
+    ):
         """
         New bucket
 
@@ -714,7 +724,7 @@ class GCSFileSystem(AsyncFileSystem):
             project=self.project,
             predefinedDefaultObjectAcl=default_acl,
             json={"name": bucket},
-            json_out=True
+            json_out=True,
         )
         self.invalidate_cache(bucket)
 
@@ -821,7 +831,9 @@ class GCSFileSystem(AsyncFileSystem):
         meta = self.info(path).get("metadata", {})
         return meta[attr]
 
-    async def _setxattrs(self, path, content_type=None, content_encoding=None, **kwargs):
+    async def _setxattrs(
+        self, path, content_type=None, content_encoding=None, **kwargs
+    ):
         """ Set/delete/add writable metadata attributes
 
         Parameters
@@ -846,8 +858,13 @@ class GCSFileSystem(AsyncFileSystem):
 
         bucket, key = self.split_path(path)
         o_json = await self._call(
-            "PATCH", "b/{}/o/{}", bucket, key, fields="metadata", json=i_json,
-            json_out=True
+            "PATCH",
+            "b/{}/o/{}",
+            bucket,
+            key,
+            fields="metadata",
+            json=i_json,
+            json_out=True,
         )
         (await self._info(path))["metadata"] = o_json.get("metadata", {})
         return o_json.get("metadata", {})
@@ -864,7 +881,7 @@ class GCSFileSystem(AsyncFileSystem):
             bucket,
             key,
             destinationPredefinedAcl=acl,
-            headers={'Content-Type': 'application/json'},
+            headers={"Content-Type": "application/json"},
             json={
                 "sourceObjects": source,
                 "kind": "storage#composeRequest",
@@ -886,9 +903,9 @@ class GCSFileSystem(AsyncFileSystem):
             k1,
             b2,
             k2,
-            headers={'Content-Type': 'application/json'},
+            headers={"Content-Type": "application/json"},
             destinationPredefinedAcl=acl,
-            json_out=True
+            json_out=True,
         )
         while out["done"] is not True:
             out = await self._call(
@@ -898,10 +915,10 @@ class GCSFileSystem(AsyncFileSystem):
                 k1,
                 b2,
                 k2,
-                headers={'Content-Type': 'application/json'},
+                headers={"Content-Type": "application/json"},
                 rewriteToken=out["rewriteToken"],
                 destinationPredefinedAcl=acl,
-                json_out=True
+                json_out=True,
             )
 
     async def _rm_one_file(self, path):
@@ -947,8 +964,10 @@ class GCSFileSystem(AsyncFileSystem):
         parents = [self._parent(p) for p in paths]
         [self.invalidate_cache(parent) for parent in parents + list(paths)]
         txt = content.decode()
-        if any(not ("200 OK" in c or "204 No Content" in c)
-               for c in txt.split(boundary)[1:-1]):
+        if any(
+            not ("200 OK" in c or "204 No Content" in c)
+            for c in txt.split(boundary)[1:-1]
+        ):
             pattern = '"message": "([^"]+)"'
             out = set(re.findall(pattern, txt))
             raise OSError(out)
@@ -956,68 +975,98 @@ class GCSFileSystem(AsyncFileSystem):
     async def _rm(self, paths, batchsize):
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
-        await asyncio.gather(*(
-            [self._rm_files(files[i:i + batchsize])
-                for i in range(0, len(files), batchsize)] +
-            [self._rmdir(d) for d in dirs]
-        ))
+        await asyncio.gather(
+            *(
+                [
+                    self._rm_files(files[i : i + batchsize])
+                    for i in range(0, len(files), batchsize)
+                ]
+                + [self._rmdir(d) for d in dirs]
+            )
+        )
 
-    async def _pipe_file(self, path, data, metadata=None, consistency=None,
-                         content_type="application/octet-stream",
-                         chunksize=50 * 2**20):
+    async def _pipe_file(
+        self,
+        path,
+        data,
+        metadata=None,
+        consistency=None,
+        content_type="application/octet-stream",
+        chunksize=50 * 2 ** 20,
+    ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
         bucket, key = self.split_path(path)
         size = len(data)
         out = None
-        if size < 5 * 2**20:
-            return await simple_upload(self, bucket, key, data, metadata, consistency,
-                                       content_type)
+        if size < 5 * 2 ** 20:
+            return await simple_upload(
+                self, bucket, key, data, metadata, consistency, content_type
+            )
         else:
             location = await initiate_upload(self, bucket, key, content_type, metadata)
             for offset in range(0, len(data), chunksize):
-                bit = data[offset:offset + chunksize]
-                out = await upload_chunk(self, location, bit, offset, size, content_type)
-        if consistency == 'size':
-            assert int(out['size']) == size
-        elif consistency == 'md5':
+                bit = data[offset : offset + chunksize]
+                out = await upload_chunk(
+                    self, location, bit, offset, size, content_type
+                )
+        if consistency == "size":
+            assert int(out["size"]) == size
+        elif consistency == "md5":
             md = md5()
             md.update(data)
-            assert out['md5Hash'] == b64encode(md.digest()).decode()
+            assert out["md5Hash"] == b64encode(md.digest()).decode()
         self.invalidate_cache(self._parent(path))
 
-    async def _put_file(self, lpath, rpath, metadata=None, consistency=None,
-                        content_type="application/octet-stream",
-                        chunksize=50 * 2**20, **kwargs):
+    async def _put_file(
+        self,
+        lpath,
+        rpath,
+        metadata=None,
+        consistency=None,
+        content_type="application/octet-stream",
+        chunksize=50 * 2 ** 20,
+        **kwargs,
+    ):
         # enforce blocksize should be a multiple of 2**18
         if os.path.isdir(lpath):
             return
         consistency = consistency or self.consistency
         bucket, key = self.split_path(rpath)
-        with open(lpath, 'rb') as f0:
+        with open(lpath, "rb") as f0:
             size = f0.seek(0, 2)
             f0.seek(0)
             md = md5()
             if size < 5 * 2 ** 20:
-                return await simple_upload(self, bucket, key, f0.read(), consistency=consistency,
-                                           metadatain=metadata, content_type=content_type)
+                return await simple_upload(
+                    self,
+                    bucket,
+                    key,
+                    f0.read(),
+                    consistency=consistency,
+                    metadatain=metadata,
+                    content_type=content_type,
+                )
             else:
-                location = await initiate_upload(self, bucket, key, content_type, metadata)
+                location = await initiate_upload(
+                    self, bucket, key, content_type, metadata
+                )
                 offset = 0
                 while True:
-                    bit = f.read(chunksize)
+                    bit = f0.read(chunksize)
                     if not bit:
                         break
-                    bit = data[offset:offset + chunksize]
-                    out = await upload_chunk(self, location, bit, offset, size, content_type)
+                    out = await upload_chunk(
+                        self, location, bit, offset, size, content_type
+                    )
                     offset += len(bit)
                     if consistency == "md5":
                         # check this chunk against X-Range-MD5 response header?
                         md.update(bit)
-            if consistency == 'size':
-                assert int(out['size']) == size
-            elif consistency == 'md5':
-                assert out['md5Hash'] == b64encode(md.digest()).decode()
+            if consistency == "size":
+                assert int(out["size"]) == size
+            elif consistency == "md5":
+                assert out["md5Hash"] == b64encode(md.digest()).decode()
             self.invalidate_cache(self._parent(rpath))
 
     async def _isdir(self, path):
@@ -1030,8 +1079,8 @@ class GCSFileSystem(AsyncFileSystem):
         if await self._isdir(rpath):
             return
         u2 = self.url(rpath)
-        headers = kwargs.pop('headers', {})
-        consistency = kwargs.pop('consistency', self.consistency)
+        headers = kwargs.pop("headers", {})
+        consistency = kwargs.pop("consistency", self.consistency)
         if "User-Agent" not in headers:
             headers["User-Agent"] = "python-gcsfs/" + version
         headers.update(self.heads or {})  # add creds
@@ -1045,17 +1094,14 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
 
         async with self.session.get(
-                url=u2,
-                params=kwargs,
-                headers=headers,
-                timeout=self.requests_timeout,
+            url=u2, params=kwargs, headers=headers, timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
             if self.consistency == "md5":
                 md = md5()
 
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
-            with open(lpath, 'wb') as f2:
+            with open(lpath, "wb") as f2:
                 size = 0
                 while True:
                     data = await r.content.read(4096)
@@ -1069,8 +1115,11 @@ class GCSFileSystem(AsyncFileSystem):
             if consistency == "size":
                 assert r.content_length == size
             if consistency == "md5":
-                dig = [bit.split('=')[1] for bit in r.headers['X-Goog-Hash'].split(',')
-                       if bit.split('=')[0] == 'md5'][0]
+                dig = [
+                    bit.split("=")[1]
+                    for bit in r.headers["X-Goog-Hash"].split(",")
+                    if bit.split("=")[0] == "md5"
+                ][0]
                 assert b64encode(md.digest()).decode().rstrip("=") == dig
 
     def rm(self, path, recursive=False, batchsize=20):
@@ -1087,7 +1136,7 @@ class GCSFileSystem(AsyncFileSystem):
         consistency=None,
         metadata=None,
         autocommit=True,
-        **kwargs
+        **kwargs,
     ):
         """
         See ``GCSFile``.
@@ -1108,7 +1157,7 @@ class GCSFileSystem(AsyncFileSystem):
             metadata=metadata,
             acl=acl,
             autocommit=autocommit,
-            **kwargs
+            **kwargs,
         )
 
     @classmethod
@@ -1144,7 +1193,7 @@ class GCSFileSystem(AsyncFileSystem):
         if status >= 400:
             error = None
             try:
-                error = json['error']
+                error = json["error"]
                 msg = error["message"]
             except:  # noqa: E722
                 # TODO: limit to appropriate exceptions
@@ -1183,7 +1232,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         consistency="md5",
         metadata=None,
         content_type=None,
-        **kwargs
+        **kwargs,
     ):
         """
         Open a file.
@@ -1220,7 +1269,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             autocommit=autocommit,
             cache_type=cache_type,
             cache_options=cache_options,
-            **kwargs
+            **kwargs,
         )
         bucket, key = self.fs.split_path(path)
         if not key:
@@ -1323,8 +1372,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def _initiate_upload(self):
         """ Create multi-upload """
-        self.location = sync(self.gcsfs.loop, initiate_upload, self.gcsfs,
-                             self.bucket, self.key, self.content_type, self.metadata)
+        self.location = sync(
+            self.gcsfs.loop,
+            initiate_upload,
+            self.gcsfs,
+            self.bucket,
+            self.key,
+            self.content_type,
+            self.metadata,
+        )
 
     def discard(self):
         """Cancel in-progress multi-upload
@@ -1339,16 +1395,24 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             "https://www.googleapis.com/upload/storage/v1/b/%s/o"
             "" % quote_plus(self.bucket),
             params={"uploadType": "resumable", "upload_id": uid},
-            json_out=True
+            json_out=True,
         )
 
     def _simple_upload(self):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
         data = self.buffer.read()
-        sync(self.gcsfs.loop, simple_upload,
-             self.gcsfs, self.bucket, self.key, data, self.metadata,
-             self.consistency, self.content_type)
+        sync(
+            self.gcsfs.loop,
+            simple_upload,
+            self.gcsfs,
+            self.bucket,
+            self.key,
+            data,
+            self.metadata,
+            self.consistency,
+            self.content_type,
+        )
 
     def _fetch_range(self, start=None, end=None):
         """ Get data from GCS
@@ -1377,9 +1441,7 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     range = "bytes %i-%i/%i" % (offset, offset + l - 1, size)
     head["Content-Range"] = range
     head.update({"Content-Type": content_type, "Content-Length": str(l)})
-    headers, txt = await fs._call(
-        "POST", location, headers=head, data=data
-    )
+    headers, txt = await fs._call("POST", location, headers=head, data=data)
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])
         shortfall = (offset + l - 1) - end
@@ -1388,15 +1450,16 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     return json.loads(txt) if txt else None
 
 
-async def initiate_upload(fs, bucket, key, content_type="application/octet-stream",
-                          metadata=None):
+async def initiate_upload(
+    fs, bucket, key, content_type="application/octet-stream", metadata=None
+):
     j = {"name": key}
     if metadata:
-        j['metadata'] = metadata
+        j["metadata"] = metadata
     headers, _ = await fs._call(
         method="POST",
         path="https://www.googleapis.com/upload/storage"
-             "/v1/b/%s/o" % quote_plus(bucket),
+        "/v1/b/%s/o" % quote_plus(bucket),
         uploadType="resumable",
         json=j,
         headers={"X-Upload-Content-Type": content_type},
@@ -1404,11 +1467,16 @@ async def initiate_upload(fs, bucket, key, content_type="application/octet-strea
     return headers["Location"]
 
 
-async def simple_upload(fs, bucket, key, datain, metadatain=None, consistency=None,
-                        content_type="application/octet-stream"):
-    path = "https://www.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(
-        bucket
-    )
+async def simple_upload(
+    fs,
+    bucket,
+    key,
+    datain,
+    metadatain=None,
+    consistency=None,
+    content_type="application/octet-stream",
+):
+    path = "https://www.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(bucket)
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain
@@ -1416,24 +1484,21 @@ async def simple_upload(fs, bucket, key, datain, metadatain=None, consistency=No
     template = (
         "--==0=="
         "\nContent-Type: application/json; charset=UTF-8"
-        "\n\n" + metadata + "\n--==0==" +
-                            "\nContent-Type: {0}".format(content_type) +
-                            "\n\n"
+        "\n\n"
+        + metadata
+        + "\n--==0=="
+        + "\nContent-Type: {0}".format(content_type)
+        + "\n\n"
     )
 
-    data = (
-        template
-        .encode()
-        + datain
-        + b"\n--==0==--"
-    )
+    data = template.encode() + datain + b"\n--==0==--"
     j = await fs._call(
         "POST",
         path,
         uploadType="multipart",
         headers={"Content-Type": 'multipart/related; boundary="==0=="'},
         data=data,
-        json_out=True
+        json_out=True,
     )
     size, mdback = int(j["size"]), j["md5Hash"]
     if consistency == "size":

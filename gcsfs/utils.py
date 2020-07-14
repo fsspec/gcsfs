@@ -44,12 +44,13 @@ def is_retriable(exception):
 
 
 class FileSender:
-    def __init__(self, consistency='none'):
+    def __init__(self, consistency="none"):
         self.consistency = consistency
-        if consistency == 'size':
+        if consistency == "size":
             self.sent = 0
-        elif consistency == 'md5':
+        elif consistency == "md5":
             from hashlib import md5
+
             self.md5 = md5()
 
     async def send(self, pre, f, post):
@@ -57,9 +58,9 @@ class FileSender:
         chunk = f.read(64 * 1024)
         while chunk:
             yield chunk
-            if self.consistency == 'size':
+            if self.consistency == "size":
                 self.sent += len(chunk)
-            elif self.consistency == 'md5':
+            elif self.consistency == "md5":
                 self.md5.update(chunk)
             chunk = f.read(64 * 1024)
         yield post

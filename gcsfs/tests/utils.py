@@ -35,12 +35,13 @@ def before_record_response(response):
         if isinstance(loc, list):
             r["headers"]["Location"] = [
                 r["headers"]["Location"][0]
-                    .replace(TEST_BUCKET, "gcsfs-testing")
-                    .replace(TEST_PROJECT, "test_project")
+                .replace(TEST_BUCKET, "gcsfs-testing")
+                .replace(TEST_PROJECT, "test_project")
             ]
         else:
-            r["headers"]["Location"] = loc.replace(TEST_BUCKET, "gcsfs-testing"
-                                                   ).replace(TEST_PROJECT, "test_project")
+            r["headers"]["Location"] = loc.replace(
+                TEST_BUCKET, "gcsfs-testing"
+            ).replace(TEST_PROJECT, "test_project")
     try:
         try:
             data = json.loads(gzip.decompress(r["body"]["string"]).decode())
@@ -104,7 +105,7 @@ def matcher(r1, r2):
     if r1.method == "POST":
         if "upload_id" in r1.uri and "upload_id" in r2.uri:
             # vcrpy looses body on redirect with aiohttp
-            if r2.body is None and int(r2.headers['Content-Length']) > 1:
+            if r2.body is None and int(r2.headers["Content-Length"]) > 1:
                 r2.body = r1.body
         try:
             return json.loads(r2.body.decode()) == json.loads(r1.body.decode())

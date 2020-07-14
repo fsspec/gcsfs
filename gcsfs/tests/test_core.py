@@ -18,7 +18,7 @@ from gcsfs.tests.settings import (
     GOOGLE_TOKEN,
     TEST_BUCKET,
     TEST_REQUESTER_PAYS_BUCKET,
-    ON_VCR
+    ON_VCR,
 )
 from gcsfs.tests.utils import (
     tempdir,
@@ -364,7 +364,7 @@ def test_move():
 
 @pytest.mark.skipif(ON_VCR, reason="async fail")
 @my_vcr.use_cassette(match=["all"])
-@pytest.mark.parametrize('consistency', [None, 'size', 'md5'])
+@pytest.mark.parametrize("consistency", [None, "size", "md5"])
 def test_get_put(consistency):
     with gcs_maker(True) as gcs:
         gcs.consistency = consistency
@@ -786,7 +786,7 @@ def test_request_user_project():
             delimiter="/",
             prefix="test",
             maxResults=100,
-            info_out=True
+            info_out=True,
         )
         qs = urlparse(r.url.human_repr()).query
         result = parse_qs(qs)
@@ -808,7 +808,7 @@ def test_request_user_project_string():
             delimiter="/",
             prefix="test",
             maxResults=100,
-            info_out=True
+            info_out=True,
         )
         qs = urlparse(r.url.human_repr()).query
         result = parse_qs(qs)
@@ -827,7 +827,7 @@ def test_request_header():
             delimiter="/",
             prefix="test",
             maxResults=100,
-            info_out=True
+            info_out=True,
         )
         assert r.headers["User-Agent"] == "python-gcsfs/" + version
 
@@ -858,7 +858,7 @@ def test_raise_on_project_mismatch(mock_auth):
 
 
 def test_validate_response():
-    gcs = GCSFileSystem(token='anon')
+    gcs = GCSFileSystem(token="anon")
     gcs.validate_response(200, None, None, "/path")
 
     # HttpError with no JSON body
@@ -875,8 +875,8 @@ def test_validate_response():
     assert e.value.message == b"Service Unavailable"
 
     # 403
-    j = ({"error": {"message": "Not ok"}})
-    with pytest.raises(IOError, match='Forbidden: /path\nNot ok'):
+    j = {"error": {"message": "Not ok"}}
+    with pytest.raises(IOError, match="Forbidden: /path\nNot ok"):
         gcs.validate_response(403, None, j, "/path")
 
     # 404
