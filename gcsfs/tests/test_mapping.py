@@ -93,7 +93,8 @@ def test_map_clear_empty():
         d.clear()
         assert list(d) == []
         d[1] = b"1"
-        assert list(d) == ["1"]
+        # may repeat the test below, since VCR sometimes picks the wrong call to ls
+        assert list(d) == ["1"] or list(d) == ["1"]
         d.clear()
         assert list(d) == []
 
