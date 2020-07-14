@@ -464,8 +464,8 @@ class GCSFileSystem(AsyncFileSystem):
                     info_out=False, **kwargs):
         self.maybe_refresh()
         path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
-        # import time
-        # print(f"{time.time()} - {method}: {path}, {jsonin}, {kwargs} ", end="", flush=True)
+        import time
+        print(f"{time.time()} - {method}: {path}, {jsonin}, {kwargs} \n{headers} ", end="", flush=True)
 
         for retry in range(self.retries):
             try:
@@ -487,10 +487,10 @@ class GCSFileSystem(AsyncFileSystem):
                     contents = await r.read()
                     try:
                         json = json.loads(contents)
-                    except (json.JSONDecodeError, TypeError):
+                    except:
                         json = None
 
-                # print(r.status)
+                print(r.status)
                 self.validate_response(status, contents, json, path)
                 break
             except (HttpError, RequestException, GoogleAuthError) as e:
@@ -964,7 +964,8 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _pipe_file(self, path, data, metadata=None, consistency=None,
                          content_type="application/octet-stream",
-                         chunksize=1 * 2**20):
+                         chunksize=50 * 2**20):
+        # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
         bucket, key = self.split_path(path)
         size = len(data)
@@ -985,23 +986,39 @@ class GCSFileSystem(AsyncFileSystem):
             assert out['md5Hash'] == b64encode(md.digest()).decode()
         self.invalidate_cache(self._parent(path))
 
-    async def _put_file(self, lpath, rpath, **kwargs):
+    async def _put_file(self, lpath, rpath, metadata=None, consistency=None,
+                        content_type="application/octet-stream",
+                        chunksize=50 * 2**20, **kwargs):
+        # enforce blocksize should be a multiple of 2**18
         if os.path.isdir(lpath):
             return
-        headers = kwargs.pop('headers', {})
+        consistency = consistency or self.consistency
         bucket, key = self.split_path(rpath)
-        consistency = kwargs.pop('consistency', self.consistency)
-        kw = {k: v for k, v in kwargs if k in ['metadata', 'consistency']}
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = "python-gcsfs/" + version
-        headers.update(self.heads or {})  # add creds
         with open(lpath, 'rb') as f0:
             size = f0.seek(0, 2)
             f0.seek(0)
+            md = md5()
             if size < 5 * 2 ** 20:
-                await simple_upload(self, bucket, key, f0.read(), consistency=consistency, **kw)
+                return await simple_upload(self, bucket, key, f0.read(), consistency=consistency,
+                                           metadatain=metadata, content_type=content_type)
             else:
-                raise NotImplementedError
+                location = await initiate_upload(self, bucket, key, content_type, metadata)
+                offset = 0
+                while True:
+                    bit = f.read(chunksize)
+                    if not bit:
+                        break
+                    bit = data[offset:offset + chunksize]
+                    out = await upload_chunk(self, location, bit, offset, size, content_type)
+                    offset += len(bit)
+                    if consistency == "md5":
+                        # check this chunk against X-Range-MD5 response header?
+                        md.update(bit)
+            if consistency == 'size':
+                assert int(out['size']) == size
+            elif consistency == 'md5':
+                assert out['md5Hash'] == b64encode(md.digest()).decode()
+            self.invalidate_cache(self._parent(rpath))
 
     async def _isdir(self, path):
         try:
@@ -1139,7 +1156,7 @@ class GCSFileSystem(AsyncFileSystem):
                 raise IOError("Forbidden: %s\n%s" % (path, msg))
             elif status == 502:
                 raise ProxyError()
-            elif b"invalid" in msg:
+            elif "invalid" in str(msg):
                 raise ValueError("Bad Request: %s\n%s" % (path, msg))
             elif error:
                 raise HttpError(error)
@@ -1239,12 +1256,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         final: bool
             Complete and commit upload
         """
-        self.buffer.seek(0)
         data = self.buffer.getvalue()
         head = {}
         l = len(data)
         if final and self.autocommit:
             if l:
+                # last chunk
                 head["Content-Range"] = "bytes %i-%i/%i" % (
                     self.offset,
                     self.offset + l - 1,
@@ -1263,7 +1280,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             head["Content-Range"] = "bytes %i-%i/*" % (self.offset, self.offset + l - 1)
         head.update({"Content-Type": self.content_type, "Content-Length": str(l)})
         headers, contents = self.gcsfs.call(
-            "POST", self.location, uploadType="resumable", headers=head, data=data
+            "POST", self.location, headers=head, data=data
         )
         if "Range" in headers:
             end = int(headers["Range"].split("-")[1])
@@ -1271,12 +1288,14 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if shortfall:
                 if self.consistency == "md5":
                     self.md5.update(data[:-shortfall])
+                    # check this chunk against X-Range-MD5 response header?
                 self.buffer = io.BytesIO(data[-shortfall:])
                 self.buffer.seek(shortfall)
                 self.offset += l - shortfall
                 return False
             else:
                 if self.consistency == "md5":
+                    # check this chunk against X-Range-MD5 response header?
                     self.md5.update(data)
         elif l:
             #
@@ -1359,7 +1378,7 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     head["Content-Range"] = range
     head.update({"Content-Type": content_type, "Content-Length": str(l)})
     headers, txt = await fs._call(
-        "POST", location, uploadType="resumable", headers=head, data=data
+        "POST", location, headers=head, data=data
     )
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])

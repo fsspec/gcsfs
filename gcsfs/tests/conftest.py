@@ -1,6 +1,7 @@
 import pytest
 
 from gcsfs.core import GCSFileSystem
+from gcsfs.tests.settings import TEST_PROJECT, TEST_BUCKET
 import vcr.stubs.aiohttp_stubs as aios
 
 
@@ -63,10 +64,42 @@ async def record_response(cassette, vcr_request, response):
         "status": {"code": response.status, "message": response.reason},
         "headers": aios._serialize_headers(response.headers),
         "body": body,  # NOQA: E999
-        "url": str(response.url),
+        "url": str(response.url).replace(TEST_BUCKET, "gcsfs-testing"
+                                                   ).replace(TEST_PROJECT, "test_project"),
     }
 
     cassette.append(vcr_request, vcr_response)
 
 
 aios.record_response = record_response
+
+
+def play_responses(cassette, vcr_request):
+    history = []
+    vcr_response = cassette.play_response(vcr_request)
+    response = build_response(vcr_request, vcr_response, history)
+
+    # If we're following redirects, continue playing until we reach
+    # our final destination.
+    while 300 <= response.status <= 399:
+        if "Location" not in response.headers:
+            break
+        next_url = URL(response.url).with_path(response.headers["location"])
+
+        # Make a stub VCR request that we can then use to look up the recorded
+        # VCR request saved to the cassette. This feels a little hacky and
+        # may have edge cases based on the headers we're providing (e.g. if
+        # there's a matcher that is used to filter by headers).
+        vcr_request = aios.Request("GET", str(next_url), None, aio._serialize_headers(response.request_info.headers))
+        vcr_request = cassette.find_requests_with_most_matches(vcr_request)[0][0]
+
+        # Tack on the response we saw from the redirect into the history
+        # list that is added on to the final response.
+        history.append(response)
+        vcr_response = aios.cassette.play_response(vcr_request)
+        response = aios.build_response(vcr_request, vcr_response, history)
+
+    return response
+
+
+aios.play_responses = play_responses

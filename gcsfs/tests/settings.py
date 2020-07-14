@@ -29,6 +29,7 @@ FAKE_GOOGLE_TOKEN = {
     "type": "authorized_user",
 }
 GOOGLE_TOKEN = os.environ.get("GCSFS_GOOGLE_TOKEN", FAKE_GOOGLE_TOKEN)
+ON_VCR = "GCSFS_GOOGLE_TOKEN" not in os.environ
 
 if isinstance(GOOGLE_TOKEN, str) and os.path.exists(GOOGLE_TOKEN):
     with open(GOOGLE_TOKEN) as f:
