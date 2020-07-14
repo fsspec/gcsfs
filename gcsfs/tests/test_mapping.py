@@ -1,4 +1,3 @@
-import time
 import pytest
 from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.tests.utils import my_vcr, gcs_maker
