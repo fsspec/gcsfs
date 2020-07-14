@@ -19,9 +19,9 @@ setup(
         "Intended Audience :: Developers",
         "License :: OSI Approved :: BSD License",
         "Operating System :: OS Independent",
-        "Programming Language :: Python :: 3.5",
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
     ],
     keywords=["google-cloud-storage", "gcloud", "file-system"],
     packages=["gcsfs", "gcsfs.cli"],
@@ -30,6 +30,6 @@ setup(
         open("README.rst").read() if os.path.exists("README.rst") else ""
     ),
     extras_require={"gcsfuse": ["fusepy"]},
-    python_requires=">=3.5",
+    python_requires=">=3.6",
     zip_safe=False,
 )
