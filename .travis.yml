@@ -17,15 +17,15 @@ install:
   # Install dependencies
   - conda create -n test python=$TRAVIS_PYTHON_VERSION pytest requests decorator -y
   - source activate test
-  - conda install -c conda-forge google-auth vcrpy aiohttp google-auth-oauthlib google-cloud-core google-api-core google-api-python-client -y
+  - conda install -c conda-forge google-auth vcrpy aiohttp google-auth-oauthlib flake8 black google-cloud-core google-api-core google-api-python-client -y
   - pip install git+https://github.com/intake/filesystem_spec --no-deps
   - conda list
   - conda --version
 
 script:
   - GCSFS_RECORD_MODE=none py.test -vv  gcsfs
-  - pip install flake8 ; flake8 gcsfs
-  - pip install git+https://github.com/psf/black@cad4138050b86d1c8570b926883e32f7465c2880; black gcsfs --check
+  - flake8 gcsfs
+  - black gcsfs --check
 
 notifications:
   email: false
