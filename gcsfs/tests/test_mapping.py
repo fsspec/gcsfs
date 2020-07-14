@@ -1,3 +1,4 @@
+import time
 import pytest
 from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.tests.utils import my_vcr, gcs_maker
@@ -93,7 +94,8 @@ def test_map_clear_empty():
         d.clear()
         assert list(d) == []
         d[1] = b"1"
-        assert list(d) == ["1"]
+        # may repeat the test below, since VCR sometimes picks the wrong call to ls
+        assert list(d) == ["1"] or list(d) == ["1"]
         d.clear()
         assert list(d) == []
 
