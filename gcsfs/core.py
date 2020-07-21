@@ -475,7 +475,7 @@ class GCSFileSystem(AsyncFileSystem):
         for retry in range(self.retries):
             try:
                 if retry > 0:
-                    time.sleep(min(random.random() + 2 ** (retry - 1), 32))
+                    await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
                 async with self.session.request(
                     method=method,
                     url=path,
