@@ -892,6 +892,4 @@ def test_validate_response():
     # ChecksumError
     md5 = repr(base64.b64encode(hashlib.md5(b"foo").digest()))[2:-1]
     with pytest.raises(ChecksumError):
-        gcs.validate_response(
-            0, b"f", None, "/path", {"X-Goog-Hash": f"md5={md5}"}
-        )
+        gcs.validate_response(0, b"f", None, "/path", {"X-Goog-Hash": f"md5={md5}"})
