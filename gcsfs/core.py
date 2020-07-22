@@ -1181,9 +1181,6 @@ class GCSFileSystem(AsyncFileSystem):
         r: requests response object
         path: associated URL path, for error messages
         """
-        if headers is None:
-            headers = {}
-
         if status >= 400:
             error = None
             try:
@@ -1208,7 +1205,7 @@ class GCSFileSystem(AsyncFileSystem):
             else:
                 raise RuntimeError(msg)
         else:
-            if "X-Goog-Hash" in headers:
+            if headers is not None and "X-Goog-Hash" in headers:
                 # if header includes md5 hash, check that data matches
                 bits = headers["X-Goog-Hash"].split(",")
                 for bit in bits:
