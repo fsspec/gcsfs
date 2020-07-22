@@ -24,7 +24,6 @@ import posixpath
 import requests
 import pickle
 import re
-import time
 import requests
 import threading
 import warnings
