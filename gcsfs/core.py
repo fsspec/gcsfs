@@ -1172,7 +1172,7 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             return path.split("/", 1)
 
-    def validate_response(self, status, content, json, path, headers):
+    def validate_response(self, status, content, json, path, headers=None):
         """
         Check the requests object r, raise error if it's not ok.
 
@@ -1181,6 +1181,9 @@ class GCSFileSystem(AsyncFileSystem):
         r: requests response object
         path: associated URL path, for error messages
         """
+        if headers is None:
+            headers = {}
+
         if status >= 400:
             error = None
             try:

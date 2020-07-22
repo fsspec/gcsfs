@@ -861,33 +861,33 @@ def test_raise_on_project_mismatch(mock_auth):
 
 def test_validate_response():
     gcs = GCSFileSystem(token="anon")
-    gcs.validate_response(200, None, None, "/path", {})
+    gcs.validate_response(200, None, None, "/path")
 
     # HttpError with no JSON body
     with pytest.raises(HttpError) as e:
-        gcs.validate_response(503, b"", None, "/path", {})
+        gcs.validate_response(503, b"", None, "/path")
     assert e.value.code == 503
     assert e.value.message == ""
 
     # HttpError with JSON body
     j = {"error": {"code": 503, "message": b"Service Unavailable"}}
     with pytest.raises(HttpError) as e:
-        gcs.validate_response(503, None, j, "/path", {})
+        gcs.validate_response(503, None, j, "/path")
     assert e.value.code == 503
     assert e.value.message == b"Service Unavailable"
 
     # 403
     j = {"error": {"message": "Not ok"}}
     with pytest.raises(IOError, match="Forbidden: /path\nNot ok"):
-        gcs.validate_response(403, None, j, "/path", {})
+        gcs.validate_response(403, None, j, "/path")
 
     # 404
     with pytest.raises(FileNotFoundError):
-        gcs.validate_response(404, b"", None, "/path", {})
+        gcs.validate_response(404, b"", None, "/path")
 
     # 502
     with pytest.raises(ProxyError):
-        gcs.validate_response(502, b"", None, "/path", {})
+        gcs.validate_response(502, b"", None, "/path")
 
     # ChecksumError
     md5 = repr(base64.b64encode(hashlib.md5(b"foo").digest()))[2:-1]
