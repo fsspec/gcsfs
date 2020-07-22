@@ -24,7 +24,6 @@ import posixpath
 import requests
 import pickle
 import re
-import time
 import requests
 import threading
 import warnings
@@ -34,7 +33,7 @@ import weakref
 from requests.exceptions import RequestException, ProxyError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.implementations.http import get_client
-from .utils import HttpError, is_retriable
+from .utils import ChecksumError, HttpError, is_retriable
 from . import __version__ as version
 
 logger = logging.getLogger(__name__)
@@ -496,9 +495,9 @@ class GCSFileSystem(AsyncFileSystem):
                     except Exception:
                         json = None
 
-                self.validate_response(status, contents, json, path)
+                self.validate_response(status, contents, json, path, headers)
                 break
-            except (HttpError, RequestException, GoogleAuthError) as e:
+            except (HttpError, RequestException, GoogleAuthError, ChecksumError) as e:
                 json = None
                 if (
                     isinstance(e, HttpError)
@@ -816,14 +815,6 @@ class GCSFileSystem(AsyncFileSystem):
         """ Simple one-shot get of file data """
         u2 = self.url(path)
         headers, out = await self._call("GET", u2)
-        if "X-Goog-Hash" in headers:
-            # if header includes md5 hash, check that data matches
-            bits = headers["X-Goog-Hash"].split(",")
-            for bit in bits:
-                key, val = bit.split("=", 1)
-                if key == "md5":
-                    md = b64decode(val)
-                    assert md5(out).digest() == md, "Checksum failure"
         return out
 
     def getxattr(self, path, attr):
@@ -1181,7 +1172,7 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             return path.split("/", 1)
 
-    def validate_response(self, status, content, json, path):
+    def validate_response(self, status, content, json, path, headers=None):
         """
         Check the requests object r, raise error if it's not ok.
 
@@ -1213,6 +1204,16 @@ class GCSFileSystem(AsyncFileSystem):
                 raise HttpError({"code": status})
             else:
                 raise RuntimeError(msg)
+        else:
+            if headers is not None and "X-Goog-Hash" in headers:
+                # if header includes md5 hash, check that data matches
+                bits = headers["X-Goog-Hash"].split(",")
+                for bit in bits:
+                    key, val = bit.split("=", 1)
+                    if key == "md5":
+                        md = b64decode(val)
+                        if md5(content).digest() != md:
+                            raise ChecksumError("Checksum failure")
 
 
 GCSFileSystem.load_tokens()

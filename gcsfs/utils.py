@@ -16,6 +16,12 @@ class HttpError(Exception):
         super(HttpError, self).__init__(self.message)
 
 
+class ChecksumError(Exception):
+    """Raised when the md5 hash of the content does not match the header."""
+
+    pass
+
+
 RETRIABLE_EXCEPTIONS = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
@@ -25,6 +31,7 @@ RETRIABLE_EXCEPTIONS = (
     requests.exceptions.SSLError,
     requests.exceptions.ContentDecodingError,
     google.auth.exceptions.RefreshError,
+    ChecksumError,
 )
 
 

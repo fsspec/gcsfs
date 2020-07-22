@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import base64
+import hashlib
 import io
 from builtins import FileNotFoundError
 from itertools import chain
@@ -11,7 +13,7 @@ import requests
 from fsspec.utils import seek_delimiter
 from requests.exceptions import ProxyError
 
-from gcsfs.utils import HttpError
+from gcsfs.utils import ChecksumError, HttpError
 
 from gcsfs.tests.settings import (
     TEST_PROJECT,
@@ -886,3 +888,8 @@ def test_validate_response():
     # 502
     with pytest.raises(ProxyError):
         gcs.validate_response(502, b"", None, "/path")
+
+    # ChecksumError
+    md5 = repr(base64.b64encode(hashlib.md5(b"foo").digest()))[2:-1]
+    with pytest.raises(ChecksumError):
+        gcs.validate_response(0, b"f", None, "/path", {"X-Goog-Hash": f"md5={md5}"})
