@@ -114,6 +114,55 @@ distributed computation context. If credentials are given by a file path, howeve
 then this file must exist on every machine.
 
 
+Integration
+-----------
+
+The libraries ``intake``, ``pandas`` and ``dask`` accept URLs with the prefix
+"gcs://", and will use gcsfs to complete the IO operation in question. The
+IO functions take an argument ``storage_options``, which will be passed
+to ``GCSFileSystem``, for example:
+
+.. code-block:: python
+
+   df = pd.read_excel("gcs://bucket/path/file.xls",
+                      storage_options={"token": "anon"})
+
+This gives the chance to pass any credentials or other necessary
+arguments needed to s3fs.
+
+
+Async
+-----
+
+``s3fs`` is implemented using ``aiohttp``, and offers async functionality.
+A number of methods of ``GCSFileSystem`` are ``async``, for for each of these,
+there is also a synchronous version with the same name and lack of a ``_``
+prefix.
+
+If you wish to call ``gcsfs`` from async code, then you should pass
+``asynchronous=False, loop=`` to the constructor (the latter is optional,
+if you wish to use both async and sync methods). You must also explicitly
+await the client creation before making any GCS call.
+
+.. code-block:: python
+
+    loop = ...  # however you create your loop
+
+    async def run_program(loop):
+        gcs = GCSFileSystem(..., asynchronous=True, loop=loop)
+        await gcs.set_session()
+        ...  # perform work
+
+    asyncio.run(run_program(loop))  # or call from your async code
+
+Concurrent async operations are also used internally for bulk operations
+such as ``pipe/cat``, ``get/put``, ``cp/mv/rm``. The async calls are
+hidden behind a synchronisation layer, so are designed to be called
+from normal code. If you are *not*
+using async-style programming, you do not need to know about how this
+works, but you might find the implementation interesting.
+
+
 Contents
 ========
 
