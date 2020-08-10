@@ -1,6 +1,12 @@
 Changelog
 =========
 
+Version 0.7.0
+=============
+
+* async operations via aiohttp
+
+
 Version 0.6.0
 =============
 
