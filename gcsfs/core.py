@@ -1215,6 +1215,16 @@ class GCSFileSystem(AsyncFileSystem):
                         if md5(content).digest() != md:
                             raise ChecksumError("Checksum failure")
 
+    def sign(self, path, expiration=0):
+        # if we don't want to use google.cloud we can use
+        # https://github.com/GoogleCloudPlatform/python-docs-samples/blob/master/storage/signed_urls/generate_signed_urls.py
+        from google.cloud import storage
+        bucket, key = self.split_path(path)
+        client = storage.Client()
+        bucket = client.bucket(bucket)
+        blob = bucket.blob(key)
+        return blob.generate_signed_url(expiration=expiration, method='GET')
+
 
 GCSFileSystem.load_tokens()
 
