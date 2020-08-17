@@ -1084,7 +1084,7 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
 
         async with self.session.get(
-            url=u2, params=kwargs, headers=headers, timeout=self.requests_timeout,
+            url=u2, params=kwargs, headers=headers, timeout=self.requests_timeout
         ) as r:
             r.raise_for_status()
             if self.consistency == "md5":
@@ -1218,7 +1218,9 @@ class GCSFileSystem(AsyncFileSystem):
         # if we don't want to use google.cloud we can use
         bucket, object_name = self.split_path(path)
         self.connect()
-        return generate_signed_url(self.credentials, bucket, object_name, expiration=expiration)
+        return generate_signed_url(
+            self.credentials, bucket, object_name, expiration=expiration
+        )
 
 
 GCSFileSystem.load_tokens()
