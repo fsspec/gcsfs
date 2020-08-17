@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import posixpath
-import requests
 import pickle
 import re
 import requests
@@ -33,7 +32,7 @@ import weakref
 from requests.exceptions import RequestException, ProxyError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.implementations.http import get_client
-from .utils import ChecksumError, HttpError, is_retriable
+from .utils import ChecksumError, HttpError, is_retriable, generate_signed_url
 from . import __version__ as version
 
 logger = logging.getLogger(__name__)
@@ -1215,15 +1214,11 @@ class GCSFileSystem(AsyncFileSystem):
                         if md5(content).digest() != md:
                             raise ChecksumError("Checksum failure")
 
-    def sign(self, path, expiration=0):
+    def sign(self, path, expiration=100, **kwargs):
         # if we don't want to use google.cloud we can use
-        # https://github.com/GoogleCloudPlatform/python-docs-samples/blob/master/storage/signed_urls/generate_signed_urls.py
-        from google.cloud import storage
-        bucket, key = self.split_path(path)
-        client = storage.Client()
-        bucket = client.bucket(bucket)
-        blob = bucket.blob(key)
-        return blob.generate_signed_url(expiration=expiration, method='GET')
+        bucket, object_name = self.split_path(path)
+        self.connect()
+        return generate_signed_url(self.credentials, bucket, object_name, expiration=expiration)
 
 
 GCSFileSystem.load_tokens()
