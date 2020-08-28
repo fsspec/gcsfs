@@ -607,7 +607,7 @@ class GCSFileSystem(AsyncFileSystem):
         self.dircache[path] = out
         return out
 
-    async def _do_list_objects(self, path, max_results=None):
+    async def _do_list_objects(self, path, max_results=None, delimiter="/"):
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, prefix = self.split_path(path)
         prefix = None if not prefix else prefix.rstrip("/") + "/"
@@ -618,7 +618,7 @@ class GCSFileSystem(AsyncFileSystem):
             "GET",
             "b/{}/o/",
             bucket,
-            delimiter="/",
+            delimiter=delimiter,
             prefix=prefix,
             maxResults=max_results,
             json_out=True,
@@ -633,7 +633,7 @@ class GCSFileSystem(AsyncFileSystem):
                 "GET",
                 "b/{}/o/",
                 bucket,
-                delimiter="/",
+                delimiter=delimiter,
                 prefix=prefix,
                 maxResults=max_results,
                 pageToken=next_page_token,
@@ -972,9 +972,9 @@ class GCSFileSystem(AsyncFileSystem):
                     self._rm_files(files[i : i + batchsize])
                     for i in range(0, len(files), batchsize)
                 ]
-                + [self._rmdir(d) for d in dirs]
-            )
+             )
         )
+        await asyncio.gather(*[self._rmdir(d) for d in dirs])
 
     async def _pipe_file(
         self,
@@ -1065,6 +1065,12 @@ class GCSFileSystem(AsyncFileSystem):
             return (await self._info(path))["type"] == "directory"
         except IOError:
             return False
+
+    def find(self, path, withdirs=False, detail=False):
+        out, _ = sync(self.loop, self._do_list_objects, path, delimiter=None)
+        if detail:
+            return out
+        return [o['name'] for o in out]
 
     async def _get_file(self, rpath, lpath, **kwargs):
         if await self._isdir(rpath):
