@@ -966,14 +966,18 @@ class GCSFileSystem(AsyncFileSystem):
     async def _rm(self, paths, batchsize):
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
-        await asyncio.gather(
+        exs = await asyncio.gather(
             *(
                 [
                     self._rm_files(files[i : i + batchsize])
                     for i in range(0, len(files), batchsize)
                 ]
-             )
+             ),
+            return_exceptions=True
         )
+        exs = [ex for ex in exs if "No such object" not in str(ex)]
+        if exs:
+            raise exs[0]
         await asyncio.gather(*[self._rmdir(d) for d in dirs])
 
     async def _pipe_file(
@@ -1067,6 +1071,7 @@ class GCSFileSystem(AsyncFileSystem):
             return False
 
     def find(self, path, withdirs=False, detail=False):
+        path = self._strip_protocol(path)
         out, _ = sync(self.loop, self._do_list_objects, path, delimiter=None)
         if detail:
             return out
