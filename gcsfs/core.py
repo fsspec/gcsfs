@@ -975,7 +975,8 @@ class GCSFileSystem(AsyncFileSystem):
              ),
             return_exceptions=True
         )
-        exs = [ex for ex in exs if "No such object" not in str(ex)]
+        exs = [ex for ex in exs
+               if ex is not None and "No such object" not in str(ex)]
         if exs:
             raise exs[0]
         await asyncio.gather(*[self._rmdir(d) for d in dirs])
