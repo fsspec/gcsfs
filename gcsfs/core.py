@@ -39,8 +39,9 @@ from . import __version__ as version
 logger = logging.getLogger("gcsfs")
 if "GCSFS_DEBUG" in os.environ:
     handle = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s '
-                                  '- %(message)s')
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s " "- %(message)s"
+    )
     handle.setFormatter(formatter)
     logger.addHandler(handle)
     logger.setLevel("DEBUG")
@@ -980,11 +981,10 @@ class GCSFileSystem(AsyncFileSystem):
                     self._rm_files(files[i : i + batchsize])
                     for i in range(0, len(files), batchsize)
                 ]
-             ),
-            return_exceptions=True
+            ),
+            return_exceptions=True,
         )
-        exs = [ex for ex in exs
-               if ex is not None and "No such object" not in str(ex)]
+        exs = [ex for ex in exs if ex is not None and "No such object" not in str(ex)]
         if exs:
             raise exs[0]
         await asyncio.gather(*[self._rmdir(d) for d in dirs])
@@ -1089,8 +1089,8 @@ class GCSFileSystem(AsyncFileSystem):
             except FileNotFoundError:
                 out = []
         if detail:
-            return {o['name']: o for o in out}
-        return [o['name'] for o in out]
+            return {o["name"]: o for o in out}
+        return [o["name"] for o in out]
 
     async def _get_file(self, rpath, lpath, **kwargs):
         if await self._isdir(rpath):

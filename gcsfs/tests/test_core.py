@@ -182,7 +182,7 @@ def test_rm():
         gcs.rm(a)
         assert not gcs.exists(a)
         # silently ignored for now
-        #with pytest.raises((OSError, IOError)):
+        # with pytest.raises((OSError, IOError)):
         #    gcs.rm(TEST_BUCKET + "/nonexistent")
         with pytest.raises((OSError, IOError)):
             gcs.rm("nonexistent")
@@ -425,7 +425,7 @@ def test_errors():
         #    gcs.touch('tmp/test/shfoshf/x')
 
         # silently ignoed for now
-        #with pytest.raises((IOError, OSError)):
+        # with pytest.raises((IOError, OSError)):
         #    gcs.rm(TEST_BUCKET + "/tmp/test/shfoshf/x")
 
         with pytest.raises((IOError, OSError)):
