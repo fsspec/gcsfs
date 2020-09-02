@@ -7,23 +7,15 @@ import re
 import pickle
 import tempfile
 
-import gcsfs.utils
 from gcsfs.core import GCSFileSystem
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_PROJECT,
     RECORD_MODE,
     GOOGLE_TOKEN,
-    DEBUG,
 )
 
 import vcr
-import logging
-
-if DEBUG:
-    logging.basicConfig()  # you need to initialize logging, otherwise you will not see anything from vcrpy
-    vcr_log = logging.getLogger("vcr")
-    vcr_log.setLevel(logging.DEBUG)
 
 
 def before_record_response(response):
@@ -233,7 +225,7 @@ def gcs_maker(populate=False):
             gcs.mkdir(
                 TEST_BUCKET, default_acl="authenticatedread", acl="publicReadWrite"
             )
-        except gcsfs.utils.HttpError:
+        except Exception:
             pass
 
         if populate:

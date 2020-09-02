@@ -36,8 +36,16 @@ from fsspec.implementations.http import get_client
 from .utils import ChecksumError, HttpError, is_retriable
 from . import __version__ as version
 
-logger = logging.getLogger(__name__)
-logging.basicConfig()
+logger = logging.getLogger("gcsfs")
+if "GCSFS_DEBUG" in os.environ:
+    handle = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s " "- %(message)s"
+    )
+    handle.setFormatter(formatter)
+    logger.addHandler(handle)
+    logger.setLevel("DEBUG")
+
 
 # client created 2018-01-16
 not_secret = {
@@ -468,6 +476,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _call(
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
+        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs}")
         self.maybe_refresh()
         path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
 
@@ -607,7 +616,7 @@ class GCSFileSystem(AsyncFileSystem):
         self.dircache[path] = out
         return out
 
-    async def _do_list_objects(self, path, max_results=None):
+    async def _do_list_objects(self, path, max_results=None, delimiter="/"):
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, prefix = self.split_path(path)
         prefix = None if not prefix else prefix.rstrip("/") + "/"
@@ -618,7 +627,7 @@ class GCSFileSystem(AsyncFileSystem):
             "GET",
             "b/{}/o/",
             bucket,
-            delimiter="/",
+            delimiter=delimiter,
             prefix=prefix,
             maxResults=max_results,
             json_out=True,
@@ -633,7 +642,7 @@ class GCSFileSystem(AsyncFileSystem):
                 "GET",
                 "b/{}/o/",
                 bucket,
-                delimiter="/",
+                delimiter=delimiter,
                 prefix=prefix,
                 maxResults=max_results,
                 pageToken=next_page_token,
@@ -966,15 +975,19 @@ class GCSFileSystem(AsyncFileSystem):
     async def _rm(self, paths, batchsize):
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
-        await asyncio.gather(
+        exs = await asyncio.gather(
             *(
                 [
                     self._rm_files(files[i : i + batchsize])
                     for i in range(0, len(files), batchsize)
                 ]
-                + [self._rmdir(d) for d in dirs]
-            )
+            ),
+            return_exceptions=True,
         )
+        exs = [ex for ex in exs if ex is not None and "No such object" not in str(ex)]
+        if exs:
+            raise exs[0]
+        await asyncio.gather(*[self._rmdir(d) for d in dirs])
 
     async def _pipe_file(
         self,
@@ -1065,6 +1078,19 @@ class GCSFileSystem(AsyncFileSystem):
             return (await self._info(path))["type"] == "directory"
         except IOError:
             return False
+
+    def find(self, path, withdirs=False, detail=False, **kwargs):
+        path = self._strip_protocol(path)
+        bucket, key = self.split_path(path)
+        out, _ = sync(self.loop, self._do_list_objects, path, delimiter=None)
+        if not out and key:
+            try:
+                out = [sync(self.loop, self._get_object, path)]
+            except FileNotFoundError:
+                out = []
+        if detail:
+            return {o["name"]: o for o in out}
+        return [o["name"] for o in out]
 
     async def _get_file(self, rpath, lpath, **kwargs):
         if await self._isdir(rpath):
@@ -1465,7 +1491,8 @@ async def initiate_upload(
         json=j,
         headers={"X-Upload-Content-Type": content_type},
     )
-    return headers["Location"]
+    loc = headers["Location"]
+    return loc[0] if isinstance(loc, list) else loc  # <- for CVR responses
 
 
 async def simple_upload(
