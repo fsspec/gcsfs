@@ -14,16 +14,9 @@ from gcsfs.tests.settings import (
     TEST_PROJECT,
     RECORD_MODE,
     GOOGLE_TOKEN,
-    DEBUG,
 )
 
 import vcr
-import logging
-
-if DEBUG:
-    logging.basicConfig()  # you need to initialize logging, otherwise you will not see anything from vcrpy
-    vcr_log = logging.getLogger("vcr")
-    vcr_log.setLevel(logging.DEBUG)
 
 
 def before_record_response(response):

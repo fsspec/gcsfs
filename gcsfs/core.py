@@ -36,8 +36,15 @@ from fsspec.implementations.http import get_client
 from .utils import ChecksumError, HttpError, is_retriable
 from . import __version__ as version
 
-logger = logging.getLogger(__name__)
-logging.basicConfig()
+logger = logging.getLogger("gcsfs")
+if "GCSFS_DEBUG" in os.environ:
+    handle = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s '
+                                  '- %(message)s')
+    handle.setFormatter(formatter)
+    logger.addHandler(handle)
+    logger.setLevel("DEBUG")
+
 
 # client created 2018-01-16
 not_secret = {
@@ -468,6 +475,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _call(
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
+        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs}")
         self.maybe_refresh()
         path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
 
@@ -1071,11 +1079,17 @@ class GCSFileSystem(AsyncFileSystem):
         except IOError:
             return False
 
-    def find(self, path, withdirs=False, detail=False):
+    def find(self, path, withdirs=False, detail=False, **kwargs):
         path = self._strip_protocol(path)
+        bucket, key = self.split_path(path)
         out, _ = sync(self.loop, self._do_list_objects, path, delimiter=None)
+        if not out and key:
+            try:
+                out = [sync(self.loop, self._get_object, path)]
+            except FileNotFoundError:
+                out = []
         if detail:
-            return out
+            return {o['name']: o for o in out}
         return [o['name'] for o in out]
 
     async def _get_file(self, rpath, lpath, **kwargs):
@@ -1477,7 +1491,8 @@ async def initiate_upload(
         json=j,
         headers={"X-Upload-Content-Type": content_type},
     )
-    return headers["Location"]
+    loc = headers["Location"]
+    return loc[0] if isinstance(loc, list) else loc  # <- for CVR responses
 
 
 async def simple_upload(

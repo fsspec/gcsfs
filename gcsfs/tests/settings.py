@@ -34,7 +34,3 @@ ON_VCR = "GCSFS_GOOGLE_TOKEN" not in os.environ
 if isinstance(GOOGLE_TOKEN, str) and os.path.exists(GOOGLE_TOKEN):
     with open(GOOGLE_TOKEN) as f:
         GOOGLE_TOKEN = json.load(f)
-
-
-# /Users/mdurant/.config/gcloud/application_default_credentials.json
-DEBUG = os.environ.get("GCSFS_DEBUG", False)

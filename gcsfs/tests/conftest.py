@@ -31,7 +31,9 @@ def build_response(vcr_request, vcr_response, history):
     response.status = vcr_response["status"]["code"]
     response._body = vcr_response["body"].get("string", b"")
     response.reason = vcr_response["status"]["message"]
-    response._headers = aios.CIMultiDictProxy(aios.CIMultiDict(vcr_response["headers"]))
+    head = {k: v[0] if isinstance(v, list) else v
+            for k, v in vcr_response["headers"].items()}
+    response._headers = aios.CIMultiDictProxy(aios.CIMultiDict(head))
     response._history = tuple(history)
 
     response.close()
