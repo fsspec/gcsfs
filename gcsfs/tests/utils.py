@@ -226,7 +226,7 @@ def gcs_maker(populate=False):
             gcs.mkdir(
                 TEST_BUCKET, default_acl="authenticatedread", acl="publicReadWrite"
             )
-        except gcsfs.utils.HttpError:
+        except Exception:
             pass
 
         if populate:
