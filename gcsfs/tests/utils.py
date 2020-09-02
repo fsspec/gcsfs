@@ -7,7 +7,6 @@ import re
 import pickle
 import tempfile
 
-import gcsfs.utils
 from gcsfs.core import GCSFileSystem
 from gcsfs.tests.settings import (
     TEST_BUCKET,
