@@ -834,7 +834,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _setxattrs(
         self, path, content_type=None, content_encoding=None, **kwargs
     ):
-        """ Set/delete/add writable metadata attributes
+        """Set/delete/add writable metadata attributes
 
         Parameters
         ---------
@@ -892,8 +892,7 @@ class GCSFileSystem(AsyncFileSystem):
     merge = sync_wrapper(_merge)
 
     async def _cp_file(self, path1, path2, acl=None, **kwargs):
-        """Duplicate remote file
-        """
+        """Duplicate remote file"""
         b1, k1 = self.split_path(path1)
         b2, k2 = self.split_path(path2)
         out = await self._call(
@@ -1133,7 +1132,10 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
 
         async with self.session.get(
-            url=u2, params=kwargs, headers=headers, timeout=self.requests_timeout,
+            url=u2,
+            params=kwargs,
+            headers=headers,
+            timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
             if self.consistency == "md5":
@@ -1347,7 +1349,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         return self.details["mediaLink"]
 
     def _upload_chunk(self, final=False):
-        """ Write one part of a multi-block file upload
+        """Write one part of a multi-block file upload
 
         Parameters
         ----------
@@ -1464,7 +1466,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
 
     def _fetch_range(self, start=None, end=None):
-        """ Get data from GCS
+        """Get data from GCS
 
         start, end : None or integers
             if not both None, fetch only given range
