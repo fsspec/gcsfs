@@ -516,12 +516,12 @@ class GCSFileSystem(AsyncFileSystem):
                     msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
                     raise ValueError(msg) from e
                 if retry == self.retries - 1:
-                    logger.exception("_call out of retries on exception: %s", e)
+                    logger.exception("_call out of retries on exception: %s" % e)
                     raise e
                 if is_retriable(e):
-                    logger.debug("_call retrying after exception: %s", e)
+                    logger.debug("_call retrying after exception: %s" % e)
                     continue
-                logger.exception("_call non-retriable exception: %s", e)
+                logger.exception("_call non-retriable exception: %s" % e)
                 raise e
         if json_out:
             return json
@@ -1088,6 +1088,23 @@ class GCSFileSystem(AsyncFileSystem):
                 out = [sync(self.loop, self._get_object, path)]
             except FileNotFoundError:
                 out = []
+        dirs = []
+        sdirs = set()
+        for o in out:
+            par = self._parent(o['name'])
+            if par not in sdirs:
+                sdirs.add(par)
+                dirs.append(
+                    {'Key': self.split_path(par)[1], 'Size': 0, "name": par,
+                     'StorageClass': "DIRECTORY",
+                     'type': 'directory', 'size': 0}
+                )
+                self.dircache[par] = []
+            self.dircache[par].append(o)
+
+        if withdirs:
+            out = sorted(out + dirs, key=lambda x: x["name"])
+
         if detail:
             return {o["name"]: o for o in out}
         return [o["name"] for o in out]
@@ -1492,7 +1509,10 @@ async def initiate_upload(
         headers={"X-Upload-Content-Type": content_type},
     )
     loc = headers["Location"]
-    return loc[0] if isinstance(loc, list) else loc  # <- for CVR responses
+    out = loc[0] if isinstance(loc, list) else loc  # <- for CVR responses
+    if len(str(loc)) < 20:
+        logger.error("Location failed: %s" % headers)
+    return out
 
 
 async def simple_upload(
