@@ -414,6 +414,33 @@ def test_get_put_recursive(protocol):
             )
 
 
+@pytest.mark.skipif(ON_VCR, reason="async fail")
+@pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
+@my_vcr.use_cassette(match=["all"])
+def test_get_put_file_in_dir(protocol):
+    with gcs_maker(True) as gcs:
+        with tempdir() as dn:
+            gcs.get(protocol + TEST_BUCKET + "/test/", dn + "/temp_dir", recursive=True)
+            # there is now in local directory:
+            # dn+'/temp_dir/accounts.1.json'
+            # dn+'/temp_dir/accounts.2.json'
+            data1 = files["test/accounts.1.json"]
+            assert open(dn + "/temp_dir/accounts.1.json", "rb").read() == data1
+            gcs.put(
+                dn + "/temp_dir/accounts.1.json",
+                protocol + TEST_BUCKET + "/temp_dir/",
+                recursive=True,
+            )
+            # there is now in remote directory:
+            # protocol+TEST_BUCKET+'/temp_dir/accounts.1.json'
+            assert gcs.du(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == len(
+                data1
+            )
+            assert (
+                gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
+            )
+
+
 @my_vcr.use_cassette(match=["all"])
 def test_errors():
     with gcs_maker() as gcs:

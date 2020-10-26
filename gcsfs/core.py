@@ -32,6 +32,7 @@ import weakref
 
 from requests.exceptions import RequestException, ProxyError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
+from fsspec.utils import stringify_path
 from fsspec.implementations.http import get_client
 from .utils import ChecksumError, HttpError, is_retriable
 from . import __version__ as version
@@ -269,6 +270,20 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             self._session = None
         self.connect(method=token)
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        if isinstance(path, list):
+            return [cls._strip_protocol(p) for p in path]
+        path = stringify_path(path)
+        protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
+        for protocol in protos:
+            if path.startswith(protocol + "://"):
+                path = path[len(protocol) + 3 :]
+            elif path.startswith(protocol + "::"):
+                path = path[len(protocol) + 2 :]
+        # use of root_marker to make minimum required path, e.g., "/"
+        return path or cls.root_marker
 
     @property
     def session(self):
