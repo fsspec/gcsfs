@@ -431,7 +431,9 @@ class GCSFileSystem(AsyncFileSystem):
                     break
                 except Exception as e:  # noqa: E722
                     # TODO: catch specific exceptions
-                    logger.debug('Connection with method "%s" failed' % meth, exc_info=e)
+                    logger.debug(
+                        'Connection with method "%s" failed' % meth, exc_info=e
+                    )
         else:
             self.__getattribute__("_connect_" + method)()
             self.method = method
