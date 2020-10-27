@@ -444,9 +444,11 @@ class GCSFileSystem(AsyncFileSystem):
                         self.ls("anaconda-public-data")
                     logger.debug("Connected with method %s", meth)
                     break
-                except:  # noqa: E722
+                except Exception as e:  # noqa: E722
                     # TODO: catch specific exceptions
-                    logger.debug('Connection with method "%s" failed' % meth)
+                    logger.debug(
+                        'Connection with method "%s" failed' % meth, exc_info=e
+                    )
         else:
             self.__getattribute__("_connect_" + method)()
             self.method = method
