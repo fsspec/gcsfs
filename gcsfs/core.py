@@ -493,7 +493,9 @@ class GCSFileSystem(AsyncFileSystem):
     async def _call(
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
-        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs}")
+        kwargs_without_data = kwargs.copy()
+        kwargs_without_data.pop("data", None)
+        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs_without_data}")
         self.maybe_refresh()
         path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
 
