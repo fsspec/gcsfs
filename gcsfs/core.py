@@ -595,7 +595,7 @@ class GCSFileSystem(AsyncFileSystem):
 
         return result
 
-    async def _list_objects(self, path):
+    async def _list_objects(self, path, prefix=""):
         bucket, key = self.split_path(path)
         path = path.rstrip("/")
 
@@ -612,7 +612,7 @@ class GCSFileSystem(AsyncFileSystem):
             if key:
                 raise
 
-        items, prefixes = await self._do_list_objects(path)
+        items, prefixes = await self._do_list_objects(path, prefix=prefix)
 
         pseudodirs = [
             {
@@ -633,10 +633,11 @@ class GCSFileSystem(AsyncFileSystem):
         self.dircache[path] = out
         return out
 
-    async def _do_list_objects(self, path, max_results=None, delimiter="/"):
+    async def _do_list_objects(self, path, max_results=None, delimiter="/", prefix=""):
         """Object listing for the given {bucket}/{prefix}/ path."""
-        bucket, prefix = self.split_path(path)
-        prefix = None if not prefix else prefix.rstrip("/") + "/"
+        bucket, _path = self.split_path(path)
+        _path = "" if not _path else _path.rstrip("/") + "/"
+        prefix = f"{_path}{prefix}" or None
 
         prefixes = []
         items = []
@@ -815,14 +816,19 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             raise FileNotFoundError(path)
 
-    async def _ls(self, path, detail=False, **kwargs):
+    def glob(self, path, **kwargs):
+        if "**" in path:
+            kwargs.setdefault("prefix", path.split("**")[0].split("/")[-1])
+        return super().glob(path, **kwargs)
+
+    async def _ls(self, path, detail=False, prefix="", **kwargs):
         """List objects under the given '/{bucket}/{prefix} path."""
         path = self._strip_protocol(path).rstrip("/")
 
         if path in ["/", ""]:
             out = await self._list_buckets()
         else:
-            out = await self._list_objects(path)
+            out = await self._list_objects(path, prefix=prefix)
 
         if detail:
             return out
@@ -1095,10 +1101,12 @@ class GCSFileSystem(AsyncFileSystem):
         except IOError:
             return False
 
-    def find(self, path, withdirs=False, detail=False, **kwargs):
+    def find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
-        out, _ = sync(self.loop, self._do_list_objects, path, delimiter=None)
+        out, _ = sync(
+            self.loop, self._do_list_objects, path, delimiter=None, prefix=prefix
+        )
         if not out and key:
             try:
                 out = [sync(self.loop, self._get_object, path)]
