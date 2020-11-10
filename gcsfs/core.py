@@ -589,11 +589,22 @@ class GCSFileSystem(AsyncFileSystem):
             # listing.
             raise FileNotFoundError(path)
 
-        result = self._process_object(
-            bucket, await self._call("GET", "b/{}/o/{}", bucket, key, json_out=True)
-        )
-
-        return result
+        res = None
+        # Work around various permission settings. Prefer an object get (storage.objects.get), but
+        # fall back to a bucket list + filter to object name (storage.objects.list).
+        try:
+            res = await self._call("GET", "b/{}/o/{}", bucket, key, json_out=True)
+        except OSError as e:
+            if not str(e).startswith("Forbidden"):
+                raise
+            resp = await self._call("GET", "b/{}/o/", bucket, prefix=key, json_out=True)
+            for item in resp.get("items", []):
+                if item["name"] == key:
+                    res = item
+                    break
+            if res is None:
+                raise FileNotFoundError(path)
+        return self._process_object(bucket, res)
 
     async def _list_objects(self, path, prefix=""):
         bucket, key = self.split_path(path)
@@ -799,7 +810,8 @@ class GCSFileSystem(AsyncFileSystem):
             return await self._get_object(path)
         except FileNotFoundError:
             pass
-        out = await self._ls(path, detail=True, **kwargs)
+        kwargs["detail"] = True  # Force to true for info
+        out = await self._ls(path, **kwargs)
         out0 = [o for o in out if o["name"].rstrip("/") == path]
         if out0:
             # exact hit
