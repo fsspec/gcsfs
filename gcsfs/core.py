@@ -597,7 +597,9 @@ class GCSFileSystem(AsyncFileSystem):
         except OSError as e:
             if not str(e).startswith("Forbidden"):
                 raise
-            resp = await self._call("GET", "b/{}/o/", bucket, prefix=key, json_out=True)
+            resp = await self._call(
+                "GET", "b/{}/o/", bucket, json_out=True, prefix=key, maxResults=1
+            )
             for item in resp.get("items", []):
                 if item["name"] == key:
                     res = item
