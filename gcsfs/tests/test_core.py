@@ -279,11 +279,18 @@ def test_gcs_glob():
         assert fn in gcs.glob(TEST_BUCKET + "/nested/file*")
         assert fn in gcs.glob(TEST_BUCKET + "/*/*")
         assert fn in gcs.glob(TEST_BUCKET + "/**")
+        assert fn in gcs.glob(TEST_BUCKET + "/**1")
         assert all(
             f in gcs.find(TEST_BUCKET)
             for f in gcs.glob(TEST_BUCKET + "/nested/*")
             if gcs.isfile(f)
         )
+        # Ensure the glob only fetches prefixed folders
+        gcs.dircache.clear()
+        gcs.glob(TEST_BUCKET + "/nested**1")
+        assert all(d.startswith(TEST_BUCKET + "/nested") for d in gcs.dircache)
+        gcs.glob(TEST_BUCKET + "/test*")
+        assert TEST_BUCKET + "/test" in gcs.dircache
 
 
 @my_vcr.use_cassette(match=["all"])
