@@ -363,6 +363,49 @@ def test_copy():
 
 
 @my_vcr.use_cassette(match=["all"])
+def test_copy_recursive():
+    with gcs_maker(True) as gcs:
+        src = TEST_BUCKET + "/nested"
+        dest = TEST_BUCKET + "/dest"
+        gcs.copy(src, dest, recursive=True)
+        for fn in gcs.ls(dest):
+            if not gcs.isdir(fn):
+                assert gcs.cat(fn) == gcs.cat(fn.replace("dest", "nested"))
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_copy_errors():
+    with gcs_maker(True) as gcs:
+
+        src = TEST_BUCKET + "/test/"
+        file1 = TEST_BUCKET + "/test/accounts.1.json"
+        file2 = TEST_BUCKET + "/test/accounts.2.json"
+        dne = TEST_BUCKET + "/test/notafile"
+        dest1 = TEST_BUCKET + "/dest1/"
+        dest2 = TEST_BUCKET + "/dest2/"
+
+        # Non recursive should raise an error unless we specify ignore
+        with pytest.raises(FileNotFoundError):
+            gcs.copy([file1, file2, dne], dest1)
+
+        gcs.copy([file1, file2, dne], dest1, on_error="ignore")
+        assert gcs.ls(dest1) == [dest1 + "accounts.1.json", dest1 + "accounts.2.json"]
+
+        # Recursive should raise an error only if we specify raise
+        # the patch simulates the filesystem finding a file that does not exist in the directory
+        current_files = gcs.expand_path(src, recursive=True)
+        with mock.patch.object(gcs, "expand_path", return_value=current_files + [dne]):
+            with pytest.raises(FileNotFoundError):
+                gcs.copy(src, dest2, recursive=True, on_error="raise")
+
+            gcs.copy(src, dest2, recursive=True)
+            assert gcs.ls(dest2) == [
+                dest2 + "accounts.1.json",
+                dest2 + "accounts.2.json",
+            ]
+
+
+@my_vcr.use_cassette(match=["all"])
 def test_move():
     with gcs_maker(True) as gcs:
         fn = TEST_BUCKET + "/test/accounts.1.json"
