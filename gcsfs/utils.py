@@ -10,7 +10,10 @@ class HttpError(Exception):
             self.code = error_response.get("code", None)
             self.message = error_response.get("message", "")
             if self.code:
-                self.message += ", %s" % self.code
+                if isinstance(self.message, bytes):
+                    self.message.extends(b", %s" % self.code)
+                else:
+                    self.message += ", %s" % self.code
         else:
             self.message = ""
             self.code = None
