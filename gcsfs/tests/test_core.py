@@ -946,14 +946,14 @@ def test_validate_response():
     with pytest.raises(HttpError) as e:
         gcs.validate_response(503, b"", None, "/path")
     assert e.value.code == 503
-    assert e.value.message == ""
+    assert e.value.message == ", 503"
 
     # HttpError with JSON body
     j = {"error": {"code": 503, "message": b"Service Unavailable"}}
     with pytest.raises(HttpError) as e:
         gcs.validate_response(503, None, j, "/path")
     assert e.value.code == 503
-    assert e.value.message == b"Service Unavailable"
+    assert e.value.message == b"Service Unavailable, 503"
 
     # 403
     j = {"error": {"message": "Not ok"}}
