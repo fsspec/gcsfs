@@ -7,8 +7,10 @@ class HttpError(Exception):
 
     def __init__(self, error_response=None):
         if error_response:
-            self.message = error_response.get("message", "")
             self.code = error_response.get("code", None)
+            self.message = error_response.get("message", "")
+            if self.code:
+                self.message += ", %s" % self.code
         else:
             self.message = ""
             self.code = None
