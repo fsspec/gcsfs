@@ -864,10 +864,14 @@ class GCSFileSystem(AsyncFileSystem):
         object = quote_plus(object)
         return u.format(bucket, object)
 
-    async def _cat_file(self, path):
+    async def _cat_file(self, path, start=None, end=None):
         """ Simple one-shot get of file data """
         u2 = self.url(path)
-        headers, out = await self._call("GET", u2)
+        if start or end:
+            head = {"Range": "bytes=%i-%s" % (start or 0, end - 1 if end else "")}
+        else:
+            head = {}
+        headers, out = await self._call("GET", u2, headers=head)
         return out
 
     def getxattr(self, path, attr):
