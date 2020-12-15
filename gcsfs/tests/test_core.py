@@ -415,6 +415,16 @@ def test_move():
         assert not gcs.exists(fn)
 
 
+@my_vcr.use_cassette(match=["all"])
+def test_cat_file():
+    with gcs_maker(True) as gcs:
+        fn = TEST_BUCKET + "/test/accounts.1.json"
+        data = gcs.cat_file(fn)
+        assert data[1:10] == gcs.cat_file(fn, start=1, end=10)
+        assert data[1:] == gcs.cat_file(fn, start=1)
+        assert data[:1] == gcs.cat_file(fn, end=1)
+
+
 @pytest.mark.skipif(ON_VCR, reason="async fail")
 @my_vcr.use_cassette(match=["all"])
 @pytest.mark.parametrize("consistency", [None, "size", "md5"])
