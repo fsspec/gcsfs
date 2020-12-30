@@ -1066,3 +1066,20 @@ def test_placeholder_dir_cache_validity():
 
         gcs.find(f"gs://{TEST_BUCKET}/a/")
         gcs.info(f"gs://{TEST_BUCKET}/b")
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_zero_cache_timeout():
+    with gcs_maker(True, cache_timeout=0) as gcs:
+        gcs.touch(f"gs://{TEST_BUCKET}/a/file")
+        gcs.find(f"gs://{TEST_BUCKET}/a/")
+        gcs.info(f"gs://{TEST_BUCKET}/a/file")
+        gcs.ls(f"gs://{TEST_BUCKET}/a/")
+
+        # The _times entry and exception below should only be present after
+        # https://github.com/intake/filesystem_spec/pull/513.
+        if f"{TEST_BUCKET}/a" not in gcs.dircache._times:
+            pytest.skip("fsspec version too early")
+
+        with pytest.raises(KeyError):
+            gcs.dircache[f"{TEST_BUCKET}/a"]

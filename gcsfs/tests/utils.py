@@ -212,8 +212,8 @@ def tmpfile(extension="", dir=None):
 
 
 @contextmanager
-def gcs_maker(populate=False):
-    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
+def gcs_maker(populate=False, **kwargs):
+    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, **kwargs)
     gcs.invalidate_cache()
     try:
         # ensure we're empty.
