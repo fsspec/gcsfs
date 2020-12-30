@@ -643,7 +643,9 @@ class GCSFileSystem(AsyncFileSystem):
             else:
                 return []
         out = items + pseudodirs
-        self.dircache[path] = out
+        # Don't cache prefixed/partial listings
+        if not prefix:
+            self.dircache[path] = out
         return out
 
     async def _do_list_objects(self, path, max_results=None, delimiter="/", prefix=""):
@@ -1153,8 +1155,11 @@ class GCSFileSystem(AsyncFileSystem):
                         "size": 0,
                     }
                 )
-                self.dircache[par] = []
-            self.dircache[par].append(o)
+            # Don't cache "folder-like" objects (ex: "Create Folder" in GCS console) to prevent
+            # masking subfiles in subsequent requests.
+            if not o["name"].endswith("/"):
+                self.dircache.setdefault(par, [])
+                self.dircache[par].append(o)
 
         if withdirs:
             out = sorted(out + dirs, key=lambda x: x["name"])

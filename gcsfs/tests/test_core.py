@@ -1045,3 +1045,24 @@ def test_metadata_read_permissions(
             with pytest.raises(expected_error):
                 gcs.info(TEST_BUCKET + file_path)
             assert gcs.exists(TEST_BUCKET + file_path) is False
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_ls_prefix_cache():
+    with gcs_maker(True) as gcs:
+        gcs.touch(f"gs://{TEST_BUCKET}/a/file1")
+        gcs.touch(f"gs://{TEST_BUCKET}/a/file2")
+
+        gcs.ls(f"gs://{TEST_BUCKET}/", prefix="a/file")
+        gcs.info(f"gs://{TEST_BUCKET}/a/file1")
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_placeholder_dir_cache_validity():
+    with gcs_maker(True) as gcs:
+        gcs.touch(f"gs://{TEST_BUCKET}/a/")
+        gcs.touch(f"gs://{TEST_BUCKET}/a/file")
+        gcs.touch(f"gs://{TEST_BUCKET}/b")
+
+        gcs.find(f"gs://{TEST_BUCKET}/a/")
+        gcs.info(f"gs://{TEST_BUCKET}/b")
