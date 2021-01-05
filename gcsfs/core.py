@@ -1141,6 +1141,7 @@ class GCSFileSystem(AsyncFileSystem):
                 out = []
         dirs = []
         sdirs = set()
+        cache_entries = {}
         for o in out:
             par = self._parent(o["name"])
             if par not in sdirs:
@@ -1158,8 +1159,9 @@ class GCSFileSystem(AsyncFileSystem):
             # Don't cache "folder-like" objects (ex: "Create Folder" in GCS console) to prevent
             # masking subfiles in subsequent requests.
             if not o["name"].endswith("/"):
-                self.dircache.setdefault(par, [])
-                self.dircache[par].append(o)
+                cache_entries.setdefault(par, [])
+                cache_entries[par].append(o)
+        self.dircache.update(cache_entries)
 
         if withdirs:
             out = sorted(out + dirs, key=lambda x: x["name"])
