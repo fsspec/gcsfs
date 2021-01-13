@@ -237,7 +237,6 @@ class GCSFileSystem(AsyncFileSystem):
         requester_pays=False,
         asynchronous=False,
         loop=None,
-        callback_timeout=None,
         **kwargs,
     ):
         super().__init__(
@@ -265,11 +264,8 @@ class GCSFileSystem(AsyncFileSystem):
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
-        self.callback_timeout = callback_timeout
         if not asynchronous:
-            self._session = sync(
-                self.loop, get_client, callback_timeout=self.callback_timeout
-            )
+            self._session = sync(self.loop, get_client)
             weakref.finalize(self, sync, self.loop, self.session.close)
         else:
             self._session = None
@@ -556,12 +552,7 @@ class GCSFileSystem(AsyncFileSystem):
     @property
     def buckets(self):
         """Return list of available project buckets."""
-        return [
-            b["name"]
-            for b in sync(
-                self.loop, self._list_buckets(), callback_timeout=self.callback_timeout
-            )
-        ]
+        return [b["name"] for b in sync(self.loop, self._list_buckets())]
 
     @staticmethod
     def _process_object(bucket, object_metadata):
@@ -1141,23 +1132,11 @@ class GCSFileSystem(AsyncFileSystem):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
         out, _ = sync(
-            self.loop,
-            self._do_list_objects,
-            path,
-            delimiter=None,
-            prefix=prefix,
-            callback_timeout=self.callback_timeout,
+            self.loop, self._do_list_objects, path, delimiter=None, prefix=prefix
         )
         if not out and key:
             try:
-                out = [
-                    sync(
-                        self.loop,
-                        self._get_object,
-                        path,
-                        callback_timeout=self.callback_timeout,
-                    )
-                ]
+                out = [sync(self.loop, self._get_object, path)]
             except FileNotFoundError:
                 out = []
         dirs = []
@@ -1243,13 +1222,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     def rm(self, path, recursive=False, batchsize=20):
         paths = self.expand_path(path, recursive=recursive)
-        sync(
-            self.loop,
-            self._rm,
-            paths,
-            callback_timeout=self.callback_timeout,
-            batchsize=batchsize,
-        )
+        sync(self.loop, self._rm, paths, batchsize=batchsize)
 
     def _open(
         self,
@@ -1367,7 +1340,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         consistency="md5",
         metadata=None,
         content_type=None,
-        callback_timeout=None,
         **kwargs,
     ):
         """
@@ -1396,8 +1368,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             content types at https://www.iana.org/assignments/media-types/media-types.txt
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
-        callback_timeout: int
-            Timeout seconds for the asynchronous callback.
         """
         super().__init__(
             gcsfs,
@@ -1419,7 +1389,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.acl = acl
         self.consistency = consistency
         self.content_type = content_type or "application/octet-stream"
-        self.callback_timeout = callback_timeout
         if self.consistency == "md5":
             self.md5 = md5()
         if mode == "wb":
@@ -1519,7 +1488,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.key,
             self.content_type,
             self.metadata,
-            callback_timeout=self.callback_timeout,
         )
 
     def discard(self):
@@ -1552,7 +1520,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.metadata,
             self.consistency,
             self.content_type,
-            callback_timeout=self.callback_timeout,
         )
 
     def _fetch_range(self, start=None, end=None):
