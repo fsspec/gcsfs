@@ -267,7 +267,9 @@ class GCSFileSystem(AsyncFileSystem):
         self.check_credentials = check_connection
         self.callback_timeout = callback_timeout
         if not asynchronous:
-            self._session = sync(self.loop, get_client, callback_timeout=self.callback_timeout)
+            self._session = sync(
+                self.loop, get_client, callback_timeout=self.callback_timeout
+            )
             weakref.finalize(self, sync, self.loop, self.session.close)
         else:
             self._session = None
@@ -554,7 +556,12 @@ class GCSFileSystem(AsyncFileSystem):
     @property
     def buckets(self):
         """Return list of available project buckets."""
-        return [b["name"] for b in sync(self.loop, self._list_buckets(), callback_timeout=self.callback_timeout)]
+        return [
+            b["name"]
+            for b in sync(
+                self.loop, self._list_buckets(), callback_timeout=self.callback_timeout
+            )
+        ]
 
     @staticmethod
     def _process_object(bucket, object_metadata):
@@ -1134,11 +1141,23 @@ class GCSFileSystem(AsyncFileSystem):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
         out, _ = sync(
-            self.loop, self._do_list_objects, path, delimiter=None, prefix=prefix,
-            callback_timeout=self.callback_timeout)
+            self.loop,
+            self._do_list_objects,
+            path,
+            delimiter=None,
+            prefix=prefix,
+            callback_timeout=self.callback_timeout,
+        )
         if not out and key:
             try:
-                out = [sync(self.loop, self._get_object, path, callback_timeout=self.callback_timeout)]
+                out = [
+                    sync(
+                        self.loop,
+                        self._get_object,
+                        path,
+                        callback_timeout=self.callback_timeout,
+                    )
+                ]
             except FileNotFoundError:
                 out = []
         dirs = []
@@ -1224,7 +1243,13 @@ class GCSFileSystem(AsyncFileSystem):
 
     def rm(self, path, recursive=False, batchsize=20):
         paths = self.expand_path(path, recursive=recursive)
-        sync(self.loop, self._rm, paths, callback_timeout=self.callback_timeout, batchsize=batchsize)
+        sync(
+            self.loop,
+            self._rm,
+            paths,
+            callback_timeout=self.callback_timeout,
+            batchsize=batchsize,
+        )
 
     def _open(
         self,
