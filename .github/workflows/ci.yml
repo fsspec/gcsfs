@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         shell: bash -l {0}
         run: |
-          conda install -c conda-forge pytest requests decorator google-auth vcrpy aiohttp google-auth-oauthlib bdist_wheel google-cloud-core google-api-core google-api-python-client -y
+          conda install -c conda-forge pytest requests decorator google-auth vcrpy aiohttp google-auth-oauthlib wheel google-cloud-core google-api-core google-api-python-client -y
           pip install git+https://github.com/intake/filesystem_spec --no-deps
           conda list
           conda --version
