@@ -39,8 +39,8 @@ jobs:
         shell: bash -l {0}
         run: GCSFS_RECORD_MODE=none py.test -vv gcsfs
 
-      - name: Lint
+      - name: Run pre-commit hooks
         shell: bash -l {0}
         run: |
-          flake8 gcsfs
-          black gcsfs --check
+          pip install pre-commit
+          pre-commit run --all-file
