@@ -388,6 +388,8 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             raise ValueError("Token format not understood")
         self.credentials = credentials
+        if self.credentials.valid:
+            self.credentials.apply(self.heads)
 
     def maybe_refresh(self):
         # this uses requests and is blocking
