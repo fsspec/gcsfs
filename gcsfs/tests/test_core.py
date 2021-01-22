@@ -6,34 +6,35 @@ import io
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
-from urllib.parse import parse_qs, urlparse
-
+from urllib.parse import urlparse, parse_qs
 import pytest
 import requests
+
 from fsspec.utils import seek_delimiter
 from requests.exceptions import ProxyError
 
-from gcsfs import __version__ as version
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.utils import ChecksumError, HttpError
+
 from gcsfs.tests.settings import (
-    GOOGLE_TOKEN,
-    ON_VCR,
-    TEST_BUCKET,
     TEST_PROJECT,
+    GOOGLE_TOKEN,
+    TEST_BUCKET,
     TEST_REQUESTER_PAYS_BUCKET,
+    ON_VCR,
 )
 from gcsfs.tests.utils import (
+    tempdir,
+    my_vcr,
+    gcs_maker,
+    files,
+    csv_files,
+    text_files,
     a,
     b,
-    csv_files,
-    files,
-    gcs_maker,
-    my_vcr,
-    tempdir,
-    text_files,
     tmpfile,
 )
-from gcsfs.utils import ChecksumError, HttpError
+from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs import __version__ as version
 
 pytestmark = pytest.mark.usefixtures("token_restore")
 
