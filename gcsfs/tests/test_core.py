@@ -73,14 +73,12 @@ def test_simple_upload():
         assert gcs.cat(fn) == b"zz"
 
 
-# @my_vcr.use_cassette(match=["all"])
+@my_vcr.use_cassette(match=["all"])
 def test_large_upload():
     with gcs_maker() as gcs:
         fn = TEST_BUCKET + "/test"
-        d = b"7" * (2 ** 31)
-        print("Opening")
+        d = b"71" * (2 ** 30)
         with gcs.open(fn, "wb", content_type="application/octet-stream") as f:
-            print("Writing")
             f.write(d)
         assert gcs.cat(fn) == d
 

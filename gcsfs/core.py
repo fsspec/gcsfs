@@ -81,6 +81,7 @@ bACLs = {
 DEFAULT_PROJECT = os.environ.get("GCSFS_DEFAULT_PROJECT", "")
 
 GCS_MIN_BLOCK_SIZE = 2 ** 18
+GCS_MAX_BLOCK_SIZE = 2 ** 30
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
 
@@ -1449,12 +1450,17 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         data = self.buffer.getvalue()
         head = {}
         l = len(data)
+
+        # Select the biggest possible chunk of data to be uploaded
+        chunk_length = min(l, GCS_MAX_BLOCK_SIZE)
+        chunk = data[:chunk_length]
+
         if final and self.autocommit:
             if l:
                 # last chunk
                 head["Content-Range"] = "bytes %i-%i/%i" % (
                     self.offset,
-                    self.offset + l - 1,
+                    self.offset + chunk_length - 1,
                     self.offset + l,
                 )
             else:
@@ -1467,10 +1473,22 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     return False
                 elif not final:
                     raise ValueError("Non-final chunk write below min size.")
-            head["Content-Range"] = "bytes %i-%i/*" % (self.offset, self.offset + l - 1)
-        head.update({"Content-Type": self.content_type, "Content-Length": str(l)})
+            if chunk_length != l:
+                head["Content-Range"] = "bytes %i-%i/%i" % (
+                    self.offset,
+                    self.offset + chunk_length - 1,
+                    self.offset + l,
+                )
+            else:
+                head["Content-Range"] = "bytes %i-%i/*" % (
+                    self.offset,
+                    self.offset + l - 1,
+                )
+        head.update(
+            {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
+        )
         headers, contents = self.gcsfs.call(
-            "POST", self.location, headers=head, data=data
+            "POST", self.location, headers=head, data=chunk
         )
         if "Range" in headers:
             end = int(headers["Range"].split("-")[1])
@@ -1486,7 +1504,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             else:
                 if self.consistency == "md5":
                     # check this chunk against X-Range-MD5 response header?
-                    self.md5.update(data)
+                    self.md5.update(chunk)
         elif l:
             #
             assert final, "Response looks like upload is over"
