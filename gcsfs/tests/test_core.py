@@ -6,35 +6,34 @@ import io
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 import requests
-
 from fsspec.utils import seek_delimiter
 from requests.exceptions import ProxyError
 
-from gcsfs.utils import ChecksumError, HttpError
-
+from gcsfs import __version__ as version
+from gcsfs.core import GCSFileSystem, quote_plus
 from gcsfs.tests.settings import (
-    TEST_PROJECT,
     GOOGLE_TOKEN,
-    TEST_BUCKET,
-    TEST_REQUESTER_PAYS_BUCKET,
     ON_VCR,
+    TEST_BUCKET,
+    TEST_PROJECT,
+    TEST_REQUESTER_PAYS_BUCKET,
 )
 from gcsfs.tests.utils import (
-    tempdir,
-    my_vcr,
-    gcs_maker,
-    files,
-    csv_files,
-    text_files,
     a,
     b,
+    csv_files,
+    files,
+    gcs_maker,
+    my_vcr,
+    tempdir,
+    text_files,
     tmpfile,
 )
-from gcsfs.core import GCSFileSystem, quote_plus
-from gcsfs import __version__ as version
+from gcsfs.utils import ChecksumError, HttpError
 
 pytestmark = pytest.mark.usefixtures("token_restore")
 
@@ -72,6 +71,18 @@ def test_simple_upload():
         with gcs.open(fn, "wb") as f:
             f.write(b"zz")
         assert gcs.cat(fn) == b"zz"
+
+
+# @my_vcr.use_cassette(match=["all"])
+def test_large_upload():
+    with gcs_maker() as gcs:
+        fn = TEST_BUCKET + "/test"
+        d = b"7" * (2 ** 31)
+        print("Opening")
+        with gcs.open(fn, "wb", content_type="application/octet-stream") as f:
+            print("Writing")
+            f.write(d)
+        assert gcs.cat(fn) == d
 
 
 @pytest.mark.xfail(reason="oddness in repeat VCR calls")

@@ -2,40 +2,40 @@
 """
 Google Cloud Storage pythonic interface
 """
-import textwrap
 import asyncio
-import fsspec
-
-from base64 import b64encode, b64decode
-import google.auth as gauth
-import google.auth.compute_engine
-import google.auth.credentials
-from google.auth.exceptions import GoogleAuthError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request
-from hashlib import md5
 import io
 import json
 import logging
+import math
 import os
-import posixpath
-import requests
 import pickle
+import posixpath
+import random
 import re
-import requests
+import textwrap
 import threading
 import warnings
-import random
 import weakref
+from base64 import b64decode, b64encode
+from hashlib import md5
 
-from requests.exceptions import RequestException, ProxyError
-from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
-from fsspec.utils import stringify_path
+import fsspec
+import google.auth as gauth
+import google.auth.compute_engine
+import google.auth.credentials
+import requests
+from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
 from fsspec.implementations.http import get_client
-from .utils import ChecksumError, HttpError, is_retriable
+from fsspec.utils import stringify_path
+from google.auth.exceptions import GoogleAuthError
+from google.auth.transport.requests import Request
+from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from requests.exceptions import ProxyError, RequestException
+
 from . import __version__ as version
+from .utils import ChecksumError, HttpError, is_retriable
 
 logger = logging.getLogger("gcsfs")
 if "GCSFS_DEBUG" in os.environ:
@@ -1448,62 +1448,75 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         data = self.buffer.getvalue()
         head = {}
-        l = len(data)
-        if final and self.autocommit:
-            if l:
-                # last chunk
-                head["Content-Range"] = "bytes %i-%i/%i" % (
+        full_length = len(data)
+        CHUNK_SIZE = 2 ** 30
+        n_chunks = math.ceil(full_length / CHUNK_SIZE)
+        chunks = (
+            data[(i * CHUNK_SIZE) : ((i + 1) * CHUNK_SIZE)] for i in range(n_chunks)
+        )
+        for i_chunk, chunk in enumerate(chunks):
+            print("Chunk:", i_chunk)
+            l = len(chunk)
+            if final and self.autocommit:
+                if l:
+                    # last chunk
+                    head["Content-Range"] = "bytes %i-%i/%i" % (
+                        self.offset,
+                        self.offset + l - 1,
+                        self.offset + full_length,
+                    )
+                else:
+                    # closing when buffer is empty
+                    head["Content-Range"] = "bytes */%i" % self.offset
+                    chunk = None
+            else:
+                if l < GCS_MIN_BLOCK_SIZE:
+                    if not self.autocommit:
+                        return False
+                    elif not final:
+                        raise ValueError("Non-final chunk write below min size.")
+                head["Content-Range"] = "bytes %i-%i/*" % (
                     self.offset,
                     self.offset + l - 1,
-                    self.offset + l,
                 )
-            else:
-                # closing when buffer is empty
-                head["Content-Range"] = "bytes */%i" % self.offset
-                data = None
-        else:
-            if l < GCS_MIN_BLOCK_SIZE:
-                if not self.autocommit:
+            head.update({"Content-Type": self.content_type, "Content-Length": str(l)})
+            headers, contents = self.gcsfs.call(
+                "POST", self.location, headers=head, data=chunk
+            )
+            if "Range" in headers:
+                end = int(headers["Range"].split("-")[1])
+                shortfall = (self.offset + l - 1) - end
+                if shortfall:
+                    if self.consistency == "md5":
+                        self.md5.update(chunk[:-shortfall])
+                        # check this chunk against X-Range-MD5 response header?
+                    self.buffer = io.BytesIO(
+                        chunk[-shortfall:] + data[i_chunk * CHUNK_SIZE :]
+                    )
+                    self.buffer.seek(shortfall)
+                    self.offset += full_length - shortfall
                     return False
-                elif not final:
-                    raise ValueError("Non-final chunk write below min size.")
-            head["Content-Range"] = "bytes %i-%i/*" % (self.offset, self.offset + l - 1)
-        head.update({"Content-Type": self.content_type, "Content-Length": str(l)})
-        headers, contents = self.gcsfs.call(
-            "POST", self.location, headers=head, data=data
-        )
-        if "Range" in headers:
-            end = int(headers["Range"].split("-")[1])
-            shortfall = (self.offset + l - 1) - end
-            if shortfall:
+                else:
+                    if self.consistency == "md5":
+                        # check this chunk against X-Range-MD5 response header?
+                        self.md5.update(chunk)
+            elif l:
+                #
+                assert final, "Response looks like upload is over"
+                j = json.loads(contents)
+                size, md5 = int(j["size"]), j["md5Hash"]
+                if self.consistency == "size":
+                    # update offset with final chunk of data
+                    self.offset += l
+                    assert size == self.buffer.tell() + self.offset, "Size mismatch"
                 if self.consistency == "md5":
-                    self.md5.update(data[:-shortfall])
-                    # check this chunk against X-Range-MD5 response header?
-                self.buffer = io.BytesIO(data[-shortfall:])
-                self.buffer.seek(shortfall)
-                self.offset += l - shortfall
-                return False
+                    # update md5 with final chunk of data
+                    self.md5.update(chunk)
+                    assert (
+                        b64encode(self.md5.digest()) == md5.encode()
+                    ), "MD5 checksum failed"
             else:
-                if self.consistency == "md5":
-                    # check this chunk against X-Range-MD5 response header?
-                    self.md5.update(data)
-        elif l:
-            #
-            assert final, "Response looks like upload is over"
-            j = json.loads(contents)
-            size, md5 = int(j["size"]), j["md5Hash"]
-            if self.consistency == "size":
-                # update offset with final chunk of data
-                self.offset += l
-                assert size == self.buffer.tell() + self.offset, "Size mismatch"
-            if self.consistency == "md5":
-                # update md5 with final chunk of data
-                self.md5.update(data)
-                assert (
-                    b64encode(self.md5.digest()) == md5.encode()
-                ), "MD5 checksum failed"
-        else:
-            assert final, "Response looks like upload is over"
+                assert final, "Response looks like upload is over"
         return True
 
     def commit(self):
