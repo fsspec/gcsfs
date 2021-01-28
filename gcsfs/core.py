@@ -500,13 +500,15 @@ class GCSFileSystem(AsyncFileSystem):
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
         logger.debug(f"{method.upper()}: {path}, {args}, {kwargs}")
-        self.maybe_refresh()
-        path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
 
         for retry in range(self.retries):
             try:
                 if retry > 0:
                     await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
+                self.maybe_refresh()
+                path, jsonin, datain, headers, kwargs = self._get_args(
+                    path, *args, **kwargs
+                )
                 async with self.session.request(
                     method=method,
                     url=path,
@@ -1152,14 +1154,12 @@ class GCSFileSystem(AsyncFileSystem):
         )
         if not out and key:
             try:
-                out = [
-                    sync(
-                        self.loop,
-                        self._get_object,
-                        path,
-                        callback_timeout=self.callback_timeout,
-                    )
-                ]
+                out = sync(
+                    self.loop,
+                    self._get_object,
+                    path,
+                    callback_timeout=self.callback_timeout,
+                )
             except FileNotFoundError:
                 out = []
         dirs = []

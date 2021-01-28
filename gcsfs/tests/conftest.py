@@ -5,6 +5,11 @@ from gcsfs.tests.settings import TEST_PROJECT, TEST_BUCKET
 import vcr.stubs.aiohttp_stubs as aios
 
 
+import fsspec.config
+
+fsspec.config.conf.pop("gcs", None)
+
+
 @pytest.yield_fixture
 def token_restore():
     cache = GCSFileSystem.tokens
