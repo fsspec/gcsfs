@@ -506,7 +506,9 @@ class GCSFileSystem(AsyncFileSystem):
                 if retry > 0:
                     await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
                 self.maybe_refresh()
-                path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
+                path, jsonin, datain, headers, kwargs = self._get_args(
+                    path, *args, **kwargs
+                )
                 async with self.session.request(
                     method=method,
                     url=path,

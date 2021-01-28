@@ -6,6 +6,7 @@ import vcr.stubs.aiohttp_stubs as aios
 
 
 import fsspec.config
+
 fsspec.config.conf.pop("gcs", None)
 
 
