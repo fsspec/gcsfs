@@ -1190,7 +1190,7 @@ class GCSFileSystem(AsyncFileSystem):
             out = sorted(out + dirs, key=lambda x: x["name"])
 
         if detail:
-            return out
+            return {o["name"]: o for o in out}
         return [o["name"] for o in out]
 
     async def _get_file(self, rpath, lpath, **kwargs):
