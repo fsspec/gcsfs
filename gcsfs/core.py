@@ -1240,8 +1240,14 @@ class GCSFileSystem(AsyncFileSystem):
                     bit.split("=")[1]
                     for bit in r.headers["X-Goog-Hash"].split(",")
                     if bit.split("=")[0] == "md5"
-                ][0]
-                assert b64encode(md.digest()).decode().rstrip("=") == dig
+                ]
+                if dig:
+                    assert b64encode(md.digest()).decode().rstrip("=") == dig[0]
+                else:
+                    raise NotImplementedError(
+                        "No md5 checksum available to do consistency check. GCS does "
+                        "not provide md5 sums for composite objects."
+                    )
 
     def rm(self, path, recursive=False, batchsize=20):
         paths = self.expand_path(path, recursive=recursive)
