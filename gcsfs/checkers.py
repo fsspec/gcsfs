@@ -83,6 +83,9 @@ class Crc32cChecker(ConsistencyChecker):
         digest = self.crc32c.digest()
         assert base64.b64encode(digest) == gcs_object["crc32c"]
 
+    def validate_http_response(self, r):
+        raise NotImplementedError()
+
 
 def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
     if consistency == "size":
