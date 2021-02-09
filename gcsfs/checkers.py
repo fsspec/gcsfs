@@ -96,9 +96,7 @@ def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
         return SizeChecker()
     elif consistency == "md5":
         return MD5Checker()
-    elif consistency == "none":
-        return ConsistencyChecker()
-    elif consistency is None:
-        return ConsistencyChecker()
+    elif consistency == "crc32c":
+        return Crc32cChecker()
     else:
-        raise NotImplementedError()
+        return ConsistencyChecker()

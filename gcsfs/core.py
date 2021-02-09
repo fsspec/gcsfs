@@ -1225,7 +1225,6 @@ class GCSFileSystem(AsyncFileSystem):
 
             checker.validate_http_response(r)
 
-
     def rm(self, path, recursive=False, batchsize=20):
         paths = self.expand_path(path, recursive=recursive)
         sync(
@@ -1366,11 +1365,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             ACL to apply, if any, one of ``ACLs``. New files are normally
             "bucketownerfullcontrol", but a default can be configured per
             bucket.
-        consistency: str, 'none', 'size', 'md5'
+        consistency: str, 'none', 'size', 'md5', 'crc32c'
             Check for success in writing, applied at file close.
             'size' ensures that the number of bytes reported by GCS matches
             the number we wrote; 'md5' does a full checksum. Any value other
-            than 'size' or 'md5' is assumed to mean no checking.
+            than 'size' or 'md5' or 'crc32' is assumed to mean no checking.
         content_type: str
             default is `application/octet-stream`. See the list of available
             content types at https://www.iana.org/assignments/media-types/media-types.txt
