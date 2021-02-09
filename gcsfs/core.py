@@ -14,7 +14,6 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
-from hashlib import md5
 import io
 import json
 import logging
@@ -1323,7 +1322,7 @@ class GCSFileSystem(AsyncFileSystem):
             else:
                 raise RuntimeError(msg)
         else:
-            if not headers is None:
+            if headers is not None:
                 checker = MD5Checker()
                 checker.update(content)
                 checker.validate_headers(headers)

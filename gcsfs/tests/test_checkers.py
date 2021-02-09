@@ -1,4 +1,3 @@
-from _pytest.assertion import AssertionState
 from gcsfs.utils import ChecksumError
 from gcsfs.checkers import Crc32cChecker, MD5Checker, SizeChecker
 from hashlib import md5

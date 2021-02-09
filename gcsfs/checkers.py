@@ -1,4 +1,4 @@
-from base64 import b64encode, b64decode
+from base64 import b64encode
 import base64
 from typing import Optional
 from hashlib import md5
