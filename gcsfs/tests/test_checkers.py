@@ -1,3 +1,4 @@
+from _pytest.assertion import AssertionState
 from gcsfs.utils import ChecksumError
 from gcsfs.checkers import MD5Checker, SizeChecker
 from hashlib import md5
@@ -6,89 +7,79 @@ import base64
 import pytest
 
 
-def google_response_from_data(data: bytes, checksum=None):
+def google_response_from_data(expected_data: bytes, actual_data=None):
 
-    if checksum is None:
-        checksum = md5(data)
-        checksum_b64 = base64.b64encode(checksum.digest()).decode("UTF-8")
-    else:
-        checksum_b64 = checksum
+    actual_data = actual_data or expected_data
+    checksum = md5(actual_data)
+    checksum_b64 = base64.b64encode(checksum.digest()).decode("UTF-8")
 
     class response:
-        content_length = len(data)
+        content_length = len(actual_data)
         headers = {"X-Goog-Hash": f"md5={checksum_b64}"}
 
     return response
 
 
-def test_size_checker_json():
-    checker = SizeChecker()
-    data = b"hello world"
-    checker.update(data)
-    checker.validate_json_response({"size": len(data)})
+def google_json_response_from_data(expected_data: bytes, actual_data=None):
+    actual_data = actual_data or expected_data
+    checksum = md5(actual_data)
+    checksum_b64 = base64.b64encode(checksum.digest()).decode("UTF-8")
+
+    return {"md5Hash": checksum_b64, "size": len(actual_data)}
 
 
-def test_size_checker_json_raises_error():
-    checker = SizeChecker()
-    data = b"hello world"
-    checker.update(data)
-    with pytest.raises(AssertionError):
-        checker.validate_json_response({"size": 1})
-
-
-def test_size_checker_http():
-    checker = SizeChecker()
-    data = b"hello world"
-
-    class response:
-        content_length = len(data)
-
-    checker.update(data)
-    checker.validate_http_response(response)
-
-
-def test_size_checker_http_raises_error():
-    checker = SizeChecker()
-    data = b"hello world"
-    response = google_response_from_data(data)
-
-    # set incorrect length
-    response.content_length = 1
-
-    checker.update(data)
-    with pytest.raises(AssertionError):
-        checker.validate_http_response(response)
-
-
-def test_md5_checker_http():
+@pytest.mark.parametrize(
+    "data, actual_data, raises",
+    [
+        (b"hello world", b"different checksum", (ChecksumError,)),
+        (b"hello world", b"hello world", ()),
+    ],
+)
+def test_md5_checker_validate_headers(data, actual_data, raises):
     checker = MD5Checker()
-    data = b"hello world"
-    response = google_response_from_data(data)
-
-    checker.update(data)
-    checker.validate_http_response(response)
-    checker.validate_headers(response.headers)
-
-
-def test_md5_checker_http_raisers_checksum_error():
-    checker = MD5Checker()
-    data = b"hello world"
-    response = google_response_from_data(data, checksum=b"not the real hash")
-
+    response = google_response_from_data(actual_data)
     checker.update(data)
 
-    with pytest.raises(ChecksumError):
-        checker.validate_http_response(response)
-
-    with pytest.raises(ChecksumError):
+    if raises:
+        with pytest.raises(raises):
+            checker.validate_headers(response.headers)
+    else:
         checker.validate_headers(response.headers)
 
 
-def test_md5_checker_json():
-    checker = MD5Checker()
-    data = b"hello world"
-    checksum = md5(data)
-    checksum_b64 = base64.b64encode(checksum.digest()).decode("UTF-8")
-
+@pytest.mark.parametrize(
+    "checker, data, actual_data, raises",
+    [
+        (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
+        (MD5Checker(), b"hello world", b"hello world", ()),
+        (SizeChecker(), b"hello world", b"hello world", ()),
+        (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
+    ],
+)
+def test_checker_validate_http_response(checker, data, actual_data, raises):
+    response = google_response_from_data(data, actual_data=actual_data)
     checker.update(data)
-    checker.validate_json_response({"md5Hash": checksum_b64})
+    if raises:
+        with pytest.raises(raises):
+            checker.validate_http_response(response)
+    else:
+        checker.validate_http_response(response)
+
+
+@pytest.mark.parametrize(
+    "checker, data, actual_data, raises",
+    [
+        (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
+        (MD5Checker(), b"hello world", b"hello world", ()),
+        (SizeChecker(), b"hello world", b"hello world", ()),
+        (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
+    ],
+)
+def test_checker_validate_json_response(checker, data, actual_data, raises):
+    response = google_json_response_from_data(data, actual_data=actual_data)
+    checker.update(data)
+    if raises:
+        with pytest.raises(raises):
+            checker.validate_json_response(response)
+    else:
+        checker.validate_json_response(response)

@@ -1,7 +1,10 @@
 from base64 import b64encode, b64decode
+import base64
 from typing import Optional
 from hashlib import md5
 from .utils import ChecksumError
+
+import crcmod
 
 
 class ConsistencyChecker:
@@ -30,7 +33,8 @@ class MD5Checker(ConsistencyChecker):
 
     def validate_json_response(self, gcs_object):
         mdback = gcs_object["md5Hash"]
-        assert b64encode(self.md.digest()) == mdback.encode(), "MD5 checksum failed"
+        if b64encode(self.md.digest()) != mdback.encode():
+            raise ChecksumError("MD5 checksum failed")
 
     def validate_headers(self, headers):
         if headers is not None and "X-Goog-Hash" in headers:
@@ -65,6 +69,19 @@ class SizeChecker(ConsistencyChecker):
 
     def validate_http_response(self, r):
         assert r.content_length == self.size
+
+
+class Crc32cChecker(ConsistencyChecker):
+    def __init__(self):
+        self.crc32c = crcmod.Crc(0x11EDC6F41, initCrc=0, xorOut=0xFFFFFFFF)
+
+    def update(self, data: bytes):
+        self.crc32c.update(data)
+
+    def validate_json_response(self, gcs_object):
+        # docs for gcs_object: https://cloud.google.com/storage/docs/json_api/v1/objects
+        digest = self.crc32c.digest()
+        assert base64.b64encode(digest) == gcs_object["crc32c"]
 
 
 def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
