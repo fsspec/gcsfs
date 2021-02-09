@@ -1324,9 +1324,10 @@ class GCSFileSystem(AsyncFileSystem):
             else:
                 raise RuntimeError(msg)
         else:
-            checker = MD5Checker()
-            checker.update(content)
-            checker.validate_headers(headers)
+            if not headers is None:
+                checker = MD5Checker()
+                checker.update(content)
+                checker.validate_headers(headers)
 
 
 GCSFileSystem.load_tokens()
