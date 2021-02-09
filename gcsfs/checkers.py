@@ -52,7 +52,7 @@ class MD5Checker(ConsistencyChecker):
     def validate_http_response(self, r):
         return self.validate_headers(r.headers)
 
-            
+
 class SizeChecker(ConsistencyChecker):
     def __init__(self):
         self.size = 0
@@ -61,14 +61,14 @@ class SizeChecker(ConsistencyChecker):
         self.size += len(data)
 
     def validate_json_response(self, gcs_object):
-        assert int(gcs_object['size']) == self.size, "Size mismatch"
+        assert int(gcs_object["size"]) == self.size, "Size mismatch"
 
     def validate_http_response(self, r):
         assert r.content_length == self.size
 
 
 def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
-    if consistency == 'size':
+    if consistency == "size":
         return SizeChecker()
     elif consistency == "md5":
         return MD5Checker()
@@ -78,4 +78,3 @@ def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
         return ConsistencyChecker()
     else:
         raise NotImplementedError()
-
