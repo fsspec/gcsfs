@@ -81,7 +81,11 @@ class Crc32cChecker(ConsistencyChecker):
     def validate_json_response(self, gcs_object):
         # docs for gcs_object: https://cloud.google.com/storage/docs/json_api/v1/objects
         digest = self.crc32c.digest()
-        assert base64.b64encode(digest) == gcs_object["crc32c"]
+        digest_b64 = base64.b64encode(digest).decode()
+        expected = gcs_object["crc32c"]
+
+        if digest_b64 != expected:
+            raise ChecksumError(f'Expected "{expected}". Got "{digest_b64}"')
 
     def validate_http_response(self, r):
         raise NotImplementedError()
