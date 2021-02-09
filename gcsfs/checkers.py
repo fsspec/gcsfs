@@ -4,7 +4,11 @@ from typing import Optional
 from hashlib import md5
 from .utils import ChecksumError
 
-import crcmod
+
+try:
+    import crcmod
+except ImportError:
+    crcmod = None
 
 
 class ConsistencyChecker:
@@ -97,6 +101,12 @@ def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
     elif consistency == "md5":
         return MD5Checker()
     elif consistency == "crc32c":
-        return Crc32cChecker()
+        if crcmod is None:
+            raise ImportError(
+                "The python package `crcmod` is required for `consistency='crc32c'`. "
+                "This can be installed with `pip install gcsfs[crc]`"
+            )
+        else:
+            return Crc32cChecker()
     else:
         return ConsistencyChecker()
