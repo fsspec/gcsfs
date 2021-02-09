@@ -1322,7 +1322,7 @@ class GCSFileSystem(AsyncFileSystem):
             else:
                 raise RuntimeError(msg)
         else:
-            if headers is not None:
+            if headers is not None and "X-Goog-Hash" in headers:
                 checker = MD5Checker()
                 checker.update(content)
                 checker.validate_headers(headers)
