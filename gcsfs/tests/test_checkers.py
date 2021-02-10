@@ -1,5 +1,5 @@
 from gcsfs.utils import ChecksumError
-from gcsfs.checkers import Crc32cChecker, MD5Checker, SizeChecker
+from gcsfs.checkers import Crc32cChecker, MD5Checker, SizeChecker, crcmod
 from hashlib import md5
 import base64
 
@@ -61,16 +61,20 @@ def test_md5_checker_validate_headers(data, actual_data, raises):
         checker.validate_headers(response.headers)
 
 
-@pytest.mark.parametrize(
-    "checker, data, actual_data, raises",
-    [
-        (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
-        (MD5Checker(), b"hello world", b"hello world", ()),
-        (SizeChecker(), b"hello world", b"hello world", ()),
-        (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
-        (Crc32cChecker(), b"hello world", b"different size", (NotImplementedError,)),
-    ],
-)
+params = [
+    (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
+    (MD5Checker(), b"hello world", b"hello world", ()),
+    (SizeChecker(), b"hello world", b"hello world", ()),
+    (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
+]
+
+if crcmod is not None:
+    params.append(
+        (Crc32cChecker(), b"hello world", b"different size", (NotImplementedError,))
+    )
+
+
+@pytest.mark.parametrize("checker, data, actual_data, raises", params)
 def test_checker_validate_http_response(checker, data, actual_data, raises):
     response = google_response_from_data(data, actual_data=actual_data)
     checker.update(data)
@@ -81,17 +85,22 @@ def test_checker_validate_http_response(checker, data, actual_data, raises):
         checker.validate_http_response(response)
 
 
-@pytest.mark.parametrize(
-    "checker, data, actual_data, raises",
-    [
-        (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
-        (MD5Checker(), b"hello world", b"hello world", ()),
-        (SizeChecker(), b"hello world", b"hello world", ()),
-        (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
-        (Crc32cChecker(), b"hello world", b"different checksum", (ChecksumError,)),
-        (Crc32cChecker(), b"hello world\n", b"hello world\n", ()),
-    ],
-)
+params = [
+    (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
+    (MD5Checker(), b"hello world", b"hello world", ()),
+    (SizeChecker(), b"hello world", b"hello world", ()),
+    (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
+]
+if crcmod is not None:
+    params.extend(
+        [
+            (Crc32cChecker(), b"hello world", b"different checksum", (ChecksumError,)),
+            (Crc32cChecker(), b"hello world\n", b"hello world\n", ()),
+        ]
+    )
+
+
+@pytest.mark.parametrize("checker, data, actual_data, raises", params)
 def test_checker_validate_json_response(checker, data, actual_data, raises):
     response = google_json_response_from_data(data, actual_data=actual_data)
     checker.update(data)
