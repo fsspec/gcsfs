@@ -1147,12 +1147,14 @@ class GCSFileSystem(AsyncFileSystem):
         )
         if not out and key:
             try:
-                out = [sync(
-                    self.loop,
-                    self._get_object,
-                    path,
-                    callback_timeout=self.callback_timeout,
-                )]
+                out = [
+                    sync(
+                        self.loop,
+                        self._get_object,
+                        path,
+                        callback_timeout=self.callback_timeout,
+                    )
+                ]
             except FileNotFoundError:
                 out = []
         dirs = []
