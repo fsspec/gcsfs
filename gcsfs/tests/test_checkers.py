@@ -69,13 +69,12 @@ params = [
 ]
 
 if crcmod is not None:
-    params.append((Crc32cChecker(), b"hello world", b"different size", (NotImplementedError,)))
+    params.append(
+        (Crc32cChecker(), b"hello world", b"different size", (NotImplementedError,))
+    )
 
 
-@pytest.mark.parametrize(
-    "checker, data, actual_data, raises",
-    params
-)
+@pytest.mark.parametrize("checker, data, actual_data, raises", params)
 def test_checker_validate_http_response(checker, data, actual_data, raises):
     response = google_response_from_data(data, actual_data=actual_data)
     checker.update(data)
@@ -93,16 +92,15 @@ params = [
     (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
 ]
 if crcmod is not None:
-    params.extend([
-        (Crc32cChecker(), b"hello world", b"different checksum", (ChecksumError,)),
-        (Crc32cChecker(), b"hello world\n", b"hello world\n", ()),
-    ])
+    params.extend(
+        [
+            (Crc32cChecker(), b"hello world", b"different checksum", (ChecksumError,)),
+            (Crc32cChecker(), b"hello world\n", b"hello world\n", ()),
+        ]
+    )
 
 
-@pytest.mark.parametrize(
-    "checker, data, actual_data, raises",
-    params
-)
+@pytest.mark.parametrize("checker, data, actual_data, raises", params)
 def test_checker_validate_json_response(checker, data, actual_data, raises):
     response = google_json_response_from_data(data, actual_data=actual_data)
     checker.update(data)
