@@ -34,6 +34,7 @@ from gcsfs.tests.utils import (
     tmpfile,
 )
 from gcsfs.core import GCSFileSystem, quote_plus
+import gcsfs.checkers
 from gcsfs import __version__ as version
 
 pytestmark = pytest.mark.usefixtures("token_restore")
@@ -429,6 +430,8 @@ def test_cat_file():
 @my_vcr.use_cassette(match=["all"])
 @pytest.mark.parametrize("consistency", [None, "size", "md5", "crc32c"])
 def test_get_put(consistency):
+    if consistency == "crc32c" and gcsfs.checkers.crcmod is None:
+        pytest.skip("No CRC")
     with gcs_maker(True) as gcs:
         gcs.consistency = consistency
         with tmpfile() as fn:
