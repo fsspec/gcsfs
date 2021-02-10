@@ -6,7 +6,6 @@ import textwrap
 import asyncio
 import fsspec
 
-from base64 import b64encode, b64decode
 import google.auth as gauth
 import google.auth.compute_engine
 import google.auth.credentials
@@ -15,7 +14,6 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
-from hashlib import md5
 import io
 import json
 import logging
@@ -35,6 +33,7 @@ from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path
 from fsspec.implementations.http import get_client
 from .utils import ChecksumError, HttpError, is_retriable
+from .checkers import get_consistency_checker, MD5Checker
 from . import __version__ as version
 
 logger = logging.getLogger("gcsfs")
@@ -501,13 +500,15 @@ class GCSFileSystem(AsyncFileSystem):
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
         logger.debug(f"{method.upper()}: {path}, {args}, {kwargs}")
-        self.maybe_refresh()
-        path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
 
         for retry in range(self.retries):
             try:
                 if retry > 0:
                     await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
+                self.maybe_refresh()
+                path, jsonin, datain, headers, kwargs = self._get_args(
+                    path, *args, **kwargs
+                )
                 async with self.session.request(
                     method=method,
                     url=path,
@@ -1075,12 +1076,10 @@ class GCSFileSystem(AsyncFileSystem):
                 out = await upload_chunk(
                     self, location, bit, offset, size, content_type
                 )
-        if consistency == "size":
-            assert int(out["size"]) == size
-        elif consistency == "md5":
-            md = md5()
-            md.update(data)
-            assert out["md5Hash"] == b64encode(md.digest()).decode()
+
+        checker = get_consistency_checker(consistency)
+        checker.update(data)
+        checker.validate_json_response(out)
         self.invalidate_cache(self._parent(path))
 
     async def _put_file(
@@ -1097,11 +1096,11 @@ class GCSFileSystem(AsyncFileSystem):
         if os.path.isdir(lpath):
             return
         consistency = consistency or self.consistency
+        checker = get_consistency_checker(consistency)
         bucket, key = self.split_path(rpath)
         with open(lpath, "rb") as f0:
             size = f0.seek(0, 2)
             f0.seek(0)
-            md = md5()
             if size < 5 * 2 ** 20:
                 return await simple_upload(
                     self,
@@ -1125,13 +1124,9 @@ class GCSFileSystem(AsyncFileSystem):
                         self, location, bit, offset, size, content_type
                     )
                     offset += len(bit)
-                    if consistency == "md5":
-                        # check this chunk against X-Range-MD5 response header?
-                        md.update(bit)
-            if consistency == "size":
-                assert int(out["size"]) == size
-            elif consistency == "md5":
-                assert out["md5Hash"] == b64encode(md.digest()).decode()
+                    checker.update(bit)
+
+            checker.validate_json_response(out)
             self.invalidate_cache(self._parent(rpath))
 
     async def _isdir(self, path):
@@ -1153,14 +1148,12 @@ class GCSFileSystem(AsyncFileSystem):
         )
         if not out and key:
             try:
-                out = [
-                    sync(
-                        self.loop,
-                        self._get_object,
-                        path,
-                        callback_timeout=self.callback_timeout,
-                    )
-                ]
+                out = sync(
+                    self.loop,
+                    self._get_object,
+                    path,
+                    callback_timeout=self.callback_timeout,
+                )
             except FileNotFoundError:
                 out = []
         dirs = []
@@ -1219,30 +1212,18 @@ class GCSFileSystem(AsyncFileSystem):
             timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
-            if self.consistency == "md5":
-                md = md5()
+            checker = get_consistency_checker(consistency)
 
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
             with open(lpath, "wb") as f2:
-                size = 0
                 while True:
                     data = await r.content.read(4096)
                     if not data:
                         break
                     f2.write(data)
-                    if consistency == "md5":
-                        md.update(data)
-                    size = f2.tell()
+                    checker.update(data)
 
-            if consistency == "size":
-                assert r.content_length == size
-            if consistency == "md5":
-                dig = [
-                    bit.split("=")[1]
-                    for bit in r.headers["X-Goog-Hash"].split(",")
-                    if bit.split("=")[0] == "md5"
-                ][0]
-                assert b64encode(md.digest()).decode().rstrip("=") == dig
+            checker.validate_http_response(r)
 
     def rm(self, path, recursive=False, batchsize=20):
         paths = self.expand_path(path, recursive=recursive)
@@ -1343,14 +1324,9 @@ class GCSFileSystem(AsyncFileSystem):
                 raise RuntimeError(msg)
         else:
             if headers is not None and "X-Goog-Hash" in headers:
-                # if header includes md5 hash, check that data matches
-                bits = headers["X-Goog-Hash"].split(",")
-                for bit in bits:
-                    key, val = bit.split("=", 1)
-                    if key == "md5":
-                        md = b64decode(val)
-                        if md5(content).digest() != md:
-                            raise ChecksumError("Checksum failure")
+                checker = MD5Checker()
+                checker.update(content)
+                checker.validate_headers(headers)
 
 
 GCSFileSystem.load_tokens()
@@ -1389,11 +1365,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             ACL to apply, if any, one of ``ACLs``. New files are normally
             "bucketownerfullcontrol", but a default can be configured per
             bucket.
-        consistency: str, 'none', 'size', 'md5'
+        consistency: str, 'none', 'size', 'md5', 'crc32c'
             Check for success in writing, applied at file close.
             'size' ensures that the number of bytes reported by GCS matches
             the number we wrote; 'md5' does a full checksum. Any value other
-            than 'size' or 'md5' is assumed to mean no checking.
+            than 'size' or 'md5' or 'crc32' is assumed to mean no checking.
         content_type: str
             default is `application/octet-stream`. See the list of available
             content types at https://www.iana.org/assignments/media-types/media-types.txt
@@ -1420,11 +1396,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.key = key
         self.metadata = metadata
         self.acl = acl
-        self.consistency = consistency
+        self.checker = get_consistency_checker(consistency)
         self.content_type = content_type or "application/octet-stream"
         self.callback_timeout = callback_timeout
-        if self.consistency == "md5":
-            self.md5 = md5()
         if mode == "wb":
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
                 warnings.warn("Setting block size to minimum value, 2**18")
@@ -1494,32 +1468,18 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             end = int(headers["Range"].split("-")[1])
             shortfall = (self.offset + l - 1) - end
             if shortfall:
-                if self.consistency == "md5":
-                    self.md5.update(data[:-shortfall])
-                    # check this chunk against X-Range-MD5 response header?
+                self.checker.update(data[:-shortfall])
                 self.buffer = io.BytesIO(data[-shortfall:])
                 self.buffer.seek(shortfall)
                 self.offset += l - shortfall
                 return False
             else:
-                if self.consistency == "md5":
-                    # check this chunk against X-Range-MD5 response header?
-                    self.md5.update(chunk)
+                self.checker.update(data)
         elif l:
-            #
             assert final, "Response looks like upload is over"
             j = json.loads(contents)
-            size, md5 = int(j["size"]), j["md5Hash"]
-            if self.consistency == "size":
-                # update offset with final chunk of data
-                self.offset += l
-                assert size == self.buffer.tell() + self.offset, "Size mismatch"
-            if self.consistency == "md5":
-                # update md5 with final chunk of data
-                self.md5.update(data)
-                assert (
-                    b64encode(self.md5.digest()) == md5.encode()
-                ), "MD5 checksum failed"
+            self.checker.update(data)
+            self.checker.validate_json_response(j)
         else:
             assert final, "Response looks like upload is over"
         return True
@@ -1641,6 +1601,7 @@ async def simple_upload(
     consistency=None,
     content_type="application/octet-stream",
 ):
+    checker = get_consistency_checker(consistency)
     path = "https://www.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(bucket)
     metadata = {"name": key}
     if metadatain is not None:
@@ -1665,10 +1626,5 @@ async def simple_upload(
         data=data,
         json_out=True,
     )
-    size, mdback = int(j["size"]), j["md5Hash"]
-    if consistency == "size":
-        assert size == len(datain)
-    if consistency == "md5":
-        md = md5()
-        md.update(datain)
-        assert b64encode(md.digest()) == mdback.encode(), "MD5 checksum failed"
+    checker.update(datain)
+    checker.validate_json_response(j)

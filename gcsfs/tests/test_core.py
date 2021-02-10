@@ -437,7 +437,7 @@ def test_cat_file():
 
 @pytest.mark.skipif(ON_VCR, reason="async fail")
 @my_vcr.use_cassette(match=["all"])
-@pytest.mark.parametrize("consistency", [None, "size", "md5"])
+@pytest.mark.parametrize("consistency", [None, "size", "md5", "crc32c"])
 def test_get_put(consistency):
     with gcs_maker(True) as gcs:
         gcs.consistency = consistency
