@@ -499,7 +499,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _call(
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
-        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs}")
+        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs.get('headers')}")
 
         for retry in range(self.retries):
             try:
@@ -1428,60 +1428,56 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         # Select the biggest possible chunk of data to be uploaded
         chunk_length = min(l, GCS_MAX_BLOCK_SIZE)
         chunk = data[:chunk_length]
+        shortfall = True
 
-        if final and self.autocommit:
-            if l:
-                # last chunk
-                head["Content-Range"] = "bytes %i-%i/%i" % (
-                    self.offset,
-                    self.offset + chunk_length - 1,
-                    self.offset + l,
-                )
+        while shortfall:
+            if final and self.autocommit and chunk_length == l:
+                if l:
+                    # last chunk
+                    head["Content-Range"] = "bytes %i-%i/%i" % (
+                        self.offset,
+                        self.offset + chunk_length - 1,
+                        self.offset + l,
+                    )
+                else:
+                    # closing when buffer is empty
+                    head["Content-Range"] = "bytes */%i" % self.offset
+                    data = None
             else:
-                # closing when buffer is empty
-                head["Content-Range"] = "bytes */%i" % self.offset
-                data = None
-        else:
-            if l < GCS_MIN_BLOCK_SIZE:
-                if not self.autocommit:
-                    return False
-                elif not final:
-                    raise ValueError("Non-final chunk write below min size.")
-            if chunk_length != l:
-                head["Content-Range"] = "bytes %i-%i/%i" % (
-                    self.offset,
-                    self.offset + chunk_length - 1,
-                    self.offset + l,
-                )
-            else:
+                if l < GCS_MIN_BLOCK_SIZE:
+                    if not self.autocommit:
+                        return False
+                    elif not final:
+                        raise ValueError("Non-final chunk write below min size.")
                 head["Content-Range"] = "bytes %i-%i/*" % (
-                    self.offset,
-                    self.offset + l - 1,
+                        self.offset,
+                        self.offset + chunk_length - 1
                 )
-        head.update(
-            {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
-        )
-        headers, contents = self.gcsfs.call(
-            "POST", self.location, headers=head, data=chunk
-        )
-        if "Range" in headers:
-            end = int(headers["Range"].split("-")[1])
-            shortfall = (self.offset + l - 1) - end
-            if shortfall:
-                self.checker.update(data[:-shortfall])
-                self.buffer = io.BytesIO(data[-shortfall:])
-                self.buffer.seek(shortfall)
-                self.offset += l - shortfall
-                return False
-            else:
+            head.update(
+                {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
+            )
+            headers, contents = self.gcsfs.call(
+                "POST", self.location, headers=head, data=chunk
+            )
+            if "Range" in headers:
+                end = int(headers["Range"].split("-")[1])
+                shortfall = (self.offset + l - 1) - end
+                if shortfall:
+                    self.checker.update(data[:-shortfall])
+                    self.buffer = io.BytesIO(data[-shortfall:])
+                    self.buffer.seek(shortfall)
+                    self.offset += l - shortfall
+                    continue
+                else:
+                    self.checker.update(data)
+            elif l:
+                assert final, "Response looks like upload is over"
+                j = json.loads(contents)
                 self.checker.update(data)
-        elif l:
-            assert final, "Response looks like upload is over"
-            j = json.loads(contents)
-            self.checker.update(data)
-            self.checker.validate_json_response(j)
-        else:
-            assert final, "Response looks like upload is over"
+                self.checker.validate_json_response(j)
+            else:
+                assert final, "Response looks like upload is over"
+            break
         return True
 
     def commit(self):
