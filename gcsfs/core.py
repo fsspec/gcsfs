@@ -37,7 +37,9 @@ from .checkers import get_consistency_checker, MD5Checker
 from . import __version__ as version
 
 logger = logging.getLogger("gcsfs")
-if "GCSFS_DEBUG" in os.environ:
+
+
+def set_logger(level="DEBUG"):
     handle = logging.StreamHandler()
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s " "- %(message)s"
@@ -45,6 +47,10 @@ if "GCSFS_DEBUG" in os.environ:
     handle.setFormatter(formatter)
     logger.addHandler(handle)
     logger.setLevel("DEBUG")
+
+
+if "GCSFS_DEBUG" in os.environ:
+    set_logger()
 
 
 # client created 2018-01-16
@@ -80,7 +86,7 @@ bACLs = {
 DEFAULT_PROJECT = os.environ.get("GCSFS_DEFAULT_PROJECT", "")
 
 GCS_MIN_BLOCK_SIZE = 2 ** 18
-GCS_MAX_BLOCK_SIZE = 2 ** 30
+GCS_MAX_BLOCK_SIZE = 2 ** 28
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
 
@@ -1421,16 +1427,25 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         final: bool
             Complete and commit upload
         """
-        data = self.buffer.getvalue()
-        head = {}
-        l = len(data)
-
-        # Select the biggest possible chunk of data to be uploaded
-        chunk_length = min(l, GCS_MAX_BLOCK_SIZE)
-        chunk = data[:chunk_length]
         shortfall = True
 
         while shortfall:
+            # shortfall splits blocks bigger than max allowed upload
+            data = self.buffer.getvalue()
+            head = {}
+            l = len(data)
+            if (l < GCS_MIN_BLOCK_SIZE) or (
+                shortfall is not True and l < self.blocksize
+            ):
+                if not final:
+                    # either flush() was called, but we don't have enough to push,
+                    # or we split a big upload, and have less left than one block.
+                    # If this is the final part, OK to violate those terms.
+                    return False
+
+            # Select the biggest possible chunk of data to be uploaded
+            chunk_length = min(l, GCS_MAX_BLOCK_SIZE)
+            chunk = data[:chunk_length]
             if final and self.autocommit and chunk_length == l:
                 if l:
                     # last chunk
@@ -1444,14 +1459,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     head["Content-Range"] = "bytes */%i" % self.offset
                     data = None
             else:
-                if l < GCS_MIN_BLOCK_SIZE:
-                    if not self.autocommit:
-                        return False
-                    elif not final:
-                        raise ValueError("Non-final chunk write below min size.")
                 head["Content-Range"] = "bytes %i-%i/*" % (
-                        self.offset,
-                        self.offset + chunk_length - 1
+                    self.offset,
+                    self.offset + chunk_length - 1,
                 )
             head.update(
                 {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}

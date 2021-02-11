@@ -74,9 +74,12 @@ def test_simple_upload():
         assert gcs.cat(fn) == b"zz"
 
 
-@my_vcr.use_cassette(match=["all"])
+#  @my_vcr.use_cassette(match=["all"])
+@pytest.skip
 def test_large_upload():
     import gcsfs.core
+
+    orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
     gcsfs.core.GCS_MAX_BLOCK_SIZE = 10 * 2 ** 20
     try:
         with gcs_maker() as gcs:
@@ -86,7 +89,7 @@ def test_large_upload():
                 f.write(d)
             assert gcs.cat(fn) == d
     finally:
-        gcsfs.core.GCS_MAX_BLOCK_SIZE = 2 ** 30
+        gcsfs.core.GCS_MAX_BLOCK_SIZE = orig
 
 
 @pytest.mark.xfail(reason="oddness in repeat VCR calls")
