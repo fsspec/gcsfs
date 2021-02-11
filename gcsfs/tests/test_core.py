@@ -75,8 +75,8 @@ def test_simple_upload():
 
 
 #  @my_vcr.use_cassette(match=["all"])
-@pytest.skip("later")
 def test_large_upload():
+    pytest.skip()
     import gcsfs.core
 
     orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
