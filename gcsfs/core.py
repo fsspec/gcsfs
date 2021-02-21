@@ -1427,21 +1427,18 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         final: bool
             Complete and commit upload
         """
-        shortfall = True
-
-        while shortfall:
+        while True:
             # shortfall splits blocks bigger than max allowed upload
             data = self.buffer.getvalue()
             head = {}
             l = len(data)
-            if (l < GCS_MIN_BLOCK_SIZE) or (
-                shortfall is not True and l < self.blocksize
-            ):
-                if not final:
-                    # either flush() was called, but we don't have enough to push,
-                    # or we split a big upload, and have less left than one block.
-                    # If this is the final part, OK to violate those terms.
-                    return False
+
+            if (l < GCS_MIN_BLOCK_SIZE) and not final:
+                # either flush() was called, but we don't have enough to
+                # push, or we split a big upload, and have less left than one
+                # block.  If this is the final part, OK to violate those
+                # terms.
+                return False
 
             # Select the biggest possible chunk of data to be uploaded
             chunk_length = min(l, GCS_MAX_BLOCK_SIZE)
@@ -1480,13 +1477,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     continue
                 else:
                     self.checker.update(data)
-            elif l:
-                assert final, "Response looks like upload is over"
-                j = json.loads(contents)
-                self.checker.update(data)
-                self.checker.validate_json_response(j)
             else:
                 assert final, "Response looks like upload is over"
+                if l:
+                    j = json.loads(contents)
+                    self.checker.update(data)
+                    self.checker.validate_json_response(j)
+            # Clear buffer and update offset when all is received
+            self.buffer = io.BytesIO()
+            self.offset += l
             break
         return True
 
