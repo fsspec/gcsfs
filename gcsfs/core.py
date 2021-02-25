@@ -1552,7 +1552,7 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
         end = int(headers["Range"].split("-")[1])
         shortfall = (offset + l - 1) - end
         if shortfall:
-            return await upload_chunk(fs, data[-shortfall:], end, size, content_type)
+            return await upload_chunk(fs, location, data[-shortfall:], end, size, content_type)
     return json.loads(txt) if txt else None
 
 
