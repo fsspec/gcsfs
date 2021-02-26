@@ -1226,8 +1226,8 @@ class GCSFileSystem(AsyncFileSystem):
 
             checker.validate_http_response(r)
 
-    def rm(self, path, recursive=False, batchsize=20):
-        paths = self.expand_path(path, recursive=recursive)
+    def rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+        paths = self.expand_path(path, recursive=recursive, maxdepth=maxdepth)
         sync(
             self.loop,
             self._rm,
