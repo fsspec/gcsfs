@@ -76,7 +76,8 @@ params = [
 ]
 
 if crcmod is not None:
-    params.append((Crc32cChecker(), b"hello world", b"different size", ()))
+    params.append((Crc32cChecker(), b"hello world", b"hello world", ()))
+    params.append((Crc32cChecker(), b"hello world", b"different size", (ChecksumError, )))
 
 
 @pytest.mark.parametrize("checker, data, actual_data, raises", params)
