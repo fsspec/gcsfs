@@ -11,10 +11,16 @@ def google_response_from_data(expected_data: bytes, actual_data=None):
     actual_data = actual_data or expected_data
     checksum = md5(actual_data)
     checksum_b64 = base64.b64encode(checksum.digest()).decode("UTF-8")
+    if crcmod is not None:
+        checksum = crcmod.Crc(0x11EDC6F41, initCrc=0, xorOut=0xFFFFFFFF)
+        checksum.update(actual_data)
+        crc = base64.b64encode(checksum.digest()).decode()
 
     class response:
         content_length = len(actual_data)
         headers = {"X-Goog-Hash": f"md5={checksum_b64}"}
+        if crcmod is not None:
+            headers["X-Goog-Hash"] += f",crc32c={crc}"
 
     return response
 
@@ -43,14 +49,15 @@ def google_json_response_from_data(expected_data: bytes, actual_data=None):
 
 
 @pytest.mark.parametrize(
-    "data, actual_data, raises",
+    "checker, data, actual_data, raises",
     [
-        (b"hello world", b"different checksum", (ChecksumError,)),
-        (b"hello world", b"hello world", ()),
+        (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
+        (MD5Checker(), b"hello world", b"hello world", ()),
+        (Crc32cChecker(), b"hello world", b"different checksum", (ChecksumError,)),
+        (Crc32cChecker(), b"hello world", b"hello world", ()),
     ],
 )
-def test_md5_checker_validate_headers(data, actual_data, raises):
-    checker = MD5Checker()
+def test_validate_headers(checker, data, actual_data, raises):
     response = google_response_from_data(actual_data)
     checker.update(data)
 
@@ -69,8 +76,9 @@ params = [
 ]
 
 if crcmod is not None:
+    params.append((Crc32cChecker(), b"hello world", b"hello world", ()))
     params.append(
-        (Crc32cChecker(), b"hello world", b"different size", (NotImplementedError,))
+        (Crc32cChecker(), b"hello world", b"different size", (ChecksumError,))
     )
 
 

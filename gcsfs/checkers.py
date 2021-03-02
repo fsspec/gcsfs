@@ -91,8 +91,17 @@ class Crc32cChecker(ConsistencyChecker):
         if digest_b64 != expected:
             raise ChecksumError(f'Expected "{expected}". Got "{digest_b64}"')
 
+    def validate_headers(self, headers):
+        if headers is not None:
+            hasher = headers.get("X-Goog-Hash", "")
+            crc = [h.split("=", 1)[1] for h in hasher.split(",") if "crc32c" in h]
+            if not crc:
+                raise NotImplementedError("No crc32c checksum was provided by google!")
+            if crc[0] != b64encode(self.crc32c.digest()).decode():
+                raise ChecksumError()
+
     def validate_http_response(self, r):
-        raise NotImplementedError()
+        return self.validate_headers(r.headers)
 
 
 def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
