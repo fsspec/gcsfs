@@ -93,12 +93,10 @@ class Crc32cChecker(ConsistencyChecker):
 
     def validate_headers(self, headers):
         if headers is not None:
-            hasher = headers.get('X-Goog-Hash', "")
-            crc = [h.split("=", 1)[1] for h in hasher.split(',') if "crc32c" in h]
+            hasher = headers.get("X-Goog-Hash", "")
+            crc = [h.split("=", 1)[1] for h in hasher.split(",") if "crc32c" in h]
             if not crc:
-                raise NotImplementedError(
-                    "No crc32c checksum was provided by google!"
-                )
+                raise NotImplementedError("No crc32c checksum was provided by google!")
             if crc[0] != b64encode(self.crc32c.digest()).decode():
                 raise ChecksumError()
 
