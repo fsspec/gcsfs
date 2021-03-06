@@ -1161,24 +1161,27 @@ class GCSFileSystem(AsyncFileSystem):
         sdirs = set()
         cache_entries = {}
         for o in out:
-            par = self._parent(o["name"])
-            if par not in sdirs:
-                sdirs.add(par)
-                dirs.append(
-                    {
-                        "Key": self.split_path(par)[1],
-                        "Size": 0,
-                        "name": par,
-                        "StorageClass": "DIRECTORY",
-                        "type": "directory",
-                        "size": 0,
-                    }
-                )
-            # Don't cache "folder-like" objects (ex: "Create Folder" in GCS console) to prevent
-            # masking subfiles in subsequent requests.
-            if not o["name"].endswith("/"):
-                cache_entries.setdefault(par, [])
-                cache_entries[par].append(o)
+            par = o["name"]
+            while par:
+                par = self._parent(par)
+                if par not in sdirs:
+                    if len(par) < len(path):
+                        break
+                    sdirs.add(par)
+                    dirs.append(
+                        {
+                            "Key": self.split_path(par)[1],
+                            "Size": 0,
+                            "name": par,
+                            "StorageClass": "DIRECTORY",
+                            "type": "directory",
+                            "size": 0,
+                        }
+                    )
+                # Don't cache "folder-like" objects (ex: "Create Folder" in GCS console) to prevent
+                # masking subfiles in subsequent requests.
+                if not o["name"].endswith("/"):
+                    cache_entries.setdefault(par, []).append(o)
         self.dircache.update(cache_entries)
 
         if withdirs:

@@ -1072,6 +1072,23 @@ def test_placeholder_dir_cache_validity():
 
 
 @my_vcr.use_cassette(match=["all"])
+def test_pseudo_dir_find():
+    with gcs_maker(False) as fs:
+        fs.touch(f"{TEST_BUCKET}/a/b/file")
+        b = set(fs.glob(f"{TEST_BUCKET}/a/*"))
+        assert f"{TEST_BUCKET}/a/b" in b
+        a = set(fs.glob(f"{TEST_BUCKET}/*"))
+        assert f"{TEST_BUCKET}/a" in a
+        assert fs.find(TEST_BUCKET) == [f"{TEST_BUCKET}/a/b/file"]
+        assert fs.find(f"{TEST_BUCKET}/a", withdirs=True) == [
+            f"{TEST_BUCKET}/a",
+            f"{TEST_BUCKET}/a/b",
+            f"{TEST_BUCKET}/a/b/file"
+        ]
+
+
+
+@my_vcr.use_cassette(match=["all"])
 def test_zero_cache_timeout():
     with gcs_maker(True, cache_timeout=0) as gcs:
         gcs.touch(f"gs://{TEST_BUCKET}/a/file")
