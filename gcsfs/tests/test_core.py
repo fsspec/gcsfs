@@ -1083,9 +1083,8 @@ def test_pseudo_dir_find():
         assert fs.find(f"{TEST_BUCKET}/a", withdirs=True) == [
             f"{TEST_BUCKET}/a",
             f"{TEST_BUCKET}/a/b",
-            f"{TEST_BUCKET}/a/b/file"
+            f"{TEST_BUCKET}/a/b/file",
         ]
-
 
 
 @my_vcr.use_cassette(match=["all"])
