@@ -124,6 +124,15 @@ async def _req_to_text(r):
         return (await r.read()).decode()
 
 
+def unjson(contents):
+    import ujson
+
+    try:
+        return ujson.loads(contents)
+    except:  # noqa: E722
+        return None
+
+
 class GCSFileSystem(AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -407,6 +416,7 @@ class GCSFileSystem(AsyncFileSystem):
         with self.lock:
             if self.credentials.valid:
                 return  # repeat to avoid race (but don't want lock in common case)
+            logger.debug("GCS refresh")
             self.credentials.refresh(req)
             self.credentials.apply(self.heads)
 
@@ -524,21 +534,15 @@ class GCSFileSystem(AsyncFileSystem):
                     data=datain,
                     timeout=self.requests_timeout,
                 ) as r:
-                    import json
 
                     status = r.status
                     headers = r.headers
                     info = r.request_info  # for debug only
                     contents = await r.read()
-                    try:
-                        json = json.loads(contents)
-                    except Exception:
-                        json = None
 
-                self.validate_response(status, contents, json, path, headers)
+                self.validate_response(status, contents, path, headers)
                 break
             except (HttpError, RequestException, GoogleAuthError, ChecksumError) as e:
-                json = None
                 if (
                     isinstance(e, HttpError)
                     and e.code == 400
@@ -555,7 +559,7 @@ class GCSFileSystem(AsyncFileSystem):
                 logger.exception("_call non-retriable exception: %s" % e)
                 raise e
         if json_out:
-            return json
+            return unjson(contents)
         elif info_out:
             return info
         else:
@@ -1296,7 +1300,7 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             return path.split("/", 1)
 
-    def validate_response(self, status, content, json, path, headers=None):
+    def validate_response(self, status, content, path, headers=None):
         """
         Check the requests object r, raise error if it's not ok.
 
@@ -1308,7 +1312,7 @@ class GCSFileSystem(AsyncFileSystem):
         if status >= 400:
             error = None
             try:
-                error = json["error"]
+                error = unjson(content)["error"]
                 msg = error["message"]
             except:  # noqa: E722
                 # TODO: limit to appropriate exceptions
@@ -1325,7 +1329,9 @@ class GCSFileSystem(AsyncFileSystem):
             elif error:
                 raise HttpError(error)
             elif status:
-                raise HttpError({"code": status})
+                raise HttpError(
+                    {"code": status, "message": content.decode()}
+                )  # text-like
             else:
                 raise RuntimeError(msg)
         else:

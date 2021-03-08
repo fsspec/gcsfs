@@ -74,17 +74,18 @@ def test_simple_upload():
         assert gcs.cat(fn) == b"zz"
 
 
-# @my_vcr.use_cassette(match=["all"])
+@my_vcr.use_cassette(match=["all"])
 def test_large_upload():
-    pytest.skip()
     import gcsfs.core
 
+    gcsfs.core.set_logger()
+
     orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
-    gcsfs.core.GCS_MAX_BLOCK_SIZE = 2 ** 20
+    gcsfs.core.GCS_MAX_BLOCK_SIZE = 262144  # minimum block size
     try:
         with gcs_maker() as gcs:
             fn = TEST_BUCKET + "/test"
-            d = b"7123" * 2 ** 20
+            d = b"7123" * 262144
             with gcs.open(fn, "wb", content_type="application/octet-stream") as f:
                 f.write(d)
             assert gcs.cat(fn) == d
