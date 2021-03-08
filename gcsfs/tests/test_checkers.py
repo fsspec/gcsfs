@@ -48,15 +48,19 @@ def google_json_response_from_data(expected_data: bytes, actual_data=None):
     return response
 
 
-@pytest.mark.parametrize(
-    "checker, data, actual_data, raises",
-    [
-        (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
-        (MD5Checker(), b"hello world", b"hello world", ()),
-        (Crc32cChecker(), b"hello world", b"different checksum", (ChecksumError,)),
-        (Crc32cChecker(), b"hello world", b"hello world", ()),
-    ],
-)
+params = [
+    (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
+    (MD5Checker(), b"hello world", b"hello world", ()),
+]
+
+if crcmod is not None:
+    params.append(
+        (Crc32cChecker(), b"hello world", b"different checksum", (ChecksumError,))
+    )
+    params.append((Crc32cChecker(), b"hello world", b"hello world", ()))
+
+
+@pytest.mark.parametrize("checker, data, actual_data, raises", params)
 def test_validate_headers(checker, data, actual_data, raises):
     response = google_response_from_data(actual_data)
     checker.update(data)
