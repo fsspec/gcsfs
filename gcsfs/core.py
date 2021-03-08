@@ -1330,7 +1330,10 @@ class GCSFileSystem(AsyncFileSystem):
                 raise HttpError(error)
             elif status:
                 raise HttpError(
-                    {"code": status, "message": content.decode() if content is not None else content}
+                    {
+                        "code": status,
+                        "message": content.decode() if content is not None else content,
+                    }
                 )  # text-like
             else:
                 raise RuntimeError(msg)
