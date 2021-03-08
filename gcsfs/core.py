@@ -1311,6 +1311,8 @@ class GCSFileSystem(AsyncFileSystem):
         """
         if status >= 400:
             error = None
+            if hasattr(content, "decode"):
+                content = content.decode()
             try:
                 error = unjson(content)["error"]
                 msg = error["message"]
@@ -1332,7 +1334,7 @@ class GCSFileSystem(AsyncFileSystem):
                 raise HttpError(
                     {
                         "code": status,
-                        "message": content.decode() if content is not None else content,
+                        "message": msg,
                     }
                 )  # text-like
             else:

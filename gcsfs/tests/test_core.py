@@ -969,25 +969,25 @@ def test_raise_on_project_mismatch(mock_auth):
 
 def test_validate_response():
     gcs = GCSFileSystem(token="anon")
-    gcs.validate_response(200, None, None, "/path")
+    gcs.validate_response(200, None, "/path")
 
     # HttpError with no JSON body
     with pytest.raises(HttpError) as e:
-        gcs.validate_response(503, b"", None, "/path")
+        gcs.validate_response(503, b"", "/path")
     assert e.value.code == 503
     assert e.value.message == ", 503"
 
     # HttpError with JSON body
-    j = {"error": {"code": 503, "message": b"Service Unavailable"}}
+    j = '{"error": {"code": 503, "message": "Service Unavailable"}}'
     with pytest.raises(HttpError) as e:
-        gcs.validate_response(503, None, j, "/path")
+        gcs.validate_response(503, j, "/path")
     assert e.value.code == 503
-    assert e.value.message == b"Service Unavailable, 503"
+    assert e.value.message == "Service Unavailable, 503"
 
     # 403
-    j = {"error": {"message": "Not ok"}}
+    j = '{"error": {"message": "Not ok"}}'
     with pytest.raises(IOError, match="Forbidden: /path\nNot ok"):
-        gcs.validate_response(403, None, j, "/path")
+        gcs.validate_response(403, j, "/path")
 
     # 404
     with pytest.raises(FileNotFoundError):
@@ -1000,7 +1000,7 @@ def test_validate_response():
     # ChecksumError
     md5 = repr(base64.b64encode(hashlib.md5(b"foo").digest()))[2:-1]
     with pytest.raises(ChecksumError):
-        gcs.validate_response(0, b"f", None, "/path", {"X-Goog-Hash": f"md5={md5}"})
+        gcs.validate_response(0, b"f", "/path", {"X-Goog-Hash": f"md5={md5}"})
 
 
 @my_vcr.use_cassette(match=["all"])
@@ -1045,12 +1045,12 @@ def test_metadata_read_permissions(
     with gcs_maker(True) as gcs:
         _validate_response = gcs.validate_response
 
-        def validate_response(self, status, content, json, path, headers=None):
+        def validate_response(self, status, content, path, headers=None):
             if path.endswith(f"/o{file_path}") and validate_get_error is not None:
                 raise validate_get_error
             if path.endswith("/o/") and validate_list_error is not None:
                 raise validate_list_error
-            _validate_response(status, content, json, path, headers=None)
+            _validate_response(status, content, path, headers=None)
 
         gcs.validate_response = validate_response.__get__(gcs)
 
