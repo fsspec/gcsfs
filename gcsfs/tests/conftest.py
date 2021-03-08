@@ -10,7 +10,7 @@ import fsspec.config
 fsspec.config.conf.pop("gcs", None)
 
 
-@pytest.yield_fixture
+@pytest.fixture
 def token_restore():
     cache = GCSFileSystem.tokens
     try:

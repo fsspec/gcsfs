@@ -37,7 +37,9 @@ from .checkers import get_consistency_checker, MD5Checker
 from . import __version__ as version
 
 logger = logging.getLogger("gcsfs")
-if "GCSFS_DEBUG" in os.environ:
+
+
+def set_logger(level="DEBUG"):
     handle = logging.StreamHandler()
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s " "- %(message)s"
@@ -45,6 +47,10 @@ if "GCSFS_DEBUG" in os.environ:
     handle.setFormatter(formatter)
     logger.addHandler(handle)
     logger.setLevel("DEBUG")
+
+
+if "GCSFS_DEBUG" in os.environ:
+    set_logger()
 
 
 # client created 2018-01-16
@@ -80,6 +86,7 @@ bACLs = {
 DEFAULT_PROJECT = os.environ.get("GCSFS_DEFAULT_PROJECT", "")
 
 GCS_MIN_BLOCK_SIZE = 2 ** 18
+GCS_MAX_BLOCK_SIZE = 2 ** 28
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
 
@@ -115,6 +122,15 @@ def norm_path(path):
 async def _req_to_text(r):
     async with r:
         return (await r.read()).decode()
+
+
+def unjson(contents):
+    import ujson
+
+    try:
+        return ujson.loads(contents)
+    except:  # noqa: E722
+        return None
 
 
 class GCSFileSystem(AsyncFileSystem):
@@ -400,6 +416,7 @@ class GCSFileSystem(AsyncFileSystem):
         with self.lock:
             if self.credentials.valid:
                 return  # repeat to avoid race (but don't want lock in common case)
+            logger.debug("GCS refresh")
             self.credentials.refresh(req)
             self.credentials.apply(self.heads)
 
@@ -498,7 +515,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _call(
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
-        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs}")
+        logger.debug(f"{method.upper()}: {path}, {args}, {kwargs.get('headers')}")
 
         for retry in range(self.retries):
             try:
@@ -517,21 +534,15 @@ class GCSFileSystem(AsyncFileSystem):
                     data=datain,
                     timeout=self.requests_timeout,
                 ) as r:
-                    import json
 
                     status = r.status
                     headers = r.headers
                     info = r.request_info  # for debug only
                     contents = await r.read()
-                    try:
-                        json = json.loads(contents)
-                    except Exception:
-                        json = None
 
-                self.validate_response(status, contents, json, path, headers)
+                self.validate_response(status, contents, path, headers)
                 break
             except (HttpError, RequestException, GoogleAuthError, ChecksumError) as e:
-                json = None
                 if (
                     isinstance(e, HttpError)
                     and e.code == 400
@@ -548,7 +559,7 @@ class GCSFileSystem(AsyncFileSystem):
                 logger.exception("_call non-retriable exception: %s" % e)
                 raise e
         if json_out:
-            return json
+            return unjson(contents)
         elif info_out:
             return info
         else:
@@ -1294,7 +1305,7 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             return path.split("/", 1)
 
-    def validate_response(self, status, content, json, path, headers=None):
+    def validate_response(self, status, content, path, headers=None):
         """
         Check the requests object r, raise error if it's not ok.
 
@@ -1305,8 +1316,10 @@ class GCSFileSystem(AsyncFileSystem):
         """
         if status >= 400:
             error = None
+            if hasattr(content, "decode"):
+                content = content.decode()
             try:
-                error = json["error"]
+                error = unjson(content)["error"]
                 msg = error["message"]
             except:  # noqa: E722
                 # TODO: limit to appropriate exceptions
@@ -1323,7 +1336,12 @@ class GCSFileSystem(AsyncFileSystem):
             elif error:
                 raise HttpError(error)
             elif status:
-                raise HttpError({"code": status})
+                raise HttpError(
+                    {
+                        "code": status,
+                        "message": msg,
+                    }
+                )  # text-like
             else:
                 raise RuntimeError(msg)
         else:
@@ -1425,51 +1443,66 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         final: bool
             Complete and commit upload
         """
-        data = self.buffer.getvalue()
-        head = {}
-        l = len(data)
-        if final and self.autocommit:
-            if l:
-                # last chunk
-                head["Content-Range"] = "bytes %i-%i/%i" % (
-                    self.offset,
-                    self.offset + l - 1,
-                    self.offset + l,
-                )
-            else:
-                # closing when buffer is empty
-                head["Content-Range"] = "bytes */%i" % self.offset
-                data = None
-        else:
-            if l < GCS_MIN_BLOCK_SIZE:
-                if not self.autocommit:
-                    return False
-                elif not final:
-                    raise ValueError("Non-final chunk write below min size.")
-            head["Content-Range"] = "bytes %i-%i/*" % (self.offset, self.offset + l - 1)
-        head.update({"Content-Type": self.content_type, "Content-Length": str(l)})
-        headers, contents = self.gcsfs.call(
-            "POST", self.location, headers=head, data=data
-        )
-        if "Range" in headers:
-            end = int(headers["Range"].split("-")[1])
-            shortfall = (self.offset + l - 1) - end
-            if shortfall:
-                self.checker.update(data[:-shortfall])
-                self.buffer = io.BytesIO(data[-shortfall:])
-                self.buffer.seek(shortfall)
-                self.offset += l - shortfall
+        while True:
+            # shortfall splits blocks bigger than max allowed upload
+            data = self.buffer.getvalue()
+            head = {}
+            l = len(data)
+
+            if (l < GCS_MIN_BLOCK_SIZE) and not final:
+                # either flush() was called, but we don't have enough to
+                # push, or we split a big upload, and have less left than one
+                # block.  If this is the final part, OK to violate those
+                # terms.
                 return False
+
+            # Select the biggest possible chunk of data to be uploaded
+            chunk_length = min(l, GCS_MAX_BLOCK_SIZE)
+            chunk = data[:chunk_length]
+            if final and self.autocommit and chunk_length == l:
+                if l:
+                    # last chunk
+                    head["Content-Range"] = "bytes %i-%i/%i" % (
+                        self.offset,
+                        self.offset + chunk_length - 1,
+                        self.offset + l,
+                    )
+                else:
+                    # closing when buffer is empty
+                    head["Content-Range"] = "bytes */%i" % self.offset
+                    data = None
             else:
-                self.checker.update(data)
-        elif l:
-            #
-            assert final, "Response looks like upload is over"
-            j = json.loads(contents)
-            self.checker.update(data)
-            self.checker.validate_json_response(j)
-        else:
-            assert final, "Response looks like upload is over"
+                head["Content-Range"] = "bytes %i-%i/*" % (
+                    self.offset,
+                    self.offset + chunk_length - 1,
+                )
+            head.update(
+                {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
+            )
+            headers, contents = self.gcsfs.call(
+                "POST", self.location, headers=head, data=chunk
+            )
+            if "Range" in headers:
+                end = int(headers["Range"].split("-")[1])
+                shortfall = (self.offset + l - 1) - end
+                if shortfall:
+                    self.checker.update(data[:-shortfall])
+                    self.buffer = io.BytesIO(data[-shortfall:])
+                    self.buffer.seek(shortfall)
+                    self.offset += l - shortfall
+                    continue
+                else:
+                    self.checker.update(data)
+            else:
+                assert final, "Response looks like upload is over"
+                if l:
+                    j = json.loads(contents)
+                    self.checker.update(data)
+                    self.checker.validate_json_response(j)
+            # Clear buffer and update offset when all is received
+            self.buffer = io.BytesIO()
+            self.offset += l
+            break
         return True
 
     def commit(self):
