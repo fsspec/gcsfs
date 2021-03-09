@@ -993,7 +993,7 @@ class GCSFileSystem(AsyncFileSystem):
                 json_out=True,
             )
 
-    async def _rm_one_file(self, path):
+    async def _rm_file(self, path):
         bucket, key = self.split_path(path)
         if key:
             await self._call("DELETE", "b/{}/o/{}", bucket, key)
