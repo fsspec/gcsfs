@@ -971,7 +971,7 @@ def test_raise_on_project_mismatch(mock_auth):
 
 
 def test_validate_response():
-    gcs = GCSFileSystem(token="anon")
+    gcs = GCSFileSystem(token="anon", consistency=None)
     gcs.validate_response(200, None, "/path")
 
     # HttpError with no JSON body
@@ -1000,8 +1000,11 @@ def test_validate_response():
     with pytest.raises(ProxyError):
         gcs.validate_response(502, b"", None, "/path")
 
-    # ChecksumError
+    # No response validation when the method isn't md5
     md5 = repr(base64.b64encode(hashlib.md5(b"foo").digest()))[2:-1]
+    gcs.validate_response(0, b"f", "/path", {"X-Goog-Hash": f"md5={md5}"})
+
+    gcs.consistency = "md5"
     with pytest.raises(ChecksumError):
         gcs.validate_response(0, b"f", "/path", {"X-Goog-Hash": f"md5={md5}"})
 
