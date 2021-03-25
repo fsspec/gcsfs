@@ -1236,7 +1236,7 @@ class GCSFileSystem(AsyncFileSystem):
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
             with open(lpath, "wb") as f2:
                 while True:
-                    data = await r.content.read(4096*32)
+                    data = await r.content.read(4096 * 32)
                     if not data:
                         break
                     f2.write(data)
