@@ -281,14 +281,28 @@ class GCSFileSystem(AsyncFileSystem):
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         self.callback_timeout = callback_timeout
-        if not asynchronous:
-            self._session = sync(
-                self.loop, get_client, callback_timeout=self.callback_timeout
-            )
-            weakref.finalize(self, sync, self.loop, self.session.close)
-        else:
-            self._session = None
+        weakref.finalize(self, self.close_session, self._loop)
+        if self.asynchronous:
+            self._loop.session = None
         self.connect(method=token)
+
+    @staticmethod
+    def close_session(looplocal):
+        loop = getattr(looplocal, "loop", None)
+        session = getattr(looplocal, "session", None)
+        if loop is not None and session is not None:
+            try:
+                sync(loop, session.close)
+            except RuntimeError:
+                pass  # loop already closed
+
+    async def _set_session(self):
+        if not hasattr(self._loop, "session") or self._loop.session is None:
+            self._loop.session = await get_client()
+
+    @property
+    def session(self):
+        return self._loop.session
 
     @classmethod
     def _strip_protocol(cls, path):
@@ -303,17 +317,6 @@ class GCSFileSystem(AsyncFileSystem):
                 path = path[len(protocol) + 2 :]
         # use of root_marker to make minimum required path, e.g., "/"
         return path or cls.root_marker
-
-    @property
-    def session(self):
-        if self._session is None:
-            raise RuntimeError("please await ``.set_session`` before anything else")
-        return self._session
-
-    async def set_session(self):
-        from fsspec.implementations.http import get_client
-
-        self._session = await get_client()
 
     @classmethod
     def load_tokens(cls):
@@ -525,6 +528,7 @@ class GCSFileSystem(AsyncFileSystem):
                 path, jsonin, datain, headers, kwargs = self._get_args(
                     path, *args, **kwargs
                 )
+                await self._set_session()
                 async with self.session.request(
                     method=method,
                     url=path,
@@ -1232,7 +1236,7 @@ class GCSFileSystem(AsyncFileSystem):
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
             with open(lpath, "wb") as f2:
                 while True:
-                    data = await r.content.read(4096)
+                    data = await r.content.read(4096 * 32)
                     if not data:
                         break
                     f2.write(data)
