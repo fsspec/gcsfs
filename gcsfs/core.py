@@ -297,14 +297,11 @@ class GCSFileSystem(AsyncFileSystem):
                 pass  # loop already closed
 
     async def _set_session(self):
-        self._loop.session = await get_client()
+        if not hasattr(self._loop, "session") or self._loop.session is None:
+            self._loop.session = await get_client()
 
     @property
     def session(self):
-        if not hasattr(self._loop, "session"):
-            sync(self._loop.loop, self._set_session)
-        elif self._loop.session is None:
-            raise RuntimeError("please await ``._set_session`` before anything else")
         return self._loop.session
 
     @classmethod
@@ -531,6 +528,7 @@ class GCSFileSystem(AsyncFileSystem):
                 path, jsonin, datain, headers, kwargs = self._get_args(
                     path, *args, **kwargs
                 )
+                await self._set_session()
                 async with self.session.request(
                     method=method,
                     url=path,
@@ -1238,7 +1236,7 @@ class GCSFileSystem(AsyncFileSystem):
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
             with open(lpath, "wb") as f2:
                 while True:
-                    data = await r.content.read(4096)
+                    data = await r.content.read(4096*32)
                     if not data:
                         break
                     f2.write(data)
