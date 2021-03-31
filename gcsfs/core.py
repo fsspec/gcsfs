@@ -30,7 +30,7 @@ import weakref
 
 from requests.exceptions import RequestException, ProxyError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
-from fsspec.utils import stringify_path
+from fsspec.utils import stringify_path, setup_logging
 from fsspec.implementations.http import get_client
 from .utils import ChecksumError, HttpError, is_retriable
 from .checkers import get_consistency_checker, MD5Checker
@@ -39,18 +39,8 @@ from . import __version__ as version
 logger = logging.getLogger("gcsfs")
 
 
-def set_logger(level="DEBUG"):
-    handle = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s " "- %(message)s"
-    )
-    handle.setFormatter(formatter)
-    logger.addHandler(handle)
-    logger.setLevel("DEBUG")
-
-
 if "GCSFS_DEBUG" in os.environ:
-    set_logger()
+    setup_logging(logger=logger, level=os.environ["GCSFS_DEBUG"])
 
 
 # client created 2018-01-16
@@ -252,7 +242,7 @@ class GCSFileSystem(AsyncFileSystem):
         requester_pays=False,
         asynchronous=False,
         loop=None,
-        callback_timeout=None,
+        timeout=None,
         **kwargs,
     ):
         super().__init__(
@@ -280,29 +270,33 @@ class GCSFileSystem(AsyncFileSystem):
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
-        self.callback_timeout = callback_timeout
-        weakref.finalize(self, self.close_session, self._loop)
-        if self.asynchronous:
-            self._loop.session = None
+        self.timeout = timeout
+        self._session = None
+        if not self.asynchronous:
+            self._session = sync(
+                self.loop, get_client, timeout=self.timeout
+            )
+            weakref.finalize(self, self.close_session, self.loop, self._session)
         self.connect(method=token)
 
     @staticmethod
-    def close_session(looplocal):
-        loop = getattr(looplocal, "loop", None)
-        session = getattr(looplocal, "session", None)
+    def close_session(loop, session):
         if loop is not None and session is not None:
-            try:
-                sync(loop, session.close)
-            except RuntimeError:
-                pass  # loop already closed
+            if loop.is_running():
+                sync(loop, session.close, timeout=0.1)
+            else:
+                pass
 
     async def _set_session(self):
-        if not hasattr(self._loop, "session") or self._loop.session is None:
-            self._loop.session = await get_client()
+        if self._session is None:
+            self._session = await get_client()
+        return self._session
 
     @property
     def session(self):
-        return self._loop.session
+        if self.asynchronous and self._session is None:
+            raise RuntimeError("Please await _connect* before anything else")
+        return self._session
 
     @classmethod
     def _strip_protocol(cls, path):
@@ -577,7 +571,7 @@ class GCSFileSystem(AsyncFileSystem):
         return [
             b["name"]
             for b in sync(
-                self.loop, self._list_buckets(), callback_timeout=self.callback_timeout
+                self.loop, self._list_buckets, timeout=self.timeout
             )
         ]
 
@@ -859,7 +853,7 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             raise FileNotFoundError(path)
 
-    def glob(self, path, prefix="", **kwargs):
+    async def _glob(self, path, prefix="", **kwargs):
         if not prefix:
             # Identify pattern prefixes. Ripped from fsspec.spec.AbstractFileSystem.glob and matches
             # the glob.has_magic patterns.
@@ -869,7 +863,7 @@ class GCSFileSystem(AsyncFileSystem):
 
             ind = min(indstar, indques, indbrace)
             prefix = path[:ind].split("/")[-1]
-        return super().glob(path, prefix=prefix, **kwargs)
+        return await super()._glob(path, prefix=prefix, **kwargs)
 
     async def _ls(self, path, detail=False, prefix="", **kwargs):
         """List objects under the given '/{bucket}/{prefix} path."""
@@ -903,10 +897,12 @@ class GCSFileSystem(AsyncFileSystem):
         headers, out = await self._call("GET", u2, headers=head)
         return out
 
-    def getxattr(self, path, attr):
+    async def _getxattr(self, path, attr):
         """Get user-defined metadata attribute"""
-        meta = self.info(path).get("metadata", {})
+        meta = (await self._info(path)).get("metadata", {})
         return meta[attr]
+
+    getxattr = sync_wrapper(_getxattr)
 
     async def _setxattrs(
         self, path, content_type=None, content_encoding=None, **kwargs
@@ -1048,7 +1044,8 @@ class GCSFileSystem(AsyncFileSystem):
             out = set(re.findall(pattern, txt))
             raise OSError(out)
 
-    async def _rm(self, paths, batchsize):
+    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+        paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
         exs = await asyncio.gather(
@@ -1064,6 +1061,8 @@ class GCSFileSystem(AsyncFileSystem):
         if exs:
             raise exs[0]
         await asyncio.gather(*[self._rmdir(d) for d in dirs])
+
+    rm = sync_wrapper(_rm)
 
     async def _pipe_file(
         self,
@@ -1149,25 +1148,19 @@ class GCSFileSystem(AsyncFileSystem):
         except IOError:
             return False
 
-    def find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
+    async def _find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
-        out, _ = sync(
-            self.loop,
-            self._do_list_objects,
+        out, _ = await self._do_list_objects(
             path,
             delimiter=None,
             prefix=prefix,
-            callback_timeout=self.callback_timeout,
         )
         if not out and key:
             try:
                 out = [
-                    sync(
-                        self.loop,
-                        self._get_object,
+                    await self._get_object(
                         path,
-                        callback_timeout=self.callback_timeout,
                     )
                 ]
             except FileNotFoundError:
@@ -1243,16 +1236,6 @@ class GCSFileSystem(AsyncFileSystem):
                     checker.update(data)
 
             checker.validate_http_response(r)
-
-    def rm(self, path, recursive=False, maxdepth=None, batchsize=20):
-        paths = self.expand_path(path, recursive=recursive, maxdepth=maxdepth)
-        sync(
-            self.loop,
-            self._rm,
-            paths,
-            callback_timeout=self.callback_timeout,
-            batchsize=batchsize,
-        )
 
     def _open(
         self,
@@ -1372,7 +1355,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         consistency="md5",
         metadata=None,
         content_type=None,
-        callback_timeout=None,
+        timeout=None,
         **kwargs,
     ):
         """
@@ -1401,7 +1384,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             content types at https://www.iana.org/assignments/media-types/media-types.txt
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
-        callback_timeout: int
+        timeout: int
             Timeout seconds for the asynchronous callback.
         """
         super().__init__(
@@ -1424,7 +1407,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.acl = acl
         self.checker = get_consistency_checker(consistency)
         self.content_type = content_type or "application/octet-stream"
-        self.callback_timeout = callback_timeout
+        self.timeout = timeout
         if mode == "wb":
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
                 warnings.warn("Setting block size to minimum value, 2**18")
@@ -1524,7 +1507,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.key,
             self.content_type,
             self.metadata,
-            callback_timeout=self.callback_timeout,
+            timeout=self.timeout,
         )
 
     def discard(self):
@@ -1557,7 +1540,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.metadata,
             self.consistency,
             self.content_type,
-            callback_timeout=self.callback_timeout,
+            timeout=self.timeout,
         )
 
     def _fetch_range(self, start=None, end=None):

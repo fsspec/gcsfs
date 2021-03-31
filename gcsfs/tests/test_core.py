@@ -52,6 +52,7 @@ def test_simple():
 @my_vcr.use_cassette(match=["all"])
 def test_many_connect():
     from multiprocessing.pool import ThreadPool
+    GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
 
     def task(i):
         GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN).ls("")
@@ -77,10 +78,6 @@ def test_simple_upload():
 
 @my_vcr.use_cassette(match=["all"])
 def test_large_upload():
-    import gcsfs.core
-
-    gcsfs.core.set_logger()
-
     orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
     gcsfs.core.GCS_MAX_BLOCK_SIZE = 262144  # minimum block size
     try:
