@@ -134,9 +134,9 @@ arguments needed to s3fs.
 Async
 -----
 
-``s3fs`` is implemented using ``aiohttp``, and offers async functionality.
+``gcsfs`` is implemented using ``aiohttp``, and offers async functionality.
 A number of methods of ``GCSFileSystem`` are ``async``, for for each of these,
-there is also a synchronous version with the same name and lack of a ``_``
+there is also a synchronous version with the same name and lack of a "_"
 prefix.
 
 If you wish to call ``gcsfs`` from async code, then you should pass
