@@ -273,9 +273,7 @@ class GCSFileSystem(AsyncFileSystem):
         self.timeout = timeout
         self._session = None
         if not self.asynchronous:
-            self._session = sync(
-                self.loop, get_client, timeout=self.timeout
-            )
+            self._session = sync(self.loop, get_client, timeout=self.timeout)
             weakref.finalize(self, self.close_session, self.loop, self._session)
         self.connect(method=token)
 
@@ -569,10 +567,7 @@ class GCSFileSystem(AsyncFileSystem):
     def buckets(self):
         """Return list of available project buckets."""
         return [
-            b["name"]
-            for b in sync(
-                self.loop, self._list_buckets, timeout=self.timeout
-            )
+            b["name"] for b in sync(self.loop, self._list_buckets, timeout=self.timeout)
         ]
 
     @staticmethod

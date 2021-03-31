@@ -52,6 +52,7 @@ def test_simple():
 @my_vcr.use_cassette(match=["all"])
 def test_many_connect():
     from multiprocessing.pool import ThreadPool
+
     GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
 
     def task(i):
