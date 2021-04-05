@@ -1400,10 +1400,14 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
-        self.metadata = metadata
         self.acl = acl
         self.checker = get_consistency_checker(consistency)
-        self.content_type = content_type or "application/octet-stream"
+
+        det = getattr(self, "details", {})  # only exists in read mode
+        self.content_type = content_type or det.get(
+            "contentType", "application/octet-stream"
+        )
+        self.metadata = metadata or det.get("metadata", {})
         self.timeout = timeout
         if mode == "wb":
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
