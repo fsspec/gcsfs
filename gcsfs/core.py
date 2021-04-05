@@ -1404,7 +1404,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.checker = get_consistency_checker(consistency)
 
         det = getattr(self, "details", {})  # only exists in read mode
-        self.content_type = content_type or det.get("contentType", "application/octet-stream")
+        self.content_type = content_type or det.get(
+            "contentType", "application/octet-stream"
+        )
         self.metadata = metadata or det.get("metadata", {})
         self.timeout = timeout
         if mode == "wb":
