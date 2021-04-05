@@ -1,6 +1,18 @@
 Changelog
 =========
 
+Version 0.8.0
+=============
+
+* keep up with fsspec 0.9.0 async
+* one-shot find
+* consistency checkers
+* retries for intermittent issues
+* timeouts
+* partial cat
+* http error status
+* CI to GHA
+
 Version 0.7.0
 =============
 
