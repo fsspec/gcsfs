@@ -140,7 +140,7 @@ there is also a synchronous version with the same name and lack of a "_"
 prefix.
 
 If you wish to call ``gcsfs`` from async code, then you should pass
-``asynchronous=True, loop=`` to the constructor (the latter is optional,
+``asynchronous=True, loop=loop`` to the constructor (the latter is optional,
 if you wish to use both async and sync methods). You must also explicitly
 await the client creation before making any GCS call.
 
