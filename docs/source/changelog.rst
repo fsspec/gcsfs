@@ -1,6 +1,11 @@
 Changelog
 =========
 
+Version 2021.04.0
+=================
+
+* switch to calver and fsspec pin
+
 Version 0.8.0
 =============
 

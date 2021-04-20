@@ -2,6 +2,7 @@
 """
 Google Cloud Storage pythonic interface
 """
+from contextlib import contextmanager
 import textwrap
 import asyncio
 import fsspec
@@ -112,15 +113,6 @@ def norm_path(path):
 async def _req_to_text(r):
     async with r:
         return (await r.read()).decode()
-
-
-def unjson(contents):
-    import ujson
-
-    try:
-        return ujson.loads(contents)
-    except:  # noqa: E722
-        return None
 
 
 class GCSFileSystem(AsyncFileSystem):
@@ -555,7 +547,7 @@ class GCSFileSystem(AsyncFileSystem):
                 logger.exception("_call non-retriable exception: %s" % e)
                 raise e
         if json_out:
-            return unjson(contents)
+            return json.loads(contents)
         elif info_out:
             return info
         else:
@@ -1301,7 +1293,7 @@ class GCSFileSystem(AsyncFileSystem):
             if hasattr(content, "decode"):
                 content = content.decode()
             try:
-                error = unjson(content)["error"]
+                error = json.loads(content)["error"]
                 msg = error["message"]
             except:  # noqa: E722
                 # TODO: limit to appropriate exceptions
