@@ -791,7 +791,7 @@ class GCSFileSystem(AsyncFileSystem):
         bucket = bucket.rstrip("/")
         if "/" in bucket:
             return
-        await self._call("DELETE", "b/" + bucket, json_out=True)
+        await self._call("DELETE", "b/" + bucket, json_out=False)
         self.invalidate_cache(bucket)
         self.invalidate_cache("")
 
