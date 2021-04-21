@@ -2,7 +2,6 @@
 """
 Google Cloud Storage pythonic interface
 """
-from contextlib import contextmanager
 import textwrap
 import asyncio
 import fsspec
