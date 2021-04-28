@@ -436,7 +436,6 @@ class GCSFileSystem(AsyncFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
-        self.project = project
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
@@ -450,6 +449,10 @@ class GCSFileSystem(AsyncFileSystem):
         if not self.asynchronous:
             self._session = sync(self.loop, get_client, timeout=self.timeout)
             weakref.finalize(self, self.close_session, self.loop, self._session)
+
+    @property
+    def project(self):
+        return self.credentials.project
 
     @staticmethod
     def close_session(loop, session):
