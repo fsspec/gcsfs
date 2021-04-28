@@ -498,6 +498,27 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
         return path, jsonin, datain, headers, kwargs
 
+    async def _request(self, method, path, *args, **kwargs):
+        await self._set_session()
+        self.maybe_refresh()
+        path, jsonin, datain, headers, params = self._get_args(path, *args, **kwargs)
+        async with self.session.request(
+            method=method,
+            url=path,
+            params=params,
+            json=jsonin,
+            headers=headers,
+            data=datain,
+            timeout=self.requests_timeout,
+        ) as r:
+
+            status = r.status
+            headers = r.headers
+            info = r.request_info  # for debug only
+            contents = await r.read()
+
+            return status, headers, info, contents
+
     async def _call(
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
@@ -507,26 +528,9 @@ class GCSFileSystem(AsyncFileSystem):
             try:
                 if retry > 0:
                     await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
-                self.maybe_refresh()
-                path, jsonin, datain, headers, kwargs = self._get_args(
-                    path, *args, **kwargs
+                status, headers, info, contents = await self._request(
+                    method, path, *args, **kwargs
                 )
-                await self._set_session()
-                async with self.session.request(
-                    method=method,
-                    url=path,
-                    params=kwargs,
-                    json=jsonin,
-                    headers=headers,
-                    data=datain,
-                    timeout=self.requests_timeout,
-                ) as r:
-
-                    status = r.status
-                    headers = r.headers
-                    info = r.request_info  # for debug only
-                    contents = await r.read()
-
                 self.validate_response(status, contents, path, headers)
                 break
             except (HttpError, RequestException, GoogleAuthError, ChecksumError) as e:
