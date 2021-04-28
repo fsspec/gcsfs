@@ -501,11 +501,11 @@ class GCSFileSystem(AsyncFileSystem):
     async def _request(self, method, path, *args, **kwargs):
         await self._set_session()
         self.maybe_refresh()
-        path, jsonin, datain, headers, kwargs = self._get_args(path, *args, **kwargs)
+        path, jsonin, datain, headers, params = self._get_args(path, *args, **kwargs)
         async with self.session.request(
             method=method,
             url=path,
-            params=kwargs,
+            params=params,
             json=jsonin,
             headers=headers,
             data=datain,
