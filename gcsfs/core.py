@@ -1209,22 +1209,11 @@ class GCSFileSystem(AsyncFileSystem):
         u2 = self.url(rpath)
         headers = kwargs.pop("headers", {})
         consistency = kwargs.pop("consistency", self.consistency)
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = "python-gcsfs/" + version
-        self.credentials.apply(headers)
-
-        # needed for requester pays buckets
-        if self.requester_pays:
-            if isinstance(self.requester_pays, str):
-                user_project = self.requester_pays
-            else:
-                user_project = self.project
-            kwargs["userProject"] = user_project
 
         async with self.session.get(
             url=u2,
-            params=kwargs,
-            headers=headers,
+            params=self._get_params(kwargs),
+            headers=self._get_headers(headers),
             timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
