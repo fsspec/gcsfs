@@ -469,46 +469,46 @@ class GCSFileSystem(AsyncFileSystem):
         except Exception as e:
             warnings.warn("Saving token cache failed: " + str(e))
 
-    def _get_args(self, path, *args, **kwargs):
-        for k, v in list(kwargs.items()):
-            if v is None:
-                del kwargs[k]
-        jsonin = kwargs.pop("json", None)
-        headers = kwargs.pop("headers", None)
-        datain = kwargs.pop("data", None)
-
-        if headers is None:
-            headers = {}
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = "python-gcsfs/" + version
-        headers.update(self.heads or {})  # add creds
-
-        if not path.startswith("http"):
-            path = self.base + path
-
-        if args:
-            path = path.format(*[quote_plus(p) for p in args])
-
+    def _get_params(self, kwargs):
+        params = {k: v for k, v in kwargs.items() if v is not None}
         # needed for requester pays buckets
         if self.requester_pays:
             if isinstance(self.requester_pays, str):
                 user_project = self.requester_pays
             else:
                 user_project = self.project
-            kwargs["userProject"] = user_project
-        return path, jsonin, datain, headers, kwargs
+            params["userProject"] = user_project
+        return params
 
-    async def _request(self, method, path, *args, **kwargs):
+    def _format_path(self, path, args):
+        if not path.startswith("http"):
+            path = self.base + path
+
+        if args:
+            path = path.format(*[quote_plus(p) for p in args])
+        return path
+
+    def _get_headers(self, headers):
+        out = {}
+        if headers is not None:
+            out.update(headers)
+        if "User-Agent" not in out:
+            out["User-Agent"] = "python-gcsfs/" + version
+        out.update(self.heads or {})  # add creds
+        return out
+
+    async def _request(
+        self, method, path, *args, headers=None, json=None, data=None, **kwargs
+    ):
         await self._set_session()
         self.maybe_refresh()
-        path, jsonin, datain, headers, params = self._get_args(path, *args, **kwargs)
         async with self.session.request(
             method=method,
-            url=path,
-            params=params,
-            json=jsonin,
-            headers=headers,
-            data=datain,
+            url=self._format_path(path, args),
+            params=self._get_params(kwargs),
+            json=json,
+            headers=self._get_headers(headers),
+            data=data,
             timeout=self.requests_timeout,
         ) as r:
 
