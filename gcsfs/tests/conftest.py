@@ -1,6 +1,6 @@
 import pytest
 
-from gcsfs.core import GCSFileSystem
+from gcsfs.core import GCSFileSystem, GoogleCredentials
 from gcsfs.tests.settings import TEST_PROJECT, TEST_BUCKET
 import vcr.stubs.aiohttp_stubs as aios
 
@@ -14,11 +14,11 @@ fsspec.config.conf.pop("gcs", None)
 def token_restore():
     cache = GCSFileSystem.tokens
     try:
-        GCSFileSystem.tokens = {}
+        GoogleCredentials.tokens = {}
         yield
     finally:
-        GCSFileSystem.tokens = cache
-        GCSFileSystem._save_tokens()
+        GoogleCredentials.tokens = cache
+        GoogleCredentials._save_tokens()
         GCSFileSystem.clear_instance_cache()
 
 
