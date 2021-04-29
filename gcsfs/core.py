@@ -1141,18 +1141,10 @@ class GCSFileSystem(AsyncFileSystem):
     async def _find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
-        out, _ = await self._do_list_objects(
-            path,
-            delimiter=None,
-            prefix=prefix,
-        )
+        out, _ = await self._do_list_objects(path, delimiter=None, prefix=prefix,)
         if not out and key:
             try:
-                out = [
-                    await self._get_object(
-                        path,
-                    )
-                ]
+                out = [await self._get_object(path,)]
             except FileNotFoundError:
                 out = []
         dirs = []
@@ -1207,25 +1199,14 @@ class GCSFileSystem(AsyncFileSystem):
                 user_project = self.project
             kwargs["userProject"] = user_project
 
-        async with self.session.get(
-            url=u2,
-            params=kwargs,
-            headers=headers,
-            timeout=self.requests_timeout,
-        ) as r:
-            r.raise_for_status()
-            checker = get_consistency_checker(consistency)
+        checker = get_consistency_checker(consistency)
+        os.makedirs(os.path.dirname(lpath), exist_ok=True)
 
-            os.makedirs(os.path.dirname(lpath), exist_ok=True)
-            with open(lpath, "wb") as f2:
-                while True:
-                    data = await r.content.read(4096 * 32)
-                    if not data:
-                        break
-                    f2.write(data)
-                    checker.update(data)
-
-            checker.validate_http_response(r)
+        with open(lpath, "wb") as f2:
+            headers, content = await self._call("GET", u2)
+            f2.write(content)
+            checker.update(content)
+            checker.validate_headers(headers)
 
     def _open(
         self,
@@ -1314,10 +1295,7 @@ class GCSFileSystem(AsyncFileSystem):
                 raise HttpError(error)
             elif status:
                 raise HttpError(
-                    {
-                        "code": status,
-                        "message": msg,
-                    }
+                    {"code": status, "message": msg,}
                 )  # text-like
             else:
                 raise RuntimeError(msg)
