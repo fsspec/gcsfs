@@ -1185,20 +1185,7 @@ class GCSFileSystem(AsyncFileSystem):
         if await self._isdir(rpath):
             return
         u2 = self.url(rpath)
-        headers = kwargs.pop("headers", {})
         consistency = kwargs.pop("consistency", self.consistency)
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = "python-gcsfs/" + version
-        headers.update(self.heads or {})  # add creds
-
-        # needed for requester pays buckets
-        if self.requester_pays:
-            if isinstance(self.requester_pays, str):
-                user_project = self.requester_pays
-            else:
-                user_project = self.project
-            kwargs["userProject"] = user_project
-
         checker = get_consistency_checker(consistency)
         os.makedirs(os.path.dirname(lpath), exist_ok=True)
 
