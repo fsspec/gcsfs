@@ -1189,10 +1189,22 @@ class GCSFileSystem(AsyncFileSystem):
         checker = get_consistency_checker(consistency)
         os.makedirs(os.path.dirname(lpath), exist_ok=True)
 
+        bucket, key = self.split_path(rpath)
+        metadata = await self._call("GET", "b/{}/o/{}", bucket, key, json_out=True)
+        data_size = int(metadata["size"])
         with open(lpath, "wb") as f2:
-            headers, content = await self._call("GET", u2, **kwargs)
-            f2.write(content)
-            checker.update(content)
+            offset = 0
+            while True:
+                print(offset)
+                head = {
+                    "Range": "bytes=%i-%i" % (offset, offset + DEFAULT_BLOCK_SIZE - 1)
+                }
+                headers, data = await self._call("GET", u2, headers=head, **kwargs)
+                f2.write(data)
+                checker.update(data)
+                if offset + DEFAULT_BLOCK_SIZE >= data_size:
+                    break
+                offset += DEFAULT_BLOCK_SIZE
             checker.validate_headers(headers)
 
     def _open(
