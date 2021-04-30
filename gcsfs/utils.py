@@ -1,13 +1,15 @@
 import asyncio
 from decorator import decorator
 import json
-import logger
+import logging
 import random
 
 
 import requests.exceptions
 import google.auth.exceptions
 import aiohttp.client_exceptions
+
+logger = logging.getLogger("gcsfs")
 
 
 class HttpError(Exception):
