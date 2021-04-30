@@ -29,6 +29,7 @@ import random
 import weakref
 
 from requests.exceptions import RequestException, ProxyError
+from aiohttp.client_exceptions import ClientError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path, setup_logging
 from fsspec.implementations.http import get_client
@@ -533,7 +534,13 @@ class GCSFileSystem(AsyncFileSystem):
                 )
                 self.validate_response(status, contents, path, headers)
                 break
-            except (HttpError, RequestException, GoogleAuthError, ChecksumError) as e:
+            except (
+                HttpError,
+                RequestException,
+                GoogleAuthError,
+                ChecksumError,
+                ClientError,
+            ) as e:
                 if (
                     isinstance(e, HttpError)
                     and e.code == 400
