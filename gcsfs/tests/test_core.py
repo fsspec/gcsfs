@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-import base64
-import hashlib
 import io
 from builtins import FileNotFoundError
 from itertools import chain
@@ -11,9 +9,6 @@ import pytest
 import requests
 
 from fsspec.utils import seek_delimiter
-from requests.exceptions import ProxyError
-
-from gcsfs.utils import ChecksumError, HttpError
 
 from gcsfs.tests.settings import (
     TEST_PROJECT,
@@ -981,108 +976,6 @@ def test_raise_on_project_mismatch(mock_auth):
 
     result = GCSFileSystem(token="google_default")
     assert result.project == "my_other_project"
-
-
-def test_validate_response():
-    gcs = GCSFileSystem(token="anon", consistency=None)
-    gcs.validate_response(200, None, "/path")
-
-    # HttpError with no JSON body
-    with pytest.raises(HttpError) as e:
-        gcs.validate_response(503, b"", "/path")
-    assert e.value.code == 503
-    assert e.value.message == ", 503"
-
-    # HttpError with JSON body
-    j = '{"error": {"code": 503, "message": "Service Unavailable"}}'
-    with pytest.raises(HttpError) as e:
-        gcs.validate_response(503, j, "/path")
-    assert e.value.code == 503
-    assert e.value.message == "Service Unavailable, 503"
-
-    # 403
-    j = '{"error": {"message": "Not ok"}}'
-    with pytest.raises(IOError, match="Forbidden: /path\nNot ok"):
-        gcs.validate_response(403, j, "/path")
-
-    # 404
-    with pytest.raises(FileNotFoundError):
-        gcs.validate_response(404, b"", None, "/path")
-
-    # 502
-    with pytest.raises(ProxyError):
-        gcs.validate_response(502, b"", None, "/path")
-
-    # No response validation when the method isn't md5
-    md5 = repr(base64.b64encode(hashlib.md5(b"foo").digest()))[2:-1]
-    gcs.validate_response(0, b"f", "/path", {"X-Goog-Hash": f"md5={md5}"})
-
-    gcs.consistency = "md5"
-    with pytest.raises(ChecksumError):
-        gcs.validate_response(0, b"f", "/path", {"X-Goog-Hash": f"md5={md5}"})
-
-
-@my_vcr.use_cassette(match=["all"])
-@pytest.mark.parametrize(
-    ["file_path", "validate_get_error", "validate_list_error", "expected_error"],
-    [
-        (
-            "/missing",
-            FileNotFoundError,
-            None,  # Not called
-            FileNotFoundError,
-        ),
-        (
-            "/missing",
-            OSError("Forbidden"),
-            FileNotFoundError,
-            FileNotFoundError,
-        ),
-        (
-            "/2014-01-01.csv",
-            None,
-            None,
-            None,
-        ),
-        (
-            "/2014-01-01.csv",
-            OSError("Forbidden"),
-            None,
-            None,
-        ),
-    ],
-    ids=[
-        "missing_with_get_perms",
-        "missing_with_list_perms",
-        "existing_with_get_perms",
-        "existing_with_list_perms",
-    ],
-)
-def test_metadata_read_permissions(
-    file_path, validate_get_error, validate_list_error, expected_error
-):
-    with gcs_maker(True) as gcs:
-        _validate_response = gcs.validate_response
-
-        def validate_response(self, status, content, path, headers=None):
-            if path.endswith(f"/o{file_path}") and validate_get_error is not None:
-                raise validate_get_error
-            if path.endswith("/o/") and validate_list_error is not None:
-                raise validate_list_error
-            _validate_response(status, content, path, headers=None)
-
-        gcs.validate_response = validate_response.__get__(gcs)
-
-        if expected_error is None:
-            gcs.ls(TEST_BUCKET + file_path)
-            gcs.info(TEST_BUCKET + file_path)
-            assert gcs.exists(TEST_BUCKET + file_path)
-        else:
-            with pytest.raises(expected_error):
-                gcs.ls(TEST_BUCKET + file_path)
-            with pytest.raises(expected_error):
-                gcs.info(TEST_BUCKET + file_path)
-            assert gcs.exists(TEST_BUCKET + file_path) is False
 
 
 @my_vcr.use_cassette(match=["all"])

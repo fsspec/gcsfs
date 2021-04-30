@@ -9,7 +9,6 @@ import fsspec
 import google.auth as gauth
 import google.auth.compute_engine
 import google.auth.credentials
-from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
@@ -25,16 +24,13 @@ import re
 import requests
 import threading
 import warnings
-import random
 import weakref
 
-from requests.exceptions import RequestException, ProxyError
-from aiohttp.client_exceptions import ClientError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path, setup_logging
 from fsspec.implementations.http import get_client
-from .utils import ChecksumError, HttpError, is_retriable
-from .checkers import get_consistency_checker, MD5Checker
+from .utils import retry_request
+from .checkers import get_consistency_checker
 from . import __version__ as version
 
 logger = logging.getLogger("gcsfs")
@@ -499,7 +495,8 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
         return path, jsonin, datain, headers, kwargs
 
-    async def _request(self, method, path, *args, **kwargs):
+    @retry_request(retries=retries)
+    async def _request(self, path, method, *args, **kwargs):
         await self._set_session()
         self.maybe_refresh()
         path, jsonin, datain, headers, params = self._get_args(path, *args, **kwargs)
@@ -525,37 +522,9 @@ class GCSFileSystem(AsyncFileSystem):
     ):
         logger.debug(f"{method.upper()}: {path}, {args}, {kwargs.get('headers')}")
 
-        for retry in range(self.retries):
-            try:
-                if retry > 0:
-                    await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
-                status, headers, info, contents = await self._request(
-                    method, path, *args, **kwargs
-                )
-                self.validate_response(status, contents, path, headers)
-                break
-            except (
-                HttpError,
-                RequestException,
-                GoogleAuthError,
-                ChecksumError,
-                ClientError,
-            ) as e:
-                if (
-                    isinstance(e, HttpError)
-                    and e.code == 400
-                    and "requester pays" in e.message
-                ):
-                    msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
-                    raise ValueError(msg) from e
-                if retry == self.retries - 1:
-                    logger.exception("_call out of retries on exception: %s" % e)
-                    raise e
-                if is_retriable(e):
-                    logger.debug("_call retrying after exception: %s" % e)
-                    continue
-                logger.exception("_call non-retriable exception: %s" % e)
-                raise e
+        status, headers, info, contents = await self._request(
+            path, method, *args, **kwargs
+        )
         if json_out:
             return json.loads(contents)
         elif info_out:
@@ -1288,53 +1257,6 @@ class GCSFileSystem(AsyncFileSystem):
             return path, ""
         else:
             return path.split("/", 1)
-
-    def validate_response(self, status, content, path, headers=None):
-        """
-        Check the requests object r, raise error if it's not ok.
-
-        Parameters
-        ----------
-        r: requests response object
-        path: associated URL path, for error messages
-        """
-        if status >= 400:
-            error = None
-            if hasattr(content, "decode"):
-                content = content.decode()
-            try:
-                error = json.loads(content)["error"]
-                msg = error["message"]
-            except:  # noqa: E722
-                # TODO: limit to appropriate exceptions
-                msg = content
-
-            if status == 404:
-                raise FileNotFoundError
-            elif status == 403:
-                raise IOError("Forbidden: %s\n%s" % (path, msg))
-            elif status == 502:
-                raise ProxyError()
-            elif "invalid" in str(msg):
-                raise ValueError("Bad Request: %s\n%s" % (path, msg))
-            elif error:
-                raise HttpError(error)
-            elif status:
-                raise HttpError(
-                    {
-                        "code": status,
-                        "message": msg,
-                    }
-                )  # text-like
-            else:
-                raise RuntimeError(msg)
-        else:
-            if self.consistency != "md5":
-                return None
-            elif headers is not None and "X-Goog-Hash" in headers:
-                checker = MD5Checker()
-                checker.update(content)
-                checker.validate_headers(headers)
 
 
 GCSFileSystem.load_tokens()

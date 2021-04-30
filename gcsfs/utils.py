@@ -1,3 +1,10 @@
+import asyncio
+from decorator import decorator
+import json
+import logger
+import random
+
+
 import requests.exceptions
 import google.auth.exceptions
 import aiohttp.client_exceptions
@@ -81,3 +88,72 @@ class FileSender:
 
     def __len__(self):
         return self.sent
+
+
+def validate_response(status, content, path, headers=None):
+    """
+    Check the requests object r, raise error if it's not ok.
+
+    Parameters
+    ----------
+    r: requests response object
+    path: associated URL path, for error messages
+    """
+    if status >= 400:
+        error = None
+        if hasattr(content, "decode"):
+            content = content.decode()
+        try:
+            error = json.loads(content)["error"]
+            msg = error["message"]
+        except json.decoder.JSONDecodeError:
+            msg = content
+
+        if status == 404:
+            raise FileNotFoundError
+        elif status == 403:
+            raise IOError("Forbidden: %s\n%s" % (path, msg))
+        elif status == 502:
+            raise requests.exceptions.ProxyError()
+        elif "invalid" in str(msg):
+            raise ValueError("Bad Request: %s\n%s" % (path, msg))
+        elif error:
+            raise HttpError(error)
+        elif status:
+            raise HttpError({"code": status, "message": msg})  # text-like
+        else:
+            raise RuntimeError(msg)
+
+
+@decorator
+async def retry_request(func, retries=6, *args, **kwargs):
+    for retry in range(retries):
+        try:
+            if retry > 0:
+                await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
+            status, headers, info, contents = await func(*args, **kwargs)
+            validate_response(status, contents, args[1], headers)
+            return status, headers, info, contents
+            break
+        except (
+            HttpError,
+            requests.exceptions.RequestException,
+            google.auth.exceptions.GoogleAuthError,
+            ChecksumError,
+            aiohttp.client_exceptions.ClientError,
+        ) as e:
+            if (
+                isinstance(e, HttpError)
+                and e.code == 400
+                and "requester pays" in e.message
+            ):
+                msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
+                raise ValueError(msg) from e
+            if retry == retries - 1:
+                logger.exception("_call out of retries on exception: %s" % e)
+                raise e
+            if is_retriable(e):
+                logger.debug("_call retrying after exception: %s" % e)
+                continue
+            logger.exception("_call non-retriable exception: %s" % e)
+            raise e
