@@ -1194,16 +1194,13 @@ class GCSFileSystem(AsyncFileSystem):
         data_size = int(metadata["size"])
         with open(lpath, "wb") as f2:
             offset = 0
-            while True:
-                print(offset)
+            while offset < data_size:
                 head = {
                     "Range": "bytes=%i-%i" % (offset, offset + DEFAULT_BLOCK_SIZE - 1)
                 }
                 headers, data = await self._call("GET", u2, headers=head, **kwargs)
                 f2.write(data)
                 checker.update(data)
-                if offset + DEFAULT_BLOCK_SIZE >= data_size:
-                    break
                 offset += DEFAULT_BLOCK_SIZE
             checker.validate_headers(headers)
 
