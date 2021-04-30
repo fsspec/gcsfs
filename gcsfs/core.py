@@ -1181,7 +1181,7 @@ class GCSFileSystem(AsyncFileSystem):
             return {o["name"]: o for o in out}
         return [o["name"] for o in out]
 
-    async def _get_file(self, rpath, lpath, **kwargs):
+    async def _get_file(self, rpath, lpath, chunksize=50 * 2 ** 20, **kwargs):
         if await self._isdir(rpath):
             return
         u2 = self.url(rpath)
@@ -1195,13 +1195,11 @@ class GCSFileSystem(AsyncFileSystem):
         with open(lpath, "wb") as f2:
             offset = 0
             while offset < data_size:
-                head = {
-                    "Range": "bytes=%i-%i" % (offset, offset + DEFAULT_BLOCK_SIZE - 1)
-                }
+                head = {"Range": "bytes=%i-%i" % (offset, offset + chunksize - 1)}
                 headers, data = await self._call("GET", u2, headers=head, **kwargs)
                 f2.write(data)
                 checker.update(data)
-                offset += DEFAULT_BLOCK_SIZE
+                offset += chunksize
             checker.validate_headers(headers)
 
     def _open(
