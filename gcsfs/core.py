@@ -1117,18 +1117,10 @@ class GCSFileSystem(AsyncFileSystem):
     async def _find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
-        out, _ = await self._do_list_objects(
-            path,
-            delimiter=None,
-            prefix=prefix,
-        )
+        out, _ = await self._do_list_objects(path, delimiter=None, prefix=prefix,)
         if not out and key:
             try:
-                out = [
-                    await self._get_object(
-                        path,
-                    )
-                ]
+                out = [await self._get_object(path,)]
             except FileNotFoundError:
                 out = []
         dirs = []
@@ -1165,32 +1157,15 @@ class GCSFileSystem(AsyncFileSystem):
             return {o["name"]: o for o in out}
         return [o["name"] for o in out]
 
-    async def _get_file(self, rpath, lpath, **kwargs):
-        if await self._isdir(rpath):
-            return
-        u2 = self.url(rpath)
-        headers = kwargs.pop("headers", {})
-        consistency = kwargs.pop("consistency", self.consistency)
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = "python-gcsfs/" + version
-        headers.update(self.heads or {})  # add creds
-
-        # needed for requester pays buckets
-        if self.requester_pays:
-            if isinstance(self.requester_pays, str):
-                user_project = self.requester_pays
-            else:
-                user_project = self.project
-            kwargs["userProject"] = user_project
+    @retry_request(retries=retries)
+    async def _get_request(self, rpath, lpath, *args, **kwargs):
+        rpath, jsonin, datain, headers, params = self._get_args(rpath, *args, **kwargs)
 
         async with self.session.get(
-            url=u2,
-            params=kwargs,
-            headers=headers,
-            timeout=self.requests_timeout,
+            url=rpath, params=params, headers=headers, timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
-            checker = get_consistency_checker(consistency)
+            checker = get_consistency_checker(self.consistency)
 
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
             with open(lpath, "wb") as f2:
@@ -1202,6 +1177,13 @@ class GCSFileSystem(AsyncFileSystem):
                     checker.update(data)
 
             checker.validate_http_response(r)
+            return r.status, r.headers, r.request_info, data
+
+    async def _get_file(self, rpath, lpath, **kwargs):
+        if await self._isdir(rpath):
+            return
+        u2 = self.url(rpath)
+        await self._get_request(u2, lpath, **kwargs)
 
     def _open(
         self,
