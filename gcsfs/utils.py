@@ -1,5 +1,6 @@
 import requests.exceptions
 import google.auth.exceptions
+import aiohttp.client_exceptions
 
 
 class HttpError(Exception):
@@ -36,6 +37,7 @@ RETRIABLE_EXCEPTIONS = (
     requests.exceptions.SSLError,
     requests.exceptions.ContentDecodingError,
     google.auth.exceptions.RefreshError,
+    aiohttp.client_exceptions.ClientError,
     ChecksumError,
 )
 
