@@ -1141,10 +1141,10 @@ class GCSFileSystem(AsyncFileSystem):
     async def _find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
-        out, _ = await self._do_list_objects(path, delimiter=None, prefix=prefix,)
+        out, _ = await self._do_list_objects(path, delimiter=None, prefix=prefix)
         if not out and key:
             try:
-                out = [await self._get_object(path,)]
+                out = [await self._get_object(path)]
             except FileNotFoundError:
                 out = []
         dirs = []
@@ -1294,9 +1294,7 @@ class GCSFileSystem(AsyncFileSystem):
             elif error:
                 raise HttpError(error)
             elif status:
-                raise HttpError(
-                    {"code": status, "message": msg,}
-                )  # text-like
+                raise HttpError({"code": status, "message": msg})  # text-like
             else:
                 raise RuntimeError(msg)
         else:
