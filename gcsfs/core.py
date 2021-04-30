@@ -1190,7 +1190,7 @@ class GCSFileSystem(AsyncFileSystem):
         os.makedirs(os.path.dirname(lpath), exist_ok=True)
 
         with open(lpath, "wb") as f2:
-            headers, content = await self._call("GET", u2)
+            headers, content = await self._call("GET", u2, **kwargs)
             f2.write(content)
             checker.update(content)
             checker.validate_headers(headers)
