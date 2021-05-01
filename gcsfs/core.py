@@ -29,7 +29,7 @@ import weakref
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path, setup_logging
 from fsspec.implementations.http import get_client
-from .retry import retry_request
+from .retry import retry_request, validate_response
 from .checkers import get_consistency_checker
 from . import __version__ as version
 
@@ -515,6 +515,7 @@ class GCSFileSystem(AsyncFileSystem):
             info = r.request_info  # for debug only
             contents = await r.read()
 
+            validate_response(status, contents, path)
             return status, headers, info, contents
 
     async def _call(
@@ -1117,10 +1118,10 @@ class GCSFileSystem(AsyncFileSystem):
     async def _find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
-        out, _ = await self._do_list_objects(path, delimiter=None, prefix=prefix,)
+        out, _ = await self._do_list_objects(path, delimiter=None, prefix=prefix)
         if not out and key:
             try:
-                out = [await self._get_object(path,)]
+                out = [await self._get_object(path)]
             except FileNotFoundError:
                 out = []
         dirs = []
@@ -1158,14 +1159,15 @@ class GCSFileSystem(AsyncFileSystem):
         return [o["name"] for o in out]
 
     @retry_request(retries=retries)
-    async def _get_request(self, rpath, lpath, *args, **kwargs):
+    async def _get_file_request(self, rpath, lpath, *args, **kwargs):
+        consistency = kwargs.pop("consistency", self.consistency)
         rpath, jsonin, datain, headers, params = self._get_args(rpath, *args, **kwargs)
 
         async with self.session.get(
             url=rpath, params=params, headers=headers, timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
-            checker = get_consistency_checker(self.consistency)
+            checker = get_consistency_checker(consistency)
 
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
             with open(lpath, "wb") as f2:
@@ -1176,14 +1178,15 @@ class GCSFileSystem(AsyncFileSystem):
                     f2.write(data)
                     checker.update(data)
 
-            checker.validate_http_response(r)
+            validate_response(r.status, data, rpath)  # validate http request
+            checker.validate_http_response(r)  # validate file consistency
             return r.status, r.headers, r.request_info, data
 
     async def _get_file(self, rpath, lpath, **kwargs):
         if await self._isdir(rpath):
             return
         u2 = self.url(rpath)
-        await self._get_request(u2, lpath, **kwargs)
+        await self._get_file_request(u2, lpath, **kwargs)
 
     def _open(
         self,

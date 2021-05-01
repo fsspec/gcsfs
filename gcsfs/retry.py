@@ -107,9 +107,7 @@ async def retry_request(func, retries=6, *args, **kwargs):
         try:
             if retry > 0:
                 await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
-            status, headers, info, contents = await func(*args, **kwargs)
-            validate_response(status, contents, args[1], headers)
-            return status, headers, info, contents
+            return await func(*args, **kwargs)
             break
         except (
             HttpError,
