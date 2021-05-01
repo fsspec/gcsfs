@@ -496,7 +496,7 @@ class GCSFileSystem(AsyncFileSystem):
         return path, jsonin, datain, headers, kwargs
 
     @retry_request(retries=retries)
-    async def _request(self, path, method, *args, **kwargs):
+    async def _request(self, method, path, *args, **kwargs):
         await self._set_session()
         self.maybe_refresh()
         path, jsonin, datain, headers, params = self._get_args(path, *args, **kwargs)
@@ -524,7 +524,7 @@ class GCSFileSystem(AsyncFileSystem):
         logger.debug(f"{method.upper()}: {path}, {args}, {kwargs.get('headers')}")
 
         status, headers, info, contents = await self._request(
-            path, method, *args, **kwargs
+            method, path, *args, **kwargs
         )
         if json_out:
             return json.loads(contents)
