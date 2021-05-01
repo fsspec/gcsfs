@@ -29,7 +29,7 @@ import weakref
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path, setup_logging
 from fsspec.implementations.http import get_client
-from .utils import retry_request
+from .retry import retry_request
 from .checkers import get_consistency_checker
 from . import __version__ as version
 

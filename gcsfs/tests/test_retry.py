@@ -6,7 +6,7 @@ from requests.exceptions import ProxyError
 import pytest
 
 from gcsfs.tests.settings import TEST_BUCKET
-from gcsfs.utils import HttpError, is_retriable, validate_response
+from gcsfs.retry import HttpError, is_retriable, validate_response
 from gcsfs.tests.utils import tmpfile, my_vcr, gcs_maker
 
 
@@ -82,30 +82,10 @@ def test_validate_response():
 @pytest.mark.parametrize(
     ["file_path", "validate_get_error", "validate_list_error", "expected_error"],
     [
-        (
-            "/missing",
-            FileNotFoundError,
-            None,
-            FileNotFoundError,
-        ),  # Not called
-        (
-            "/missing",
-            OSError("Forbidden"),
-            FileNotFoundError,
-            FileNotFoundError,
-        ),
-        (
-            "/2014-01-01.csv",
-            None,
-            None,
-            None,
-        ),
-        (
-            "/2014-01-01.csv",
-            OSError("Forbidden"),
-            None,
-            None,
-        ),
+        ("/missing", FileNotFoundError, None, FileNotFoundError,),  # Not called
+        ("/missing", OSError("Forbidden"), FileNotFoundError, FileNotFoundError,),
+        ("/2014-01-01.csv", None, None, None,),
+        ("/2014-01-01.csv", OSError("Forbidden"), None, None,),
     ],
     ids=[
         "missing_with_get_perms",
