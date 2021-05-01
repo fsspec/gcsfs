@@ -69,23 +69,35 @@ def test_validate_response():
     with pytest.raises(ProxyError):
         validate_response(502, b"", None, "/path")
 
-    # No response validation when the method isn't md5
-    md5 = repr(base64.b64encode(hashlib.md5(b"foo").digest()))[2:-1]
-    validate_response(0, b"f", "/path", {"X-Goog-Hash": f"md5={md5}"})
-
-    # gcs.consistency = "md5"
-    # with pytest.raises(ChecksumError):
-    #    validate_response(0, b"f", "/path", {"X-Goog-Hash": f"md5={md5}"})
-
 
 @my_vcr.use_cassette(match=["all"])
 @pytest.mark.parametrize(
     ["file_path", "validate_get_error", "validate_list_error", "expected_error"],
     [
-        ("/missing", FileNotFoundError, None, FileNotFoundError,),  # Not called
-        ("/missing", OSError("Forbidden"), FileNotFoundError, FileNotFoundError,),
-        ("/2014-01-01.csv", None, None, None,),
-        ("/2014-01-01.csv", OSError("Forbidden"), None, None,),
+        (
+            "/missing",
+            FileNotFoundError,
+            None,
+            FileNotFoundError,
+        ),  # Not called
+        (
+            "/missing",
+            OSError("Forbidden"),
+            FileNotFoundError,
+            FileNotFoundError,
+        ),
+        (
+            "/2014-01-01.csv",
+            None,
+            None,
+            None,
+        ),
+        (
+            "/2014-01-01.csv",
+            OSError("Forbidden"),
+            None,
+            None,
+        ),
     ],
     ids=[
         "missing_with_get_perms",
@@ -105,8 +117,6 @@ def test_metadata_read_permissions(
             if path.endswith("/o/") and validate_list_error is not None:
                 raise validate_list_error
             validate_response(status, content, path, headers=None)
-
-        # validate_response = validate_response.__get__(gcs)
 
         if expected_error is None:
             gcs.ls(TEST_BUCKET + file_path)
