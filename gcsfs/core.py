@@ -1164,7 +1164,10 @@ class GCSFileSystem(AsyncFileSystem):
         rpath, jsonin, datain, headers, params = self._get_args(rpath, *args, **kwargs)
 
         async with self.session.get(
-            url=rpath, params=params, headers=headers, timeout=self.requests_timeout,
+            url=rpath,
+            params=params,
+            headers=headers,
+            timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
             checker = get_consistency_checker(consistency)

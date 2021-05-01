@@ -1,5 +1,3 @@
-import base64
-import hashlib
 import os
 import requests
 from requests.exceptions import ProxyError
