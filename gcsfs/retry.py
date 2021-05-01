@@ -66,32 +66,6 @@ def is_retriable(exception):
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
 
 
-class FileSender:
-    def __init__(self, consistency="none"):
-        self.consistency = consistency
-        if consistency == "size":
-            self.sent = 0
-        elif consistency == "md5":
-            from hashlib import md5
-
-            self.md5 = md5()
-
-    async def send(self, pre, f, post):
-        yield pre
-        chunk = f.read(64 * 1024)
-        while chunk:
-            yield chunk
-            if self.consistency == "size":
-                self.sent += len(chunk)
-            elif self.consistency == "md5":
-                self.md5.update(chunk)
-            chunk = f.read(64 * 1024)
-        yield post
-
-    def __len__(self):
-        return self.sent
-
-
 def validate_response(status, content, path, headers=None):
     """
     Check the requests object r, raise error if it's not ok.
