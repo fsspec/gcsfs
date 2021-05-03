@@ -215,7 +215,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     scopes = {"read_only", "read_write", "full_control"}
     retries = 6  # number of retries on http failure
-    base = "https://www.googleapis.com/storage/v1/"
+    base = "https://storage.googleapis.com/storage/v1/"
     default_block_size = DEFAULT_BLOCK_SIZE
     protocol = "gcs", "gs"
     async_impl = True
@@ -879,7 +879,7 @@ class GCSFileSystem(AsyncFileSystem):
     @classmethod
     def url(cls, path):
         """ Get HTTP URL of the given path """
-        u = "https://www.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media"
+        u = "https://storage.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media"
         bucket, object = cls.split_path(path)
         object = quote_plus(object)
         return u.format(bucket, object)
@@ -1021,7 +1021,7 @@ class GCSFileSystem(AsyncFileSystem):
         )
         headers, content = await self._call(
             "POST",
-            "https://www.googleapis.com/batch/storage/v1",
+            "https://storage.googleapis.com/batch/storage/v1",
             headers={
                 "Content-Type": 'multipart/mixed; boundary="=========='
                 '=====7330845974216740156=="'
@@ -1523,7 +1523,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         uid = re.findall("upload_id=([^&=?]+)", self.location)
         self.gcsfs.call(
             "DELETE",
-            "https://www.googleapis.com/upload/storage/v1/b/%s/o"
+            "https://storage.googleapis.com/upload/storage/v1/b/%s/o"
             "" % quote_plus(self.bucket),
             params={"uploadType": "resumable", "upload_id": uid},
             json_out=True,
@@ -1592,7 +1592,7 @@ async def initiate_upload(
         j["metadata"] = metadata
     headers, _ = await fs._call(
         method="POST",
-        path="https://www.googleapis.com/upload/storage"
+        path="https://storage.googleapis.com/upload/storage"
         "/v1/b/%s/o" % quote_plus(bucket),
         uploadType="resumable",
         json=j,
@@ -1615,7 +1615,9 @@ async def simple_upload(
     content_type="application/octet-stream",
 ):
     checker = get_consistency_checker(consistency)
-    path = "https://www.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(bucket)
+    path = "https://storage.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(
+        bucket
+    )
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain
