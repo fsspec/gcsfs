@@ -124,10 +124,12 @@ async def retry_request(func, retries=6, *args, **kwargs):
                 msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
                 raise ValueError(msg) from e
             if retry == retries - 1:
-                logger.exception("_call out of retries on exception: %s" % e)
+                logger.exception(
+                    "%s out of retries on exception: %s" % (func.__name__, e)
+                )
                 raise e
             if is_retriable(e):
-                logger.debug("_call retrying after exception: %s" % e)
+                logger.debug("%s retrying after exception: %s" % (func.__name__, e))
                 continue
-            logger.exception("_call non-retriable exception: %s" % e)
+            logger.exception("%s non-retriable exception: %s" % (func.__name__, e))
             raise e
