@@ -9,7 +9,6 @@ import fsspec
 import google.auth as gauth
 import google.auth.compute_engine
 import google.auth.credentials
-from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
@@ -25,16 +24,13 @@ import re
 import requests
 import threading
 import warnings
-import random
 import weakref
 
-from requests.exceptions import RequestException, ProxyError
-from aiohttp.client_exceptions import ClientError
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path, setup_logging
 from fsspec.implementations.http import get_client
-from .utils import ChecksumError, HttpError, is_retriable
-from .checkers import get_consistency_checker, MD5Checker
+from .retry import retry_request, validate_response
+from .checkers import get_consistency_checker
 from . import __version__ as version
 
 logger = logging.getLogger("gcsfs")
@@ -499,6 +495,7 @@ class GCSFileSystem(AsyncFileSystem):
             kwargs["userProject"] = user_project
         return path, jsonin, datain, headers, kwargs
 
+    @retry_request(retries=retries)
     async def _request(self, method, path, *args, **kwargs):
         await self._set_session()
         self.maybe_refresh()
@@ -518,6 +515,7 @@ class GCSFileSystem(AsyncFileSystem):
             info = r.request_info  # for debug only
             contents = await r.read()
 
+            validate_response(status, contents, path)
             return status, headers, info, contents
 
     async def _call(
@@ -525,37 +523,9 @@ class GCSFileSystem(AsyncFileSystem):
     ):
         logger.debug(f"{method.upper()}: {path}, {args}, {kwargs.get('headers')}")
 
-        for retry in range(self.retries):
-            try:
-                if retry > 0:
-                    await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
-                status, headers, info, contents = await self._request(
-                    method, path, *args, **kwargs
-                )
-                self.validate_response(status, contents, path, headers)
-                break
-            except (
-                HttpError,
-                RequestException,
-                GoogleAuthError,
-                ChecksumError,
-                ClientError,
-            ) as e:
-                if (
-                    isinstance(e, HttpError)
-                    and e.code == 400
-                    and "requester pays" in e.message
-                ):
-                    msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
-                    raise ValueError(msg) from e
-                if retry == self.retries - 1:
-                    logger.exception("_call out of retries on exception: %s" % e)
-                    raise e
-                if is_retriable(e):
-                    logger.debug("_call retrying after exception: %s" % e)
-                    continue
-                logger.exception("_call non-retriable exception: %s" % e)
-                raise e
+        status, headers, info, contents = await self._request(
+            method, path, *args, **kwargs
+        )
         if json_out:
             return json.loads(contents)
         elif info_out:
@@ -1196,27 +1166,14 @@ class GCSFileSystem(AsyncFileSystem):
             return {o["name"]: o for o in out}
         return [o["name"] for o in out]
 
-    async def _get_file(self, rpath, lpath, **kwargs):
-        if await self._isdir(rpath):
-            return
-        u2 = self.url(rpath)
-        headers = kwargs.pop("headers", {})
+    @retry_request(retries=retries)
+    async def _get_file_request(self, rpath, lpath, *args, **kwargs):
         consistency = kwargs.pop("consistency", self.consistency)
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = "python-gcsfs/" + version
-        headers.update(self.heads or {})  # add creds
-
-        # needed for requester pays buckets
-        if self.requester_pays:
-            if isinstance(self.requester_pays, str):
-                user_project = self.requester_pays
-            else:
-                user_project = self.project
-            kwargs["userProject"] = user_project
+        rpath, jsonin, datain, headers, params = self._get_args(rpath, *args, **kwargs)
 
         async with self.session.get(
-            url=u2,
-            params=kwargs,
+            url=rpath,
+            params=params,
             headers=headers,
             timeout=self.requests_timeout,
         ) as r:
@@ -1232,7 +1189,15 @@ class GCSFileSystem(AsyncFileSystem):
                     f2.write(data)
                     checker.update(data)
 
-            checker.validate_http_response(r)
+            validate_response(r.status, data, rpath)  # validate http request
+            checker.validate_http_response(r)  # validate file consistency
+            return r.status, r.headers, r.request_info, data
+
+    async def _get_file(self, rpath, lpath, **kwargs):
+        if await self._isdir(rpath):
+            return
+        u2 = self.url(rpath)
+        await self._get_file_request(u2, lpath, **kwargs)
 
     def _open(
         self,
@@ -1288,53 +1253,6 @@ class GCSFileSystem(AsyncFileSystem):
             return path, ""
         else:
             return path.split("/", 1)
-
-    def validate_response(self, status, content, path, headers=None):
-        """
-        Check the requests object r, raise error if it's not ok.
-
-        Parameters
-        ----------
-        r: requests response object
-        path: associated URL path, for error messages
-        """
-        if status >= 400:
-            error = None
-            if hasattr(content, "decode"):
-                content = content.decode()
-            try:
-                error = json.loads(content)["error"]
-                msg = error["message"]
-            except:  # noqa: E722
-                # TODO: limit to appropriate exceptions
-                msg = content
-
-            if status == 404:
-                raise FileNotFoundError
-            elif status == 403:
-                raise IOError("Forbidden: %s\n%s" % (path, msg))
-            elif status == 502:
-                raise ProxyError()
-            elif "invalid" in str(msg):
-                raise ValueError("Bad Request: %s\n%s" % (path, msg))
-            elif error:
-                raise HttpError(error)
-            elif status:
-                raise HttpError(
-                    {
-                        "code": status,
-                        "message": msg,
-                    }
-                )  # text-like
-            else:
-                raise RuntimeError(msg)
-        else:
-            if self.consistency != "md5":
-                return None
-            elif headers is not None and "X-Goog-Hash" in headers:
-                checker = MD5Checker()
-                checker.update(content)
-                checker.validate_headers(headers)
 
 
 GCSFileSystem.load_tokens()
