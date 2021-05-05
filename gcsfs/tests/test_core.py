@@ -29,6 +29,7 @@ from gcsfs.tests.utils import (
     tmpfile,
 )
 from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.credentials import GoogleCredentials
 import gcsfs.checkers
 from gcsfs import __version__ as version
 
@@ -37,7 +38,7 @@ pytestmark = pytest.mark.usefixtures("token_restore")
 
 @my_vcr.use_cassette(match=["all"])
 def test_simple():
-    assert not GCSFileSystem.tokens
+    assert not GoogleCredentials.tokens
     gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN)
     gcs.ls(TEST_BUCKET)  # no error
     gcs.ls("/" + TEST_BUCKET)  # OK to lead with '/'
@@ -953,7 +954,7 @@ def test_request_header():
         assert r.headers["User-Agent"] == "python-gcsfs/" + version
 
 
-@mock.patch("gcsfs.core.gauth")
+@mock.patch("gcsfs.credentials.gauth")
 def test_user_project_fallback_google_default(mock_auth):
     mock_auth.default.return_value = (requests.Session(), "my_default_project")
     fs = GCSFileSystem(token="google_default")
@@ -967,7 +968,7 @@ def test_user_project_cat():
     assert len(result)
 
 
-@mock.patch("gcsfs.core.gauth")
+@mock.patch("gcsfs.credentials.gauth")
 def test_raise_on_project_mismatch(mock_auth):
     mock_auth.default.return_value = (requests.Session(), "my_other_project")
     match = "'my_project' does not match the google default project 'my_other_project'"

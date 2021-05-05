@@ -12,7 +12,7 @@ fsspec.config.conf.pop("gcs", None)
 
 @pytest.fixture
 def token_restore():
-    cache = GCSFileSystem.tokens
+    cache = GoogleCredentials.tokens
     try:
         GoogleCredentials.tokens = {}
         yield
