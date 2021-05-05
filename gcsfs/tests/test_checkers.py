@@ -1,4 +1,4 @@
-from gcsfs.utils import ChecksumError
+from gcsfs.retry import ChecksumError
 from gcsfs.checkers import Crc32cChecker, MD5Checker, SizeChecker, crcmod
 from hashlib import md5
 import base64
