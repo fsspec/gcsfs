@@ -1,6 +1,7 @@
 import json
 import os
 import gcsfs.core
+import gcsfs.credentials
 
 RECORD_MODE = os.environ.get("GCSFS_RECORD_MODE", "none")
 TEST_PROJECT = os.environ.get("GCSFS_TEST_PROJECT", "test_project")
@@ -18,7 +19,7 @@ FAKE_TOKEN = {
     "timestamp": 1487859400.0,
 }
 
-FAKE_TOKEN.update(gcsfs.core.not_secret)
+FAKE_TOKEN.update(gcsfs.credentials.not_secret)
 
 FAKE_GOOGLE_TOKEN = {
     "client_id": (

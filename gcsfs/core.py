@@ -2,27 +2,15 @@
 """
 Google Cloud Storage pythonic interface
 """
-import textwrap
 import asyncio
 import fsspec
 
-import google.auth as gauth
-import google.auth.compute_engine
-import google.auth.credentials
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request
 import io
 import json
 import logging
 import os
 import posixpath
-import requests
-import pickle
 import re
-import requests
-import threading
 import warnings
 import weakref
 
@@ -31,6 +19,7 @@ from fsspec.utils import stringify_path, setup_logging
 from fsspec.implementations.http import get_client
 from .retry import retry_request, validate_response
 from .checkers import get_consistency_checker
+from .credentials import GoogleCredentials
 from . import __version__ as version
 
 logger = logging.getLogger("gcsfs")
@@ -41,20 +30,6 @@ if "GCSFS_DEBUG" in os.environ:
 
 
 # client created 2018-01-16
-not_secret = {
-    "client_id": "586241054156-9kst7ltfj66svc342pcn43vp6ta3idin"
-    ".apps.googleusercontent.com",
-    "client_secret": "xto0LIFYX35mmHF9T1R2QBqT",
-}
-client_config = {
-    "installed": {
-        "client_id": not_secret["client_id"],
-        "client_secret": not_secret["client_secret"],
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://accounts.google.com/o/oauth2/token",
-    }
-}
-tfile = os.path.join(os.path.expanduser("~"), ".gcs_tokens")
 ACLs = {
     "authenticatedread",
     "bucketownerfullcontrol",
@@ -246,24 +221,23 @@ class GCSFileSystem(AsyncFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
-        self.project = project
         self.requester_pays = requester_pays
-        self.access = access
-        self.credentials = None
-        self.heads = {}
-        self.lock = threading.Lock()
-        self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.consistency = consistency
-        self.token = token
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
         self.check_credentials = check_connection
         self.timeout = timeout
         self._session = None
+
+        self.credentials = GoogleCredentials(project, access, token)
+
         if not self.asynchronous:
             self._session = sync(self.loop, get_client, timeout=self.timeout)
             weakref.finalize(self, self.close_session, self.loop, self._session)
-        self.connect(method=token)
+
+    @property
+    def project(self):
+        return self.credentials.project
 
     @staticmethod
     def close_session(loop, session):
@@ -298,215 +272,46 @@ class GCSFileSystem(AsyncFileSystem):
         # use of root_marker to make minimum required path, e.g., "/"
         return path or cls.root_marker
 
-    @classmethod
-    def load_tokens(cls):
-        """Get "browser" tokens from disc"""
-        try:
-            with open(tfile, "rb") as f:
-                tokens = pickle.load(f)
-        except Exception:
-            tokens = {}
-        GCSFileSystem.tokens = tokens
-
-    def _connect_google_default(self):
-        credentials, project = gauth.default(scopes=[self.scope])
-        msg = textwrap.dedent(
-            """\
-        User-provided project '{}' does not match the google default project '{}'. Either
-
-          1. Accept the google-default project by not passing a `project` to GCSFileSystem
-          2. Configure the default project to match the user-provided project (gcloud config set project)
-          3. Use an authorization method other than 'google_default' by providing 'token=...'
-        """
-        )
-        if self.project and self.project != project:
-            raise ValueError(msg.format(self.project, project))
-        self.project = project
-        self.credentials = credentials
-
-    def _connect_cloud(self):
-        self.credentials = gauth.compute_engine.Credentials()
-
-    def _connect_cache(self):
-        project, access = self.project, self.access
-        if (project, access) in self.tokens:
-            credentials = self.tokens[(project, access)]
-            self.credentials = credentials
-
-    def _dict_to_credentials(self, token):
-        """
-        Convert old dict-style token.
-
-        Does not preserve access token itself, assumes refresh required.
-        """
-        try:
-            token = service_account.Credentials.from_service_account_info(
-                token, scopes=[self.scope]
-            )
-        except:  # noqa: E722
-            # TODO: catch specific exceptions
-            # According https://github.com/googleapis/python-cloud-core/blob/master/google/cloud/client.py
-            # Scopes required for authenticating with a service. User authentification fails
-            # with invalid_scope if scope is specified.
-            token = Credentials(
-                None,
-                refresh_token=token["refresh_token"],
-                client_secret=token["client_secret"],
-                client_id=token["client_id"],
-                token_uri="https://oauth2.googleapis.com/token",
-            )
-        return token
-
-    def _connect_token(self, token):
-        """
-        Connect using a concrete token
-
-        Parameters
-        ----------
-        token: str, dict or Credentials
-            If a str, try to load as a Service file, or next as a JSON; if
-            dict, try to interpret as credentials; if Credentials, use directly.
-        """
-        if isinstance(token, str):
-            if not os.path.exists(token):
-                raise FileNotFoundError(token)
-            try:
-                # is this a "service" token?
-                self._connect_service(token)
-                return
-            except:  # noqa: E722
-                # TODO: catch specific exceptions
-                # some other kind of token file
-                # will raise exception if is not json
-                token = json.load(open(token))
-        if isinstance(token, dict):
-            credentials = self._dict_to_credentials(token)
-        elif isinstance(token, google.auth.credentials.Credentials):
-            credentials = token
-        else:
-            raise ValueError("Token format not understood")
-        self.credentials = credentials
-        if self.credentials.valid:
-            self.credentials.apply(self.heads)
-
-    def maybe_refresh(self):
-        # this uses requests and is blocking
-        if self.credentials is None:
-            return  # anon
-        if self.credentials.valid:
-            return  # still good
-        req = Request(requests.Session())
-        with self.lock:
-            if self.credentials.valid:
-                return  # repeat to avoid race (but don't want lock in common case)
-            logger.debug("GCS refresh")
-            self.credentials.refresh(req)
-            self.credentials.apply(self.heads)
-
-    def _connect_service(self, fn):
-        # raises exception if file does not match expectation
-        credentials = service_account.Credentials.from_service_account_file(
-            fn, scopes=[self.scope]
-        )
-        self.credentials = credentials
-
-    def _connect_anon(self):
-        self.credentials = None
-
-    def _connect_browser(self):
-        flow = InstalledAppFlow.from_client_config(client_config, [self.scope])
-        credentials = flow.run_console()
-        self.tokens[(self.project, self.access)] = credentials
-        self._save_tokens()
-        self.credentials = credentials
-
-    def connect(self, method=None):
-        """
-        Establish session token. A new token will be requested if the current
-        one is within 100s of expiry.
-
-        Parameters
-        ----------
-        method: str (google_default|cache|cloud|token|anon|browser) or None
-            Type of authorisation to implement - calls `_connect_*` methods.
-            If None, will try sequence of methods.
-        """
-        if method not in [
-            "google_default",
-            "cache",
-            "cloud",
-            "token",
-            "anon",
-            "browser",
-            None,
-        ]:
-            self._connect_token(method)
-        elif method is None:
-            for meth in ["google_default", "cache", "cloud", "anon"]:
-                try:
-                    self.connect(method=meth)
-                    if self.check_credentials and meth != "anon":
-                        self.ls("anaconda-public-data")
-                    logger.debug("Connected with method %s", meth)
-                    break
-                except Exception as e:  # noqa: E722
-                    # TODO: catch specific exceptions
-                    logger.debug(
-                        'Connection with method "%s" failed' % meth, exc_info=e
-                    )
-        else:
-            self.__getattribute__("_connect_" + method)()
-            self.method = method
-
-    @staticmethod
-    def _save_tokens():
-        try:
-            with open(tfile, "wb") as f:
-                pickle.dump(GCSFileSystem.tokens, f, 2)
-        except Exception as e:
-            warnings.warn("Saving token cache failed: " + str(e))
-
-    def _get_args(self, path, *args, **kwargs):
-        for k, v in list(kwargs.items()):
-            if v is None:
-                del kwargs[k]
-        jsonin = kwargs.pop("json", None)
-        headers = kwargs.pop("headers", None)
-        datain = kwargs.pop("data", None)
-
-        if headers is None:
-            headers = {}
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = "python-gcsfs/" + version
-        headers.update(self.heads or {})  # add creds
-
-        if not path.startswith("http"):
-            path = self.base + path
-
-        if args:
-            path = path.format(*[quote_plus(p) for p in args])
-
+    def _get_params(self, kwargs):
+        params = {k: v for k, v in kwargs.items() if v is not None}
         # needed for requester pays buckets
         if self.requester_pays:
             if isinstance(self.requester_pays, str):
                 user_project = self.requester_pays
             else:
                 user_project = self.project
-            kwargs["userProject"] = user_project
-        return path, jsonin, datain, headers, kwargs
+            params["userProject"] = user_project
+        return params
+
+    def _get_headers(self, headers):
+        out = {}
+        if headers is not None:
+            out.update(headers)
+        if "User-Agent" not in out:
+            out["User-Agent"] = "python-gcsfs/" + version
+        self.credentials.apply(out)
+        return out
+
+    def _format_path(self, path, args):
+        if not path.startswith("http"):
+            path = self.base + path
+
+        if args:
+            path = path.format(*[quote_plus(p) for p in args])
+        return path
 
     @retry_request(retries=retries)
-    async def _request(self, method, path, *args, **kwargs):
+    async def _request(
+        self, method, path, *args, headers=None, json=None, data=None, **kwargs
+    ):
         await self._set_session()
-        self.maybe_refresh()
-        path, jsonin, datain, headers, params = self._get_args(path, *args, **kwargs)
         async with self.session.request(
             method=method,
-            url=path,
-            params=params,
-            json=jsonin,
-            headers=headers,
-            data=datain,
+            url=self._format_path(path, args),
+            params=self._get_params(kwargs),
+            json=json,
+            headers=self._get_headers(headers),
+            data=data,
             timeout=self.requests_timeout,
         ) as r:
 
@@ -1167,14 +972,13 @@ class GCSFileSystem(AsyncFileSystem):
         return [o["name"] for o in out]
 
     @retry_request(retries=retries)
-    async def _get_file_request(self, rpath, lpath, *args, **kwargs):
+    async def _get_file_request(self, rpath, lpath, *args, headers=None, **kwargs):
         consistency = kwargs.pop("consistency", self.consistency)
-        rpath, jsonin, datain, headers, params = self._get_args(rpath, *args, **kwargs)
 
         async with self.session.get(
             url=rpath,
-            params=params,
-            headers=headers,
+            params=self._get_params(kwargs),
+            headers=self._get_headers(headers),
             timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
@@ -1255,7 +1059,7 @@ class GCSFileSystem(AsyncFileSystem):
             return path.split("/", 1)
 
 
-GCSFileSystem.load_tokens()
+GoogleCredentials.load_tokens()
 
 
 class GCSFile(fsspec.spec.AbstractBufferedFile):
