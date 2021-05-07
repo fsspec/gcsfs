@@ -37,7 +37,10 @@ jobs:
 
       - name: Run Tests
         shell: bash -l {0}
-        run: GCSFS_RECORD_MODE=none py.test -vv gcsfs
+        run: |
+            export GCSFS_RECORD_MODE=none
+            export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
+            py.test -vv gcsfs
 
       - name: Run pre-commit hooks
         shell: bash -l {0}

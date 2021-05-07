@@ -166,7 +166,8 @@ class GoogleCredentials:
     def apply(self, out):
         """Insert credential headers in-place to a dictionary"""
         self.maybe_refresh()
-        self.credentials.apply(out)
+        if self.credentials is not None:
+            self.credentials.apply(out)
 
     def _connect_service(self, fn):
         # raises exception if file does not match expectation
