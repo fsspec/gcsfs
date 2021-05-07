@@ -37,12 +37,13 @@ client_config = {
 
 
 class GoogleCredentials:
-    def __init__(self, project, access, token):
+    def __init__(self, project, access, token, check_credentials=False):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.project = project
         self.access = access
         self.heads = {}
 
+        self.check_credentials = check_credentials
         self.credentials = None
         self.method = None
         self.lock = threading.Lock()

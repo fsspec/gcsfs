@@ -225,11 +225,10 @@ class GCSFileSystem(AsyncFileSystem):
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
-        self.check_credentials = check_connection
         self.timeout = timeout
         self._session = None
 
-        self.credentials = GoogleCredentials(project, access, token)
+        self.credentials = GoogleCredentials(project, access, token, check_connection)
 
         if not self.asynchronous:
             self._session = sync(self.loop, get_client, timeout=self.timeout)
