@@ -3,6 +3,7 @@ import textwrap
 import google.auth as gauth
 import google.auth.compute_engine
 import google.auth.credentials
+import google.auth.exceptions
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
@@ -37,12 +38,13 @@ client_config = {
 
 
 class GoogleCredentials:
-    def __init__(self, project, access, token):
+    def __init__(self, project, access, token, check_credentials=False):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.project = project
         self.access = access
         self.heads = {}
 
+        self.check_credentials = check_credentials
         self.credentials = None
         self.method = None
         self.lock = threading.Lock()
@@ -165,7 +167,8 @@ class GoogleCredentials:
     def apply(self, out):
         """Insert credential headers in-place to a dictionary"""
         self.maybe_refresh()
-        self.credentials.apply(out)
+        if self.credentials is not None:
+            self.credentials.apply(out)
 
     def _connect_service(self, fn):
         # raises exception if file does not match expectation
@@ -213,8 +216,9 @@ class GoogleCredentials:
                         self.ls("anaconda-public-data")
                     logger.debug("Connected with method %s", meth)
                     break
-                except Exception as e:  # noqa: E722
-                    # TODO: catch specific exceptions
+                except google.auth.exceptions.GoogleAuthError as e:
+                    # GoogleAuthError is the base class for all authentication
+                    # errors
                     logger.debug(
                         'Connection with method "%s" failed' % meth, exc_info=e
                     )
