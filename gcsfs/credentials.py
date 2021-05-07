@@ -3,6 +3,7 @@ import textwrap
 import google.auth as gauth
 import google.auth.compute_engine
 import google.auth.credentials
+import google.auth.exceptions
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2 import service_account
@@ -215,8 +216,9 @@ class GoogleCredentials:
                         self.ls("anaconda-public-data")
                     logger.debug("Connected with method %s", meth)
                     break
-                except Exception as e:  # noqa: E722
-                    # TODO: catch specific exceptions
+                except google.auth.exceptions.GoogleAuthError as e:
+                    # GoogleAuthError is the base class for all authentication
+                    # errors
                     logger.debug(
                         'Connection with method "%s" failed' % meth, exc_info=e
                     )
