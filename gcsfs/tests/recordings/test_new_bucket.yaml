@@ -17,9 +17,9 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIADjcZGAC/4WPMQ7DIBAEv4KoE+hd5iPWCc42CnCIO4SjyH+PSapULne1I82+NTiHzLPQE7Oe
-        lN73Xd+UZkcFR95ECk/W9t7NSrRGhBLYOEoWmmz25KllYVNxZHViOXh1hTXGGvJCBhOEeDl3kZq/
-        lwiyUE1D8Cs8y+tn+UCoWEcf/P+X4wNVOkHA4wAAAA==
+        H4sIAFdKmWAC/4WPMQ7DIBAEv4KoE+hd5iPWCc42CnCIO4SjyH+PSapULne1I82+NTiHzLPQE7Oe
+        lN73Xd+UZkcFR95ECk/W9t7NSrRGhBLYOEoWmmy2MdaQFzKYIER1Ujl4dUW5SM3fSwRZqKbL+SlJ
+        LQubiiMPwa/wLK+f5QOhYh198P9fjg9b1v+I4wAAAA==
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -50,7 +50,7 @@ interactions:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -69,12 +69,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -93,12 +93,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/
 - request:
     body: null
     headers: {}
     method: POST
-    uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
+    uri: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 409,\n    \"message\": \"You already
@@ -123,12 +123,12 @@ interactions:
     status:
       code: 409
       message: Conflict
-    url: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&project=test_project&predefinedDefaultObjectAcl=authenticatedread
+    url: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&project=test_project&predefinedDefaultObjectAcl=authenticatedread
 - request:
     body: null
     headers: {}
     method: DELETE
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Not Found\",\n
@@ -151,12 +151,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=%2F
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Not Found\",\n
@@ -179,12 +179,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=%2F
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Not Found\",\n
@@ -207,19 +207,19 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?delimiter=/
 - request:
     body: null
     headers: {}
     method: POST
-    uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=projectPrivate&predefinedDefaultObjectAcl=bucketOwnerFullControl&project=test_project
+    uri: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=projectPrivate&predefinedDefaultObjectAcl=bucketOwnerFullControl&project=test_project
   response:
     body:
       string: "{\n  \"kind\": \"storage#bucket\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket\",\n
         \ \"id\": \"gcsfs-testingnew-bucket\",\n  \"name\": \"gcsfs-testingnew-bucket\",\n
         \ \"projectNumber\": \"586241054156\",\n  \"metageneration\": \"1\",\n  \"location\":
         \"US\",\n  \"storageClass\": \"STANDARD\",\n  \"etag\": \"CAE=\",\n  \"timeCreated\":
-        \"2021-03-31T20:31:54.471Z\",\n  \"updated\": \"2021-03-31T20:31:54.471Z\",\n
+        \"2021-05-10T14:59:36.637Z\",\n  \"updated\": \"2021-05-10T14:59:36.637Z\",\n
         \ \"acl\": [\n    {\n      \"kind\": \"storage#bucketAccessControl\",\n      \"id\":
         \"gcsfs-testingnew-bucket/project-owners-586241054156\",\n      \"selfLink\":
         \"https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/acl/project-owners-586241054156\",\n
@@ -264,12 +264,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/?predefinedAcl=projectPrivate&project=test_project&predefinedDefaultObjectAcl=bucketOwnerFullControl
+    url: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=projectPrivate&project=test_project&predefinedDefaultObjectAcl=bucketOwnerFullControl
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -288,12 +288,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?prefix=new-directory%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?prefix=new-directory%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -312,12 +312,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?prefix=new-directory/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/?prefix=new-directory/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/new-directory
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/new-directory
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -341,12 +341,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/new-directory
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket/o/new-directory
 - request:
     body: null
     headers: {}
     method: DELETE
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
   response:
     body:
       string: ''
@@ -367,12 +367,12 @@ interactions:
     status:
       code: 204
       message: No Content
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testingnew-bucket
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -391,5 +391,5 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
 version: 1
