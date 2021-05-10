@@ -17,9 +17,9 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAHvbZGAC/4XPsQ7DIAwE0F9BzC3sGfsjkQVOggoYYSNSVfn3hnbqlPFON7x7a3AOmWehJ2Y9
-        Kb3vu74pzY4KjryJFJ6s7b2blWiNCCWwcZQsNNmsi9T8vUSQhWpSV/PGWENeyGCCEC/np45aFjYV
-        R1YnKgc/gF/wLK+f8oFQsY4++P8vxwdVrNCv4wAAAA==
+        H4sIALVJmWAC/4WPMQ7DIBAEv4KoE+hd5iPWCc42CnCIO4SjyH+PSapULnc10s6+NTiHzLPQE7Oe
+        lN73Xd+UZkcFR95ECk/W9t7NSrRGhBLYOEoWmmzWRWr+XiLIQjWpK/yco5aFTcWRL/nGWENeyGCC
+        ENUplYMfgl/hWV4/ywdCxTr64P+/HB90ZZ3Z4wAAAA==
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -50,7 +50,7 @@ interactions:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -69,12 +69,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -93,12 +93,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/
 - request:
     body: null
     headers: {}
     method: POST
-    uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
+    uri: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 409,\n    \"message\": \"You already
@@ -123,29 +123,38 @@ interactions:
     status:
       code: 409
       message: Conflict
-    url: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&project=test_project&predefinedDefaultObjectAcl=authenticatedread
+    url: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&project=test_project&predefinedDefaultObjectAcl=authenticatedread
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/?project=test_project
+    uri: https://storage.googleapis.com/storage/v1/b/?project=test_project
   response:
     body:
       string: "{\n  \"kind\": \"storage#buckets\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#bucket\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/anaconda-enterprise\",\n
-        \     \"id\": \"anaconda-enterprise\",\n      \"name\": \"anaconda-enterprise\",\n
-        \     \"projectNumber\": \"586241054156\",\n      \"metageneration\": \"3\",\n
-        \     \"location\": \"US\",\n      \"storageClass\": \"MULTI_REGIONAL\",\n
-        \     \"etag\": \"CAM=\",\n      \"timeCreated\": \"2017-07-05T23:53:06.552Z\",\n
-        \     \"updated\": \"2017-07-14T17:39:54.178Z\",\n      \"locationType\":
+        \"storage#bucket\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/803ae74b-fcd9-418c-a923-d11535ef8555\",\n
+        \     \"id\": \"803ae74b-fcd9-418c-a923-d11535ef8555\",\n      \"name\": \"803ae74b-fcd9-418c-a923-d11535ef8555\",\n
+        \     \"projectNumber\": \"586241054156\",\n      \"metageneration\": \"1\",\n
+        \     \"location\": \"US\",\n      \"storageClass\": \"STANDARD\",\n      \"etag\":
+        \"CAE=\",\n      \"timeCreated\": \"2021-04-13T13:53:46.885Z\",\n      \"updated\":
+        \"2021-04-13T13:53:46.885Z\",\n      \"iamConfiguration\": {\n        \"bucketPolicyOnly\":
+        {\n          \"enabled\": false\n        },\n        \"uniformBucketLevelAccess\":
+        {\n          \"enabled\": false\n        }\n      },\n      \"locationType\":
         \"multi-region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
-        \"https://www.googleapis.com/storage/v1/b/anaconda-public-data\",\n      \"id\":
-        \"anaconda-public-data\",\n      \"name\": \"anaconda-public-data\",\n      \"projectNumber\":
-        \"586241054156\",\n      \"metageneration\": \"2\",\n      \"location\": \"US\",\n
-        \     \"storageClass\": \"MULTI_REGIONAL\",\n      \"etag\": \"CAI=\",\n      \"timeCreated\":
-        \"2017-04-05T20:22:12.865Z\",\n      \"updated\": \"2017-07-10T16:32:07.980Z\",\n
+        \"https://www.googleapis.com/storage/v1/b/anaconda-enterprise\",\n      \"id\":
+        \"anaconda-enterprise\",\n      \"name\": \"anaconda-enterprise\",\n      \"projectNumber\":
+        \"586241054156\",\n      \"metageneration\": \"3\",\n      \"location\": \"US\",\n
+        \     \"storageClass\": \"MULTI_REGIONAL\",\n      \"etag\": \"CAM=\",\n      \"timeCreated\":
+        \"2017-07-05T23:53:06.552Z\",\n      \"updated\": \"2017-07-14T17:39:54.178Z\",\n
         \     \"locationType\": \"multi-region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n
-        \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/artifacts.test_project.appspot.com\",\n
+        \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/anaconda-public-data\",\n
+        \     \"id\": \"anaconda-public-data\",\n      \"name\": \"anaconda-public-data\",\n
+        \     \"projectNumber\": \"586241054156\",\n      \"metageneration\": \"2\",\n
+        \     \"location\": \"US\",\n      \"storageClass\": \"MULTI_REGIONAL\",\n
+        \     \"etag\": \"CAI=\",\n      \"timeCreated\": \"2017-04-05T20:22:12.865Z\",\n
+        \     \"updated\": \"2017-07-10T16:32:07.980Z\",\n      \"locationType\":
+        \"multi-region\"\n    },\n    {\n      \"kind\": \"storage#bucket\",\n      \"selfLink\":
+        \"https://www.googleapis.com/storage/v1/b/artifacts.test_project.appspot.com\",\n
         \     \"id\": \"artifacts.test_project.appspot.com\",\n      \"name\": \"artifacts.test_project.appspot.com\",\n
         \     \"projectNumber\": \"586241054156\",\n      \"metageneration\": \"3\",\n
         \     \"location\": \"US\",\n      \"storageClass\": \"STANDARD\",\n      \"etag\":
@@ -168,7 +177,7 @@ interactions:
         \"gcsfs-testing\",\n      \"name\": \"gcsfs-testing\",\n      \"projectNumber\":
         \"586241054156\",\n      \"metageneration\": \"1\",\n      \"location\": \"US\",\n
         \     \"storageClass\": \"STANDARD\",\n      \"etag\": \"CAE=\",\n      \"timeCreated\":
-        \"2021-03-31T20:12:46.700Z\",\n      \"updated\": \"2021-03-31T20:12:46.700Z\",\n
+        \"2021-03-31T20:30:45.847Z\",\n      \"updated\": \"2021-03-31T20:30:45.847Z\",\n
         \     \"iamConfiguration\": {\n        \"bucketPolicyOnly\": {\n          \"enabled\":
         false\n        },\n        \"uniformBucketLevelAccess\": {\n          \"enabled\":
         false\n        }\n      },\n      \"locationType\": \"multi-region\"\n    },\n
@@ -202,7 +211,7 @@ interactions:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '5119'
+      - '5827'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -213,12 +222,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/?project=test_project
+    url: https://storage.googleapis.com/storage/v1/b/?project=test_project
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -237,5 +246,5 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
 version: 1

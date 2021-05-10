@@ -17,9 +17,9 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAC3cZGAC/4WPMQ7DIBAEv4KoE+hd5iPWCc42CnCIO4SjyH+PSapULnc10s6+NTiHzLPQE7Oe
-        lN73Xd+UZkcFR95ECk/W9t7NSrRGhBLYOEoWmmy2MdaQFzKYIER1hZ9z1LKwqTjyJe8iNX8vEWSh
-        mtQplYMfgl/hWV4/ywdCxTr64P+/HB9GPeS/4wAAAA==
+        H4sIACNMmWAC/4XPsQ7DIAwE0F9BzC3sGfsjkQVOggoYYSNSVfn3hnbqlPFON7x7a3AOmWehJ2Y9
+        Kb3vu74pzY4KjryJFJ6s7b2blWiNCCWwcZQsNNlsY6whL2QwQYjqau4iNX8vEWShmi7np45aFjYV
+        R1YnKgc/gF/wLK+f8oFQsY4++P8vxwcIgekt4wAAAA==
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
@@ -50,7 +50,7 @@ interactions:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -69,12 +69,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -93,12 +93,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/
 - request:
     body: null
     headers: {}
     method: POST
-    uri: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
+    uri: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&predefinedDefaultObjectAcl=authenticatedread&project=test_project
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 409,\n    \"message\": \"You already
@@ -123,12 +123,12 @@ interactions:
     status:
       code: 409
       message: Conflict
-    url: https://www.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&project=test_project&predefinedDefaultObjectAcl=authenticatedread
+    url: https://storage.googleapis.com/storage/v1/b/?predefinedAcl=publicReadWrite&project=test_project&predefinedDefaultObjectAcl=authenticatedread
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -147,12 +147,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -176,12 +176,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -205,12 +205,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=%2F&prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -229,12 +229,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/&prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?delimiter=/&prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -258,12 +258,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -282,12 +282,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -311,12 +311,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -335,12 +335,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -364,12 +364,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -388,12 +388,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -417,7 +417,7 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: '--==0==
 
@@ -438,27 +438,27 @@ interactions:
       Content-Type:
       - multipart/related; boundary="==0=="
     method: POST
-    uri: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=multipart
+    uri: https://storage.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=multipart
   response:
     body:
-      string: "{\n  \"kind\": \"storage#object\",\n  \"id\": \"gcsfs-testing/mapping/1/1617222704587903\",\n
+      string: "{\n  \"kind\": \"storage#object\",\n  \"id\": \"gcsfs-testing/mapping/1/1620659237179633\",\n
         \ \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2F1\",\n
-        \ \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1617222704587903&alt=media\",\n
+        \ \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1620659237179633&alt=media\",\n
         \ \"name\": \"mapping/1\",\n  \"bucket\": \"gcsfs-testing\",\n  \"generation\":
-        \"1617222704587903\",\n  \"metageneration\": \"1\",\n  \"contentType\": \"application/octet-stream\",\n
+        \"1620659237179633\",\n  \"metageneration\": \"1\",\n  \"contentType\": \"application/octet-stream\",\n
         \ \"storageClass\": \"STANDARD\",\n  \"size\": \"1\",\n  \"md5Hash\": \"xMpCOKC5I4INzFCab3WEmw==\",\n
-        \ \"crc32c\": \"kPWZ4w==\",\n  \"etag\": \"CP/I0Yaw2+8CEAE=\",\n  \"timeCreated\":
-        \"2021-03-31T20:31:44.617Z\",\n  \"updated\": \"2021-03-31T20:31:44.617Z\",\n
-        \ \"timeStorageClassUpdated\": \"2021-03-31T20:31:44.617Z\"\n}\n"
+        \ \"crc32c\": \"kPWZ4w==\",\n  \"etag\": \"CPGhiZGyv/ACEAE=\",\n  \"timeCreated\":
+        \"2021-05-10T15:07:17.199Z\",\n  \"updated\": \"2021-05-10T15:07:17.199Z\",\n
+        \ \"timeStorageClassUpdated\": \"2021-05-10T15:07:17.199Z\"\n}\n"
     headers:
       Cache-Control:
       - no-cache, no-store, max-age=0, must-revalidate
       Content-Length:
-      - '738'
+      - '742'
       Content-Type:
       - application/json; charset=UTF-8
       Etag:
-      - CP/I0Yaw2+8CEAE=
+      - CPGhiZGyv/ACEAE=
       Pragma:
       - no-cache
       Server:
@@ -469,30 +469,30 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=multipart
+    url: https://storage.googleapis.com/upload/storage/v1/b/gcsfs-testing/o?uploadType=multipart
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1617222704587903\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1620659237179633\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2F1\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1617222704587903&alt=media\",\n
+        \     \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1620659237179633&alt=media\",\n
         \     \"name\": \"mapping/1\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1617222704587903\",\n      \"metageneration\": \"1\",\n      \"contentType\":
+        \"1620659237179633\",\n      \"metageneration\": \"1\",\n      \"contentType\":
         \"application/octet-stream\",\n      \"storageClass\": \"STANDARD\",\n      \"size\":
         \"1\",\n      \"md5Hash\": \"xMpCOKC5I4INzFCab3WEmw==\",\n      \"crc32c\":
-        \"kPWZ4w==\",\n      \"etag\": \"CP/I0Yaw2+8CEAE=\",\n      \"timeCreated\":
-        \"2021-03-31T20:31:44.617Z\",\n      \"updated\": \"2021-03-31T20:31:44.617Z\",\n
-        \     \"timeStorageClassUpdated\": \"2021-03-31T20:31:44.617Z\"\n    }\n  ]\n}\n"
+        \"kPWZ4w==\",\n      \"etag\": \"CPGhiZGyv/ACEAE=\",\n      \"timeCreated\":
+        \"2021-05-10T15:07:17.199Z\",\n      \"updated\": \"2021-05-10T15:07:17.199Z\",\n
+        \     \"timeStorageClassUpdated\": \"2021-05-10T15:07:17.199Z\"\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '864'
+      - '868'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -503,30 +503,30 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1617222704587903\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1620659237179633\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2F1\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1617222704587903&alt=media\",\n
+        \     \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1620659237179633&alt=media\",\n
         \     \"name\": \"mapping/1\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1617222704587903\",\n      \"metageneration\": \"1\",\n      \"contentType\":
+        \"1620659237179633\",\n      \"metageneration\": \"1\",\n      \"contentType\":
         \"application/octet-stream\",\n      \"storageClass\": \"STANDARD\",\n      \"size\":
         \"1\",\n      \"md5Hash\": \"xMpCOKC5I4INzFCab3WEmw==\",\n      \"crc32c\":
-        \"kPWZ4w==\",\n      \"etag\": \"CP/I0Yaw2+8CEAE=\",\n      \"timeCreated\":
-        \"2021-03-31T20:31:44.617Z\",\n      \"updated\": \"2021-03-31T20:31:44.617Z\",\n
-        \     \"timeStorageClassUpdated\": \"2021-03-31T20:31:44.617Z\"\n    }\n  ]\n}\n"
+        \"kPWZ4w==\",\n      \"etag\": \"CPGhiZGyv/ACEAE=\",\n      \"timeCreated\":
+        \"2021-05-10T15:07:17.199Z\",\n      \"updated\": \"2021-05-10T15:07:17.199Z\",\n
+        \     \"timeStorageClassUpdated\": \"2021-05-10T15:07:17.199Z\"\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '864'
+      - '868'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -537,30 +537,30 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1617222704587903\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1620659237179633\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2F1\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1617222704587903&alt=media\",\n
+        \     \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1620659237179633&alt=media\",\n
         \     \"name\": \"mapping/1\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1617222704587903\",\n      \"metageneration\": \"1\",\n      \"contentType\":
+        \"1620659237179633\",\n      \"metageneration\": \"1\",\n      \"contentType\":
         \"application/octet-stream\",\n      \"storageClass\": \"STANDARD\",\n      \"size\":
         \"1\",\n      \"md5Hash\": \"xMpCOKC5I4INzFCab3WEmw==\",\n      \"crc32c\":
-        \"kPWZ4w==\",\n      \"etag\": \"CP/I0Yaw2+8CEAE=\",\n      \"timeCreated\":
-        \"2021-03-31T20:31:44.617Z\",\n      \"updated\": \"2021-03-31T20:31:44.617Z\",\n
-        \     \"timeStorageClassUpdated\": \"2021-03-31T20:31:44.617Z\"\n    }\n  ]\n}\n"
+        \"kPWZ4w==\",\n      \"etag\": \"CPGhiZGyv/ACEAE=\",\n      \"timeCreated\":
+        \"2021-05-10T15:07:17.199Z\",\n      \"updated\": \"2021-05-10T15:07:17.199Z\",\n
+        \     \"timeStorageClassUpdated\": \"2021-05-10T15:07:17.199Z\"\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '864'
+      - '868'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -571,30 +571,30 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\":
-        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1617222704587903\",\n
+        \"storage#object\",\n      \"id\": \"gcsfs-testing/mapping/1/1620659237179633\",\n
         \     \"selfLink\": \"https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping%2F1\",\n
-        \     \"mediaLink\": \"https://www.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1617222704587903&alt=media\",\n
+        \     \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/gcsfs-testing/o/mapping%2F1?generation=1620659237179633&alt=media\",\n
         \     \"name\": \"mapping/1\",\n      \"bucket\": \"gcsfs-testing\",\n      \"generation\":
-        \"1617222704587903\",\n      \"metageneration\": \"1\",\n      \"contentType\":
+        \"1620659237179633\",\n      \"metageneration\": \"1\",\n      \"contentType\":
         \"application/octet-stream\",\n      \"storageClass\": \"STANDARD\",\n      \"size\":
         \"1\",\n      \"md5Hash\": \"xMpCOKC5I4INzFCab3WEmw==\",\n      \"crc32c\":
-        \"kPWZ4w==\",\n      \"etag\": \"CP/I0Yaw2+8CEAE=\",\n      \"timeCreated\":
-        \"2021-03-31T20:31:44.617Z\",\n      \"updated\": \"2021-03-31T20:31:44.617Z\",\n
-        \     \"timeStorageClassUpdated\": \"2021-03-31T20:31:44.617Z\"\n    }\n  ]\n}\n"
+        \"kPWZ4w==\",\n      \"etag\": \"CPGhiZGyv/ACEAE=\",\n      \"timeCreated\":
+        \"2021-05-10T15:07:17.199Z\",\n      \"updated\": \"2021-05-10T15:07:17.199Z\",\n
+        \     \"timeStorageClassUpdated\": \"2021-05-10T15:07:17.199Z\"\n    }\n  ]\n}\n"
     headers:
       Cache-Control:
       - private, max-age=0, must-revalidate, no-transform
       Content-Length:
-      - '864'
+      - '868'
       Content-Type:
       - application/json; charset=UTF-8
       Server:
@@ -605,7 +605,7 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: '
 
@@ -650,29 +650,29 @@ interactions:
       Content-Type:
       - multipart/mixed; boundary="===============7330845974216740156=="
     method: POST
-    uri: https://www.googleapis.com/batch/storage/v1
+    uri: https://storage.googleapis.com/batch/storage/v1
   response:
     body:
-      string: "--batch_TdYhmvtcQ_gLd6_lmn9tBm0IrrqlEeXz\r\nContent-Type: application/http\r\nContent-ID:
+      string: "--batch_znWfXrqZAcghUaLqRI0NWOImBphFRO7a\r\nContent-Type: application/http\r\nContent-ID:
         <response-b29c5de2-0db4-490b-b421-6a51b598bd11+1>\r\n\r\nHTTP/1.1 404 Not
-        Found\r\nContent-Type: application/json; charset=UTF-8\r\nDate: Wed, 31 Mar
-        2021 20:31:45 GMT\r\nCache-Control: no-cache, no-store, max-age=0, must-revalidate\r\nExpires:
+        Found\r\nContent-Type: application/json; charset=UTF-8\r\nDate: Mon, 10 May
+        2021 15:07:17 GMT\r\nCache-Control: no-cache, no-store, max-age=0, must-revalidate\r\nExpires:
         Mon, 01 Jan 1990 00:00:00 GMT\r\nContent-Length: 247\r\n\r\n{\n  \"error\":
         {\n    \"code\": 404,\n    \"message\": \"No such object: gcsfs-testing/mapping\",\n
         \   \"errors\": [\n      {\n        \"message\": \"No such object: gcsfs-testing/mapping\",\n
         \       \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n
-        \   ]\n  }\n}\n\r\n--batch_TdYhmvtcQ_gLd6_lmn9tBm0IrrqlEeXz\r\nContent-Type:
+        \   ]\n  }\n}\n\r\n--batch_znWfXrqZAcghUaLqRI0NWOImBphFRO7a\r\nContent-Type:
         application/http\r\nContent-ID: <response-b29c5de2-0db4-490b-b421-6a51b598bd11+2>\r\n\r\nHTTP/1.1
-        204 No Content\r\nContent-Type: application/json\r\nDate: Wed, 31 Mar 2021
-        20:31:45 GMT\r\nCache-Control: no-cache, no-store, max-age=0, must-revalidate\r\nExpires:
-        Mon, 01 Jan 1990 00:00:00 GMT\r\nContent-Length: 0\r\n\r\n\r\n--batch_TdYhmvtcQ_gLd6_lmn9tBm0IrrqlEeXz--\r\n"
+        204 No Content\r\nContent-Type: application/json\r\nDate: Mon, 10 May 2021
+        15:07:17 GMT\r\nCache-Control: no-cache, no-store, max-age=0, must-revalidate\r\nExpires:
+        Mon, 01 Jan 1990 00:00:00 GMT\r\nContent-Length: 0\r\n\r\n\r\n--batch_znWfXrqZAcghUaLqRI0NWOImBphFRO7a--\r\n"
     headers:
       Cache-Control:
       - private, max-age=0
       Content-Encoding:
       - gzip
       Content-Type:
-      - multipart/mixed; boundary=batch_TdYhmvtcQ_gLd6_lmn9tBm0IrrqlEeXz
+      - multipart/mixed; boundary=batch_znWfXrqZAcghUaLqRI0NWOImBphFRO7a
       Server:
       - Upload Server
       Transfer-Encoding:
@@ -689,12 +689,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/batch/storage/v1
+    url: https://storage.googleapis.com/batch/storage/v1
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -713,12 +713,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -742,12 +742,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -766,12 +766,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -795,12 +795,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping%2F
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -819,12 +819,12 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/?prefix=mapping/
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
   response:
     body:
       string: "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object:
@@ -848,12 +848,12 @@ interactions:
     status:
       code: 404
       message: Not Found
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/mapping
 - request:
     body: null
     headers: {}
     method: GET
-    uri: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    uri: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
   response:
     body:
       string: "{\n  \"kind\": \"storage#objects\"\n}\n"
@@ -872,5 +872,5 @@ interactions:
     status:
       code: 200
       message: OK
-    url: https://www.googleapis.com/storage/v1/b/gcsfs-testing/o/
+    url: https://storage.googleapis.com/storage/v1/b/gcsfs-testing/o/
 version: 1
