@@ -662,7 +662,7 @@ class GCSFileSystem(AsyncFileSystem):
         """ Simple one-shot get of file data """
         u2 = self.url(path)
         if start or end:
-            head = {"Range": "bytes=%i-%s" % (start or 0, end - 1 if end else "")}
+            head = {"Range": await self._process_limits(path, start, end)}
         else:
             head = {}
         headers, out = await self._call("GET", u2, headers=head)
