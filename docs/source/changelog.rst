@@ -1,8 +1,10 @@
 Changelog
 =========
 
-Dev
----
+2021.06.0
+---------
+
+* negative ranges in cat_file (#394)
 
 2021.05.0
 ---------
