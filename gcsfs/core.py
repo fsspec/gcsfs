@@ -242,7 +242,10 @@ class GCSFileSystem(AsyncFileSystem):
     def close_session(loop, session):
         if loop is not None and session is not None:
             if loop.is_running():
-                sync(loop, session.close, timeout=0.1)
+                try:
+                    sync(loop, session.close, timeout=0.1)
+                except fsspec.FSTimeoutError:
+                    pass
             else:
                 pass
 
