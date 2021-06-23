@@ -182,6 +182,9 @@ class GCSFileSystem(AsyncFileSystem):
         project ID `project` in requests as the `userPorject`, and you'll be
         billed for accessing data from requester-pays buckets. Optionally,
         pass a project-id here as a string to use that as the `userProject`.
+    session_kwargs: dict
+        passed on to aiohttp.ClientSession; can contain, for example,
+        proxy settings.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -204,6 +207,7 @@ class GCSFileSystem(AsyncFileSystem):
         requests_timeout=None,
         requester_pays=False,
         asynchronous=False,
+        session_kwargs=None,
         loop=None,
         timeout=None,
         **kwargs,
@@ -227,11 +231,14 @@ class GCSFileSystem(AsyncFileSystem):
         self.requests_timeout = requests_timeout
         self.timeout = timeout
         self._session = None
+        self.session_kwargs = session_kwargs or {}
 
         self.credentials = GoogleCredentials(project, access, token, check_connection)
 
         if not self.asynchronous:
-            self._session = sync(self.loop, get_client, timeout=self.timeout)
+            self._session = sync(
+                self.loop, get_client, timeout=self.timeout, **self.session_kwargs
+            )
             weakref.finalize(self, self.close_session, self.loop, self._session)
 
     @property
@@ -251,7 +258,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _set_session(self):
         if self._session is None:
-            self._session = await get_client()
+            self._session = await get_client(**self.session_kwargs)
         return self._session
 
     @property
