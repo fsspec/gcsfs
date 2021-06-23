@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2021.06.1
+---------
+
+* kwargs to aiohttpClient session
+* graceful timeout when disconnecting at finalise (#397)
+
 2021.06.0
 ---------
 
