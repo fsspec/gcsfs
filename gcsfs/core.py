@@ -236,8 +236,9 @@ class GCSFileSystem(AsyncFileSystem):
         self.credentials = GoogleCredentials(project, access, token, check_connection)
 
         if not self.asynchronous:
-            self._session = sync(self.loop, get_client, timeout=self.timeout,
-                                 **self.session_kwargs)
+            self._session = sync(
+                self.loop, get_client, timeout=self.timeout, **self.session_kwargs
+            )
             weakref.finalize(self, self.close_session, self.loop, self._session)
 
     @property
