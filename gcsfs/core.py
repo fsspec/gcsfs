@@ -380,11 +380,11 @@ class GCSFileSystem(AsyncFileSystem):
         # Check if parent dir is in listing cache
         listing = self._ls_from_cache(path)
         if listing:
-            f = [f for f in listing if f["type"] == "file"]
-            if f:
-                return f
-            # parent is listed, doesn't contain the path
-            raise FileNotFoundError(path)
+            for file_details in listing:
+                if file_details["type"] == "file" and file_details["name"] == path:
+                    return file_details
+            else:
+                raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -937,7 +937,7 @@ class GCSFileSystem(AsyncFileSystem):
             delimiter=None,
             prefix=prefix,
         )
-        if not out and key:
+        if not prefix and not out and key:
             try:
                 out = [
                     await self._get_object(
