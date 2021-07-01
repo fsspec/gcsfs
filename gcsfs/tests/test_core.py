@@ -1031,3 +1031,27 @@ def test_zero_cache_timeout():
 
         with pytest.raises(KeyError):
             gcs.dircache[f"{TEST_BUCKET}/a"]
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_find_with_prefix_partial_cache():
+    base_dir = f"{TEST_BUCKET}/test_find_with_prefix"
+    with gcs_maker(False) as gcs:
+        gcs.touch(base_dir + "/test_1")
+        gcs.touch(base_dir + "/test_2")
+
+        for with_cache in (True, False):
+            # Test once with cached, and once with no cache
+            gcs.invalidate_cache()
+            if with_cache:
+                gcs.ls(base_dir)
+            assert gcs.find(base_dir, prefix="non_existent_") == []
+            assert gcs.find(base_dir, prefix="test_") == [
+                base_dir + "/test_1",
+                base_dir + "/test_2",
+            ]
+            assert gcs.find(base_dir + "/test_1") == [base_dir + "/test_1"]
+            assert gcs.find(base_dir + "/non_existent") == []
+            assert (
+                gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []
+            )
