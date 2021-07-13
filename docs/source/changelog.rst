@@ -1,6 +1,11 @@
 Changelog
 =========
 
+2021.07.0
+---------
+
+* fix find/glob with a prefix (#399)
+
 2021.06.1
 ---------
 
