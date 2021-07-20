@@ -472,6 +472,19 @@ def test_get_put(consistency):
 
 
 @pytest.mark.skipif(ON_VCR, reason="async fail")
+@my_vcr.use_cassette(match=["all"])
+def test_get_put_list():
+    with gcs_maker(True) as gcs:
+        with tmpfile() as fn:
+            gcs.get([TEST_BUCKET + "/test/accounts.1.json"], [fn])
+            data = files["test/accounts.1.json"]
+            assert open(fn, "rb").read() == data
+            gcs.put([fn], [TEST_BUCKET + "/temp"])
+            assert gcs.du(TEST_BUCKET + "/temp") == len(data)
+            assert gcs.cat(TEST_BUCKET + "/temp") == data
+
+
+@pytest.mark.skipif(ON_VCR, reason="async fail")
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
 @my_vcr.use_cassette(match=["all"])
 def test_get_put_recursive(protocol):
