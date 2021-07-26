@@ -1108,7 +1108,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             Check for success in writing, applied at file close.
             'size' ensures that the number of bytes reported by GCS matches
             the number we wrote; 'md5' does a full checksum. Any value other
-            than 'size' or 'md5' or 'crc32' is assumed to mean no checking.
+            than 'size' or 'md5' or 'crc32c' is assumed to mean no checking.
         content_type: str
             default is `application/octet-stream`. See the list of available
             content types at https://www.iana.org/assignments/media-types/media-types.txt
