@@ -4,6 +4,7 @@ Google Cloud Storage pythonic interface
 """
 import asyncio
 import fsspec
+import aiofiles
 
 import io
 import json
@@ -892,15 +893,15 @@ class GCSFileSystem(AsyncFileSystem):
         consistency = consistency or self.consistency
         checker = get_consistency_checker(consistency)
         bucket, key = self.split_path(rpath)
-        with open(lpath, "rb") as f0:
-            size = f0.seek(0, 2)
-            f0.seek(0)
+        async with aiofiles.open(lpath, "rb") as f0:
+            size = await f0.seek(0, 2)
+            await f0.seek(0)
             if size < 5 * 2 ** 20:
                 return await simple_upload(
                     self,
                     bucket,
                     key,
-                    f0.read(),
+                    await f0.read(),
                     consistency=consistency,
                     metadatain=metadata,
                     content_type=content_type,
@@ -911,7 +912,7 @@ class GCSFileSystem(AsyncFileSystem):
                 )
                 offset = 0
                 while True:
-                    bit = f0.read(chunksize)
+                    bit = await f0.read(chunksize)
                     if not bit:
                         break
                     out = await upload_chunk(
@@ -994,12 +995,12 @@ class GCSFileSystem(AsyncFileSystem):
             checker = get_consistency_checker(consistency)
 
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
-            with open(lpath, "wb") as f2:
+            async with aiofiles.open(lpath, "wb") as f2:
                 while True:
                     data = await r.content.read(4096 * 32)
                     if not data:
                         break
-                    f2.write(data)
+                    await f2.write(data)
                     checker.update(data)
 
             validate_response(r.status, data, rpath)  # validate http request
