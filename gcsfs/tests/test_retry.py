@@ -61,11 +61,11 @@ def test_validate_response():
 
     # 404
     with pytest.raises(FileNotFoundError):
-        validate_response(404, b"", None, "/path")
+        validate_response(404, b"", "/path")
 
     # 502
     with pytest.raises(ProxyError):
-        validate_response(502, b"", None, "/path")
+        validate_response(502, b"", "/path")
 
 
 @my_vcr.use_cassette(match=["all"])
@@ -109,12 +109,12 @@ def test_metadata_read_permissions(
 ):
     with gcs_maker(True) as gcs:
 
-        def _validate_response(self, status, content, path, headers=None):
+        def _validate_response(self, status, content, path):
             if path.endswith(f"/o{file_path}") and validate_get_error is not None:
                 raise validate_get_error
             if path.endswith("/o/") and validate_list_error is not None:
                 raise validate_list_error
-            validate_response(status, content, path, headers=None)
+            validate_response(status, content, path)
 
         if expected_error is None:
             gcs.ls(TEST_BUCKET + file_path)
