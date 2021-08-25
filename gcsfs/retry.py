@@ -77,7 +77,7 @@ def validate_response(status, content, path):
     """
     if status >= 400:
         if status == 404:
-            raise FileNotFoundError
+            raise FileNotFoundError(path)
 
         error = None
         if hasattr(content, "decode"):
