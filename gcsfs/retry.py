@@ -66,7 +66,7 @@ def is_retriable(exception):
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
 
 
-def validate_response(status, content, path, headers=None):
+def validate_response(status, content, path):
     """
     Check the requests object r, raise error if it's not ok.
 
@@ -76,6 +76,9 @@ def validate_response(status, content, path, headers=None):
     path: associated URL path, for error messages
     """
     if status >= 400:
+        if status == 404:
+            raise FileNotFoundError(path)
+
         error = None
         if hasattr(content, "decode"):
             content = content.decode()
@@ -85,9 +88,7 @@ def validate_response(status, content, path, headers=None):
         except json.decoder.JSONDecodeError:
             msg = content
 
-        if status == 404:
-            raise FileNotFoundError
-        elif status == 403:
+        if status == 403:
             raise IOError("Forbidden: %s\n%s" % (path, msg))
         elif status == 502:
             raise requests.exceptions.ProxyError()
@@ -108,7 +109,6 @@ async def retry_request(func, retries=6, *args, **kwargs):
             if retry > 0:
                 await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
             return await func(*args, **kwargs)
-            break
         except (
             HttpError,
             requests.exceptions.RequestException,
@@ -121,8 +121,15 @@ async def retry_request(func, retries=6, *args, **kwargs):
                 and e.code == 400
                 and "requester pays" in e.message
             ):
-                msg = "Bucket is requester pays. Set `requester_pays=True` when creating the GCSFileSystem."
+                msg = (
+                    "Bucket is requester pays. "
+                    "Set `requester_pays=True` when creating the GCSFileSystem."
+                )
                 raise ValueError(msg) from e
+            # Special test for 404 to avoid retrying the request
+            if isinstance(e, aiohttp.client_exceptions.ClientError) and e.code == 404:
+                logger.debug("Request returned 404, no retries.")
+                raise e
             if retry == retries - 1:
                 logger.exception(
                     "%s out of retries on exception: %s" % (func.__name__, e)
