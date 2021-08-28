@@ -107,7 +107,7 @@ class GoogleCredentials:
         except:  # noqa: E722
             # TODO: catch specific exceptions
             # According https://github.com/googleapis/python-cloud-core/blob/master/google/cloud/client.py
-            # Scopes required for authenticating with a service. User authentification fails
+            # Scopes required for authenticating with a service. User authentication fails
             # with invalid_scope if scope is specified.
             token = Credentials(
                 None,
