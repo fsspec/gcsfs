@@ -57,7 +57,7 @@ Version 0.6.0
 
   The ``user_project`` keyword has been removed, and has been replaced with
   the ``requester_pays`` keyword. If you're working with a ``requester_pays`` bucket
-  you will need to explicity pass ``requester_pays-True``. This will include your
+  you will need to explicitly pass ``requester_pays-True``. This will include your
   ``project`` ID in requests made to GCS.
 
 Version 0.5.3

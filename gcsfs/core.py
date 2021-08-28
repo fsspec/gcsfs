@@ -99,7 +99,7 @@ class GCSFileSystem(AsyncFileSystem):
       which are typically established by doing ``gcloud login`` in a terminal.
     - ``token=='cache'``, credentials from previously successful gcsfs
       authentication will be used (use this after "browser" auth succeeded)
-    - ``token='anon'``, no authentication is preformed, and you can only
+    - ``token='anon'``, no authentication is performed, and you can only
       access data which is accessible to allUsers (in this case, the project and
       access level parameters are meaningless)
     - ``token='browser'``, you get an access code with which you can
@@ -130,7 +130,7 @@ class GCSFileSystem(AsyncFileSystem):
     all objects from a directory implicitly deletes the empty directory.
 
     `GCSFileSystem` generates listing entries for these implied directories in
-    listing apis with the  object properies:
+    listing apis with the  object properties:
 
         - "name" : string
             The "{bucket}/{name}" path of the dir, used in calls to
@@ -158,7 +158,7 @@ class GCSFileSystem(AsyncFileSystem):
         This is required in order
         to list all the buckets you have access to within a project and to
         create/delete buckets, or update their access policies.
-        If ``token='google_default'``, the value is overriden by the default,
+        If ``token='google_default'``, the value is overridden by the default,
         if ``token='anon'``, the value is ignored.
     access : one of {'read_only', 'read_write', 'full_control'}
         Full control implies read/write as well as modifying metadata,
