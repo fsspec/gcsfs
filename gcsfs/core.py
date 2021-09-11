@@ -67,6 +67,7 @@ def quote_plus(s):
     -------
     corrected URL
     """
+    s = s.replace("%", "%25")
     s = s.replace("/", "%2F")
     s = s.replace(" ", "%20")
     return s

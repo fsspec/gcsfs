@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import io
+import uuid
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 import pytest
 import requests
 
@@ -1068,3 +1069,20 @@ def test_find_with_prefix_partial_cache():
             assert (
                 gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []
             )
+
+
+@my_vcr.use_cassette(match=["all"])
+def test_percent_file_name():
+    with gcs_maker(False) as gcs:
+        parent = f"{TEST_BUCKET}/test/{uuid.uuid1()}"
+        fn = f"{parent}/a%25.txt"
+        data = b"zz"
+        with gcs.open(fn, "wb", content_type="text/plain") as f:
+            f.write(data)
+        gcs.invalidate_cache()
+        assert gcs.cat(fn) == data
+        fn2 = unquote(fn)
+        gcs.touch(fn2)
+        gcs.invalidate_cache()
+        assert gcs.cat(fn2) != data
+        assert set(gcs.ls(parent)) == set([fn, fn2])
