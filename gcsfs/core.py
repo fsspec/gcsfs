@@ -1136,7 +1136,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.acl = acl
         self.checker = get_consistency_checker(consistency)
 
-        det = getattr(self, "details", {})  # only exists in read mode
+        if "r" in self.mode:
+            det = self.details
+        else:
+            det = {}
         self.content_type = content_type or det.get(
             "contentType", "application/octet-stream"
         )
