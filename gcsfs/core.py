@@ -51,11 +51,13 @@ GCS_MIN_BLOCK_SIZE = 2 ** 18
 GCS_MAX_BLOCK_SIZE = 2 ** 28
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
-QUOTE_TABLE = str.maketrans({
-    "%": "%25",
-    "/": "%2F",
-    " ": "%20",
-})
+QUOTE_TABLE = str.maketrans(
+    {
+        "%": "%25",
+        "/": "%2F",
+        " ": "%20",
+    }
+)
 
 
 def quote_plus(s):

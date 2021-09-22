@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import io
-import uuid
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
