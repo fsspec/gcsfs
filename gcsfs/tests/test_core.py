@@ -1074,7 +1074,7 @@ def test_find_with_prefix_partial_cache():
 @my_vcr.use_cassette(match=["all"])
 def test_percent_file_name():
     with gcs_maker(False) as gcs:
-        parent = f"{TEST_BUCKET}/test/{uuid.uuid1()}"
+        parent = f"{TEST_BUCKET}/test/onefile"
         fn = f"{parent}/a%25.txt"
         data = b"zz"
         with gcs.open(fn, "wb", content_type="text/plain") as f:
