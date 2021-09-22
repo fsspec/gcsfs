@@ -80,8 +80,6 @@ def validate_response(status, content, path, args=None):
             from .core import quote_plus
             path = path.format(*[quote_plus(p) for p in args])
         if status == 404:
-            import pdb
-            pdb.set_trace()
             raise FileNotFoundError(path)
 
         error = None
