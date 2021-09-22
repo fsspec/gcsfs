@@ -333,7 +333,7 @@ class GCSFileSystem(AsyncFileSystem):
             info = r.request_info  # for debug only
             contents = await r.read()
 
-            validate_response(status, contents, path)
+            validate_response(status, contents, path, args)
             return status, headers, info, contents
 
     async def _call(

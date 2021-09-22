@@ -66,7 +66,7 @@ def is_retriable(exception):
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
 
 
-def validate_response(status, content, path):
+def validate_response(status, content, path, args=None):
     """
     Check the requests object r, raise error if it's not ok.
 
@@ -76,7 +76,12 @@ def validate_response(status, content, path):
     path: associated URL path, for error messages
     """
     if status >= 400:
+        if args:
+            from .core import quote_plus
+            path = path.format(*[quote_plus(p) for p in args])
         if status == 404:
+            import pdb
+            pdb.set_trace()
             raise FileNotFoundError(path)
 
         error = None

@@ -1079,10 +1079,8 @@ def test_percent_file_name():
         data = b"zz"
         with gcs.open(fn, "wb", content_type="text/plain") as f:
             f.write(data)
-        gcs.invalidate_cache()
         assert gcs.cat(fn) == data
         fn2 = unquote(fn)
         gcs.touch(fn2)
-        gcs.invalidate_cache()
         assert gcs.cat(fn2) != data
         assert set(gcs.ls(parent)) == set([fn, fn2])
