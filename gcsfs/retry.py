@@ -131,6 +131,9 @@ async def retry_request(func, retries=6, *args, **kwargs):
                 )
                 raise ValueError(msg) from e
             # Special test for 404 to avoid retrying the request
+            if isinstance(e, aiohttp.client_exceptions.ClientResponseError) and e.status == 404:
+                logger.debug("Request returned 404, no retries.")
+                raise e
             if isinstance(e, HttpError) and e.code == 404:
                 logger.debug("Request returned 404, no retries.")
                 raise e
