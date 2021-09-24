@@ -1,6 +1,14 @@
 Changelog
 =========
 
+2021.09.0
+---------
+
+* correctly recognise 404 (#419)
+* fix for .details due to upstream (#417)
+* callbacks in get/put (#416)
+* "%" in paths (#415)
+
 2021.08.1
 ---------
 
