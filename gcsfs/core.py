@@ -16,6 +16,7 @@ import weakref
 
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path, setup_logging
+from fsspec.callbacks import NoOpCallback
 from fsspec.implementations.http import get_client
 from .retry import retry_request, validate_response
 from .checkers import get_consistency_checker
@@ -896,6 +897,7 @@ class GCSFileSystem(AsyncFileSystem):
         # enforce blocksize should be a multiple of 2**18
         if os.path.isdir(lpath):
             return
+        callback = callback or NoOpCallback()
         consistency = consistency or self.consistency
         checker = get_consistency_checker(consistency)
         bucket, key = self.split_path(rpath)
@@ -1032,6 +1034,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
         u2 = self.url(rpath)
+        callback = callback or NoOpCallback()
         await self._get_file_request(u2, lpath, callback=callback, **kwargs)
 
     def _open(
