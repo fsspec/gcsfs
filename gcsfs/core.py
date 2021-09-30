@@ -904,8 +904,7 @@ class GCSFileSystem(AsyncFileSystem):
         with open(lpath, "rb") as f0:
             size = f0.seek(0, 2)
             f0.seek(0)
-            if callback is not None:
-                callback.set_size(size)
+            callback.set_size(size)
 
             if size < 5 * 2 ** 20:
                 await simple_upload(
@@ -932,8 +931,7 @@ class GCSFileSystem(AsyncFileSystem):
                         self, location, bit, offset, size, content_type
                     )
                     offset += len(bit)
-                    if callback is not None:
-                        callback.absolute_update(offset)
+                    callback.absolute_update(offset)
                     checker.update(bit)
 
             checker.validate_json_response(out)
@@ -1009,12 +1007,11 @@ class GCSFileSystem(AsyncFileSystem):
             timeout=self.requests_timeout,
         ) as r:
             r.raise_for_status()
-            if callback is not None:
-                try:
-                    size = int(r.headers["content-length"])
-                except (KeyError, ValueError):
-                    size = None
-                callback.set_size(size)
+            try:
+                size = int(r.headers["content-length"])
+            except (KeyError, ValueError):
+                size = None
+            callback.set_size(size)
 
             checker = get_consistency_checker(consistency)
             os.makedirs(os.path.dirname(lpath), exist_ok=True)
@@ -1025,8 +1022,7 @@ class GCSFileSystem(AsyncFileSystem):
                         break
                     f2.write(data)
                     checker.update(data)
-                    if callback is not None:
-                        callback.relative_update(len(data))
+                    callback.relative_update(len(data))
 
             validate_response(r.status, data, rpath)  # validate http request
             checker.validate_http_response(r)  # validate file consistency
