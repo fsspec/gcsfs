@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2021.10.0
+---------
+
+* min version for decorator
+* default callback in get (#422)
+
 2021.09.0
 ---------
 
