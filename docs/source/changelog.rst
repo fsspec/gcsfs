@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2021.10.1
+---------
+
+* url signing (#411)
+* default callback (#422)
+
 2021.10.0
 ---------
 
