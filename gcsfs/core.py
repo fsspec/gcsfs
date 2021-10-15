@@ -52,6 +52,7 @@ GCS_MIN_BLOCK_SIZE = 2 ** 18
 GCS_MAX_BLOCK_SIZE = 2 ** 28
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
+
 QUOTE_TABLE = str.maketrans(
     {
         "%": "%25",
@@ -92,6 +93,18 @@ async def _req_to_text(r):
     async with r:
         return (await r.read()).decode()
 
+def _location():
+    """
+    Resolves GCS HTTP location as http[s]://host
+
+    Enables storage emulation for integration tests.
+
+    Returns
+    -------
+    valid http location
+    """
+    _emulator_location = os.environ.get("STORAGE_EMULATOR_HOST", None)
+    return _emulator_location if _emulator_location else "https://storage.googleapis.com"
 
 class GCSFileSystem(AsyncFileSystem):
     r"""
@@ -196,7 +209,6 @@ class GCSFileSystem(AsyncFileSystem):
 
     scopes = {"read_only", "read_write", "full_control"}
     retries = 6  # number of retries on http failure
-    base = "https://storage.googleapis.com/storage/v1/"
     default_block_size = DEFAULT_BLOCK_SIZE
     protocol = "gcs", "gs"
     async_impl = True
@@ -247,6 +259,10 @@ class GCSFileSystem(AsyncFileSystem):
                 self.loop, get_client, timeout=self.timeout, **self.session_kwargs
             )
             weakref.finalize(self, self.close_session, self.loop, self._session)
+
+    @property
+    def base(self):
+        return f"{_location()}/storage/v1/" 
 
     @property
     def project(self):
@@ -670,10 +686,10 @@ class GCSFileSystem(AsyncFileSystem):
     @classmethod
     def url(cls, path):
         """ Get HTTP URL of the given path """
-        u = "https://storage.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media"
+        u = "{}/download/storage/v1/b/{}/o/{}?alt=media"
         bucket, object = cls.split_path(path)
         object = quote_plus(object)
-        return u.format(bucket, object)
+        return u.format(_location(), bucket, object)
 
     async def _cat_file(self, path, start=None, end=None):
         """ Simple one-shot get of file data """
@@ -812,7 +828,7 @@ class GCSFileSystem(AsyncFileSystem):
         )
         headers, content = await self._call(
             "POST",
-            "https://storage.googleapis.com/batch/storage/v1",
+            f"{_location()}/batch/storage/v1",
             headers={
                 "Content-Type": 'multipart/mixed; boundary="=========='
                 '=====7330845974216740156=="'
@@ -1303,8 +1319,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         uid = re.findall("upload_id=([^&=?]+)", self.location)
         self.gcsfs.call(
             "DELETE",
-            "https://storage.googleapis.com/upload/storage/v1/b/%s/o"
-            "" % quote_plus(self.bucket),
+            f"{_location()}/upload/storage/v1/b/{quote_plus(self.bucket)}/o",
             params={"uploadType": "resumable", "upload_id": uid},
             json_out=True,
         )
@@ -1372,8 +1387,7 @@ async def initiate_upload(
         j["metadata"] = metadata
     headers, _ = await fs._call(
         method="POST",
-        path="https://storage.googleapis.com/upload/storage"
-        "/v1/b/%s/o" % quote_plus(bucket),
+        path=f"{_location()}/upload/storage/v1/b/{quote_plus(bucket)}/o",
         uploadType="resumable",
         json=j,
         headers={"X-Upload-Content-Type": content_type},
@@ -1395,9 +1409,7 @@ async def simple_upload(
     content_type="application/octet-stream",
 ):
     checker = get_consistency_checker(consistency)
-    path = "https://storage.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(
-        bucket
-    )
+    path = f"{_location()}/upload/storage/v1/b/{quote_plus(bucket)}/o"
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain
