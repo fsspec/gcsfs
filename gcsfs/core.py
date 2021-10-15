@@ -1088,6 +1088,31 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             return path.split("/", 1)
 
+    def sign(self, path, expiration=100, **kwargs):
+        """Create a signed URL representing the given path.
+
+        Parameters
+        ----------
+        path : str
+             The path on the filesystem
+        expiration : int
+            Number of seconds to enable the URL for
+
+        Returns
+        -------
+        URL : str
+            The signed URL
+        """
+        from google.cloud import storage
+
+        bucket, key = self.split_path(path)
+        client = storage.Client(
+            credentials=self.credentials.credentials, project=self.project
+        )
+        bucket = client.bucket(bucket)
+        blob = bucket.blob(key)
+        return blob.generate_signed_url(expiration=expiration)
+
 
 GoogleCredentials.load_tokens()
 
