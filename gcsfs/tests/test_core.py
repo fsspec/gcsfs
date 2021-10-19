@@ -10,13 +10,7 @@ import requests
 
 from fsspec.utils import seek_delimiter
 
-from gcsfs.tests.settings import (
-    TEST_PROJECT,
-    GOOGLE_TOKEN,
-    TEST_BUCKET,
-    TEST_REQUESTER_PAYS_BUCKET,
-    ON_VCR,
-)
+from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.tests.utils import (
     tempdir,
     my_vcr,
