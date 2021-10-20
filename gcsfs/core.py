@@ -693,7 +693,9 @@ class GCSFileSystem(AsyncFileSystem):
     getxattr = sync_wrapper(_getxattr)
 
     async def _setxattrs(
-        self, path, content_type=None, content_encoding=None, **kwargs
+        self, path, content_type=None, content_encoding=None, cache_control=None,
+        content_disposition=None, content_language=None, custom_time=None,
+        **kwargs
     ):
         """Set/delete/add writable metadata attributes
 
@@ -704,6 +706,18 @@ class GCSFileSystem(AsyncFileSystem):
         content_encoding: str
             If not None, set the content-encoding.
             See https://cloud.google.com/storage/docs/transcoding
+        cache_control: str
+            If not None set the cache-control metadata
+            See https://cloud.google.com/storage/docs/metadata#cache-control
+        content_disposition: str
+            If not None set the content-disposition metadata
+            See https://cloud.google.com/storage/docs/metadata#content-disposition
+        content_language: str
+            If not None set the content-language metadata
+            See https://cloud.google.com/storage/docs/metadata#content-language
+        custom_time: str
+            If not None set the custom-time metadata
+            See https://cloud.google.com/storage/docs/metadata#custom-time
         kw_args: key-value pairs like field="value" or field=None
             value must be string to add or modify, or None to delete
 
@@ -712,10 +726,14 @@ class GCSFileSystem(AsyncFileSystem):
         Entire metadata after update (even if only path is passed)
         """
         i_json = {"metadata": kwargs}
-        if content_type is not None:
-            i_json["contentType"] = content_type
-        if content_encoding is not None:
-            i_json["contentEncoding"] = content_encoding
+        fixed_key_metadata = await get_fixed_key_metadata(
+            content_type=content_type,
+            content_encoding=content_encoding, cache_control=cache_control,
+            content_disposition=content_disposition, content_language=content_language,
+            custom_time=custom_time, json_key=True
+        )
+
+        i_json.update(fixed_key_metadata)
 
         bucket, key = self.split_path(path)
         o_json = await self._call(
@@ -860,6 +878,11 @@ class GCSFileSystem(AsyncFileSystem):
         consistency=None,
         content_type="application/octet-stream",
         chunksize=50 * 2 ** 20,
+        content_encoding=None,
+        cache_control=None,
+        content_disposition=None,
+        content_language=None,
+        custom_time=None,
     ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
@@ -868,14 +891,24 @@ class GCSFileSystem(AsyncFileSystem):
         out = None
         if size < 5 * 2 ** 20:
             return await simple_upload(
-                self, bucket, key, data, metadata, consistency, content_type
+                self, bucket, key, data, metadata, consistency, content_type,
+                content_encoding=content_encoding,
+                cache_control=cache_control,
+                content_disposition=content_disposition,
+                content_language=content_language,
+                custom_time=custom_time,
             )
         else:
             location = await initiate_upload(self, bucket, key, content_type, metadata)
             for offset in range(0, len(data), chunksize):
                 bit = data[offset : offset + chunksize]
                 out = await upload_chunk(
-                    self, location, bit, offset, size, content_type
+                    self, location, bit, offset, size, content_type,
+                    content_encoding=content_encoding,
+                    cache_control=cache_control,
+                    content_disposition=content_disposition,
+                    content_language=content_language,
+                    custom_time=custom_time,
                 )
 
         checker = get_consistency_checker(consistency)
@@ -892,6 +925,11 @@ class GCSFileSystem(AsyncFileSystem):
         content_type="application/octet-stream",
         chunksize=50 * 2 ** 20,
         callback=None,
+        content_encoding=None,
+        cache_control=None,
+        content_disposition=None,
+        content_language=None,
+        custom_time=None,
         **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -915,6 +953,11 @@ class GCSFileSystem(AsyncFileSystem):
                     consistency=consistency,
                     metadatain=metadata,
                     content_type=content_type,
+                    content_encoding=content_encoding,
+                    cache_control=cache_control,
+                    content_disposition=content_disposition,
+                    content_language=content_language,
+                    custom_time=custom_time,
                 )
                 callback.absolute_update(size)
                 return None
@@ -928,7 +971,12 @@ class GCSFileSystem(AsyncFileSystem):
                     if not bit:
                         break
                     out = await upload_chunk(
-                        self, location, bit, offset, size, content_type
+                        self, location, bit, offset, size, content_type,
+                        content_encoding=content_encoding,
+                        cache_control=cache_control,
+                        content_disposition=content_disposition,
+                        content_language=content_language,
+                        custom_time=custom_time,
                     )
                     offset += len(bit)
                     callback.absolute_update(offset)
@@ -1131,6 +1179,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         consistency="md5",
         metadata=None,
         content_type=None,
+        cache_control=None,
+        content_disposition=None,
+        content_encoding=None,
+        content_language=None,
+        custom_time=None,
         timeout=None,
         **kwargs,
     ):
@@ -1189,6 +1242,21 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.content_type = content_type or det.get(
             "contentType", "application/octet-stream"
         )
+        self.cache_control = cache_control or det.get(
+            "cacheControl"
+        )
+        self.content_disposition = content_disposition or det.get(
+            "contentDisposition"
+        )
+        self.content_language = content_language or det.get(
+            "contentLanguage"
+        )
+        self.custom_time = custom_time or det.get(
+            "customTime"
+        )
+        self.content_encoding = content_encoding or det.get(
+            "contentEncoding"
+        )
         self.metadata = metadata or det.get("metadata", {})
         self.timeout = timeout
         if mode == "wb":
@@ -1246,9 +1314,18 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     self.offset,
                     self.offset + chunk_length - 1,
                 )
-            head.update(
-                {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
+            fixed_key_metadata = sync(
+                self.gcsfs.loop,
+                get_fixed_key_metadata,
+                content_type=self.content_type,
+                content_encoding=self.content_encoding,
+                cache_control=self.cache_control,
+                content_disposition=self.content_disposition,
+                content_language=self.content_language,
+                custom_time=self.custom_time,
+                json_key=False
             )
+            head.update(fixed_key_metadata)
             headers, contents = self.gcsfs.call(
                 "POST", self.location, headers=head, data=chunk
             )
@@ -1291,6 +1368,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.content_type,
             self.metadata,
             timeout=self.timeout,
+            cache_control=self.cache_control,
+            content_disposition=self.content_disposition,
+            content_language=self.content_language,
+            custom_time=self.custom_time,
         )
 
     def discard(self):
@@ -1324,6 +1405,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.consistency,
             self.content_type,
             timeout=self.timeout,
+            cache_control=self.cache_control,
+            content_disposition=self.content_disposition,
+            content_language=self.content_language,
+            custom_time=self.custom_time,
         )
 
     def _fetch_range(self, start=None, end=None):
@@ -1347,12 +1432,49 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise
 
 
-async def upload_chunk(fs, location, data, offset, size, content_type):
+async def get_fixed_key_metadata(
+    content_type=None, content_encoding=None, cache_control=None, content_disposition=None,
+    content_language=None, custom_time=None, json_key=False
+):
+    fixed_key_metadatas = {
+        'contentType': content_type,
+        'contentEncoding': content_encoding,
+        'cacheControl': cache_control,
+        'contentDisposition': content_disposition,
+        'contentLanguage': content_language,
+        'customTime': custom_time,
+    } if json_key else {
+        'Content-Type': content_type,
+        'Content-Encoding': content_encoding,
+        'Cache-Control': cache_control,
+        'Content-Disposition': content_disposition,
+        'Content-Language': content_language,
+        'Custom-Time': custom_time,
+    }
+    result = {}
+    for fixed_key, value in fixed_key_metadatas.items():
+        if value is not None:
+            result[fixed_key] = value
+    return result
+
+
+async def upload_chunk(
+    fs, location, data, offset, size, content_type,
+    content_encoding=None, cache_control=None, content_disposition=None,
+    content_language=None, custom_time=None, metadata=None
+):
     head = {}
     l = len(data)
     range = "bytes %i-%i/%i" % (offset, offset + l - 1, size)
     head["Content-Range"] = range
-    head.update({"Content-Type": content_type, "Content-Length": str(l)})
+    fixed_key_metadata = await get_fixed_key_metadata(
+        content_type=content_type, content_encoding=content_encoding,
+        cache_control=cache_control,
+        content_disposition=content_disposition, content_language=content_language,
+        custom_time=custom_time
+    )
+    head.update(fixed_key_metadata)
+    head.update({"Content-Length": str(l)})
     headers, txt = await fs._call("POST", location, headers=head, data=data)
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])
@@ -1365,11 +1487,20 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
 
 
 async def initiate_upload(
-    fs, bucket, key, content_type="application/octet-stream", metadata=None
+    fs, bucket, key, content_type="application/octet-stream",
+    content_encoding=None, cache_control=None, content_disposition=None,
+    content_language=None, custom_time=None, metadata=None
 ):
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
+    fixed_key_metadata = await get_fixed_key_metadata(
+        content_type=content_type,
+        content_encoding=content_encoding, cache_control=cache_control,
+        content_disposition=content_disposition, content_language=content_language,
+        custom_time=custom_time, json_key=True
+    )
+    j.update(fixed_key_metadata)
     headers, _ = await fs._call(
         method="POST",
         path="https://storage.googleapis.com/upload/storage"
@@ -1393,6 +1524,11 @@ async def simple_upload(
     metadatain=None,
     consistency=None,
     content_type="application/octet-stream",
+    content_encoding=None,
+    cache_control=None,
+    content_disposition=None,
+    content_language=None,
+    custom_time=None,
 ):
     checker = get_consistency_checker(consistency)
     path = "https://storage.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(
@@ -1402,13 +1538,23 @@ async def simple_upload(
     if metadatain is not None:
         metadata["metadata"] = metadatain
     metadata = json.dumps(metadata)
+    fixed_key_metadata = await get_fixed_key_metadata(
+        content_type=content_type,
+        content_encoding=content_encoding, cache_control=cache_control,
+        content_disposition=content_disposition, content_language=content_language,
+        custom_time=custom_time, json_key=False
+    )
     template = (
         "--==0=="
         "\nContent-Type: application/json; charset=UTF-8"
         "\n\n"
         + metadata
         + "\n--==0=="
-        + "\nContent-Type: {0}".format(content_type)
+        + "\n{}".format(
+            [
+                '{}: {}'.format(key, value)
+                for key, value in fixed_key_metadata.items()
+            ].join('\n'))
         + "\n\n"
     )
 
