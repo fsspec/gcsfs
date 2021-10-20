@@ -1551,10 +1551,10 @@ async def simple_upload(
         + metadata
         + "\n--==0=="
         + "\n{}".format(
-            [
+            '\n'.join([
                 '{}: {}'.format(key, value)
                 for key, value in fixed_key_metadata.items()
-            ].join('\n'))
+            ]))
         + "\n\n"
     )
 
