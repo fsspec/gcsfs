@@ -388,7 +388,7 @@ def test_cat_file(gcs):
 def test_get_put(consistency, gcs):
     if consistency == "crc32c" and gcsfs.checkers.crcmod is None:
         pytest.skip("No CRC")
-    if consistency == "size" and not gcs.is_google:
+    if consistency == "size" and not gcs.on_google:
         pytest.skip("emulator does not return size")
     gcs.consistency = consistency
     with tmpfile() as fn:
