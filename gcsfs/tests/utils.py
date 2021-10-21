@@ -1,17 +1,7 @@
-import subprocess
 from contextlib import contextmanager
-import gzip
-import json
 import os
-import shlex
 import shutil
-import re
-import pickle
 import tempfile
-
-import pytest
-
-from gcsfs.core import GCSFileSystem
 
 
 @contextmanager

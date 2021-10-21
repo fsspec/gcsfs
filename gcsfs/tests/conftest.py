@@ -61,10 +61,12 @@ def docker_gcs():
         yield os.environ["STORAGE_EMULATOR_HOST"]
         return
     container = "gcsfs_test"
-    cmd = "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme " \
-          "http -public-host http://localhost:4443 -external-url http://localhost:4443"
+    cmd = (
+        "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "
+        "http -public-host http://localhost:4443 -external-url http://localhost:4443"
+    )
     stop_docker(container)
-    out = subprocess.check_output(shlex.split(cmd))
+    subprocess.check_output(shlex.split(cmd))
     url = "http://0.0.0.0:4443"
     timeout = 10
     while True:
@@ -93,7 +95,7 @@ def gcs(docker_gcs, populate=True):
             pass
         try:
             gcs.mkdir(TEST_BUCKET)
-        except Exception as e:
+        except Exception:
             pass
 
         if populate:

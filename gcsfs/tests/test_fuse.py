@@ -1,9 +1,9 @@
 import os
 
-import fsspec.utils
 import pytest
 
 import tempfile
+
 fuse = pytest.importorskip("fuse")
 from fsspec.fuse import run
 from gcsfs.tests.settings import TEST_BUCKET

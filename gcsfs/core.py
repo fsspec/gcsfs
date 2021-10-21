@@ -93,6 +93,7 @@ async def _req_to_text(r):
     async with r:
         return (await r.read()).decode()
 
+
 def _location():
     """
     Resolves GCS HTTP location as http[s]://host
@@ -104,7 +105,9 @@ def _location():
     valid http location
     """
     _emulator_location = os.environ.get("STORAGE_EMULATOR_HOST", None)
-    return _emulator_location if _emulator_location else "https://storage.googleapis.com"
+    return (
+        _emulator_location if _emulator_location else "https://storage.googleapis.com"
+    )
 
 
 class GCSFileSystem(AsyncFileSystem):
@@ -895,8 +898,13 @@ class GCSFileSystem(AsyncFileSystem):
                 return_exceptions=True,
             )
 
-        exs = [ex for ex in exs if ex is not None and "No such object" not in str(ex)
-               and not isinstance(ex, FileNotFoundError)]
+        exs = [
+            ex
+            for ex in exs
+            if ex is not None
+            and "No such object" not in str(ex)
+            and not isinstance(ex, FileNotFoundError)
+        ]
         if exs:
             raise exs[0]
         await asyncio.gather(*[self._rmdir(d) for d in dirs])

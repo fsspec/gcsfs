@@ -106,7 +106,6 @@ def test_validate_response():
 def test_metadata_read_permissions(
     file_path, validate_get_error, validate_list_error, expected_error, gcs
 ):
-
     def _validate_response(self, status, content, path):
         if path.endswith(f"/o{file_path}") and validate_get_error is not None:
             raise validate_get_error

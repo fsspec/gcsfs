@@ -229,9 +229,7 @@ def test_du(gcs):
     assert all(isinstance(v, int) and v >= 0 for v in d.values())
     assert TEST_BUCKET + "/nested/file1" in d
 
-    assert gcs.du(TEST_BUCKET + "/test/", total=True) == sum(
-        map(len, files.values())
-    )
+    assert gcs.du(TEST_BUCKET + "/test/", total=True) == sum(map(len, files.values()))
 
 
 def test_ls(gcs):
@@ -421,24 +419,18 @@ def test_get_put_recursive(protocol, gcs):
         data2 = files["test/accounts.2.json"]
         assert open(dn + "/temp_dir/accounts.1.json", "rb").read() == data1
         assert open(dn + "/temp_dir/accounts.2.json", "rb").read() == data2
-        gcs.put(
-            dn + "/temp_dir", protocol + TEST_BUCKET + "/temp_dir", recursive=True
-        )
+        gcs.put(dn + "/temp_dir", protocol + TEST_BUCKET + "/temp_dir", recursive=True)
         # there is now in remote directory:
         # protocol+TEST_BUCKET+'/temp_dir/accounts.1.json'
         # protocol+TEST_BUCKET+'/temp_dir/accounts.2.json'
         assert gcs.du(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == len(
             data1
         )
-        assert (
-            gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
-        )
+        assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
         assert gcs.du(protocol + TEST_BUCKET + "/temp_dir/accounts.2.json") == len(
             data2
         )
-        assert (
-            gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.2.json") == data2
-        )
+        assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.2.json") == data2
 
 
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
@@ -460,9 +452,7 @@ def test_get_put_file_in_dir(protocol, gcs):
         assert gcs.du(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == len(
             data1
         )
-        assert (
-            gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
-        )
+        assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
 
 
 def test_errors(gcs):
@@ -786,8 +776,9 @@ def test_attrs(gcs):
 
 
 def test_request_user_project(gcs):
-    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=True,
-                        project=TEST_PROJECT)
+    gcs = GCSFileSystem(
+        endpoint_url=gcs._endpoint, requester_pays=True, project=TEST_PROJECT
+    )
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",
@@ -804,9 +795,7 @@ def test_request_user_project(gcs):
 
 
 def test_request_user_project_string(gcs):
-    gcs = GCSFileSystem(
-        endpoint_url=gcs._endpoint, requester_pays=TEST_PROJECT
-    )
+    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=TEST_PROJECT)
     assert gcs.requester_pays == TEST_PROJECT
     # test directly against `_call` to inspect the result
     r = gcs.call(
@@ -840,10 +829,14 @@ def test_request_header(gcs):
 
 def test_user_project_fallback_google_default(monkeypatch):
     import fsspec
+
     monkeypatch.setattr(gcsfs.core, "DEFAULT_PROJECT", "my_default_project")
     monkeypatch.setattr(fsspec.config, "conf", {})
-    monkeypatch.setattr(gcsfs.credentials.gauth, "default",
-                        lambda *__, **_: (requests.Session(), "my_default_project"))
+    monkeypatch.setattr(
+        gcsfs.credentials.gauth,
+        "default",
+        lambda *__, **_: (requests.Session(), "my_default_project"),
+    )
     fs = GCSFileSystem(skip_instance_cache=True)
     assert fs.project == "my_default_project"
 
@@ -937,9 +930,7 @@ def test_find_with_prefix_partial_cache(gcs):
         ]
         assert gcs.find(base_dir + "/test_1") == [base_dir + "/test_1"]
         assert gcs.find(base_dir + "/non_existent") == []
-        assert (
-            gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []
-        )
+        assert gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []
 
 
 def test_percent_file_name(gcs):
