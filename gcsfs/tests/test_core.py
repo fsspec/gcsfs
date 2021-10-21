@@ -782,12 +782,13 @@ def test_attrs(gcs):
 
 
 def test_request_user_project(gcs):
-    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=True)
+    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=True,
+                        project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",
-        "b/{}/o/",
-        TEST_REQUESTER_PAYS_BUCKET,
+        "b/{}/o",
+        TEST_BUCKET,
         delimiter="/",
         prefix="test",
         maxResults=100,
