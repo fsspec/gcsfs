@@ -1,3 +1,4 @@
+import os
 import shlex
 import subprocess
 import time
@@ -78,7 +79,11 @@ def docker_gcs():
 
 @pytest.fixture
 def gcs(docker_gcs, populate=True):
-
+    GCSFileSystem.clear_instance_cache()
+    if "STORAGE_EMULATOR_HOST" in os.environ:
+        # assume using real API or otherwise have a server already set up
+        yield "STORAGE_EMULATOR_HOST" in os.environ["STORAGE_EMULATOR_HOST"]
+        return
     gcs = fsspec.filesystem("gcs", endpoint_url=docker_gcs)
     try:
         # ensure we're empty.
@@ -89,8 +94,6 @@ def gcs(docker_gcs, populate=True):
         try:
             gcs.mkdir(TEST_BUCKET)
         except Exception as e:
-            import pdb
-            pdb.set_trace()
             pass
 
         if populate:

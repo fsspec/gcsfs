@@ -1064,6 +1064,8 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
         u2 = self.url(rpath)
+        if os.path.isdir(lpath):
+            return
         callback = callback or NoOpCallback()
         await self._get_file_request(u2, lpath, callback=callback, **kwargs)
 
@@ -1365,15 +1367,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         start, end : None or integers
             if not both None, fetch only given range
         """
-        if start is not None or end is not None:
-            start = start or 0
-            end = end or 0
-            head = {"Range": "bytes=%i-%i" % (start, end - 1)}
-        else:
-            head = None
         try:
-            _, data = self.gcsfs.call("GET", self.details["mediaLink"], headers=head)
-            return data
+            return self.gcsfs.cat_file(self.path, start=start, end=end)
         except RuntimeError as e:
             if "not satisfiable" in str(e):
                 return b""
