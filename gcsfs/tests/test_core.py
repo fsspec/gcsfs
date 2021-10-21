@@ -10,7 +10,7 @@ import requests
 
 from fsspec.utils import seek_delimiter
 
-from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT
+from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
 from gcsfs.tests.conftest import (
     files,
     csv_files,
@@ -388,6 +388,8 @@ def test_cat_file(gcs):
 def test_get_put(consistency, gcs):
     if consistency == "crc32c" and gcsfs.checkers.crcmod is None:
         pytest.skip("No CRC")
+    if consistency == "size" and not gcs.is_google:
+        pytest.skip("emulator does not return size")
     gcs.consistency = consistency
     with tmpfile() as fn:
         gcs.get(TEST_BUCKET + "/test/accounts.1.json", fn)
@@ -602,6 +604,8 @@ def test_write_blocks(gcs):
 
 
 def test_write_blocks2(gcs):
+    if not gcs.on_google:
+        pytest.skip("emulator always accepts whole request")
     with gcs.open(TEST_BUCKET + "/temp1", "wb", block_size=2 ** 18) as f:
         f.write(b"a" * (2 ** 18 + 1))
         # leftover bytes: GCS accepts blocks in multiples of 2**18 bytes
@@ -807,10 +811,10 @@ def test_request_user_project_string(gcs):
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",
-        "b/{}/o/",
-        TEST_REQUESTER_PAYS_BUCKET,
+        "b/{}/o",
+        TEST_BUCKET,
         delimiter="/",
-        prefix="test",
+        prefix="",
         maxResults=100,
         info_out=True,
     )
@@ -824,8 +828,8 @@ def test_request_header(gcs):
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",
-        "b/{}/o/",
-        TEST_REQUESTER_PAYS_BUCKET,
+        "b/{}/o",
+        TEST_BUCKET,
         delimiter="/",
         prefix="test",
         maxResults=100,
@@ -834,17 +838,28 @@ def test_request_header(gcs):
     assert r.headers["User-Agent"] == "python-gcsfs/" + version
 
 
-@mock.patch("gcsfs.credentials.gauth")
-def test_user_project_fallback_google_default(mock_auth):
-    mock_auth.default.return_value = (requests.Session(), "my_default_project")
-    fs = GCSFileSystem(token="google_default")
+def test_user_project_fallback_google_default(monkeypatch):
+    import fsspec
+    monkeypatch.setattr(gcsfs.core, "DEFAULT_PROJECT", "my_default_project")
+    monkeypatch.setattr(fsspec.config, "conf", {})
+    monkeypatch.setattr(gcsfs.credentials.gauth, "default",
+                        lambda *__, **_: (requests.Session(), "my_default_project"))
+    fs = GCSFileSystem(skip_instance_cache=True)
     assert fs.project == "my_default_project"
 
 
-def test_user_project_cat():
-    gcs = GCSFileSystem(TEST_PROJECT, token=GOOGLE_TOKEN, requester_pays=True)
-    result = gcs.cat(TEST_REQUESTER_PAYS_BUCKET + "/foo.csv")
-    assert len(result)
+def test_user_project_cat(gcs):
+    if not gcs.on_google:
+        pytest.skip("no requester-pays on emulation")
+    gcs.mkdir(TEST_REQUESTER_PAYS_BUCKET)
+    try:
+        gcs.pipe(TEST_REQUESTER_PAYS_BUCKET + "/foo.csv", b"data")
+        gcs.make_bucket_requester_pays(TEST_REQUESTER_PAYS_BUCKET)
+        gcs = GCSFileSystem(requester_pays=True)
+        result = gcs.cat(TEST_REQUESTER_PAYS_BUCKET + "/foo.csv")
+        assert len(result)
+    finally:
+        gcs.rm(TEST_REQUESTER_PAYS_BUCKET, recursive=True)
 
 
 @mock.patch("gcsfs.credentials.gauth")
@@ -854,7 +869,7 @@ def test_raise_on_project_mismatch(mock_auth):
     with pytest.raises(ValueError, match=match):
         GCSFileSystem(project="my_project", token="google_default")
 
-    result = GCSFileSystem(token="google_default")
+    result = GCSFileSystem(project="my_other_project", token="google_default")
     assert result.project == "my_other_project"
 
 
@@ -876,7 +891,8 @@ def test_placeholder_dir_cache_validity(gcs):
 
 
 def test_pseudo_dir_find(gcs):
-    fs.touch(f"{TEST_BUCKET}/a/b/file")
+    gcs.rm(f"{TEST_BUCKET}/*", recursive=True)
+    gcs.touch(f"{TEST_BUCKET}/a/b/file")
     b = set(gcs.glob(f"{TEST_BUCKET}/a/*"))
     assert f"{TEST_BUCKET}/a/b" in b
     a = set(gcs.glob(f"{TEST_BUCKET}/*"))

@@ -56,6 +56,10 @@ def stop_docker(container):
 
 @pytest.fixture(scope="module")
 def docker_gcs():
+    if "STORAGE_EMULATOR_HOST" in os.environ:
+        # assume using real API or otherwise have a server already set up
+        yield os.environ["STORAGE_EMULATOR_HOST"]
+        return
     container = "gcsfs_test"
     cmd = "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme " \
           "http -public-host http://localhost:4443 -external-url http://localhost:4443"
@@ -80,10 +84,6 @@ def docker_gcs():
 @pytest.fixture
 def gcs(docker_gcs, populate=True):
     GCSFileSystem.clear_instance_cache()
-    if "STORAGE_EMULATOR_HOST" in os.environ:
-        # assume using real API or otherwise have a server already set up
-        yield "STORAGE_EMULATOR_HOST" in os.environ["STORAGE_EMULATOR_HOST"]
-        return
     gcs = fsspec.filesystem("gcs", endpoint_url=docker_gcs)
     try:
         # ensure we're empty.

@@ -408,6 +408,14 @@ class GCSFileSystem(AsyncFileSystem):
 
         return result
 
+    async def _make_bucket_requester_pays(self, path, state=True):
+        # this is really some form of setACL/chmod
+        # perhaps should be automatic if gcs.requester_pays
+        json = {"billing": {"requesterPays": state}}
+        await self._call("PATCH", f"b/{path}", json=json)
+
+    make_bucket_requester_pays = sync_wrapper(_make_bucket_requester_pays)
+
     async def _get_object(self, path):
         """Return object information at the given path."""
         bucket, key = self.split_path(path)
@@ -629,6 +637,10 @@ class GCSFileSystem(AsyncFileSystem):
     async def _info(self, path, **kwargs):
         """File information about this path."""
         path = self._strip_protocol(path).rstrip("/")
+        if "/" not in path:
+            out = await self._call("GET", f"b/{path}", json_out=True)
+            out.update(size=0, type="directory")
+            return out
         # Check directory cache for parent dir
         parent_path = self._parent(path)
         parent_cache = self._ls_from_cache(parent_path)
@@ -858,11 +870,15 @@ class GCSFileSystem(AsyncFileSystem):
             out = set(re.findall(pattern, txt))
             raise OSError(out)
 
+    @property
+    def on_google(self):
+        return "torage.googleapis.com" in self._location
+
     async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
-        if "torage.googleapis.com" in self._location:
+        if self.on_google:
             # emulators do not support batch
             exs = await asyncio.gather(
                 *(
@@ -879,7 +895,8 @@ class GCSFileSystem(AsyncFileSystem):
                 return_exceptions=True,
             )
 
-        exs = [ex for ex in exs if ex is not None and "No such object" not in str(ex)]
+        exs = [ex for ex in exs if ex is not None and "No such object" not in str(ex)
+               and not isinstance(ex, FileNotFoundError)]
         if exs:
             raise exs[0]
         await asyncio.gather(*[self._rmdir(d) for d in dirs])
@@ -1239,7 +1256,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def url(self):
         """ HTTP link to this file's data """
-        return self.details["mediaLink"]
+        return self.fs.url(self.path)
 
     def _upload_chunk(self, final=False):
         """Write one part of a multi-block file upload
