@@ -52,6 +52,7 @@ GCS_MIN_BLOCK_SIZE = 2 ** 18
 GCS_MAX_BLOCK_SIZE = 2 ** 28
 DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
 
+
 QUOTE_TABLE = str.maketrans(
     {
         "%": "%25",
@@ -91,6 +92,22 @@ def norm_path(path):
 async def _req_to_text(r):
     async with r:
         return (await r.read()).decode()
+
+
+def _location():
+    """
+    Resolves GCS HTTP location as http[s]://host
+
+    Enables storage emulation for integration tests.
+
+    Returns
+    -------
+    valid http location
+    """
+    _emulator_location = os.environ.get("STORAGE_EMULATOR_HOST", None)
+    return (
+        _emulator_location if _emulator_location else "https://storage.googleapis.com"
+    )
 
 
 class GCSFileSystem(AsyncFileSystem):
@@ -192,11 +209,15 @@ class GCSFileSystem(AsyncFileSystem):
     session_kwargs: dict
         passed on to aiohttp.ClientSession; can contain, for example,
         proxy settings.
+    endpoin_url: str
+        If given, use this URL (format protocol://host:port , *without* any
+        path part) for communication. If not given, defaults to the value
+        of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
+        either, will use the standard Google endpoint.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
     retries = 6  # number of retries on http failure
-    base = "https://storage.googleapis.com/storage/v1/"
     default_block_size = DEFAULT_BLOCK_SIZE
     protocol = "gcs", "gs"
     async_impl = True
@@ -217,6 +238,7 @@ class GCSFileSystem(AsyncFileSystem):
         session_kwargs=None,
         loop=None,
         timeout=None,
+        endpoint_url=None,
         **kwargs,
     ):
         super().__init__(
@@ -238,6 +260,7 @@ class GCSFileSystem(AsyncFileSystem):
         self.requests_timeout = requests_timeout
         self.timeout = timeout
         self._session = None
+        self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
 
         self.credentials = GoogleCredentials(project, access, token, check_connection)
@@ -247,6 +270,14 @@ class GCSFileSystem(AsyncFileSystem):
                 self.loop, get_client, timeout=self.timeout, **self.session_kwargs
             )
             weakref.finalize(self, self.close_session, self.loop, self._session)
+
+    @property
+    def _location(self):
+        return self._endpoint or _location()
+
+    @property
+    def base(self):
+        return f"{self._location}/storage/v1/"
 
     @property
     def project(self):
@@ -380,6 +411,14 @@ class GCSFileSystem(AsyncFileSystem):
 
         return result
 
+    async def _make_bucket_requester_pays(self, path, state=True):
+        # this is really some form of setACL/chmod
+        # perhaps should be automatic if gcs.requester_pays
+        json = {"billing": {"requesterPays": state}}
+        await self._call("PATCH", f"b/{path}", json=json)
+
+    make_bucket_requester_pays = sync_wrapper(_make_bucket_requester_pays)
+
     async def _get_object(self, path):
         """Return object information at the given path."""
         bucket, key = self.split_path(path)
@@ -407,7 +446,7 @@ class GCSFileSystem(AsyncFileSystem):
             if not str(e).startswith("Forbidden"):
                 raise
             resp = await self._call(
-                "GET", "b/{}/o/", bucket, json_out=True, prefix=key, maxResults=1
+                "GET", "b/{}/o", bucket, json_out=True, prefix=key, maxResults=1
             )
             for item in resp.get("items", []):
                 if item["name"] == key:
@@ -467,7 +506,7 @@ class GCSFileSystem(AsyncFileSystem):
         items = []
         page = await self._call(
             "GET",
-            "b/{}/o/",
+            "b/{}/o",
             bucket,
             delimiter=delimiter,
             prefix=prefix,
@@ -482,7 +521,7 @@ class GCSFileSystem(AsyncFileSystem):
         while next_page_token is not None:
             page = await self._call(
                 "GET",
-                "b/{}/o/",
+                "b/{}/o",
                 bucket,
                 delimiter=delimiter,
                 prefix=prefix,
@@ -503,7 +542,7 @@ class GCSFileSystem(AsyncFileSystem):
         """Return list of all buckets under the current project."""
         if "" not in self.dircache:
             items = []
-            page = await self._call("GET", "b/", project=self.project, json_out=True)
+            page = await self._call("GET", "b", project=self.project, json_out=True)
 
             assert page["kind"] == "storage#buckets"
             items.extend(page.get("items", []))
@@ -512,7 +551,7 @@ class GCSFileSystem(AsyncFileSystem):
             while next_page_token is not None:
                 page = await self._call(
                     "GET",
-                    "b/",
+                    "b",
                     project=self.project,
                     pageToken=next_page_token,
                     json_out=True,
@@ -569,7 +608,7 @@ class GCSFileSystem(AsyncFileSystem):
             return
         await self._call(
             method="POST",
-            path="b/",
+            path="b",
             predefinedAcl=acl,
             project=self.project,
             predefinedDefaultObjectAcl=default_acl,
@@ -601,6 +640,10 @@ class GCSFileSystem(AsyncFileSystem):
     async def _info(self, path, **kwargs):
         """File information about this path."""
         path = self._strip_protocol(path).rstrip("/")
+        if "/" not in path:
+            out = await self._call("GET", f"b/{path}", json_out=True)
+            out.update(size=0, type="directory")
+            return out
         # Check directory cache for parent dir
         parent_path = self._parent(path)
         parent_cache = self._ls_from_cache(parent_path)
@@ -667,13 +710,12 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             return sorted([o["name"] for o in out])
 
-    @classmethod
-    def url(cls, path):
+    def url(self, path):
         """ Get HTTP URL of the given path """
-        u = "https://storage.googleapis.com/download/storage/v1/b/{}/o/{}?alt=media"
-        bucket, object = cls.split_path(path)
+        u = "{}/download/storage/v1/b/{}/o/{}?alt=media"
+        bucket, object = self.split_path(path)
         object = quote_plus(object)
-        return u.format(bucket, object)
+        return u.format(self._location, bucket, object)
 
     async def _cat_file(self, path, start=None, end=None):
         """ Simple one-shot get of file data """
@@ -781,12 +823,11 @@ class GCSFileSystem(AsyncFileSystem):
                 json_out=True,
             )
 
-    async def _rm_file(self, path):
+    async def _rm_file(self, path, **kwargs):
         bucket, key = self.split_path(path)
         if key:
             await self._call("DELETE", "b/{}/o/{}", bucket, key)
             self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
-            return True
         else:
             await self._rmdir(path)
 
@@ -812,7 +853,7 @@ class GCSFileSystem(AsyncFileSystem):
         )
         headers, content = await self._call(
             "POST",
-            "https://storage.googleapis.com/batch/storage/v1",
+            f"{self._location}/batch/storage/v1",
             headers={
                 "Content-Type": 'multipart/mixed; boundary="=========='
                 '=====7330845974216740156=="'
@@ -832,20 +873,38 @@ class GCSFileSystem(AsyncFileSystem):
             out = set(re.findall(pattern, txt))
             raise OSError(out)
 
+    @property
+    def on_google(self):
+        return "torage.googleapis.com" in self._location
+
     async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
-        exs = await asyncio.gather(
-            *(
-                [
-                    self._rm_files(files[i : i + batchsize])
-                    for i in range(0, len(files), batchsize)
-                ]
-            ),
-            return_exceptions=True,
-        )
-        exs = [ex for ex in exs if ex is not None and "No such object" not in str(ex)]
+        if self.on_google:
+            # emulators do not support batch
+            exs = await asyncio.gather(
+                *(
+                    [
+                        self._rm_files(files[i : i + batchsize])
+                        for i in range(0, len(files), batchsize)
+                    ]
+                ),
+                return_exceptions=True,
+            )
+        else:
+            exs = await asyncio.gather(
+                *([self._rm_file(f) for f in files]),
+                return_exceptions=True,
+            )
+
+        exs = [
+            ex
+            for ex in exs
+            if ex is not None
+            and "No such object" not in str(ex)
+            and not isinstance(ex, FileNotFoundError)
+        ]
         if exs:
             raise exs[0]
         await asyncio.gather(*[self._rmdir(d) for d in dirs])
@@ -1030,6 +1089,8 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
         u2 = self.url(rpath)
+        if os.path.isdir(lpath):
+            return
         callback = callback or NoOpCallback()
         await self._get_file_request(u2, lpath, callback=callback, **kwargs)
 
@@ -1203,7 +1264,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def url(self):
         """ HTTP link to this file's data """
-        return self.details["mediaLink"]
+        return self.fs.url(self.path)
 
     def _upload_chunk(self, final=False):
         """Write one part of a multi-block file upload
@@ -1255,7 +1316,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if "Range" in headers:
                 end = int(headers["Range"].split("-")[1])
                 shortfall = (self.offset + l - 1) - end
-                if shortfall:
+                if shortfall > 0:
                     self.checker.update(data[:-shortfall])
                     self.buffer = io.BytesIO(data[-shortfall:])
                     self.buffer.seek(shortfall)
@@ -1303,8 +1364,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         uid = re.findall("upload_id=([^&=?]+)", self.location)
         self.gcsfs.call(
             "DELETE",
-            "https://storage.googleapis.com/upload/storage/v1/b/%s/o"
-            "" % quote_plus(self.bucket),
+            f"{self.fs._location}/upload/storage/v1/b/{quote_plus(self.bucket)}/o",
             params={"uploadType": "resumable", "upload_id": uid},
             json_out=True,
         )
@@ -1332,15 +1392,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         start, end : None or integers
             if not both None, fetch only given range
         """
-        if start is not None or end is not None:
-            start = start or 0
-            end = end or 0
-            head = {"Range": "bytes=%i-%i" % (start, end - 1)}
-        else:
-            head = None
         try:
-            _, data = self.gcsfs.call("GET", self.details["mediaLink"], headers=head)
-            return data
+            return self.gcsfs.cat_file(self.path, start=start, end=end)
         except RuntimeError as e:
             if "not satisfiable" in str(e):
                 return b""
@@ -1372,8 +1425,7 @@ async def initiate_upload(
         j["metadata"] = metadata
     headers, _ = await fs._call(
         method="POST",
-        path="https://storage.googleapis.com/upload/storage"
-        "/v1/b/%s/o" % quote_plus(bucket),
+        path=f"{fs._location}/upload/storage/v1/b/{quote_plus(bucket)}/o",
         uploadType="resumable",
         json=j,
         headers={"X-Upload-Content-Type": content_type},
@@ -1395,9 +1447,7 @@ async def simple_upload(
     content_type="application/octet-stream",
 ):
     checker = get_consistency_checker(consistency)
-    path = "https://storage.googleapis.com/upload/storage/v1/b/%s/o" % quote_plus(
-        bucket
-    )
+    path = f"{fs._location}/upload/storage/v1/b/{quote_plus(bucket)}/o"
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain

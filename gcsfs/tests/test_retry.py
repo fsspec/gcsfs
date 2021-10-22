@@ -5,7 +5,7 @@ import pytest
 
 from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.retry import HttpError, is_retriable, validate_response
-from gcsfs.tests.utils import tmpfile, my_vcr, gcs_maker
+from gcsfs.tests.utils import tmpfile
 
 
 def test_tempfile():
@@ -68,7 +68,6 @@ def test_validate_response():
         validate_response(502, b"", "/path")
 
 
-@my_vcr.use_cassette(match=["all"])
 @pytest.mark.parametrize(
     ["file_path", "validate_get_error", "validate_list_error", "expected_error"],
     [
@@ -105,24 +104,22 @@ def test_validate_response():
     ],
 )
 def test_metadata_read_permissions(
-    file_path, validate_get_error, validate_list_error, expected_error
+    file_path, validate_get_error, validate_list_error, expected_error, gcs
 ):
-    with gcs_maker(True) as gcs:
+    def _validate_response(self, status, content, path):
+        if path.endswith(f"/o{file_path}") and validate_get_error is not None:
+            raise validate_get_error
+        if path.endswith("/o/") and validate_list_error is not None:
+            raise validate_list_error
+        validate_response(status, content, path)
 
-        def _validate_response(self, status, content, path):
-            if path.endswith(f"/o{file_path}") and validate_get_error is not None:
-                raise validate_get_error
-            if path.endswith("/o/") and validate_list_error is not None:
-                raise validate_list_error
-            validate_response(status, content, path)
-
-        if expected_error is None:
+    if expected_error is None:
+        gcs.ls(TEST_BUCKET + file_path)
+        gcs.info(TEST_BUCKET + file_path)
+        assert gcs.exists(TEST_BUCKET + file_path)
+    else:
+        with pytest.raises(expected_error):
             gcs.ls(TEST_BUCKET + file_path)
+        with pytest.raises(expected_error):
             gcs.info(TEST_BUCKET + file_path)
-            assert gcs.exists(TEST_BUCKET + file_path)
-        else:
-            with pytest.raises(expected_error):
-                gcs.ls(TEST_BUCKET + file_path)
-            with pytest.raises(expected_error):
-                gcs.info(TEST_BUCKET + file_path)
-            assert gcs.exists(TEST_BUCKET + file_path) is False
+        assert gcs.exists(TEST_BUCKET + file_path) is False
