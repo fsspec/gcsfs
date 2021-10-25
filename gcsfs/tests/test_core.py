@@ -683,12 +683,42 @@ def test_iterable(gcs):
         f.seek(1)
         assert f.readline() == b"bc\n"
 
-    with gcs.open(a) as f:
-        out = list(f)
-    with gcs.open(a) as f:
-        out2 = f.readlines()
-    assert out == out2
-    assert b"".join(out) == data
+
+@pytest.mark.parametrize(
+    "metadata_attribute, value, result_attribute",
+    [
+        ("custom_time", "2021-10-21T17:00:00Z", "customTime"),
+        ("cache_control", "public, max-age=3600", "cacheControl"),
+        ("content_encoding", "gzip", "contentEncoding"),
+        ("content_language", "en", "contentLanguage"),
+        (
+            "content_disposition",
+            "Attachment; filename=sample.empty",
+            "contentDisposition",
+        ),
+    ],
+)
+def test_fixed_key_metadata(metadata_attribute, value, result_attribute, gcs):
+    if not gcs.on_google:
+        # might be added in the future
+        # follow https://github.com/fsouza/fake-gcs-server/issues/477
+        pytest.skip("no google metadata support on emulation")
+
+    # open
+    gcs.touch(a)
+    assert metadata_attribute not in gcs.info(a)
+    gcs.touch(a, fixed_key_metadata={metadata_attribute: value})
+    file_info = gcs.info(a)
+    assert result_attribute in file_info
+    assert file_info[result_attribute] == value
+
+    # setxattrs
+    gcs.touch(b)
+    assert metadata_attribute not in gcs.info(b)
+    gcs.setxattrs(b, fixed_key_metadata={metadata_attribute: value})
+    file_info = gcs.info(b)
+    assert result_attribute in file_info
+    assert file_info[result_attribute] == value
 
 
 def test_readable(gcs):

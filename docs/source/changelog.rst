@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2021.11.0
+---------
+
+* add support for google fixed_key_metadata (#429)
+* deprecate `content_encoding` parameter of setxattrs method (#429)
+
 2021.10.1
 ---------
 

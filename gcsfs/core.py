@@ -61,6 +61,14 @@ QUOTE_TABLE = str.maketrans(
     }
 )
 
+SUPPORTED_FIXED_KEY_METADATA = {
+    "content_encoding": "contentEncoding",
+    "cache_control": "cacheControl",
+    "content_disposition": "contentDisposition",
+    "content_language": "contentLanguage",
+    "custom_time": "customTime",
+}
+
 
 def quote_plus(s):
     """
@@ -735,7 +743,12 @@ class GCSFileSystem(AsyncFileSystem):
     getxattr = sync_wrapper(_getxattr)
 
     async def _setxattrs(
-        self, path, content_type=None, content_encoding=None, **kwargs
+        self,
+        path,
+        content_type=None,
+        content_encoding=None,
+        fixed_key_metadata=None,
+        **kwargs,
     ):
         """Set/delete/add writable metadata attributes
 
@@ -744,8 +757,18 @@ class GCSFileSystem(AsyncFileSystem):
         content_type: str
             If not None, set the content-type to this value
         content_encoding: str
+            This parameter is deprecated, you may use fixed_key_metadata instead.
             If not None, set the content-encoding.
             See https://cloud.google.com/storage/docs/transcoding
+        fixed_key_metadata: dict
+            Google metadata, in key/value pairs, supported keys:
+                - cache_control
+                - content_disposition
+                - content_encoding
+                - content_language
+                - custom_time
+            More info:
+            https://cloud.google.com/storage/docs/metadata#mutable
         kw_args: key-value pairs like field="value" or field=None
             value must be string to add or modify, or None to delete
 
@@ -757,7 +780,12 @@ class GCSFileSystem(AsyncFileSystem):
         if content_type is not None:
             i_json["contentType"] = content_type
         if content_encoding is not None:
+            logger.warn(
+                "setxattrs: content_encoding parameter is now deprecated "
+                "you may use `fixed_key_metadata` instead"
+            )
             i_json["contentEncoding"] = content_encoding
+        i_json.update(_convert_fixed_key_metadata(fixed_key_metadata))
 
         bucket, key = self.split_path(path)
         o_json = await self._call(
@@ -1104,6 +1132,7 @@ class GCSFileSystem(AsyncFileSystem):
         consistency=None,
         metadata=None,
         autocommit=True,
+        fixed_key_metadata=None,
         **kwargs,
     ):
         """
@@ -1125,6 +1154,7 @@ class GCSFileSystem(AsyncFileSystem):
             metadata=metadata,
             acl=acl,
             autocommit=autocommit,
+            fixed_key_metadata=fixed_key_metadata,
             **kwargs,
         )
 
@@ -1193,6 +1223,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         metadata=None,
         content_type=None,
         timeout=None,
+        fixed_key_metadata=None,
         **kwargs,
     ):
         """
@@ -1221,6 +1252,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             content types at https://www.iana.org/assignments/media-types/media-types.txt
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
+        fixed_key_metadata: dict
+            Google metadata, in key/value pairs, supported keys:
+                - cache_control
+                - content_disposition
+                - content_encoding
+                - content_language
+                - custom_time
+            More info:
+            https://cloud.google.com/storage/docs/metadata#mutable
         timeout: int
             Timeout seconds for the asynchronous callback.
         """
@@ -1251,6 +1291,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             "contentType", "application/octet-stream"
         )
         self.metadata = metadata or det.get("metadata", {})
+        self.fixed_key_metadata = _convert_fixed_key_metadata(det, from_google=True)
+        self.fixed_key_metadata.update(fixed_key_metadata or {})
         self.timeout = timeout
         if mode == "wb":
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
@@ -1351,6 +1393,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.key,
             self.content_type,
             self.metadata,
+            self.fixed_key_metadata,
             timeout=self.timeout,
         )
 
@@ -1383,6 +1426,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.metadata,
             self.consistency,
             self.content_type,
+            self.fixed_key_metadata,
             timeout=self.timeout,
         )
 
@@ -1398,6 +1442,34 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if "not satisfiable" in str(e):
                 return b""
             raise
+
+
+def _convert_fixed_key_metadata(metadata, *, from_google=False):
+    """
+    Convert fixed_key_metadata to/from GCS format.
+
+    Google uses camelCase for its parameters, this function transform
+    exposed fixed_key_metadata (snake_case) to or from GCS(google) format
+
+    Parameters
+    ----------
+    metadata: dict
+        A key value pair of fixed_key_metadata, key can be either
+        camel case or snake case.
+    from_google: bool
+        True means that the metadata come from google and thus should be converted
+        to snake_case
+    """
+    out = {}
+    if metadata is None:
+        return out
+
+    for key, attribute_name in SUPPORTED_FIXED_KEY_METADATA.items():
+        src = key if not from_google else attribute_name
+        dst = attribute_name if not from_google else key
+        if src in metadata:
+            out[dst] = metadata[src]
+    return out
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
@@ -1418,11 +1490,17 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
 
 
 async def initiate_upload(
-    fs, bucket, key, content_type="application/octet-stream", metadata=None
+    fs,
+    bucket,
+    key,
+    content_type="application/octet-stream",
+    metadata=None,
+    fixed_key_metadata=None,
 ):
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
+    j.update(_convert_fixed_key_metadata(fixed_key_metadata))
     headers, _ = await fs._call(
         method="POST",
         path=f"{fs._location}/upload/storage/v1/b/{quote_plus(bucket)}/o",
@@ -1445,12 +1523,14 @@ async def simple_upload(
     metadatain=None,
     consistency=None,
     content_type="application/octet-stream",
+    fixed_key_metadata=None,
 ):
     checker = get_consistency_checker(consistency)
     path = f"{fs._location}/upload/storage/v1/b/{quote_plus(bucket)}/o"
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain
+    metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
     metadata = json.dumps(metadata)
     template = (
         "--==0=="
