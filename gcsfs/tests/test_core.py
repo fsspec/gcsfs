@@ -150,7 +150,7 @@ def test_pickle(gcs):
 
     gcs2 = pickle.loads(b)
 
-    # since https://github.com/intake/filesystem_spec/pull/155
+    # since https://github.com/fsspec/filesystem_spec/pull/155
     assert gcs.session is gcs2.session
     gcs.touch(a)
     assert gcs.ls(TEST_BUCKET) == gcs2.ls(TEST_BUCKET)
@@ -935,7 +935,7 @@ def test_zero_cache_timeout(gcs):
     gcs.ls(f"gs://{TEST_BUCKET}/a/")
 
     # The _times entry and exception below should only be present after
-    # https://github.com/intake/filesystem_spec/pull/513.
+    # https://github.com/fsspec/filesystem_spec/pull/513.
     if f"{TEST_BUCKET}/a" not in gcs.dircache._times:
         pytest.skip("fsspec version too early")
 

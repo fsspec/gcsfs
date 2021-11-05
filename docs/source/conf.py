@@ -298,4 +298,4 @@ texinfo_documents = [
 # If true, do not generate a @detailmenu in the "Top" node's menu.
 # texinfo_no_detailmenu = False
 
-extlinks = {"pr": ("https://github.com/dask/gcsfs/pull/%s", "PR #")}
+extlinks = {"pr": ("https://github.com/fsspec/gcsfs/pull/%s", "PR #")}
