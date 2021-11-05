@@ -10,7 +10,7 @@ setup(
     version=versioneer.get_version(),
     cmdclass=versioneer.get_cmdclass(),
     description="Convenient Filesystem interface over GCS",
-    url="https://github.com/dask/gcsfs",
+    url="https://github.com/fsspec/gcsfs",
     maintainer="Martin Durant",
     maintainer_email="mdurant@anaconda.com",
     license="BSD",

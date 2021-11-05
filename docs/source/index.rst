@@ -7,7 +7,7 @@ This software is beta, use at your own risk.
 
 Please file issues and requests on github_ and we welcome pull requests.
 
-.. _github: https://github.com/dask/gcsfs/issues
+.. _github: https://github.com/fsspec/gcsfs/issues
 
 
 This package depends on fsspec_ , and inherits many useful behaviours from there,
@@ -31,7 +31,7 @@ or by cloning the repository:
 
 .. code-block:: bash
 
-   git clone https://github.com/dask/gcsfs/
+   git clone https://github.com/fsspec/gcsfs/
    cd gcsfs/
    pip install .
 

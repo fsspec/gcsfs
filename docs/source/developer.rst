@@ -5,7 +5,7 @@ We welcome contributions to gcsfs!
 
 Please file issues and requests on github_ and we welcome pull requests.
 
-.. _github: https://github.com/dask/gcsfs/issues
+.. _github: https://github.com/fsspec/gcsfs/issues
 
 Testing
 -------
