@@ -4,8 +4,10 @@ Changelog
 2021.11.0
 ---------
 
+* move to fsspec org
 * add support for google fixed_key_metadata (#429)
 * deprecate `content_encoding` parameter of setxattrs method (#429)
+* use emulator for resting instead of vcrpy (#424)
 
 2021.10.1
 ---------
