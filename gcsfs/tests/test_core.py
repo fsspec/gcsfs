@@ -953,11 +953,13 @@ def test_find_with_prefix_partial_cache(gcs):
         gcs.invalidate_cache()
         if with_cache:
             gcs.ls(base_dir)
+        precache = dict(gcs.dircache)
         assert gcs.find(base_dir, prefix="non_existent_") == []
         assert gcs.find(base_dir, prefix="test_") == [
             base_dir + "/test_1",
             base_dir + "/test_2",
         ]
+        assert dict(gcs.dircache) == precache  # find qwith prefix shouldn't touch cache
         assert gcs.find(base_dir + "/test_1") == [base_dir + "/test_1"]
         assert gcs.find(base_dir + "/non_existent") == []
         assert gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []

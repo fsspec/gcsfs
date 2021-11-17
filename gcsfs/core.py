@@ -1072,7 +1072,8 @@ class GCSFileSystem(AsyncFileSystem):
                 # masking subfiles in subsequent requests.
                 if not o["name"].endswith("/"):
                     cache_entries.setdefault(par, []).append(o)
-        self.dircache.update(cache_entries)
+        if not prefix:
+            self.dircache.update(cache_entries)
 
         if withdirs:
             out = sorted(out + dirs, key=lambda x: x["name"])
