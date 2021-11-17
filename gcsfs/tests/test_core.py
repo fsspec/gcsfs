@@ -265,8 +265,9 @@ def test_gcs_glob(gcs):
     gcs.dircache.clear()
     gcs.glob(TEST_BUCKET + "/nested**1")
     assert all(d.startswith(TEST_BUCKET + "/nested") for d in gcs.dircache)
-    gcs.glob(TEST_BUCKET + "/test*")
-    assert TEST_BUCKET + "/test" in gcs.dircache
+    # the following is no longer true as of #437
+    # gcs.glob(TEST_BUCKET + "/test*")
+    # assert TEST_BUCKET + "/test" in gcs.dircache
 
 
 def test_read_keys_from_bucket(gcs):
