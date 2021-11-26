@@ -1,6 +1,11 @@
 Changelog
 =========
 
+2021.11.1
+---------
+
+* don't touch cache when doing find with a prefix (#437)
+
 2021.11.0
 ---------
 
