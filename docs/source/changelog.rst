@@ -1,6 +1,11 @@
 Changelog
 =========
 
+2022.01.0
+---------
+
+* update refname for versions (#442)
+
 2021.11.1
 ---------
 
