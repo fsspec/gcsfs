@@ -569,9 +569,11 @@ class GCSFileSystem(AsyncFileSystem):
                 items.extend(page.get("items", []))
                 next_page_token = page.get("nextPageToken", None)
 
-            self.dircache[""] = [
+            buckets = [
                 {"name": i["name"] + "/", "size": 0, "type": "directory"} for i in items
             ]
+            self.dircache[""] = buckets
+            return buckets
         return self.dircache[""]
 
     def invalidate_cache(self, path=None):
