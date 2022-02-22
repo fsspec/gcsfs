@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2022.02.0
+---------
+
+* fix list_buckets without cache (#449)
+* drop py36 (#445)
+
 2022.01.0
 ---------
 
