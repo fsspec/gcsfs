@@ -156,13 +156,14 @@ class GoogleCredentials:
             return  # anon
         if self.credentials.valid:
             return  # still good
-        req = Request(requests.Session())
-        with self.lock:
-            if self.credentials.valid:
-                return  # repeat to avoid race (but don't want lock in common case)
-            logger.debug("GCS refresh")
-            self.credentials.refresh(req)
-            self.apply(self.heads)
+        with requests.Session() as session:
+            req = Request(session)
+            with self.lock:
+                if self.credentials.valid:
+                    return  # repeat to avoid race (but don't want lock in common case)
+                logger.debug("GCS refresh")
+                self.credentials.refresh(req)
+                self.apply(self.heads)
 
     def apply(self, out):
         """Insert credential headers in-place to a dictionary"""
