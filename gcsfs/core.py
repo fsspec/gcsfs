@@ -217,7 +217,7 @@ class GCSFileSystem(AsyncFileSystem):
     session_kwargs: dict
         passed on to aiohttp.ClientSession; can contain, for example,
         proxy settings.
-    endpoin_url: str
+    endpoint_url: str
         If given, use this URL (format protocol://host:port , *without* any
         path part) for communication. If not given, defaults to the value
         of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
