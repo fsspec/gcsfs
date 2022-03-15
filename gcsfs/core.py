@@ -247,6 +247,7 @@ class GCSFileSystem(AsyncFileSystem):
         loop=None,
         timeout=None,
         endpoint_url=None,
+        location="US",
         **kwargs,
     ):
         super().__init__(
@@ -270,6 +271,7 @@ class GCSFileSystem(AsyncFileSystem):
         self._session = None
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
+        self.location = location
 
         self.credentials = GoogleCredentials(project, access, token, check_connection)
 
@@ -622,7 +624,7 @@ class GCSFileSystem(AsyncFileSystem):
             predefinedAcl=acl,
             project=self.project,
             predefinedDefaultObjectAcl=default_acl,
-            json={"name": bucket},
+            json={"name": bucket, "location": self.location},
             json_out=True,
         )
         self.invalidate_cache(bucket)
