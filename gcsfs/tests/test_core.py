@@ -4,25 +4,19 @@ import io
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlparse
+
+import gcsfs.checkers
 import pytest
 import requests
-
+from fsspec.asyn import sync
 from fsspec.utils import seek_delimiter
-
-from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
-from gcsfs.tests.conftest import (
-    files,
-    csv_files,
-    text_files,
-    a,
-    b,
-)
-from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote_plus
 from gcsfs.credentials import GoogleCredentials
-import gcsfs.checkers
-from gcsfs import __version__ as version
+from gcsfs.tests.conftest import a, b, csv_files, files, text_files
+from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
+from gcsfs.tests.utils import tempdir, tmpfile
 
 
 def test_simple(gcs):
@@ -977,3 +971,26 @@ def test_percent_file_name(gcs):
     gcs.touch(fn2)
     assert gcs.cat(fn2) != data
     assert set(gcs.ls(parent)) == set([fn, fn2])
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        (None),
+        ("US"),
+        ("EUROPE-WEST-3"),
+        ("europe-west-3"),
+    ],
+)
+def test_bucket_location(gcs_factory, location):
+    with gcs_factory(location=location) as gcs:
+        gcs.mkdir(TEST_BUCKET)
+        try:
+            bucket = [
+                b
+                for b in sync(gcs.loop, gcs._list_bucket_objects, timeout=gcs.timeout)
+                if b["name"] == TEST_BUCKET
+            ][0]
+            assert bucket["location"] == location
+        finally:
+            gcs.rm(TEST_BUCKET, recursive=True)
