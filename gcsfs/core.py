@@ -239,7 +239,7 @@ class GCSFileSystem(AsyncFileSystem):
         consistency="none",
         cache_timeout=None,
         secure_serialize=True,
-        check_connection=False,
+        check_connection=True,
         requests_timeout=None,
         requester_pays=False,
         asynchronous=False,
