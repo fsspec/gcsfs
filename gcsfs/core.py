@@ -299,7 +299,7 @@ class GCSFileSystem(AsyncFileSystem):
             raise RuntimeError("All connection methods have failed!")
 
     def _check_credentials(self):
-        self.ls("anaconda-public-data")
+        sync(self.loop, self._ls, timeout=self.timeout, path="")
 
     @property
     def _location(self):
