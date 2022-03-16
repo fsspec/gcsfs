@@ -13,6 +13,7 @@ import posixpath
 import re
 import warnings
 import weakref
+import google
 
 from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
 from fsspec.utils import stringify_path, setup_logging
@@ -271,13 +272,34 @@ class GCSFileSystem(AsyncFileSystem):
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
 
-        self.credentials = GoogleCredentials(project, access, token, check_connection)
+        if token is None:
+            self._guess_credentials(project, access, check_connection)
+        else:
+            self.credentials = GoogleCredentials(project, access, token)
 
         if not self.asynchronous:
             self._session = sync(
                 self.loop, get_client, timeout=self.timeout, **self.session_kwargs
             )
             weakref.finalize(self, self.close_session, self.loop, self._session)
+
+    def _guess_credentials(self, project, access, check_connection):
+        for meth in ["google_default", "cache", "cloud", "anon"]:
+            try:
+                self.credentials = GoogleCredentials(project, access, meth)
+                if check_connection and meth != "anon":
+                    self._check_credentials()
+                logger.debug("Connected with method %s", meth)
+                break
+            except google.auth.exceptions.GoogleAuthError as e:
+                # GoogleAuthError is the base class for all authentication
+                # errors
+                logger.debug('Connection with method "%s" failed' % meth, exc_info=e)
+        else:
+            raise RuntimeError("All connection methods have failed!")
+
+    def _check_credentials(self):
+        self.ls("anaconda-public-data")
 
     @property
     def _location(self):
