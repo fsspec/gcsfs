@@ -38,18 +38,22 @@ client_config = {
 
 
 class GoogleCredentials:
-    def __init__(self, project, access, token, check_credentials=False):
+    def __init__(self, project, access, token, check_credentials=None):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.project = project
         self.access = access
         self.heads = {}
 
-        self.check_credentials = check_credentials
         self.credentials = None
         self.method = None
         self.lock = threading.Lock()
         self.token = token
         self.connect(method=token)
+
+        if check_credentials is not None:
+            warnings.warn(
+                "The `check_credentials` argument has no effect and will be removed in a future release."
+            )
 
     @classmethod
     def load_tokens(cls):
@@ -195,9 +199,8 @@ class GoogleCredentials:
 
         Parameters
         ----------
-        method: str (google_default|cache|cloud|token|anon|browser) or None
+        method: str (google_default|cache|cloud|token|anon|browser)
             Type of authorisation to implement - calls `_connect_*` methods.
-            If None, will try sequence of methods.
         """
         if method not in [
             "google_default",
@@ -209,20 +212,6 @@ class GoogleCredentials:
             None,
         ]:
             self._connect_token(method)
-        elif method is None:
-            for meth in ["google_default", "cache", "cloud", "anon"]:
-                try:
-                    self.connect(method=meth)
-                    if self.check_credentials and meth != "anon":
-                        self.ls("anaconda-public-data")
-                    logger.debug("Connected with method %s", meth)
-                    break
-                except google.auth.exceptions.GoogleAuthError as e:
-                    # GoogleAuthError is the base class for all authentication
-                    # errors
-                    logger.debug(
-                        'Connection with method "%s" failed' % meth, exc_info=e
-                    )
         else:
             self.__getattribute__("_connect_" + method)()
             self.method = method
