@@ -183,7 +183,7 @@ class GoogleCredentials:
 
     def _connect_browser(self):
         flow = InstalledAppFlow.from_client_config(client_config, [self.scope])
-        credentials = flow.run_console()
+        credentials = flow.run_local_server()
         self.tokens[(self.project, self.access)] = credentials
         self._save_tokens()
         self.credentials = credentials
