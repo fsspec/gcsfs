@@ -251,7 +251,7 @@ class GCSFileSystem(AsyncFileSystem):
         loop=None,
         timeout=None,
         endpoint_url=None,
-        location="US",
+        location=None,
         **kwargs,
     ):
         super().__init__(
@@ -622,13 +622,16 @@ class GCSFileSystem(AsyncFileSystem):
             raise ValueError("Cannot create root bucket")
         if "/" in bucket:
             return
+        json_data = {"name": bucket}
+        if self.location:
+            json_data["location"] = self.location
         await self._call(
             method="POST",
             path="b",
             predefinedAcl=acl,
             project=self.project,
             predefinedDefaultObjectAcl=default_acl,
-            json={"name": bucket, "location": self.location},
+            json=json_data,
             json_out=True,
         )
         self.invalidate_cache(bucket)
