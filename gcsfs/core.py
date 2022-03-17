@@ -552,8 +552,8 @@ class GCSFileSystem(AsyncFileSystem):
         items = [self._process_object(bucket, i) for i in items]
         return items, prefixes
 
-    async def _list_bucket_objects(self):
-        """Return list of all bucket objects under the current project."""
+    async def _list_bucket_dicts(self):
+        """Return list of all bucket as dictionaries under the current project."""
         items = []
         page = await self._call("GET", "b", project=self.project, json_out=True)
 
@@ -580,7 +580,7 @@ class GCSFileSystem(AsyncFileSystem):
         """Return list of all buckets under the current project."""
         if "" not in self.dircache:
 
-            items = await self._list_bucket_objects()
+            items = await self._list_bucket_dicts()
             buckets = [
                 {"name": i["name"] + "/", "size": 0, "type": "directory"} for i in items
             ]

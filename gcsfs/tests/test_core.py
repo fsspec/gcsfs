@@ -992,7 +992,7 @@ def test_bucket_location(gcs_factory, location):
         gcs.mkdir(bucket_name)
         bucket = [
             b
-            for b in sync(gcs.loop, gcs._list_bucket_objects, timeout=gcs.timeout)
+            for b in sync(gcs.loop, gcs._list_bucket_dicts, timeout=gcs.timeout)
             if b["name"] == bucket_name
         ][0]
         assert bucket["location"] == (location or "US").upper()
