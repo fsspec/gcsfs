@@ -223,7 +223,7 @@ class GCSFileSystem(AsyncFileSystem):
         of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
         either, will use the standard Google endpoint.
     location: str
-        Location where buckets are created, like 'US' or 'EUROPE-WEST-3'.
+        Location where buckets are created, like 'US' or 'EUROPE-WEST3'.
         You can find a list of all available locations here:
         https://cloud.google.com/storage/docs/locations#available-locations
     """
