@@ -5,6 +5,7 @@ from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
+from uuid import uuid4
 
 import gcsfs.checkers
 import pytest
@@ -978,19 +979,22 @@ def test_percent_file_name(gcs):
     [
         (None),
         ("US"),
-        ("EUROPE-WEST-3"),
-        ("europe-west-3"),
+        ("EUROPE-WEST3"),
+        ("europe-west3"),
     ],
 )
 def test_bucket_location(gcs_factory, location):
-    with gcs_factory(location=location) as gcs:
-        gcs.mkdir(TEST_BUCKET)
-        try:
-            bucket = [
-                b
-                for b in sync(gcs.loop, gcs._list_bucket_objects, timeout=gcs.timeout)
-                if b["name"] == TEST_BUCKET
-            ][0]
-            assert bucket["location"] == location
-        finally:
-            gcs.rm(TEST_BUCKET, recursive=True)
+    gcs = gcs_factory(location=location)
+    if not gcs.on_google:
+        pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
+    bucket_name = str(uuid4())
+    try:
+        gcs.mkdir(bucket_name)
+        bucket = [
+            b
+            for b in sync(gcs.loop, gcs._list_bucket_objects, timeout=gcs.timeout)
+            if b["name"] == bucket_name
+        ][0]
+        assert bucket["location"] == (location or "US").upper()
+    finally:
+        gcs.rm(bucket_name, recursive=True)
