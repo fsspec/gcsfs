@@ -2,7 +2,6 @@ import os
 import shlex
 import subprocess
 import time
-from contextlib import contextmanager
 
 import fsspec
 import pytest
@@ -84,36 +83,34 @@ def docker_gcs():
 
 
 @pytest.fixture
-def gcs_factory(docker_gcs, populate=True):
-    @contextmanager
+def gcs_factory(docker_gcs):
     def factory(location=None):
         GCSFileSystem.clear_instance_cache()
-        gcs = fsspec.filesystem("gcs", endpoint_url=docker_gcs, location=location)
-        try:
-            # ensure we're empty.
-            try:
-                gcs.rm(TEST_BUCKET, recursive=True)
-            except FileNotFoundError:
-                pass
-            try:
-                gcs.mkdir(TEST_BUCKET)
-            except Exception:
-                pass
-
-            if populate:
-                gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
-            gcs.invalidate_cache()
-            yield gcs
-        finally:
-            try:
-                gcs.rm(gcs.find(TEST_BUCKET))
-            except:  # noqa: E722
-                pass
+        return fsspec.filesystem("gcs", endpoint_url=docker_gcs, location=location)
 
     return factory
 
 
 @pytest.fixture
-def gcs(gcs_factory):
-    with gcs_factory() as gcs:
+def gcs(gcs_factory, populate=True):
+    gcs = gcs_factory()
+    try:
+        # ensure we're empty.
+        try:
+            gcs.rm(TEST_BUCKET, recursive=True)
+        except FileNotFoundError:
+            pass
+        try:
+            gcs.mkdir(TEST_BUCKET)
+        except Exception:
+            pass
+
+        if populate:
+            gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
+        gcs.invalidate_cache()
         yield gcs
+    finally:
+        try:
+            gcs.rm(gcs.find(TEST_BUCKET))
+        except:  # noqa: E722
+            pass
