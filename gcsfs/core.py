@@ -274,7 +274,7 @@ class GCSFileSystem(AsyncFileSystem):
             )
 
         if token is None:
-            self._guess_credentials(project, access, check_connection)
+            self._guess_credentials(project, access)
         else:
             self.credentials = GoogleCredentials(project, access, token)
 
@@ -284,7 +284,7 @@ class GCSFileSystem(AsyncFileSystem):
             )
             weakref.finalize(self, self.close_session, self.loop, self._session)
 
-    def _guess_credentials(self, project, access, check_connection):
+    def _guess_credentials(self, project, access):
         for meth in ["google_default", "cache", "cloud", "anon"]:
             try:
                 self.credentials = GoogleCredentials(project, access, meth)
