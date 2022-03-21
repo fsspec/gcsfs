@@ -50,9 +50,10 @@ class GoogleCredentials:
         self.token = token
         self.connect(method=token)
 
-        if check_credentials is not None:
+        if check_credentials:
             warnings.warn(
-                "The `check_credentials` argument has no effect and will be removed in a future release."
+                "The `check_credentials` argument is deprecated and will be removed in a future release.",
+                DeprecationWarning,
             )
 
     @classmethod
