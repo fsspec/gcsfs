@@ -84,9 +84,11 @@ def docker_gcs():
 
 @pytest.fixture
 def gcs_factory(docker_gcs):
-    def factory(location=None):
+    def factory(default_location=None):
         GCSFileSystem.clear_instance_cache()
-        return fsspec.filesystem("gcs", endpoint_url=docker_gcs, location=location)
+        return fsspec.filesystem(
+            "gcs", endpoint_url=docker_gcs, default_location=default_location
+        )
 
     return factory
 

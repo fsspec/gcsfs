@@ -984,7 +984,7 @@ def test_percent_file_name(gcs):
     ],
 )
 def test_bucket_location(gcs_factory, location):
-    gcs = gcs_factory(location=location)
+    gcs = gcs_factory(default_location=location)
     if not gcs.on_google:
         pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
     bucket_name = str(uuid4())

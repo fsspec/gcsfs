@@ -222,8 +222,8 @@ class GCSFileSystem(AsyncFileSystem):
         path part) for communication. If not given, defaults to the value
         of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
         either, will use the standard Google endpoint.
-    location: str
-        Location where buckets are created, like 'US' or 'EUROPE-WEST3'.
+    default_location: str
+        Default location where buckets are created, like 'US' or 'EUROPE-WEST3'.
         You can find a list of all available locations here:
         https://cloud.google.com/storage/docs/locations#available-locations
     """
@@ -251,7 +251,7 @@ class GCSFileSystem(AsyncFileSystem):
         loop=None,
         timeout=None,
         endpoint_url=None,
-        location=None,
+        default_location=None,
         **kwargs,
     ):
         super().__init__(
@@ -275,7 +275,7 @@ class GCSFileSystem(AsyncFileSystem):
         self._session = None
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
-        self.location = location
+        self.default_location = default_location
 
         self.credentials = GoogleCredentials(project, access, token, check_connection)
 
@@ -629,8 +629,8 @@ class GCSFileSystem(AsyncFileSystem):
         if "/" in bucket:
             return
         json_data = {"name": bucket}
-        if self.location:
-            json_data["location"] = self.location
+        if self.default_location:
+            json_data["location"] = self.default_location
         await self._call(
             method="POST",
             path="b",
