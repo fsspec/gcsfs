@@ -287,8 +287,6 @@ class GCSFileSystem(AsyncFileSystem):
         for meth in ["google_default", "cache", "cloud", "anon"]:
             try:
                 self.credentials = GoogleCredentials(project, access, meth)
-                if check_connection and meth != "anon":
-                    self._check_credentials()
                 logger.debug("Connected with method %s", meth)
                 break
             except google.auth.exceptions.GoogleAuthError as e:
@@ -297,9 +295,6 @@ class GCSFileSystem(AsyncFileSystem):
                 logger.debug('Connection with method "%s" failed' % meth, exc_info=e)
         else:
             raise RuntimeError("All connection methods have failed!")
-
-    def _check_credentials(self):
-        sync(self.loop, self._ls, timeout=self.timeout, path="")
 
     @property
     def _location(self):
