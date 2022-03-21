@@ -998,3 +998,20 @@ def test_bucket_location(gcs_factory, location):
         assert bucket["location"] == (location or "US").upper()
     finally:
         gcs.rm(bucket_name, recursive=True)
+
+
+def test_bucket_default_location_overwrite(gcs_factory):
+    gcs = gcs_factory(default_location="US")
+    if not gcs.on_google:
+        pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
+    bucket_name = str(uuid4())
+    try:
+        gcs.mkdir(bucket_name, location="EUROPE-WEST3")
+        bucket = [
+            b
+            for b in sync(gcs.loop, gcs._list_bucket_dicts, timeout=gcs.timeout)
+            if b["name"] == bucket_name
+        ][0]
+        assert bucket["location"] == "EUROPE-WEST3"
+    finally:
+        gcs.rm(bucket_name, recursive=True)
