@@ -609,7 +609,11 @@ class GCSFileSystem(AsyncFileSystem):
                 path = self._parent(path)
 
     async def _mkdir(
-        self, bucket, acl="projectPrivate", default_acl="bucketOwnerFullControl"
+        self,
+        bucket,
+        acl="projectPrivate",
+        default_acl="bucketOwnerFullControl",
+        location=None,
     ):
         """
         New bucket
@@ -623,14 +627,20 @@ class GCSFileSystem(AsyncFileSystem):
             access for the bucket itself
         default_acl: str, one of ACLs
             default ACL for objects created in this bucket
+        location: Optional[str]
+            Location where buckets are created, like 'US' or 'EUROPE-WEST3'.
+            If not provided, defaults to `self.default_location`.
+            You can find a list of all available locations here:
+            https://cloud.google.com/storage/docs/locations#available-locations
         """
         if bucket in ["", "/"]:
             raise ValueError("Cannot create root bucket")
         if "/" in bucket:
             return
         json_data = {"name": bucket}
-        if self.default_location:
-            json_data["location"] = self.default_location
+        location = location or self.default_location
+        if location:
+            json_data["location"] = location
         await self._call(
             method="POST",
             path="b",
