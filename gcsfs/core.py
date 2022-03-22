@@ -295,6 +295,8 @@ class GCSFileSystem(AsyncFileSystem):
                 # errors
                 logger.debug('Connection with method "%s" failed' % meth, exc_info=e)
         else:
+            # Since the "anon" connection method should technically always succeed,
+            # ending up here means something must have gone terribly wrong.
             raise RuntimeError("All connection methods have failed!")
 
     @property
