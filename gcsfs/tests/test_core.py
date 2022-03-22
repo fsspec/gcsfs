@@ -772,7 +772,7 @@ def test_bigger_than_block_read(gcs):
 
 def test_current(gcs):
     assert GCSFileSystem.current() is gcs
-    gcs2 = GCSFileSystem(endpoint_url=gcs._endpoint)
+    gcs2 = GCSFileSystem(endpoint_url=gcs._endpoint, default_location=None)
     assert gcs2.session is gcs.session
 
 
