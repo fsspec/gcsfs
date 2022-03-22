@@ -203,12 +203,6 @@ class GCSFileSystem(AsyncFileSystem):
         Cache expiration time in seconds for object metadata cache.
         Set cache_timeout <= 0 for no caching, None for no cache expiration.
     secure_serialize: bool (deprecated)
-    check_connection: bool
-        When token=None, gcsfs will attempt various methods of establishing
-        credentials, falling back to anon. It is possible for a method to
-        find credentials in the system that turn out not to be valid. Setting
-        this parameter to True will ensure that an actual operation is
-        attempted before deciding that credentials are valid.
     requester_pays : bool, or str default False
         Whether to use requester-pays requests. This will include your
         project ID `project` in requests as the `userPorject`, and you'll be
@@ -239,7 +233,7 @@ class GCSFileSystem(AsyncFileSystem):
         consistency="none",
         cache_timeout=None,
         secure_serialize=True,
-        check_connection=False,
+        check_connection=None,
         requests_timeout=None,
         requester_pays=False,
         asynchronous=False,
@@ -271,7 +265,13 @@ class GCSFileSystem(AsyncFileSystem):
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
 
-        self.credentials = GoogleCredentials(project, access, token, check_connection)
+        if check_connection:
+            warnings.warn(
+                "The `check_connection` argument is deprecated and will be removed in a future release.",
+                DeprecationWarning,
+            )
+
+        self.credentials = GoogleCredentials(project, access, token)
 
         if not self.asynchronous:
             self._session = sync(

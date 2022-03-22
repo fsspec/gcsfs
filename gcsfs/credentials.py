@@ -38,18 +38,23 @@ client_config = {
 
 
 class GoogleCredentials:
-    def __init__(self, project, access, token, check_credentials=False):
+    def __init__(self, project, access, token, check_credentials=None):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.project = project
         self.access = access
         self.heads = {}
 
-        self.check_credentials = check_credentials
         self.credentials = None
         self.method = None
         self.lock = threading.Lock()
         self.token = token
         self.connect(method=token)
+
+        if check_credentials:
+            warnings.warn(
+                "The `check_credentials` argument is deprecated and will be removed in a future release.",
+                DeprecationWarning,
+            )
 
     @classmethod
     def load_tokens(cls):
@@ -213,8 +218,6 @@ class GoogleCredentials:
             for meth in ["google_default", "cache", "cloud", "anon"]:
                 try:
                     self.connect(method=meth)
-                    if self.check_credentials and meth != "anon":
-                        self.ls("anaconda-public-data")
                     logger.debug("Connected with method %s", meth)
                     break
                 except google.auth.exceptions.GoogleAuthError as e:
@@ -223,6 +226,10 @@ class GoogleCredentials:
                     logger.debug(
                         'Connection with method "%s" failed' % meth, exc_info=e
                     )
+            else:
+                # Since the 'anon' connection method should always succeed,
+                # getting here means something has gone terribly wrong.
+                raise RuntimeError("All connection methods have failed!")
         else:
             self.__getattribute__("_connect_" + method)()
             self.method = method
