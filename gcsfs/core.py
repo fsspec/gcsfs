@@ -675,7 +675,7 @@ class GCSFileSystem(AsyncFileSystem):
         try:
             exact = await self._get_object(path)
             # this condition finds a "placeholder" - still need to check if it's a directory
-            if exact['size'] or not exact["name"].endswith("/"):
+            if exact["size"] or not exact["name"].endswith("/"):
                 return exact
         except FileNotFoundError:
             pass
