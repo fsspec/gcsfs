@@ -213,8 +213,21 @@ class GoogleCredentials:
             "token",
             "anon",
             "browser",
+            None,
         ]:
             self._connect_token(method)
+        elif method is None:
+            for meth in ["google_default", "cache", "cloud", "anon"]:
+                try:
+                    self.connect(method=meth)
+                    logger.debug("Connected with method %s", meth)
+                    break
+                except google.auth.exceptions.GoogleAuthError as e:
+                    # GoogleAuthError is the base class for all authentication
+                    # errors
+                    logger.debug(
+                        'Connection with method "%s" failed' % meth, exc_info=e
+                    )
         else:
             self.__getattribute__("_connect_" + method)()
             self.method = method

@@ -13,7 +13,6 @@ import warnings
 import weakref
 
 import fsspec
-import google
 from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
 from fsspec.callbacks import NoOpCallback
 from fsspec.implementations.http import get_client
@@ -272,31 +271,13 @@ class GCSFileSystem(AsyncFileSystem):
                 DeprecationWarning,
             )
 
-        if token is None:
-            self._guess_credentials(project, access)
-        else:
-            self.credentials = GoogleCredentials(project, access, token)
+        self.credentials = GoogleCredentials(project, access, token)
 
         if not self.asynchronous:
             self._session = sync(
                 self.loop, get_client, timeout=self.timeout, **self.session_kwargs
             )
             weakref.finalize(self, self.close_session, self.loop, self._session)
-
-    def _guess_credentials(self, project, access):
-        for meth in ["google_default", "cache", "cloud", "anon"]:
-            try:
-                self.credentials = GoogleCredentials(project, access, meth)
-                logger.debug("Connected with methozd %s", meth)
-                break
-            except google.auth.exceptions.GoogleAuthError as e:
-                # GoogleAuthError is the base class for all authentication
-                # errors
-                logger.debug('Connection with method "%s" failed' % meth, exc_info=e)
-        else:
-            # Since the "anon" connection method should technically always succeed,
-            # ending up here means something must have gone terribly wrong.
-            raise RuntimeError("All connection methods have failed!")
 
     @property
     def _location(self):
