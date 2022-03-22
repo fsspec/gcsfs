@@ -3,9 +3,6 @@
 Google Cloud Storage pythonic interface
 """
 import asyncio
-import warnings
-import fsspec
-
 import io
 import json
 import logging
@@ -14,16 +11,18 @@ import posixpath
 import re
 import warnings
 import weakref
-import google
 
-from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
-from fsspec.utils import stringify_path, setup_logging
+import fsspec
+import google
+from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
 from fsspec.callbacks import NoOpCallback
 from fsspec.implementations.http import get_client
-from .retry import retry_request, validate_response
+from fsspec.utils import setup_logging, stringify_path
+
+from . import __version__ as version
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
-from . import __version__ as version
+from .retry import retry_request, validate_response
 
 logger = logging.getLogger("gcsfs")
 
@@ -288,7 +287,7 @@ class GCSFileSystem(AsyncFileSystem):
         for meth in ["google_default", "cache", "cloud", "anon"]:
             try:
                 self.credentials = GoogleCredentials(project, access, meth)
-                logger.debug("Connected with method %s", meth)
+                logger.debug("Connected with methozd %s", meth)
                 break
             except google.auth.exceptions.GoogleAuthError as e:
                 # GoogleAuthError is the base class for all authentication
