@@ -47,9 +47,6 @@ class GoogleCredentials:
         self.credentials = None
         self.method = None
         self.lock = threading.Lock()
-
-        if token is None:
-            raise ValueError("token must not be `None`.")
         self.token = token
         self.connect(method=token)
 
