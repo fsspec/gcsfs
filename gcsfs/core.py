@@ -3,6 +3,8 @@
 Google Cloud Storage pythonic interface
 """
 import asyncio
+import fsspec
+
 import io
 import json
 import logging
@@ -12,16 +14,14 @@ import re
 import warnings
 import weakref
 
-import fsspec
-from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
+from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
+from fsspec.utils import stringify_path, setup_logging
 from fsspec.callbacks import NoOpCallback
 from fsspec.implementations.http import get_client
-from fsspec.utils import setup_logging, stringify_path
-
-from . import __version__ as version
+from .retry import retry_request, validate_response
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
-from .retry import retry_request, validate_response
+from . import __version__ as version
 
 logger = logging.getLogger("gcsfs")
 
