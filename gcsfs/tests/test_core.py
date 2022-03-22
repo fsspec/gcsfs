@@ -5,11 +5,13 @@ from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
 from urllib.parse import urlparse, parse_qs, unquote
+from uuid import uuid4
 
 import pytest
 import requests
 
 from fsspec.utils import seek_delimiter
+from fsspec.asyn import sync
 
 from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
 from gcsfs.tests.conftest import (
@@ -770,7 +772,7 @@ def test_bigger_than_block_read(gcs):
 
 def test_current(gcs):
     assert GCSFileSystem.current() is gcs
-    gcs2 = GCSFileSystem(endpoint_url=gcs._endpoint)
+    gcs2 = GCSFileSystem(endpoint_url=gcs._endpoint, default_location=None)
     assert gcs2.session is gcs.session
 
 
@@ -978,6 +980,49 @@ def test_percent_file_name(gcs):
     gcs.touch(fn2)
     assert gcs.cat(fn2) != data
     assert set(gcs.ls(parent)) == set([fn, fn2])
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        (None),
+        ("US"),
+        ("EUROPE-WEST3"),
+        ("europe-west3"),
+    ],
+)
+def test_bucket_location(gcs_factory, location):
+    gcs = gcs_factory(default_location=location)
+    if not gcs.on_google:
+        pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
+    bucket_name = str(uuid4())
+    try:
+        gcs.mkdir(bucket_name)
+        bucket = [
+            b
+            for b in sync(gcs.loop, gcs._list_buckets, timeout=gcs.timeout)
+            if b["name"] == bucket_name + "/"
+        ][0]
+        assert bucket["location"] == (location or "US").upper()
+    finally:
+        gcs.rm(bucket_name, recursive=True)
+
+
+def test_bucket_default_location_overwrite(gcs_factory):
+    gcs = gcs_factory(default_location="US")
+    if not gcs.on_google:
+        pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
+    bucket_name = str(uuid4())
+    try:
+        gcs.mkdir(bucket_name, location="EUROPE-WEST3")
+        bucket = [
+            b
+            for b in sync(gcs.loop, gcs._list_buckets, timeout=gcs.timeout)
+            if b["name"] == bucket_name + "/"
+        ][0]
+        assert bucket["location"] == "EUROPE-WEST3"
+    finally:
+        gcs.rm(bucket_name, recursive=True)
 
 
 def test_dir_marker(gcs):

@@ -216,6 +216,10 @@ class GCSFileSystem(AsyncFileSystem):
         path part) for communication. If not given, defaults to the value
         of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
         either, will use the standard Google endpoint.
+    default_location: str
+        Default location where buckets are created, like 'US' or 'EUROPE-WEST3'.
+        You can find a list of all available locations here:
+        https://cloud.google.com/storage/docs/locations#available-locations
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -241,6 +245,7 @@ class GCSFileSystem(AsyncFileSystem):
         loop=None,
         timeout=None,
         endpoint_url=None,
+        default_location=None,
         **kwargs,
     ):
         super().__init__(
@@ -264,6 +269,7 @@ class GCSFileSystem(AsyncFileSystem):
         self._session = None
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
+        self.default_location = default_location
 
         if check_connection:
             warnings.warn(
@@ -570,7 +576,8 @@ class GCSFileSystem(AsyncFileSystem):
                 next_page_token = page.get("nextPageToken", None)
 
             buckets = [
-                {"name": i["name"] + "/", "size": 0, "type": "directory"} for i in items
+                {**i, "name": i["name"] + "/", "size": 0, "type": "directory"}
+                for i in items
             ]
             self.dircache[""] = buckets
             return buckets
@@ -597,7 +604,11 @@ class GCSFileSystem(AsyncFileSystem):
                 path = self._parent(path)
 
     async def _mkdir(
-        self, bucket, acl="projectPrivate", default_acl="bucketOwnerFullControl"
+        self,
+        bucket,
+        acl="projectPrivate",
+        default_acl="bucketOwnerFullControl",
+        location=None,
     ):
         """
         New bucket
@@ -611,18 +622,27 @@ class GCSFileSystem(AsyncFileSystem):
             access for the bucket itself
         default_acl: str, one of ACLs
             default ACL for objects created in this bucket
+        location: Optional[str]
+            Location where buckets are created, like 'US' or 'EUROPE-WEST3'.
+            If not provided, defaults to `self.default_location`.
+            You can find a list of all available locations here:
+            https://cloud.google.com/storage/docs/locations#available-locations
         """
         if bucket in ["", "/"]:
             raise ValueError("Cannot create root bucket")
         if "/" in bucket:
             return
+        json_data = {"name": bucket}
+        location = location or self.default_location
+        if location:
+            json_data["location"] = location
         await self._call(
             method="POST",
             path="b",
             predefinedAcl=acl,
             project=self.project,
             predefinedDefaultObjectAcl=default_acl,
-            json={"name": bucket},
+            json=json_data,
             json_out=True,
         )
         self.invalidate_cache(bucket)
