@@ -5,6 +5,8 @@ from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
 from urllib.parse import urlparse, parse_qs, unquote
+
+import fsspec.utils
 import pytest
 import requests
 
@@ -977,3 +979,15 @@ def test_percent_file_name(gcs):
     gcs.touch(fn2)
     assert gcs.cat(fn2) != data
     assert set(gcs.ls(parent)) == set([fn, fn2])
+
+
+def test_dir_marker(gcs):
+    gcs.touch(f"{TEST_BUCKET}/placeholder/")
+    gcs.touch(f"{TEST_BUCKET}/placeholder/inner")
+    out = gcs.find(TEST_BUCKET)
+    assert f"{TEST_BUCKET}/placeholder/" in out
+    gcs.invalidate_cache()
+    out2 = gcs.info(f"{TEST_BUCKET}/placeholder/")
+    out3 = gcs.info(f"{TEST_BUCKET}/placeholder/")
+    assert out2 == out3
+    assert out2["type"] == "directory"

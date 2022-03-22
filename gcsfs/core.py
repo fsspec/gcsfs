@@ -498,7 +498,7 @@ class GCSFileSystem(AsyncFileSystem):
                 return [await self._get_object(path)]
             else:
                 return []
-        out = items + pseudodirs
+        out = pseudodirs + items
         # Don't cache prefixed/partial listings
         if not prefix:
             self.dircache[path] = out
@@ -649,7 +649,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _info(self, path, **kwargs):
         """File information about this path."""
-        path = self._strip_protocol(path).rstrip("/")
+        path = self._strip_protocol(path)
         if "/" not in path:
             out = await self._call("GET", f"b/{path}", json_out=True)
             out.update(size=0, type="directory")
@@ -673,7 +673,10 @@ class GCSFileSystem(AsyncFileSystem):
             }
         # Check exact file path
         try:
-            return await self._get_object(path)
+            exact = await self._get_object(path)
+            # this condition finds a "placeholder" - still need to check if it's a directory
+            if exact['size'] or not exact["name"].endswith("/"):
+                return exact
         except FileNotFoundError:
             pass
         kwargs["detail"] = True  # Force to true for info
