@@ -210,7 +210,6 @@ class GoogleCredentials:
             "token",
             "anon",
             "browser",
-            None,
         ]:
             self._connect_token(method)
         else:
