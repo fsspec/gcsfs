@@ -992,8 +992,8 @@ def test_bucket_location(gcs_factory, location):
         gcs.mkdir(bucket_name)
         bucket = [
             b
-            for b in sync(gcs.loop, gcs._list_bucket_dicts, timeout=gcs.timeout)
-            if b["name"] == bucket_name
+            for b in sync(gcs.loop, gcs._list_buckets, timeout=gcs.timeout)
+            if b["name"] == bucket_name + "/"
         ][0]
         assert bucket["location"] == (location or "US").upper()
     finally:
@@ -1009,8 +1009,8 @@ def test_bucket_default_location_overwrite(gcs_factory):
         gcs.mkdir(bucket_name, location="EUROPE-WEST3")
         bucket = [
             b
-            for b in sync(gcs.loop, gcs._list_bucket_dicts, timeout=gcs.timeout)
-            if b["name"] == bucket_name
+            for b in sync(gcs.loop, gcs._list_buckets, timeout=gcs.timeout)
+            if b["name"] == bucket_name + "/"
         ][0]
         assert bucket["location"] == "EUROPE-WEST3"
     finally:

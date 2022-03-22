@@ -552,37 +552,32 @@ class GCSFileSystem(AsyncFileSystem):
         items = [self._process_object(bucket, i) for i in items]
         return items, prefixes
 
-    async def _list_bucket_dicts(self):
-        """Return list of all bucket as dictionaries under the current project."""
-        items = []
-        page = await self._call("GET", "b", project=self.project, json_out=True)
-
-        assert page["kind"] == "storage#buckets"
-        items.extend(page.get("items", []))
-        next_page_token = page.get("nextPageToken", None)
-
-        while next_page_token is not None:
-            page = await self._call(
-                "GET",
-                "b",
-                project=self.project,
-                pageToken=next_page_token,
-                json_out=True,
-            )
+    async def _list_buckets(self):
+        """Return list of all buckets under the current project."""
+        if "" not in self.dircache:
+            items = []
+            page = await self._call("GET", "b", project=self.project, json_out=True)
 
             assert page["kind"] == "storage#buckets"
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
 
-        return items
+            while next_page_token is not None:
+                page = await self._call(
+                    "GET",
+                    "b",
+                    project=self.project,
+                    pageToken=next_page_token,
+                    json_out=True,
+                )
 
-    async def _list_buckets(self):
-        """Return list of all buckets under the current project."""
-        if "" not in self.dircache:
+                assert page["kind"] == "storage#buckets"
+                items.extend(page.get("items", []))
+                next_page_token = page.get("nextPageToken", None)
 
-            items = await self._list_bucket_dicts()
             buckets = [
-                {"name": i["name"] + "/", "size": 0, "type": "directory"} for i in items
+                {**i, "name": i["name"] + "/", "size": 0, "type": "directory"}
+                for i in items
             ]
             self.dircache[""] = buckets
             return buckets
