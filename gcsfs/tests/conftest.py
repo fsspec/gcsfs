@@ -6,6 +6,7 @@ import time
 import fsspec
 import pytest
 import requests
+
 from gcsfs import GCSFileSystem
 from gcsfs.tests.settings import TEST_BUCKET
 
