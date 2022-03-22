@@ -226,6 +226,10 @@ class GoogleCredentials:
                     logger.debug(
                         'Connection with method "%s" failed' % meth, exc_info=e
                     )
+            else:
+                # Since the 'anon' connection method should always succeed,
+                # getting here means something has gone terribly wrong.
+                raise RuntimeError("All connection methods have failed!")
         else:
             self.__getattribute__("_connect_" + method)()
             self.method = method
