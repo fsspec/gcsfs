@@ -6,7 +6,6 @@ from itertools import chain
 from unittest import mock
 from urllib.parse import urlparse, parse_qs, unquote
 
-import fsspec.utils
 import pytest
 import requests
 
