@@ -203,12 +203,6 @@ class GCSFileSystem(AsyncFileSystem):
         Cache expiration time in seconds for object metadata cache.
         Set cache_timeout <= 0 for no caching, None for no cache expiration.
     secure_serialize: bool (deprecated)
-    check_connection: bool
-        When token=None, gcsfs will attempt various methods of establishing
-        credentials, falling back to anon. It is possible for a method to
-        find credentials in the system that turn out not to be valid. Setting
-        this parameter to True will ensure that an actual operation is
-        attempted before deciding that credentials are valid.
     requester_pays : bool, or str default False
         Whether to use requester-pays requests. This will include your
         project ID `project` in requests as the `userPorject`, and you'll be
@@ -243,7 +237,7 @@ class GCSFileSystem(AsyncFileSystem):
         consistency="none",
         cache_timeout=None,
         secure_serialize=True,
-        check_connection=False,
+        check_connection=None,
         requests_timeout=None,
         requester_pays=False,
         asynchronous=False,
@@ -277,7 +271,13 @@ class GCSFileSystem(AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
 
-        self.credentials = GoogleCredentials(project, access, token, check_connection)
+        if check_connection:
+            warnings.warn(
+                "The `check_connection` argument is deprecated and will be removed in a future release.",
+                DeprecationWarning,
+            )
+
+        self.credentials = GoogleCredentials(project, access, token)
 
         if not self.asynchronous:
             self._session = sync(
@@ -504,7 +504,7 @@ class GCSFileSystem(AsyncFileSystem):
                 return [await self._get_object(path)]
             else:
                 return []
-        out = items + pseudodirs
+        out = pseudodirs + items
         # Don't cache prefixed/partial listings
         if not prefix:
             self.dircache[path] = out
@@ -674,7 +674,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _info(self, path, **kwargs):
         """File information about this path."""
-        path = self._strip_protocol(path).rstrip("/")
+        path = self._strip_protocol(path)
         if "/" not in path:
             out = await self._call("GET", f"b/{path}", json_out=True)
             out.update(size=0, type="directory")
@@ -698,7 +698,10 @@ class GCSFileSystem(AsyncFileSystem):
             }
         # Check exact file path
         try:
-            return await self._get_object(path)
+            exact = await self._get_object(path)
+            # this condition finds a "placeholder" - still need to check if it's a directory
+            if exact["size"] or not exact["name"].endswith("/"):
+                return exact
         except FileNotFoundError:
             pass
         kwargs["detail"] = True  # Force to true for info
