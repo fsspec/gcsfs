@@ -200,8 +200,9 @@ class GoogleCredentials:
 
         Parameters
         ----------
-        method: str (google_default|cache|cloud|token|anon|browser)
+        method: str (google_default|cache|cloud|token|anon|browser) or None
             Type of authorisation to implement - calls `_connect_*` methods.
+            If None, will try sequence of methods.
         """
         if method not in [
             "google_default",
