@@ -39,7 +39,7 @@ from gcsfs.gcsfuse import GCSFS
 def main(
     bucket, mount_point, token, project_id, foreground, threads, cache_files, verbose
 ):
-    """ Mount a Google Cloud Storage (GCS) bucket to a local directory """
+    """Mount a Google Cloud Storage (GCS) bucket to a local directory"""
 
     if verbose == 1:
         logging.basicConfig(level=logging.INFO)

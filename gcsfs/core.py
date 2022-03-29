@@ -48,9 +48,9 @@ bACLs = {
 }
 DEFAULT_PROJECT = os.environ.get("GCSFS_DEFAULT_PROJECT", "")
 
-GCS_MIN_BLOCK_SIZE = 2 ** 18
-GCS_MAX_BLOCK_SIZE = 2 ** 28
-DEFAULT_BLOCK_SIZE = 5 * 2 ** 20
+GCS_MIN_BLOCK_SIZE = 2**18
+GCS_MAX_BLOCK_SIZE = 2**28
+DEFAULT_BLOCK_SIZE = 5 * 2**20
 
 
 QUOTE_TABLE = str.maketrans(
@@ -671,8 +671,16 @@ class GCSFileSystem(AsyncFileSystem):
         """File information about this path."""
         path = self._strip_protocol(path)
         if "/" not in path:
-            out = await self._call("GET", f"b/{path}", json_out=True)
-            out.update(size=0, type="directory")
+            try:
+                out = await self._call("GET", f"b/{path}", json_out=True)
+                out.update(size=0, type="directory")
+            except OSError:
+                # GET bucket failed, try ls; will have no metadata
+                exists = await self._ls(path)
+                if exists:
+                    out = {"name": path, "size": 0, "type": "directory"}
+                else:
+                    raise FileNotFoundError(path)
             return out
         # Check directory cache for parent dir
         parent_path = self._parent(path)
@@ -744,14 +752,14 @@ class GCSFileSystem(AsyncFileSystem):
             return sorted([o["name"] for o in out])
 
     def url(self, path):
-        """ Get HTTP URL of the given path """
+        """Get HTTP URL of the given path"""
         u = "{}/download/storage/v1/b/{}/o/{}?alt=media"
         bucket, object = self.split_path(path)
         object = quote_plus(object)
         return u.format(self._location, bucket, object)
 
     async def _cat_file(self, path, start=None, end=None):
-        """ Simple one-shot get of file data """
+        """Simple one-shot get of file data"""
         u2 = self.url(path)
         if start or end:
             head = {"Range": await self._process_limits(path, start, end)}
@@ -971,14 +979,14 @@ class GCSFileSystem(AsyncFileSystem):
         metadata=None,
         consistency=None,
         content_type="application/octet-stream",
-        chunksize=50 * 2 ** 20,
+        chunksize=50 * 2**20,
     ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
         bucket, key = self.split_path(path)
         size = len(data)
         out = None
-        if size < 5 * 2 ** 20:
+        if size < 5 * 2**20:
             return await simple_upload(
                 self, bucket, key, data, metadata, consistency, content_type
             )
@@ -1002,7 +1010,7 @@ class GCSFileSystem(AsyncFileSystem):
         metadata=None,
         consistency=None,
         content_type="application/octet-stream",
-        chunksize=50 * 2 ** 20,
+        chunksize=50 * 2**20,
         callback=None,
         **kwargs,
     ):
@@ -1018,7 +1026,7 @@ class GCSFileSystem(AsyncFileSystem):
             f0.seek(0)
             callback.set_size(size)
 
-            if size < 5 * 2 ** 20:
+            if size < 5 * 2**20:
                 await simple_upload(
                     self,
                     bucket,
@@ -1327,11 +1335,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.location = None
 
     def info(self):
-        """ File information about this path """
+        """File information about this path"""
         return self.details
 
     def url(self):
-        """ HTTP link to this file's data """
+        """HTTP link to this file's data"""
         return self.fs.url(self.path)
 
     def _upload_chunk(self, final=False):
@@ -1410,7 +1418,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self._upload_chunk(final=True)
 
     def _initiate_upload(self):
-        """ Create multi-upload """
+        """Create multi-upload"""
         self.location = sync(
             self.gcsfs.loop,
             initiate_upload,

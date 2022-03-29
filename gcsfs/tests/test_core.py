@@ -89,16 +89,16 @@ def test_large_upload(gcs):
 
 def test_multi_upload(gcs):
     fn = TEST_BUCKET + "/test"
-    d = b"01234567" * 2 ** 15
+    d = b"01234567" * 2**15
 
     # something to write on close
-    with gcs.open(fn, "wb", content_type="text/plain", block_size=2 ** 18) as f:
+    with gcs.open(fn, "wb", content_type="text/plain", block_size=2**18) as f:
         f.write(d)
         f.write(b"xx")
     assert gcs.cat(fn) == d + b"xx"
     assert gcs.info(fn)["contentType"] == "text/plain"
     # empty buffer on close
-    with gcs.open(fn, "wb", content_type="text/plain", block_size=2 ** 19) as f:
+    with gcs.open(fn, "wb", content_type="text/plain", block_size=2**19) as f:
         f.write(d)
         f.write(b"xx")
         f.write(d)
@@ -106,16 +106,16 @@ def test_multi_upload(gcs):
     assert gcs.info(fn)["contentType"] == "text/plain"
 
     fn = TEST_BUCKET + "/test"
-    d = b"01234567" * 2 ** 15
+    d = b"01234567" * 2**15
 
     # something to write on close
-    with gcs.open(fn, "wb", block_size=2 ** 18) as f:
+    with gcs.open(fn, "wb", block_size=2**18) as f:
         f.write(d)
         f.write(b"xx")
     assert gcs.cat(fn) == d + b"xx"
     assert gcs.info(fn)["contentType"] == "application/octet-stream"
     # empty buffer on close
-    with gcs.open(fn, "wb", block_size=2 ** 19) as f:
+    with gcs.open(fn, "wb", block_size=2**19) as f:
         f.write(d)
         f.write(b"xx")
         f.write(d)
@@ -587,7 +587,7 @@ def text_mode(gcs):
 
 
 def test_write_blocks(gcs):
-    with gcs.open(TEST_BUCKET + "/temp", "wb", block_size=2 ** 18) as f:
+    with gcs.open(TEST_BUCKET + "/temp", "wb", block_size=2**18) as f:
         f.write(b"a" * 100000)
         assert f.buffer.tell() == 100000
         assert not (f.offset)
@@ -600,11 +600,11 @@ def test_write_blocks(gcs):
 def test_write_blocks2(gcs):
     if not gcs.on_google:
         pytest.skip("emulator always accepts whole request")
-    with gcs.open(TEST_BUCKET + "/temp1", "wb", block_size=2 ** 18) as f:
-        f.write(b"a" * (2 ** 18 + 1))
+    with gcs.open(TEST_BUCKET + "/temp1", "wb", block_size=2**18) as f:
+        f.write(b"a" * (2**18 + 1))
         # leftover bytes: GCS accepts blocks in multiples of 2**18 bytes
         assert f.buffer.tell() == 1
-    assert gcs.info(TEST_BUCKET + "/temp1")["size"] == 2 ** 18 + 1
+    assert gcs.info(TEST_BUCKET + "/temp1")["size"] == 2**18 + 1
 
 
 def test_readline(gcs):
@@ -650,16 +650,16 @@ def test_readline_empty(gcs):
 
 
 def test_readline_blocksize(gcs):
-    data = b"ab\n" + b"a" * (2 ** 18) + b"\nab"
+    data = b"ab\n" + b"a" * (2**18) + b"\nab"
     with gcs.open(a, "wb") as f:
         f.write(data)
-    with gcs.open(a, "rb", block_size=2 ** 18) as f:
+    with gcs.open(a, "rb", block_size=2**18) as f:
         result = f.readline()
         expected = b"ab\n"
         assert result == expected
 
         result = f.readline()
-        expected = b"a" * (2 ** 18) + b"\n"
+        expected = b"a" * (2**18) + b"\n"
         assert result == expected
 
         result = f.readline()
