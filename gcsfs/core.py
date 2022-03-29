@@ -671,8 +671,16 @@ class GCSFileSystem(AsyncFileSystem):
         """File information about this path."""
         path = self._strip_protocol(path)
         if "/" not in path:
-            out = await self._call("GET", f"b/{path}", json_out=True)
-            out.update(size=0, type="directory")
+            try:
+                out = await self._call("GET", f"b/{path}", json_out=True)
+                out.update(size=0, type="directory")
+            except OSError:
+                # GET bucket failed, try ls; will have no metadata
+                exists = await self._ls(path)
+                if exists:
+                    out = {"name": path, "size": 0, "type": "directory"}
+                else:
+                    raise FileNotFoundError(path)
             return out
         # Check directory cache for parent dir
         parent_path = self._parent(path)
