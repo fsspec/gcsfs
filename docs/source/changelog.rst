@@ -1,6 +1,19 @@
 Changelog
 =========
 
+2022.3.0
+--------
+
+(note that this release happened in 2022.4, but we label as 2022.3 to match
+fsspec)
+
+* bucket exists workaround (#464)
+* dirmarkers (#459)
+* check connection (#457)
+* browser connection now uses local server (#456)
+* bucket location (#455)
+* ensure auth is closed (#452)
+
 2022.02.0
 ---------
 
