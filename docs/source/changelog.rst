@@ -1,6 +1,16 @@
 Changelog
 =========
 
+2022.03.0
+---------
+
+* bucket exists workaround (#464)
+* dirmarkers (#459)
+* check connection (#457)
+* browser connection now uses local server (#456)
+* bucket location (#455)
+* ensure auth is closed (#452)
+
 2022.02.0
 ---------
 
