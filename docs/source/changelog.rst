@@ -1,8 +1,11 @@
 Changelog
 =========
 
-2022.03.0
----------
+2022.3.0
+--------
+
+(note that this release happened in 2022.4, but we label as 2022.3 to match
+fsspec)
 
 * bucket exists workaround (#464)
 * dirmarkers (#459)
