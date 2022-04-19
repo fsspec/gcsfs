@@ -609,6 +609,7 @@ class GCSFileSystem(AsyncFileSystem):
         acl="projectPrivate",
         default_acl="bucketOwnerFullControl",
         location=None,
+        **kwargs,
     ):
         """
         New bucket
@@ -758,7 +759,7 @@ class GCSFileSystem(AsyncFileSystem):
         object = quote_plus(object)
         return u.format(self._location, bucket, object)
 
-    async def _cat_file(self, path, start=None, end=None):
+    async def _cat_file(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
         u2 = self.url(path)
         if start or end:
