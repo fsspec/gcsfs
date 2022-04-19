@@ -605,18 +605,23 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _mkdir(
         self,
-        bucket,
+        path,
         acl="projectPrivate",
         default_acl="bucketOwnerFullControl",
         location=None,
+        create_parents=True,
         **kwargs,
     ):
         """
         New bucket
 
+        If path is more than just a bucket, will create bucket if create_parents=True;
+        otherwise is a noop. If create_parents is False and bucket does not exist,
+        will produce FileNotFFoundError.
+
         Parameters
         ----------
-        bucket: str
+        path: str
             bucket name. If contains '/' (i.e., looks like subdir), will
             have no effect because GCS doesn't have real directories.
         acl: string, one of bACLs
@@ -628,11 +633,18 @@ class GCSFileSystem(AsyncFileSystem):
             If not provided, defaults to `self.default_location`.
             You can find a list of all available locations here:
             https://cloud.google.com/storage/docs/locations#available-locations
+        create_parents: bool
+            If True, creates the bucket in question, if it doesn't already exist
         """
+        bucket, object = self.split_path(path)
         if bucket in ["", "/"]:
             raise ValueError("Cannot create root bucket")
-        if "/" in bucket:
+        if "/" in path and create_parents and await self._exists(bucket):
+            # nothing to do
             return
+        if "/" in path and not create_parents and not await self._exists(bucket):
+            raise FileNotFoundError(bucket)
+
         json_data = {"name": bucket}
         location = location or self.default_location
         if location:
