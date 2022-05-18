@@ -921,7 +921,7 @@ def test_pipe_small_cache_validity(gcs):
     folder = f"{TEST_BUCKET}/{str(uuid4())}"
 
     gcs.pipe(f"gs://{folder}/a/file.txt", b"")
-    
+
     assert gcs.ls(f"gs://{folder}") == [f"{folder}/a"]
 
     gcs.pipe(f"gs://{folder}/b/file.txt", b"")
@@ -935,7 +935,7 @@ def test_put_small_cache_validity(gcs):
     folder = f"{TEST_BUCKET}/{str(uuid4())}"
 
     gcs.pipe(f"gs://{folder}/a/file.txt", b"")
-    
+
     assert gcs.ls(f"gs://{folder}") == [f"{folder}/a"]
 
     with tmpfile() as fn:
