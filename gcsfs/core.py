@@ -1000,7 +1000,7 @@ class GCSFileSystem(AsyncFileSystem):
         size = len(data)
         out = None
         if size < 5 * 2**20:
-            return await simple_upload(
+            location = await simple_upload(
                 self, bucket, key, data, metadata, consistency, content_type
             )
         else:
@@ -1011,10 +1011,12 @@ class GCSFileSystem(AsyncFileSystem):
                     self, location, bit, offset, size, content_type
                 )
 
-        checker = get_consistency_checker(consistency)
-        checker.update(data)
-        checker.validate_json_response(out)
+            checker = get_consistency_checker(consistency)
+            checker.update(data)
+            checker.validate_json_response(out)
+
         self.invalidate_cache(self._parent(path))
+        return location
 
     async def _put_file(
         self,
@@ -1050,7 +1052,7 @@ class GCSFileSystem(AsyncFileSystem):
                     content_type=content_type,
                 )
                 callback.absolute_update(size)
-                return None
+
             else:
                 location = await initiate_upload(
                     self, bucket, key, content_type, metadata
@@ -1067,7 +1069,8 @@ class GCSFileSystem(AsyncFileSystem):
                     callback.absolute_update(offset)
                     checker.update(bit)
 
-            checker.validate_json_response(out)
+                checker.validate_json_response(out)
+
             self.invalidate_cache(self._parent(rpath))
 
     async def _isdir(self, path):

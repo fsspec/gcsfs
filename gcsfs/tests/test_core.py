@@ -917,6 +917,38 @@ def test_placeholder_dir_cache_validity(gcs):
     gcs.info(f"gs://{TEST_BUCKET}/b")
 
 
+def test_pipe_small_cache_validity(gcs):
+    folder = f"{TEST_BUCKET}/{str(uuid4())}"
+
+    gcs.pipe(f"gs://{folder}/a/file.txt", b"")
+
+    assert gcs.ls(f"gs://{folder}") == [f"{folder}/a"]
+
+    gcs.pipe(f"gs://{folder}/b/file.txt", b"")
+
+    ls_res = gcs.ls(f"gs://{folder}")
+    assert len(ls_res) == 2
+    assert f"{folder}/b" in ls_res
+
+
+def test_put_small_cache_validity(gcs):
+    folder = f"{TEST_BUCKET}/{str(uuid4())}"
+
+    gcs.pipe(f"gs://{folder}/a/file.txt", b"")
+
+    assert gcs.ls(f"gs://{folder}") == [f"{folder}/a"]
+
+    with tmpfile() as fn:
+        with open(fn, "w") as f:
+            f.write("")
+
+        gcs.put(fn, f"gs://{folder}/b/file.txt", b"")
+
+    ls_res = gcs.ls(f"gs://{folder}")
+    assert len(ls_res) == 2
+    assert f"{folder}/b" in ls_res
+
+
 def test_pseudo_dir_find(gcs):
     gcs.rm(f"{TEST_BUCKET}/*", recursive=True)
     gcs.touch(f"{TEST_BUCKET}/a/b/file")
