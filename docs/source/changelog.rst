@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2022.5.0
+--------
+
+* invalidate listings cache for simple put/pipe (#474)
+* conform _mkdir and _cat_file to upstream (#471)
+
 2022.3.0
 --------
 
