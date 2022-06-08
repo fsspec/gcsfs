@@ -1071,11 +1071,11 @@ def test_dir_marker(gcs):
 
 def test_mkdir_with_path(gcs):
     with pytest.raises(FileNotFoundError):
-        gcs.mkdir("new/path", create_parents=False)
-    assert not gcs.exists("new")
-    gcs.mkdir("new/path", create_parents=True)
-    assert gcs.exists("new")
+        gcs.mkdir("gcsfs-test-dir/path", create_parents=False)
+    assert not gcs.exists("gcsfs-test-dir")
+    gcs.mkdir("gcsfs-test-dir/path", create_parents=True)
+    assert gcs.exists("gcsfs-test-dir")
 
     # these lines do nothing, but should not fail
-    gcs.mkdir("new/path", create_parents=False)
-    gcs.mkdir("new/path", create_parents=True)
+    gcs.mkdir("gcsfs-test-dir/path", create_parents=False)
+    gcs.mkdir("gcsfs-test-dir/path", create_parents=True)
