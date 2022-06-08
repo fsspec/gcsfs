@@ -835,7 +835,7 @@ class GCSFileSystem(AsyncFileSystem):
 
         bucket, key = self.split_path(path)
         o_json = await self._call(
-            "PUT",
+            "PATCH",
             "b/{}/o/{}",
             bucket,
             key,
