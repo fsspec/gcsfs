@@ -843,7 +843,6 @@ class GCSFileSystem(AsyncFileSystem):
             json=i_json,
             json_out=True,
         )
-        (await self._info(path))["metadata"] = o_json.get("metadata", {})
         return o_json.get("metadata", {})
 
     setxattrs = sync_wrapper(_setxattrs)
