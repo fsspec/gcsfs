@@ -94,6 +94,10 @@ class GoogleCredentials:
         self.credentials = gauth.compute_engine.Credentials()
 
     def _connect_cache(self):
+
+        if len(self.tokens) == 0:
+            raise ValueError("No cached tokens")
+
         project, access = self.project, self.access
         if (project, access) in self.tokens:
             credentials = self.tokens[(project, access)]
@@ -220,7 +224,7 @@ class GoogleCredentials:
                     self.connect(method=meth)
                     logger.debug("Connected with method %s", meth)
                     break
-                except google.auth.exceptions.GoogleAuthError as e:
+                except (google.auth.exceptions.GoogleAuthError, ValueError) as e:
                     # GoogleAuthError is the base class for all authentication
                     # errors
                     logger.debug(
