@@ -93,6 +93,9 @@ class GoogleCredentials:
     def _connect_cloud(self):
         self.credentials = gauth.compute_engine.Credentials()
 
+        if not self.credentials.valid:
+            raise ValueError("Invalid gcloud credentials")
+
     def _connect_cache(self):
 
         if len(self.tokens) == 0:
@@ -230,6 +233,9 @@ class GoogleCredentials:
                     logger.debug(
                         'Connection with method "%s" failed' % meth, exc_info=e
                     )
+                    # Reset credentials if they were set but the authentication failed
+                    # (reverts to 'anon' behavior)
+                    self.credentials = None
             else:
                 # Since the 'anon' connection method should always succeed,
                 # getting here means something has gone terribly wrong.
