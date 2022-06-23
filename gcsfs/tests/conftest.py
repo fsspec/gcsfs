@@ -10,6 +10,7 @@ import requests
 from gcsfs import GCSFileSystem
 from gcsfs.tests.settings import TEST_BUCKET
 
+IS_FAKE_GCSFS = False
 files = {
     "test/accounts.1.json": (
         b'{"amount": 100, "name": "Alice"}\n'
@@ -60,6 +61,8 @@ def docker_gcs():
         # assume using real API or otherwise have a server already set up
         yield os.environ["STORAGE_EMULATOR_HOST"]
         return
+    global IS_FAKE_GCSFS
+    IS_FAKE_GCSFS = True
     container = "gcsfs_test"
     cmd = (
         "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "

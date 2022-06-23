@@ -15,6 +15,7 @@ from fsspec.asyn import sync
 
 from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
 from gcsfs.tests.conftest import (
+    IS_FAKE_GCSFS,
     files,
     csv_files,
     text_files,
@@ -790,7 +791,10 @@ def test_array(gcs):
 
 
 # https://github.com/fsspec/gcsfs/pull/479
-@pytest.mark.xfail("fake-gcs-server:latest only supports PUT for metadata, not PATCH")
+@pytest.mark.xfail(
+    IS_FAKE_GCSFS,
+    reason="fake-gcs-server:latest only supports PUT for metadata, not PATCH",
+)
 def test_attrs(gcs):
     gcs.touch(a)
     assert "metadata" not in gcs.info(a)
