@@ -642,7 +642,9 @@ class GCSFileSystem(AsyncFileSystem):
         if "/" in path and create_parents and await self._exists(bucket):
             # nothing to do
             return
-        if "/" in path and not create_parents and not await self._exists(bucket):
+        if "/" in path and not create_parents:
+            if await self._exists(bucket):
+                return
             raise FileNotFoundError(bucket)
 
         json_data = {"name": bucket}
