@@ -642,7 +642,9 @@ class GCSFileSystem(AsyncFileSystem):
         if "/" in path and create_parents and await self._exists(bucket):
             # nothing to do
             return
-        if "/" in path and not create_parents and not await self._exists(bucket):
+        if "/" in path and not create_parents:
+            if await self._exists(bucket):
+                return
             raise FileNotFoundError(bucket)
 
         json_data = {"name": bucket}
@@ -798,6 +800,9 @@ class GCSFileSystem(AsyncFileSystem):
     ):
         """Set/delete/add writable metadata attributes
 
+        Note: uses PATCH method (update), leaving unedited keys alone.
+        fake-gcs-server:latest does not seem to support this.
+
         Parameters
         ---------
         content_type: str
@@ -843,7 +848,6 @@ class GCSFileSystem(AsyncFileSystem):
             json=i_json,
             json_out=True,
         )
-        (await self._info(path))["metadata"] = o_json.get("metadata", {})
         return o_json.get("metadata", {})
 
     setxattrs = sync_wrapper(_setxattrs)
