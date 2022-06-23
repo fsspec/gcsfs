@@ -798,6 +798,9 @@ class GCSFileSystem(AsyncFileSystem):
     ):
         """Set/delete/add writable metadata attributes
 
+        Note: uses PATCH method (update), leaving unedited keys alone.
+        fake-gcs-server:latest does not seem to support this.
+
         Parameters
         ---------
         content_type: str

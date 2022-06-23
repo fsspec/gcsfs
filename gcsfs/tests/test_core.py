@@ -789,6 +789,8 @@ def test_array(gcs):
         assert out == b"A" * 1000
 
 
+# https://github.com/fsspec/gcsfs/pull/479
+@pytest.mark.xfail("fake-gcs-server:latest only supports PUT for metadata, not PATCH")
 def test_attrs(gcs):
     gcs.touch(a)
     assert "metadata" not in gcs.info(a)
@@ -1070,12 +1072,15 @@ def test_dir_marker(gcs):
 
 
 def test_mkdir_with_path(gcs):
+
     with pytest.raises(FileNotFoundError):
-        gcs.mkdir("gcsfs-test-dir/path", create_parents=False)
-    assert not gcs.exists("gcsfs-test-dir")
-    gcs.mkdir("gcsfs-test-dir/path", create_parents=True)
-    assert gcs.exists("gcsfs-test-dir")
+        gcs.mkdir(f"{TEST_BUCKET + 'new'}/path", create_parents=False)
+    assert not gcs.exists(f"{TEST_BUCKET + 'new'}")
+    gcs.mkdir(f"{TEST_BUCKET + 'new'}/path", create_parents=True)
+    assert gcs.exists(f"{TEST_BUCKET + 'new'}")
 
     # these lines do nothing, but should not fail
-    gcs.mkdir("gcsfs-test-dir/path", create_parents=False)
-    gcs.mkdir("gcsfs-test-dir/path", create_parents=True)
+    gcs.mkdir(f"{TEST_BUCKET + 'new'}/path", create_parents=False)
+    gcs.mkdir(f"{TEST_BUCKET + 'new'}/path", create_parents=True)
+
+    gcs.rm(f"{TEST_BUCKET + 'new'}", recursive=True)
