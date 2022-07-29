@@ -1,6 +1,11 @@
 Changelog
 =========
 
+2022.7.1
+--------
+
+* Try cloud auth by default (#479)
+
 2022.5.0
 --------
 
