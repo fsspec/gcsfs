@@ -15,11 +15,12 @@ from fsspec.asyn import sync
 
 from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
 from gcsfs.tests.conftest import (
-    files,
-    csv_files,
-    text_files,
     a,
+    allfiles,
     b,
+    csv_files,
+    files,
+    text_files,
 )
 from gcsfs.tests.utils import tempdir, tmpfile
 from gcsfs.core import GCSFileSystem, quote_plus
@@ -982,26 +983,42 @@ def test_zero_cache_timeout(gcs):
         gcs.dircache[f"{TEST_BUCKET}/a"]
 
 
-def test_find_with_prefix_partial_cache(gcs):
+@pytest.mark.parametrize("with_cache", (False, True))
+def test_find_with_prefix_partial_cache(gcs, with_cache):
     base_dir = f"{TEST_BUCKET}/test_find_with_prefix"
     gcs.touch(base_dir + "/test_1")
     gcs.touch(base_dir + "/test_2")
 
-    for with_cache in (True, False):
-        # Test once with cached, and once with no cache
-        gcs.invalidate_cache()
-        if with_cache:
-            gcs.ls(base_dir)
-        precache = dict(gcs.dircache)
-        assert gcs.find(base_dir, prefix="non_existent_") == []
-        assert gcs.find(base_dir, prefix="test_") == [
-            base_dir + "/test_1",
-            base_dir + "/test_2",
-        ]
-        assert dict(gcs.dircache) == precache  # find qwith prefix shouldn't touch cache
-        assert gcs.find(base_dir + "/test_1") == [base_dir + "/test_1"]
-        assert gcs.find(base_dir + "/non_existent") == []
-        assert gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []
+    gcs.invalidate_cache()
+    if with_cache:
+        gcs.ls(base_dir)
+    precache = dict(gcs.dircache)
+    assert gcs.find(base_dir, prefix="non_existent_") == []
+    assert gcs.find(base_dir, prefix="test_") == [
+        base_dir + "/test_1",
+        base_dir + "/test_2",
+    ]
+    assert dict(gcs.dircache) == precache  # find qwith prefix shouldn't touch cache
+    assert gcs.find(base_dir + "/test_1") == [base_dir + "/test_1"]
+    assert gcs.find(base_dir + "/non_existent") == []
+    assert gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []
+
+
+def test_find_dircache(gcs):
+    """Running `ls` after find should not corrupt the dir cache"""
+    assert set(gcs.find(TEST_BUCKET)) == {f"{TEST_BUCKET}/{path}" for path in allfiles}
+    assert set(gcs.ls(TEST_BUCKET)) == {
+        f"{TEST_BUCKET}/test",
+        f"{TEST_BUCKET}/nested",
+        f"{TEST_BUCKET}/2014-01-01.csv",
+        f"{TEST_BUCKET}/2014-01-02.csv",
+        f"{TEST_BUCKET}/2014-01-03.csv",
+    }
+    assert set(gcs.ls(f"{TEST_BUCKET}/nested")) == {
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+        f"{TEST_BUCKET}/nested/nested2",
+    }
 
 
 def test_percent_file_name(gcs):

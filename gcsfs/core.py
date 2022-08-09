@@ -1086,54 +1086,55 @@ class GCSFileSystem(AsyncFileSystem):
     async def _find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
         path = self._strip_protocol(path)
         bucket, key = self.split_path(path)
-        out, _ = await self._do_list_objects(
-            path,
-            delimiter=None,
-            prefix=prefix,
-        )
-        if not prefix and not out and key:
-            try:
-                out = [
-                    await self._get_object(
-                        path,
-                    )
-                ]
-            except FileNotFoundError:
-                out = []
-        dirs = []
-        sdirs = set()
+
+        if prefix:
+            _path = "" if not key else key.rstrip("/") + "/"
+            _prefix = f"{_path}{prefix}"
+        else:
+            _prefix = key
+
+        objects, _ = await self._do_list_objects(bucket, delimiter="", prefix=_prefix)
+
+        dirs = {}
         cache_entries = {}
-        for o in out:
-            par = o["name"]
-            while par:
-                par = self._parent(par)
-                if par not in sdirs:
-                    if len(par) < len(path):
-                        break
-                    sdirs.add(par)
-                    dirs.append(
-                        {
-                            "Key": self.split_path(par)[1],
-                            "Size": 0,
-                            "name": par,
-                            "StorageClass": "DIRECTORY",
-                            "type": "directory",
-                            "size": 0,
-                        }
-                    )
-                # Don't cache "folder-like" objects (ex: "Create Folder" in GCS console) to prevent
-                # masking subfiles in subsequent requests.
-                if not o["name"].endswith("/"):
-                    cache_entries.setdefault(par, []).append(o)
+
+        for obj in objects:
+            parent = self._parent(obj["name"])
+            previous = obj
+
+            while parent:
+                dir_key = self.split_path(parent)[1]
+                if not dir_key:
+                    break
+
+                dirs[parent] = {
+                    "Key": dir_key,
+                    "Size": 0,
+                    "name": parent,
+                    "StorageClass": "DIRECTORY",
+                    "type": "directory",
+                    "size": 0,
+                }
+
+                if len(parent) < len(path):
+                    # don't go above the requested level
+                    break
+
+                cache_entries.setdefault(parent, []).append(previous)
+
+                previous = dirs[parent]
+                parent = self._parent(parent)
+
         if not prefix:
             self.dircache.update(cache_entries)
 
         if withdirs:
-            out = sorted(out + dirs, key=lambda x: x["name"])
+            objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
 
         if detail:
-            return {o["name"]: o for o in out}
-        return [o["name"] for o in out]
+            return {o["name"]: o for o in objects}
+
+        return [o["name"] for o in objects]
 
     @retry_request(retries=retries)
     async def _get_file_request(
