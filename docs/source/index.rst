@@ -163,6 +163,22 @@ using async-style programming, you do not need to know about how this
 works, but you might find the implementation interesting.
 
 
+Proxy
+-----
+
+``gcsfs`` uses ``aiohttp`` for calls to the storage api, which by default
+ignores ``HTTP_PROXY/HTTPS_PROXY`` environment variables. To read
+proxy settings from the environment provide ``session_kwargs`` as follows:
+
+.. code-block:: python
+
+   fs = GCSFileSystem(project='my-google-project', session_kwargs={'trust_env': True})
+
+For further reference check `aiohttp proxy support`_.
+
+.. _aiohttp proxy support: https://docs.aiohttp.org/en/stable/client_advanced.html?highlight=proxy#proxy-support
+
+
 Contents
 ========
 
