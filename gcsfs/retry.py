@@ -48,6 +48,7 @@ RETRIABLE_EXCEPTIONS = (
     google.auth.exceptions.RefreshError,
     aiohttp.client_exceptions.ClientError,
     ChecksumError,
+    OSError,
 )
 
 
@@ -119,6 +120,7 @@ async def retry_request(func, retries=6, *args, **kwargs):
             google.auth.exceptions.GoogleAuthError,
             ChecksumError,
             aiohttp.client_exceptions.ClientError,
+            OSError,
         ) as e:
             if (
                 isinstance(e, HttpError)
