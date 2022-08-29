@@ -37,6 +37,9 @@ def test_retriable_exception():
     e = ProxyError()
     assert is_retriable(e)
 
+    e = OSError('An internal error occurred.')
+    assert is_retriable(e)
+
 
 def test_validate_response():
     validate_response(200, None, "/path")
