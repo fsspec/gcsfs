@@ -6,7 +6,6 @@ import asyncio
 import fsspec
 
 import io
-import itertools
 import json
 import logging
 import os
