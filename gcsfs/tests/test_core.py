@@ -204,6 +204,17 @@ def test_rm_recursive(gcs):
     assert not gcs.exists(TEST_BUCKET + files[-1])
 
 
+@pytest.mark.slow
+def test_rm_batch_large(gcs):
+    files = [f'{TEST_BUCKET}/t{i}' for i in range(24 * 365 * 40)]
+    for fn in files:
+        gcs.touch(fn)
+        assert fn in gcs.find(TEST_BUCKET)
+    gcs.rm(files)
+    for fn in files:
+        assert fn not in gcs.find(TEST_BUCKET)
+
+
 def test_file_access(gcs):
     fn = TEST_BUCKET + "/nested/file1"
     data = b"hello\n"
