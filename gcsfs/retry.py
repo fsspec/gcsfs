@@ -63,8 +63,8 @@ def is_retriable(exception):
     if isinstance(exception, HttpError):
         return exception.code in errs
 
-    if isinstance(exception, OSError):
-        return 'internal error' in str(exception)
+    if 'internal error' in str(exception):
+        return True
 
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
 
@@ -122,7 +122,6 @@ async def retry_request(func, retries=6, *args, **kwargs):
             google.auth.exceptions.GoogleAuthError,
             ChecksumError,
             aiohttp.client_exceptions.ClientError,
-            OSError,
         ) as e:
             if (
                 isinstance(e, HttpError)
