@@ -205,6 +205,7 @@ def test_rm_recursive(gcs):
 
 
 @pytest.mark.slow
+@pytest.mark.skip(reason="integration tests: it is really slow.")
 def test_rm_batch_large(gcs):
     files = [f'{TEST_BUCKET}/t{i}' for i in range(24 * 365 * 40)]
     for fn in files:
