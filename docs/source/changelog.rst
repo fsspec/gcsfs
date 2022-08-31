@@ -1,6 +1,11 @@
 Changelog
 =========
 
+2022.8.1
+--------
+
+* don't install prerelease aiohttp (#490)
+
 2022.7.1
 --------
 
