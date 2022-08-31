@@ -120,7 +120,7 @@ def _location():
 
 def _chunks(lst, n):
     """
-    Yield evenly sized-chunks.
+    Yield evenly-sized chunks from a list.
 
     Implementation based on https://stackoverflow.com/a/312464.
     """
