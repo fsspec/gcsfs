@@ -48,7 +48,6 @@ RETRIABLE_EXCEPTIONS = (
     google.auth.exceptions.RefreshError,
     aiohttp.client_exceptions.ClientError,
     ChecksumError,
-    OSError,
 )
 
 
@@ -63,6 +62,9 @@ def is_retriable(exception):
     errs += [str(e) for e in errs]
     if isinstance(exception, HttpError):
         return exception.code in errs
+
+    if isinstance(exception, OSError):
+        return 'internal error' in str(exception)
 
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
 
