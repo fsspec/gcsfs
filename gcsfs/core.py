@@ -125,7 +125,7 @@ def _chunks(lst, n):
     Implementation based on https://stackoverflow.com/a/312464.
     """
     for i in range(0, len(lst), n):
-        yield lst[i:i+n]
+        yield lst[i : i + n]
 
 
 class GCSFileSystem(AsyncFileSystem):
