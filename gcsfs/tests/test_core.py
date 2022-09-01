@@ -204,6 +204,22 @@ def test_rm_recursive(gcs):
     assert not gcs.exists(TEST_BUCKET + files[-1])
 
 
+def test_rm_chunked_batch(gcs):
+    files = [f"{TEST_BUCKET}/t{i}" for i in range(303)]
+    for fn in files:
+        gcs.touch(fn)
+
+    files_created = gcs.find(TEST_BUCKET)
+    for fn in files:
+        assert fn in files_created
+
+    gcs.rm(files)
+
+    files_removed = gcs.find(TEST_BUCKET)
+    for fn in files:
+        assert fn not in files_removed
+
+
 def test_file_access(gcs):
     fn = TEST_BUCKET + "/nested/file1"
     data = b"hello\n"

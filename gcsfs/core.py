@@ -118,6 +118,16 @@ def _location():
     )
 
 
+def _chunks(lst, n):
+    """
+    Yield evenly-sized chunks from a list.
+
+    Implementation based on https://stackoverflow.com/a/312464.
+    """
+    for i in range(0, len(lst), n):
+        yield lst[i : i + n]
+
+
 class GCSFileSystem(AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -919,37 +929,44 @@ class GCSFileSystem(AsyncFileSystem):
             "Content-Type: application/json\n"
             "accept: application/json\ncontent-length: 0\n"
         )
-        body = "".join(
-            [
-                template.format(
-                    i=i + 1,
-                    bucket=p.split("/", 1)[0],
-                    key=quote_plus(p.split("/", 1)[1]),
-                )
-                for i, p in enumerate(paths)
-            ]
-        )
-        headers, content = await self._call(
-            "POST",
-            f"{self._location}/batch/storage/v1",
-            headers={
-                "Content-Type": 'multipart/mixed; boundary="=========='
-                '=====7330845974216740156=="'
-            },
-            data=body + "\n--===============7330845974216740156==--",
-        )
+        errors = []
+        # Splitting requests into 100 chunk batches
+        # See https://cloud.google.com/storage/docs/batch
+        for chunk in _chunks(paths, 100):
+            body = "".join(
+                [
+                    template.format(
+                        i=i + 1,
+                        bucket=p.split("/", 1)[0],
+                        key=quote_plus(p.split("/", 1)[1]),
+                    )
+                    for i, p in enumerate(chunk)
+                ]
+            )
+            headers, content = await self._call(
+                "POST",
+                f"{self._location}/batch/storage/v1",
+                headers={
+                    "Content-Type": 'multipart/mixed; boundary="=========='
+                    '=====7330845974216740156=="'
+                },
+                data=body + "\n--===============7330845974216740156==--",
+            )
 
-        boundary = headers["Content-Type"].split("=", 1)[1]
-        parents = [self._parent(p) for p in paths]
-        [self.invalidate_cache(parent) for parent in parents + list(paths)]
-        txt = content.decode()
-        if any(
-            not ("200 OK" in c or "204 No Content" in c)
-            for c in txt.split(boundary)[1:-1]
-        ):
-            pattern = '"message": "([^"]+)"'
-            out = set(re.findall(pattern, txt))
-            raise OSError(out)
+            boundary = headers["Content-Type"].split("=", 1)[1]
+            parents = [self._parent(p) for p in paths]
+            [self.invalidate_cache(parent) for parent in parents + list(paths)]
+            txt = content.decode()
+            if any(
+                not ("200 OK" in c or "204 No Content" in c)
+                for c in txt.split(boundary)[1:-1]
+            ):
+                pattern = '"message": "([^"]+)"'
+                out = set(re.findall(pattern, txt))
+                errors.extend(out)
+
+        if errors:
+            raise OSError(errors)
 
     @property
     def on_google(self):
