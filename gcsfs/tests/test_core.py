@@ -1122,10 +1122,8 @@ def test_mkdir_with_path(gcs):
 
 def test_deep_find_wthdirs(gcs):
     gcs.touch(f"{TEST_BUCKET}/deep/nested/dir")
-    assert gcs.find(f"{TEST_BUCKET}/deep/nested") == [
-        f"{TEST_BUCKET}/deep/nested/dir"
-    ]
+    assert gcs.find(f"{TEST_BUCKET}/deep/nested") == [f"{TEST_BUCKET}/deep/nested/dir"]
     assert gcs.find(f"{TEST_BUCKET}/deep/nested", withdirs=True) == [
         f"{TEST_BUCKET}/deep/nested",
-        f"{TEST_BUCKET}/deep/nested/dir"
+        f"{TEST_BUCKET}/deep/nested/dir",
     ]
