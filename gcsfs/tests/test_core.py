@@ -1118,3 +1118,12 @@ def test_mkdir_with_path(gcs):
     gcs.mkdir(f"{TEST_BUCKET + 'new'}/path", create_parents=True)
 
     gcs.rm(f"{TEST_BUCKET + 'new'}", recursive=True)
+
+
+def test_deep_find_wthdirs(gcs):
+    gcs.touch(f"{TEST_BUCKET}/deep/nested/dir")
+    assert gcs.find(f"{TEST_BUCKET}/deep/nested") == [f"{TEST_BUCKET}/deep/nested/dir"]
+    assert gcs.find(f"{TEST_BUCKET}/deep/nested", withdirs=True) == [
+        f"{TEST_BUCKET}/deep/nested",
+        f"{TEST_BUCKET}/deep/nested/dir",
+    ]
