@@ -398,7 +398,6 @@ class GCSFileSystem(AsyncFileSystem):
         self, method, path, *args, json_out=False, info_out=False, **kwargs
     ):
         logger.debug(f"{method.upper()}: {path}, {args}, {kwargs.get('headers')}")
-
         status, headers, info, contents = await self._request(
             method, path, *args, **kwargs
         )
@@ -1121,7 +1120,7 @@ class GCSFileSystem(AsyncFileSystem):
 
             while parent:
                 dir_key = self.split_path(parent)[1]
-                if not dir_key:
+                if not dir_key or len(dir_key) < len(path):
                     break
 
                 dirs[parent] = {
