@@ -1120,7 +1120,7 @@ class GCSFileSystem(AsyncFileSystem):
 
             while parent:
                 dir_key = self.split_path(parent)[1]
-                if not dir_key or len(dir_key) < len(path):
+                if not dir_key or len(parent) < len(path):
                     break
 
                 dirs[parent] = {
@@ -1131,10 +1131,6 @@ class GCSFileSystem(AsyncFileSystem):
                     "type": "directory",
                     "size": 0,
                 }
-
-                if len(parent) < len(path):
-                    # don't go above the requested level
-                    break
 
                 cache_entries.setdefault(parent, []).append(previous)
 
