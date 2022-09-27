@@ -92,9 +92,12 @@ class GoogleCredentials:
 
     def _connect_cloud(self):
         self.credentials = gauth.compute_engine.Credentials()
-
-        if not self.credentials.valid:
-            raise ValueError("Invalid gcloud credentials")
+        try:
+            with requests.Session() as session:
+                req = Request(session)
+                self.credentials.refresh(req)
+        except gauth.exceptions.RefreshError as error:
+            raise ValueError("Invalid gcloud credentials") from error
 
     def _connect_cache(self):
 
