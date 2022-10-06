@@ -22,6 +22,7 @@ from .retry import retry_request, validate_response
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from . import __version__ as version
+from urllib.parse import quote as quote_urllib
 
 logger = logging.getLogger("gcsfs")
 
@@ -70,12 +71,10 @@ SUPPORTED_FIXED_KEY_METADATA = {
 }
 
 
-def quote_plus(s):
+def quote(s):
     """
-    Convert some URL elements to be HTTP-safe.
-
-    Not the same as in urllib, because, for instance, parentheses and commas
-    are passed through.
+    Quote characters to be safe for URL paths.
+    Also quotes '/'.
 
     Parameters
     ----------
@@ -85,7 +84,8 @@ def quote_plus(s):
     -------
     corrected URL
     """
-    return s.translate(QUOTE_TABLE)
+    # Encode everything, including slashes
+    return quote_urllib(s, safe='')
 
 
 def norm_path(path):
