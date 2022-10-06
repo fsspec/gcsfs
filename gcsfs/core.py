@@ -85,7 +85,7 @@ def quote(s):
     corrected URL
     """
     # Encode everything, including slashes
-    return quote_urllib(s, safe='')
+    return quote_urllib(s, safe="")
 
 
 def norm_path(path):
