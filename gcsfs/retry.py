@@ -77,9 +77,9 @@ def validate_response(status, content, path, args=None):
     """
     if status >= 400:
         if args:
-            from .core import quote_plus
+            from .core import quote
 
-            path = path.format(*[quote_plus(p) for p in args])
+            path = path.format(*[quote(p) for p in args])
         if status == 404:
             raise FileNotFoundError(path)
 

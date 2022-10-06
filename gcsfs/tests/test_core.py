@@ -23,7 +23,7 @@ from gcsfs.tests.conftest import (
     text_files,
 )
 from gcsfs.tests.utils import tempdir, tmpfile
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
 import gcsfs.checkers
 from gcsfs import __version__ as version
@@ -306,7 +306,7 @@ def test_url(gcs):
     fn = TEST_BUCKET + "/nested/file1"
     url = gcs.url(fn)
     assert "http" in url
-    assert quote_plus("nested/file1") in url
+    assert quote("nested/file1") in url
     with gcs.open(fn) as f:
         assert "http" in f.url()
 
