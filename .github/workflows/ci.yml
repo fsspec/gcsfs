@@ -35,6 +35,7 @@ jobs:
         if: matrix.python-version == '3.7'
         shell: bash -l {0}
         run: |
+          pip uninstall importlib-metadata -y
           pip install -I 'importlib-metadata<4.3'
 
       - name: Install
