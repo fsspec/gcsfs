@@ -31,6 +31,12 @@ jobs:
           conda list
           conda --version
 
+      - name: Install importlib-metadata for Python 3.7
+        if: matrix.python-version == '3.7'
+        shell: bash -l {0}
+        run: |
+          pip install -I 'importlib-metadata<5.0.0'
+
       - name: Install
         shell: bash -l {0}
         run: pip install .[crc]
