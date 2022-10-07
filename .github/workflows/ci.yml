@@ -35,7 +35,7 @@ jobs:
         if: matrix.python-version == '3.7'
         shell: bash -l {0}
         run: |
-          pip install -I 'importlib-metadata<5.0.0'
+          pip install -I 'importlib-metadata<4.3'
 
       - name: Install
         shell: bash -l {0}
@@ -51,4 +51,4 @@ jobs:
         shell: bash -l {0}
         run: |
           pip install pre-commit
-          pre-commit run --all-file
+          pre-commit run --all-files
