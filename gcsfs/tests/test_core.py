@@ -23,7 +23,7 @@ from gcsfs.tests.conftest import (
     text_files,
 )
 from gcsfs.tests.utils import tempdir, tmpfile
-from gcsfs.core import GCSFileSystem, quote_plus
+from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
 import gcsfs.checkers
 from gcsfs import __version__ as version
@@ -306,7 +306,7 @@ def test_url(gcs):
     fn = TEST_BUCKET + "/nested/file1"
     url = gcs.url(fn)
     assert "http" in url
-    assert quote_plus("nested/file1") in url
+    assert quote("nested/file1") in url
     with gcs.open(fn) as f:
         assert "http" in f.url()
 
@@ -474,6 +474,36 @@ def test_get_put_file_in_dir(protocol, gcs):
             data1
         )
         assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
+
+
+def test_special_characters_filename(gcs: GCSFileSystem):
+    special_filename = """'!"`#$%&'()+,-.<=>?@[]^_{}~/'"""
+    full_path = TEST_BUCKET + "/" + special_filename
+    gcs.touch(full_path)
+    info = gcs.info(full_path)
+    assert info["name"] == full_path
+    # Normal cat currently doesn't work with special characters,
+    # because it invokes expand_path (and in turn glob) without escaping the characters.
+    # This would need to be fixed in fsspec.
+    assert gcs.cat_file(full_path) == b""
+
+
+def test_slash_filename(gcs: GCSFileSystem):
+    slash_filename = """abc/def"""
+    full_path = TEST_BUCKET + "/" + slash_filename
+    gcs.touch(full_path)
+    info = gcs.info(full_path)
+    assert info["name"] == full_path
+    assert gcs.cat_file(full_path) == b""
+
+
+def test_hash_filename(gcs: GCSFileSystem):
+    slash_filename = """a#b#c"""
+    full_path = TEST_BUCKET + "/" + slash_filename
+    gcs.touch(full_path)
+    info = gcs.info(full_path)
+    assert info["name"] == full_path
+    assert gcs.cat_file(full_path) == b""
 
 
 def test_errors(gcs):

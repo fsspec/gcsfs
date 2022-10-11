@@ -22,6 +22,7 @@ from .retry import retry_request, validate_response
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from . import __version__ as version
+from urllib.parse import quote as quote_urllib
 
 logger = logging.getLogger("gcsfs")
 
@@ -52,15 +53,6 @@ GCS_MIN_BLOCK_SIZE = 2**18
 GCS_MAX_BLOCK_SIZE = 2**28
 DEFAULT_BLOCK_SIZE = 5 * 2**20
 
-
-QUOTE_TABLE = str.maketrans(
-    {
-        "%": "%25",
-        "/": "%2F",
-        " ": "%20",
-    }
-)
-
 SUPPORTED_FIXED_KEY_METADATA = {
     "content_encoding": "contentEncoding",
     "cache_control": "cacheControl",
@@ -70,12 +62,10 @@ SUPPORTED_FIXED_KEY_METADATA = {
 }
 
 
-def quote_plus(s):
+def quote(s):
     """
-    Convert some URL elements to be HTTP-safe.
-
-    Not the same as in urllib, because, for instance, parentheses and commas
-    are passed through.
+    Quote characters to be safe for URL paths.
+    Also quotes '/'.
 
     Parameters
     ----------
@@ -85,7 +75,8 @@ def quote_plus(s):
     -------
     corrected URL
     """
-    return s.translate(QUOTE_TABLE)
+    # Encode everything, including slashes
+    return quote_urllib(s, safe="")
 
 
 def norm_path(path):
@@ -368,7 +359,7 @@ class GCSFileSystem(AsyncFileSystem):
             path = self.base + path
 
         if args:
-            path = path.format(*[quote_plus(p) for p in args])
+            path = path.format(*[quote(p) for p in args])
         return path
 
     @retry_request(retries=retries)
@@ -779,7 +770,7 @@ class GCSFileSystem(AsyncFileSystem):
         """Get HTTP URL of the given path"""
         u = "{}/download/storage/v1/b/{}/o/{}?alt=media"
         bucket, object = self.split_path(path)
-        object = quote_plus(object)
+        object = quote(object)
         return u.format(self._location, bucket, object)
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
@@ -937,7 +928,7 @@ class GCSFileSystem(AsyncFileSystem):
                     template.format(
                         i=i + 1,
                         bucket=p.split("/", 1)[0],
-                        key=quote_plus(p.split("/", 1)[1]),
+                        key=quote(p.split("/", 1)[1]),
                     )
                     for i, p in enumerate(chunk)
                 ]
@@ -1474,7 +1465,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         uid = re.findall("upload_id=([^&=?]+)", self.location)
         self.gcsfs.call(
             "DELETE",
-            f"{self.fs._location}/upload/storage/v1/b/{quote_plus(self.bucket)}/o",
+            f"{self.fs._location}/upload/storage/v1/b/{quote(self.bucket)}/o",
             params={"uploadType": "resumable", "upload_id": uid},
             json_out=True,
         )
@@ -1570,7 +1561,7 @@ async def initiate_upload(
     j.update(_convert_fixed_key_metadata(fixed_key_metadata))
     headers, _ = await fs._call(
         method="POST",
-        path=f"{fs._location}/upload/storage/v1/b/{quote_plus(bucket)}/o",
+        path=f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o",
         uploadType="resumable",
         json=j,
         headers={"X-Upload-Content-Type": content_type},
@@ -1593,7 +1584,7 @@ async def simple_upload(
     fixed_key_metadata=None,
 ):
     checker = get_consistency_checker(consistency)
-    path = f"{fs._location}/upload/storage/v1/b/{quote_plus(bucket)}/o"
+    path = f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o"
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain

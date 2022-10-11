@@ -1,6 +1,6 @@
 name: CI
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   test:
@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         shell: bash -l {0}
         run: |
-          conda install -c conda-forge pytest ujson requests decorator google-auth aiohttp google-auth-oauthlib flake8 black google-cloud-core google-api-core google-api-python-client -y
+          conda install -c conda-forge pytest ujson requests decorator google-auth aiohttp google-auth-oauthlib google-cloud-core google-api-core google-api-python-client -y
           pip install git+https://github.com/fsspec/filesystem_spec --no-deps
           conda list
           conda --version
@@ -41,8 +41,10 @@ jobs:
             export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
             py.test -vv gcsfs
 
-      - name: Run pre-commit hooks
-        shell: bash -l {0}
-        run: |
-          pip install pre-commit
-          pre-commit run --all-file
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-python@v2
+    - uses: pre-commit/action@v2.0.0
