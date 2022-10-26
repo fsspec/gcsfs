@@ -116,5 +116,30 @@ def gcs(gcs_factory, populate=True):
     finally:
         try:
             gcs.rm(gcs.find(TEST_BUCKET))
+            gcs.rm(TEST_BUCKET)
+        except:  # noqa: E722
+            pass
+
+
+@pytest.fixture
+def gcs_versioned(gcs_factory):
+    gcs = gcs_factory()
+    gcs.version_aware = True
+    try:
+        try:
+            gcs.rm(gcs.find(TEST_BUCKET, versions=True))
+        except FileNotFoundError:
+            pass
+
+        try:
+            gcs.mkdir(TEST_BUCKET, enable_versioning=True)
+        except Exception:
+            pass
+        gcs.invalidate_cache()
+        yield gcs
+    finally:
+        try:
+            gcs.rm(gcs.find(TEST_BUCKET, versions=True))
+            gcs.rm(TEST_BUCKET)
         except:  # noqa: E722
             pass
