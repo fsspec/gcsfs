@@ -23,6 +23,7 @@ from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from . import __version__ as version
 from urllib.parse import quote as quote_urllib
+from urllib.parse import parse_qs, urlsplit
 
 logger = logging.getLogger("gcsfs")
 
@@ -85,7 +86,8 @@ def norm_path(path):
 
     Used by petastorm, do not remove.
     """
-    return "/".join(GCSFileSystem.split_path(path))
+    bucket, name, _ = GCSFileSystem._split_path(path)
+    return "/".join((bucket, name))
 
 
 async def _req_to_text(r):
@@ -117,6 +119,22 @@ def _chunks(lst, n):
     """
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
+
+
+def _coalesce_generation(*args):
+    """Helper to coalesce a list of object generations down to one."""
+    generations = set(args)
+    if None in generations:
+        generations.remove(None)
+    if len(generations) > 1:
+        raise ValueError(
+            "Cannot coalesce generations where more than one are defined,"
+            " {}".format(generations)
+        )
+    elif len(generations) == 0:
+        return None
+    else:
+        return generations.pop()
 
 
 class GCSFileSystem(AsyncFileSystem):
@@ -221,6 +239,9 @@ class GCSFileSystem(AsyncFileSystem):
         Default location where buckets are created, like 'US' or 'EUROPE-WEST3'.
         You can find a list of all available locations here:
         https://cloud.google.com/storage/docs/locations#available-locations
+    version_aware: bool
+        Whether to support object versioning. If enabled this will require the
+        user to have the necessary permissions for dealing with versioned objects.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -247,6 +268,7 @@ class GCSFileSystem(AsyncFileSystem):
         timeout=None,
         endpoint_url=None,
         default_location=None,
+        version_aware=False,
         **kwargs,
     ):
         super().__init__(
@@ -271,6 +293,7 @@ class GCSFileSystem(AsyncFileSystem):
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
+        self.version_aware = version_aware
 
         if check_connection:
             warnings.warn(
@@ -333,6 +356,13 @@ class GCSFileSystem(AsyncFileSystem):
                 path = path[len(protocol) + 2 :]
         # use of root_marker to make minimum required path, e.g., "/"
         return path or cls.root_marker
+
+    @classmethod
+    def _get_kwargs_from_urls(cls, path):
+        _, _, generation = cls._split_path(path, version_aware=True)
+        if generation is not None:
+            return {"version_aware": True}
+        return {}
 
     def _get_params(self, kwargs):
         params = {k: v for k, v in kwargs.items() if v is not None}
@@ -408,8 +438,7 @@ class GCSFileSystem(AsyncFileSystem):
             b["name"] for b in sync(self.loop, self._list_buckets, timeout=self.timeout)
         ]
 
-    @staticmethod
-    def _process_object(bucket, object_metadata):
+    def _process_object(self, bucket, object_metadata):
         """Process object resource into gcsfs object information format.
 
         Process GCS object resource via type casting and attribute updates to
@@ -422,6 +451,9 @@ class GCSFileSystem(AsyncFileSystem):
         result["size"] = int(object_metadata.get("size", 0))
         result["name"] = posixpath.join(bucket, object_metadata["name"])
         result["type"] = "file"
+        if "generation" in object_metadata or "metageneration" in object_metadata:
+            result["generation"] = object_metadata.get("generation")
+            result["metageneration"] = object_metadata.get("metageneration")
 
         return result
 
@@ -435,13 +467,18 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _get_object(self, path):
         """Return object information at the given path."""
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
 
         # Check if parent dir is in listing cache
         listing = self._ls_from_cache(path)
         if listing:
+            name = "/".join((bucket, key))
             for file_details in listing:
-                if file_details["type"] == "file" and file_details["name"] == path:
+                if (
+                    file_details["type"] == "file"
+                    and file_details["name"] == name
+                    and (not generation or file_details.get("generation") == generation)
+                ):
                     return file_details
             else:
                 raise FileNotFoundError(path)
@@ -455,23 +492,33 @@ class GCSFileSystem(AsyncFileSystem):
         # Work around various permission settings. Prefer an object get (storage.objects.get), but
         # fall back to a bucket list + filter to object name (storage.objects.list).
         try:
-            res = await self._call("GET", "b/{}/o/{}", bucket, key, json_out=True)
+            res = await self._call(
+                "GET", "b/{}/o/{}", bucket, key, json_out=True, generation=generation
+            )
         except OSError as e:
             if not str(e).startswith("Forbidden"):
                 raise
             resp = await self._call(
-                "GET", "b/{}/o", bucket, json_out=True, prefix=key, maxResults=1
+                "GET",
+                "b/{}/o",
+                bucket,
+                json_out=True,
+                prefix=key,
+                maxResults=1 if not generation else None,
+                versions="true" if generation else None,
             )
             for item in resp.get("items", []):
-                if item["name"] == key:
+                if item["name"] == key and (
+                    not generation or item.get("generation") == generation
+                ):
                     res = item
                     break
             if res is None:
                 raise FileNotFoundError(path)
         return self._process_object(bucket, res)
 
-    async def _list_objects(self, path, prefix=""):
-        bucket, key = self.split_path(path)
+    async def _list_objects(self, path, prefix="", versions=False):
+        bucket, key, generation = self.split_path(path)
         path = path.rstrip("/")
 
         try:
@@ -487,7 +534,9 @@ class GCSFileSystem(AsyncFileSystem):
             if key:
                 raise
 
-        items, prefixes = await self._do_list_objects(path, prefix=prefix)
+        items, prefixes = await self._do_list_objects(
+            path, prefix=prefix, versions=versions
+        )
 
         pseudodirs = [
             {
@@ -510,9 +559,11 @@ class GCSFileSystem(AsyncFileSystem):
             self.dircache[path] = out
         return out
 
-    async def _do_list_objects(self, path, max_results=None, delimiter="/", prefix=""):
+    async def _do_list_objects(
+        self, path, max_results=None, delimiter="/", prefix="", versions=False
+    ):
         """Object listing for the given {bucket}/{prefix}/ path."""
-        bucket, _path = self.split_path(path)
+        bucket, _path, generation = self.split_path(path)
         _path = "" if not _path else _path.rstrip("/") + "/"
         prefix = f"{_path}{prefix}" or None
 
@@ -526,6 +577,7 @@ class GCSFileSystem(AsyncFileSystem):
             prefix=prefix,
             maxResults=max_results,
             json_out=True,
+            versions="true" if versions or generation else None,
         )
 
         prefixes.extend(page.get("prefixes", []))
@@ -542,6 +594,7 @@ class GCSFileSystem(AsyncFileSystem):
                 maxResults=max_results,
                 pageToken=next_page_token,
                 json_out=True,
+                versions="true" if generation else None,
             )
 
             assert page["kind"] == "storage#objects"
@@ -610,6 +663,7 @@ class GCSFileSystem(AsyncFileSystem):
         default_acl="bucketOwnerFullControl",
         location=None,
         create_parents=True,
+        enable_versioning=False,
         **kwargs,
     ):
         """
@@ -635,8 +689,11 @@ class GCSFileSystem(AsyncFileSystem):
             https://cloud.google.com/storage/docs/locations#available-locations
         create_parents: bool
             If True, creates the bucket in question, if it doesn't already exist
+        enable_versioning: bool
+            If True, creates the bucket in question with object versioning
+            enabled.
         """
-        bucket, object = self.split_path(path)
+        bucket, object, generation = self.split_path(path)
         if bucket in ["", "/"]:
             raise ValueError("Cannot create root bucket")
         if "/" in path and create_parents and await self._exists(bucket):
@@ -651,6 +708,8 @@ class GCSFileSystem(AsyncFileSystem):
         location = location or self.default_location
         if location:
             json_data["location"] = location
+        if enable_versioning:
+            json_data["versioning"] = {"enabled": True}
         await self._call(
             method="POST",
             path="b",
@@ -682,7 +741,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     rmdir = sync_wrapper(_rmdir)
 
-    async def _info(self, path, **kwargs):
+    async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
         path = self._strip_protocol(path)
         if "/" not in path:
@@ -700,10 +759,14 @@ class GCSFileSystem(AsyncFileSystem):
         # Check directory cache for parent dir
         parent_path = self._parent(path)
         parent_cache = self._ls_from_cache(parent_path)
-        bucket, key = self.split_path(path)
+        bucket, key, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
         if parent_cache:
+            name = "/".join((bucket, key))
             for o in parent_cache:
-                if o["name"].rstrip("/") == path:
+                if o["name"].rstrip("/") == name and (
+                    not generation or o.get("generation") == generation
+                ):
                     return o
         if self._ls_from_cache(path):
             # this is a directory
@@ -768,10 +831,15 @@ class GCSFileSystem(AsyncFileSystem):
 
     def url(self, path):
         """Get HTTP URL of the given path"""
-        u = "{}/download/storage/v1/b/{}/o/{}?alt=media"
-        bucket, object = self.split_path(path)
+        u = "{}/download/storage/v1/b/{}/o/{}?alt=media{}"
+        bucket, object, generation = self.split_path(path)
         object = quote(object)
-        return u.format(self._location, bucket, object)
+        return u.format(
+            self._location,
+            bucket,
+            object,
+            "&generation={}".format(generation) if generation else "",
+        )
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
@@ -838,7 +906,7 @@ class GCSFileSystem(AsyncFileSystem):
             i_json["contentEncoding"] = content_encoding
         i_json.update(_convert_fixed_key_metadata(fixed_key_metadata))
 
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
         o_json = await self._call(
             "PATCH",
             "b/{}/o/{}",
@@ -854,7 +922,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
         source = [{"name": self.split_path(p)[1]} for p in paths]
         await self._call(
             "POST",
@@ -874,8 +942,10 @@ class GCSFileSystem(AsyncFileSystem):
 
     async def _cp_file(self, path1, path2, acl=None, **kwargs):
         """Duplicate remote file"""
-        b1, k1 = self.split_path(path1)
-        b2, k2 = self.split_path(path2)
+        b1, k1, g1 = self.split_path(path1)
+        b2, k2, g2 = self.split_path(path2)
+        if g2:
+            raise ValueError("Cannot write to specific object generation")
         out = await self._call(
             "POST",
             "b/{}/o/{}/rewriteTo/b/{}/o/{}",
@@ -886,6 +956,7 @@ class GCSFileSystem(AsyncFileSystem):
             headers={"Content-Type": "application/json"},
             destinationPredefinedAcl=acl,
             json_out=True,
+            sourceGeneration=g1,
         )
         while out["done"] is not True:
             out = await self._call(
@@ -899,12 +970,13 @@ class GCSFileSystem(AsyncFileSystem):
                 rewriteToken=out["rewriteToken"],
                 destinationPredefinedAcl=acl,
                 json_out=True,
+                sourceGeneration=g1,
             )
 
     async def _rm_file(self, path, **kwargs):
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
         if key:
-            await self._call("DELETE", "b/{}/o/{}", bucket, key)
+            await self._call("DELETE", "b/{}/o/{}", bucket, key, generation=generation)
             self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
         else:
             await self._rmdir(path)
@@ -915,7 +987,7 @@ class GCSFileSystem(AsyncFileSystem):
             "Content-Type: application/http\n"
             "Content-Transfer-Encoding: binary\n"
             "Content-ID: <b29c5de2-0db4-490b-b421-6a51b598bd11+{i}>"
-            "\n\nDELETE /storage/v1/b/{bucket}/o/{key} HTTP/1.1\n"
+            "\n\nDELETE /storage/v1/b/{bucket}/o/{key}{query} HTTP/1.1\n"
             "Content-Type: application/json\n"
             "accept: application/json\ncontent-length: 0\n"
         )
@@ -923,16 +995,19 @@ class GCSFileSystem(AsyncFileSystem):
         # Splitting requests into 100 chunk batches
         # See https://cloud.google.com/storage/docs/batch
         for chunk in _chunks(paths, 100):
-            body = "".join(
-                [
+            parts = []
+            for i, p in enumerate(chunk):
+                bucket, key, generation = self.split_path(p)
+                query = f"?generation={generation}" if generation else ""
+                parts.append(
                     template.format(
                         i=i + 1,
-                        bucket=p.split("/", 1)[0],
-                        key=quote(p.split("/", 1)[1]),
+                        bucket=quote(bucket),
+                        key=quote(key),
+                        query=query,
                     )
-                    for i, p in enumerate(chunk)
-                ]
-            )
+                )
+            body = "".join(parts)
             headers, content = await self._call(
                 "POST",
                 f"{self._location}/batch/storage/v1",
@@ -1007,7 +1082,7 @@ class GCSFileSystem(AsyncFileSystem):
     ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
         size = len(data)
         out = None
         if size < 5 * 2**20:
@@ -1046,7 +1121,9 @@ class GCSFileSystem(AsyncFileSystem):
         callback = callback or NoOpCallback()
         consistency = consistency or self.consistency
         checker = get_consistency_checker(consistency)
-        bucket, key = self.split_path(rpath)
+        bucket, key, generation = self.split_path(rpath)
+        if generation:
+            raise ValueError("Cannot write to specific object generation")
         with open(lpath, "rb") as f0:
             size = f0.seek(0, 2)
             f0.seek(0)
@@ -1090,9 +1167,11 @@ class GCSFileSystem(AsyncFileSystem):
         except IOError:
             return False
 
-    async def _find(self, path, withdirs=False, detail=False, prefix="", **kwargs):
+    async def _find(
+        self, path, withdirs=False, detail=False, prefix="", versions=False, **kwargs
+    ):
         path = self._strip_protocol(path)
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
 
         if prefix:
             _path = "" if not key else key.rstrip("/") + "/"
@@ -1100,7 +1179,9 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             _prefix = key
 
-        objects, _ = await self._do_list_objects(bucket, delimiter="", prefix=_prefix)
+        objects, _ = await self._do_list_objects(
+            bucket, delimiter="", prefix=_prefix, versions=versions
+        )
 
         dirs = {}
         cache_entries = {}
@@ -1135,8 +1216,12 @@ class GCSFileSystem(AsyncFileSystem):
             objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
 
         if detail:
+            if versions:
+                return {f"{o['name']}#{o['generation']}": o for o in objects}
             return {o["name"]: o for o in objects}
 
+        if versions:
+            return [f"{o['name']}#{o['generation']}" for o in objects]
         return [o["name"] for o in objects]
 
     @retry_request(retries=retries)
@@ -1191,6 +1276,7 @@ class GCSFileSystem(AsyncFileSystem):
         metadata=None,
         autocommit=True,
         fixed_key_metadata=None,
+        generation=None,
         **kwargs,
     ):
         """
@@ -1217,7 +1303,7 @@ class GCSFileSystem(AsyncFileSystem):
         )
 
     @classmethod
-    def split_path(cls, path):
+    def _split_path(cls, path, version_aware=False):
         """
         Normalise GCS path string into bucket and key.
 
@@ -1225,17 +1311,47 @@ class GCSFileSystem(AsyncFileSystem):
         ----------
         path : string
             Input path, like `gcs://mybucket/path/to/file`.
-            Path is of the form: '[gs|gcs://]bucket[/key]'
+            Path is of the form: '[gs|gcs://]bucket[/key][?querystring][#fragment]'
+
+        GCS allows object generation (object version) to be specified in either
+        the URL fragment or the `generation` query parameter. When provided,
+        the fragment will take priority over the `generation` query paramenter.
 
         Returns
         -------
-            (bucket, key) tuple
+            (bucket, key, generation) tuple
         """
         path = cls._strip_protocol(path).lstrip("/")
         if "/" not in path:
-            return path, ""
-        else:
-            return path.split("/", 1)
+            return path, "", None
+        bucket, keypart = path.split("/", 1)
+        key = keypart
+        generation = None
+        if version_aware:
+            parts = urlsplit(keypart)
+            try:
+                if parts.fragment:
+                    generation = parts.fragment
+                elif parts.query:
+                    parsed = parse_qs(parts.query)
+                    if "generation" in parsed:
+                        generation = parsed["generation"][0]
+                # Sanity check whether this could be a valid generation ID. If
+                # it is not, assume that # or ? characters are supposed to be
+                # part of the object name.
+                if generation is not None:
+                    int(generation)
+                    key = parts.path
+            except ValueError:
+                generation = None
+        return (
+            bucket,
+            key,
+            generation,
+        )
+
+    def split_path(self, path):
+        return self._split_path(path, version_aware=self.version_aware)
 
     def sign(self, path, expiration=100, **kwargs):
         """Create a signed URL representing the given path.
@@ -1282,6 +1398,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         content_type=None,
         timeout=None,
         fixed_key_metadata=None,
+        generation=None,
         **kwargs,
     ):
         """
@@ -1321,7 +1438,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             https://cloud.google.com/storage/docs/metadata#mutable
         timeout: int
             Timeout seconds for the asynchronous callback.
+        generation: str
+            Object generation.
         """
+        bucket, key, path_generation = gcsfs.split_path(path)
+        if not key:
+            raise OSError("Attempt to open a bucket")
+        self.generation = _coalesce_generation(generation, path_generation)
         super().__init__(
             gcsfs,
             path,
@@ -1332,9 +1455,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             cache_options=cache_options,
             **kwargs,
         )
-        bucket, key = self.fs.split_path(path)
-        if not key:
-            raise OSError("Attempt to open a bucket")
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
@@ -1357,6 +1477,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
+
+    @property
+    def details(self):
+        if self._details is None:
+            self._details = self.fs.info(self.path, generation=self.generation)
+        return self._details
 
     def info(self):
         """File information about this path"""

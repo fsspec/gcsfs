@@ -63,7 +63,8 @@ def docker_gcs():
     container = "gcsfs_test"
     cmd = (
         "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "
-        "http -public-host http://localhost:4443 -external-url http://localhost:4443"
+        "http -public-host http://localhost:4443 -external-url http://localhost:4443 "
+        "-backend memory"
     )
     stop_docker(container)
     subprocess.check_output(shlex.split(cmd))
@@ -115,5 +116,30 @@ def gcs(gcs_factory, populate=True):
     finally:
         try:
             gcs.rm(gcs.find(TEST_BUCKET))
+            gcs.rm(TEST_BUCKET)
+        except:  # noqa: E722
+            pass
+
+
+@pytest.fixture
+def gcs_versioned(gcs_factory):
+    gcs = gcs_factory()
+    gcs.version_aware = True
+    try:
+        try:
+            gcs.rm(gcs.find(TEST_BUCKET, versions=True))
+        except FileNotFoundError:
+            pass
+
+        try:
+            gcs.mkdir(TEST_BUCKET, enable_versioning=True)
+        except Exception:
+            pass
+        gcs.invalidate_cache()
+        yield gcs
+    finally:
+        try:
+            gcs.rm(gcs.find(TEST_BUCKET, versions=True))
+            gcs.rm(TEST_BUCKET)
         except:  # noqa: E722
             pass

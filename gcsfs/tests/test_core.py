@@ -1157,3 +1157,50 @@ def test_deep_find_wthdirs(gcs):
         f"{TEST_BUCKET}/deep/nested",
         f"{TEST_BUCKET}/deep/nested/dir",
     ]
+
+
+def test_info_versioned(gcs_versioned):
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v1")
+    v1 = gcs_versioned.info(a)["generation"]
+    assert v1 is not None
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v2")
+    v2 = gcs_versioned.info(a)["generation"]
+    assert v2 is not None and v1 != v2
+    assert gcs_versioned.info(f"{a}#{v1}")["generation"] == v1
+    assert gcs_versioned.info(f"{a}?generation={v2}")["generation"] == v2
+
+
+def test_cat_versioned(gcs_versioned):
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v1")
+    v1 = gcs_versioned.info(a)["generation"]
+    assert v1 is not None
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v2")
+    gcs_versioned.cat(f"{a}#{v1}") == b"v1"
+
+
+def test_cp_versioned(gcs_versioned):
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v1")
+    v1 = gcs_versioned.info(a)["generation"]
+    assert v1 is not None
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v2")
+    gcs_versioned.cp_file(f"{a}#{v1}", b)
+    assert gcs_versioned.cat(b) == b"v1"
+
+
+def test_find_versioned(gcs_versioned):
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v1")
+    v1 = gcs_versioned.info(a)["generation"]
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v2")
+    v2 = gcs_versioned.info(a)["generation"]
+    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(gcs_versioned.find(a, versions=True))
+    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(
+        gcs_versioned.find(a, detail=True, versions=True)
+    )
