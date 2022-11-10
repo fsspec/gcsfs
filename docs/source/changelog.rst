@@ -1,6 +1,11 @@
 Changelog
 =========
 
+2022.11.0
+---------
+
+* implement object versioning (#504)
+
 2022.10.0
 ---------
 
