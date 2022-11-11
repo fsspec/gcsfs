@@ -4,29 +4,21 @@ import io
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 import pytest
 import requests
-
-from fsspec.utils import seek_delimiter
 from fsspec.asyn import sync
+from fsspec.utils import seek_delimiter
 
-from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
-from gcsfs.tests.conftest import (
-    a,
-    allfiles,
-    b,
-    csv_files,
-    files,
-    text_files,
-)
-from gcsfs.tests.utils import tempdir, tmpfile
-from gcsfs.core import GCSFileSystem, quote
-from gcsfs.credentials import GoogleCredentials
 import gcsfs.checkers
 from gcsfs import __version__ as version
+from gcsfs.core import GCSFileSystem, quote
+from gcsfs.credentials import GoogleCredentials
+from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
+from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
+from gcsfs.tests.utils import tempdir, tmpfile
 
 
 def test_simple(gcs):

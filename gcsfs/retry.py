@@ -1,13 +1,12 @@
 import asyncio
-from decorator import decorator
 import json
 import logging
 import random
 
-
-import requests.exceptions
-import google.auth.exceptions
 import aiohttp.client_exceptions
+import google.auth.exceptions
+import requests.exceptions
+from decorator import decorator
 
 logger = logging.getLogger("gcsfs")
 

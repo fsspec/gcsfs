@@ -1,14 +1,15 @@
 import os
+import tempfile
 
 import pytest
 
-import tempfile
-
 fuse = pytest.importorskip("fuse")
-from fsspec.fuse import run
-from gcsfs.tests.settings import TEST_BUCKET
 import threading
 import time
+
+from fsspec.fuse import run
+
+from gcsfs.tests.settings import TEST_BUCKET
 
 
 def test_fuse(gcs):

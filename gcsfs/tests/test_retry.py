@@ -1,10 +1,11 @@
 import os
+
+import pytest
 import requests
 from requests.exceptions import ProxyError
-import pytest
 
-from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.retry import HttpError, is_retriable, validate_response
+from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.tests.utils import tmpfile
 
 

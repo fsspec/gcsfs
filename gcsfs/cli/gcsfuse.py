@@ -1,5 +1,6 @@
-import click
 import logging
+
+import click
 from fuse import FUSE
 
 from gcsfs.gcsfuse import GCSFS

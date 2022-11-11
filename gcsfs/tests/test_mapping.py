@@ -1,4 +1,5 @@
 import pytest
+
 from gcsfs.tests.settings import TEST_BUCKET
 
 root = TEST_BUCKET + "/mapping"
