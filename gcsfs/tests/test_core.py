@@ -1193,6 +1193,22 @@ def test_cp_versioned(gcs_versioned):
     assert gcs_versioned.cat(b) == b"v1"
 
 
+def test_ls_versioned(gcs_versioned):
+    import posixpath
+
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v1")
+    v1 = gcs_versioned.info(a)["generation"]
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"v2")
+    v2 = gcs_versioned.info(a)["generation"]
+    dpath = posixpath.dirname(a)
+    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(gcs_versioned.ls(dpath, versions=True))
+    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(
+        entry["name"] for entry in gcs_versioned.ls(dpath, detail=True, versions=True)
+    )
+
+
 def test_find_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
         wo.write(b"v1")
