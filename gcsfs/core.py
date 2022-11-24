@@ -24,6 +24,7 @@ from .credentials import GoogleCredentials
 from . import __version__ as version
 from urllib.parse import quote as quote_urllib
 from urllib.parse import parse_qs, urlsplit
+from yarl import URL
 
 logger = logging.getLogger("gcsfs")
 
@@ -397,9 +398,16 @@ class GCSFileSystem(AsyncFileSystem):
         self, method, path, *args, headers=None, json=None, data=None, **kwargs
     ):
         await self._set_session()
+
+        url = URL(self._format_path(path, args))
+        if url.fragment:
+            # in case a path contains a hash sign, aiohttp
+            # will remove the "fragment", so we need to put it into the path
+            url = url.with_path(url.path + '#' + url.fragment).with_fragment(None)
+
         async with self.session.request(
             method=method,
-            url=self._format_path(path, args),
+            url=url,
             params=self._get_params(kwargs),
             json=json,
             headers=self._get_headers(headers),
