@@ -815,14 +815,26 @@ class GCSFileSystem(AsyncFileSystem):
             prefix = path[:ind].split("/")[-1]
         return await super()._glob(path, prefix=prefix, **kwargs)
 
-    async def _ls(self, path, detail=False, prefix="", **kwargs):
+    async def _ls(self, path, detail=False, prefix="", versions=False, **kwargs):
         """List objects under the given '/{bucket}/{prefix} path."""
         path = self._strip_protocol(path).rstrip("/")
 
         if path in ["/", ""]:
             out = await self._list_buckets()
         else:
-            out = await self._list_objects(path, prefix=prefix)
+            out = []
+            for entry in await self._list_objects(
+                path, prefix=prefix, versions=versions
+            ):
+                if versions:
+                    out.append(
+                        {
+                            **entry,
+                            "name": f"{entry['name']}#{entry['generation']}",
+                        }
+                    )
+                else:
+                    out.append(entry)
 
         if detail:
             return out
