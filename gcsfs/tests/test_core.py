@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 import io
 from builtins import FileNotFoundError
 from itertools import chain
@@ -159,10 +157,10 @@ def test_ls_touch(gcs):
     gcs.touch(b)
 
     L = gcs.ls(TEST_BUCKET + "/tmp/test", False)
-    assert set(L) == set([a, b])
+    assert set(L) == {a, b}
 
     L_d = gcs.ls(TEST_BUCKET + "/tmp/test", True)
-    assert set(d["name"] for d in L_d) == set([a, b])
+    assert {d["name"] for d in L_d} == {a, b}
 
 
 def test_rm(gcs):
@@ -1069,7 +1067,7 @@ def test_percent_file_name(gcs):
     fn2 = unquote(fn)
     gcs.touch(fn2)
     assert gcs.cat(fn2) != data
-    assert set(gcs.ls(parent)) == set([fn, fn2])
+    assert set(gcs.ls(parent)) == {fn, fn2}
 
 
 @pytest.mark.parametrize(

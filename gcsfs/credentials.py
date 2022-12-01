@@ -153,7 +153,8 @@ class GoogleCredentials:
                 # TODO: catch specific exceptions
                 # some other kind of token file
                 # will raise exception if is not json
-                token = json.load(open(token))
+                with open(token) as data:
+                    token = json.load(data)
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
         elif isinstance(token, google.auth.credentials.Credentials):

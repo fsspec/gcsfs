@@ -35,6 +35,6 @@ def test_fuse(gcs):
         f.write("hello")
     files = os.listdir(mountpath)
     assert "hello" in files
-    with open(os.path.join(mountpath, "hello"), "r") as f:
+    with open(os.path.join(mountpath, "hello")) as f:
         # NB this is in TEXT mode
         assert f.read() == "hello"

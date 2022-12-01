@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Google Cloud Storage pythonic interface
 """
@@ -30,7 +29,7 @@ logger = logging.getLogger("gcsfs")
 
 
 if "GCSFS_DEBUG" in os.environ:
-    setup_logging(logger=logger, level=os.environ["GCSFS_DEBUG"])
+    setup_logging(logger=logger, level=os.getenv("GCSFS_DEBUG"))
 
 
 # client created 2018-01-16
@@ -49,7 +48,7 @@ bACLs = {
     "publicRead",
     "publicReadWrite",
 }
-DEFAULT_PROJECT = os.environ.get("GCSFS_DEFAULT_PROJECT", "")
+DEFAULT_PROJECT = os.getenv("GCSFS_DEFAULT_PROJECT", "")
 
 GCS_MIN_BLOCK_SIZE = 2**18
 GCS_MAX_BLOCK_SIZE = 2**28
@@ -106,7 +105,7 @@ def _location():
     -------
     valid http location
     """
-    _emulator_location = os.environ.get("STORAGE_EMULATOR_HOST", None)
+    _emulator_location = os.getenv("STORAGE_EMULATOR_HOST", None)
     return (
         _emulator_location if _emulator_location else "https://storage.googleapis.com"
     )
@@ -839,7 +838,7 @@ class GCSFileSystem(AsyncFileSystem):
             self._location,
             bucket,
             object,
-            "&generation={}".format(generation) if generation else "",
+            f"&generation={generation}" if generation else "",
         )
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
@@ -1165,7 +1164,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _isdir(self, path):
         try:
             return (await self._info(path))["type"] == "directory"
-        except IOError:
+        except OSError:
             return False
 
     async def _find(
@@ -1720,11 +1719,7 @@ async def simple_upload(
     template = (
         "--==0=="
         "\nContent-Type: application/json; charset=UTF-8"
-        "\n\n"
-        + metadata
-        + "\n--==0=="
-        + "\nContent-Type: {0}".format(content_type)
-        + "\n\n"
+        "\n\n" + metadata + "\n--==0==" + f"\nContent-Type: {content_type}" + "\n\n"
     )
 
     data = template.encode() + datain + b"\n--==0==--"

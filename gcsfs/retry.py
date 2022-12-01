@@ -27,7 +27,7 @@ class HttpError(Exception):
             self.message = ""
             self.code = None
         # Call the base class constructor with the parameters it needs
-        super(HttpError, self).__init__(self.message)
+        super().__init__(self.message)
 
 
 class ChecksumError(Exception):
@@ -92,11 +92,11 @@ def validate_response(status, content, path, args=None):
             msg = content
 
         if status == 403:
-            raise IOError("Forbidden: %s\n%s" % (path, msg))
+            raise OSError(f"Forbidden: {path}\n{msg}")
         elif status == 502:
             raise requests.exceptions.ProxyError()
         elif "invalid" in str(msg):
-            raise ValueError("Bad Request: %s\n%s" % (path, msg))
+            raise ValueError(f"Bad Request: {path}\n{msg}")
         elif error:
             raise HttpError(error)
         elif status:
@@ -140,12 +140,10 @@ async def retry_request(func, retries=6, *args, **kwargs):
                 logger.debug("Request returned 404, no retries.")
                 raise e
             if retry == retries - 1:
-                logger.exception(
-                    "%s out of retries on exception: %s" % (func.__name__, e)
-                )
+                logger.exception(f"{func.__name__} out of retries on exception: {e}")
                 raise e
             if is_retriable(e):
-                logger.debug("%s retrying after exception: %s" % (func.__name__, e))
+                logger.debug(f"{func.__name__} retrying after exception: {e}")
                 continue
-            logger.exception("%s non-retriable exception: %s" % (func.__name__, e))
+            logger.exception(f"{func.__name__} non-retriable exception: {e}")
             raise e
