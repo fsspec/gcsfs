@@ -34,12 +34,12 @@ jobs:
           conda --version
 
       - name: Install libfuse
-        run: sudo apt-get install -y fuse
+        run: (sudo apt-get install -y fuse || echo "Error installing fuse.")
 
-      - name: Run Tests
+      - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
-          pytest -vv gcsfs
+          pytest -vv --timeout=600 gcsfs/
 
   lint:
     name: lint
