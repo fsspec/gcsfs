@@ -1190,7 +1190,6 @@ def test_find_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
         wo.write(b"v2")
     v2 = gcs_versioned.info(a)["generation"]
-    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(gcs_versioned.find(a, versions=True))
-    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(
-        gcs_versioned.find(a, detail=True, versions=True)
-    )
+    versions = {f"{a}#{v1}", f"{a}#{v2}"}
+    assert versions == set(gcs_versioned.find(a, versions=True))
+    assert versions == set(gcs_versioned.find(a, detail=True, versions=True))
