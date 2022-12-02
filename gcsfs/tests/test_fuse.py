@@ -6,21 +6,25 @@ import time
 from functools import partial
 
 import pytest
-
-try:
-    fuse = pytest.importorskip("fuse")
-except Exception as error:
-    logging.debug("Error importing fuse: %s", error)
-    pytest.skip("Error importing fuse.")
-
 from fsspec.fuse import run
 
 from gcsfs.tests.settings import TEST_BUCKET
 
 
+@pytest.mark.timeout(180)
+@pytest.fixture
+def fuse():
+    try:
+        _fuse = pytest.importorskip("fuse")
+        return _fuse
+    except Exception as error:
+        logging.debug("Error importing fuse: %s", error)
+        pytest.skip("Error importing fuse.")
+
+
 @pytest.mark.xfail(reason="Failing test not previously tested.")
 @pytest.mark.timeout(180)
-def test_fuse(gcs):
+def test_fuse(gcs, fuse):
     mountpath = tempfile.mkdtemp()
     _run = partial(run, gcs, TEST_BUCKET + "/", mountpath)
     th = threading.Thread(target=_run)
@@ -29,7 +33,7 @@ def test_fuse(gcs):
 
     time.sleep(5)
     timeout = 20
-    while True:
+    while timeout > 0:
         try:
             logging.debug("Trying to create lock file.")
             open(os.path.join(mountpath, "lock"), "w").close()
