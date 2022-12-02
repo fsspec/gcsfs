@@ -40,7 +40,8 @@ jobs:
       - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
-          pytest -vvv --log-cli-level=DEBUG gcsfs/
+          pytest -vvv --log-cli-level=DEBUG \
+          --log-format="%(asctime)s %(levelname)s %(message)s" gcsfs/
 
   lint:
     name: lint
