@@ -1,21 +1,20 @@
+import json
+import logging
+import os
+import pickle
 import textwrap
+import threading
+import warnings
 
 import google.auth as gauth
 import google.auth.compute_engine
 import google.auth.credentials
 import google.auth.exceptions
+import requests
+from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request
-import json
-import requests
-import os
-import pickle
-import requests
-import threading
-import warnings
-import logging
 
 logger = logging.getLogger("gcsfs.credentials")
 
@@ -154,7 +153,8 @@ class GoogleCredentials:
                 # TODO: catch specific exceptions
                 # some other kind of token file
                 # will raise exception if is not json
-                token = json.load(open(token))
+                with open(token) as data:
+                    token = json.load(data)
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
         elif isinstance(token, google.auth.credentials.Credentials):

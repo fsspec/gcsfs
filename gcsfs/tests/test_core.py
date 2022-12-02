@@ -1,32 +1,22 @@
-# -*- coding: utf-8 -*-
-
 import io
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 import pytest
 import requests
-
-from fsspec.utils import seek_delimiter
 from fsspec.asyn import sync
+from fsspec.utils import seek_delimiter
 
-from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
-from gcsfs.tests.conftest import (
-    a,
-    allfiles,
-    b,
-    csv_files,
-    files,
-    text_files,
-)
-from gcsfs.tests.utils import tempdir, tmpfile
-from gcsfs.core import GCSFileSystem, quote
-from gcsfs.credentials import GoogleCredentials
 import gcsfs.checkers
 from gcsfs import __version__ as version
+from gcsfs.core import GCSFileSystem, quote
+from gcsfs.credentials import GoogleCredentials
+from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
+from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
+from gcsfs.tests.utils import tempdir, tmpfile
 
 
 def test_simple(gcs):
@@ -167,10 +157,10 @@ def test_ls_touch(gcs):
     gcs.touch(b)
 
     L = gcs.ls(TEST_BUCKET + "/tmp/test", False)
-    assert set(L) == set([a, b])
+    assert set(L) == {a, b}
 
     L_d = gcs.ls(TEST_BUCKET + "/tmp/test", True)
-    assert set(d["name"] for d in L_d) == set([a, b])
+    assert {d["name"] for d in L_d} == {a, b}
 
 
 def test_rm(gcs):
@@ -1077,7 +1067,7 @@ def test_percent_file_name(gcs):
     fn2 = unquote(fn)
     gcs.touch(fn2)
     assert gcs.cat(fn2) != data
-    assert set(gcs.ls(parent)) == set([fn, fn2])
+    assert set(gcs.ls(parent)) == {fn, fn2}
 
 
 @pytest.mark.parametrize(
@@ -1203,10 +1193,11 @@ def test_ls_versioned(gcs_versioned):
         wo.write(b"v2")
     v2 = gcs_versioned.info(a)["generation"]
     dpath = posixpath.dirname(a)
-    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(gcs_versioned.ls(dpath, versions=True))
-    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(
+    versions = {f"{a}#{v1}", f"{a}#{v2}"}
+    assert versions == set(gcs_versioned.ls(dpath, versions=True))
+    assert versions == {
         entry["name"] for entry in gcs_versioned.ls(dpath, detail=True, versions=True)
-    )
+    }
 
 
 def test_find_versioned(gcs_versioned):
@@ -1216,7 +1207,6 @@ def test_find_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
         wo.write(b"v2")
     v2 = gcs_versioned.info(a)["generation"]
-    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(gcs_versioned.find(a, versions=True))
-    assert {f"{a}#{v1}", f"{a}#{v2}"} == set(
-        gcs_versioned.find(a, detail=True, versions=True)
-    )
+    versions = {f"{a}#{v1}", f"{a}#{v2}"}
+    assert versions == set(gcs_versioned.find(a, versions=True))
+    assert versions == set(gcs_versioned.find(a, detail=True, versions=True))

@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 
 import os
-from setuptools import setup
-import versioneer
 
+from setuptools import setup
+
+import versioneer
 
 setup(
     name="gcsfs",
@@ -22,6 +23,7 @@ setup(
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
     ],
     keywords=["google-cloud-storage", "gcloud", "file-system"],
     packages=["gcsfs", "gcsfs.cli"],

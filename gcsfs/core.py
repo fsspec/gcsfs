@@ -1,10 +1,7 @@
-# -*- coding: utf-8 -*-
 """
 Google Cloud Storage pythonic interface
 """
 import asyncio
-import fsspec
-
 import io
 import json
 import logging
@@ -13,23 +10,26 @@ import posixpath
 import re
 import warnings
 import weakref
+from urllib.parse import parse_qs
+from urllib.parse import quote as quote_urllib
+from urllib.parse import urlsplit
 
-from fsspec.asyn import sync_wrapper, sync, AsyncFileSystem
-from fsspec.utils import stringify_path, setup_logging
+import fsspec
+from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
 from fsspec.callbacks import NoOpCallback
 from fsspec.implementations.http import get_client
-from .retry import retry_request, validate_response
+from fsspec.utils import setup_logging, stringify_path
+
+from . import __version__ as version
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
-from . import __version__ as version
-from urllib.parse import quote as quote_urllib
-from urllib.parse import parse_qs, urlsplit
+from .retry import retry_request, validate_response
 
 logger = logging.getLogger("gcsfs")
 
 
 if "GCSFS_DEBUG" in os.environ:
-    setup_logging(logger=logger, level=os.environ["GCSFS_DEBUG"])
+    setup_logging(logger=logger, level=os.getenv("GCSFS_DEBUG"))
 
 
 # client created 2018-01-16
@@ -48,7 +48,7 @@ bACLs = {
     "publicRead",
     "publicReadWrite",
 }
-DEFAULT_PROJECT = os.environ.get("GCSFS_DEFAULT_PROJECT", "")
+DEFAULT_PROJECT = os.getenv("GCSFS_DEFAULT_PROJECT", "")
 
 GCS_MIN_BLOCK_SIZE = 2**18
 GCS_MAX_BLOCK_SIZE = 2**28
@@ -105,7 +105,7 @@ def _location():
     -------
     valid http location
     """
-    _emulator_location = os.environ.get("STORAGE_EMULATOR_HOST", None)
+    _emulator_location = os.getenv("STORAGE_EMULATOR_HOST", None)
     return (
         _emulator_location if _emulator_location else "https://storage.googleapis.com"
     )
@@ -850,7 +850,7 @@ class GCSFileSystem(AsyncFileSystem):
             self._location,
             bucket,
             object,
-            "&generation={}".format(generation) if generation else "",
+            f"&generation={generation}" if generation else "",
         )
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
@@ -1176,7 +1176,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _isdir(self, path):
         try:
             return (await self._info(path))["type"] == "directory"
-        except IOError:
+        except OSError:
             return False
 
     async def _find(
@@ -1731,11 +1731,7 @@ async def simple_upload(
     template = (
         "--==0=="
         "\nContent-Type: application/json; charset=UTF-8"
-        "\n\n"
-        + metadata
-        + "\n--==0=="
-        + "\nContent-Type: {0}".format(content_type)
-        + "\n\n"
+        "\n\n" + metadata + "\n--==0==" + f"\nContent-Type: {content_type}" + "\n\n"
     )
 
     data = template.encode() + datain + b"\n--==0==--"

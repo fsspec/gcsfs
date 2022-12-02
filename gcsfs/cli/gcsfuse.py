@@ -1,5 +1,6 @@
-import click
 import logging
+
+import click
 from fuse import FUSE
 
 from gcsfs.gcsfuse import GCSFS
@@ -54,7 +55,7 @@ def main(
     if verbose > 1:
         logging.basicConfig(level=logging.DEBUG, format=fmt)
 
-    print("Mounting bucket %s to directory %s" % (bucket, mount_point))
+    print(f"Mounting bucket {bucket} to directory {mount_point}")
     print("foreground:", foreground, ", nothreads:", not threads)
     FUSE(
         GCSFS(bucket, token=token, project=project_id, nfiles=cache_files),

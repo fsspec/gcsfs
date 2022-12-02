@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 #
 # GCSFs documentation build configuration file, created by
 # sphinx-quickstart on Mon Mar 21 15:20:01 2016.
@@ -13,8 +12,8 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
-import sys
 import os
+import sys
 
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
@@ -118,7 +117,7 @@ todo_include_todos = False
 
 # Taken from docs.readthedocs.io:
 # on_rtd is whether we are on readthedocs.io
-on_rtd = os.environ.get("READTHEDOCS", None) == "True"
+on_rtd = os.getenv("READTHEDOCS", None) == "True"
 
 if not on_rtd:  # only import and set the theme if we're building docs locally
     import sphinx_rtd_theme

@@ -1,9 +1,10 @@
-from gcsfs.retry import ChecksumError
-from gcsfs.checkers import Crc32cChecker, MD5Checker, SizeChecker, crcmod
-from hashlib import md5
 import base64
+from hashlib import md5
 
 import pytest
+
+from gcsfs.checkers import Crc32cChecker, MD5Checker, SizeChecker, crcmod
+from gcsfs.retry import ChecksumError
 
 
 def google_response_from_data(expected_data: bytes, actual_data=None):

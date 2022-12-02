@@ -58,7 +58,7 @@ def stop_docker(container):
 def docker_gcs():
     if "STORAGE_EMULATOR_HOST" in os.environ:
         # assume using real API or otherwise have a server already set up
-        yield os.environ["STORAGE_EMULATOR_HOST"]
+        yield os.getenv("STORAGE_EMULATOR_HOST")
         return
     container = "gcsfs_test"
     cmd = (

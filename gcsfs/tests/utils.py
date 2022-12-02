@@ -1,7 +1,7 @@
-from contextlib import contextmanager
 import os
 import shutil
 import tempfile
+from contextlib import contextmanager
 
 
 @contextmanager

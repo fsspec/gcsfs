@@ -23,10 +23,10 @@ In addition to a standard installation of GCSFS, you also need:
    - fusepy_, which can be installed via conda or pip
 
    - pandas, which can also be installed via conda or pip (this library is
-     used only for its timestring parsing.
+     used only for its timestring parsing).
 
 .. _osxfuse: https://osxfuse.github.io/
-.. _fusepy: https://github.com/terencehonles/fusepy
+.. _fusepy: https://github.com/fusepy/fusepy
 
 Usage
 -----

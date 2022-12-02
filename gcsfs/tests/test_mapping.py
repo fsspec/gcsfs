@@ -1,7 +1,8 @@
 import pytest
+
 from gcsfs.tests.settings import TEST_BUCKET
 
-root = TEST_BUCKET + "/mapping"
+MAPPING_ROOT = TEST_BUCKET + "/mapping"
 
 
 def test_api():
@@ -12,7 +13,7 @@ def test_api():
 
 
 def test_map_simple(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     assert not d
 
     assert list(d) == list(d.keys()) == []
@@ -21,12 +22,12 @@ def test_map_simple(gcs):
 
 
 def test_map_default_gcsfilesystem(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     assert d.fs is gcs
 
 
 def test_map_errors(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     with pytest.raises(KeyError):
         d["nonexistent"]
     try:
@@ -36,7 +37,7 @@ def test_map_errors(gcs):
 
 
 def test_map_with_data(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     d["x"] = b"123"
     assert list(d) == list(d.keys()) == ["x"]
     assert list(d.values()) == [b"123"]
@@ -44,7 +45,7 @@ def test_map_with_data(gcs):
     assert d["x"] == b"123"
     assert bool(d)
 
-    assert gcs.find(root) == [TEST_BUCKET + "/mapping/x"]
+    assert gcs.find(MAPPING_ROOT) == [TEST_BUCKET + "/mapping/x"]
     d["x"] = b"000"
     assert d["x"] == b"000"
 
@@ -57,7 +58,7 @@ def test_map_with_data(gcs):
 
 
 def test_map_complex_keys(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     d[1] = b"hello"
     assert d[1] == b"hello"
     del d[1]
@@ -73,7 +74,7 @@ def test_map_complex_keys(gcs):
 
 
 def test_map_clear_empty(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     d.clear()
     assert list(d) == []
     d[1] = b"1"
@@ -84,7 +85,7 @@ def test_map_clear_empty(gcs):
 
 
 def test_map_pickle(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     d["x"] = b"1"
     assert d["x"] == b"1"
 
@@ -98,14 +99,14 @@ def test_map_pickle(gcs):
 def test_map_array(gcs):
     from array import array
 
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     d["x"] = array("B", [65] * 1000)
 
     assert d["x"] == b"A" * 1000
 
 
 def test_map_bytearray(gcs):
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     d["x"] = bytearray(b"123")
 
     assert d["x"] == b"123"
@@ -134,7 +135,7 @@ def test_new_bucket(gcs):
 def test_map_pickle(gcs):
     import pickle
 
-    d = gcs.get_mapper(root)
+    d = gcs.get_mapper(MAPPING_ROOT)
     d["x"] = b"1234567890"
 
     b = pickle.dumps(d)

@@ -1,9 +1,9 @@
-from base64 import b64encode
 import base64
-from typing import Optional
+from base64 import b64encode
 from hashlib import md5
-from .retry import ChecksumError
+from typing import Optional
 
+from .retry import ChecksumError
 
 try:
     import crcmod

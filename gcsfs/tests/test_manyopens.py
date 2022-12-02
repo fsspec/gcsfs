@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Test helper to open the same file many times.
 
@@ -9,8 +8,9 @@ HTTP exceptions with VCR.
 
 Ideally you should see nothing, just the attempt count go up until we're done.
 """
-from __future__ import print_function
+
 import sys
+
 import gcsfs
 
 
