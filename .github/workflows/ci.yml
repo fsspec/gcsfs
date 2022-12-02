@@ -40,7 +40,7 @@ jobs:
       - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
-          pytest -vv # \
+          pytest -vv \
           --log-format="%(asctime)s %(levelname)s %(message)s" \
           --log-date-format="%H:%M:%S" \
           gcsfs/
