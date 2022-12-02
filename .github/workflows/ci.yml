@@ -21,13 +21,13 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Setup Conda Environment
-        uses: conda-incubator/setup-miniconda@v2
+        uses: mamba-org/provision-with-micromamba@main
         with:
-          auto-update-conda: true
-          miniconda-version: latest
-          activate-environment: gcsfs_test
-          python-version: ${{ matrix.python-version }}
+          cache-downloads: true
           environment-file: environment_gcsfs.yaml
+          environment-name: gcsfs_test
+          extra-specs: |
+            python=${{ matrix.python-version }}
 
       - name: Conda info
         run: |
