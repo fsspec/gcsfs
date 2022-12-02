@@ -10,6 +10,7 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +40,7 @@ jobs:
       - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
-          pytest -vvv --timeout=600 --log-cli-level=DEBUG gcsfs/
+          pytest -vvv --log-cli-level=DEBUG gcsfs/
 
   lint:
     name: lint
