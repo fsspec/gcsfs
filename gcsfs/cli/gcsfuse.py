@@ -1,5 +1,6 @@
-import click
 import logging
+
+import click
 from fuse import FUSE
 
 from gcsfs.gcsfuse import GCSFS
@@ -39,7 +40,7 @@ from gcsfs.gcsfuse import GCSFS
 def main(
     bucket, mount_point, token, project_id, foreground, threads, cache_files, verbose
 ):
-    """ Mount a Google Cloud Storage (GCS) bucket to a local directory """
+    """Mount a Google Cloud Storage (GCS) bucket to a local directory"""
 
     if verbose == 1:
         logging.basicConfig(level=logging.INFO)
@@ -54,7 +55,7 @@ def main(
     if verbose > 1:
         logging.basicConfig(level=logging.DEBUG, format=fmt)
 
-    print("Mounting bucket %s to directory %s" % (bucket, mount_point))
+    print(f"Mounting bucket {bucket} to directory {mount_point}")
     print("foreground:", foreground, ", nothreads:", not threads)
     FUSE(
         GCSFS(bucket, token=token, project=project_id, nfiles=cache_files),

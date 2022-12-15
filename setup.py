@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 
 import os
-from setuptools import setup
-import versioneer
 
+from setuptools import setup
+
+import versioneer
 
 setup(
     name="gcsfs",
     version=versioneer.get_version(),
     cmdclass=versioneer.get_cmdclass(),
     description="Convenient Filesystem interface over GCS",
-    url="https://github.com/dask/gcsfs",
+    url="https://github.com/fsspec/gcsfs",
     maintainer="Martin Durant",
     maintainer_email="mdurant@anaconda.com",
     license="BSD",
@@ -19,9 +20,10 @@ setup(
         "Intended Audience :: Developers",
         "License :: OSI Approved :: BSD License",
         "Operating System :: OS Independent",
-        "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
     ],
     keywords=["google-cloud-storage", "gcloud", "file-system"],
     packages=["gcsfs", "gcsfs.cli"],
@@ -29,7 +31,7 @@ setup(
     long_description=(
         open("README.rst").read() if os.path.exists("README.rst") else ""
     ),
-    extras_require={"gcsfuse": ["fusepy"]},
-    python_requires=">=3.6",
+    extras_require={"gcsfuse": ["fusepy"], "crc": ["crcmod"]},
+    python_requires=">=3.7",
     zip_safe=False,
 )

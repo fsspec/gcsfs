@@ -7,7 +7,7 @@ This software is beta, use at your own risk.
 
 Please file issues and requests on github_ and we welcome pull requests.
 
-.. _github: https://github.com/dask/gcsfs/issues
+.. _github: https://github.com/fsspec/gcsfs/issues
 
 
 This package depends on fsspec_ , and inherits many useful behaviours from there,
@@ -31,7 +31,7 @@ or by cloning the repository:
 
 .. code-block:: bash
 
-   git clone https://github.com/dask/gcsfs/
+   git clone https://github.com/fsspec/gcsfs/
    cd gcsfs/
    pip install .
 
@@ -134,13 +134,13 @@ arguments needed to s3fs.
 Async
 -----
 
-``s3fs`` is implemented using ``aiohttp``, and offers async functionality.
+``gcsfs`` is implemented using ``aiohttp``, and offers async functionality.
 A number of methods of ``GCSFileSystem`` are ``async``, for for each of these,
-there is also a synchronous version with the same name and lack of a ``_``
+there is also a synchronous version with the same name and lack of a "_"
 prefix.
 
 If you wish to call ``gcsfs`` from async code, then you should pass
-``asynchronous=False, loop=`` to the constructor (the latter is optional,
+``asynchronous=True, loop=loop`` to the constructor (the latter is optional,
 if you wish to use both async and sync methods). You must also explicitly
 await the client creation before making any GCS call.
 
@@ -161,6 +161,22 @@ hidden behind a synchronisation layer, so are designed to be called
 from normal code. If you are *not*
 using async-style programming, you do not need to know about how this
 works, but you might find the implementation interesting.
+
+
+Proxy
+-----
+
+``gcsfs`` uses ``aiohttp`` for calls to the storage api, which by default
+ignores ``HTTP_PROXY/HTTPS_PROXY`` environment variables. To read
+proxy settings from the environment provide ``session_kwargs`` as follows:
+
+.. code-block:: python
+
+   fs = GCSFileSystem(project='my-google-project', session_kwargs={'trust_env': True})
+
+For further reference check `aiohttp proxy support`_.
+
+.. _aiohttp proxy support: https://docs.aiohttp.org/en/stable/client_advanced.html?highlight=proxy#proxy-support
 
 
 Contents
