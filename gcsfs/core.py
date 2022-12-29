@@ -1382,7 +1382,7 @@ class GCSFileSystem(AsyncFileSystem):
         """
         from google.cloud import storage
 
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
         client = storage.Client(
             credentials=self.credentials.credentials, project=self.project
         )
