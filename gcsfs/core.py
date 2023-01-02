@@ -1382,13 +1382,15 @@ class GCSFileSystem(AsyncFileSystem):
         """
         from google.cloud import storage
 
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
         client = storage.Client(
             credentials=self.credentials.credentials, project=self.project
         )
         bucket = client.bucket(bucket)
         blob = bucket.blob(key)
-        return blob.generate_signed_url(expiration=expiration, **kwargs)
+        return blob.generate_signed_url(
+            expiration=expiration, generation=generation, **kwargs
+        )
 
 
 GoogleCredentials.load_tokens()
