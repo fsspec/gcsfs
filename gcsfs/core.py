@@ -1388,7 +1388,9 @@ class GCSFileSystem(AsyncFileSystem):
         )
         bucket = client.bucket(bucket)
         blob = bucket.blob(key)
-        return blob.generate_signed_url(expiration=expiration, generation=generation, **kwargs)
+        return blob.generate_signed_url(
+            expiration=expiration, generation=generation, **kwargs
+        )
 
 
 GoogleCredentials.load_tokens()
