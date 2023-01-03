@@ -303,12 +303,6 @@ class GCSFileSystem(AsyncFileSystem):
 
         self.credentials = GoogleCredentials(project, access, token)
 
-        if not self.asynchronous:
-            self._session = sync(
-                self.loop, get_client, timeout=self.timeout, **self.session_kwargs
-            )
-            weakref.finalize(self, self.close_session, self.loop, self._session)
-
     @property
     def _location(self):
         return self._endpoint or _location()
@@ -335,6 +329,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _set_session(self):
         if self._session is None:
             self._session = await get_client(**self.session_kwargs)
+            weakref.finalize(self, self.close_session, self.loop, self._session)
         return self._session
 
     @property
