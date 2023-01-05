@@ -1236,7 +1236,7 @@ class GCSFileSystem(AsyncFileSystem):
         self, rpath, lpath, *args, headers=None, callback=None, **kwargs
     ):
         consistency = kwargs.pop("consistency", self.consistency)
-
+        await self._set_session()
         async with self.session.get(
             url=rpath,
             params=self._get_params(kwargs),
