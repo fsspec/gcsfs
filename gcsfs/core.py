@@ -743,7 +743,7 @@ class GCSFileSystem(AsyncFileSystem):
     rmdir = sync_wrapper(_rmdir)
 
     def modified(self, path):
-        return datetime.fromisoformat(self.info(path)["updated"])
+        return datetime.fromisoformat(self.info(path)["updated"].replace(".", ":"))
 
     def created(self, path):
         return datetime.fromisoformat(self.info(path)["timeCreated"])
