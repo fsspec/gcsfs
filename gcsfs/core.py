@@ -746,7 +746,7 @@ class GCSFileSystem(AsyncFileSystem):
         return datetime.fromisoformat(self.info(path)["updated"].replace(".", ":"))
 
     def created(self, path):
-        return datetime.fromisoformat(self.info(path)["timeCreated"])
+        return datetime.fromisoformat(self.info(path)["timeCreated"].replace(".", ":"))
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
