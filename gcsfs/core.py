@@ -10,6 +10,7 @@ import posixpath
 import re
 import warnings
 import weakref
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
@@ -735,6 +736,17 @@ class GCSFileSystem(AsyncFileSystem):
         self.invalidate_cache("")
 
     rmdir = sync_wrapper(_rmdir)
+
+    def modified(self, path):
+        return self._parse_timestamp(self.info(path)["updated"])
+
+    def created(self, path):
+        return self._parse_timestamp(self.info(path)["timeCreated"])
+
+    def _parse_timestamp(self, timestamp):
+        assert timestamp.endswith("Z")
+        UTC = timezone(timedelta(0))
+        return datetime.fromisoformat(timestamp[:-1]).astimezone(UTC)
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
