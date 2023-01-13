@@ -746,7 +746,9 @@ class GCSFileSystem(AsyncFileSystem):
     def _parse_timestamp(self, timestamp):
         assert timestamp.endswith("Z")
         UTC = timezone(timedelta(0))
-        return datetime.fromisoformat(timestamp[:-1]).astimezone(UTC)
+        timestamp = timestamp[:-1]
+        timestamp = timestamp + "0" * (6 - len(timestamp.rsplit(".", 1)[1]))
+        return datetime.fromisoformat(timestamp).astimezone(UTC)
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
