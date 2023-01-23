@@ -1,6 +1,14 @@
 Changelog
 =========
 
+2023.1.0
+--------
+
+* Support create time (#516, 518)
+* defer async session creation (#513, 514)
+* support listing of file versions (#509)
+* fix ``sign`` following versioned split protocol (#513)
+
 2022.11.0
 ---------
 
