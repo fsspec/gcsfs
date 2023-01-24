@@ -1,11 +1,13 @@
 import datetime
 import io
+import os
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
+import fsspec.core
 import pytest
 import requests
 from fsspec.asyn import sync
@@ -1215,3 +1217,124 @@ def test_find_versioned(gcs_versioned):
     versions = {f"{a}#{v1}", f"{a}#{v2}"}
     assert versions == set(gcs_versioned.find(a, versions=True))
     assert versions == set(gcs_versioned.find(a, detail=True, versions=True))
+
+
+def test_cp_directory_recursive(gcs):
+    src = TEST_BUCKET + "/src"
+    src_file = src + "/file"
+    gcs.mkdir(src)
+    gcs.touch(src_file)
+
+    target = TEST_BUCKET + "/target"
+
+    # cp without slash
+    assert not gcs.exists(target)
+    for loop in range(2):
+        gcs.cp(src, target, recursive=True)
+        assert gcs.isdir(target)
+
+        if loop == 0:
+            correct = [target + "/file"]
+            assert gcs.find(target) == correct
+        else:
+            correct = [target + "/file", target + "/src/file"]
+            assert sorted(gcs.find(target)) == correct
+
+    gcs.rm(target, recursive=True)
+
+    # cp with slash
+    assert not gcs.exists(target)
+    for loop in range(2):
+        gcs.cp(src + "/", target, recursive=True)
+        assert gcs.isdir(target)
+        correct = [target + "/file"]
+        assert gcs.find(target) == correct
+
+
+def test_get_directory_recursive(gcs):
+    src = TEST_BUCKET + "/src"
+    src_file = src + "/file"
+    gcs.mkdir(src)
+    gcs.touch(src_file)
+
+    with tempdir() as tmpdir:
+        target = os.path.join(tmpdir, "target")
+        target_fs = fsspec.filesystem("file")
+
+        # get without slash
+        assert not target_fs.exists(target)
+        for loop in range(2):
+            gcs.get(src, target, recursive=True)
+            assert target_fs.isdir(target)
+
+            if loop == 0:
+                assert target_fs.find(target) == [os.path.join(target, "file")]
+            else:
+                assert sorted(target_fs.find(target)) == [
+                    os.path.join(target, "file"),
+                    os.path.join(target, "src", "file"),
+                ]
+
+        target_fs.rm(target, recursive=True)
+
+        # get with slash
+        assert not target_fs.exists(target)
+        for loop in range(2):
+            gcs.get(src + "/", target, recursive=True)
+            assert target_fs.isdir(target)
+            assert target_fs.find(target) == [os.path.join(target, "file")]
+
+
+def test_put_directory_recursive(gcs):
+    with tempdir() as tmpdir:
+        src = os.path.join(tmpdir, "src")
+        src_file = os.path.join(src, "file")
+
+        source_fs = fsspec.filesystem("file")
+        source_fs.mkdir(src)
+        source_fs.touch(src_file)
+
+        target = TEST_BUCKET + "/target"
+
+        # put without slash
+        assert not gcs.exists(target)
+        for loop in range(2):
+            gcs.put(src, target, recursive=True)
+            assert gcs.isdir(target)
+
+            if loop == 0:
+                assert gcs.find(target) == [target + "/file"]
+            else:
+                assert sorted(gcs.find(target)) == [
+                    target + "/file",
+                    target + "/src/file",
+                ]
+
+        gcs.rm(target, recursive=True)
+
+        # put with slash
+        assert not gcs.exists(target)
+        for loop in range(2):
+            gcs.put(src + "/", target, recursive=True)
+            assert gcs.isdir(target)
+            assert gcs.find(target) == [target + "/file"]
+
+
+def test_cp_two_files(gcs):
+    src = TEST_BUCKET + "/src"
+    file0 = src + "/file0"
+    file1 = src + "/file1"
+    gcs.mkdir(src)
+    gcs.touch(file0)
+    gcs.touch(file1)
+
+    target = TEST_BUCKET + "/target"
+    assert not gcs.exists(target)
+
+    gcs.cp([file0, file1], target)
+
+    assert gcs.isdir(target)
+    assert sorted(gcs.find(target)) == [
+        target + "/file0",
+        target + "/file1",
+    ]
