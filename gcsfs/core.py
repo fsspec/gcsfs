@@ -835,15 +835,10 @@ class GCSFileSystem(AsyncFileSystem):
             for entry in await self._list_objects(
                 path, prefix=prefix, versions=versions
             ):
-                if versions:
-                    out.append(
-                        {
-                            **entry,
-                            "name": f"{entry['name']}#{entry['generation']}",
-                        }
-                    )
-                else:
-                    out.append(entry)
+                if versions and "generation" in entry:
+                    entry = entry.copy()
+                    entry["name"] = f"{entry['name']}#{entry['generation']}"
+                out.append(entry)
 
         if detail:
             return out
