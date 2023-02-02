@@ -1680,7 +1680,7 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     range = "bytes %i-%i/%i" % (offset, offset + l - 1, size)
     head["Content-Range"] = range
     head.update({"Content-Type": content_type, "Content-Length": str(l)})
-    headers, txt = await fs._call("POST", location, headers=head, data=data)
+    headers, txt = await fs._call("POST", location, headers=head, data=io.BytesIO(data))
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])
         shortfall = (offset + l - 1) - end
@@ -1746,7 +1746,7 @@ async def simple_upload(
         path,
         uploadType="multipart",
         headers={"Content-Type": 'multipart/related; boundary="==0=="'},
-        data=data,
+        data=io.BytesIO(data),
         json_out=True,
     )
     checker.update(datain)
