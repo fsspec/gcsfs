@@ -10,7 +10,7 @@ import posixpath
 import re
 import warnings
 import weakref
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
@@ -745,10 +745,9 @@ class GCSFileSystem(AsyncFileSystem):
 
     def _parse_timestamp(self, timestamp):
         assert timestamp.endswith("Z")
-        UTC = timezone(timedelta(0))
         timestamp = timestamp[:-1]
         timestamp = timestamp + "0" * (6 - len(timestamp.rsplit(".", 1)[1]))
-        return datetime.fromisoformat(timestamp).astimezone(UTC)
+        return datetime.fromisoformat(timestamp + "+00:00")
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
