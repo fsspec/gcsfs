@@ -10,7 +10,7 @@ Please file issues and requests on github_ and we welcome pull requests.
 .. _github: https://github.com/fsspec/gcsfs/issues
 
 
-This package depends on fsspec_ , and inherits many useful behaviours from there,
+This package depends on fsspec_, and inherits many useful behaviours from there,
 including integration with Dask, and the facility for key-value dict-like
 objects of the type used by zarr.
 
@@ -19,12 +19,16 @@ objects of the type used by zarr.
 Installation
 ------------
 
-The GCSFS library can be installed using ``conda`` or ``pip``:
+The GCSFS library can be installed using ``conda``:
 
 .. code-block:: bash
 
    conda install -c conda-forge gcsfs
-   or
+
+or ``pip``:
+
+.. code-block:: bash
+
    pip install gcsfs
 
 or by cloning the repository:
@@ -50,7 +54,7 @@ Locate and read a file:
    ...     print(f.read())
    b'Hello, world'
 
-(see also ``walk`` and ``glob``)
+(see also :meth:`~gcsfs.core.GCSFileSystem.walk` and :meth:`~gcsfs.core.GCSFileSystem.glob`)
 
 Read with delimited blocks:
 
@@ -128,7 +132,7 @@ to ``GCSFileSystem``, for example:
                       storage_options={"token": "anon"})
 
 This gives the chance to pass any credentials or other necessary
-arguments needed to s3fs.
+arguments needed to gcsfs.
 
 
 Async
@@ -176,7 +180,7 @@ proxy settings from the environment provide ``session_kwargs`` as follows:
 
 For further reference check `aiohttp proxy support`_.
 
-.. _aiohttp proxy support: https://docs.aiohttp.org/en/stable/client_advanced.html?highlight=proxy#proxy-support
+.. _aiohttp proxy support: https://docs.aiohttp.org/en/stable/client_advanced.html#proxy-support
 
 
 Contents
