@@ -149,7 +149,7 @@ class GCSFileSystem(AsyncFileSystem):
       metadata service, anonymous.
     - ``token='google_default'``, your default gcloud credentials will be used,
       which are typically established by doing ``gcloud login`` in a terminal.
-    - ``token=='cache'``, credentials from previously successful gcsfs
+    - ``token='cache'``, credentials from previously successful gcsfs
       authentication will be used (use this after "browser" auth succeeded)
     - ``token='anon'``, no authentication is performed, and you can only
       access data which is accessible to allUsers (in this case, the project and
@@ -166,10 +166,10 @@ class GCSFileSystem(AsyncFileSystem):
       or a Credentials object. gcloud typically stores its tokens in locations
       such as
       ``~/.config/gcloud/application_default_credentials.json``,
-      `` ~/.config/gcloud/credentials``, or
+      ``~/.config/gcloud/credentials``, or
       ``~\AppData\Roaming\gcloud\credentials``, etc.
 
-    Specific methods, (eg. `ls`, `info`, ...) may return object details from GCS.
+    Specific methods, (eg. ``ls``, ``info``, ...) may return object details from GCS.
     These detailed listings include the
     [object resource](https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
 
@@ -199,8 +199,8 @@ class GCSFileSystem(AsyncFileSystem):
     created via other processes *will not* be visible to the GCSFileSystem until the cache
     refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not effected by this cache.
 
-    In the default case the cache is never expired. This may be controlled via the `cache_timeout`
-    GCSFileSystem parameter or via explicit calls to `GCSFileSystem.invalidate_cache`.
+    In the default case the cache is never expired. This may be controlled via the ``cache_timeout``
+    GCSFileSystem parameter or via explicit calls to ``GCSFileSystem.invalidate_cache``.
 
     Parameters
     ----------
@@ -225,11 +225,11 @@ class GCSFileSystem(AsyncFileSystem):
     secure_serialize: bool (deprecated)
     requester_pays : bool, or str default False
         Whether to use requester-pays requests. This will include your
-        project ID `project` in requests as the `userPorject`, and you'll be
+        project ID `project` in requests as the `userProject`, and you'll be
         billed for accessing data from requester-pays buckets. Optionally,
         pass a project-id here as a string to use that as the `userProject`.
     session_kwargs: dict
-        passed on to aiohttp.ClientSession; can contain, for example,
+        passed on to ``aiohttp.ClientSession``; can contain, for example,
         proxy settings.
     endpoint_url: str
         If given, use this URL (format protocol://host:port , *without* any
@@ -887,7 +887,7 @@ class GCSFileSystem(AsyncFileSystem):
         fake-gcs-server:latest does not seem to support this.
 
         Parameters
-        ---------
+        ----------
         content_type: str
             If not None, set the content-type to this value
         content_encoding: str
@@ -901,6 +901,7 @@ class GCSFileSystem(AsyncFileSystem):
                 - content_encoding
                 - content_language
                 - custom_time
+
             More info:
             https://cloud.google.com/storage/docs/metadata#mutable
         kw_args: key-value pairs like field="value" or field=None

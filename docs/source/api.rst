@@ -38,8 +38,10 @@ API
 
 .. autoclass:: GCSFileSystem
    :members:
+   :inherited-members:
 
 .. autoclass:: GCSFile
    :members:
+   :inherited-members:
 
 .. currentmodule:: gcsfs.mapping
