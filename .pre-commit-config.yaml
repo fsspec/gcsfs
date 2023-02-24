@@ -18,15 +18,11 @@ repos:
     rev: 6.0.0
     hooks:
       - id: flake8
-        files: gcsfs/
-  - repo: https://github.com/pycqa/isort
-    rev: 5.10.1
+  - repo: https://github.com/asottile/seed-isort-config
+    rev: v2.2.0
+    hooks:
+      - id: seed-isort-config
+  - repo: https://github.com/pre-commit/mirrors-isort
+    rev: v5.7.0
     hooks:
       - id: isort
-        args: ["--profile", "black", "--filter-files"]
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v3.2.3
-    hooks:
-      - id: pyupgrade
-        args:
-          - --py37-plus
