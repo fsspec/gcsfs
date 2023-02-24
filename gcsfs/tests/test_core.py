@@ -14,12 +14,16 @@ from fsspec.asyn import sync
 from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
+import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
-from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
+
+TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
+TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
+TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 
 
 def test_simple(gcs):
