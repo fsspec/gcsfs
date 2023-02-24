@@ -1339,3 +1339,24 @@ def test_cp_two_files(gcs):
         target + "/file0",
         target + "/file1",
     ]
+
+
+def test_multiglob(gcs):
+    # #530
+    root = TEST_BUCKET
+
+    ggparent = root + "/t1"
+    gparent = ggparent + "/t2"
+    parent = gparent + "/t3"
+    leaf1 = parent + "/foo.txt"
+    leaf2 = parent + "/bar.txt"
+    leaf3 = parent + "/baz.txt"
+
+    gcs.touch(leaf1)
+    gcs.touch(leaf2)
+    gcs.touch(leaf3)
+    gcs.invalidate_cache()
+
+    assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]
+    gcs.glob(ggparent + "/")
+    assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]
