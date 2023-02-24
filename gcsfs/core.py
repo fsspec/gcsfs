@@ -1201,7 +1201,6 @@ class GCSFileSystem(AsyncFileSystem):
         dirs = {}
         cache_entries = {}
 
-        done = set()
         for obj in objects:
             parent = self._parent(obj["name"])
             previous = obj
@@ -1210,20 +1209,20 @@ class GCSFileSystem(AsyncFileSystem):
                 dir_key = self.split_path(parent)[1]
                 if not dir_key or len(parent) < len(path):
                     break
-                if dir_key not in done:
-                    done.add(dir_key)
 
-                    dirs[parent] = {
-                        "Key": dir_key,
-                        "Size": 0,
-                        "name": parent,
-                        "StorageClass": "DIRECTORY",
-                        "type": "directory",
-                        "size": 0,
-                    }
+                dirs[parent] = {
+                    "Key": dir_key,
+                    "Size": 0,
+                    "name": parent,
+                    "StorageClass": "DIRECTORY",
+                    "type": "directory",
+                    "size": 0,
+                }
 
-                    print(parent, previous)
-                    cache_entries.setdefault(parent, []).append(previous)
+                print(parent, previous)
+                listing = cache_entries.setdefault(parent, [])
+                if previous not in listing:
+                    listing.append(previous)
 
                 previous = dirs[parent]
                 parent = self._parent(parent)
