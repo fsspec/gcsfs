@@ -14,12 +14,16 @@ from fsspec.asyn import sync
 from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
+import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
-from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
+
+TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
+TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
+TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 
 
 def test_simple(gcs):
@@ -1339,3 +1343,24 @@ def test_cp_two_files(gcs):
         target + "/file0",
         target + "/file1",
     ]
+
+
+def test_multiglob(gcs):
+    # #530
+    root = TEST_BUCKET
+
+    ggparent = root + "/t1"
+    gparent = ggparent + "/t2"
+    parent = gparent + "/t3"
+    leaf1 = parent + "/foo.txt"
+    leaf2 = parent + "/bar.txt"
+    leaf3 = parent + "/baz.txt"
+
+    gcs.touch(leaf1)
+    gcs.touch(leaf2)
+    gcs.touch(leaf3)
+    gcs.invalidate_cache()
+
+    assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]
+    gcs.glob(ggparent + "/")
+    assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]

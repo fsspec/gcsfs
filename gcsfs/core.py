@@ -1220,7 +1220,10 @@ class GCSFileSystem(AsyncFileSystem):
                     "size": 0,
                 }
 
-                cache_entries.setdefault(parent, []).append(previous)
+                print(parent, previous)
+                listing = cache_entries.setdefault(parent, [])
+                if previous not in listing:
+                    listing.append(previous)
 
                 previous = dirs[parent]
                 parent = self._parent(parent)
