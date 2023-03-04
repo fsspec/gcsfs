@@ -1,6 +1,17 @@
 Changelog
 =========
 
+2023.3.0
+--------
+
+* Don't let find() mess up dircache (#531)
+* Drop py3.7 (#529)
+* Update docs (#528)
+* Make times UTC (#527)
+* Use BytesIO for large bodies (#525)
+* Fix: Don't append generation when it is absent (#523)
+* get/put/cp consistency tests (#521)
+
 2023.1.0
 --------
 
