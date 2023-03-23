@@ -37,6 +37,14 @@ jobs:
       - name: Install libfuse
         run: (sudo apt-get install -y fuse || echo "Error installing fuse.")
 
+      - name: Install
+        shell: bash -l {0}
+        run: |
+          # Temporary fix so that fsspec.tests is available.
+          pip install -ve git+https://github.com/fsspec/filesystem_spec#egg=fsspec
+          #pip install git+https://github.com/fsspec/filesystem_spec
+          pip install . --no-deps
+
       - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
