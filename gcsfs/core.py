@@ -96,6 +96,11 @@ async def _req_to_text(r):
         return (await r.read()).decode()
 
 
+class UnclosableBytesIO(io.BytesIO):
+    def close(self):
+        pass
+
+
 def _location():
     """
     Resolves GCS HTTP location as http[s]://host
@@ -1564,7 +1569,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 shortfall = (self.offset + l - 1) - end
                 if shortfall > 0:
                     self.checker.update(data[:-shortfall])
-                    self.buffer = io.BytesIO(data[-shortfall:])
+                    self.buffer = UnclosableBytesIO(data[-shortfall:])
                     self.buffer.seek(shortfall)
                     self.offset += l - shortfall
                     continue
@@ -1577,7 +1582,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     self.checker.update(data)
                     self.checker.validate_json_response(j)
             # Clear buffer and update offset when all is received
-            self.buffer = io.BytesIO()
+            self.buffer = UnclosableBytesIO()
             self.offset += l
             break
         return True
@@ -1682,7 +1687,9 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     range = "bytes %i-%i/%i" % (offset, offset + l - 1, size)
     head["Content-Range"] = range
     head.update({"Content-Type": content_type, "Content-Length": str(l)})
-    headers, txt = await fs._call("POST", location, headers=head, data=io.BytesIO(data))
+    headers, txt = await fs._call(
+        "POST", location, headers=head, data=UnclosableBytesIO(data)
+    )
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])
         shortfall = (offset + l - 1) - end
@@ -1748,7 +1755,7 @@ async def simple_upload(
         path,
         uploadType="multipart",
         headers={"Content-Type": 'multipart/related; boundary="==0=="'},
-        data=io.BytesIO(data),
+        data=UnclosableBytesIO(data),
         json_out=True,
     )
     checker.update(datain)
