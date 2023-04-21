@@ -1051,7 +1051,7 @@ class GCSFileSystem(AsyncFileSystem):
 
     @property
     def on_google(self):
-        return "torage.googleapis.com" in self._location
+        return "storage.googleapis.com" in self._location
 
     async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
