@@ -1572,9 +1572,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 shortfall = (self.offset + l - 1) - end
                 if shortfall > 0:
                     self.checker.update(data[:-shortfall])
-                    self.buffer = 
-                    
-                    leBytesIO(data[-shortfall:])
+                    self.buffer = UnclosableBytesIO(data[-shortfall:])
                     self.buffer.seek(shortfall)
                     self.offset += l - shortfall
                     continue
