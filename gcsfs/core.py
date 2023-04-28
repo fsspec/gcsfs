@@ -97,7 +97,10 @@ async def _req_to_text(r):
 
 
 class UnclosableBytesIO(io.BytesIO):
+    """Prevent closing BytesIO to avoid errors during retries."""
+    
     def close(self):
+        """Reset stream position for next retry."""
         self.seek(0)
 
 
@@ -1569,7 +1572,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 shortfall = (self.offset + l - 1) - end
                 if shortfall > 0:
                     self.checker.update(data[:-shortfall])
-                    self.buffer = UnclosableBytesIO(data[-shortfall:])
+                    self.buffer = 
+                    
+                    leBytesIO(data[-shortfall:])
                     self.buffer.seek(shortfall)
                     self.offset += l - shortfall
                     continue
