@@ -98,7 +98,7 @@ async def _req_to_text(r):
 
 class UnclosableBytesIO(io.BytesIO):
     def close(self):
-        pass
+        self.seek(0)
 
 
 def _location():
