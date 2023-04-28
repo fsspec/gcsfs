@@ -97,7 +97,10 @@ async def _req_to_text(r):
 
 
 class UnclosableBytesIO(io.BytesIO):
+    """Prevent closing BytesIO to avoid errors during retries."""
+    
     def close(self):
+        """Reset stream position for next retry."""
         self.seek(0)
 
 
