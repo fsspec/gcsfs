@@ -115,9 +115,13 @@ def _location():
     valid http location
     """
     _emulator_location = os.getenv("STORAGE_EMULATOR_HOST", None)
-    return (
-        _emulator_location if _emulator_location else "https://storage.googleapis.com"
-    )
+    if _emulator_location:
+        if not any(
+            _emulator_location.startswith(scheme) for scheme in ("http://", "https://")
+        ):
+            _emulator_location = f"http://{_emulator_location}"
+        return _emulator_location
+    return "https://storage.googleapis.com"
 
 
 def _chunks(lst, n):
@@ -410,7 +414,6 @@ class GCSFileSystem(AsyncFileSystem):
             data=data,
             timeout=self.requests_timeout,
         ) as r:
-
             status = r.status
             headers = r.headers
             info = r.request_info  # for debug only
