@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2023.5.0
+--------
+
+* Allow emulator host without protocol (#548)
+* Prevent upload retry from closing the file being sent (#540)
+
 2023.4.0
 --------
 
