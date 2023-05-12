@@ -1105,6 +1105,7 @@ class GCSFileSystem(AsyncFileSystem):
         metadata=None,
         consistency=None,
         content_type="application/octet-stream",
+        fixed_key_metadata=None,
         chunksize=50 * 2**20,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1114,10 +1115,24 @@ class GCSFileSystem(AsyncFileSystem):
         out = None
         if size < 5 * 2**20:
             location = await simple_upload(
-                self, bucket, key, data, metadata, consistency, content_type
+                self,
+                bucket,
+                key,
+                data,
+                metadata,
+                consistency,
+                content_type,
+                fixed_key_metadata=fixed_key_metadata,
             )
         else:
-            location = await initiate_upload(self, bucket, key, content_type, metadata)
+            location = await initiate_upload(
+                self,
+                bucket,
+                key,
+                content_type,
+                metadata,
+                fixed_key_metadata=fixed_key_metadata,
+            )
             for offset in range(0, len(data), chunksize):
                 bit = data[offset : offset + chunksize]
                 out = await upload_chunk(
@@ -1140,6 +1155,7 @@ class GCSFileSystem(AsyncFileSystem):
         content_type="application/octet-stream",
         chunksize=50 * 2**20,
         callback=None,
+        fixed_key_metadata=None,
         **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1165,12 +1181,18 @@ class GCSFileSystem(AsyncFileSystem):
                     consistency=consistency,
                     metadatain=metadata,
                     content_type=content_type,
+                    fixed_key_metadata=fixed_key_metadata,
                 )
                 callback.absolute_update(size)
 
             else:
                 location = await initiate_upload(
-                    self, bucket, key, content_type, metadata
+                    self,
+                    bucket,
+                    key,
+                    content_type,
+                    metadata=metadata,
+                    fixed_key_metadata=fixed_key_metadata,
                 )
                 offset = 0
                 while True:
