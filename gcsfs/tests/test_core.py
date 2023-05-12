@@ -1364,3 +1364,10 @@ def test_multiglob(gcs):
     assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]
     gcs.glob(ggparent + "/")
     assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]
+
+
+def test_expiry_keyword():
+    gcs = GCSFileSystem(listings_expiry_time=1, token="anon")
+    assert gcs.dircache.listings_expiry_time == 1
+    gcs = GCSFileSystem(cache_timeout=1, token="anon")
+    assert gcs.dircache.listings_expiry_time == 1

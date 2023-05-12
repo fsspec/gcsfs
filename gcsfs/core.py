@@ -284,9 +284,10 @@ class GCSFileSystem(AsyncFileSystem):
         version_aware=False,
         **kwargs,
     ):
+        if cache_timeout:
+            kwargs["listings_expiry_time"] = cache_timeout
         super().__init__(
             self,
-            listings_expiry_time=cache_timeout,
             asynchronous=asynchronous,
             loop=loop,
             **kwargs,
