@@ -150,14 +150,11 @@ await the client creation before making any GCS call.
 
 .. code-block:: python
 
-    loop = ...  # however you create your loop
+    async def run_program():
+        gcs = GCSFileSystem(asynchronous=True)
+        print(await gcs._ls(""))
 
-    async def run_program(loop):
-        gcs = GCSFileSystem(..., asynchronous=True, loop=loop)
-        await gcs.set_session()
-        ...  # perform work
-
-    asyncio.run(run_program(loop))  # or call from your async code
+    asyncio.run(run_program())  # or call from your async code
 
 Concurrent async operations are also used internally for bulk operations
 such as ``pipe/cat``, ``get/put``, ``cp/mv/rm``. The async calls are
@@ -166,6 +163,10 @@ from normal code. If you are *not*
 using async-style programming, you do not need to know about how this
 works, but you might find the implementation interesting.
 
+For every synchronous function there is asynchronous one prefixed by ``_``, but
+the ``open`` operation does not support async operation. If you need it to open
+some file in async manner, it's better to asynchronously download it to
+temporary location and working with it from there.
 
 Proxy
 -----
