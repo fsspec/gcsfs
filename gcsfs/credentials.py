@@ -132,6 +132,12 @@ class GoogleCredentials:
             )
         return token
 
+    def _raw_token_to_credentials(self, token: str):
+        try:
+            return Credentials(token)
+        except Exception:
+            raise ValueError(f"Unable to create Credentials from token: {token}")
+
     def _connect_token(self, token):
         """
         Connect using a concrete token
@@ -139,22 +145,24 @@ class GoogleCredentials:
         Parameters
         ----------
         token: str, dict or Credentials
-            If a str, try to load as a Service file, or next as a JSON; if
+            If a str and a valid file name, try to load as a Service file, or next as a JSON;
+            if not a valid file name, assume it's a valid raw token, and pass to Credentials. If
             dict, try to interpret as credentials; if Credentials, use directly.
         """
         if isinstance(token, str):
-            if not os.path.exists(token):
-                raise FileNotFoundError(token)
-            try:
-                # is this a "service" token?
-                self._connect_service(token)
-                return
-            except:  # noqa: E722
-                # TODO: catch specific exceptions
-                # some other kind of token file
-                # will raise exception if is not json
-                with open(token) as data:
-                    token = json.load(data)
+            if os.path.exists(token):
+                try:
+                    # is this a "service" token?
+                    self._connect_service(token)
+                    return
+                except:  # noqa: E722
+                    # TODO: catch specific exceptions
+                    # some other kind of token file
+                    # will raise exception if is not json
+                    with open(token) as data:
+                        token = json.load(data)
+            else:
+                token = self._raw_token_to_credentials(token)
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
         elif isinstance(token, google.auth.credentials.Credentials):
