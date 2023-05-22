@@ -132,12 +132,6 @@ class GoogleCredentials:
             )
         return token
 
-    def _raw_token_to_credentials(self, token: str):
-        try:
-            return Credentials(token)
-        except Exception:
-            raise ValueError(f"Unable to create Credentials from token: {token}")
-
     def _connect_token(self, token):
         """
         Connect using a concrete token
@@ -162,7 +156,7 @@ class GoogleCredentials:
                     with open(token) as data:
                         token = json.load(data)
             else:
-                token = self._raw_token_to_credentials(token)
+                token = Credentials(token)
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
         elif isinstance(token, google.auth.credentials.Credentials):
