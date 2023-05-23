@@ -1,7 +1,7 @@
 import pytest
 
-from gcsfs.credentials import GoogleCredentials
 from gcsfs import GCSFileSystem
+from gcsfs.credentials import GoogleCredentials
 from gcsfs.retry import HttpError
 
 
