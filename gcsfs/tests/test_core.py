@@ -266,6 +266,11 @@ def test_ls_detail(gcs):
     L = gcs.ls(TEST_BUCKET + "/nested", detail=True)
     assert all(isinstance(item, dict) for item in L)
 
+@pytest.mark.parametrize("refresh", (False, True))
+def test_ls_refresh(gcs, refresh):
+    with mock.patch.object(gcs, "invalidate_cache") as mock_invalidate_cache:
+        gcs.ls(TEST_BUCKET, refresh=refresh)
+    assert mock_invalidate_cache.called is refresh
 
 def test_gcs_glob(gcs):
     fn = TEST_BUCKET + "/nested/file1"
