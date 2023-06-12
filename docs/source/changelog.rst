@@ -1,6 +1,13 @@
 Changelog
 =========
 
+2023.6.0
+--------
+
+* allow raw/session token for auth (#554)
+* fix listings_expiry_time kwargs (#551)
+* allow setting fixed metadata on put/pipe (#550)
+
 2023.5.0
 --------
 
