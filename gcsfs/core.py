@@ -1263,7 +1263,8 @@ class GCSFileSystem(AsyncFileSystem):
                 parent = self._parent(parent)
 
         if not prefix:
-            self.dircache.update(cache_entries)
+            cache_entries_list = {k: list(v.values()) for k, v in cache_entries.items()}
+            self.dircache.update(cache_entries_list)
 
         if withdirs:
             objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
