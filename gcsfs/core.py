@@ -462,9 +462,9 @@ class GCSFileSystem(AsyncFileSystem):
         # Translate time metadata from GCS names to fsspec standard names.
         # TODO(issues/559): Remove legacy names `updated` and `timeCreated`?
         if "updated" in object_metadata:
-            result["mtime"] = object_metadata["updated"]
+            result["mtime"] = self._parse_timestamp(object_metadata["updated"])
         if "timeCreated" in object_metadata:
-            result["ctime"] = object_metadata["timeCreated"]
+            result["ctime"] = self._parse_timestamp(object_metadata["timeCreated"])
         if "generation" in object_metadata or "metageneration" in object_metadata:
             result["generation"] = object_metadata.get("generation")
             result["metageneration"] = object_metadata.get("metageneration")
@@ -756,10 +756,10 @@ class GCSFileSystem(AsyncFileSystem):
     rmdir = sync_wrapper(_rmdir)
 
     def modified(self, path):
-        return self._parse_timestamp(self.info(path)["mtime"])
+        return self.info(path)["mtime"]
 
     def created(self, path):
-        return self._parse_timestamp(self.info(path)["ctime"])
+        return self.info(path)["ctime"]
 
     def _parse_timestamp(self, timestamp):
         assert timestamp.endswith("Z")
