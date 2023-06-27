@@ -128,6 +128,9 @@ def test_info(gcs):
     today = datetime.date.today().isoformat()
     assert gcs.created(a).isoformat().startswith(today)
     assert gcs.modified(a).isoformat().startswith(today)
+    # Check conformance with expected info attribute names.
+    assert gcs.info(a)["ctime"] == gcs.created(a)
+    assert gcs.info(a)["mtime"] == gcs.modified(a)
 
 
 def test_ls2(gcs):
