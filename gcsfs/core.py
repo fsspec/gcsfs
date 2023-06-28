@@ -1006,6 +1006,7 @@ class GCSFileSystem(AsyncFileSystem):
                 json_out=True,
                 sourceGeneration=g1,
             )
+        self.invalidate_cache(self._parent(path2))
 
     async def _rm_file(self, path, **kwargs):
         bucket, key, generation = self.split_path(path)
