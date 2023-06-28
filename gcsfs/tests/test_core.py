@@ -1374,3 +1374,24 @@ def test_expiry_keyword():
     assert gcs.dircache.listings_expiry_time == 1
     gcs = GCSFileSystem(cache_timeout=1, token="anon")
     assert gcs.dircache.listings_expiry_time == 1
+
+
+def test_copy_cache_invalidated(gcs):
+    # Issue https://github.com/fsspec/gcsfs/issues/562
+    source = TEST_BUCKET + "/source"
+    gcs.mkdir(source)
+    gcs.touch(source + "/file2")
+
+    target = TEST_BUCKET + "/target"
+    assert not gcs.exists(target)
+    gcs.touch(target + "/dummy")
+    assert gcs.isdir(target)
+
+    target_file2 = target + "/file2"
+    gcs.cp(source + "/file2", target)
+
+    # Explicitly check that target has been removed from DirCache
+    assert target not in gcs.dircache
+
+    # Prior to fix the following failed as cache stale
+    assert gcs.isfile(target_file2)
