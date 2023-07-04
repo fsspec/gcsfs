@@ -1225,10 +1225,20 @@ class GCSFileSystem(AsyncFileSystem):
             return False
 
     async def _find(
-        self, path, withdirs=False, detail=False, prefix="", versions=False, **kwargs
+        self,
+        path,
+        withdirs=False,
+        detail=False,
+        prefix="",
+        versions=False,
+        maxdepth=None,
+        **kwargs,
     ):
         path = self._strip_protocol(path)
         bucket, key, generation = self.split_path(path)
+
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
 
         if prefix:
             _path = "" if not key else key.rstrip("/") + "/"
@@ -1275,6 +1285,11 @@ class GCSFileSystem(AsyncFileSystem):
 
         if withdirs:
             objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
+
+        if maxdepth:
+            # Filter returned objects based on requested maxdepth
+            depth = path.count("/") + maxdepth
+            objects = list(filter(lambda o: o["name"].count("/") <= depth, objects))
 
         if detail:
             if versions:

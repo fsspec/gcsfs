@@ -1006,10 +1006,16 @@ def test_put_small_cache_validity(gcs):
 def test_pseudo_dir_find(gcs):
     gcs.rm(f"{TEST_BUCKET}/*", recursive=True)
     gcs.touch(f"{TEST_BUCKET}/a/b/file")
+
+    c = gcs.glob(f"{TEST_BUCKET}/a/b/*")
+    assert c == [f"{TEST_BUCKET}/a/b/file"]
+
     b = set(gcs.glob(f"{TEST_BUCKET}/a/*"))
-    assert f"{TEST_BUCKET}/a/b" in b
+    assert b == {f"{TEST_BUCKET}/a/b"}
+
     a = set(gcs.glob(f"{TEST_BUCKET}/*"))
-    assert f"{TEST_BUCKET}/a" in a
+    assert a == {f"{TEST_BUCKET}/a"}
+
     assert gcs.find(TEST_BUCKET) == [f"{TEST_BUCKET}/a/b/file"]
     assert gcs.find(f"{TEST_BUCKET}/a", withdirs=True) == [
         f"{TEST_BUCKET}/a",
@@ -1395,3 +1401,36 @@ def test_copy_cache_invalidated(gcs):
 
     # Prior to fix the following failed as cache stale
     assert gcs.isfile(target_file2)
+
+
+def test_find_maxdepth(gcs):
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=None) == [
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+        f"{TEST_BUCKET}/nested/nested2/file1",
+        f"{TEST_BUCKET}/nested/nested2/file2",
+    ]
+
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=None, withdirs=True) == [
+        f"{TEST_BUCKET}/nested",
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+        f"{TEST_BUCKET}/nested/nested2",
+        f"{TEST_BUCKET}/nested/nested2/file1",
+        f"{TEST_BUCKET}/nested/nested2/file2",
+    ]
+
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=1) == [
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+    ]
+
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=1, withdirs=True) == [
+        f"{TEST_BUCKET}/nested",
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+        f"{TEST_BUCKET}/nested/nested2",
+    ]
+
+    with pytest.raises(ValueError, match="maxdepth must be at least 1"):
+        gcs.find(f"{TEST_BUCKET}/nested", maxdepth=0)
