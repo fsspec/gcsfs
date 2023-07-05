@@ -8,14 +8,8 @@ import requests
 from fsspec import filesystem
 from fsspec.tests.abstract import AbstractFixtures
 
-import gcsfs.tests.settings
-from gcsfs.core import GCSFileSystem
-
-TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
-
-
-def _container():
-    return "gcsfs_test"
+from gcsfs import GCSFileSystem
+from gcsfs.tests.settings import TEST_BUCKET
 
 
 def _stop_docker(container):
@@ -26,19 +20,19 @@ def _stop_docker(container):
 
 
 class GcsfsFixtures(AbstractFixtures):
-    @staticmethod
-    @pytest.fixture
-    def fs(_gcs):
+    @pytest.fixture(scope="class")
+    def fs(self, _gcs):
         return _gcs
 
-    @staticmethod
     @pytest.fixture
-    def fs_path():
+    def fs_path(self):
         return TEST_BUCKET
 
-    @staticmethod
-    @pytest.fixture
-    def _docker_gcs(scope="module"):
+    def supports_empty_directories(self):
+        return False
+
+    @pytest.fixture(scope="class")
+    def _docker_gcs(self, scope="module"):
         if "STORAGE_EMULATOR_HOST" in os.environ:
             # assume using real API or otherwise have a server already set up
             yield os.getenv("STORAGE_EMULATOR_HOST")
@@ -48,7 +42,7 @@ class GcsfsFixtures(AbstractFixtures):
             "http -public-host http://localhost:4443 -external-url http://localhost:4443 "
             "-backend memory"
         )
-        container = _container()
+        container = "gcsfs_test"
         _stop_docker(container)
         subprocess.check_output(shlex.split(cmd))
         url = "http://0.0.0.0:4443"
@@ -66,9 +60,8 @@ class GcsfsFixtures(AbstractFixtures):
                 time.sleep(1)
         _stop_docker(container)
 
-    @staticmethod
-    @pytest.fixture
-    def _gcs_factory(_docker_gcs):
+    @pytest.fixture(scope="class")
+    def _gcs_factory(self, _docker_gcs):
         def factory(default_location=None):
             GCSFileSystem.clear_instance_cache()
             return filesystem(
@@ -77,9 +70,8 @@ class GcsfsFixtures(AbstractFixtures):
 
         return factory
 
-    @staticmethod
-    @pytest.fixture
-    def _gcs(_gcs_factory, populate=True):
+    @pytest.fixture(scope="class")
+    def _gcs(self, _gcs_factory):
         gcs = _gcs_factory()
         try:
             # ensure we're empty.
