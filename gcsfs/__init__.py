@@ -6,3 +6,6 @@ from .core import GCSFileSystem
 from .mapping import GCSMap
 
 __all__ = ["GCSFileSystem", "GCSMap"]
+
+from . import _version
+__version__ = _version.get_versions()['version']
