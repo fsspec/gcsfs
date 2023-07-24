@@ -334,6 +334,12 @@ class GCSFileSystem(AsyncFileSystem):
         if loop is not None and session is not None:
             if loop.is_running():
                 try:
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(session.close())
+                    return
+                except RuntimeError:
+                    pass
+                try:
                     sync(loop, session.close, timeout=0.1)
                 except fsspec.FSTimeoutError:
                     pass

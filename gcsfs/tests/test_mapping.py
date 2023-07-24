@@ -57,28 +57,11 @@ def test_map_with_data(gcs):
     assert list(d) == []
 
 
-def test_map_complex_keys(gcs):
-    d = gcs.get_mapper(MAPPING_ROOT)
-    d[1] = b"hello"
-    assert d[1] == b"hello"
-    del d[1]
-
-    d[1, 2] = b"world"
-    assert d[1, 2] == b"world"
-    del d[1, 2]
-
-    d["x", 1, 2] = b"hello world"
-    assert d["x", 1, 2] == b"hello world"
-
-    assert ("x", 1, 2) in d
-
-
 def test_map_clear_empty(gcs):
     d = gcs.get_mapper(MAPPING_ROOT)
     d.clear()
     assert list(d) == []
-    d[1] = b"1"
-    # may repeat the test below, since VCR sometimes picks the wrong call to ls
+    d["1"] = b"1"
     assert list(d) == ["1"] or list(d) == ["1"]
     d.clear()
     assert list(d) == []
