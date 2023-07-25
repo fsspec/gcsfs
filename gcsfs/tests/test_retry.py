@@ -1,4 +1,6 @@
 import os
+import pickle
+from concurrent.futures import ProcessPoolExecutor
 
 import pytest
 import requests
@@ -37,6 +39,36 @@ def test_retriable_exception():
 
     e = ProxyError()
     assert is_retriable(e)
+
+
+def test_pickle_serialization():
+    expected = HttpError({"message": "", "code": 400})
+
+    # Serialize/Deserialize
+    serialized = pickle.dumps(expected)
+    actual = pickle.loads(serialized)
+
+    is_same_type = type(expected) is type(actual)
+    is_same_args = expected.args == actual.args
+
+    assert is_same_type and is_same_args
+
+
+def test_multiprocessing_error_handling():
+    def conditional_exception(process_id):
+        # Raise only on second process (id=1)
+        if process_id == 1:
+            raise HttpError({"message": "", "code": 400})
+
+    # Ensure spawn context to avoid forking issues
+    ctx = mp.get_context("spawn")
+
+    # Run on two processes
+    with ProcessPoolExecutor(2, mp_context=ctx) as p:
+        results = p.map(conditional_exception, range(2))
+
+    with pytest.raises(HttpError):
+        _ = [result for result in results]
 
 
 def test_validate_response():
