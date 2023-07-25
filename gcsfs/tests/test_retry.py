@@ -55,12 +55,13 @@ def test_pickle_serialization():
     assert is_same_type and is_same_args
 
 
-def test_multiprocessing_error_handling():
-    def conditional_exception(process_id):
-        # Raise only on second process (id=1)
-        if process_id == 1:
-            raise HttpError({"message": "", "code": 400})
+def conditional_exception(process_id):
+    # Raise only on second process (id=1)
+    if process_id == 1:
+        raise HttpError({"message": "", "code": 400})
 
+
+def test_multiprocessing_error_handling():
     # Ensure spawn context to avoid forking issues
     ctx = multiprocessing.get_context("spawn")
 
