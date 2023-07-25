@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import pickle
 from concurrent.futures import ProcessPoolExecutor
@@ -61,7 +62,7 @@ def test_multiprocessing_error_handling():
             raise HttpError({"message": "", "code": 400})
 
     # Ensure spawn context to avoid forking issues
-    ctx = mp.get_context("spawn")
+    ctx = multiprocessing.get_context("spawn")
 
     # Run on two processes
     with ProcessPoolExecutor(2, mp_context=ctx) as p:
