@@ -376,7 +376,37 @@ class InventoryReport:
             list: A list of dictionaries representing object details parsed
             from the inventory report content.
         """
-        pass
+        # Get the csv configuration for each inventory report.
+        csv_options = inventory_report_config.csv_options
+        record_separator = csv_options.get("recordSeparator", "\n")
+        delimiter = csv_options.get("delimiter", ",")
+        header_required = csv_options.get("headerRequired", False)
+
+        objects = []
+
+        for content in inventory_report_content:
+
+            # Split the content into lines based on the specified separator.
+            lines = content.split(record_separator)
+
+            # Remove the header, if present.
+            if header_required:
+                lines = lines[1:]
+            
+            # Parse each line of the inventory report.
+            for line in lines:
+                
+                obj = InventoryReport._parse_inventory_report_line(
+                    inventory_report_line=line,
+                    use_snapshot_listing=use_snapshot_listing,
+                    gcs_file_system=gcs_file_system,
+                    inventory_report_config=inventory_report_config,
+                    delimiter=delimiter,
+                    bucket=bucket)
+
+                objects.append(obj)
+
+        return objects
     
     def _parse_inventory_report_line(inventory_report_line, use_snapshot_listing, 
             gcs_file_system, inventory_report_config, delimiter, bucket):

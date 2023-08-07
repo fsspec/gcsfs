@@ -327,6 +327,92 @@ class TestInventoryReport(object):
         
         # Verify the mocked downloaded reports match (ordering does not matter).
         assert sorted(result) == sorted(expected_reports)
+    
+    @pytest.fixture(params=[
+    # One file, one lines.
+    (["header \n line1"], {"recordSeparator": "\n", "headerRequired": True}),
+    (["line1"], {"recordSeparator": "\n", "headerRequired": False}),
+    (["header \r\n line1"], {"recordSeparator": "\r\n", "headerRequired": True}),
+    (["line1"], {"recordSeparator": "\r\n", "headerRequired": False}),
+
+    # One file, multiple lines.
+    (["header \n line1 \n line2 \n line3"], \
+     {"recordSeparator": "\n", "headerRequired": True}),
+    (["line1 \n line2 \n line3"], \
+     {"recordSeparator": "\n", "headerRequired": False}),
+    (["header \r\n line1 \r\n line2 \r\n line3"], \
+     {"recordSeparator": "\r\n", "headerRequired": True}),
+    (["line1 \r\n line2 \r\n line3"], \
+     {"recordSeparator": "\r\n", "headerRequired": False}),
+
+    # Multiple files.
+    (["line1", "line2 \n line3"], \
+     {"recordSeparator": "\n", "headerRequired": False}),
+    (["header \n line1", "header \n line2 \n line3"], \
+     {"recordSeparator": "\n", "headerRequired": True})
+    ])
+    def parse_inventory_report_content_setup(self, request, mocker):
+
+        # Mock the necessary parameters.
+        gcs_file_system = mocker.MagicMock()
+        bucket = mocker.MagicMock()
+        use_snapshot_listing=mocker.MagicMock()
+        
+        # Parse the content and config data.
+        inventory_report_content = request.param[0]
+        inventory_report_config = request.param[1]
+        record_separator = inventory_report_config["recordSeparator"]
+        header_required = inventory_report_config["headerRequired"]
+
+        # Construct custom inventory report config.
+        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config.csv_options = {
+            "recordSeparator": record_separator,
+            "headerRequired": header_required
+        }
+        
+         # Stub parse_inventory_report_line method.
+        InventoryReport._parse_inventory_report_line = mocker.MagicMock(
+            side_effect="parsed_inventory_report_line") 
+        
+        return gcs_file_system, inventory_report_content, \
+            inventory_report_config, bucket, use_snapshot_listing
+
+    def test_parse_inventory_reports(self, parse_inventory_report_content_setup):
+
+        gcs_file_system, inventory_report_content, \
+            inventory_report_config, bucket, use_snapshot_listing \
+                = parse_inventory_report_content_setup
+
+        record_separator = inventory_report_config.csv_options["recordSeparator"]
+        header_required = inventory_report_config.csv_options["headerRequired"]
+
+        # Number of inventory reports.
+        num_inventory_reports = len(inventory_report_content)
+
+        # Tota, number of object metadata lines.
+        total_lines_in_reports = sum(content.count(record_separator) + 1
+                                     for content in inventory_report_content)
+    
+        # Remove the header line for each line if header is present.
+        total_lines_in_reports -= num_inventory_reports * 1 \
+            if header_required else 0
+        
+        result = InventoryReport._parse_inventory_report_content(
+            gcs_file_system=gcs_file_system, 
+            inventory_report_content=inventory_report_content, 
+            inventory_report_config=inventory_report_config, 
+            use_snapshot_listing=use_snapshot_listing, 
+            bucket=bucket
+        )
+        
+        # Assert that the number of objects returned is correct.
+        assert len(result) == total_lines_in_reports  
+
+        # Assert parse_inventory_report_line was called the correct
+        # number of times.
+        assert InventoryReport._parse_inventory_report_line. \
+            call_count == total_lines_in_reports 
 
 
 
