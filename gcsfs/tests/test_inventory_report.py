@@ -274,6 +274,59 @@ class TestInventoryReport(object):
         result = InventoryReport._sort_inventory_report_metadata(
             unsorted_inventory_report_metadata=unsorted_inventory_report_metadata)
         assert result == expected
+    
+    @pytest.fixture(params=[
+        # Unique most recent day, same datetime.
+        ([{"name": "report1", "timeCreated": "2023-08-02T12:00:00.000Z"},
+        {"name": "report2", "timeCreated": "2023-08-01T12:00:00.000Z"}],
+
+        # Expected results.
+        ["report1"]),
+
+        # Multiple most recent day, same datetime.
+        ([{"name": "report1", "timeCreated": "2023-08-02T12:00:00.000Z"},
+        {"name": "report2", "timeCreated": "2023-08-02T12:00:00.000Z"},
+        {"name": "report3", "timeCreated": "2023-08-01T12:00:00.000Z"}],
+
+        # Expected results.
+        ["report1", "report2"]),
+
+        # Multiple most recent day, different datetimes (same day, different hour).
+        ([{"name": "report1", "timeCreated": "2023-08-02T12:00:00.000Z"},
+        {"name": "report2", "timeCreated": "2023-08-02T11:00:00.000Z"},
+        {"name": "report3", "timeCreated": "2023-08-01T12:00:00.000Z"}],
+
+        # Expected results.
+        ["report1", "report2"]),
+    ])
+    def download_inventory_report_content_setup(self, request, mocker):
+        bucket = 'bucket'
+        gcs_file_system = mocker.MagicMock()
+        inventory_report_metadata, expected_reports = request.param
+        
+        # We are accessing the third argument as the return value,
+        # since it is the object name in the function.
+        # We are also encoding the content, since the actual method call needs
+        # to decode the content.
+        async_side_effect = mocker.AsyncMock(side_effect=lambda *args,
+            **kwargs: ('_header', args[3].encode()))
+        gcs_file_system._call = async_side_effect
+        return gcs_file_system, inventory_report_metadata, bucket, expected_reports
+
+    @pytest.mark.asyncio
+    async def test_download_inventory_report_content(
+        self, download_inventory_report_content_setup):
+
+        gcs_file_system, inventory_report_metadata, \
+            bucket, expected_reports = download_inventory_report_content_setup
+
+        result = await InventoryReport._download_inventory_report_content(
+            gcs_file_system=gcs_file_system,
+            inventory_report_metadata=inventory_report_metadata,
+            bucket=bucket)
+        
+        # Verify the mocked downloaded reports match (ordering does not matter).
+        assert sorted(result) == sorted(expected_reports)
 
 
 

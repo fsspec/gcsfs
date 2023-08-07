@@ -318,7 +318,41 @@ class InventoryReport:
             list: A list containing the content of the most recent inventory
             report as strings.
         """
-        pass
+        # Get the most recent inventory report date.
+        most_recent_inventory_report = inventory_report_metadata[0]
+        most_recent_date = InventoryReport._convert_str_to_datetime(
+            most_recent_inventory_report.get("timeCreated")).date()
+        
+        inventory_report_content = []
+
+        # Run a for loop here, since there might be multiple inventory reports
+        # generated on the same day. For reference, 1 million objects will be
+        # split into only 2 inventory reports, so it is very rare that there
+        # will be many inventory reports on the same day. But including this
+        # logic for robustness.
+        for metadata in inventory_report_metadata:
+
+            inventory_report_date = InventoryReport._convert_str_to_datetime \
+                (metadata["timeCreated"]).date()
+
+            if inventory_report_date == most_recent_date:
+            
+                # Download the raw inventory report if the date matches.
+                # Header is not needed, we only need to process and store
+                # the content.
+                _header, encoded_content = await gcs_file_system._call(
+                    "GET",
+                    "b/{}/o/{}",
+                    bucket,
+                    metadata.get("name"),
+                    alt="media")
+                
+                # Decode the binary content into string for the content.
+                decoded_content = encoded_content.decode()
+                
+                inventory_report_content.append(decoded_content)
+                
+        return inventory_report_content
     
     def _parse_inventory_report_content(gcs_file_system, inventory_report_content,
             inventory_report_config, use_snapshot_listing, bucket):
