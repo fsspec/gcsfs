@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from gcsfs.inventory_report import InventoryReport
 
 class TestInventoryReport(object):
@@ -33,3 +34,41 @@ class TestInventoryReport(object):
             # to ensure no exception is raised.
             InventoryReport._validate_inventory_report_info(
                 inventory_report_info=inventory_report_info)
+            
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("location, id, exception, expected_result", [
+    # Test no error fetching proceeds normally.
+    ("us-west", "id1", None, {"config": "config1"}), 
+    # Test if the exception is caught successfully.
+    ("us-west", "id2", Exception("fetch error"), None),
+    ])
+    async def test_fetch_raw_inventory_report_config(
+        self, location, id, exception, expected_result, mocker):
+
+        # Mocking the gcs_file_system.
+        gcs_file_system = mocker.MagicMock()
+        gcs_file_system.project = "project"
+        
+        # Mocking gcs_file_system._call.
+        if exception is not None:
+            gcs_file_system._call = mocker.MagicMock(side_effect=exception)
+        else:
+            return_value = asyncio.Future()
+            return_value.set_result(expected_result)
+            gcs_file_system._call = mocker.MagicMock(return_value=return_value)
+
+        if exception is not None:
+            with pytest.raises(Exception) as e_info:
+                await InventoryReport._fetch_raw_inventory_report_config(
+                    gcs_file_system=gcs_file_system,
+                    location=location,
+                    id=id)
+                assert str(e_info.value) == str(exception)
+        else:
+            result = await InventoryReport._fetch_raw_inventory_report_config(
+                gcs_file_system=gcs_file_system,
+                location=location,
+                id=id)
+            gcs_file_system._call.assert_called_once_with(
+                "GET", mocker.ANY, json_out=True)
+            assert result == expected_result

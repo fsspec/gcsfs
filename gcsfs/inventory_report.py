@@ -127,7 +127,20 @@ class InventoryReport:
             Exception: If there is an error while fetching the inventory
             report configuration.
         """
-        pass
+        project = gcs_file_system.project
+        url = "{}/projects/{}/locations/{}/reportConfigs/{}"
+        url = url.format(
+            InventoryReport.BASE_URL,
+            project,
+            location,
+            id
+        )
+        try:
+            raw_inventory_report_config = await gcs_file_system \
+                ._call("GET", url, json_out=True)
+            return raw_inventory_report_config
+        except Exception as e:
+            print(f"Error countered when fetching inventory report config: {e}.") 
 
     def _parse_raw_inventory_report_config(
             raw_inventory_report_config, use_snapshot_listing):
