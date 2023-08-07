@@ -84,7 +84,61 @@ class InventoryReport:
             to False, the 'prefixes' list will be empty, and the 'items' list
             will contain only the object names. 
         """
-        pass
+        # Validate the inventory report info that the user passes in.
+        cls._validate_inventory_report_info(inventory_report_info)
+
+        # Parse the inventory report info.
+        use_snapshot_listing = inventory_report_info.get("use_snapshot_listing")
+        inventory_report_location = inventory_report_info.get("location")
+        inventory_report_id = inventory_report_info.get("id")
+
+        # Fetch the inventory report configuration.
+        raw_inventory_report_config = await \
+            cls._fetch_raw_inventory_report_config(
+            gcs_file_system=gcs_file_system,
+            location=inventory_report_location,
+            id=inventory_report_id)
+        
+        # Parse the inventory report configuration.
+        inventory_report_config = cls._parse_raw_inventory_report_config(
+            raw_inventory_report_config=raw_inventory_report_config,
+            use_snapshot_listing=use_snapshot_listing)
+
+        # Use the config to fetch all inventory report medadata.
+        unsorted_inventory_report_metadata = \
+            await cls._fetch_inventory_report_metadata(
+            gcs_file_system=gcs_file_system,
+            inventory_report_config=inventory_report_config)
+        
+        # Sort the metadata based on reverse created time order.
+        inventory_report_metadata = cls._sort_inventory_report_medatada(
+            unsorted_inventory_report_metadata=unsorted_inventory_report_metadata)
+
+        # Download the most recent inventory reports in raw form.
+        bucket = inventory_report_config.bucket
+        inventory_report_content = await cls \
+            ._download_inventory_report_content(
+            gcs_file_system=gcs_file_system,
+            inventory_report_metadata=inventory_report_metadata,
+            bucket=bucket)
+        
+        # Parse the raw inventory reports into snapshot objects.
+        objects = cls._parse_inventory_report_content(
+            gcs_file_system=gcs_file_system,
+            inventory_report_content=inventory_report_content,
+            inventory_report_config=inventory_report_config,
+            use_snapshot_listing=use_snapshot_listing,
+            bucket=bucket
+        )
+    
+        # Construct the final snapshot based on the fetched objects.
+        snapshot = cls._construct_final_snapshot(
+            objects=objects,
+            prefix=prefix,
+            use_snapshot_listing=use_snapshot_listing)
+
+        # Return the final snapshot.
+        return snapshot
 
     def _validate_inventory_report_info(inventory_report_info):
         """
