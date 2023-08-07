@@ -463,6 +463,89 @@ class TestInventoryReport(object):
         # number of times.
         assert InventoryReport._parse_inventory_report_line. \
             call_count == total_lines_in_reports 
+    
+    @pytest.mark.parametrize(
+        "use_snapshot_listing, prefix, mock_objects, expected_result",
+        [
+            # Not using snapshot, no prefix, directory, all matched.
+            (False, None, [{"name": "prefix/object1"}, {"name": "prefix/object2"}], \
+            ([{"name": "prefix/object1"}, {"name": "prefix/object2"}], [])),
+            # Not using snapshot, no prefix, no directory, all matched.
+            (False, None, [{"name": "object1"}, {"name": "object2"}], \
+            ([{"name": "object1"}, {"name": "object2"}], [])),
+            # Not using snapshot, prefix, directory, all matched.
+            (False, "prefix", [{"name": "prefix/object1"}, {"name": "prefix/object2"}], \
+            ([{"name": "prefix/object1"}, {"name": "prefix/object2"}], [])),
+            # Not using snapshot, prefix, directory, some matched.
+            (False, "prefix", [{"name": "prefix/object1"}, {"name": "object2"}], \
+            ([{"name": "prefix/object1"}], [])),
+            # Not using snapshot, prefix, directory, none matched.
+            (False, "prefix", [{"name": "a/object1"}, {"name": "b/object2"}], \
+            ([], [])),
+            # Not using snapshot, prefix, no directory, all matched.
+            (False, "object", [{"name": "object1"}, {"name": "object2"}], \
+            ([{"name": "object1"}, {"name": "object2"}], [])),
+            # Not using snapshot, prefix, no directory, some matched.
+            (False, "object", [{"name": "object1"}, {"name": "obj2"}], \
+            ([{"name": "object1"}], [])),
+            # Not using snapshot, prefix, no directory, none matched.
+            (False, "object", [{"name": "obj1"}, {"name": "obj2"}], \
+            ([], [])),
+    
+            # Using snapshot, no prefix, no directory.
+            (True, None, [{"name": "object1"}, {"name": "object2"}], \
+            ([{"name": "object1"}, {"name": "object2"}], [])),
+            # Using snapshot, no prefix, a single directory.
+            (True, None, [{"name": "object1"}, {"name": "dir/object2"}], \
+            ([{"name": "object1"}], ["dir/"])),
+            # Using snapshot, no prefix, multiple directories.
+            (True, None, [{"name": "object1"}, {"name": "dir1/object2"}, \
+            {"name": "dir2/object3"}], ([{"name": "object1"}], ["dir1/", "dir2/"])),
+            # Using snapshot, no prefix, same directory multiple times.
+            (True, None, [{"name": "object1"}, {"name": "dir1/object2"}, \
+            {"name": "dir1/object3"}], ([{"name": "object1"}], ["dir1/"])),
+            # Using snapshot, prefix, no directory.
+            (True, "object", [{"name": "object1"}, {"name": "object2"}], \
+            ([{"name": "object1"}, {"name": "object2"}], [])),
+            # Using snapshot, prefix, a single directory.
+            (True, "dir1/", [{"name": "dir1/dir2/object1"}, \
+            {"name": "dir1/object2"}], ([{"name": "dir1/object2"}], ["dir1/dir2/"])),
+            # Using snapshot, prefix, multiple directories.
+            (True, "dir1/", [{"name": "dir1/dir2/object1"}, \
+            {"name": "dir1/dir3/object2"}, {"name": "dir1/object3"}], \
+            ([{"name": "dir1/object3"}], ["dir1/dir2/", "dir1/dir3/"])),
+            # Using snapshot, prefix, same directory multiple times.
+            (True, "dir1/", [{"name": "dir1/dir2/object1"}, \
+            {"name": "dir1/dir2/object2"}, {"name": "dir1/object3"}], \
+            ([{"name": "dir1/object3"}], ["dir1/dir2/"])),
+            
+            # Sanity check from the examples given by the JSON API.
+            # https://cloud.google.com/storage/docs/json_api/v1/objects/list
+            (True, None, [{"name": "a/b"}, {"name": "a/c"}, {"name": "d"}, \
+            {"name": "e"}, {"name": "e/f"}, {"name": "e/g/h"}], ([{"name": "d"}, \
+            {"name": "e"}], ["a/", "e/"])),
+            (True, "e/", [{"name": "a/b"}, {"name": "a/c"}, {"name": "d"}, \
+            {"name": "e"}, {"name": "e/f"}, {"name": "e/g/h"}], ([{"name": "e/f"}], \
+            ["e/g/"])),
+            (True, "e", [{"name": "a/b"}, {"name": "a/c"}, {"name": "d"}, \
+            {"name": "e"}, {"name": "e/f"}, {"name": "e/g/h"}], ([{"name": "e"}], \
+            ["e/"]))   
+        ],
+    )
+    def test_construct_final_snapshot(
+        self, use_snapshot_listing, prefix, mock_objects, expected_result):
+
+        # Construct the final snapshot.
+        result = InventoryReport._construct_final_snapshot(
+            objects=mock_objects,
+            prefix=prefix, 
+            use_snapshot_listing=use_snapshot_listing)
+
+        # Assert the expected outcomes.
+        items, prefixes = result
+        expected_items, expected_prefixes = expected_result
+        assert items == expected_items
+        assert sorted(prefixes) == sorted(expected_prefixes)
 
 
 

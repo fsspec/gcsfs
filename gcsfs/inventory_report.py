@@ -466,7 +466,53 @@ class InventoryReport:
             'prefix' will also be empty, and 'items' will contains the object 
             names in the snapshot.
         """
-        pass
+        if prefix is None:
+            prefix = ""
+
+        # Filter the prefix and returns the list if the user does not want to use
+        # the snapshot for listing.
+        if use_snapshot_listing is False:
+
+            return [obj for obj in objects \
+                if obj.get("name").startswith(prefix)], []
+        
+        else:
+            
+            # If the user wants to use the snapshot, generate both the items and 
+            # prefixes manually.
+            items = []
+            prefixes = set()
+
+            for obj in objects:
+            
+                
+                # Fetch the name of the object.
+                obj_name = obj.get("name")
+
+                # If the object name doesn't start with the prefix, continue.
+                # In the case where prefix is empty, it will always return
+                # true (which is the expected behavior).
+                if not obj_name.startswith(prefix):
+                    continue
+
+                # Remove the prefix.
+                object_name_no_prefix = obj_name.removeprefix(prefix)
+
+                # Determine whether the object name is a directory.
+                first_delimiter_idx = object_name_no_prefix.find("/")
+
+                # If not, then append it to items.
+                if first_delimiter_idx == -1:
+                    items.append(obj)
+                    continue
+
+                # If it is, recompose the directory and add to the prefix set.
+                dir = object_name_no_prefix[0:first_delimiter_idx]
+                obj_prefix = prefix.rstrip("/") + ("" if prefix == "" else "/") \
+                    + dir + ("" if dir == "" else "/")
+                prefixes.add(obj_prefix)
+        
+        return items, list(prefixes)
 
     @staticmethod
     def _convert_obj_to_date(obj):
