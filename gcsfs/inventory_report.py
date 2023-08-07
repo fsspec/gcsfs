@@ -101,7 +101,12 @@ class InventoryReport:
             ValueError: If any required key (use_snapshot_listing, location, id)
             is missing from the inventory_report_info dictionary.
         """
-        pass
+        if "use_snapshot_listing" not in inventory_report_info:
+            raise ValueError("Use snapshot listing is not configured.")
+        if "location" not in inventory_report_info:
+            raise ValueError("Inventory report location is not configured.")
+        if "id" not in inventory_report_info:
+            raise ValueError("Inventory report id is not configured.")
 
     async def _fetch_raw_inventory_report_config(gcs_file_system, location, id):
         """
