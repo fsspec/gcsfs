@@ -237,7 +237,50 @@ class InventoryReport:
         Raises:
             ValueError: If the fetched inventory reports are empty.
         """
-        pass
+        # There might be multiple inventory reports in the bucket.
+        inventory_report_metadata = []
+
+        # Extract out bucket and destination path of the inventory reports.
+        bucket = inventory_report_config.bucket
+        destination_path = inventory_report_config.destination_path
+
+        # Fetch the first page.
+        page = await gcs_file_system._call(
+            "GET",
+            "b/{}/o",
+            bucket,
+            prefix=destination_path,
+            json_out=True
+        )
+
+        inventory_report_metadata.extend(page.get("items", []))
+        next_page_token = page.get("nextPageToken", None)
+
+        # Keep fetching new pages as long as next page token exists.
+        # Note that the iteration in the while loop should most likely
+        # be minimal. For reference, a million objects is split up into
+        # two reports, and if the report is generated daily, then in a year,
+        # there will be roughly ~700 reports generated, which will still be
+        # fetched in a single page.
+        while next_page_token is not None:
+            page = await gcs_file_system._call(
+            "GET",
+            "b/{}/o",
+            bucket,
+            prefix=destination_path,
+            json_out=True,
+            pageToken=next_page_token,
+            )
+
+            inventory_report_metadata.extend(page.get("items", []))
+            next_page_token = page.get("nextPageToken", None)
+        
+        # If no reports are fetched, indicates there is an error.
+        if len(inventory_report_metadata) == 0:
+            raise ValueError("No inventory reports to fetch. Check if \
+                your inventory report is set up correctly.")
+      
+        return inventory_report_metadata
 
     def _sort_inventory_report_metadata(unsorted_inventory_report_metadata):
         """

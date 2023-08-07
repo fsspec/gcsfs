@@ -1,6 +1,8 @@
 import pytest
 import asyncio
 from datetime import datetime, timedelta
+
+from gcsfs.core import GCSFileSystem
 from gcsfs.inventory_report import InventoryReport, InventoryReportConfig
 
 class TestInventoryReport(object):
@@ -183,6 +185,61 @@ class TestInventoryReport(object):
 
         except Exception as e:
             pytest.fail(f"Unexpected exception: {e}.")
+
+    @pytest.mark.asyncio
+    async def test_fetch_inventory_report_metadata_no_reports(self, mocker):
+        
+        # Create a mock for GCSFileSystem.
+        gcs_file_system = mocker.MagicMock(spec=GCSFileSystem)
+
+        # Mock the _call method to return a page with two items
+        # and then a page with one item and without next page token.
+        gcs_file_system._call.side_effect = [{"items": [], "nextPageToken": None}]
+
+        # Create a mock for InventoryReportConfig.
+        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config.bucket = "bucket_name"
+        inventory_report_config.destination_path = "destination_path"
+
+        # If no inventory report metadata is fetched, an exception should be raised.
+        with pytest.raises(ValueError) as e_info:
+            await InventoryReport._fetch_inventory_report_metadata(
+                gcs_file_system=gcs_file_system, 
+                inventory_report_config=inventory_report_config)
+            assert e_info.value == "No inventory reports to fetch. \
+                Check if your inventory report is set up correctly."
+
+    @pytest.mark.asyncio
+    async def test_fetch_inventory_report_metadata_multiple_calls(self, mocker):
+
+        # Create a mock for GCSFileSystem.
+        gcs_file_system = mocker.MagicMock(spec=GCSFileSystem)
+
+        # Mock the _call method to return a page with two items
+        # and then a page with one item and without next page token.
+        gcs_file_system._call.side_effect = [{"items": ["item1", "item2"], \
+            "nextPageToken": "token1"}, {"items": ["item3"], "nextPageToken": None}]
+
+        # Create a mock for InventoryReportConfig.
+        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config.bucket = "bucket_name"
+        inventory_report_config.destination_path = "destination_path"
+
+        result = await InventoryReport._fetch_inventory_report_metadata(
+            gcs_file_system=gcs_file_system,
+            inventory_report_config=inventory_report_config)
+
+        # Check that _call was called with the right arguments.
+        calls = [mocker.call("GET", "b/{}/o", 'bucket_name',
+                            prefix='destination_path', json_out=True),
+                mocker.call("GET", "b/{}/o", 'bucket_name',
+                    prefix='destination_path', pageToken="token1", json_out=True)]
+        gcs_file_system._call.assert_has_calls(calls)
+
+        # Check that the function correctly processed the response
+        # and returned the right result.
+        assert result == ["item1", "item2", "item3"]
+
 
 
 # Test fields of the inventory report config is correctly stored.
