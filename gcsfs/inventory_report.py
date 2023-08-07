@@ -1,3 +1,5 @@
+from datetime import datetime
+
 class InventoryReport:
     """
     A utility class for fetching and processing inventory reports from GCS.
@@ -165,7 +167,55 @@ class InventoryReport:
             ValueError: If "size" field is not present in the metadata
             fields and use_snapshot_listing is True.
         """
-        pass
+        # Parse the report config.
+        frequency_options = raw_inventory_report_config.get("frequencyOptions")
+        start_date = InventoryReport._convert_obj_to_date( \
+            frequency_options.get("startDate"))
+        end_date = InventoryReport._convert_obj_to_date( \
+            frequency_options.get("endDate"))
+        object_metadata_report_options = \
+            raw_inventory_report_config.get("objectMetadataReportOptions")
+        metadata_fields = \
+            object_metadata_report_options.get("metadataFields")
+        storage_destination_options = \
+            object_metadata_report_options.get("storageDestinationOptions")
+        
+        # Save relevant report config properties.
+        csv_options = raw_inventory_report_config.get("csvOptions")
+        bucket = storage_destination_options.get("bucket")
+        destination_path = storage_destination_options.get("destinationPath")
+        metadata_fields = metadata_fields
+
+        # Validate date, making sure the current date is within the start and end range.
+        today = datetime.now()
+        if today < start_date or today > end_date:
+            raise ValueError(f"Current date {today} is outside the range \
+                {start_date} and {end_date} specified by the inventory report config.")
+        
+        # Validate object name exists in the metadata fields.
+        # Note that the size field is mandated to be included in the
+        # config when the client sets up the inventory report.
+        obj_name_idx = metadata_fields.index("name")
+        
+        # If the user wants to do listing based on the snapshot, also
+        # validate the report contains size metadata for each object.
+        if use_snapshot_listing:
+            try:
+                metadata_fields.index("size")
+            except ValueError:
+                raise ValueError("If you want to use the snapshot for listing, the object size metadata has to be included in the inventory report.")
+        
+        # Finally, construct and return the inventory report config.
+        inventory_report_config = InventoryReportConfig(
+            csv_options=csv_options,
+            bucket=bucket,
+            destination_path=destination_path,
+            metadata_fields=metadata_fields,
+            obj_name_idx=obj_name_idx
+        )
+        
+        return inventory_report_config
+
 
     async def _fetch_inventory_report_metadata(
             gcs_file_system, inventory_report_config):
@@ -308,7 +358,10 @@ class InventoryReport:
         Returns:
             datetime: A datetime object representing the converted date.
         """
-        pass
+        day = obj["day"]
+        month = obj["month"]
+        year = obj["year"]
+        return datetime(year, month, day)
     
     @staticmethod
     def _convert_str_to_datetime(str):

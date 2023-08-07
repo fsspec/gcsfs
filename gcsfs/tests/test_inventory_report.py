@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+from datetime import datetime, timedelta
 from gcsfs.inventory_report import InventoryReport, InventoryReportConfig
 
 class TestInventoryReport(object):
@@ -72,6 +73,117 @@ class TestInventoryReport(object):
             gcs_file_system._call.assert_called_once_with(
                 "GET", mocker.ANY, json_out=True)
             assert result == expected_result
+    
+    def test_parse_raw_inventory_report_config_invalid_date(self, mocker):
+
+        today = datetime.today().date()
+
+        # Get tomorrow's date.
+        tomorrow = today + timedelta(days=1)
+
+        # Get the date a week later.
+        next_week = today + timedelta(days=7)
+
+        raw_inventory_report_config = {
+            "frequencyOptions": {
+                "startDate": {
+                    "day": tomorrow.day,
+                    "month": tomorrow.month,
+                    "year": tomorrow.year
+                },
+                "endDate": {
+                    "day": next_week.day,
+                    "month": next_week.month,
+                    "year": next_week.year
+                }
+            },
+            "objectMetadataReportOptions": mocker.MagicMock(),
+            "csvOptions": mocker.MagicMock()
+        }
+
+        # If the current date is outside the ranges in the inventory report
+        # an exception should be raised.
+        with pytest.raises(ValueError):
+            InventoryReport._parse_raw_inventory_report_config(
+                raw_inventory_report_config=raw_inventory_report_config,
+                use_snapshot_listing=mocker.MagicMock())
+    
+    def test_parse_raw_inventory_report_config_missing_metadata_fields(
+            self, mocker):
+
+        raw_inventory_report_config = {
+            "frequencyOptions": mocker.MagicMock(),
+            "objectMetadataReportOptions": {
+                "metadataFields": ["project", "bucket", "name"],
+                "storageDestinationOptions": mocker.MagicMock()
+            },
+              "csvOptions": mocker.MagicMock()
+        }
+
+        # When the user wants to use snapshot listing, but object size is not
+        # included in the inventory reports, an exception should be raised.
+        with pytest.raises(ValueError):
+            InventoryReport._parse_raw_inventory_report_config(
+                raw_inventory_report_config=raw_inventory_report_config,
+                use_snapshot_listing=True)
+    
+    def test_parse_raw_inventory_report_config_returns_correct_config(self):
+
+        bucket = "bucket"
+        destination_path = "path/to/inventory-report"
+        metadata_fields = ["project", "bucket", "name", "size"]
+        obj_name_idx = metadata_fields.index("name")
+        today = datetime.today().date()
+        yesterday = today - timedelta(days=1)
+        tomorrow = today + timedelta(days=1)
+        use_snapshot_listing = False
+
+        csv_options = {
+                "recordSeparator": "\n",
+                "delimiter": ",",
+                "headerRequired": False
+        }
+
+        raw_inventory_report_config = {
+            "frequencyOptions": {
+                "startDate": {
+                    "day": yesterday.day,
+                    "month": yesterday.month,
+                    "year": yesterday.year
+                },
+                "endDate": {
+                    "day": tomorrow.day,
+                    "month": tomorrow.month,
+                    "year": tomorrow.year
+                }
+            },
+            "objectMetadataReportOptions": {
+                "metadataFields": metadata_fields,
+                "storageDestinationOptions": {
+                    "bucket": bucket,
+                    "destinationPath": destination_path
+                }
+            },
+            "csvOptions": csv_options
+        }
+
+        try:
+            inventory_report_config = InventoryReport. \
+                _parse_raw_inventory_report_config(
+                raw_inventory_report_config=raw_inventory_report_config,
+                use_snapshot_listing=use_snapshot_listing)
+            
+            assert isinstance(inventory_report_config, InventoryReportConfig)
+
+            assert inventory_report_config.csv_options == csv_options
+            assert inventory_report_config.bucket == bucket
+            assert inventory_report_config.destination_path == destination_path
+            assert inventory_report_config.metadata_fields == metadata_fields
+            assert inventory_report_config.obj_name_idx == obj_name_idx
+
+        except Exception as e:
+            pytest.fail(f"Unexpected exception: {e}.")
+
 
 # Test fields of the inventory report config is correctly stored.
 class TestInventoryReportConfig:
