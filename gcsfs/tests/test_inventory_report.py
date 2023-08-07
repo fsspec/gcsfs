@@ -327,6 +327,56 @@ class TestInventoryReport(object):
         
         # Verify the mocked downloaded reports match (ordering does not matter).
         assert sorted(result) == sorted(expected_reports)
+
+    @pytest.mark.parametrize(
+    "inventory_report_line, use_snapshot_listing, \
+        inventory_report_config_attrs, delimiter, bucket, expected",
+    [
+        # Test case 1: use snapshot listing with specific metadata
+        # fields and delimiter.
+        (
+            "object1,value1,value2",
+            True,
+            {"obj_name_idx": 0, "metadata_fields": ["name", "field1", "field2"]},
+            ",",
+            "bucket",
+            {"name": "object1", "field1": "value1", "field2": "value2"},
+        ),
+        # Test case 2: do not use snapshot listing and only fetch the name.
+        (
+            "object1,value1,value2",
+            False,
+            {"obj_name_idx": 0, "metadata_fields": ["name", "field1", "field2"]},
+            ",",
+            "bucket",
+            {"name": "object1"},
+        ),
+    ])
+    def test_parse_inventory_report_line(self, inventory_report_line,
+                        use_snapshot_listing, inventory_report_config_attrs,
+                                            delimiter, bucket, expected, mocker):
+
+        # Mock InventoryReportConfig.
+        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config.obj_name_idx = \
+            inventory_report_config_attrs.get("obj_name_idx")
+        inventory_report_config.metadata_fields = \
+            inventory_report_config_attrs.get("metadata_fields")
+        
+        # Mock GCSFileSystem.
+        gcs_file_system = mocker.MagicMock(spec=GCSFileSystem)
+        gcs_file_system._process_object = mocker.Mock(side_effect=lambda obj, bucket: obj)
+
+        result = InventoryReport._parse_inventory_report_line(
+                inventory_report_line=inventory_report_line,
+                use_snapshot_listing=use_snapshot_listing,
+                gcs_file_system=gcs_file_system,
+                inventory_report_config=inventory_report_config,
+                delimiter=delimiter,
+                bucket=bucket,
+            )
+        
+        assert result == expected
     
     @pytest.fixture(params=[
     # One file, one lines.

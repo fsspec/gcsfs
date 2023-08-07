@@ -432,7 +432,20 @@ class InventoryReport:
             dict: A dictionary representing object details parsed from the
             inventory report line.
         """
-        pass
+        obj_name_idx = inventory_report_config.obj_name_idx
+        metadata_fields = inventory_report_config.metadata_fields
+
+        # If the client wants to do listing from the snapshot, we need
+        # to fetch all the metadata for each object. Otherwise, we only
+        # need to fetch the name.
+        if use_snapshot_listing is True:
+            obj = gcs_file_system._process_object(
+                    {key: value for key, value in zip(metadata_fields, \
+                        inventory_report_line.strip().split(delimiter))}, bucket) 
+        else:
+            obj = {"name": inventory_report_line.strip().split(delimiter)[obj_name_idx]}
+
+        return obj
 
     def _construct_final_snapshot(objects, prefix, use_snapshot_listing):
         """
