@@ -323,3 +323,27 @@ class InventoryReport:
             datetime: A datetime object representing the converted date and time.
         """
         pass
+
+class InventoryReportConfig(object):
+    """
+    Represents the configuration for fetching inventory reports.
+
+    Attributes:
+        csv_options (dict): A dictionary containing options for parsing CSV
+        format in the inventory reports.
+        bucket (str): The name of the GCS bucket from which to fetch the
+        inventory reports.
+        destination_path (str): The path within the GCS bucket where the
+        inventory reports are stored.
+        metadata_fields (list): A list of strings representing metadata
+        fields to be extracted from the inventory reports.
+        obj_name_idx (int): The index of the "name" field in the 'metadata_fields'
+        list, used to identify object names.
+    """
+    def __init__(self, csv_options, bucket,
+         destination_path, metadata_fields, obj_name_idx):
+        self.csv_options = csv_options
+        self.bucket = bucket
+        self.destination_path = destination_path
+        self.metadata_fields = metadata_fields
+        self.obj_name_idx = obj_name_idx

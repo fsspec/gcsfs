@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from gcsfs.inventory_report import InventoryReport
+from gcsfs.inventory_report import InventoryReport, InventoryReportConfig
 
 class TestInventoryReport(object):
     """
@@ -72,3 +72,27 @@ class TestInventoryReport(object):
             gcs_file_system._call.assert_called_once_with(
                 "GET", mocker.ANY, json_out=True)
             assert result == expected_result
+
+# Test fields of the inventory report config is correctly stored.
+class TestInventoryReportConfig:
+    def test_inventory_report_config_creation(self):
+
+        csv_options = {}
+        bucket = "bucket"
+        destination_path = ""
+        metadata_fields = []
+        obj_name_idx = 0
+
+        inventory_report_config = InventoryReportConfig(
+            csv_options=csv_options,
+            bucket=bucket,
+            destination_path=destination_path,
+            metadata_fields=metadata_fields,
+            obj_name_idx=obj_name_idx
+        )
+    
+        assert inventory_report_config.csv_options == csv_options
+        assert inventory_report_config.bucket == bucket
+        assert inventory_report_config.destination_path == destination_path
+        assert inventory_report_config.metadata_fields == metadata_fields
+        assert inventory_report_config.obj_name_idx == obj_name_idx
