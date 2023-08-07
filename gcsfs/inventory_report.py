@@ -196,7 +196,7 @@ class InventoryReport:
                 ._call("GET", url, json_out=True)
             return raw_inventory_report_config
         except Exception as e:
-            print(f"Error countered when fetching inventory report config: {e}.") 
+            raise ValueError(f"Error countered when fetching inventory report config: {e}.")
 
     def _parse_raw_inventory_report_config(
             raw_inventory_report_config, use_snapshot_listing):
