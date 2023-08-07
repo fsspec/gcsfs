@@ -296,7 +296,9 @@ class InventoryReport:
             report metadata, sorted in reverse chronological order based
             on 'timeCreated'.
         """
-        pass
+        return sorted(unsorted_inventory_report_metadata, key=lambda ir:
+            InventoryReport._convert_str_to_datetime( \
+                ir.get("timeCreated")),reverse=True)
 
     async def _download_inventory_report_content(
             gcs_file_system, inventory_report_metadata, bucket):
@@ -418,7 +420,7 @@ class InventoryReport:
         Returns:
             datetime: A datetime object representing the converted date and time.
         """
-        pass
+        return datetime.fromisoformat(str.replace("Z", "+00:00"))
 
 class InventoryReportConfig(object):
     """

@@ -239,6 +239,42 @@ class TestInventoryReport(object):
         # Check that the function correctly processed the response
         # and returned the right result.
         assert result == ["item1", "item2", "item3"]
+    
+    @pytest.mark.parametrize("unsorted_inventory_report_metadata, expected", [
+    (
+        # Input.
+        [
+            {"timeCreated": "2023-08-01T12:00:00Z"},
+            {"timeCreated": "2023-08-02T12:00:00Z"},
+            {"timeCreated": "2023-08-03T12:00:00Z"},
+        ],
+        # Expected output.
+        [
+            {"timeCreated": "2023-08-03T12:00:00Z"},
+            {"timeCreated": "2023-08-02T12:00:00Z"},
+            {"timeCreated": "2023-08-01T12:00:00Z"},
+        ],
+    ),
+    (
+        # Input.
+        [
+            {"timeCreated": "2023-08-01T12:00:00Z"},
+            {"timeCreated": "2023-07-31T12:00:00Z"},
+            {"timeCreated": "2023-08-02T12:00:00Z"},
+        ],
+        # Expected output.
+        [
+            {"timeCreated": "2023-08-02T12:00:00Z"},
+            {"timeCreated": "2023-08-01T12:00:00Z"},
+            {"timeCreated": "2023-07-31T12:00:00Z"},
+        ],
+    )])
+    def test_sort_inventory_report_metadata(
+        self, unsorted_inventory_report_metadata, expected):
+        result = InventoryReport._sort_inventory_report_metadata(
+            unsorted_inventory_report_metadata=unsorted_inventory_report_metadata)
+        assert result == expected
+
 
 
 
