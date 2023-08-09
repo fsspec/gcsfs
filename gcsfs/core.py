@@ -1241,6 +1241,7 @@ class GCSFileSystem(AsyncFileSystem):
         **kwargs,
     ):
         path = self._strip_protocol(path)
+        path = path.rstrip("/")
         bucket, key, generation = self.split_path(path)
 
         if maxdepth is not None and maxdepth < 1:
