@@ -1,19 +1,17 @@
-import pytest
 import fsspec
-from gcsfs.tests.settings import TEST_BUCKET
-from gcsfs.tests.conftest import allfiles
+import pytest
 from fsspec.tests.abstract import AbstractFixtures
+
 from gcsfs.core import GCSFileSystem
+from gcsfs.tests.conftest import allfiles
+from gcsfs.tests.settings import TEST_BUCKET
 
 
 class GcsfsFixtures(AbstractFixtures):
-
     @pytest.fixture(scope="class")
     def fs(self, docker_gcs):
         GCSFileSystem.clear_instance_cache()
-        gcs = fsspec.filesystem(
-            "gcs", endpoint_url=docker_gcs
-        )
+        gcs = fsspec.filesystem("gcs", endpoint_url=docker_gcs)
         try:
             # ensure we're empty.
             try:
