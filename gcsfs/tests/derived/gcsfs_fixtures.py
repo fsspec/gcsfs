@@ -37,5 +37,6 @@ class GcsfsFixtures(AbstractFixtures):
     def fs_path(self):
         return TEST_BUCKET
 
+    @pytest.fixture
     def supports_empty_directories(self):
         return False
