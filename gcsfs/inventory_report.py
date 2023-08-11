@@ -550,7 +550,7 @@ class InventoryReport:
                     continue
 
                 # Remove the prefix.
-                object_name_no_prefix = obj_name.removeprefix(prefix)
+                object_name_no_prefix = obj_name[len(prefix):]
 
                 # Determine whether the object name is a directory.
                 first_delimiter_idx = object_name_no_prefix.find("/")
