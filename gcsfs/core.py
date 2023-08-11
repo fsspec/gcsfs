@@ -581,20 +581,23 @@ class GCSFileSystem(AsyncFileSystem):
             else:
                 return []
         out = pseudodirs + items
-        
-        use_snapshot_listing = False if not inventory_report_info \
-            else inventory_report_info.get("use_snapshot_listing")
 
-        # Don't cache prefixed/partial listings, in addition to 
+        use_snapshot_listing = (
+            False
+            if not inventory_report_info
+            else inventory_report_info.get("use_snapshot_listing")
+        )
+
+        # Don't cache prefixed/partial listings, in addition to
         # not using the inventory report service to do listing directly.
         if not prefix and use_snapshot_listing is False:
             self.dircache[path] = out
         return out
 
     async def _do_list_objects(
-        self, path, max_results=None, delimiter="/", 
-                    prefix="", versions=False, **kwargs):
-        
+        self, path, max_results=None, delimiter="/", prefix="", versions=False, **kwargs
+    ):
+
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, _path, generation = self.split_path(path)
         _path = "" if not _path else _path.rstrip("/") + "/"
@@ -603,23 +606,23 @@ class GCSFileSystem(AsyncFileSystem):
         # Page size of 5000 is officially supported across GCS.
         default_page_size = 5000
 
-        inventory_report_info = kwargs.get("inventory_report_info", None)      
+        inventory_report_info = kwargs.get("inventory_report_info", None)
 
         # Check if the user has configured inventory report option.
         if inventory_report_info is not None:
-            items, prefixes = await \
-                InventoryReport.fetch_snapshot(
-                    gcs_file_system=self,
-                    inventory_report_info=inventory_report_info,
-                    prefix=prefix)
-            
+            items, prefixes = await InventoryReport.fetch_snapshot(
+                gcs_file_system=self,
+                inventory_report_info=inventory_report_info,
+                prefix=prefix,
+            )
+
             use_snapshot_listing = inventory_report_info.get("use_snapshot_listing")
 
             # If the user wants to rely on the snapshot from the inventory report
             # for listing, directly return the results.
             if use_snapshot_listing:
                 return items, prefixes
-            
+
             # Otherwise, use the snapshot to initate concurrent listing.
             return await self._concurrent_list_objects_helper(
                 items=items,
@@ -628,9 +631,9 @@ class GCSFileSystem(AsyncFileSystem):
                 prefix=prefix,
                 versions=versions,
                 generation=generation,
-                page_size=default_page_size
+                page_size=default_page_size,
             )
-        
+
         # If the user has not configured inventory report, proceed to use
         # sequential listing.
         else:
@@ -642,20 +645,22 @@ class GCSFileSystem(AsyncFileSystem):
                 prefix=prefix,
                 versions=versions,
                 generation=generation,
-                page_size=default_page_size)
-        
-    async def _concurrent_list_objects_helper(self, items, bucket, delimiter,
-                                            prefix, versions, generation, page_size):
+                page_size=default_page_size,
+            )
+
+    async def _concurrent_list_objects_helper(
+        self, items, bucket, delimiter, prefix, versions, generation, page_size
+    ):
         """
         Lists objects using coroutines, using the object names from the inventory
         report to split up the ranges.
         """
-        
+
         # Extract out the names of the objects fetched from the inventory report.
         snapshot_object_names = [item["name"] for item in items]
         snapshot_object_names = sorted(snapshot_object_names)
 
-        # Determine the number of coroutines needed to concurrent listing. 
+        # Determine the number of coroutines needed to concurrent listing.
         # Ideally, want each coroutine to fetch a single page of objects.
         num_coroutines = len(snapshot_object_names) // page_size + 1
         num_objects_per_coroutine = len(snapshot_object_names) // num_coroutines
@@ -685,15 +690,21 @@ class GCSFileSystem(AsyncFileSystem):
             end_offsets.append(prefix_end)
 
         # Assign the coroutine all at once, and wait for them to finish listing.
-        results = await asyncio.gather(*[self._sequential_list_objects_helper(
-            bucket=bucket,
-            delimiter=delimiter,
-            start_offset=start_offsets[i],
-            end_offset=end_offsets[i],
-            prefix=prefix,
-            versions=versions,
-            generation=generation,
-            page_size=page_size) for i in range(0, len(start_offsets))])
+        results = await asyncio.gather(
+            *[
+                self._sequential_list_objects_helper(
+                    bucket=bucket,
+                    delimiter=delimiter,
+                    start_offset=start_offsets[i],
+                    end_offset=end_offsets[i],
+                    prefix=prefix,
+                    versions=versions,
+                    generation=generation,
+                    page_size=page_size,
+                )
+                for i in range(0, len(start_offsets))
+            ]
+        )
 
         items = []
         prefixes = []
@@ -703,11 +714,20 @@ class GCSFileSystem(AsyncFileSystem):
             items_from_process, prefixes_from_process = results[i]
             items.extend(items_from_process)
             prefixes.extend(prefixes_from_process)
-  
+
         return items, prefixes
-    
-    async def _sequential_list_objects_helper(self, bucket, delimiter,
-            start_offset, end_offset, prefix, versions, generation, page_size):
+
+    async def _sequential_list_objects_helper(
+        self,
+        bucket,
+        delimiter,
+        start_offset,
+        end_offset,
+        prefix,
+        versions,
+        generation,
+        page_size,
+    ):
         """
         Sequaltial list objects within the start and end offset range.
         """
