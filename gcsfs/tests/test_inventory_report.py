@@ -1,6 +1,7 @@
 import pytest
 import asyncio
 from datetime import datetime, timedelta
+from unittest import mock
 
 from gcsfs.core import GCSFileSystem
 from gcsfs.inventory_report import InventoryReport, InventoryReportConfig
@@ -46,19 +47,19 @@ class TestInventoryReport(object):
     ("us-west", "id2", Exception("fetch error"), None),
     ])
     async def test_fetch_raw_inventory_report_config(
-        self, location, id, exception, expected_result, mocker):
+        self, location, id, exception, expected_result):
 
         # Mocking the gcs_file_system.
-        gcs_file_system = mocker.MagicMock()
+        gcs_file_system = mock.MagicMock()
         gcs_file_system.project = "project"
         
         # Mocking gcs_file_system._call.
         if exception is not None:
-            gcs_file_system._call = mocker.MagicMock(side_effect=exception)
+            gcs_file_system._call = mock.MagicMock(side_effect=exception)
         else:
             return_value = asyncio.Future()
             return_value.set_result(expected_result)
-            gcs_file_system._call = mocker.MagicMock(return_value=return_value)
+            gcs_file_system._call = mock.MagicMock(return_value=return_value)
 
         if exception is not None:
             with pytest.raises(Exception) as e_info:
@@ -73,10 +74,10 @@ class TestInventoryReport(object):
                 location=location,
                 id=id)
             gcs_file_system._call.assert_called_once_with(
-                "GET", mocker.ANY, json_out=True)
+                "GET", mock.ANY, json_out=True)
             assert result == expected_result
     
-    def test_parse_raw_inventory_report_config_invalid_date(self, mocker):
+    def test_parse_raw_inventory_report_config_invalid_date(self):
 
         today = datetime.today().date()
 
@@ -99,8 +100,8 @@ class TestInventoryReport(object):
                     "year": next_week.year
                 }
             },
-            "objectMetadataReportOptions": mocker.MagicMock(),
-            "csvOptions": mocker.MagicMock()
+            "objectMetadataReportOptions": mock.MagicMock(),
+            "csvOptions": mock.MagicMock()
         }
 
         # If the current date is outside the ranges in the inventory report
@@ -108,18 +109,18 @@ class TestInventoryReport(object):
         with pytest.raises(ValueError):
             InventoryReport._parse_raw_inventory_report_config(
                 raw_inventory_report_config=raw_inventory_report_config,
-                use_snapshot_listing=mocker.MagicMock())
+                use_snapshot_listing=mock.MagicMock())
     
     def test_parse_raw_inventory_report_config_missing_metadata_fields(
-            self, mocker):
+            self):
 
         raw_inventory_report_config = {
-            "frequencyOptions": mocker.MagicMock(),
+            "frequencyOptions": mock.MagicMock(),
             "objectMetadataReportOptions": {
                 "metadataFields": ["project", "bucket", "name"],
-                "storageDestinationOptions": mocker.MagicMock()
+                "storageDestinationOptions": mock.MagicMock()
             },
-              "csvOptions": mocker.MagicMock()
+              "csvOptions": mock.MagicMock()
         }
 
         # When the user wants to use snapshot listing, but object size is not
@@ -187,17 +188,17 @@ class TestInventoryReport(object):
             pytest.fail(f"Unexpected exception: {e}.")
 
     @pytest.mark.asyncio
-    async def test_fetch_inventory_report_metadata_no_reports(self, mocker):
+    async def test_fetch_inventory_report_metadata_no_reports(self):
         
         # Create a mock for GCSFileSystem.
-        gcs_file_system = mocker.MagicMock(spec=GCSFileSystem)
+        gcs_file_system = mock.MagicMock(spec=GCSFileSystem)
 
         # Mock the _call method to return a page with two items
         # and then a page with one item and without next page token.
         gcs_file_system._call.side_effect = [{"items": [], "nextPageToken": None}]
 
         # Create a mock for InventoryReportConfig.
-        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config = mock.MagicMock(spec=InventoryReportConfig)
         inventory_report_config.bucket = "bucket_name"
         inventory_report_config.destination_path = "destination_path"
 
@@ -210,10 +211,10 @@ class TestInventoryReport(object):
                 Check if your inventory report is set up correctly."
 
     @pytest.mark.asyncio
-    async def test_fetch_inventory_report_metadata_multiple_calls(self, mocker):
+    async def test_fetch_inventory_report_metadata_multiple_calls(self):
 
         # Create a mock for GCSFileSystem.
-        gcs_file_system = mocker.MagicMock(spec=GCSFileSystem)
+        gcs_file_system = mock.MagicMock(spec=GCSFileSystem)
 
         # Mock the _call method to return a page with two items
         # and then a page with one item and without next page token.
@@ -221,7 +222,7 @@ class TestInventoryReport(object):
             "nextPageToken": "token1"}, {"items": ["item3"], "nextPageToken": None}]
 
         # Create a mock for InventoryReportConfig.
-        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config = mock.MagicMock(spec=InventoryReportConfig)
         inventory_report_config.bucket = "bucket_name"
         inventory_report_config.destination_path = "destination_path"
 
@@ -230,9 +231,9 @@ class TestInventoryReport(object):
             inventory_report_config=inventory_report_config)
 
         # Check that _call was called with the right arguments.
-        calls = [mocker.call("GET", "b/{}/o", 'bucket_name',
+        calls = [mock.call("GET", "b/{}/o", 'bucket_name',
                             prefix='destination_path', json_out=True),
-                mocker.call("GET", "b/{}/o", 'bucket_name',
+                mock.call("GET", "b/{}/o", 'bucket_name',
                     prefix='destination_path', pageToken="token1", json_out=True)]
         gcs_file_system._call.assert_has_calls(calls)
 
@@ -299,16 +300,16 @@ class TestInventoryReport(object):
         # Expected results.
         ["report1", "report2"]),
     ])
-    def download_inventory_report_content_setup(self, request, mocker):
+    def download_inventory_report_content_setup(self, request):
         bucket = 'bucket'
-        gcs_file_system = mocker.MagicMock()
+        gcs_file_system = mock.MagicMock()
         inventory_report_metadata, expected_reports = request.param
         
         # We are accessing the third argument as the return value,
         # since it is the object name in the function.
         # We are also encoding the content, since the actual method call needs
         # to decode the content.
-        async_side_effect = mocker.AsyncMock(side_effect=lambda *args,
+        async_side_effect = mock.AsyncMock(side_effect=lambda *args,
             **kwargs: ('_header', args[3].encode()))
         gcs_file_system._call = async_side_effect
         return gcs_file_system, inventory_report_metadata, bucket, expected_reports
@@ -354,18 +355,18 @@ class TestInventoryReport(object):
     ])
     def test_parse_inventory_report_line(self, inventory_report_line,
                         use_snapshot_listing, inventory_report_config_attrs,
-                                            delimiter, bucket, expected, mocker):
+                                            delimiter, bucket, expected):
 
         # Mock InventoryReportConfig.
-        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config = mock.MagicMock(spec=InventoryReportConfig)
         inventory_report_config.obj_name_idx = \
             inventory_report_config_attrs.get("obj_name_idx")
         inventory_report_config.metadata_fields = \
             inventory_report_config_attrs.get("metadata_fields")
         
         # Mock GCSFileSystem.
-        gcs_file_system = mocker.MagicMock(spec=GCSFileSystem)
-        gcs_file_system._process_object = mocker.Mock(side_effect=lambda obj, bucket: obj)
+        gcs_file_system = mock.MagicMock(spec=GCSFileSystem)
+        gcs_file_system._process_object = mock.Mock(side_effect=lambda obj, bucket: obj)
 
         result = InventoryReport._parse_inventory_report_line(
                 inventory_report_line=inventory_report_line,
@@ -401,12 +402,12 @@ class TestInventoryReport(object):
     (["header \n line1", "header \n line2 \n line3"], \
      {"recordSeparator": "\n", "headerRequired": True})
     ])
-    def parse_inventory_report_content_setup(self, request, mocker):
+    def parse_inventory_report_content_setup(self, request):
 
         # Mock the necessary parameters.
-        gcs_file_system = mocker.MagicMock()
-        bucket = mocker.MagicMock()
-        use_snapshot_listing=mocker.MagicMock()
+        gcs_file_system = mock.MagicMock()
+        bucket = mock.MagicMock()
+        use_snapshot_listing=mock.MagicMock()
         
         # Parse the content and config data.
         inventory_report_content = request.param[0]
@@ -415,14 +416,14 @@ class TestInventoryReport(object):
         header_required = inventory_report_config["headerRequired"]
 
         # Construct custom inventory report config.
-        inventory_report_config = mocker.MagicMock(spec=InventoryReportConfig)
+        inventory_report_config = mock.MagicMock(spec=InventoryReportConfig)
         inventory_report_config.csv_options = {
             "recordSeparator": record_separator,
             "headerRequired": header_required
         }
         
          # Stub parse_inventory_report_line method.
-        InventoryReport._parse_inventory_report_line = mocker.MagicMock(
+        InventoryReport._parse_inventory_report_line = mock.MagicMock(
             side_effect="parsed_inventory_report_line") 
         
         return gcs_file_system, inventory_report_content, \
