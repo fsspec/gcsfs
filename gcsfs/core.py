@@ -543,6 +543,7 @@ class GCSFileSystem(AsyncFileSystem):
         bucket, key, generation = self.split_path(path)
         path = path.rstrip("/")
 
+        # NOTE: the inventory report logic is experimental.
         inventory_report_info = kwargs.get("inventory_report_info", None)
 
         # Only attempt to list from the cache when the user does not use
@@ -606,6 +607,7 @@ class GCSFileSystem(AsyncFileSystem):
         # Page size of 5000 is officially supported across GCS.
         default_page_size = 5000
 
+        # NOTE: the inventory report logic is experimental.
         inventory_report_info = kwargs.get("inventory_report_info", None)
 
         # Check if the user has configured inventory report option.
