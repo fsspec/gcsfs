@@ -195,7 +195,7 @@ class InventoryReport:
             return raw_inventory_report_config
         except Exception as e:
             raise ValueError(
-                f"Error countered when fetching inventory report config: {e}."
+                f"Error encountered when fetching inventory report config: {e}."
             )
 
     def _parse_raw_inventory_report_config(
@@ -233,7 +233,6 @@ class InventoryReport:
         object_metadata_report_options = raw_inventory_report_config.get(
             "objectMetadataReportOptions"
         )
-        metadata_fields = object_metadata_report_options.get("metadataFields")
         storage_destination_options = object_metadata_report_options.get(
             "storageDestinationOptions"
         )
@@ -242,7 +241,7 @@ class InventoryReport:
         csv_options = raw_inventory_report_config.get("csvOptions")
         bucket = storage_destination_options.get("bucket")
         destination_path = storage_destination_options.get("destinationPath")
-        metadata_fields = metadata_fields
+        metadata_fields = object_metadata_report_options.get("metadataFields")
 
         # Validate date, making sure the current date is within the start and end range.
         today = datetime.now()
@@ -588,7 +587,7 @@ class InventoryReport:
                     continue
 
                 # If it is, recompose the directory and add to the prefix set.
-                dir = object_name_no_prefix[0:first_delimiter_idx]
+                dir = object_name_no_prefix[:first_delimiter_idx]
                 obj_prefix = (
                     prefix.rstrip("/")
                     + ("" if prefix == "" else "/")

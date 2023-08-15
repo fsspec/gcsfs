@@ -29,11 +29,11 @@ class TestInventoryReport(object):
                 {"use_snapshot_listing": True, "id": "123"},
                 "Inventory report location is not configured.",
             ),
-            # Check complete inventory report infor will not raise exception.
             (
                 {"use_snapshot_listing": True, "location": "us-west"},
                 "Inventory report id is not configured.",
             ),
+            # Check complete inventory report info will not raise exception.
             ({"use_snapshot_listing": True, "location": "us-west", "id": "123"}, None),
         ],
     )
@@ -223,15 +223,12 @@ class TestInventoryReport(object):
         inventory_report_config.destination_path = "destination_path"
 
         # If no inventory report metadata is fetched, an exception should be raised.
-        with pytest.raises(ValueError) as e_info:
+        match = "No inventory reports to fetch. Check if \
+                your inventory report is set up correctly."
+        with pytest.raises(ValueError, match=match):
             await InventoryReport._fetch_inventory_report_metadata(
                 gcs_file_system=gcs_file_system,
                 inventory_report_config=inventory_report_config,
-            )
-            assert (
-                e_info.value
-                == "No inventory reports to fetch. \
-                Check if your inventory report is set up correctly."
             )
 
     @pytest.mark.asyncio

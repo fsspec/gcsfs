@@ -623,7 +623,7 @@ class GCSFileSystem(AsyncFileSystem):
             if use_snapshot_listing:
                 return items, prefixes
 
-            # Otherwise, use the snapshot to initate concurrent listing.
+            # Otherwise, use the snapshot to initiate concurrent listing.
             return await self._concurrent_list_objects_helper(
                 items=items,
                 bucket=bucket,
@@ -729,7 +729,7 @@ class GCSFileSystem(AsyncFileSystem):
         page_size,
     ):
         """
-        Sequaltial list objects within the start and end offset range.
+        Sequential list objects within the start and end offset range.
         """
 
         prefixes = []
