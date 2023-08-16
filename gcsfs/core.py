@@ -1241,7 +1241,6 @@ class GCSFileSystem(AsyncFileSystem):
         **kwargs,
     ):
         path = self._strip_protocol(path)
-        path = path.rstrip("/")
         bucket, key, generation = self.split_path(path)
 
         if maxdepth is not None and maxdepth < 1:
@@ -1295,7 +1294,7 @@ class GCSFileSystem(AsyncFileSystem):
 
         if maxdepth:
             # Filter returned objects based on requested maxdepth
-            depth = path.count("/") + maxdepth
+            depth = path.rstrip("/").count("/") + maxdepth
             objects = list(filter(lambda o: o["name"].count("/") <= depth, objects))
 
         if detail:
