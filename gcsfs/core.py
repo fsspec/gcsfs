@@ -840,7 +840,7 @@ class GCSFileSystem(AsyncFileSystem):
         path = self._strip_protocol(path).rstrip("/")
 
         if refresh:
-            self.invalidate_cache()
+            self.invalidate_cache(path)
         if path in ["/", ""]:
             out = await self._list_buckets()
         else:
