@@ -1448,7 +1448,7 @@ class GCSFileSystem(AsyncFileSystem):
 
         if maxdepth:
             # Filter returned objects based on requested maxdepth
-            depth = path.count("/") + maxdepth
+            depth = path.rstrip("/").count("/") + maxdepth
             objects = list(filter(lambda o: o["name"].count("/") <= depth, objects))
 
         if detail:
