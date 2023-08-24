@@ -835,18 +835,6 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             raise FileNotFoundError(path)
 
-    async def _glob(self, path, prefix="", **kwargs):
-        if not prefix:
-            # Identify pattern prefixes. Ripped from fsspec.spec.AbstractFileSystem.glob and matches
-            # the glob.has_magic patterns.
-            indstar = path.find("*") if path.find("*") >= 0 else len(path)
-            indques = path.find("?") if path.find("?") >= 0 else len(path)
-            indbrace = path.find("[") if path.find("[") >= 0 else len(path)
-
-            ind = min(indstar, indques, indbrace)
-            prefix = path[:ind].split("/")[-1]
-        return await super()._glob(path, prefix=prefix, **kwargs)
-
     async def _ls(self, path, detail=False, prefix="", versions=False, **kwargs):
         """List objects under the given '/{bucket}/{prefix} path."""
         path = self._strip_protocol(path).rstrip("/")
@@ -1251,6 +1239,9 @@ class GCSFileSystem(AsyncFileSystem):
             _prefix = f"{_path}{prefix}"
         else:
             _prefix = key
+
+        if _prefix != "" and await self._isdir(f"{bucket}/{_prefix}"):
+            _prefix = _prefix.rstrip("/") + "/"
 
         objects, _ = await self._do_list_objects(
             bucket, delimiter="", prefix=_prefix, versions=versions
