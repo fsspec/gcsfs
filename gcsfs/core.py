@@ -835,7 +835,7 @@ class GCSFileSystem(AsyncFileSystem):
             prefix = path[:ind].split("/")[-1]
         return await super()._glob(path, prefix=prefix, **kwargs)
 
-    async def _ls(self, path, detail=False, refresh=False, prefix="", versions=False, **kwargs):
+    async def _ls(self, path, detail=False, prefix="", versions=False, refresh=False, **kwargs):
         """List objects under the given '/{bucket}/{prefix} path."""
         path = self._strip_protocol(path).rstrip("/")
 
