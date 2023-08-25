@@ -125,7 +125,7 @@ def test_info(gcs):
     gcs.touch(a)
     assert gcs.info(a) == gcs.ls(a, detail=True)[0]
 
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.utcnow().date().isoformat()
     assert gcs.created(a).isoformat().startswith(today)
     assert gcs.modified(a).isoformat().startswith(today)
     # Check conformance with expected info attribute names.
@@ -270,11 +270,18 @@ def test_ls_detail(gcs):
     assert all(isinstance(item, dict) for item in L)
 
 
+@pytest.mark.parametrize("refresh", (False, True))
+def test_ls_refresh(gcs, refresh):
+    with mock.patch.object(gcs, "invalidate_cache") as mock_invalidate_cache:
+        gcs.ls(TEST_BUCKET, refresh=refresh)
+    assert mock_invalidate_cache.called is refresh
+
+
 def test_gcs_glob(gcs):
     fn = TEST_BUCKET + "/nested/file1"
     assert fn not in gcs.glob(TEST_BUCKET + "/")
     assert fn not in gcs.glob(TEST_BUCKET + "/*")
-    assert fn in gcs.glob(TEST_BUCKET + "/nested/")
+    assert fn not in gcs.glob(TEST_BUCKET + "/nested/")
     assert fn in gcs.glob(TEST_BUCKET + "/nested/*")
     assert fn in gcs.glob(TEST_BUCKET + "/nested/file*")
     assert fn in gcs.glob(TEST_BUCKET + "/*/*")
