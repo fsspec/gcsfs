@@ -106,14 +106,14 @@ class InventoryReport:
             use_snapshot_listing=use_snapshot_listing,
         )
 
-        # Use the config to fetch all inventory report medadata.
+        # Use the config to fetch all inventory report metadata.
         unsorted_inventory_report_metadata = await cls._fetch_inventory_report_metadata(
             gcs_file_system=gcs_file_system,
             inventory_report_config=inventory_report_config,
         )
 
         # Sort the metadata based on reverse created time order.
-        inventory_report_metadata = cls._sort_inventory_report_medatada(
+        inventory_report_metadata = cls._sort_inventory_report_metadata(
             unsorted_inventory_report_metadata=unsorted_inventory_report_metadata
         )
 
@@ -397,13 +397,11 @@ class InventoryReport:
         # will be many inventory reports on the same day. But including this
         # logic for robustness.
         for metadata in inventory_report_metadata:
-
             inventory_report_date = InventoryReport._convert_str_to_datetime(
                 metadata["timeCreated"]
             ).date()
 
             if inventory_report_date == most_recent_date:
-
                 # Download the raw inventory report if the date matches.
                 # Header is not needed, we only need to process and store
                 # the content.
@@ -454,7 +452,6 @@ class InventoryReport:
         objects = []
 
         for content in inventory_report_content:
-
             # Split the content into lines based on the specified separator.
             lines = content.split(record_separator)
 
@@ -464,7 +461,6 @@ class InventoryReport:
 
             # Parse each line of the inventory report.
             for line in lines:
-
                 obj = InventoryReport._parse_inventory_report_line(
                     inventory_report_line=line,
                     use_snapshot_listing=use_snapshot_listing,
@@ -554,18 +550,15 @@ class InventoryReport:
         # Filter the prefix and returns the list if the user does not want to use
         # the snapshot for listing.
         if use_snapshot_listing is False:
-
             return [obj for obj in objects if obj.get("name").startswith(prefix)], []
 
         else:
-
             # If the user wants to use the snapshot, generate both the items and
             # prefixes manually.
             items = []
             prefixes = set()
 
             for obj in objects:
-
                 # Fetch the name of the object.
                 obj_name = obj.get("name")
 

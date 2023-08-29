@@ -66,7 +66,6 @@ class TestInventoryReport(object):
     async def test_fetch_raw_inventory_report_config(
         self, location, id, exception, expected_result
     ):
-
         # Mocking the gcs_file_system.
         gcs_file_system = mock.MagicMock()
         gcs_file_system.project = "project"
@@ -95,7 +94,6 @@ class TestInventoryReport(object):
             assert result == expected_result
 
     def test_parse_raw_inventory_report_config_invalid_date(self):
-
         today = datetime.today().date()
 
         # Get tomorrow's date.
@@ -130,7 +128,6 @@ class TestInventoryReport(object):
             )
 
     def test_parse_raw_inventory_report_config_missing_metadata_fields(self):
-
         raw_inventory_report_config = {
             "frequencyOptions": mock.MagicMock(),
             "objectMetadataReportOptions": {
@@ -149,7 +146,6 @@ class TestInventoryReport(object):
             )
 
     def test_parse_raw_inventory_report_config_returns_correct_config(self):
-
         bucket = "bucket"
         destination_path = "path/to/inventory-report"
         metadata_fields = ["project", "bucket", "name", "size"]
@@ -209,7 +205,6 @@ class TestInventoryReport(object):
 
     @pytest.mark.asyncio
     async def test_fetch_inventory_report_metadata_no_reports(self):
-
         # Create a mock for GCSFileSystem.
         gcs_file_system = mock.MagicMock(spec=GCSFileSystem)
 
@@ -233,7 +228,6 @@ class TestInventoryReport(object):
 
     @pytest.mark.asyncio
     async def test_fetch_inventory_report_metadata_multiple_calls(self):
-
         # Create a mock for GCSFileSystem.
         gcs_file_system = mock.MagicMock(spec=GCSFileSystem)
 
@@ -367,7 +361,6 @@ class TestInventoryReport(object):
     async def test_download_inventory_report_content(
         self, download_inventory_report_content_setup
     ):
-
         (
             gcs_file_system,
             inventory_report_metadata,
@@ -418,7 +411,6 @@ class TestInventoryReport(object):
         bucket,
         expected,
     ):
-
         # Mock InventoryReportConfig.
         inventory_report_config = mock.MagicMock(spec=InventoryReportConfig)
         inventory_report_config.obj_name_idx = inventory_report_config_attrs.get(
@@ -482,7 +474,6 @@ class TestInventoryReport(object):
         ]
     )
     def parse_inventory_report_content_setup(self, request):
-
         # Mock the necessary parameters.
         gcs_file_system = mock.MagicMock()
         bucket = mock.MagicMock()
@@ -515,7 +506,6 @@ class TestInventoryReport(object):
         )
 
     def test_parse_inventory_reports(self, parse_inventory_report_content_setup):
-
         (
             gcs_file_system,
             inventory_report_content,
@@ -723,7 +713,6 @@ class TestInventoryReport(object):
     def test_construct_final_snapshot(
         self, use_snapshot_listing, prefix, mock_objects, expected_result
     ):
-
         # Construct the final snapshot.
         result = InventoryReport._construct_final_snapshot(
             objects=mock_objects,
@@ -741,7 +730,6 @@ class TestInventoryReport(object):
 # Test fields of the inventory report config is correctly stored.
 class TestInventoryReportConfig:
     def test_inventory_report_config_creation(self):
-
         csv_options = {}
         bucket = "bucket"
         destination_path = ""
