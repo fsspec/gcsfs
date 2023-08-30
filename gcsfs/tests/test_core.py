@@ -125,7 +125,7 @@ def test_info(gcs):
     gcs.touch(a)
     assert gcs.info(a) == gcs.ls(a, detail=True)[0]
 
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.utcnow().date().isoformat()
     assert gcs.created(a).isoformat().startswith(today)
     assert gcs.modified(a).isoformat().startswith(today)
     # Check conformance with expected info attribute names.
@@ -405,6 +405,19 @@ def test_move(gcs):
     gcs.mv(fn, fn + "2")
     assert gcs.cat(fn + "2") == data
     assert not gcs.exists(fn)
+
+
+@pytest.mark.parametrize("slash_from", ([False, True]))
+def test_move_recursive(gcs, slash_from):
+    # See issue #489
+    dir_from = TEST_BUCKET + "/nested"
+    if slash_from:
+        dir_from += "/"
+    dir_to = TEST_BUCKET + "/new_name"
+
+    gcs.mv(dir_from, dir_to, recursive=True)
+    assert not gcs.exists(dir_from)
+    assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
 
 
 def test_cat_file(gcs):
