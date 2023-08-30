@@ -1387,23 +1387,26 @@ class GCSFileSystem(AsyncFileSystem):
         **kwargs,
     ):
         path = self._strip_protocol(path)
-        bucket, key, generation = self.split_path(path)
 
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
 
-        if prefix:
-            _path = "" if not key else key.rstrip("/") + "/"
-            _prefix = f"{_path}{prefix}"
-        else:
-            _prefix = key
-
-        if _prefix != "" and await self._isdir(f"{bucket}/{_prefix}"):
-            _prefix = _prefix.rstrip("/") + "/"
-
+        # Fetch objects as if the path is a directory
         objects, _ = await self._do_list_objects(
-            bucket, delimiter="", prefix=_prefix, versions=versions
+            path, delimiter="", prefix=prefix, versions=versions
         )
+
+        if not objects:
+            # Fetch objects as if the path is a file
+            bucket, key, _ = self.split_path(path)
+            if prefix:
+                _path = "" if not key else key.rstrip("/") + "/"
+                _prefix = f"{_path}{prefix}"
+            else:
+                _prefix = key
+            objects, _ = await self._do_list_objects(
+                bucket, delimiter="", prefix=_prefix, versions=versions
+            )
 
         dirs = {}
         cache_entries = {}
