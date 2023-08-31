@@ -292,10 +292,11 @@ def test_gcs_glob(gcs):
         for f in gcs.glob(TEST_BUCKET + "/nested/*")
         if gcs.isfile(f)
     )
+    # the following is no longer true since the glob method list the root path
     # Ensure the glob only fetches prefixed folders
-    gcs.dircache.clear()
-    gcs.glob(TEST_BUCKET + "/nested**1")
-    assert all(d.startswith(TEST_BUCKET + "/nested") for d in gcs.dircache)
+    # gcs.dircache.clear()
+    # gcs.glob(TEST_BUCKET + "/nested**1")
+    # assert all(d.startswith(TEST_BUCKET + "/nested") for d in gcs.dircache)
     # the following is no longer true as of #437
     # gcs.glob(TEST_BUCKET + "/test*")
     # assert TEST_BUCKET + "/test" in gcs.dircache

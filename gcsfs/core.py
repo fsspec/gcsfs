@@ -989,18 +989,6 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             raise FileNotFoundError(path)
 
-    async def _glob(self, path, prefix="", **kwargs):
-        if not prefix:
-            # Identify pattern prefixes. Ripped from fsspec.spec.AbstractFileSystem.glob and matches
-            # the glob.has_magic patterns.
-            indstar = path.find("*") if path.find("*") >= 0 else len(path)
-            indques = path.find("?") if path.find("?") >= 0 else len(path)
-            indbrace = path.find("[") if path.find("[") >= 0 else len(path)
-
-            ind = min(indstar, indques, indbrace)
-            prefix = path[:ind].split("/")[-1]
-        return await super()._glob(path, prefix=prefix, **kwargs)
-
     async def _ls(
         self, path, detail=False, prefix="", versions=False, refresh=False, **kwargs
     ):
@@ -1399,20 +1387,26 @@ class GCSFileSystem(AsyncFileSystem):
         **kwargs,
     ):
         path = self._strip_protocol(path)
-        bucket, key, generation = self.split_path(path)
 
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
 
-        if prefix:
-            _path = "" if not key else key.rstrip("/") + "/"
-            _prefix = f"{_path}{prefix}"
-        else:
-            _prefix = key
-
+        # Fetch objects as if the path is a directory
         objects, _ = await self._do_list_objects(
-            bucket, delimiter="", prefix=_prefix, versions=versions
+            path, delimiter="", prefix=prefix, versions=versions
         )
+
+        if not objects:
+            # Fetch objects as if the path is a file
+            bucket, key, _ = self.split_path(path)
+            if prefix:
+                _path = "" if not key else key.rstrip("/") + "/"
+                _prefix = f"{_path}{prefix}"
+            else:
+                _prefix = key
+            objects, _ = await self._do_list_objects(
+                bucket, delimiter="", prefix=_prefix, versions=versions
+            )
 
         dirs = {}
         cache_entries = {}
