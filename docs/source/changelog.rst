@@ -1,6 +1,19 @@
 Changelog
 =========
 
+2023.9.0
+--------
+
+* bulk operations edge cases (#576, 572)
+* inventory report based file listing (#573)
+* pickle HttpError (#571)
+* avoid warnings (#569)
+* maxdepth in find() (#566)
+* invalidate dircache (#564)
+* standard metadata field names (#563)
+* performance of building cache in find() (#561)
+
+
 2023.6.0
 --------
 
