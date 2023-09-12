@@ -539,7 +539,6 @@ class GCSFileSystem(AsyncFileSystem):
         return self._process_object(bucket, res)
 
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
-
         bucket, key, generation = self.split_path(path)
         path = path.rstrip("/")
 
@@ -583,10 +582,8 @@ class GCSFileSystem(AsyncFileSystem):
                 return []
         out = pseudodirs + items
 
-        use_snapshot_listing = (
-            False
-            if not inventory_report_info
-            else inventory_report_info.get("use_snapshot_listing")
+        use_snapshot_listing = inventory_report_info and inventory_report_info.get(
+            "use_snapshot_listing"
         )
 
         # Don't cache prefixed/partial listings, in addition to
@@ -598,7 +595,6 @@ class GCSFileSystem(AsyncFileSystem):
     async def _do_list_objects(
         self, path, max_results=None, delimiter="/", prefix="", versions=False, **kwargs
     ):
-
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, _path, generation = self.split_path(path)
         _path = "" if not _path else _path.rstrip("/") + "/"
@@ -659,8 +655,7 @@ class GCSFileSystem(AsyncFileSystem):
         """
 
         # Extract out the names of the objects fetched from the inventory report.
-        snapshot_object_names = [item["name"] for item in items]
-        snapshot_object_names = sorted(snapshot_object_names)
+        snapshot_object_names = sorted([item["name"] for item in items])
 
         # Determine the number of coroutines needed to concurrent listing.
         # Ideally, want each coroutine to fetch a single page of objects.
@@ -755,7 +750,6 @@ class GCSFileSystem(AsyncFileSystem):
         next_page_token = page.get("nextPageToken", None)
 
         while next_page_token is not None:
-
             page = await self._call(
                 "GET",
                 "b/{}/o",

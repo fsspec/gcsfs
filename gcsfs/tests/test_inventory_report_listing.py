@@ -7,7 +7,6 @@ TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
 
 # Basic integration test to ensure listing returns the correct result.
 def test_ls_base(monkeypatch, gcs):
-
     # First get results from original listing.
     items = gcs.ls(TEST_BUCKET)
 
