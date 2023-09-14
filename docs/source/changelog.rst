@@ -1,6 +1,56 @@
 Changelog
 =========
 
+2023.9.0
+--------
+
+* bulk operations edge cases (#576, 572)
+* inventory report based file listing (#573)
+* pickle HttpError (#571)
+* avoid warnings (#569)
+* maxdepth in find() (#566)
+* invalidate dircache (#564)
+* standard metadata field names (#563)
+* performance of building cache in find() (#561)
+
+
+2023.6.0
+--------
+
+* allow raw/session token for auth (#554)
+* fix listings_expiry_time kwargs (#551)
+* allow setting fixed metadata on put/pipe (#550)
+
+2023.5.0
+--------
+
+* Allow emulator host without protocol (#548)
+* Prevent upload retry from closing the file being sent (#540)
+
+2023.4.0
+--------
+
+No changes
+
+2023.3.0
+--------
+
+* Don't let find() mess up dircache (#531)
+* Drop py3.7 (#529)
+* Update docs (#528)
+* Make times UTC (#527)
+* Use BytesIO for large bodies (#525)
+* Fix: Don't append generation when it is absent (#523)
+* get/put/cp consistency tests (#521)
+
+2023.1.0
+--------
+
+* Support create time (#516, 518)
+* defer async session creation (#513, 514)
+* support listing of file versions (#509)
+* fix ``sign`` following versioned split protocol (#513)
+
 2022.11.0
 ---------
 

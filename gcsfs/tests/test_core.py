@@ -1,22 +1,29 @@
+import datetime
 import io
+import os
 from builtins import FileNotFoundError
 from itertools import chain
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
+import fsspec.core
 import pytest
 import requests
 from fsspec.asyn import sync
 from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
+import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
-from gcsfs.tests.settings import TEST_BUCKET, TEST_PROJECT, TEST_REQUESTER_PAYS_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
+
+TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
+TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
+TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 
 
 def test_simple(gcs):
@@ -117,6 +124,13 @@ def test_multi_upload(gcs):
 def test_info(gcs):
     gcs.touch(a)
     assert gcs.info(a) == gcs.ls(a, detail=True)[0]
+
+    today = datetime.datetime.utcnow().date().isoformat()
+    assert gcs.created(a).isoformat().startswith(today)
+    assert gcs.modified(a).isoformat().startswith(today)
+    # Check conformance with expected info attribute names.
+    assert gcs.info(a)["ctime"] == gcs.created(a)
+    assert gcs.info(a)["mtime"] == gcs.modified(a)
 
 
 def test_ls2(gcs):
@@ -256,11 +270,18 @@ def test_ls_detail(gcs):
     assert all(isinstance(item, dict) for item in L)
 
 
+@pytest.mark.parametrize("refresh", (False, True))
+def test_ls_refresh(gcs, refresh):
+    with mock.patch.object(gcs, "invalidate_cache") as mock_invalidate_cache:
+        gcs.ls(TEST_BUCKET, refresh=refresh)
+    assert mock_invalidate_cache.called is refresh
+
+
 def test_gcs_glob(gcs):
     fn = TEST_BUCKET + "/nested/file1"
     assert fn not in gcs.glob(TEST_BUCKET + "/")
     assert fn not in gcs.glob(TEST_BUCKET + "/*")
-    assert fn in gcs.glob(TEST_BUCKET + "/nested/")
+    assert fn not in gcs.glob(TEST_BUCKET + "/nested/")
     assert fn in gcs.glob(TEST_BUCKET + "/nested/*")
     assert fn in gcs.glob(TEST_BUCKET + "/nested/file*")
     assert fn in gcs.glob(TEST_BUCKET + "/*/*")
@@ -271,10 +292,11 @@ def test_gcs_glob(gcs):
         for f in gcs.glob(TEST_BUCKET + "/nested/*")
         if gcs.isfile(f)
     )
+    # the following is no longer true since the glob method list the root path
     # Ensure the glob only fetches prefixed folders
-    gcs.dircache.clear()
-    gcs.glob(TEST_BUCKET + "/nested**1")
-    assert all(d.startswith(TEST_BUCKET + "/nested") for d in gcs.dircache)
+    # gcs.dircache.clear()
+    # gcs.glob(TEST_BUCKET + "/nested**1")
+    # assert all(d.startswith(TEST_BUCKET + "/nested") for d in gcs.dircache)
     # the following is no longer true as of #437
     # gcs.glob(TEST_BUCKET + "/test*")
     # assert TEST_BUCKET + "/test" in gcs.dircache
@@ -383,6 +405,19 @@ def test_move(gcs):
     gcs.mv(fn, fn + "2")
     assert gcs.cat(fn + "2") == data
     assert not gcs.exists(fn)
+
+
+@pytest.mark.parametrize("slash_from", ([False, True]))
+def test_move_recursive(gcs, slash_from):
+    # See issue #489
+    dir_from = TEST_BUCKET + "/nested"
+    if slash_from:
+        dir_from += "/"
+    dir_to = TEST_BUCKET + "/new_name"
+
+    gcs.mv(dir_from, dir_to, recursive=True)
+    assert not gcs.exists(dir_from)
+    assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
 
 
 def test_cat_file(gcs):
@@ -992,10 +1027,16 @@ def test_put_small_cache_validity(gcs):
 def test_pseudo_dir_find(gcs):
     gcs.rm(f"{TEST_BUCKET}/*", recursive=True)
     gcs.touch(f"{TEST_BUCKET}/a/b/file")
+
+    c = gcs.glob(f"{TEST_BUCKET}/a/b/*")
+    assert c == [f"{TEST_BUCKET}/a/b/file"]
+
     b = set(gcs.glob(f"{TEST_BUCKET}/a/*"))
-    assert f"{TEST_BUCKET}/a/b" in b
+    assert b == {f"{TEST_BUCKET}/a/b"}
+
     a = set(gcs.glob(f"{TEST_BUCKET}/*"))
-    assert f"{TEST_BUCKET}/a" in a
+    assert a == {f"{TEST_BUCKET}/a"}
+
     assert gcs.find(TEST_BUCKET) == [f"{TEST_BUCKET}/a/b/file"]
     assert gcs.find(f"{TEST_BUCKET}/a", withdirs=True) == [
         f"{TEST_BUCKET}/a",
@@ -1198,6 +1239,7 @@ def test_ls_versioned(gcs_versioned):
     assert versions == {
         entry["name"] for entry in gcs_versioned.ls(dpath, detail=True, versions=True)
     }
+    assert gcs_versioned.ls(TEST_BUCKET, versions=True) == ["gcsfs_test/tmp"]
 
 
 def test_find_versioned(gcs_versioned):
@@ -1210,3 +1252,206 @@ def test_find_versioned(gcs_versioned):
     versions = {f"{a}#{v1}", f"{a}#{v2}"}
     assert versions == set(gcs_versioned.find(a, versions=True))
     assert versions == set(gcs_versioned.find(a, detail=True, versions=True))
+
+
+def test_cp_directory_recursive(gcs):
+    src = TEST_BUCKET + "/src"
+    src_file = src + "/file"
+    gcs.mkdir(src)
+    gcs.touch(src_file)
+
+    target = TEST_BUCKET + "/target"
+
+    # cp without slash
+    assert not gcs.exists(target)
+    for loop in range(2):
+        gcs.cp(src, target, recursive=True)
+        assert gcs.isdir(target)
+
+        if loop == 0:
+            correct = [target + "/file"]
+            assert gcs.find(target) == correct
+        else:
+            correct = [target + "/file", target + "/src/file"]
+            assert sorted(gcs.find(target)) == correct
+
+    gcs.rm(target, recursive=True)
+
+    # cp with slash
+    assert not gcs.exists(target)
+    for loop in range(2):
+        gcs.cp(src + "/", target, recursive=True)
+        assert gcs.isdir(target)
+        correct = [target + "/file"]
+        assert gcs.find(target) == correct
+
+
+def test_get_directory_recursive(gcs):
+    src = TEST_BUCKET + "/src"
+    src_file = src + "/file"
+    gcs.mkdir(src)
+    gcs.touch(src_file)
+
+    with tempdir() as tmpdir:
+        target = os.path.join(tmpdir, "target")
+        target_fs = fsspec.filesystem("file")
+
+        # get without slash
+        assert not target_fs.exists(target)
+        for loop in range(2):
+            gcs.get(src, target, recursive=True)
+            assert target_fs.isdir(target)
+
+            if loop == 0:
+                assert target_fs.find(target) == [os.path.join(target, "file")]
+            else:
+                assert sorted(target_fs.find(target)) == [
+                    os.path.join(target, "file"),
+                    os.path.join(target, "src", "file"),
+                ]
+
+        target_fs.rm(target, recursive=True)
+
+        # get with slash
+        assert not target_fs.exists(target)
+        for loop in range(2):
+            gcs.get(src + "/", target, recursive=True)
+            assert target_fs.isdir(target)
+            assert target_fs.find(target) == [os.path.join(target, "file")]
+
+
+def test_put_directory_recursive(gcs):
+    with tempdir() as tmpdir:
+        src = os.path.join(tmpdir, "src")
+        src_file = os.path.join(src, "file")
+
+        source_fs = fsspec.filesystem("file")
+        source_fs.mkdir(src)
+        source_fs.touch(src_file)
+
+        target = TEST_BUCKET + "/target"
+
+        # put without slash
+        assert not gcs.exists(target)
+        for loop in range(2):
+            gcs.put(src, target, recursive=True)
+            assert gcs.isdir(target)
+
+            if loop == 0:
+                assert gcs.find(target) == [target + "/file"]
+            else:
+                assert sorted(gcs.find(target)) == [
+                    target + "/file",
+                    target + "/src/file",
+                ]
+
+        gcs.rm(target, recursive=True)
+
+        # put with slash
+        assert not gcs.exists(target)
+        for loop in range(2):
+            gcs.put(src + "/", target, recursive=True)
+            assert gcs.isdir(target)
+            assert gcs.find(target) == [target + "/file"]
+
+
+def test_cp_two_files(gcs):
+    src = TEST_BUCKET + "/src"
+    file0 = src + "/file0"
+    file1 = src + "/file1"
+    gcs.mkdir(src)
+    gcs.touch(file0)
+    gcs.touch(file1)
+
+    target = TEST_BUCKET + "/target"
+    assert not gcs.exists(target)
+
+    gcs.cp([file0, file1], target)
+
+    assert gcs.isdir(target)
+    assert sorted(gcs.find(target)) == [
+        target + "/file0",
+        target + "/file1",
+    ]
+
+
+def test_multiglob(gcs):
+    # #530
+    root = TEST_BUCKET
+
+    ggparent = root + "/t1"
+    gparent = ggparent + "/t2"
+    parent = gparent + "/t3"
+    leaf1 = parent + "/foo.txt"
+    leaf2 = parent + "/bar.txt"
+    leaf3 = parent + "/baz.txt"
+
+    gcs.touch(leaf1)
+    gcs.touch(leaf2)
+    gcs.touch(leaf3)
+    gcs.invalidate_cache()
+
+    assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]
+    gcs.glob(ggparent + "/")
+    assert gcs.ls(gparent, detail=False) == [f"{root}/t1/t2/t3"]
+
+
+def test_expiry_keyword():
+    gcs = GCSFileSystem(listings_expiry_time=1, token="anon")
+    assert gcs.dircache.listings_expiry_time == 1
+    gcs = GCSFileSystem(cache_timeout=1, token="anon")
+    assert gcs.dircache.listings_expiry_time == 1
+
+
+def test_copy_cache_invalidated(gcs):
+    # Issue https://github.com/fsspec/gcsfs/issues/562
+    source = TEST_BUCKET + "/source"
+    gcs.mkdir(source)
+    gcs.touch(source + "/file2")
+
+    target = TEST_BUCKET + "/target"
+    assert not gcs.exists(target)
+    gcs.touch(target + "/dummy")
+    assert gcs.isdir(target)
+
+    target_file2 = target + "/file2"
+    gcs.cp(source + "/file2", target)
+
+    # Explicitly check that target has been removed from DirCache
+    assert target not in gcs.dircache
+
+    # Prior to fix the following failed as cache stale
+    assert gcs.isfile(target_file2)
+
+
+def test_find_maxdepth(gcs):
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=None) == [
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+        f"{TEST_BUCKET}/nested/nested2/file1",
+        f"{TEST_BUCKET}/nested/nested2/file2",
+    ]
+
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=None, withdirs=True) == [
+        f"{TEST_BUCKET}/nested",
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+        f"{TEST_BUCKET}/nested/nested2",
+        f"{TEST_BUCKET}/nested/nested2/file1",
+        f"{TEST_BUCKET}/nested/nested2/file2",
+    ]
+
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=1) == [
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+    ]
+
+    assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=1, withdirs=True) == [
+        f"{TEST_BUCKET}/nested",
+        f"{TEST_BUCKET}/nested/file1",
+        f"{TEST_BUCKET}/nested/file2",
+        f"{TEST_BUCKET}/nested/nested2",
+    ]
+
+    with pytest.raises(ValueError, match="maxdepth must be at least 1"):
+        gcs.find(f"{TEST_BUCKET}/nested", maxdepth=0)

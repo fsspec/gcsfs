@@ -15,6 +15,8 @@ class HttpError(Exception):
     """Holds the message and code from cloud errors."""
 
     def __init__(self, error_response=None):
+        # Save error_response for potential pickle.
+        self._error_response = error_response
         if error_response:
             self.code = error_response.get("code", None)
             self.message = error_response.get("message", "")
@@ -28,6 +30,12 @@ class HttpError(Exception):
             self.code = None
         # Call the base class constructor with the parameters it needs
         super().__init__(self.message)
+
+    def __reduce__(self):
+        """This makes the Exception pickleable."""
+
+        # This is basically deconstructing the HttpError when pickled.
+        return HttpError, (self._error_response,)
 
 
 class ChecksumError(Exception):

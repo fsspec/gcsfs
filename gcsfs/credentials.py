@@ -139,22 +139,24 @@ class GoogleCredentials:
         Parameters
         ----------
         token: str, dict or Credentials
-            If a str, try to load as a Service file, or next as a JSON; if
+            If a str and a valid file name, try to load as a Service file, or next as a JSON;
+            if not a valid file name, assume it's a valid raw (non-renewable/session) token, and pass to Credentials. If
             dict, try to interpret as credentials; if Credentials, use directly.
         """
         if isinstance(token, str):
-            if not os.path.exists(token):
-                raise FileNotFoundError(token)
-            try:
-                # is this a "service" token?
-                self._connect_service(token)
-                return
-            except:  # noqa: E722
-                # TODO: catch specific exceptions
-                # some other kind of token file
-                # will raise exception if is not json
-                with open(token) as data:
-                    token = json.load(data)
+            if os.path.exists(token):
+                try:
+                    # is this a "service" token?
+                    self._connect_service(token)
+                    return
+                except:  # noqa: E722
+                    # TODO: catch specific exceptions
+                    # some other kind of token file
+                    # will raise exception if is not json
+                    with open(token) as data:
+                        token = json.load(data)
+            else:
+                token = Credentials(token)
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
         elif isinstance(token, google.auth.credentials.Credentials):

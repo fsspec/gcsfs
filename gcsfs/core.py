@@ -10,6 +10,7 @@ import posixpath
 import re
 import warnings
 import weakref
+from datetime import datetime
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
@@ -23,6 +24,7 @@ from fsspec.utils import setup_logging, stringify_path
 from . import __version__ as version
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
+from .inventory_report import InventoryReport
 from .retry import retry_request, validate_response
 
 logger = logging.getLogger("gcsfs")
@@ -95,6 +97,14 @@ async def _req_to_text(r):
         return (await r.read()).decode()
 
 
+class UnclosableBytesIO(io.BytesIO):
+    """Prevent closing BytesIO to avoid errors during retries."""
+
+    def close(self):
+        """Reset stream position for next retry."""
+        self.seek(0)
+
+
 def _location():
     """
     Resolves GCS HTTP location as http[s]://host
@@ -106,9 +116,13 @@ def _location():
     valid http location
     """
     _emulator_location = os.getenv("STORAGE_EMULATOR_HOST", None)
-    return (
-        _emulator_location if _emulator_location else "https://storage.googleapis.com"
-    )
+    if _emulator_location:
+        if not any(
+            _emulator_location.startswith(scheme) for scheme in ("http://", "https://")
+        ):
+            _emulator_location = f"http://{_emulator_location}"
+        return _emulator_location
+    return "https://storage.googleapis.com"
 
 
 def _chunks(lst, n):
@@ -148,7 +162,7 @@ class GCSFileSystem(AsyncFileSystem):
       metadata service, anonymous.
     - ``token='google_default'``, your default gcloud credentials will be used,
       which are typically established by doing ``gcloud login`` in a terminal.
-    - ``token=='cache'``, credentials from previously successful gcsfs
+    - ``token='cache'``, credentials from previously successful gcsfs
       authentication will be used (use this after "browser" auth succeeded)
     - ``token='anon'``, no authentication is performed, and you can only
       access data which is accessible to allUsers (in this case, the project and
@@ -165,10 +179,10 @@ class GCSFileSystem(AsyncFileSystem):
       or a Credentials object. gcloud typically stores its tokens in locations
       such as
       ``~/.config/gcloud/application_default_credentials.json``,
-      `` ~/.config/gcloud/credentials``, or
+      ``~/.config/gcloud/credentials``, or
       ``~\AppData\Roaming\gcloud\credentials``, etc.
 
-    Specific methods, (eg. `ls`, `info`, ...) may return object details from GCS.
+    Specific methods, (eg. ``ls``, ``info``, ...) may return object details from GCS.
     These detailed listings include the
     [object resource](https://cloud.google.com/storage/docs/json_api/v1/objects#resource)
 
@@ -198,8 +212,8 @@ class GCSFileSystem(AsyncFileSystem):
     created via other processes *will not* be visible to the GCSFileSystem until the cache
     refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not effected by this cache.
 
-    In the default case the cache is never expired. This may be controlled via the `cache_timeout`
-    GCSFileSystem parameter or via explicit calls to `GCSFileSystem.invalidate_cache`.
+    In the default case the cache is never expired. This may be controlled via the ``cache_timeout``
+    GCSFileSystem parameter or via explicit calls to ``GCSFileSystem.invalidate_cache``.
 
     Parameters
     ----------
@@ -224,11 +238,11 @@ class GCSFileSystem(AsyncFileSystem):
     secure_serialize: bool (deprecated)
     requester_pays : bool, or str default False
         Whether to use requester-pays requests. This will include your
-        project ID `project` in requests as the `userPorject`, and you'll be
+        project ID `project` in requests as the `userProject`, and you'll be
         billed for accessing data from requester-pays buckets. Optionally,
         pass a project-id here as a string to use that as the `userProject`.
     session_kwargs: dict
-        passed on to aiohttp.ClientSession; can contain, for example,
+        passed on to ``aiohttp.ClientSession``; can contain, for example,
         proxy settings.
     endpoint_url: str
         If given, use this URL (format protocol://host:port , *without* any
@@ -271,9 +285,10 @@ class GCSFileSystem(AsyncFileSystem):
         version_aware=False,
         **kwargs,
     ):
+        if cache_timeout:
+            kwargs["listings_expiry_time"] = cache_timeout
         super().__init__(
             self,
-            listings_expiry_time=cache_timeout,
             asynchronous=asynchronous,
             loop=loop,
             **kwargs,
@@ -303,12 +318,6 @@ class GCSFileSystem(AsyncFileSystem):
 
         self.credentials = GoogleCredentials(project, access, token)
 
-        if not self.asynchronous:
-            self._session = sync(
-                self.loop, get_client, timeout=self.timeout, **self.session_kwargs
-            )
-            weakref.finalize(self, self.close_session, self.loop, self._session)
-
     @property
     def _location(self):
         return self._endpoint or _location()
@@ -326,6 +335,12 @@ class GCSFileSystem(AsyncFileSystem):
         if loop is not None and session is not None:
             if loop.is_running():
                 try:
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(session.close())
+                    return
+                except RuntimeError:
+                    pass
+                try:
                     sync(loop, session.close, timeout=0.1)
                 except fsspec.FSTimeoutError:
                     pass
@@ -335,6 +350,7 @@ class GCSFileSystem(AsyncFileSystem):
     async def _set_session(self):
         if self._session is None:
             self._session = await get_client(**self.session_kwargs)
+            weakref.finalize(self, self.close_session, self.loop, self._session)
         return self._session
 
     @property
@@ -406,7 +422,6 @@ class GCSFileSystem(AsyncFileSystem):
             data=data,
             timeout=self.requests_timeout,
         ) as r:
-
             status = r.status
             headers = r.headers
             info = r.request_info  # for debug only
@@ -451,6 +466,12 @@ class GCSFileSystem(AsyncFileSystem):
         result["size"] = int(object_metadata.get("size", 0))
         result["name"] = posixpath.join(bucket, object_metadata["name"])
         result["type"] = "file"
+        # Translate time metadata from GCS names to fsspec standard names.
+        # TODO(issues/559): Remove legacy names `updated` and `timeCreated`?
+        if "updated" in object_metadata:
+            result["mtime"] = self._parse_timestamp(object_metadata["updated"])
+        if "timeCreated" in object_metadata:
+            result["ctime"] = self._parse_timestamp(object_metadata["timeCreated"])
         if "generation" in object_metadata or "metageneration" in object_metadata:
             result["generation"] = object_metadata.get("generation")
             result["metageneration"] = object_metadata.get("metageneration")
@@ -517,25 +538,31 @@ class GCSFileSystem(AsyncFileSystem):
                 raise FileNotFoundError(path)
         return self._process_object(bucket, res)
 
-    async def _list_objects(self, path, prefix="", versions=False):
+    async def _list_objects(self, path, prefix="", versions=False, **kwargs):
         bucket, key, generation = self.split_path(path)
         path = path.rstrip("/")
 
-        try:
-            clisting = self._ls_from_cache(path)
-            hassubdirs = clisting and any(
-                c["name"].rstrip("/") == path and c["type"] == "directory"
-                for c in clisting
-            )
-            if clisting and not hassubdirs:
-                return clisting
-        except FileNotFoundError:
-            # not finding a bucket in list of "my" buckets is OK
-            if key:
-                raise
+        # NOTE: the inventory report logic is experimental.
+        inventory_report_info = kwargs.get("inventory_report_info", None)
+
+        # Only attempt to list from the cache when the user does not use
+        # the inventory report service.
+        if not inventory_report_info:
+            try:
+                clisting = self._ls_from_cache(path)
+                hassubdirs = clisting and any(
+                    c["name"].rstrip("/") == path and c["type"] == "directory"
+                    for c in clisting
+                )
+                if clisting and not hassubdirs:
+                    return clisting
+            except FileNotFoundError:
+                # not finding a bucket in list of "my" buckets is OK
+                if key:
+                    raise
 
         items, prefixes = await self._do_list_objects(
-            path, prefix=prefix, versions=versions
+            path, prefix=prefix, versions=versions, **kwargs
         )
 
         pseudodirs = [
@@ -554,28 +581,166 @@ class GCSFileSystem(AsyncFileSystem):
             else:
                 return []
         out = pseudodirs + items
-        # Don't cache prefixed/partial listings
-        if not prefix:
+
+        use_snapshot_listing = inventory_report_info and inventory_report_info.get(
+            "use_snapshot_listing"
+        )
+
+        # Don't cache prefixed/partial listings, in addition to
+        # not using the inventory report service to do listing directly.
+        if not prefix and use_snapshot_listing is False:
             self.dircache[path] = out
         return out
 
     async def _do_list_objects(
-        self, path, max_results=None, delimiter="/", prefix="", versions=False
+        self, path, max_results=None, delimiter="/", prefix="", versions=False, **kwargs
     ):
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, _path, generation = self.split_path(path)
         _path = "" if not _path else _path.rstrip("/") + "/"
         prefix = f"{_path}{prefix}" or None
 
+        # Page size of 5000 is officially supported across GCS.
+        default_page_size = 5000
+
+        # NOTE: the inventory report logic is experimental.
+        inventory_report_info = kwargs.get("inventory_report_info", None)
+
+        # Check if the user has configured inventory report option.
+        if inventory_report_info is not None:
+            items, prefixes = await InventoryReport.fetch_snapshot(
+                gcs_file_system=self,
+                inventory_report_info=inventory_report_info,
+                prefix=prefix,
+            )
+
+            use_snapshot_listing = inventory_report_info.get("use_snapshot_listing")
+
+            # If the user wants to rely on the snapshot from the inventory report
+            # for listing, directly return the results.
+            if use_snapshot_listing:
+                return items, prefixes
+
+            # Otherwise, use the snapshot to initiate concurrent listing.
+            return await self._concurrent_list_objects_helper(
+                items=items,
+                bucket=bucket,
+                delimiter=delimiter,
+                prefix=prefix,
+                versions=versions,
+                generation=generation,
+                page_size=default_page_size,
+            )
+
+        # If the user has not configured inventory report, proceed to use
+        # sequential listing.
+        else:
+            return await self._sequential_list_objects_helper(
+                bucket=bucket,
+                delimiter=delimiter,
+                start_offset=None,
+                end_offset=None,
+                prefix=prefix,
+                versions=versions,
+                generation=generation,
+                page_size=default_page_size,
+            )
+
+    async def _concurrent_list_objects_helper(
+        self, items, bucket, delimiter, prefix, versions, generation, page_size
+    ):
+        """
+        Lists objects using coroutines, using the object names from the inventory
+        report to split up the ranges.
+        """
+
+        # Extract out the names of the objects fetched from the inventory report.
+        snapshot_object_names = sorted([item["name"] for item in items])
+
+        # Determine the number of coroutines needed to concurrent listing.
+        # Ideally, want each coroutine to fetch a single page of objects.
+        num_coroutines = len(snapshot_object_names) // page_size + 1
+        num_objects_per_coroutine = len(snapshot_object_names) // num_coroutines
+
+        start_offsets = []
+        end_offsets = []
+
+        # Calculate the split splits of each coroutine (start offset and end offset).
+        for i in range(num_coroutines):
+            range_start = i * num_objects_per_coroutine
+            if i == num_coroutines - 1:
+                range_end = len(snapshot_object_names)
+            else:
+                range_end = range_start + num_objects_per_coroutine
+
+            if range_start == 0:
+                prefix_start = None
+            else:
+                prefix_start = snapshot_object_names[range_start]
+
+            if range_end == len(snapshot_object_names):
+                prefix_end = None
+            else:
+                prefix_end = snapshot_object_names[range_end]
+
+            start_offsets.append(prefix_start)
+            end_offsets.append(prefix_end)
+
+        # Assign the coroutine all at once, and wait for them to finish listing.
+        results = await asyncio.gather(
+            *[
+                self._sequential_list_objects_helper(
+                    bucket=bucket,
+                    delimiter=delimiter,
+                    start_offset=start_offsets[i],
+                    end_offset=end_offsets[i],
+                    prefix=prefix,
+                    versions=versions,
+                    generation=generation,
+                    page_size=page_size,
+                )
+                for i in range(0, len(start_offsets))
+            ]
+        )
+
+        items = []
+        prefixes = []
+
+        # Concatenate the items and prefixes from each coroutine for final results.
+        for i in range(len(results)):
+            items_from_process, prefixes_from_process = results[i]
+            items.extend(items_from_process)
+            prefixes.extend(prefixes_from_process)
+
+        return items, prefixes
+
+    async def _sequential_list_objects_helper(
+        self,
+        bucket,
+        delimiter,
+        start_offset,
+        end_offset,
+        prefix,
+        versions,
+        generation,
+        page_size,
+    ):
+        """
+        Sequential list objects within the start and end offset range.
+        """
+
         prefixes = []
         items = []
+
         page = await self._call(
             "GET",
             "b/{}/o",
             bucket,
             delimiter=delimiter,
             prefix=prefix,
-            maxResults=max_results,
+            startOffset=start_offset,
+            endOffset=end_offset,
+            maxResults=page_size,
             json_out=True,
             versions="true" if versions or generation else None,
         )
@@ -591,7 +756,9 @@ class GCSFileSystem(AsyncFileSystem):
                 bucket,
                 delimiter=delimiter,
                 prefix=prefix,
-                maxResults=max_results,
+                startOffset=start_offset,
+                endOffset=end_offset,
+                maxResults=page_size,
                 pageToken=next_page_token,
                 json_out=True,
                 versions="true" if generation else None,
@@ -603,6 +770,7 @@ class GCSFileSystem(AsyncFileSystem):
             next_page_token = page.get("nextPageToken", None)
 
         items = [self._process_object(bucket, i) for i in items]
+
         return items, prefixes
 
     async def _list_buckets(self):
@@ -741,6 +909,18 @@ class GCSFileSystem(AsyncFileSystem):
 
     rmdir = sync_wrapper(_rmdir)
 
+    def modified(self, path):
+        return self.info(path)["mtime"]
+
+    def created(self, path):
+        return self.info(path)["ctime"]
+
+    def _parse_timestamp(self, timestamp):
+        assert timestamp.endswith("Z")
+        timestamp = timestamp[:-1]
+        timestamp = timestamp + "0" * (6 - len(timestamp.rsplit(".", 1)[1]))
+        return datetime.fromisoformat(timestamp + "+00:00")
+
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
         path = self._strip_protocol(path)
@@ -803,38 +983,25 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             raise FileNotFoundError(path)
 
-    async def _glob(self, path, prefix="", **kwargs):
-        if not prefix:
-            # Identify pattern prefixes. Ripped from fsspec.spec.AbstractFileSystem.glob and matches
-            # the glob.has_magic patterns.
-            indstar = path.find("*") if path.find("*") >= 0 else len(path)
-            indques = path.find("?") if path.find("?") >= 0 else len(path)
-            indbrace = path.find("[") if path.find("[") >= 0 else len(path)
-
-            ind = min(indstar, indques, indbrace)
-            prefix = path[:ind].split("/")[-1]
-        return await super()._glob(path, prefix=prefix, **kwargs)
-
-    async def _ls(self, path, detail=False, prefix="", versions=False, **kwargs):
+    async def _ls(
+        self, path, detail=False, prefix="", versions=False, refresh=False, **kwargs
+    ):
         """List objects under the given '/{bucket}/{prefix} path."""
         path = self._strip_protocol(path).rstrip("/")
 
+        if refresh:
+            self.invalidate_cache(path)
         if path in ["/", ""]:
             out = await self._list_buckets()
         else:
             out = []
             for entry in await self._list_objects(
-                path, prefix=prefix, versions=versions
+                path, prefix=prefix, versions=versions, **kwargs
             ):
-                if versions:
-                    out.append(
-                        {
-                            **entry,
-                            "name": f"{entry['name']}#{entry['generation']}",
-                        }
-                    )
-                else:
-                    out.append(entry)
+                if versions and "generation" in entry:
+                    entry = entry.copy()
+                    entry["name"] = f"{entry['name']}#{entry['generation']}"
+                out.append(entry)
 
         if detail:
             return out
@@ -884,7 +1051,7 @@ class GCSFileSystem(AsyncFileSystem):
         fake-gcs-server:latest does not seem to support this.
 
         Parameters
-        ---------
+        ----------
         content_type: str
             If not None, set the content-type to this value
         content_encoding: str
@@ -898,6 +1065,7 @@ class GCSFileSystem(AsyncFileSystem):
                 - content_encoding
                 - content_language
                 - custom_time
+
             More info:
             https://cloud.google.com/storage/docs/metadata#mutable
         kw_args: key-value pairs like field="value" or field=None
@@ -984,6 +1152,7 @@ class GCSFileSystem(AsyncFileSystem):
                 json_out=True,
                 sourceGeneration=g1,
             )
+        self.invalidate_cache(self._parent(path2))
 
     async def _rm_file(self, path, **kwargs):
         bucket, key, generation = self.split_path(path)
@@ -1090,6 +1259,7 @@ class GCSFileSystem(AsyncFileSystem):
         metadata=None,
         consistency=None,
         content_type="application/octet-stream",
+        fixed_key_metadata=None,
         chunksize=50 * 2**20,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1099,10 +1269,24 @@ class GCSFileSystem(AsyncFileSystem):
         out = None
         if size < 5 * 2**20:
             location = await simple_upload(
-                self, bucket, key, data, metadata, consistency, content_type
+                self,
+                bucket,
+                key,
+                data,
+                metadata,
+                consistency,
+                content_type,
+                fixed_key_metadata=fixed_key_metadata,
             )
         else:
-            location = await initiate_upload(self, bucket, key, content_type, metadata)
+            location = await initiate_upload(
+                self,
+                bucket,
+                key,
+                content_type,
+                metadata,
+                fixed_key_metadata=fixed_key_metadata,
+            )
             for offset in range(0, len(data), chunksize):
                 bit = data[offset : offset + chunksize]
                 out = await upload_chunk(
@@ -1125,6 +1309,7 @@ class GCSFileSystem(AsyncFileSystem):
         content_type="application/octet-stream",
         chunksize=50 * 2**20,
         callback=None,
+        fixed_key_metadata=None,
         **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1150,12 +1335,18 @@ class GCSFileSystem(AsyncFileSystem):
                     consistency=consistency,
                     metadatain=metadata,
                     content_type=content_type,
+                    fixed_key_metadata=fixed_key_metadata,
                 )
                 callback.absolute_update(size)
 
             else:
                 location = await initiate_upload(
-                    self, bucket, key, content_type, metadata
+                    self,
+                    bucket,
+                    key,
+                    content_type,
+                    metadata=metadata,
+                    fixed_key_metadata=fixed_key_metadata,
                 )
                 offset = 0
                 while True:
@@ -1180,20 +1371,36 @@ class GCSFileSystem(AsyncFileSystem):
             return False
 
     async def _find(
-        self, path, withdirs=False, detail=False, prefix="", versions=False, **kwargs
+        self,
+        path,
+        withdirs=False,
+        detail=False,
+        prefix="",
+        versions=False,
+        maxdepth=None,
+        **kwargs,
     ):
         path = self._strip_protocol(path)
-        bucket, key, generation = self.split_path(path)
 
-        if prefix:
-            _path = "" if not key else key.rstrip("/") + "/"
-            _prefix = f"{_path}{prefix}"
-        else:
-            _prefix = key
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
 
+        # Fetch objects as if the path is a directory
         objects, _ = await self._do_list_objects(
-            bucket, delimiter="", prefix=_prefix, versions=versions
+            path, delimiter="", prefix=prefix, versions=versions
         )
+
+        if not objects:
+            # Fetch objects as if the path is a file
+            bucket, key, _ = self.split_path(path)
+            if prefix:
+                _path = "" if not key else key.rstrip("/") + "/"
+                _prefix = f"{_path}{prefix}"
+            else:
+                _prefix = key
+            objects, _ = await self._do_list_objects(
+                bucket, delimiter="", prefix=_prefix, versions=versions
+            )
 
         dirs = {}
         cache_entries = {}
@@ -1216,16 +1423,25 @@ class GCSFileSystem(AsyncFileSystem):
                     "size": 0,
                 }
 
-                cache_entries.setdefault(parent, []).append(previous)
+                listing = cache_entries.setdefault(parent, {})
+                name = previous["name"]
+                if name not in listing:
+                    listing[name] = previous
 
                 previous = dirs[parent]
                 parent = self._parent(parent)
 
         if not prefix:
-            self.dircache.update(cache_entries)
+            cache_entries_list = {k: list(v.values()) for k, v in cache_entries.items()}
+            self.dircache.update(cache_entries_list)
 
         if withdirs:
             objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
+
+        if maxdepth:
+            # Filter returned objects based on requested maxdepth
+            depth = path.rstrip("/").count("/") + maxdepth
+            objects = list(filter(lambda o: o["name"].count("/") <= depth, objects))
 
         if detail:
             if versions:
@@ -1241,7 +1457,7 @@ class GCSFileSystem(AsyncFileSystem):
         self, rpath, lpath, *args, headers=None, callback=None, **kwargs
     ):
         consistency = kwargs.pop("consistency", self.consistency)
-
+        await self._set_session()
         async with self.session.get(
             url=rpath,
             params=self._get_params(kwargs),
@@ -1382,13 +1598,15 @@ class GCSFileSystem(AsyncFileSystem):
         """
         from google.cloud import storage
 
-        bucket, key = self.split_path(path)
+        bucket, key, generation = self.split_path(path)
         client = storage.Client(
             credentials=self.credentials.credentials, project=self.project
         )
         bucket = client.bucket(bucket)
         blob = bucket.blob(key)
-        return blob.generate_signed_url(expiration=expiration, **kwargs)
+        return blob.generate_signed_url(
+            expiration=expiration, generation=generation, **kwargs
+        )
 
 
 GoogleCredentials.load_tokens()
@@ -1556,7 +1774,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 shortfall = (self.offset + l - 1) - end
                 if shortfall > 0:
                     self.checker.update(data[:-shortfall])
-                    self.buffer = io.BytesIO(data[-shortfall:])
+                    self.buffer = UnclosableBytesIO(data[-shortfall:])
                     self.buffer.seek(shortfall)
                     self.offset += l - shortfall
                     continue
@@ -1569,7 +1787,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     self.checker.update(data)
                     self.checker.validate_json_response(j)
             # Clear buffer and update offset when all is received
-            self.buffer = io.BytesIO()
+            self.buffer = UnclosableBytesIO()
             self.offset += l
             break
         return True
@@ -1674,7 +1892,9 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     range = "bytes %i-%i/%i" % (offset, offset + l - 1, size)
     head["Content-Range"] = range
     head.update({"Content-Type": content_type, "Content-Length": str(l)})
-    headers, txt = await fs._call("POST", location, headers=head, data=data)
+    headers, txt = await fs._call(
+        "POST", location, headers=head, data=UnclosableBytesIO(data)
+    )
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])
         shortfall = (offset + l - 1) - end
@@ -1740,7 +1960,7 @@ async def simple_upload(
         path,
         uploadType="multipart",
         headers={"Content-Type": 'multipart/related; boundary="==0=="'},
-        data=data,
+        data=UnclosableBytesIO(data),
         json_out=True,
     )
     checker.update(datain)

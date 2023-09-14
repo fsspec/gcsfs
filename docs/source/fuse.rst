@@ -1,7 +1,7 @@
 GCSFS and FUSE
 ==============
 
-Warning, this functionality is **experimental**
+Warning, this functionality is **experimental**.
 
 FUSE_ is a mechanism to mount user-level filesystems in unix-like
 systems (linux, osx, etc.). GCSFS is able to use FUSE to present remote
