@@ -4,7 +4,7 @@ Changelog
 2023.9.1
 --------
 
-no changes
+* small fixes following #573 (#578)
 
 2023.9.0
 --------
