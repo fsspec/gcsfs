@@ -1424,6 +1424,29 @@ def test_copy_cache_invalidated(gcs):
     assert gcs.isfile(target_file2)
 
 
+def test_transaction(gcs):
+    # https://github.com/fsspec/gcsfs/issues/389
+    if not gcs.on_google:
+        pytest.skip()
+    try:
+        with gcs.transaction:
+            with gcs.open(f"{TEST_BUCKET}/foo", "wb") as f:
+                f.write(b"This is a test string")
+            f.discard()
+            assert not gcs.exists(f"{TEST_BUCKET}/foo")
+            raise ZeroDivisionError
+    except ZeroDivisionError:
+        ...
+    assert not gcs.exists(f"{TEST_BUCKET}/foo")
+
+    with gcs.transaction:
+        with gcs.open(f"{TEST_BUCKET}/foo", "wb") as f:
+            f.write(b"This is a test string")
+        assert not gcs.exists(f"{TEST_BUCKET}/foo")
+
+    assert gcs.cat(f"{TEST_BUCKET}/foo") == b"This is a test string"
+
+
 def test_find_maxdepth(gcs):
     assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=None) == [
         f"{TEST_BUCKET}/nested/file1",
