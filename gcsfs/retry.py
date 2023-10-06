@@ -82,7 +82,8 @@ def validate_response(status, content, path, args=None):
     r: requests response object
     path: associated URL path, for error messages
     """
-    if status >= 400:
+    if status >= 400 and status != 499:
+        # 499 is special "upload was cancelled" status
         if args:
             from .core import quote
 

@@ -1736,7 +1736,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             head = {}
             l = len(data)
 
-            if (l < GCS_MIN_BLOCK_SIZE) and not final:
+            if (l < GCS_MIN_BLOCK_SIZE) and (not final or not self.autocommit):
                 # either flush() was called, but we don't have enough to
                 # push, or we split a big upload, and have less left than one
                 # block.  If this is the final part, OK to violate those
@@ -1818,13 +1818,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         if self.location is None:
             return
-        uid = re.findall("upload_id=([^&=?]+)", self.location)
         self.gcsfs.call(
             "DELETE",
-            f"{self.fs._location}/upload/storage/v1/b/{quote(self.bucket)}/o",
-            params={"uploadType": "resumable", "upload_id": uid},
-            json_out=True,
+            self.location,
         )
+        self.location = None
+        self.closed = True
 
     def _simple_upload(self):
         """One-shot upload, less than 5MB"""
