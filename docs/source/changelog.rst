@@ -1,6 +1,11 @@
 Changelog
 =========
 
+2023.10.0
+---------
+
+* Fix for transactions of small files (#586)
+
 2023.9.2
 --------
 
