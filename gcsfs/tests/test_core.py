@@ -286,7 +286,7 @@ def test_gcs_glob(gcs):
     assert fn in gcs.glob(TEST_BUCKET + "/nested/file*")
     assert fn in gcs.glob(TEST_BUCKET + "/*/*")
     assert fn in gcs.glob(TEST_BUCKET + "/**")
-    assert fn in gcs.glob(TEST_BUCKET + "/**1")
+    assert fn in gcs.glob(TEST_BUCKET + "/**/*1")
     assert all(
         f in gcs.find(TEST_BUCKET)
         for f in gcs.glob(TEST_BUCKET + "/nested/*")
