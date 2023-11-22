@@ -599,6 +599,7 @@ class GCSFileSystem(AsyncFileSystem):
         bucket, _path, generation = self.split_path(path)
         _path = "" if not _path else _path.rstrip("/") + "/"
         prefix = f"{_path}{prefix}" or None
+        versions = bool(versions or generation)
 
         # Page size of 5000 is officially supported across GCS.
         default_page_size = 5000
@@ -628,7 +629,6 @@ class GCSFileSystem(AsyncFileSystem):
                 delimiter=delimiter,
                 prefix=prefix,
                 versions=versions,
-                generation=generation,
                 page_size=default_page_size,
             )
 
@@ -642,12 +642,11 @@ class GCSFileSystem(AsyncFileSystem):
                 end_offset=None,
                 prefix=prefix,
                 versions=versions,
-                generation=generation,
                 page_size=default_page_size,
             )
 
     async def _concurrent_list_objects_helper(
-        self, items, bucket, delimiter, prefix, versions, generation, page_size
+        self, items, bucket, delimiter, prefix, versions, page_size
     ):
         """
         Lists objects using coroutines, using the object names from the inventory
@@ -696,7 +695,6 @@ class GCSFileSystem(AsyncFileSystem):
                     end_offset=end_offsets[i],
                     prefix=prefix,
                     versions=versions,
-                    generation=generation,
                     page_size=page_size,
                 )
                 for i in range(0, len(start_offsets))
@@ -722,7 +720,6 @@ class GCSFileSystem(AsyncFileSystem):
         end_offset,
         prefix,
         versions,
-        generation,
         page_size,
     ):
         """
@@ -742,7 +739,7 @@ class GCSFileSystem(AsyncFileSystem):
             endOffset=end_offset,
             maxResults=page_size,
             json_out=True,
-            versions="true" if versions or generation else None,
+            versions="true" if versions else None,
         )
 
         prefixes.extend(page.get("prefixes", []))
@@ -761,7 +758,7 @@ class GCSFileSystem(AsyncFileSystem):
                 maxResults=page_size,
                 pageToken=next_page_token,
                 json_out=True,
-                versions="true" if generation else None,
+                versions="true" if versions else None,
             )
 
             assert page["kind"] == "storage#objects"
