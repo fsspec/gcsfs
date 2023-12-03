@@ -1,6 +1,12 @@
 Changelog
 =========
 
+2023.12.0
+---------
+
+* use same version when paginating list (#591)
+* fix double asterisk glob test (#589)
+
 2023.10.0
 ---------
 
