@@ -1,6 +1,14 @@
 Changelog
 =========
 
+Note: in some releases, there are no changes, because we always guarantee relasing in step
+with fsspec.
+
+2023.12.2
+---------
+
+no changes
+
 2023.12.1
 ---------
 
