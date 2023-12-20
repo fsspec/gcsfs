@@ -177,6 +177,14 @@ def test_ls_touch(gcs):
     assert {d["name"] for d in L_d} == {a, b}
 
 
+# DO NOT MERGE!
+# Note: We assume this test will fail. Once it does in CI, we will update the code to make it pass.
+# Only then can this PR be approved and merged.
+def test_ls_empty_dir(gcs):
+    gcs.mkdir(TEST_BUCKET + "/test")
+    assert gcs.ls(TEST_BUCKET + "/test", False) == []
+
+
 def test_rm(gcs):
     assert not gcs.exists(a)
     gcs.touch(a)
