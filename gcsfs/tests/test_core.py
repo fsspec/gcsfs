@@ -177,6 +177,11 @@ def test_ls_touch(gcs):
     assert {d["name"] for d in L_d} == {a, b}
 
 
+def test_ls_empty_dir(gcs):
+    gcs.mkdir(TEST_BUCKET + "/test")
+    assert gcs.ls(TEST_BUCKET + "/test", False) == []
+
+
 def test_rm(gcs):
     assert not gcs.exists(a)
     gcs.touch(a)
