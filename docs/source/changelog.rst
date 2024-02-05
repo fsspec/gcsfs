@@ -4,6 +4,11 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2024.2.0
+--------
+
+* doc for passing tokens (#603)
+
 2023.12.2
 ---------
 
