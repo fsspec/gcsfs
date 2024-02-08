@@ -330,16 +330,24 @@ class GCSFileSystem(AsyncFileSystem):
     def project(self):
         return self.credentials.project
 
+    # Clean up the aiohttp session
+    #
+    # This can run from the main thread if invoked via the weakref callbcak.
+    # This can happen even if the `loop` parameter belongs to another thread
+    # (e.g. the fsspec IO worker). The control flow here is intended to attempt
+    # in-thread asynchronous cleanup first, then fallback to synchronous
+    # cleanup (which can handle cross-thread calls).
     @staticmethod
     def close_session(loop, session):
         if loop is not None and session is not None:
             if loop.is_running():
                 try:
-                    loop = asyncio.get_event_loop()
-                    loop.create_task(session.close())
+                    current_loop = asyncio.get_event_loop()
+                    current_loop.create_task(session.close())
                     return
                 except RuntimeError:
                     pass
+
                 try:
                     sync(loop, session.close, timeout=0.1)
                 except fsspec.FSTimeoutError:
