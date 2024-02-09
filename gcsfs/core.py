@@ -342,7 +342,7 @@ class GCSFileSystem(AsyncFileSystem):
         if loop is not None and session is not None:
             if loop.is_running():
                 try:
-                    current_loop = asyncio.get_event_loop()
+                    current_loop = asyncio.get_running_loop()
                     current_loop.create_task(session.close())
                     return
                 except RuntimeError:
