@@ -64,12 +64,12 @@ errs = list(range(500, 505)) + [
     # Too Many Requests
     429,
 ]
+errs += [str(e) for e in errs]
 
 
 def is_retriable(exception):
     """Returns True if this exception is retriable."""
 
-    errs += [str(e) for e in errs]
     if isinstance(exception, HttpError):
         return exception.code in errs
 
