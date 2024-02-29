@@ -1181,10 +1181,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             "accept: application/json\ncontent-length: 0\n"
         )
         out = []
-        # Splitting requests into 100 chunk batches
+        # Splitting requests into batches
         # See https://cloud.google.com/storage/docs/batch
-        end = False
         for retry in range(1, 6):
+            remaining = []
             for chunk in _chunks(paths, 20):
                 parts = []
                 for i, p in enumerate(chunk):
@@ -1214,7 +1214,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 [self.invalidate_cache(parent) for parent in parents]
                 txt = content.decode()
                 responses = txt.split(boundary)[1:-1]
-                remaining = []
                 for path, response in zip(paths, responses):
                     m = re.search("HTTP/[0-9.]+ ([0-9]+)", response)
                     code = int(m.groups()[0]) if m else None
@@ -1229,16 +1228,13 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                         else:
                             msg2 = None
                         if msg and msg2:
-                            out.append(IOError(msg2.groups()[0]))
+                            out.append(OSError(msg2.groups()[0]))
                         else:
-                            out.append(IOError(str(path, code)))
-                if remaining:
-                    paths = remaining
-                    await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
-                else:
-                    end = True
-                    break
-            if end:
+                            out.append(OSError(str(path, code)))
+            if remaining:
+                paths = remaining
+                await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
+            else:
                 break
         return out
 
