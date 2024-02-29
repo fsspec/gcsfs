@@ -183,9 +183,8 @@ def test_rm(gcs):
     assert gcs.exists(a)
     gcs.rm(a)
     assert not gcs.exists(a)
-    # silently ignored for now
-    # with pytest.raises((OSError, IOError)):
-    #    gcs.rm(TEST_BUCKET + "/nonexistent")
+    with pytest.raises((OSError, IOError)):
+        gcs.rm(TEST_BUCKET + "/nonexistent")
     with pytest.raises((OSError, IOError)):
         gcs.rm("nonexistent")
 
