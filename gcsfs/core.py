@@ -1183,6 +1183,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         out = []
         # Splitting requests into 100 chunk batches
         # See https://cloud.google.com/storage/docs/batch
+        end = False
         for retry in range(1, 6):
             for chunk in _chunks(paths, 20):
                 parts = []
