@@ -1252,7 +1252,7 @@ class GCSFileSystem(AsyncFileSystem):
             and not isinstance(ex, FileNotFoundError)
         ]
         if exs:
-            raise exs[0]
+            raise Exception(exs)
         await asyncio.gather(*[self._rmdir(d) for d in dirs])
 
     rm = sync_wrapper(_rm)
