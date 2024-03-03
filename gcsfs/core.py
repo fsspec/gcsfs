@@ -1219,7 +1219,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     code = int(m.groups()[0]) if m else None
                     if code in [200, 204]:
                         out.append(path)
-                    elif code in errs and i < 5:
+                    elif code in errs and retry < 5:
                         remaining.append(path)
                     else:
                         msg = re.search("{(.*)}", response.replace("\n", ""))
