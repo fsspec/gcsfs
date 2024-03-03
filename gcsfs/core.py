@@ -837,6 +837,8 @@ class GCSFileSystem(AsyncFileSystem):
         location=None,
         create_parents=True,
         enable_versioning=False,
+        uniform_access=False,
+        public_access_prevention=True,
         **kwargs,
     ):
         """
@@ -865,6 +867,12 @@ class GCSFileSystem(AsyncFileSystem):
         enable_versioning: bool
             If True, creates the bucket in question with object versioning
             enabled.
+        uniform_access: bool
+            If True, creates the bucket in question with uniform access
+            enabled.
+        public_access_prevention: bool
+            If True, creates the bucket in question with public access
+            prevention enabled.
         """
         bucket, object, generation = self.split_path(path)
         if bucket in ["", "/"]:
@@ -877,12 +885,22 @@ class GCSFileSystem(AsyncFileSystem):
                 return
             raise FileNotFoundError(bucket)
 
-        json_data = {"name": bucket}
+        json_data = {"name": bucket, "iamConfiguration": {}}
         location = location or self.default_location
         if location:
             json_data["location"] = location
         if enable_versioning:
             json_data["versioning"] = {"enabled": True}
+        if uniform_access:
+            # Cannot use ACLs with uniform access
+            acl = None
+            default_acl = None
+            json_data["iamConfiguration"]["uniformBucketLevelAccess"] = {
+                "enabled": True
+            }
+        if public_access_prevention:
+            json_data["iamConfiguration"]["publicAccessPrevention"] = "enforced"
+
         await self._call(
             method="POST",
             path="b",
