@@ -26,10 +26,25 @@ TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
 TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 
 
-def test_simple(gcs):
-    assert not GoogleCredentials.tokens
+def test_simple(gcs, monkeypatch):
+    monkeypatch.setattr(GoogleCredentials, "tokens", None)
     gcs.ls(TEST_BUCKET)  # no error
     gcs.ls("/" + TEST_BUCKET)  # OK to lead with '/'
+
+
+def test_dircache_filled(gcs, mocker):
+    assert not dict(gcs.dircache)
+    gcs.ls(TEST_BUCKET)
+    assert len(gcs.dircache) == 1
+    gcs.dircache[TEST_BUCKET][0]["CHECK"] = True
+    out = gcs.ls(TEST_BUCKET, detail=True)
+    assert [o for o in out if o.get("CHECK", None)]
+
+    gcs.invalidate_cache()
+    assert not dict(gcs.dircache)
+
+    gcs.find(TEST_BUCKET)
+    assert len(gcs.dircache)
 
 
 def test_many_connect(docker_gcs):
