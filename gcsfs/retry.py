@@ -58,15 +58,17 @@ RETRIABLE_EXCEPTIONS = (
 )
 
 
+errs = list(range(500, 505)) + [
+    # Request Timeout
+    408,
+    # Too Many Requests
+    429,
+]
+errs = set(errs + [str(e) for e in errs])
+
+
 def is_retriable(exception):
     """Returns True if this exception is retriable."""
-    errs = list(range(500, 505)) + [
-        # Request Timeout
-        408,
-        # Too Many Requests
-        429,
-    ]
-    errs += [str(e) for e in errs]
     if isinstance(exception, HttpError):
         return exception.code in errs
 
