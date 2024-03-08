@@ -583,7 +583,6 @@ class GCSFileSystem(AsyncFileSystem):
             }
             for prefix in prefixes
         ]
-        breakpoint()
         if not (items + pseudodirs):
             if key:
                 return [await self._get_object(path)]
