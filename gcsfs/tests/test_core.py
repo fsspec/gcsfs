@@ -32,7 +32,7 @@ def test_simple(gcs, monkeypatch):
     gcs.ls("/" + TEST_BUCKET)  # OK to lead with '/'
 
 
-def test_dircache_filled(gcs, mocker):
+def test_dircache_filled(gcs):
     assert not dict(gcs.dircache)
     gcs.ls(TEST_BUCKET)
     assert len(gcs.dircache) == 1
