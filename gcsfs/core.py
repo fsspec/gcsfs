@@ -596,7 +596,7 @@ class GCSFileSystem(AsyncFileSystem):
 
         # Don't cache prefixed/partial listings, in addition to
         # not using the inventory report service to do listing directly.
-        if not prefix and use_snapshot_listing is False:
+        if not prefix and not use_snapshot_listing:
             self.dircache[path] = out
         return out
 
