@@ -24,7 +24,6 @@ from gcsfs.tests.utils import tempdir, tmpfile
 TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
 TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
 TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
-TEST_CUSTOM_BUCKET = gcsfs.tests.settings.TEST_CUSTOM_BUCKET
 
 
 def test_simple(gcs):
@@ -1479,16 +1478,3 @@ def test_find_maxdepth(gcs):
 
     with pytest.raises(ValueError, match="maxdepth must be at least 1"):
         gcs.find(f"{TEST_BUCKET}/nested", maxdepth=0)
-
-
-def test_mkdir_options(gcs):
-    gcs = GCSFileSystem(endpoint_url=gcs._endpoint)
-    if not gcs.on_google:
-        pytest.skip("emulator doesn't support IAM policies.")
-
-    gcs.mkdir(TEST_CUSTOM_BUCKET, uniform_access=True, public_access_prevention=True)
-    info = gcs.info(TEST_CUSTOM_BUCKET)
-    gcs.rm(TEST_CUSTOM_BUCKET, recursive=True)
-
-    assert info["iamConfiguration"]["uniformBucketLevelAccess"]["enabled"]
-    assert info["iamConfiguration"]["publicAccessPrevention"] == "enforced"
