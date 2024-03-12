@@ -1,7 +1,7 @@
-import datetime
 import io
 import os
 from builtins import FileNotFoundError
+from datetime import datetime, timezone
 from itertools import chain
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
@@ -140,7 +140,7 @@ def test_info(gcs):
     gcs.touch(a)
     assert gcs.info(a) == gcs.ls(a, detail=True)[0]
 
-    today = datetime.datetime.utcnow().date().isoformat()
+    today = datetime.utcnow().date().isoformat()
     assert gcs.created(a).isoformat().startswith(today)
     assert gcs.modified(a).isoformat().startswith(today)
     # Check conformance with expected info attribute names.
@@ -1493,3 +1493,28 @@ def test_find_maxdepth(gcs):
 
     with pytest.raises(ValueError, match="maxdepth must be at least 1"):
         gcs.find(f"{TEST_BUCKET}/nested", maxdepth=0)
+
+
+def test_sign(gcs, monkeypatch):
+    file = TEST_BUCKET + "/test.jpg"
+    with gcs.open(file, "wb") as f:
+        f.write(b"This is a test string")
+    assert gcs.cat(file) == b"This is a test string"
+
+    # `sign` is creating a google Client on its own, it needs a realistically
+    # looking credentials file.
+    if not gcs.on_google:
+        monkeypatch.setenv(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            os.path.dirname(__file__) + "/fake-service-account-credentials.json",
+        )
+
+    current_ts_utc = int(datetime.now(tz=timezone.utc).timestamp())
+    result = gcs.sign(file)
+
+    # Check it here since emulator doesn't really validate those values
+    params = parse_qs(urlparse(result).query)
+    assert int(params["Expires"][0]) >= current_ts_utc + 100
+
+    response = requests.get(result)
+    assert response.text == "This is a test string"

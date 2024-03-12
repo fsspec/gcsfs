@@ -10,7 +10,7 @@ import posixpath
 import re
 import warnings
 import weakref
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
@@ -1603,14 +1603,20 @@ class GCSFileSystem(AsyncFileSystem):
         """
         from google.cloud import storage
 
-        bucket, key, generation = self.split_path(path)
         client = storage.Client(
-            credentials=self.credentials.credentials, project=self.project
+            credentials=self.credentials.credentials,
+            project=self.project,
         )
+
+        bucket, key, generation = self.split_path(path)
         bucket = client.bucket(bucket)
         blob = bucket.blob(key)
+
         return blob.generate_signed_url(
-            expiration=expiration, generation=generation, **kwargs
+            expiration=timedelta(seconds=expiration),
+            generation=generation,
+            api_access_endpoint=self._endpoint,
+            **kwargs,
         )
 
 
