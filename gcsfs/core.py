@@ -837,6 +837,8 @@ class GCSFileSystem(AsyncFileSystem):
         location=None,
         create_parents=True,
         enable_versioning=False,
+        enable_object_retention=False,
+        iam_configuration=None,
         **kwargs,
     ):
         """
@@ -844,7 +846,7 @@ class GCSFileSystem(AsyncFileSystem):
 
         If path is more than just a bucket, will create bucket if create_parents=True;
         otherwise is a noop. If create_parents is False and bucket does not exist,
-        will produce FileNotFFoundError.
+        will produce FileNotFoundError.
 
         Parameters
         ----------
@@ -852,7 +854,8 @@ class GCSFileSystem(AsyncFileSystem):
             bucket name. If contains '/' (i.e., looks like subdir), will
             have no effect because GCS doesn't have real directories.
         acl: string, one of bACLs
-            access for the bucket itself
+            access for the bucket itself. See:
+            https://cloud.google.com/storage/docs/access-control/lists#predefined-acl
         default_acl: str, one of ACLs
             default ACL for objects created in this bucket
         location: Optional[str]
@@ -865,6 +868,19 @@ class GCSFileSystem(AsyncFileSystem):
         enable_versioning: bool
             If True, creates the bucket in question with object versioning
             enabled.
+        enable_object_retention: bool
+            If True, creates the bucket in question with object retention
+            permanently enabled.
+        iam_configuration: dict
+            If provided, sets the IAM policy for the bucket. This argument
+            allows setting properties such as `{publicAccessPrevention: "enforced"}`
+            and `{"uniformBucketLevelAccess": {"enabled": True}}`. If passed, `acl`
+            and `default_acl` are explicitly ignored.
+        **kwargs
+            Additional parameters passed to the API call request body. See:
+            https://cloud.google.com/storage/docs/json_api/v1/buckets/insert#request-body
+            for all possible options. Pass nested parameters as dictionaries, e.g.:
+            `{"autoclass": {"enabled": True}}`
         """
         bucket, object, generation = self.split_path(path)
         if bucket in ["", "/"]:
@@ -883,12 +899,20 @@ class GCSFileSystem(AsyncFileSystem):
             json_data["location"] = location
         if enable_versioning:
             json_data["versioning"] = {"enabled": True}
+        if iam_configuration:
+            json_data["iamConfiguration"] = iam_configuration
+            acl = None
+            default_acl = None
+        if kwargs:
+            json_data.update(kwargs)
+
         await self._call(
             method="POST",
             path="b",
             predefinedAcl=acl,
             project=self.project,
             predefinedDefaultObjectAcl=default_acl,
+            enableObjectRetention=str(enable_object_retention).lower(),
             json=json_data,
             json_out=True,
         )
