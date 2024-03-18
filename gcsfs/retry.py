@@ -64,7 +64,7 @@ errs = list(range(500, 505)) + [
     # Too Many Requests
     429,
 ]
-errs += [str(e) for e in errs]
+errs = set(errs + [str(e) for e in errs])
 
 
 def is_retriable(exception):

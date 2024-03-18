@@ -10,7 +10,7 @@ import posixpath
 import re
 import warnings
 import weakref
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
@@ -597,7 +597,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         # Don't cache prefixed/partial listings, in addition to
         # not using the inventory report service to do listing directly.
-        if not prefix and use_snapshot_listing is False:
+        if not prefix and not use_snapshot_listing:
             self.dircache[path] = out
         return out
 
@@ -838,6 +838,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         location=None,
         create_parents=True,
         enable_versioning=False,
+        enable_object_retention=False,
+        iam_configuration=None,
         **kwargs,
     ):
         """
@@ -845,7 +847,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         If path is more than just a bucket, will create bucket if create_parents=True;
         otherwise is a noop. If create_parents is False and bucket does not exist,
-        will produce FileNotFFoundError.
+        will produce FileNotFoundError.
 
         Parameters
         ----------
@@ -853,7 +855,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             bucket name. If contains '/' (i.e., looks like subdir), will
             have no effect because GCS doesn't have real directories.
         acl: string, one of bACLs
-            access for the bucket itself
+            access for the bucket itself. See:
+            https://cloud.google.com/storage/docs/access-control/lists#predefined-acl
         default_acl: str, one of ACLs
             default ACL for objects created in this bucket
         location: Optional[str]
@@ -866,6 +869,19 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         enable_versioning: bool
             If True, creates the bucket in question with object versioning
             enabled.
+        enable_object_retention: bool
+            If True, creates the bucket in question with object retention
+            permanently enabled.
+        iam_configuration: dict
+            If provided, sets the IAM policy for the bucket. This argument
+            allows setting properties such as `{publicAccessPrevention: "enforced"}`
+            and `{"uniformBucketLevelAccess": {"enabled": True}}`. If passed, `acl`
+            and `default_acl` are explicitly ignored.
+        **kwargs
+            Additional parameters passed to the API call request body. See:
+            https://cloud.google.com/storage/docs/json_api/v1/buckets/insert#request-body
+            for all possible options. Pass nested parameters as dictionaries, e.g.:
+            `{"autoclass": {"enabled": True}}`
         """
         bucket, object, generation = self.split_path(path)
         if bucket in ["", "/"]:
@@ -884,12 +900,20 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             json_data["location"] = location
         if enable_versioning:
             json_data["versioning"] = {"enabled": True}
+        if iam_configuration:
+            json_data["iamConfiguration"] = iam_configuration
+            acl = None
+            default_acl = None
+        if kwargs:
+            json_data.update(kwargs)
+
         await self._call(
             method="POST",
             path="b",
             predefinedAcl=acl,
             project=self.project,
             predefinedDefaultObjectAcl=default_acl,
+            enableObjectRetention=str(enable_object_retention).lower(),
             json=json_data,
             json_out=True,
         )
@@ -1168,7 +1192,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         else:
             await self._rmdir(path)
 
-    async def _rm_files(self, paths, batchsize=20):
+    async def _rm_files(self, paths):
         import random
 
         template = (
@@ -1185,52 +1209,52 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         # See https://cloud.google.com/storage/docs/batch
         for retry in range(1, 6):
             remaining = []
-            for chunk in _chunks(paths, 20):
-                parts = []
-                for i, p in enumerate(chunk):
-                    bucket, key, generation = self.split_path(p)
-                    query = f"?generation={generation}" if generation else ""
-                    parts.append(
-                        template.format(
-                            i=i + 1,
-                            bucket=quote(bucket),
-                            key=quote(key),
-                            query=query,
-                        )
+            chunk = paths
+            parts = []
+            for i, p in enumerate(chunk):
+                bucket, key, generation = self.split_path(p)
+                query = f"?generation={generation}" if generation else ""
+                parts.append(
+                    template.format(
+                        i=i + 1,
+                        bucket=quote(bucket),
+                        key=quote(key),
+                        query=query,
                     )
-                body = "".join(parts)
-                headers, content = await self._call(
-                    "POST",
-                    f"{self._location}/batch/storage/v1",
-                    headers={
-                        "Content-Type": 'multipart/mixed; boundary="=========='
-                        '=====7330845974216740156=="'
-                    },
-                    data=body + "\n--===============7330845974216740156==--",
                 )
+            body = "".join(parts)
+            headers, content = await self._call(
+                "POST",
+                f"{self._location}/batch/storage/v1",
+                headers={
+                    "Content-Type": 'multipart/mixed; boundary="=========='
+                    '=====7330845974216740156=="'
+                },
+                data=body + "\n--===============7330845974216740156==--",
+            )
 
-                boundary = headers["Content-Type"].split("=", 1)[1]
-                parents = set(self._parent(p) for p in paths) | set(paths)
-                [self.invalidate_cache(parent) for parent in parents]
-                txt = content.decode()
-                responses = txt.split(boundary)[1:-1]
-                for path, response in zip(paths, responses):
-                    m = re.search("HTTP/[0-9.]+ ([0-9]+)", response)
-                    code = int(m.groups()[0]) if m else None
-                    if code in [200, 204]:
-                        out.append(path)
-                    elif code in errs and retry < 5:
-                        remaining.append(path)
+            boundary = headers["Content-Type"].split("=", 1)[1]
+            parents = set(self._parent(p) for p in paths) | set(paths)
+            [self.invalidate_cache(parent) for parent in parents]
+            txt = content.decode()
+            responses = txt.split(boundary)[1:-1]
+            for path, response in zip(paths, responses):
+                m = re.search("HTTP/[0-9.]+ ([0-9]+)", response)
+                code = int(m.groups()[0]) if m else None
+                if code in [200, 204]:
+                    out.append(path)
+                elif code in errs and retry < 5:
+                    remaining.append(path)
+                else:
+                    msg = re.search("{(.*)}", response.replace("\n", ""))
+                    if msg:
+                        msg2 = re.search("({.*})", msg.groups()[0])
                     else:
-                        msg = re.search("{(.*)}", response.replace("\n", ""))
-                        if msg:
-                            msg2 = re.search("({.*})", msg.groups()[0])
-                        else:
-                            msg2 = None
-                        if msg and msg2:
-                            out.append(OSError(msg2.groups()[0]))
-                        else:
-                            out.append(OSError(str(path, code)))
+                        msg2 = None
+                    if msg and msg2:
+                        out.append(OSError(msg2.groups()[0]))
+                    else:
+                        out.append(OSError(str(path, code)))
             if remaining:
                 paths = remaining
                 await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
@@ -1636,14 +1660,20 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         """
         from google.cloud import storage
 
-        bucket, key, generation = self.split_path(path)
         client = storage.Client(
-            credentials=self.credentials.credentials, project=self.project
+            credentials=self.credentials.credentials,
+            project=self.project,
         )
+
+        bucket, key, generation = self.split_path(path)
         bucket = client.bucket(bucket)
         blob = bucket.blob(key)
+
         return blob.generate_signed_url(
-            expiration=expiration, generation=generation, **kwargs
+            expiration=timedelta(seconds=expiration),
+            generation=generation,
+            api_access_endpoint=self._endpoint,
+            **kwargs,
         )
 
 
