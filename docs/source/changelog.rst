@@ -4,6 +4,16 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2024.3.1
+--------
+
+* fix expiration= for sign() (#613)
+* do populate dircache in ls() (#612)
+* allow passing extra options to mkdir (#610)
+* credentials docs (#609)
+* retry in bulk rm (#608)
+* clean up loop on close (#606)
+
 2024.2.0
 --------
 

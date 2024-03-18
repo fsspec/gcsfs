@@ -951,8 +951,6 @@ def test_request_header(gcs):
 
 
 def test_user_project_fallback_google_default(monkeypatch):
-    import fsspec
-
     monkeypatch.setattr(gcsfs.core, "DEFAULT_PROJECT", "my_default_project")
     monkeypatch.setattr(fsspec.config, "conf", {})
     monkeypatch.setattr(
