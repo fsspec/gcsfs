@@ -1185,7 +1185,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         # See https://cloud.google.com/storage/docs/batch
         for retry in range(1, 6):
             remaining = []
-            for chunk in _chunks(paths, 20):
+            for chunk in _chunks(paths, batchsize):
                 parts = []
                 for i, p in enumerate(chunk):
                     bucket, key, generation = self.split_path(p)
