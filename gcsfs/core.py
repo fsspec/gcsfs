@@ -16,7 +16,7 @@ from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
 
 import fsspec
-from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
+from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from fsspec.implementations.http import get_client
 from fsspec.utils import setup_logging, stringify_path
@@ -25,7 +25,7 @@ from . import __version__ as version
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
-from .retry import retry_request, validate_response
+from .retry import errs, retry_request, validate_response
 
 logger = logging.getLogger("gcsfs")
 
@@ -151,7 +151,7 @@ def _coalesce_generation(*args):
         return generations.pop()
 
 
-class GCSFileSystem(AsyncFileSystem):
+class GCSFileSystem(asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
 
@@ -349,7 +349,7 @@ class GCSFileSystem(AsyncFileSystem):
                     pass
 
                 try:
-                    sync(loop, session.close, timeout=0.1)
+                    asyn.sync(loop, session.close, timeout=0.1)
                 except fsspec.FSTimeoutError:
                     pass
             else:
@@ -452,13 +452,14 @@ class GCSFileSystem(AsyncFileSystem):
         else:
             return headers, contents
 
-    call = sync_wrapper(_call)
+    call = asyn.sync_wrapper(_call)
 
     @property
     def buckets(self):
         """Return list of available project buckets."""
         return [
-            b["name"] for b in sync(self.loop, self._list_buckets, timeout=self.timeout)
+            b["name"]
+            for b in asyn.sync(self.loop, self._list_buckets, timeout=self.timeout)
         ]
 
     def _process_object(self, bucket, object_metadata):
@@ -492,7 +493,7 @@ class GCSFileSystem(AsyncFileSystem):
         json = {"billing": {"requesterPays": state}}
         await self._call("PATCH", f"b/{path}", json=json)
 
-    make_bucket_requester_pays = sync_wrapper(_make_bucket_requester_pays)
+    make_bucket_requester_pays = asyn.sync_wrapper(_make_bucket_requester_pays)
 
     async def _get_object(self, path):
         """Return object information at the given path."""
@@ -918,7 +919,7 @@ class GCSFileSystem(AsyncFileSystem):
         )
         self.invalidate_cache(bucket)
 
-    mkdir = sync_wrapper(_mkdir)
+    mkdir = asyn.sync_wrapper(_mkdir)
 
     async def _rmdir(self, bucket):
         """Delete an empty bucket
@@ -936,7 +937,7 @@ class GCSFileSystem(AsyncFileSystem):
         self.invalidate_cache(bucket)
         self.invalidate_cache("")
 
-    rmdir = sync_wrapper(_rmdir)
+    rmdir = asyn.sync_wrapper(_rmdir)
 
     def modified(self, path):
         return self.info(path)["mtime"]
@@ -1064,7 +1065,7 @@ class GCSFileSystem(AsyncFileSystem):
         meta = (await self._info(path)).get("metadata", {})
         return meta[attr]
 
-    getxattr = sync_wrapper(_getxattr)
+    getxattr = asyn.sync_wrapper(_getxattr)
 
     async def _setxattrs(
         self,
@@ -1127,7 +1128,7 @@ class GCSFileSystem(AsyncFileSystem):
         )
         return o_json.get("metadata", {})
 
-    setxattrs = sync_wrapper(_setxattrs)
+    setxattrs = asyn.sync_wrapper(_setxattrs)
 
     async def _merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
@@ -1147,7 +1148,7 @@ class GCSFileSystem(AsyncFileSystem):
             },
         )
 
-    merge = sync_wrapper(_merge)
+    merge = asyn.sync_wrapper(_merge)
 
     async def _cp_file(self, path1, path2, acl=None, **kwargs):
         """Duplicate remote file"""
@@ -1192,6 +1193,8 @@ class GCSFileSystem(AsyncFileSystem):
             await self._rmdir(path)
 
     async def _rm_files(self, paths):
+        import random
+
         template = (
             "\n--===============7330845974216740156==\n"
             "Content-Type: application/http\n"
@@ -1201,10 +1204,12 @@ class GCSFileSystem(AsyncFileSystem):
             "Content-Type: application/json\n"
             "accept: application/json\ncontent-length: 0\n"
         )
-        errors = []
-        # Splitting requests into 100 chunk batches
+        out = []
+        # Splitting requests into batches
         # See https://cloud.google.com/storage/docs/batch
-        for chunk in _chunks(paths, 100):
+        for retry in range(1, 6):
+            remaining = []
+            chunk = paths
             parts = []
             for i, p in enumerate(chunk):
                 bucket, key, generation = self.split_path(p)
@@ -1229,19 +1234,33 @@ class GCSFileSystem(AsyncFileSystem):
             )
 
             boundary = headers["Content-Type"].split("=", 1)[1]
-            parents = [self._parent(p) for p in paths]
-            [self.invalidate_cache(parent) for parent in parents + list(paths)]
+            parents = set(self._parent(p) for p in paths) | set(paths)
+            [self.invalidate_cache(parent) for parent in parents]
             txt = content.decode()
-            if any(
-                not ("200 OK" in c or "204 No Content" in c)
-                for c in txt.split(boundary)[1:-1]
-            ):
-                pattern = '"message": "([^"]+)"'
-                out = set(re.findall(pattern, txt))
-                errors.extend(out)
-
-        if errors:
-            raise OSError(errors)
+            responses = txt.split(boundary)[1:-1]
+            for path, response in zip(paths, responses):
+                m = re.search("HTTP/[0-9.]+ ([0-9]+)", response)
+                code = int(m.groups()[0]) if m else None
+                if code in [200, 204]:
+                    out.append(path)
+                elif code in errs and retry < 5:
+                    remaining.append(path)
+                else:
+                    msg = re.search("{(.*)}", response.replace("\n", ""))
+                    if msg:
+                        msg2 = re.search("({.*})", msg.groups()[0])
+                    else:
+                        msg2 = None
+                    if msg and msg2:
+                        out.append(OSError(msg2.groups()[0]))
+                    else:
+                        out.append(OSError(str(path, code)))
+            if remaining:
+                paths = remaining
+                await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
+            else:
+                break
+        return out
 
     @property
     def on_google(self):
@@ -1253,33 +1272,47 @@ class GCSFileSystem(AsyncFileSystem):
         dirs = [p for p in paths if not self.split_path(p)[1]]
         if self.on_google:
             # emulators do not support batch
-            exs = await asyncio.gather(
-                *(
+            exs = sum(
+                await asyn._run_coros_in_chunks(
                     [
                         self._rm_files(files[i : i + batchsize])
                         for i in range(0, len(files), batchsize)
-                    ]
+                    ],
+                    return_exceptions=True,
                 ),
-                return_exceptions=True,
+                [],
             )
         else:
-            exs = await asyncio.gather(
-                *([self._rm_file(f) for f in files]),
-                return_exceptions=True,
+            exs = await asyn._run_coros_in_chunks(
+                [self._rm_file(f) for f in files], return_exceptions=True, batch_size=5
             )
 
-        exs = [
+        # buckets
+        exs.extend(
+            await asyncio.gather(
+                *[self._rmdir(d) for d in dirs], return_exceptions=True
+            )
+        )
+        errors = [
             ex
             for ex in exs
-            if ex is not None
+            if isinstance(ex, Exception)
             and "No such object" not in str(ex)
             and not isinstance(ex, FileNotFoundError)
         ]
-        if exs:
-            raise exs[0]
-        await asyncio.gather(*[self._rmdir(d) for d in dirs])
+        if errors:
+            raise errors[0]
+        exs = [
+            ex
+            for ex in exs
+            if "No such object" not in str(ex) and not isinstance(ex, FileNotFoundError)
+        ]
+        if not exs:
+            # nothing got deleted
+            raise FileNotFoundError(path)
+        return exs
 
-    rm = sync_wrapper(_rm)
+    rm = asyn.sync_wrapper(_rm)
 
     async def _pipe_file(
         self,
@@ -1834,7 +1867,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def _initiate_upload(self):
         """Create multi-upload"""
-        self.location = sync(
+        self.location = asyn.sync(
             self.gcsfs.loop,
             initiate_upload,
             self.gcsfs,
@@ -1864,7 +1897,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
         data = self.buffer.read()
-        sync(
+        asyn.sync(
             self.gcsfs.loop,
             simple_upload,
             self.gcsfs,

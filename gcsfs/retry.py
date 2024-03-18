@@ -69,6 +69,7 @@ errs = set(errs + [str(e) for e in errs])
 
 def is_retriable(exception):
     """Returns True if this exception is retriable."""
+
     if isinstance(exception, HttpError):
         return exception.code in errs
 
