@@ -997,10 +997,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             pass
         kwargs["detail"] = True  # Force to true for info
         out = await self._ls(path, **kwargs)
-        out0 = [o for o in out if o["name"].rstrip("/") == path]
-        if out0:
+        out0 = next((o for o in out if o["name"].rstrip("/") == path), None)
+        if out0 and out0["name"][-1] != "/" and out0["size"] == 0:
             # exact hit
-            return out0[0]
+            return out0
         elif out:
             # other stuff - must be a directory
             return {
