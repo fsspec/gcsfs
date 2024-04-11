@@ -1534,7 +1534,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             callback.set_size(size)
 
             checker = get_consistency_checker(consistency)
-            os.makedirs(os.path.dirname(lpath), exist_ok=True)
+            lparent = os.path.dirname(lpath) or os.curdir
+            os.makedirs(lparent, exist_ok=True)
             with open(lpath, "wb") as f2:
                 while True:
                     data = await r.content.read(4096 * 32)

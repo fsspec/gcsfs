@@ -515,6 +515,19 @@ def test_get_put_file_in_dir(protocol, gcs):
         assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
 
 
+@pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
+def test_get_file_to_current_working_directory(monkeypatch, protocol, gcs):
+    fn = protocol + TEST_BUCKET + "/temp"
+    gcs.pipe(fn, b"hello world")
+
+    with tempdir() as dn:
+        os.makedirs(dn)
+        monkeypatch.chdir(dn)
+        gcs.get_file(fn, "temp")
+        with open("temp", mode="rb") as f:
+            assert f.read() == b"hello world"
+
+
 def test_special_characters_filename(gcs: GCSFileSystem):
     special_filename = """'!"`#$%&'()+,-.<=>?@[]^_{}~/'"""
     full_path = TEST_BUCKET + "/" + special_filename
