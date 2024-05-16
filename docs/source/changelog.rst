@@ -4,6 +4,12 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2024.5.0
+--------
+
+* swap order of "gcs", "gs" protocols (#620)
+* fix get_file for relative lpath (#618)
+
 2024.3.1
 --------
 
