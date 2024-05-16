@@ -261,7 +261,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     scopes = {"read_only", "read_write", "full_control"}
     retries = 6  # number of retries on http failure
     default_block_size = DEFAULT_BLOCK_SIZE
-    protocol = "gcs", "gs"
+    protocol = "gs", "gcs"
     async_impl = True
 
     def __init__(
