@@ -1,6 +1,61 @@
 Changelog
 =========
 
+Note: in some releases, there are no changes, because we always guarantee relasing in step
+with fsspec.
+
+2024.5.0
+--------
+
+* swap order of "gcs", "gs" protocols (#620)
+* fix get_file for relative lpath (#618)
+
+2024.3.1
+--------
+
+* fix expiration= for sign() (#613)
+* do populate dircache in ls() (#612)
+* allow passing extra options to mkdir (#610)
+* credentials docs (#609)
+* retry in bulk rm (#608)
+* clean up loop on close (#606)
+
+2024.2.0
+--------
+
+* doc for passing tokens (#603)
+
+2023.12.2
+---------
+
+no changes
+
+2023.12.1
+---------
+
+no changes
+
+2023.12.0
+---------
+
+* use same version when paginating list (#591)
+* fix double asterisk glob test (#589)
+
+2023.10.0
+---------
+
+* Fix for transactions of small files (#586)
+
+2023.9.2
+--------
+
+* CI updates (#582)
+
+2023.9.1
+--------
+
+* small fixes following #573 (#578)
+
 2023.9.0
 --------
 

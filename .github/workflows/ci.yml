@@ -18,16 +18,16 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Conda Environment
-        uses: mamba-org/provision-with-micromamba@main
+        uses: mamba-org/setup-micromamba@v1
         with:
           cache-downloads: true
           environment-file: environment_gcsfs.yaml
           environment-name: gcsfs_test
-          extra-specs: |
-            python=${{ matrix.python-version }}
+          create-args: >-
+            python=${{ matrix.PY }}
 
       - name: Conda info
         run: |
@@ -49,6 +49,8 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
-      - uses: pre-commit/action@v2.0.0
+        with:
+          python-version: "3.11"
+      - uses: pre-commit/action@v3.0.0

@@ -1,7 +1,7 @@
-import datetime
 import io
 import os
 from builtins import FileNotFoundError
+from datetime import datetime, timezone
 from itertools import chain
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
@@ -26,10 +26,25 @@ TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
 TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 
 
-def test_simple(gcs):
-    assert not GoogleCredentials.tokens
+def test_simple(gcs, monkeypatch):
+    monkeypatch.setattr(GoogleCredentials, "tokens", None)
     gcs.ls(TEST_BUCKET)  # no error
     gcs.ls("/" + TEST_BUCKET)  # OK to lead with '/'
+
+
+def test_dircache_filled(gcs):
+    assert not dict(gcs.dircache)
+    gcs.ls(TEST_BUCKET)
+    assert len(gcs.dircache) == 1
+    gcs.dircache[TEST_BUCKET][0]["CHECK"] = True
+    out = gcs.ls(TEST_BUCKET, detail=True)
+    assert [o for o in out if o.get("CHECK", None)]
+
+    gcs.invalidate_cache()
+    assert not dict(gcs.dircache)
+
+    gcs.find(TEST_BUCKET)
+    assert len(gcs.dircache)
 
 
 def test_many_connect(docker_gcs):
@@ -125,7 +140,7 @@ def test_info(gcs):
     gcs.touch(a)
     assert gcs.info(a) == gcs.ls(a, detail=True)[0]
 
-    today = datetime.datetime.utcnow().date().isoformat()
+    today = datetime.utcnow().date().isoformat()
     assert gcs.created(a).isoformat().startswith(today)
     assert gcs.modified(a).isoformat().startswith(today)
     # Check conformance with expected info attribute names.
@@ -183,9 +198,8 @@ def test_rm(gcs):
     assert gcs.exists(a)
     gcs.rm(a)
     assert not gcs.exists(a)
-    # silently ignored for now
-    # with pytest.raises((OSError, IOError)):
-    #    gcs.rm(TEST_BUCKET + "/nonexistent")
+    with pytest.raises((OSError, IOError)):
+        gcs.rm(TEST_BUCKET + "/nonexistent")
     with pytest.raises((OSError, IOError)):
         gcs.rm("nonexistent")
 
@@ -286,7 +300,7 @@ def test_gcs_glob(gcs):
     assert fn in gcs.glob(TEST_BUCKET + "/nested/file*")
     assert fn in gcs.glob(TEST_BUCKET + "/*/*")
     assert fn in gcs.glob(TEST_BUCKET + "/**")
-    assert fn in gcs.glob(TEST_BUCKET + "/**1")
+    assert fn in gcs.glob(TEST_BUCKET + "/**/*1")
     assert all(
         f in gcs.find(TEST_BUCKET)
         for f in gcs.glob(TEST_BUCKET + "/nested/*")
@@ -499,6 +513,19 @@ def test_get_put_file_in_dir(protocol, gcs):
             data1
         )
         assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
+
+
+@pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
+def test_get_file_to_current_working_directory(monkeypatch, protocol, gcs):
+    fn = protocol + TEST_BUCKET + "/temp"
+    gcs.pipe(fn, b"hello world")
+
+    with tempdir() as dn:
+        os.makedirs(dn)
+        monkeypatch.chdir(dn)
+        gcs.get_file(fn, "temp")
+        with open("temp", mode="rb") as f:
+            assert f.read() == b"hello world"
 
 
 def test_special_characters_filename(gcs: GCSFileSystem):
@@ -937,8 +964,6 @@ def test_request_header(gcs):
 
 
 def test_user_project_fallback_google_default(monkeypatch):
-    import fsspec
-
     monkeypatch.setattr(gcsfs.core, "DEFAULT_PROJECT", "my_default_project")
     monkeypatch.setattr(fsspec.config, "conf", {})
     monkeypatch.setattr(
@@ -1424,6 +1449,29 @@ def test_copy_cache_invalidated(gcs):
     assert gcs.isfile(target_file2)
 
 
+def test_transaction(gcs):
+    # https://github.com/fsspec/gcsfs/issues/389
+    if not gcs.on_google:
+        pytest.skip()
+    try:
+        with gcs.transaction:
+            with gcs.open(f"{TEST_BUCKET}/foo", "wb") as f:
+                f.write(b"This is a test string")
+            f.discard()
+            assert not gcs.exists(f"{TEST_BUCKET}/foo")
+            raise ZeroDivisionError
+    except ZeroDivisionError:
+        ...
+    assert not gcs.exists(f"{TEST_BUCKET}/foo")
+
+    with gcs.transaction:
+        with gcs.open(f"{TEST_BUCKET}/foo", "wb") as f:
+            f.write(b"This is a test string")
+        assert not gcs.exists(f"{TEST_BUCKET}/foo")
+
+    assert gcs.cat(f"{TEST_BUCKET}/foo") == b"This is a test string"
+
+
 def test_find_maxdepth(gcs):
     assert gcs.find(f"{TEST_BUCKET}/nested", maxdepth=None) == [
         f"{TEST_BUCKET}/nested/file1",
@@ -1455,3 +1503,28 @@ def test_find_maxdepth(gcs):
 
     with pytest.raises(ValueError, match="maxdepth must be at least 1"):
         gcs.find(f"{TEST_BUCKET}/nested", maxdepth=0)
+
+
+def test_sign(gcs, monkeypatch):
+    file = TEST_BUCKET + "/test.jpg"
+    with gcs.open(file, "wb") as f:
+        f.write(b"This is a test string")
+    assert gcs.cat(file) == b"This is a test string"
+
+    # `sign` is creating a google Client on its own, it needs a realistically
+    # looking credentials file.
+    if not gcs.on_google:
+        monkeypatch.setenv(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            os.path.dirname(__file__) + "/fake-service-account-credentials.json",
+        )
+
+    current_ts_utc = int(datetime.now(tz=timezone.utc).timestamp())
+    result = gcs.sign(file)
+
+    # Check it here since emulator doesn't really validate those values
+    params = parse_qs(urlparse(result).query)
+    assert int(params["Expires"][0]) >= current_ts_utc + 100
+
+    response = requests.get(result)
+    assert response.text == "This is a test string"
