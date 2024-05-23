@@ -580,7 +580,19 @@ class GCSFileSystem(AsyncFileSystem):
                 return [await self._get_object(path)]
             else:
                 return []
-        out = pseudodirs + items
+        dirty_out = pseudodirs + items
+
+        out = []
+        for entry in dirty_out:
+            if (
+                entry["name"].rstrip("/") == path
+                and entry.get("kind", "") == "storage#object"
+                and (entry.get("size", "") == "0" or entry.get("size", "") == 0)
+                and entry.get("crc32c", "") == "AAAAAA=="
+            ):
+                # this is the "ghost" object of an empty folder, skip it
+                continue
+            out.append(entry)
 
         use_snapshot_listing = inventory_report_info and inventory_report_info.get(
             "use_snapshot_listing"
@@ -1001,15 +1013,6 @@ class GCSFileSystem(AsyncFileSystem):
                 if versions and "generation" in entry:
                     entry = entry.copy()
                     entry["name"] = f"{entry['name']}#{entry['generation']}"
-
-                if (
-                    entry["name"].rstrip("/") == path
-                    and entry.get("kind", "") == "storage#object"
-                    and (entry.get("size", "") == "0" or entry.get("size", "") == 0)
-                    and entry.get("crc32c", "") == "AAAAAA=="
-                ):
-                    # this is the "ghost" object of an empty folder, skip it
-                    continue
                 out.append(entry)
 
         if detail:
