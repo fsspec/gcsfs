@@ -421,6 +421,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self, method, path, *args, headers=None, json=None, data=None, **kwargs
     ):
         await self._set_session()
+        if hasattr(data, "seek"):
+            data.seek(0)
         async with self.session.request(
             method=method,
             url=self._format_path(path, args),
