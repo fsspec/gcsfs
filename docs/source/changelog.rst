@@ -4,6 +4,11 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2024.6.0
+--------
+
+* Add seek(0) to request data to prevent issues on retries (#624)
+
 2024.5.0
 --------
 
