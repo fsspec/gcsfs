@@ -4,6 +4,11 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2024.6.1
+--------
+
+no changes
+
 2024.6.0
 --------
 
