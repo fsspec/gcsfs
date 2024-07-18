@@ -99,7 +99,11 @@ def validate_response(status, content, path, args=None):
             content = content.decode()
         try:
             error = json.loads(content)["error"]
-            msg = error["message"]
+            # Sometimes the error message is a string.
+            if isinstance(error, str):
+                msg = error
+            else:
+                msg = error["message"]
         except json.decoder.JSONDecodeError:
             msg = content
 
@@ -109,7 +113,7 @@ def validate_response(status, content, path, args=None):
             raise requests.exceptions.ProxyError()
         elif "invalid" in str(msg):
             raise ValueError(f"Bad Request: {path}\n{msg}")
-        elif error:
+        elif error and not isinstance(error, str):
             raise HttpError(error)
         elif status:
             raise HttpError({"code": status, "message": msg})  # text-like

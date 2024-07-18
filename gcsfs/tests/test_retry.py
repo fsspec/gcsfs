@@ -103,6 +103,15 @@ def test_validate_response():
         validate_response(502, b"", "/path")
 
 
+def test_validate_response_error_is_string():
+    # HttpError with JSON body
+    j = '{"error": "Too Many Requests"}'
+    with pytest.raises(HttpError) as e:
+        validate_response(429, j, "/path")
+    assert e.value.code == 429
+    assert e.value.message == "Too Many Requests, 429"
+
+
 @pytest.mark.parametrize(
     ["file_path", "validate_get_error", "validate_list_error", "expected_error"],
     [
