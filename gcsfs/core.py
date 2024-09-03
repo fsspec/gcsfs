@@ -27,6 +27,10 @@ from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
 
+os.register_at_fork(
+    after_in_child=asyn.reset_lock,
+)
+
 logger = logging.getLogger("gcsfs")
 
 
