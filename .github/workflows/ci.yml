@@ -20,14 +20,11 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup Conda Environment
-        uses: mamba-org/setup-micromamba@v1
+      - name: Setup conda
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          cache-downloads: true
           environment-file: environment_gcsfs.yaml
-          environment-name: gcsfs_test
-          create-args: >-
-            python=${{ matrix.PY }}
+          python-version: ${{ matrix.PY }}
 
       - name: Conda info
         run: |
