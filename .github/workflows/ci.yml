@@ -25,12 +25,16 @@ jobs:
         with:
           environment-file: environment_gcsfs.yaml
           python-version: ${{ matrix.PY }}
+          activate-environment: gcsfs_test
 
       - name: Conda info
         run: |
           conda list
           conda --version
 
+      - name: install
+        run: |
+          pip install -e .
       - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
