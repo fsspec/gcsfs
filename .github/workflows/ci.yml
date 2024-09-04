@@ -31,9 +31,6 @@ jobs:
           conda list
           conda --version
 
-      - name: Install libfuse
-        run: (sudo apt-get install -y fuse || echo "Error installing fuse.")
-
       - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
