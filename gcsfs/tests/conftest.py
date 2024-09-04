@@ -10,6 +10,8 @@ import requests
 from gcsfs import GCSFileSystem
 from gcsfs.tests.settings import TEST_BUCKET
 
+fsspec.utils.setup_logging(logger_name="gcsfs")
+
 files = {
     "test/accounts.1.json": (
         b'{"amount": 100, "name": "Alice"}\n'
