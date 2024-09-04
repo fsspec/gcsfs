@@ -870,8 +870,10 @@ def test_bigger_than_block_read(gcs):
 
 
 def test_current(gcs):
+    from gcsfs.tests import conftest
+
     assert GCSFileSystem.current() is gcs
-    gcs2 = GCSFileSystem(endpoint_url=gcs._endpoint, default_location=None)
+    gcs2 = GCSFileSystem(**conftest.params)
     assert gcs2.session is gcs.session
 
 

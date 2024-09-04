@@ -10,7 +10,7 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -20,27 +20,25 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup Conda Environment
-        uses: mamba-org/setup-micromamba@v1
+      - name: Setup conda
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          cache-downloads: true
           environment-file: environment_gcsfs.yaml
-          environment-name: gcsfs_test
-          create-args: >-
-            python=${{ matrix.PY }}
+          python-version: ${{ matrix.PY }}
+          activate-environment: gcsfs_test
 
       - name: Conda info
         run: |
           conda list
           conda --version
 
-      - name: Install libfuse
-        run: (sudo apt-get install -y fuse || echo "Error installing fuse.")
-
+      - name: install
+        run: |
+          pip install -e .
       - name: Run tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
-          pytest -vv \
+          pytest -vv -s \
           --log-format="%(asctime)s %(levelname)s %(message)s" \
           --log-date-format="%H:%M:%S" \
           gcsfs/
