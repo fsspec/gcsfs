@@ -10,8 +10,6 @@ import requests
 from gcsfs import GCSFileSystem
 from gcsfs.tests.settings import TEST_BUCKET
 
-fsspec.utils.setup_logging(logger_name="gcsfs")
-
 files = {
     "test/accounts.1.json": (
         b'{"amount": 100, "name": "Alice"}\n'
@@ -48,6 +46,8 @@ b = TEST_BUCKET + "/tmp/test/b"
 c = TEST_BUCKET + "/tmp/test/c"
 d = TEST_BUCKET + "/tmp/test/d"
 
+params = dict()
+
 
 def stop_docker(container):
     cmd = shlex.split('docker ps -a -q --filter "name=%s"' % container)
@@ -62,6 +62,7 @@ def docker_gcs():
         # assume using real API or otherwise have a server already set up
         yield os.getenv("STORAGE_EMULATOR_HOST")
         return
+    params["token"] = "anon"
     container = "gcsfs_test"
     cmd = (
         "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "
@@ -88,11 +89,12 @@ def docker_gcs():
 
 @pytest.fixture
 def gcs_factory(docker_gcs):
+    params["endpoint_url"] = docker_gcs
+
     def factory(default_location=None):
         GCSFileSystem.clear_instance_cache()
-        return fsspec.filesystem(
-            "gcs", endpoint_url=docker_gcs, default_location=default_location
-        )
+        params["default_location"] = default_location
+        return fsspec.filesystem("gcs", **params)
 
     return factory
 
