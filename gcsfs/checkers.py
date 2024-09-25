@@ -46,7 +46,7 @@ class MD5Checker(ConsistencyChecker):
             dig = [
                 bit.split("=")[1]
                 for bit in headers["X-Goog-Hash"].split(",")
-                if bit.split("=")[0] == "md5"
+                if bit and bit.strip().startswith("md5=")
             ]
             if dig:
                 if b64encode(self.md.digest()).decode().rstrip("=") != dig[0]:
