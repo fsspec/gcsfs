@@ -25,7 +25,9 @@ def google_response_from_data(expected_data: bytes, actual_data=None):
     return response
 
 
-def google_response_from_data_with_reverse_header_order(expected_data: bytes, actual_data=None):
+def google_response_from_data_with_reverse_header_order(
+    expected_data: bytes, actual_data=None
+):
     actual_data = actual_data or expected_data
     checksum = md5(actual_data)
     checksum_b64 = base64.b64encode(checksum.digest()).decode("UTF-8")
