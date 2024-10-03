@@ -1841,7 +1841,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
             )
             headers, contents = self.gcsfs.call(
-                "POST", self.location + "&ifGenerationMatch=0", headers=head, data=chunk
+                "POST", self.location, headers=head, data=chunk
             )
             if "Range" in headers:
                 end = int(headers["Range"].split("-")[1])
@@ -1967,7 +1967,7 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     head.update({"Content-Type": content_type, "Content-Length": str(l)})
     headers, txt = await fs._call(
         "POST",
-        location + "&ifGenerationMatch=0",
+        location,
         headers=head,
         data=UnclosableBytesIO(data),
     )
