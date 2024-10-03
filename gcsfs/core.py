@@ -1325,13 +1325,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         content_type="application/octet-stream",
         fixed_key_metadata=None,
         chunksize=50 * 2**20,
+        overwrite=True,
     ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
         size = len(data)
         out = None
-        if size < 5 * 2**20:
+        if size < chunksize:
             location = await simple_upload(
                 self,
                 bucket,
@@ -1341,6 +1342,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 consistency,
                 content_type,
                 fixed_key_metadata=fixed_key_metadata,
+                overwrite=overwrite,
             )
         else:
             location = await initiate_upload(
@@ -1374,6 +1376,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         chunksize=50 * 2**20,
         callback=None,
         fixed_key_metadata=None,
+        overwrite=True,
         **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1838,7 +1841,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
             )
             headers, contents = self.gcsfs.call(
-                "POST", self.location, headers=head, data=chunk
+                "POST", self.location + "&ifGenerationMatch=0", headers=head, data=chunk
             )
             if "Range" in headers:
                 end = int(headers["Range"].split("-")[1])
@@ -1963,7 +1966,10 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     head["Content-Range"] = range
     head.update({"Content-Type": content_type, "Content-Length": str(l)})
     headers, txt = await fs._call(
-        "POST", location, headers=head, data=UnclosableBytesIO(data)
+        "POST",
+        location + "&ifGenerationMatch=0",
+        headers=head,
+        data=UnclosableBytesIO(data),
     )
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])
@@ -2010,27 +2016,22 @@ async def simple_upload(
     consistency=None,
     content_type="application/octet-stream",
     fixed_key_metadata=None,
+    overwrite=True,
 ):
     checker = get_consistency_checker(consistency)
-    path = f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o"
+    path = f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o?uploadType=media&name={key}"
+    if not overwrite:
+        path += "&ifGenerationMatch=0"
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
-    metadata = json.dumps(metadata)
-    template = (
-        "--==0=="
-        "\nContent-Type: application/json; charset=UTF-8"
-        "\n\n" + metadata + "\n--==0==" + f"\nContent-Type: {content_type}" + "\n\n"
-    )
 
-    data = template.encode() + datain + b"\n--==0==--"
     j = await fs._call(
         "POST",
         path,
-        uploadType="multipart",
-        headers={"Content-Type": 'multipart/related; boundary="==0=="'},
-        data=UnclosableBytesIO(data),
+        headers=metadata,
+        data=UnclosableBytesIO(datain),
         json_out=True,
     )
     checker.update(datain)
