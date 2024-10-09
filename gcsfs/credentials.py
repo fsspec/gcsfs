@@ -180,7 +180,8 @@ class GoogleCredentials:
                     return  # repeat to avoid race (but don't want lock in common case)
                 logger.debug("GCS refresh")
                 self.credentials.refresh(req)
-                self.apply(self.heads)
+                # https://github.com/fsspec/filesystem_spec/issues/565
+                self.credentials.apply(self.heads)
 
     def apply(self, out):
         """Insert credential headers in-place to a dictionary"""
