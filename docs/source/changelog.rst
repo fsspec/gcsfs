@@ -4,6 +4,12 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2024.10.0
+---------
+
+* Remove race condition in credentials (#643)
+* fix md5 hash order logic (#640)
+
 2024.9.0
 --------
 
