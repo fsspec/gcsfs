@@ -1428,6 +1428,8 @@ def test_expiry_keyword():
     assert gcs.dircache.listings_expiry_time == 1
     gcs = GCSFileSystem(cache_timeout=1, token="anon")
     assert gcs.dircache.listings_expiry_time == 1
+    gcs = GCSFileSystem(cache_timeout=0, token="anon")
+    assert gcs.dircache.listings_expiry_time == 0
 
 
 def test_copy_cache_invalidated(gcs):
