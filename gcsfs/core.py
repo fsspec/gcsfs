@@ -210,7 +210,13 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     GCSFileSystem maintains a per-implied-directory cache of object listings and
     fulfills all object information and listing requests from cache. This implied, for example, that objects
     created via other processes *will not* be visible to the GCSFileSystem until the cache
-    refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not effected by this cache.
+    refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not affected by this cache.
+
+    *Note that caching creates divergences from the behavior of POSIX utilities such as 'ls'*.  In a POSIX 
+    filesystem, ls always returns the current state of a directory; however, if `refresh = False` (the
+    default), ls returns the state of the cache.  `refresh = False` is the default because (unlike in a POSIX filesystem)
+    listing directory contents of a GCS bucket can be expensive.  Developers are advised to set `refresh = True`
+    if exact POSIX behavior is desired.
 
     In the default case the cache is never expired. This may be controlled via the ``cache_timeout``
     GCSFileSystem parameter or via explicit calls to ``GCSFileSystem.invalidate_cache``.
