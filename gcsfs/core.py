@@ -213,7 +213,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     refreshed. Calls to GCSFileSystem.open and calls to GCSFile are not affected by this cache.
 
     Note that directory listings are cached by default, because fetching those listings can be expensive. This is
-    contrary to local filesystem behaviour. The cache will be cleared if writing from this instance, but it can 
+    contrary to local filesystem behaviour. The cache will be cleared if writing from this instance, but it can
     become stale and return incorrect results if the storage is written to from another process/machine.
     If you anticipate this possibility, you can set the use_listings_cache and listings_expiry_time arguments
     to configure the caching, call `.invalidate_cache()` when required, or pass `refresh=True` to the
