@@ -33,6 +33,6 @@ setup(
         open("README.rst").read() if os.path.exists("README.rst") else ""
     ),
     extras_require={"gcsfuse": ["fusepy"], "crc": ["crcmod"]},
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     zip_safe=False,
 )
