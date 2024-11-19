@@ -957,7 +957,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     def _parse_timestamp(self, timestamp):
         assert timestamp.endswith("Z")
         timestamp = timestamp[:-1]
-        timestamp = timestamp + "0" * (6 - len(timestamp.rsplit(".", 1)[1]))
+        timestamp = timestamp + "0" * (6 - len(timestamp.rsplit(".", 1)[-1]))
         return datetime.fromisoformat(timestamp + "+00:00")
 
     async def _info(self, path, generation=None, **kwargs):
