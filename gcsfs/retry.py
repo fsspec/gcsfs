@@ -109,6 +109,8 @@ def validate_response(status, content, path, args=None):
 
         if status == 403:
             raise OSError(f"Forbidden: {path}\n{msg}")
+        elif status == 412:
+            raise FileExistsError(path)
         elif status == 502:
             raise requests.exceptions.ProxyError()
         elif "invalid" in str(msg):
