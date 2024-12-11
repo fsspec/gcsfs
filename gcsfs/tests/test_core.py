@@ -1532,3 +1532,16 @@ def test_sign(gcs, monkeypatch):
 
     response = requests.get(result)
     assert response.text == "This is a test string"
+
+
+@pytest.mark.xfail(reason="emulator does not support condition")
+def test_write_x_mpu(gcs):
+    fn = TEST_BUCKET + "/test.file"
+    with gcs.open(fn, mode="xb", block_size=5 * 2**20) as f:
+        assert f.mode == "xb"
+        f.write(b"0" * 5 * 2**20)
+        f.write(b"done")
+    with pytest.raises(FileExistsError):
+        with gcs.open(fn, mode="xb", block_size=5 * 2**20) as f:
+            f.write(b"0" * 5 * 2**20)
+            f.write(b"done")
