@@ -115,8 +115,8 @@ def _location():
     -------
     valid http location
     """
-    _emulator_location = os.getenv("STORAGE_EMULATOR_HOST", None)
-    if _emulator_location:
+    _emulator_location = os.getenv("STORAGE_EMULATOR_HOST", "")
+    if _emulator_location not in {"default", "", None}:
         if not any(
             _emulator_location.startswith(scheme) for scheme in ("http://", "https://")
         ):
@@ -221,6 +221,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     In the default case the cache is never expired. This may be controlled via the ``cache_timeout``
     GCSFileSystem parameter or via explicit calls to ``GCSFileSystem.invalidate_cache``.
+
+    NOTE on "exclusive" mode: mode=="create"" (in pipe and put) and open(mode="xb") are supported on an
+    experimental basis. The test harness does not currently support this, so use at your
+    own risk.
 
     Parameters
     ----------
