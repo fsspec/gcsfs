@@ -4,6 +4,14 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2024.12.0
+---------
+
+* Exclusive write (#651)
+* Avoid IndexError on integer seconds (#649)
+* note on non-posixness (#648)
+* handle chache_timeout=0 (#646)
+
 2024.10.0
 ---------
 
