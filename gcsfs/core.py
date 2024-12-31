@@ -1,19 +1,20 @@
 """
 Google Cloud Storage pythonic interface
 """
+
 import asyncio
 import io
 import json
 import logging
+import mimetypes
 import os
 import posixpath
 import re
 import warnings
 import weakref
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from urllib.parse import quote as quote_urllib
-from urllib.parse import urlsplit
 
 import fsspec
 from fsspec import asyn
@@ -142,8 +143,9 @@ def _coalesce_generation(*args):
         generations.remove(None)
     if len(generations) > 1:
         raise ValueError(
-            "Cannot coalesce generations where more than one are defined,"
-            " {}".format(generations)
+            "Cannot coalesce generations where more than one are defined," " {}".format(
+                generations
+            )
         )
     elif len(generations) == 0:
         return None
@@ -1391,7 +1393,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         rpath,
         metadata=None,
         consistency=None,
-        content_type="application/octet-stream",
+        content_type=None,
         chunksize=50 * 2**20,
         callback=None,
         fixed_key_metadata=None,
@@ -1401,6 +1403,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         # enforce blocksize should be a multiple of 2**18
         if os.path.isdir(lpath):
             return
+        if content_type is None:
+            content_type, _ = mimetypes.guess_type(lpath)
+            if content_type is None:
+                content_type = "application/octet-stream"
         callback = callback or NoOpCallback()
         consistency = consistency or self.consistency
         checker = get_consistency_checker(consistency)
@@ -1755,7 +1761,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             the number we wrote; 'md5' does a full checksum. Any value other
             than 'size' or 'md5' or 'crc32c' is assumed to mean no checking.
         content_type: str
-            default is `application/octet-stream`. See the list of available
+            default when unspecified is provided by mimetypes.guess_type or
+            otherwise `application/octet-stream`. See the list of available
             content types at https://www.iana.org/assignments/media-types/media-types.txt
         metadata: dict
             Custom metadata, in key/value pairs, added at file creation
@@ -1798,7 +1805,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         else:
             det = {}
         self.content_type = content_type or det.get(
-            "contentType", "application/octet-stream"
+            "contentType",
+            mimetypes.guess_type(self.path)[0] or "application/octet-stream",
         )
         self.metadata = metadata or det.get("metadata", {})
         self.fixed_key_metadata = _convert_fixed_key_metadata(det, from_google=True)

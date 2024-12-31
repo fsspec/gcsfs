@@ -890,6 +890,36 @@ def test_array(gcs):
         assert out == b"A" * 1000
 
 
+def test_content_type_set(gcs):
+    fn = TEST_BUCKET + "/content_type"
+    with gcs.open(fn, "wb", content_type="text/html") as f:
+        f.write(b"<html>")
+    assert gcs.info(fn)["contentType"] == "text/html"
+
+
+def test_content_type_guess(gcs):
+    fn = TEST_BUCKET + "/content_type.txt"
+    with gcs.open(fn, "wb") as f:
+        f.write(b"zz")
+    assert gcs.info(fn)["contentType"] == "text/plain"
+
+
+def test_content_type_default(gcs):
+    fn = TEST_BUCKET + "/content_type.abcdef"
+    with gcs.open(fn, "wb") as f:
+        f.write(b"zz")
+    assert gcs.info(fn)["contentType"] == "application/octet-stream"
+
+
+def test_content_type_put_guess(gcs):
+    dst = TEST_BUCKET + "/content_type_put_guess"
+    with tmpfile(extension="txt") as fn:
+        with open(fn, "w") as f:
+            f.write("zz")
+        gcs.put(fn, f"gs://{dst}", b"")
+    assert gcs.info(dst)["contentType"] == "text/plain"
+
+
 def test_attrs(gcs):
     if not gcs.on_google:
         # https://github.com/fsspec/gcsfs/pull/479
@@ -1194,7 +1224,6 @@ def test_dir_marker(gcs):
 
 
 def test_mkdir_with_path(gcs):
-
     with pytest.raises(FileNotFoundError):
         gcs.mkdir(f"{TEST_BUCKET + 'new'}/path", create_parents=False)
     assert not gcs.exists(f"{TEST_BUCKET + 'new'}")
