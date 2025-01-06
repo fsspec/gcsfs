@@ -13,8 +13,9 @@ import re
 import warnings
 import weakref
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
+from urllib.parse import urlsplit
 
 import fsspec
 from fsspec import asyn
@@ -143,9 +144,8 @@ def _coalesce_generation(*args):
         generations.remove(None)
     if len(generations) > 1:
         raise ValueError(
-            "Cannot coalesce generations where more than one are defined," " {}".format(
-                generations
-            )
+            "Cannot coalesce generations where more than one are defined,"
+            " {}".format(generations)
         )
     elif len(generations) == 0:
         return None
