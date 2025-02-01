@@ -4,6 +4,12 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee relasing in step
 with fsspec.
 
+2025.2.0
+--------
+
+* guess upload file MIME types (#655)
+* better shutdown cleanup (#657)
+
 2024.12.0
 ---------
 
