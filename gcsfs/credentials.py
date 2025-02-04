@@ -164,19 +164,19 @@ class GoogleCredentials:
         else:
             raise ValueError("Token format not understood")
         self.credentials = credentials
-        if self.credentials.valid:
+        if self.credentials.token_state == google.auth.credentials.TokenState.FRESH:
             self.credentials.apply(self.heads)
 
     def maybe_refresh(self):
         # this uses requests and is blocking
         if self.credentials is None:
             return  # anon
-        if self.credentials.valid:
+        if self.credentials.token_state == google.auth.credentials.TokenState.FRESH:
             return  # still good
         with requests.Session() as session:
             req = Request(session)
             with self.lock:
-                if self.credentials.valid:
+                if self.credentials.token_state == google.auth.credentials.TokenState.FRESH:
                     return  # repeat to avoid race (but don't want lock in common case)
                 logger.debug("GCS refresh")
                 self.credentials.refresh(req)
