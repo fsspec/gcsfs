@@ -17,6 +17,8 @@ from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+from gcsfs.retry import HttpError
+
 logger = logging.getLogger("gcsfs.credentials")
 
 tfile = os.path.join(os.path.expanduser("~"), ".gcs_tokens")
@@ -178,7 +180,9 @@ class GoogleCredentials:
         )
 
     def maybe_refresh(self, refresh_buffer=300):
-        """Check and refresh credentials if needed"""
+        """
+        Check and refresh credentials if needed
+        """
         if self.credentials is None:
             return  # anon
 
@@ -189,10 +193,17 @@ class GoogleCredentials:
             req = Request(session)
             with self.lock:
                 if self._credentials_valid(refresh_buffer):
-                    return  # repeat to avoid race (but don't want lock in common case)
+                    return  # repeat check to avoid race conditions
 
                 logger.debug("GCS refresh")
-                self.credentials.refresh(req)
+                try:
+                    self.credentials.refresh(req)
+                except gauth.exceptions.RefreshError as error:
+                    # Re-raise as HttpError with a 401 code and the expected message
+                    raise HttpError(
+                        {"code": 401, "message": "Invalid Credentials"}
+                    ) from error
+
                 # https://github.com/fsspec/filesystem_spec/issues/565
                 self.credentials.apply(self.heads)
 
