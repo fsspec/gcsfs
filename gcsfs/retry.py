@@ -71,6 +71,9 @@ def is_retriable(exception):
     """Returns True if this exception is retriable."""
 
     if isinstance(exception, HttpError):
+        # Add 401 to retriable errors when it's an auth expiration issue
+        if exception.code == 401 and "Invalid Credentials" in str(exception.message):
+            return True
         return exception.code in errs
 
     return isinstance(exception, RETRIABLE_EXCEPTIONS)
