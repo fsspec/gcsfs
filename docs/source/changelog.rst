@@ -1,8 +1,13 @@
 Changelog
 =========
 
-Note: in some releases, there are no changes, because we always guarantee relasing in step
-with fsspec.
+Note: in some releases, there are no changes, because we always guarantee
+relasing in step with fsspec.
+
+2025.3.0
+--------
+
+* Improvements for credentials refresh under high load (#658)
 
 2025.2.0
 --------
