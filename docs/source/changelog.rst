@@ -7,7 +7,7 @@ relasing in step with fsspec.
 2025.3.0
 --------
 
-No changes
+* Improvements for credentials refresh under high load (#658)
 
 2025.2.0
 --------
