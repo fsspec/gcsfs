@@ -1519,10 +1519,17 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             objects, _ = await self._do_list_objects(
                 bucket, delimiter="", prefix=_prefix, versions=versions
             )
+        else:
+            _prefix = prefix
 
         dirs = {}
         cache_entries = {}
+        path2 = path.rstrip("/") + "/"
 
+        if not prefix:
+            objects = [
+                o for o in objects if o["name"].startswith(path2) or o["name"] == path
+            ]
         for obj in objects:
             parent = self._parent(obj["name"])
             previous = obj

@@ -1574,3 +1574,9 @@ def test_write_x_mpu(gcs):
         with gcs.open(fn, mode="xb", block_size=5 * 2**20) as f:
             f.write(b"0" * 5 * 2**20)
             f.write(b"done")
+
+
+def test_near_find(gcs):
+    gcs.touch(f"{TEST_BUCKET}/inner/aa/file")
+    out = gcs.find(f"{TEST_BUCKET}/inner/a")
+    assert not out
