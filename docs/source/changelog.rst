@@ -4,6 +4,13 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 relasing in step with fsspec.
 
+2025.3.1
+--------
+
+* Fix find with path not ending with "/" (#668)
+* remove "beta" note from doc (#666)
+* don't check expiry of creds that don't expire (#665)
+
 2025.3.0
 --------
 
