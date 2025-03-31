@@ -4,6 +4,11 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 relasing in step with fsspec.
 
+2025.3.2
+--------
+
+no changes
+
 2025.3.1
 --------
 
