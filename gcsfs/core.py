@@ -1245,7 +1245,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             parts = []
             for i, p in enumerate(chunk):
                 bucket, key, generation = self.split_path(p)
-                query = f"?generation={generation}" if generation else ""
+                query_params = self._get_params(
+                    {"generation": generation} if generation else {}
+                )
+                query = (
+                    ("?" + "&".join(f"{k}={v}" for k, v in query_params.items()))
+                    if query_params
+                    else ""
+                )
                 parts.append(
                     template.format(
                         i=i + 1,
