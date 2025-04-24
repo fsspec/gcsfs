@@ -683,7 +683,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 end_offset=None,
                 prefix=prefix,
                 versions=versions,
-                page_size=default_page_size,
+                page_size=max_results,
             )
 
     async def _concurrent_list_objects_helper(
@@ -1023,16 +1023,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         try:
             exact = await self._get_object(path)
             # this condition finds a "placeholder" - still need to check if it's a directory
-            if exact["size"] or not exact["name"].endswith("/"):
+            if not (exact["size"] == 0 and exact["name"].endswith("/")):
                 return exact
         except FileNotFoundError:
             pass
-        kwargs["detail"] = True  # Force to true for info
-        out = await self._ls(path, **kwargs)
-        match = next((o for o in out if o["name"].rstrip("/") == path), None)
-        if match:
+        out = await self._list_objects(path, max_results=1)
+        exact = next((o for o in out if o["name"].rstrip("/") == path), None)
+        if exact and not (exact["size"] == 0 and exact["name"].endswith("/")):
             # exact hit
-            return match
+            return exact
         elif out:
             # other stuff - must be a directory
             return {
