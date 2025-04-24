@@ -985,7 +985,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
-        path = self._strip_protocol(path)
+        path = self._strip_protocol(path).rstrip("/")
         if "/" not in path:
             try:
                 out = await self._call("GET", f"b/{path}", json_out=True)
@@ -1014,7 +1014,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             # this is a directory
             return {
                 "bucket": bucket,
-                "name": path.rstrip("/"),
+                "name": path,
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
@@ -1029,15 +1029,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             pass
         kwargs["detail"] = True  # Force to true for info
         out = await self._ls(path, **kwargs)
-        out0 = [o for o in out if o["name"].rstrip("/") == path]
-        if out0:
+        match = next((o for o in out if o["name"].rstrip("/") == path), None)
+        if match:
             # exact hit
-            return out0[0]
+            return match
         elif out:
             # other stuff - must be a directory
             return {
                 "bucket": bucket,
-                "name": path.rstrip("/"),
+                "name": path,
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
@@ -1060,13 +1060,32 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             for entry in await self._list_objects(
                 path, prefix=prefix, versions=versions, **kwargs
             ):
+                if entry["size"] == 0 and entry["name"].endswith("/"):
+                    entry = {
+                        "bucket": entry["bucket"],
+                        "name": path.rstrip("/"),
+                        "size": 0,
+                        "storageClass": "DIRECTORY",
+                        "type": "directory",
+                    }
+                    if entry in out:
+                        continue
+
                 if versions and "generation" in entry:
                     entry = entry.copy()
                     entry["name"] = f"{entry['name']}#{entry['generation']}"
+
                 out.append(entry)
 
         if detail:
-            return out
+            return sorted(
+                out,
+                key=lambda e: (
+                    e["name"].count("/"),
+                    e["type"] != "directory",
+                    e["name"],
+                ),
+            )
         else:
             return sorted([o["name"] for o in out])
 
@@ -1490,6 +1509,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             self.invalidate_cache(self._parent(rpath))
 
     async def _isdir(self, path):
+
         try:
             return (await self._info(path))["type"] == "directory"
         except OSError:
