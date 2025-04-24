@@ -1223,6 +1223,47 @@ def test_dir_marker(gcs):
     assert out2["type"] == "directory"
 
 
+def test_dir_marker_directory_not_listed(gcs):
+    gcs.touch(f"{TEST_BUCKET}/psudodir/")
+    gcs.touch(f"{TEST_BUCKET}/psudodir/innerfolder/innerfile")
+    gcs.invalidate_cache()
+    info = gcs.info(f"{TEST_BUCKET}/psudodir")
+    assert info["type"] == "directory"
+
+
+def test_dir_marker_directory_listed(gcs):
+    gcs.touch(f"{TEST_BUCKET}/psudodir/")
+    gcs.touch(f"{TEST_BUCKET}/psudodir/innerfolder/innerfile")
+    gcs.invalidate_cache()
+    gcs.ls(f"{TEST_BUCKET}/psudodir")
+    info = gcs.info(f"{TEST_BUCKET}/psudodir")
+    assert info["type"] == "directory"
+
+
+def test_dir_marker_parent_directory_listed(gcs):
+    gcs.touch(f"{TEST_BUCKET}/parent_psudodir/psudodir/")
+    gcs.touch(f"{TEST_BUCKET}/parent_psudodir/psudodir/innerfolder/innerfile")
+    gcs.invalidate_cache()
+    gcs.ls(f"{TEST_BUCKET}/parent_psudodir")
+    info = gcs.info(f"{TEST_BUCKET}/parent_psudodir/psudodir")
+    assert info["type"] == "directory"
+
+
+def test_dir_marker_info_eq_ls(gcs):
+    gcs.touch(f"{TEST_BUCKET}/psudodir/")
+    gcs.invalidate_cache()
+    out1 = gcs.info(f"{TEST_BUCKET}/psudodir")
+    out2 = gcs.ls(f"{TEST_BUCKET}/psudodir", detail=True)[0]
+    assert out1["type"] == "directory"
+    assert out1 == out2
+
+    gcs.invalidate_cache()
+    out3 = gcs.ls(f"{TEST_BUCKET}/psudodir", detail=True)[0]
+    out4 = gcs.info(f"{TEST_BUCKET}/psudodir")
+    assert out3["type"] == "directory"
+    assert out3 == out4
+
+
 def test_mkdir_with_path(gcs):
     with pytest.raises(FileNotFoundError):
         gcs.mkdir(f"{TEST_BUCKET + 'new'}/path", create_parents=False)
