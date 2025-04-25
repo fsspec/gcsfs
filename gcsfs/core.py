@@ -627,9 +627,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             "use_snapshot_listing"
         )
 
+        max_results = kwargs.get("max_results")
+
         # Don't cache prefixed/partial listings, in addition to
         # not using the inventory report service to do listing directly.
-        if not prefix and not use_snapshot_listing:
+        if not prefix and not use_snapshot_listing and not max_results:
             self.dircache[path] = out
         return out
 
@@ -683,7 +685,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 end_offset=None,
                 prefix=prefix,
                 versions=versions,
-                page_size=max_results,
+                max_results=max_results,
             )
 
     async def _concurrent_list_objects_helper(
@@ -736,7 +738,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     end_offset=end_offsets[i],
                     prefix=prefix,
                     versions=versions,
-                    page_size=page_size,
+                    max_results=page_size,
                 )
                 for i in range(0, len(start_offsets))
             ]
@@ -761,7 +763,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         end_offset,
         prefix,
         versions,
-        page_size,
+        max_results,
     ):
         """
         Sequential list objects within the start and end offset range.
@@ -778,7 +780,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             prefix=prefix,
             startOffset=start_offset,
             endOffset=end_offset,
-            maxResults=page_size,
+            maxResults=max_results,
             json_out=True,
             versions="true" if versions else None,
         )
@@ -796,7 +798,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 prefix=prefix,
                 startOffset=start_offset,
                 endOffset=end_offset,
-                maxResults=page_size,
+                maxResults=max_results,
                 pageToken=next_page_token,
                 json_out=True,
                 versions="true" if versions else None,
