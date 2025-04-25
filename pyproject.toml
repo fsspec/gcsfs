@@ -1,0 +1,85 @@
+[project]
+name = "gcsfs"
+description = "Convenient Filesystem interface over GCS"
+maintainers = [
+  {name = "Martin Durant", email = "mdurant@anaconda.com"}
+]
+license = "BSD-4-Clause"
+license-files = ["LICENSE.txt"]
+readme = "README.rst"
+keywords=["google-cloud-storage", "gcloud", "file-system"]
+classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "Operating System :: OS Independent",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+    ]
+requires-python = ">=3.9"
+dependencies = [
+    "aiohttp!=4.0.0a0,!=4.0.0a1",
+    "decorator>4.1.2",
+    "fsspec==2025.3.2",
+    "google-auth>=1.2",
+    "google-auth-oauthlib>=1.2.2",
+    "google-cloud-storage>=3.1.0",
+    "requests>=2.32.3",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+gcsfuse = ["fusepy"]
+crc = ["crcmod"]
+
+[tool.versioneer]
+VCS = "git"
+style = "pep440"
+versionfile_source = "gcsfs/_version.py"
+versionfile_build = "gcsfs/_version.py"
+tag_prefix = ""
+
+[tool.flake8]
+exclude = "versioneer.py,docs/source/conf.py"
+ignore = [
+    # Extra space in brackets
+    "E20",
+    # Multiple spaces around ","
+    "E231" , "E241",
+    # Comments
+    "E26",
+    # Import formatting
+    "E4",
+    # Comparing types instead of isinstance
+    "E721",
+    # Assigning lambda expression
+    "E731",
+    # Ambiguous variable names
+    "E741",
+    # line break before binary operator
+    "W503",
+    # line break after binary operator
+    "W504",
+    # redefinition of unused 'loop' from line 10
+    "F811"
+]
+max-line-length = 120
+
+[tool.pytest.ini_options]
+addopts = "--color=yes --timeout=600"
+log_cli = false
+log_cli_level = "DEBUG"
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["."] 
+include = ["gcsfs", "gcsfs.cli"]
+exclude = ["gcsfs.tests*"]
+
+[build-system]
+requires = ["setuptools", "versioneer[toml]"]
+build-backend = "setuptools.build_meta"
