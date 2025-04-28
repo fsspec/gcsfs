@@ -1058,6 +1058,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             out = await self._list_buckets()
         else:
             out = []
+            dir_names = set()
             for entry in await self._list_objects(
                 path, prefix=prefix, versions=versions, **kwargs
             ):
@@ -1069,8 +1070,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                         "storageClass": "DIRECTORY",
                         "type": "directory",
                     }
-                    if entry in out:
+
+                if entry["type"] == "directory":
+                    if entry["name"] in dir_names:
                         continue
+                    dir_names.add(entry["name"])
 
                 if versions and "generation" in entry:
                     entry = entry.copy()
@@ -1078,17 +1082,12 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
                 out.append(entry)
 
+        out.sort(key=lambda e: (e["name"]))
+
         if detail:
-            return sorted(
-                out,
-                key=lambda e: (
-                    e["name"].count("/"),
-                    e["type"] != "directory",
-                    e["name"],
-                ),
-            )
+            return out
         else:
-            return sorted([o["name"] for o in out])
+            return [o["name"] for o in out]
 
     def url(self, path):
         """Get HTTP URL of the given path"""
