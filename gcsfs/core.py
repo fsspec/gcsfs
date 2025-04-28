@@ -154,6 +154,10 @@ def _coalesce_generation(*args):
         return generations.pop()
 
 
+def _is_directory_marker(entry):
+    return entry["size"] == 0 and entry["name"].endswith("/")
+
+
 class GCSFileSystem(asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -1025,13 +1029,13 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         try:
             exact = await self._get_object(path)
             # this condition finds a "placeholder" - still need to check if it's a directory
-            if not (exact["size"] == 0 and exact["name"].endswith("/")):
+            if not _is_directory_marker(exact):
                 return exact
         except FileNotFoundError:
             pass
         out = await self._list_objects(path, max_results=1)
         exact = next((o for o in out if o["name"].rstrip("/") == path), None)
-        if exact and not (exact["size"] == 0 and exact["name"].endswith("/")):
+        if exact and not _is_directory_marker(exact):
             # exact hit
             return exact
         elif out:
@@ -1062,7 +1066,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             for entry in await self._list_objects(
                 path, prefix=prefix, versions=versions, **kwargs
             ):
-                if entry["size"] == 0 and entry["name"].endswith("/"):
+                if _is_directory_marker(entry):
                     entry = {
                         "bucket": entry["bucket"],
                         "name": path.rstrip("/"),
