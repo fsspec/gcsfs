@@ -154,6 +154,10 @@ def _coalesce_generation(*args):
         return generations.pop()
 
 
+def _is_directory_marker(entry):
+    return entry["size"] == 0 and entry["name"].endswith("/")
+
+
 class GCSFileSystem(asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -627,9 +631,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             "use_snapshot_listing"
         )
 
+        max_results = kwargs.get("max_results")
+
         # Don't cache prefixed/partial listings, in addition to
         # not using the inventory report service to do listing directly.
-        if not prefix and not use_snapshot_listing:
+        if not prefix and not use_snapshot_listing and not max_results:
             self.dircache[path] = out
         return out
 
@@ -683,7 +689,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 end_offset=None,
                 prefix=prefix,
                 versions=versions,
-                page_size=default_page_size,
+                max_results=max_results,
             )
 
     async def _concurrent_list_objects_helper(
@@ -736,7 +742,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     end_offset=end_offsets[i],
                     prefix=prefix,
                     versions=versions,
-                    page_size=page_size,
+                    max_results=page_size,
                 )
                 for i in range(0, len(start_offsets))
             ]
@@ -761,7 +767,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         end_offset,
         prefix,
         versions,
-        page_size,
+        max_results,
     ):
         """
         Sequential list objects within the start and end offset range.
@@ -778,7 +784,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             prefix=prefix,
             startOffset=start_offset,
             endOffset=end_offset,
-            maxResults=page_size,
+            maxResults=max_results,
             json_out=True,
             versions="true" if versions else None,
         )
@@ -796,7 +802,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 prefix=prefix,
                 startOffset=start_offset,
                 endOffset=end_offset,
-                maxResults=page_size,
+                maxResults=max_results,
                 pageToken=next_page_token,
                 json_out=True,
                 versions="true" if versions else None,
@@ -985,7 +991,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
-        path = self._strip_protocol(path)
+        path = self._strip_protocol(path).rstrip("/")
         if "/" not in path:
             try:
                 out = await self._call("GET", f"b/{path}", json_out=True)
@@ -1014,7 +1020,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             # this is a directory
             return {
                 "bucket": bucket,
-                "name": path.rstrip("/"),
+                "name": path,
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
@@ -1023,21 +1029,20 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         try:
             exact = await self._get_object(path)
             # this condition finds a "placeholder" - still need to check if it's a directory
-            if exact["size"] or not exact["name"].endswith("/"):
+            if not _is_directory_marker(exact):
                 return exact
         except FileNotFoundError:
             pass
-        kwargs["detail"] = True  # Force to true for info
-        out = await self._ls(path, **kwargs)
-        out0 = [o for o in out if o["name"].rstrip("/") == path]
-        if out0:
+        out = await self._list_objects(path, max_results=1)
+        exact = next((o for o in out if o["name"].rstrip("/") == path), None)
+        if exact and not _is_directory_marker(exact):
             # exact hit
-            return out0[0]
+            return exact
         elif out:
             # other stuff - must be a directory
             return {
                 "bucket": bucket,
-                "name": path.rstrip("/"),
+                "name": path,
                 "size": 0,
                 "storageClass": "DIRECTORY",
                 "type": "directory",
@@ -1057,18 +1062,36 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             out = await self._list_buckets()
         else:
             out = []
+            dir_names = set()
             for entry in await self._list_objects(
                 path, prefix=prefix, versions=versions, **kwargs
             ):
+                if _is_directory_marker(entry):
+                    entry = {
+                        "bucket": entry["bucket"],
+                        "name": path.rstrip("/"),
+                        "size": 0,
+                        "storageClass": "DIRECTORY",
+                        "type": "directory",
+                    }
+
+                if entry["type"] == "directory":
+                    if entry["name"] in dir_names:
+                        continue
+                    dir_names.add(entry["name"])
+
                 if versions and "generation" in entry:
                     entry = entry.copy()
                     entry["name"] = f"{entry['name']}#{entry['generation']}"
+
                 out.append(entry)
+
+        out.sort(key=lambda e: (e["name"]))
 
         if detail:
             return out
         else:
-            return sorted([o["name"] for o in out])
+            return [o["name"] for o in out]
 
     def url(self, path):
         """Get HTTP URL of the given path"""
@@ -1490,6 +1513,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             self.invalidate_cache(self._parent(rpath))
 
     async def _isdir(self, path):
+
         try:
             return (await self._info(path))["type"] == "directory"
         except OSError:
