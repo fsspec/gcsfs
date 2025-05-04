@@ -2093,7 +2093,7 @@ async def initiate_upload(
         j["metadata"] = metadata
     kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
     if kms_key_name:
-        kw['kmsKeyName'] = kms_key_name
+        kw["kmsKeyName"] = kms_key_name
     j.update(_convert_fixed_key_metadata(fixed_key_metadata))
     headers, _ = await fs._call(
         method="POST",
@@ -2129,7 +2129,7 @@ async def simple_upload(
         metadata["metadata"] = metadatain
     kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
     if kms_key_name:
-        kw['kmsKeyName'] = kms_key_name
+        kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
     metadata = json.dumps(metadata)
     template = (

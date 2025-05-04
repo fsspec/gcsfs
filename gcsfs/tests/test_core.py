@@ -26,6 +26,7 @@ TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
 TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 TEST_KMS_KEY = gcsfs.tests.settings.TEST_KMS_KEY
 
+
 def test_simple(gcs, monkeypatch):
     monkeypatch.setattr(GoogleCredentials, "tokens", None)
     gcs.ls(TEST_BUCKET)  # no error
@@ -94,7 +95,7 @@ def test_simple_upload_with_kms(gcs):
     with gcs.open(fn, "wb", content_type="text/plain", kms_key_name=TEST_KMS_KEY) as f:
         f.write(b"zz")
     assert gcs.cat(fn) == b"zz"
-    assert TEST_KMS_KEY in gcs.info(fn)['kmsKeyName']
+    assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
 
 
 def test_large_upload(gcs):
@@ -118,10 +119,12 @@ def test_large_upload_with_kms(gcs):
     try:
         fn = TEST_BUCKET + "/test"
         d = b"7123" * 262144
-        with gcs.open(fn, "wb", content_type="application/octet-stream", kms_key_name=TEST_KMS_KEY) as f:
+        with gcs.open(
+            fn, "wb", content_type="application/octet-stream", kms_key_name=TEST_KMS_KEY
+        ) as f:
             f.write(d)
         assert gcs.cat(fn) == d
-        assert TEST_KMS_KEY in gcs.info(fn)['kmsKeyName']
+        assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
     finally:
         gcsfs.core.GCS_MAX_BLOCK_SIZE = orig
 
@@ -176,13 +179,15 @@ def test_multi_upload_with_kms(gcs):
     assert gcs.cat(fn) == d + b"xx"
     assert gcs.info(fn)["contentType"] == "text/plain"
     # empty buffer on close
-    with gcs.open(fn, "wb", content_type="text/plain", block_size=2**19, kms_key_name=TEST_KMS_KEY) as f:
+    with gcs.open(
+        fn, "wb", content_type="text/plain", block_size=2**19, kms_key_name=TEST_KMS_KEY
+    ) as f:
         f.write(d)
         f.write(b"xx")
         f.write(d)
     assert gcs.cat(fn) == d + b"xx" + d
     assert gcs.info(fn)["contentType"] == "text/plain"
-    assert TEST_KMS_KEY in gcs.info(fn)['kmsKeyName']
+    assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
 
     fn = TEST_BUCKET + "/test"
     d = b"01234567" * 2**15
@@ -193,7 +198,7 @@ def test_multi_upload_with_kms(gcs):
         f.write(b"xx")
     assert gcs.cat(fn) == d + b"xx"
     assert gcs.info(fn)["contentType"] == "application/octet-stream"
-    assert 'kmsKeyName' not in gcs.info(fn)
+    assert "kmsKeyName" not in gcs.info(fn)
     # empty buffer on close
     with gcs.open(fn, "wb", block_size=2**19) as f:
         f.write(d)
