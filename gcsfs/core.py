@@ -2086,7 +2086,7 @@ async def initiate_upload(
     metadata=None,
     fixed_key_metadata=None,
     kms_key_name=None,
-    mode="overwrie",
+    mode="overwrite",
 ):
     j = {"name": key}
     if metadata:
