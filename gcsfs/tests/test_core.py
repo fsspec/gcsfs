@@ -180,7 +180,11 @@ def test_multi_upload_with_kms(gcs):
     assert gcs.info(fn)["contentType"] == "text/plain"
     # empty buffer on close
     with gcs.open(
-        fn, "wb", content_type="text/plain", block_size=2**19, kms_key_name=TEST_KMS_KEY
+        fn,
+        "wb",
+        content_type="text/plain",
+        block_size=2**19,
+        kms_key_name=TEST_KMS_KEY,
     ) as f:
         f.write(d)
         f.write(b"xx")
