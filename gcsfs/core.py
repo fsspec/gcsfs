@@ -1834,6 +1834,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         kms_key_name: str
             Resource name of the Cloud KMS key that will be used to encrypt
             the object.
+            More info:
+            https://cloud.google.com/storage/docs/encryption/customer-managed-keys
         timeout: int
             Timeout seconds for the asynchronous callback.
         generation: str
