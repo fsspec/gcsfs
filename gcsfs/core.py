@@ -1791,8 +1791,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         content_type=None,
         timeout=None,
         fixed_key_metadata=None,
-        kms_key_name=None,
         generation=None,
+        kms_key_name=None,
         **kwargs,
     ):
         """
@@ -1978,8 +1978,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.content_type,
             self.metadata,
             self.fixed_key_metadata,
-            self.kms_key_name,
             mode="create" if "x" in self.mode else "overwrite",
+            kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
 
@@ -2012,8 +2012,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.consistency,
             self.content_type,
             self.fixed_key_metadata,
-            self.kms_key_name,
             mode="create" if "x" in self.mode else "overwrite",
+            kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
 
@@ -2085,8 +2085,8 @@ async def initiate_upload(
     content_type="application/octet-stream",
     metadata=None,
     fixed_key_metadata=None,
-    kms_key_name=None,
     mode="overwrite",
+    kms_key_name=None,
 ):
     j = {"name": key}
     if metadata:
@@ -2119,8 +2119,8 @@ async def simple_upload(
     consistency=None,
     content_type="application/octet-stream",
     fixed_key_metadata=None,
-    kms_key_name=None,
     mode="overwrite",
+    kms_key_name=None,
 ):
     checker = get_consistency_checker(consistency)
     path = f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o"
