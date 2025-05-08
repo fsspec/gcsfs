@@ -1792,6 +1792,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         timeout=None,
         fixed_key_metadata=None,
         generation=None,
+        kms_key_name=None,
         **kwargs,
     ):
         """
@@ -1830,6 +1831,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 - custom_time
             More info:
             https://cloud.google.com/storage/docs/metadata#mutable
+        kms_key_name: str
+            Resource name of the Cloud KMS key that will be used to encrypt
+            the object.
+            More info:
+            https://cloud.google.com/storage/docs/encryption/customer-managed-keys
         timeout: int
             Timeout seconds for the asynchronous callback.
         generation: str
@@ -1866,6 +1872,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.metadata = metadata or det.get("metadata", {})
         self.fixed_key_metadata = _convert_fixed_key_metadata(det, from_google=True)
         self.fixed_key_metadata.update(fixed_key_metadata or {})
+        self.kms_key_name = kms_key_name
         self.timeout = timeout
         if mode in {"wb", "xb"}:
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
@@ -1974,6 +1981,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.metadata,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
 
@@ -2007,6 +2015,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.content_type,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
 
@@ -2078,12 +2087,15 @@ async def initiate_upload(
     content_type="application/octet-stream",
     metadata=None,
     fixed_key_metadata=None,
-    mode="overwrie",
+    mode="overwrite",
+    kms_key_name=None,
 ):
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
     kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
+    if kms_key_name:
+        kw["kmsKeyName"] = kms_key_name
     j.update(_convert_fixed_key_metadata(fixed_key_metadata))
     headers, _ = await fs._call(
         method="POST",
@@ -2110,6 +2122,7 @@ async def simple_upload(
     content_type="application/octet-stream",
     fixed_key_metadata=None,
     mode="overwrite",
+    kms_key_name=None,
 ):
     checker = get_consistency_checker(consistency)
     path = f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o"
@@ -2117,6 +2130,8 @@ async def simple_upload(
     if metadatain is not None:
         metadata["metadata"] = metadatain
     kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
+    if kms_key_name:
+        kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
     metadata = json.dumps(metadata)
     template = (
