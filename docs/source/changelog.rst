@@ -2,7 +2,16 @@ Changelog
 =========
 
 Note: in some releases, there are no changes, because we always guarantee
-relasing in step with fsspec.
+releasing in step with fsspec.
+
+2025.5.0
+--------
+
+* Avoid deprecated utcnow (#680)
+* Add support for specifying Cloud KMS keys when creating files (#679)
+* Yet another fix for isdir (#676)
+* Create warning for appending mode 'a' operations (#675)
+* add userProject to batch deletion query (#673)
 
 2025.3.2
 --------
