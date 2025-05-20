@@ -177,7 +177,9 @@ class GoogleCredentials:
             and (
                 (
                     self.credentials.expiry
-                    and (self.credentials.expiry - datetime.now(timezone.utc)).total_seconds()
+                    and (
+                        self.credentials.expiry - datetime.now(timezone.utc)
+                    ).total_seconds()
                     > refresh_buffer
                 )
                 or not self.credentials.expiry
