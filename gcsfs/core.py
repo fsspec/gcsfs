@@ -1825,7 +1825,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.checker = get_consistency_checker(consistency)
 
         if "a" in self.mode:
-            warnings.warn("Append mode 'a' is not supported in GCS. Using overwrite mode instead.")
+            warnings.warn(
+                "Append mode 'a' is not supported in GCS. Using overwrite mode instead."
+            )
             self.mode = self.mode.replace("a", "w")
 
         if "r" in self.mode:
