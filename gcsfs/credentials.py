@@ -178,7 +178,8 @@ class GoogleCredentials:
                 (
                     self.credentials.expiry
                     and (
-                        self.credentials.expiry - datetime.now(timezone.utc)
+                        self.credentials.expiry.astimezone(timezone.utc)
+                        - datetime.now(timezone.utc)
                     ).total_seconds()
                     > refresh_buffer
                 )
