@@ -5,7 +5,7 @@ import pickle
 import textwrap
 import threading
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 
 import google.auth as gauth
 import google.auth.compute_engine
@@ -177,7 +177,9 @@ class GoogleCredentials:
             and (
                 (
                     self.credentials.expiry
-                    and (self.credentials.expiry - datetime.utcnow()).total_seconds()
+                    and (
+                        self.credentials.expiry - datetime.now(timezone.utc)
+                    ).total_seconds()
                     > refresh_buffer
                 )
                 or not self.credentials.expiry
