@@ -4,6 +4,11 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2025.5.1
+--------
+
+* Fix token timezone comparison (#683, 688)
+
 2025.5.0
 --------
 
