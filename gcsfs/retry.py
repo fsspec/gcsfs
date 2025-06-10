@@ -160,9 +160,6 @@ async def retry_request(func, retries=6, *args, **kwargs):
             if isinstance(e, HttpError) and e.code == 404:
                 logger.debug("Request returned 404, no retries.")
                 raise e
-            if isinstance(e, HttpError) and e.code == 401:
-                logger.debug("Invalid credentials, no retries.")
-                raise e
             if retry == retries - 1:
                 logger.exception(f"{func.__name__} out of retries on exception: {e}")
                 raise e
