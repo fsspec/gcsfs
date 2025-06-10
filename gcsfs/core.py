@@ -334,7 +334,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 DeprecationWarning,
             )
 
-        self.credentials = GoogleCredentials(project, access, token)
+        self.credentials = GoogleCredentials(
+            project, access, token, on_google=self.on_google
+        )
 
     @property
     def _location(self):

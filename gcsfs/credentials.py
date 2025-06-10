@@ -40,7 +40,7 @@ client_config = {
 
 
 class GoogleCredentials:
-    def __init__(self, project, access, token, check_credentials=None):
+    def __init__(self, project, access, token, check_credentials=None, on_google=True):
         self.scope = "https://www.googleapis.com/auth/devstorage." + access
         self.project = project
         self.access = access
@@ -50,6 +50,7 @@ class GoogleCredentials:
         self.method = None
         self.lock = threading.Lock()
         self.token = token
+        self.on_google = on_google
         self.connect(method=token)
 
         if check_credentials:
@@ -93,6 +94,8 @@ class GoogleCredentials:
         self.credentials = credentials
 
     def _connect_cloud(self):
+        if not self.on_google:
+            raise ValueError
         self.credentials = gauth.compute_engine.Credentials()
         try:
             with requests.Session() as session:
@@ -222,7 +225,7 @@ class GoogleCredentials:
             self.credentials.apply(out)
 
     def _connect_service(self, fn):
-        # raises exception if file does not match expectation
+        # raises exception if the file does not match expectation
         credentials = service_account.Credentials.from_service_account_file(
             fn, scopes=[self.scope]
         )
@@ -255,7 +258,6 @@ class GoogleCredentials:
             "cloud",
             "token",
             "anon",
-            "browser",
             None,
         ]:
             self._connect_token(method)
