@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-import os
-
 from setuptools import setup
 
 import versioneer
@@ -29,10 +27,9 @@ setup(
     keywords=["google-cloud-storage", "gcloud", "file-system"],
     packages=["gcsfs", "gcsfs.cli"],
     install_requires=[open("requirements.txt").read().strip().split("\n")],
-    long_description=(
-        open("README.rst").read() if os.path.exists("README.rst") else ""
-    ),
     extras_require={"gcsfuse": ["fusepy"], "crc": ["crcmod"]},
     python_requires=">=3.9",
+    long_description_content_type="text/markdown",
+    long_description=open("README.md").read(),
     zip_safe=False,
 )

@@ -4,6 +4,12 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2025.7.0
+--------
+
+* acknowledge Anaconda support (#691)
+* less refreshing for CI (#690)
+
 2025.5.1
 --------
 
