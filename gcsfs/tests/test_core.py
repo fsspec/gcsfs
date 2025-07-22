@@ -1697,3 +1697,8 @@ def test_near_find(gcs):
     gcs.touch(f"{TEST_BUCKET}/inner/aa/file")
     out = gcs.find(f"{TEST_BUCKET}/inner/a")
     assert not out
+
+
+def test_get_error(gcs):
+    with pytest.raises(FileNotFoundError):
+        gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
