@@ -1622,7 +1622,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             headers=self._get_headers(headers),
             timeout=self.requests_timeout,
         ) as r:
-            r.raise_for_status()
+            validate_response(r.status, None, rpath)
             try:
                 size = int(r.headers["content-length"])
             except (KeyError, ValueError):
