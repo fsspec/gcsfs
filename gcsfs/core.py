@@ -770,14 +770,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         prefix,
         versions,
         max_results,
+        items_per_call=1000,
     ):
         """
         Sequential list objects within the start and end offset range.
         """
-
+        max_results = max_results if max_results else 10_000_000
         prefixes = []
         items = []
-
+        num_items = min(items_per_call, max_results, 1000)
         page = await self._call(
             "GET",
             "b/{}/o",
@@ -786,7 +787,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             prefix=prefix,
             startOffset=start_offset,
             endOffset=end_offset,
-            maxResults=max_results,
+            maxResults=num_items,
             json_out=True,
             versions="true" if versions else None,
         )
@@ -795,7 +796,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         items.extend(page.get("items", []))
         next_page_token = page.get("nextPageToken", None)
 
-        while next_page_token is not None:
+        while len(items) < max_results and next_page_token is not None:
+            num_items = min(items_per_call, max_results - len(items), 1000)
             page = await self._call(
                 "GET",
                 "b/{}/o",
@@ -804,7 +806,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 prefix=prefix,
                 startOffset=start_offset,
                 endOffset=end_offset,
-                maxResults=max_results,
+                maxResults=num_items,
                 pageToken=next_page_token,
                 json_out=True,
                 versions="true" if versions else None,
