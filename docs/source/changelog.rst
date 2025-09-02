@@ -4,6 +4,12 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2025.9.0
+--------
+
+* fix slow ls iterations (#697)
+* Ensure right error type for get() on nonexistent (#695)
+
 2025.7.0
 --------
 
