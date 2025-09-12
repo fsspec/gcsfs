@@ -221,3 +221,12 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
+
+
+These docs pages collect anonymous tracking data using goatcounter, and the
+dashboard is available to the public: https://gcsfs.goatcounter.com/ .
+
+.. raw:: html
+
+    <script data-goatcounter="https://gcsfs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
