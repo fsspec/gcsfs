@@ -29,6 +29,7 @@ from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
+from .gcs_adapter import GCSAdapter
 
 logger = logging.getLogger("gcsfs")
 
@@ -281,6 +282,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     default_block_size = DEFAULT_BLOCK_SIZE
     protocol = "gs", "gcs"
     async_impl = True
+    bucket_type = None
+    _adapter = None
+
+    @classmethod
+    def _get_adapter(cls, **kwargs):
+        if cls._adapter is None:
+            cls._adapter = GCSAdapter(**kwargs)
+        return cls._adapter
 
     def __init__(
         self,
@@ -301,6 +310,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
+        bucket_type=None,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -327,6 +337,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
+        self.bucket_type = bucket_type
 
         if check_connection:
             warnings.warn(
@@ -456,6 +467,12 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _request(
         self, method, path, *args, headers=None, json=None, data=None, **kwargs
     ):
+        if self.bucket_type == "Zonal":
+            adapter = self._get_adapter(project=self.project, token=self.credentials.credentials)
+            result = adapter.handle(method, self._format_path(path, args), **kwargs)
+            if result is not None:
+                return result
+
         await self._set_session()
         if hasattr(data, "seek"):
             data.seek(0)
