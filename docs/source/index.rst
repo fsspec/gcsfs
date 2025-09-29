@@ -204,6 +204,7 @@ Contents
    developer
    fuse
    changelog
+   code-of-conduct
    :maxdepth: 2
 
 
