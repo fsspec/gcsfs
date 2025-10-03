@@ -285,8 +285,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async_impl = True
 
     class BucketType(Enum):
-        ZONAL = "ZONAL"
-        REGIONAL = "REGIONAL"
+        ZONAL_HIERARCHICAL = "ZONAL_HIERARCHICAL"
+        HIERARCHICAL = "HIERARCHICAL"
+        NON_HIERARCHICAL = "NON_HIERARCHICAL"
         UNKNOWN = "UNKNOWN"
 
     bucket_type = None
@@ -347,11 +348,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.bucket_type = bucket_type
         self._storage_layout_cache = {}
 
-        if project and project != DEFAULT_PROJECT:
-            try:
-                self.bucket_type = self._get_storage_layout(project)
-            except Exception as e:
-                logger.warning(f"Failed to get storage layout for bucket {project}: {e}")
+        try:
+         self.bucket_type = self._sync_get_storage_layout(project)
+        except Exception as e:
+         logger.warning(f"Failed to get storage layout for bucket {project}: {e}")
 
         if check_connection:
             warnings.warn(
@@ -370,10 +370,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         try:
             response = await self._call("GET", f"b/{bucket}/storageLayout", json_out=True)
             if response.get("locationType") == "zone":
-                bucket_type = self.BucketType.ZONAL
+                bucket_type = self.BucketType.ZONAL_HIERARCHICAL
             else:
                 # This should be updated to include HNS in the future
-                bucket_type = self.BucketType.REGIONAL
+                bucket_type = self.BucketType.NON_HIERARCHICAL
             self._storage_layout_cache[bucket] = bucket_type
             return bucket_type
         except Exception as e:
@@ -382,7 +382,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             self._storage_layout_cache[bucket] = self.BucketType.UNKNOWN
             return self.BucketType.UNKNOWN
 
-    _get_storage_layout = asyn.sync_wrapper(_get_storage_layout)
+    _sync_get_storage_layout = asyn.sync_wrapper(_get_storage_layout)
 
     @property
     def _location(self):
@@ -502,7 +502,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _request(
         self, method, path, *args, headers=None, json=None, data=None, **kwargs
     ):
-        if self.bucket_type == self.BucketType.ZONAL:
+        if self.bucket_type == self.BucketType.ZONAL_HIERARCHICAL:
             adapter = self._get_adapter(project=self.project, token=self.credentials.credentials)
             result = adapter.handle(method, self._format_path(path, args), **kwargs)
             if result is not None:
