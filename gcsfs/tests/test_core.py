@@ -1728,7 +1728,7 @@ def test_storage_layout_not_called_when_toggle_is_default_off(gcs_factory):
         mock_get_layout.assert_not_called()
 
         # Verify that the bucket_type attribute on the gcs instance is UNKNOWN
-        assert gcs.bucket_type == "UNKNOWN"
+        assert gcs.bucket_type == gcs.BucketType.UNKNOWN
 
 def test_storage_layout_zonal(gcs_factory):
     with mock.patch("gcsfs.core.GCSFileSystem._sync_get_storage_layout", return_value=GCSFileSystem.BucketType.ZONAL_HIERARCHICAL) as mock_get_layout:
