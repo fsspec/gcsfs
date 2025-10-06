@@ -290,7 +290,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         NON_HIERARCHICAL = "NON_HIERARCHICAL"
         UNKNOWN = "UNKNOWN"
 
-    bucket_type = "UNKNOWN"
+    bucket_type = BucketType.UNKNOWN
     _adapter = None
 
     @classmethod
