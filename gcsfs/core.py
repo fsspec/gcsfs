@@ -290,7 +290,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         NON_HIERARCHICAL = "NON_HIERARCHICAL"
         UNKNOWN = "UNKNOWN"
 
-    bucket_type = None
+    bucket_type = "UNKNOWN"
     _adapter = None
 
     @classmethod
@@ -318,7 +318,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
-        bucket_type=None,
+        experimental_zb_hns_support=False,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -345,13 +345,16 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
-        self.bucket_type = bucket_type
+        self.experimental_zb_hns_support = experimental_zb_hns_support
         self._storage_layout_cache = {}
 
-        try:
-         self.bucket_type = self._sync_get_storage_layout(project)
-        except Exception as e:
-         logger.warning(f"Failed to get storage layout for bucket {project}: {e}")
+        if self.experimental_zb_hns_support:
+            try:
+                self.bucket_type = self._sync_get_storage_layout(project)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get storage layout for bucket {project}: {e}"
+                )
 
         if check_connection:
             warnings.warn(

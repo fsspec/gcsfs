@@ -91,10 +91,9 @@ def docker_gcs():
 def gcs_factory(docker_gcs):
     params["endpoint_url"] = docker_gcs
 
-    def factory(default_location=None):
+    def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
-        params["default_location"] = default_location
-        return fsspec.filesystem("gcs", **params)
+        return fsspec.filesystem("gcs", **params, **kwargs)
 
     return factory
 
