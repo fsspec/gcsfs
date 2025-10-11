@@ -30,11 +30,6 @@ from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
-from .gcs_adapter import GCSAdapter
-from enum import Enum
-from google.cloud.storage._experimental.asyncio.async_grpc_client import \
-    AsyncGrpcClient
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (AsyncMultiRangeDownloader)
 
 logger = logging.getLogger("gcsfs")
 
@@ -347,14 +342,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.default_location = default_location
         self.version_aware = version_aware
         self.experimental_zb_hns_support = experimental_zb_hns_support
-
-        if self.experimental_zb_hns_support:
-            try:
-                self.bucket_type = self._sync_get_storage_layout(project)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to get storage layout for bucket {project}: {e}"
-                )
 
         if check_connection:
             warnings.warn(
@@ -1706,43 +1693,19 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         if block_size is None:
             block_size = self.default_block_size
         const = consistency or self.consistency
-        bucket, key, path_generation = self.split_path(path)
-        bucket_type = self._sync_get_storage_layout(bucket)
-        if bucket_type == self.BucketType.ZONAL_HIERARCHICAL:
-            # grpc client location needs to be discussed so same client can be used for different streams
-            client = AsyncGrpcClient()._grpc_client
-            bucket_name, name, _ = self.split_path(path)
-            # mrd = self._sync_createMRD(client, bucket_name, name)
-            # TODO remove circular import issue
-            from .zonal import GCSZonalFile
-            return GCSZonalFile(
-                self,
-                path,
-                mode,
-                block_size,
-                cache_options=cache_options,
-                consistency=const,
-                metadata=metadata,
-                acl=acl,
-                autocommit=autocommit,
-                fixed_key_metadata=fixed_key_metadata,
-                client=client,
-                **kwargs,
-            )
-        else:
-            return GCSFile(
-                self,
-                path,
-                mode,
-                block_size,
-                cache_options=cache_options,
-                consistency=const,
-                metadata=metadata,
-                acl=acl,
-                autocommit=autocommit,
-                fixed_key_metadata=fixed_key_metadata,
-                **kwargs,
-            )
+        return GCSFile(
+            self,
+            path,
+            mode,
+            block_size,
+            cache_options=cache_options,
+            consistency=const,
+            metadata=metadata,
+            acl=acl,
+            autocommit=autocommit,
+            fixed_key_metadata=fixed_key_metadata,
+            **kwargs,
+        )
 
     @classmethod
     def _split_path(cls, path, version_aware=False):
