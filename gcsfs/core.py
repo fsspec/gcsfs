@@ -287,20 +287,18 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     protocol = "gs", "gcs"
     async_impl = True
 
-    class BucketType(Enum):
-        ZONAL_HIERARCHICAL = "ZONAL_HIERARCHICAL"
-        HIERARCHICAL = "HIERARCHICAL"
-        NON_HIERARCHICAL = "NON_HIERARCHICAL"
-        UNKNOWN = "UNKNOWN"
+    def __new__(cls, *args, **kwargs):
+        """
+        Factory to return a ZonalFileSystem instance if the experimental
+        flag is enabled.
+        """
+        experimental_support = kwargs.pop('experimental_zb_hns_support', False)
 
-    bucket_type = BucketType.UNKNOWN
-    _adapter = None
-
-    @classmethod
-    def _get_adapter(cls, **kwargs):
-        if cls._adapter is None:
-            cls._adapter = GCSAdapter(**kwargs)
-        return cls._adapter
+        if experimental_support:
+            from .gcsfilesystem_adapter import GCSFileSystemAdapter
+            return object.__new__(GCSFileSystemAdapter)
+        else:
+            return object.__new__(cls)
 
     def __init__(
         self,
@@ -349,7 +347,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.default_location = default_location
         self.version_aware = version_aware
         self.experimental_zb_hns_support = experimental_zb_hns_support
-        self._storage_layout_cache = {}
+
+        if self.experimental_zb_hns_support:
+            try:
+                self.bucket_type = self._sync_get_storage_layout(project)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get storage layout for bucket {project}: {e}"
+                )
 
         if check_connection:
             warnings.warn(
@@ -360,37 +365,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
-
-    async def _get_storage_layout(self, bucket):
-        if self.experimental_zb_hns_support:
-            if bucket in self._storage_layout_cache:
-                return self._storage_layout_cache[bucket]
-
-            try:
-                response = await self._call("GET", f"b/{bucket}/storageLayout", json_out=True)
-                if response.get("locationType") == "zone":
-                    bucket_type = self.BucketType.ZONAL_HIERARCHICAL
-                else:
-                    # This should be updated to include HNS in the future
-                    bucket_type = self.BucketType.NON_HIERARCHICAL
-                self._storage_layout_cache[bucket] = bucket_type
-                return bucket_type
-            except Exception as e:
-                logger.error(f"Could not determine storage layout for bucket {bucket}: {e}")
-                # Default to UNKNOWN
-                self._storage_layout_cache[bucket] = self.BucketType.UNKNOWN
-                return self.BucketType.UNKNOWN
-        else:
-            return self.BucketType.UNKNOWN
-
-    _sync_get_storage_layout = asyn.sync_wrapper(_get_storage_layout)
-
-    async def createMRD(self, grpcclient, bucket_name, name):
-        mrd = AsyncMultiRangeDownloader(grpcclient, bucket_name, name)
-        await mrd.open()
-        return mrd
-
-    _sync_createMRD = asyn.sync_wrapper(createMRD)
 
     @property
     def _location(self):
@@ -510,12 +484,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _request(
         self, method, path, *args, headers=None, json=None, data=None, **kwargs
     ):
-        # if self.bucket_type == self.BucketType.ZONAL_HIERARCHICAL:
-            #adapter = self._get_adapter(project=self.project, token=self.credentials.credentials)
-            #result = adapter.handle(method, self._format_path(path, args), **kwargs)
-            # if result is not None:
-            #     return result
-
         await self._set_session()
         if hasattr(data, "seek"):
             data.seek(0)
