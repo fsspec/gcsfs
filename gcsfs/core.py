@@ -32,6 +32,9 @@ from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
 from .gcs_adapter import GCSAdapter
 from enum import Enum
+from google.cloud.storage._experimental.asyncio.async_grpc_client import \
+    AsyncGrpcClient
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (AsyncMultiRangeDownloader)
 
 logger = logging.getLogger("gcsfs")
 
@@ -348,14 +351,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.experimental_zb_hns_support = experimental_zb_hns_support
         self._storage_layout_cache = {}
 
-        if self.experimental_zb_hns_support:
-            try:
-                self.bucket_type = self._sync_get_storage_layout(project)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to get storage layout for bucket {project}: {e}"
-                )
-
         if check_connection:
             warnings.warn(
                 "The `check_connection` argument is deprecated and will be removed in a future release.",
@@ -367,25 +362,35 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         )
 
     async def _get_storage_layout(self, bucket):
-        if bucket in self._storage_layout_cache:
-            return self._storage_layout_cache[bucket]
+        if self.experimental_zb_hns_support:
+            if bucket in self._storage_layout_cache:
+                return self._storage_layout_cache[bucket]
 
-        try:
-            response = await self._call("GET", f"b/{bucket}/storageLayout", json_out=True)
-            if response.get("locationType") == "zone":
-                bucket_type = self.BucketType.ZONAL_HIERARCHICAL
-            else:
-                # This should be updated to include HNS in the future
-                bucket_type = self.BucketType.NON_HIERARCHICAL
-            self._storage_layout_cache[bucket] = bucket_type
-            return bucket_type
-        except Exception as e:
-            logger.error(f"Could not determine storage layout for bucket {bucket}: {e}")
-            # Default to UNKNOWN
-            self._storage_layout_cache[bucket] = self.BucketType.UNKNOWN
+            try:
+                response = await self._call("GET", f"b/{bucket}/storageLayout", json_out=True)
+                if response.get("locationType") == "zone":
+                    bucket_type = self.BucketType.ZONAL_HIERARCHICAL
+                else:
+                    # This should be updated to include HNS in the future
+                    bucket_type = self.BucketType.NON_HIERARCHICAL
+                self._storage_layout_cache[bucket] = bucket_type
+                return bucket_type
+            except Exception as e:
+                logger.error(f"Could not determine storage layout for bucket {bucket}: {e}")
+                # Default to UNKNOWN
+                self._storage_layout_cache[bucket] = self.BucketType.UNKNOWN
+                return self.BucketType.UNKNOWN
+        else:
             return self.BucketType.UNKNOWN
 
     _sync_get_storage_layout = asyn.sync_wrapper(_get_storage_layout)
+
+    async def createMRD(self, grpcclient, bucket_name, name):
+        mrd = AsyncMultiRangeDownloader(grpcclient, bucket_name, name)
+        await mrd.open()
+        return mrd
+
+    _sync_createMRD = asyn.sync_wrapper(createMRD)
 
     @property
     def _location(self):
@@ -505,11 +510,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _request(
         self, method, path, *args, headers=None, json=None, data=None, **kwargs
     ):
-        if self.bucket_type == self.BucketType.ZONAL_HIERARCHICAL:
-            adapter = self._get_adapter(project=self.project, token=self.credentials.credentials)
-            result = adapter.handle(method, self._format_path(path, args), **kwargs)
-            if result is not None:
-                return result
+        # if self.bucket_type == self.BucketType.ZONAL_HIERARCHICAL:
+            #adapter = self._get_adapter(project=self.project, token=self.credentials.credentials)
+            #result = adapter.handle(method, self._format_path(path, args), **kwargs)
+            # if result is not None:
+            #     return result
 
         await self._set_session()
         if hasattr(data, "seek"):
@@ -1733,19 +1738,43 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         if block_size is None:
             block_size = self.default_block_size
         const = consistency or self.consistency
-        return GCSFile(
-            self,
-            path,
-            mode,
-            block_size,
-            cache_options=cache_options,
-            consistency=const,
-            metadata=metadata,
-            acl=acl,
-            autocommit=autocommit,
-            fixed_key_metadata=fixed_key_metadata,
-            **kwargs,
-        )
+        bucket, key, path_generation = self.split_path(path)
+        bucket_type = self._sync_get_storage_layout(bucket)
+        if bucket_type == self.BucketType.ZONAL_HIERARCHICAL:
+            # grpc client location needs to be discussed so same client can be used for different streams
+            client = AsyncGrpcClient()._grpc_client
+            bucket_name, name, _ = self.split_path(path)
+            mrd = self._sync_createMRD(client, bucket_name, name)
+            # TODO remove circular import issue
+            from .zonal import GCSZonalFile
+            return GCSZonalFile(
+                self,
+                path,
+                mode,
+                block_size,
+                cache_options=cache_options,
+                consistency=const,
+                metadata=metadata,
+                acl=acl,
+                autocommit=autocommit,
+                fixed_key_metadata=fixed_key_metadata,
+                mrd=mrd,
+                **kwargs,
+            )
+        else:
+            return GCSFile(
+                self,
+                path,
+                mode,
+                block_size,
+                cache_options=cache_options,
+                consistency=const,
+                metadata=metadata,
+                acl=acl,
+                autocommit=autocommit,
+                fixed_key_metadata=fixed_key_metadata,
+                **kwargs,
+            )
 
     @classmethod
     def _split_path(cls, path, version_aware=False):
