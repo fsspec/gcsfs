@@ -1744,7 +1744,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             # grpc client location needs to be discussed so same client can be used for different streams
             client = AsyncGrpcClient()._grpc_client
             bucket_name, name, _ = self.split_path(path)
-            mrd = self._sync_createMRD(client, bucket_name, name)
+            # mrd = self._sync_createMRD(client, bucket_name, name)
             # TODO remove circular import issue
             from .zonal import GCSZonalFile
             return GCSZonalFile(
@@ -1758,7 +1758,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 acl=acl,
                 autocommit=autocommit,
                 fixed_key_metadata=fixed_key_metadata,
-                mrd=mrd,
+                client=client,
                 **kwargs,
             )
         else:

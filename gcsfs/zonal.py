@@ -1,7 +1,11 @@
+import asyncio
 import logging
+import threading
 from io import BytesIO
 
 from fsspec import asyn
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import \
+    AsyncMultiRangeDownloader
 
 from .core import GCSFile
 
@@ -32,11 +36,15 @@ class GCSZonalFile(GCSFile):
         fixed_key_metadata=None,
         generation=None,
         kms_key_name=None,
-        mrd=None,
+        client=None,
         **kwargs,
     ):
-        self.mrd = mrd
-        super().__init__(
+        self.gcsfs = gcsfs
+        bucket_name, name, _ = self.gcsfs.split_path(path)
+        self.mrd = AsyncMultiRangeDownloader(client, bucket_name, name)
+        self._run_async_in_new_loop(self.mrd.open())
+        GCSFile.__init__(
+            self,
             gcsfs,
             path,
             mode=mode,
@@ -64,10 +72,36 @@ class GCSZonalFile(GCSFile):
         # Placeholder for custom zonal fetch logic.
         logger.info("--- GCSZonalFile._fetch_range is called ---")
         buffer = BytesIO()
-        sync_download_ranges = asyn.sync_wrapper(self.mrd.download_ranges)
         offset = start
         length = (end - start) + 1
-        results = sync_download_ranges([(offset, length, buffer)])
+        self._run_async_in_new_loop(self.mrd.download_ranges([(offset, length, buffer)]))
         downloaded_data = buffer.getvalue()
         print(downloaded_data)
         return downloaded_data
+
+    def _run_async_in_new_loop(self, coro):
+        """
+        Runs a coroutine in a new event loop in a separate thread.
+        This is a workaround to avoid deadlocks when calling async code from a
+        sync method that is itself running inside an outer event loop.
+        """
+        result = None
+        exception = None
+
+        def runner():
+            nonlocal result, exception
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = asyncio.run_coroutine_threadsafe(coro, loop)
+                loop.close()
+            except Exception as e:
+                exception = e
+
+        thread = threading.Thread(target=runner)
+        thread.start()
+        thread.join()
+
+        if exception:
+            raise exception
+        return result
