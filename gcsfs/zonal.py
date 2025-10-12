@@ -82,7 +82,7 @@ class GCSZonalFile(GCSFile):
     def _run_async_in_new_loop(self, coro):
         """
         Runs a coroutine in a new event loop in a separate thread.
-        This is a workaround to avoid deadlocks when calling async code from a
+        This is done to avoid any deadlocks when calling async code from a
         sync method that is itself running inside an outer event loop.
         """
         result = None
