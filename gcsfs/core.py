@@ -290,8 +290,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         experimental_support = kwargs.pop('experimental_zb_hns_support', False)
 
         if experimental_support:
-            from .gcsfilesystem_adapter import GCSFileSystemAdapter
-            return object.__new__(GCSFileSystemAdapter)
+            from .gcs_hns_filesystem import GCSHNSFileSystem
+            return object.__new__(GCSHNSFileSystem)
         else:
             return object.__new__(cls)
 

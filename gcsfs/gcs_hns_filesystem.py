@@ -22,7 +22,7 @@ gcs_file_types = {
     None : GCSFile,
 }
 
-class GCSFileSystemAdapter(GCSFileSystem):
+class GCSHNSFileSystem(GCSFileSystem):
     """
     An subclass of GCSFileSystem that will contain specialized
     logic for Zonal and HNS buckets.
