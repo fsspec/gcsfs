@@ -284,7 +284,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     def __new__(cls, *args, **kwargs):
         """
-        Factory to return a ZonalFileSystem instance if the experimental
+        Factory to return a GCSHNSFileSystem instance if the experimental
         flag is enabled.
         """
         experimental_support = kwargs.pop('experimental_zb_hns_support', False)
