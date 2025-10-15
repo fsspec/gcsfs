@@ -18,6 +18,7 @@ import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
+from gcsfs.gcsfilesystem_adapter import GCSFileSystemAdapter
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
 
@@ -1704,86 +1705,16 @@ def test_get_error(gcs):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
 
 
-def test_storage_layout_called_when_toggle_is_on(gcs_factory):
-    with mock.patch(
-        "gcsfs.core.GCSFileSystem._sync_get_storage_layout",
-        return_value=GCSFileSystem.BucketType.ZONAL_HIERARCHICAL,
-    ) as mock_get_layout:
-        gcs = gcs_factory(experimental_zb_hns_support=True)
+def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_passed(gcs_factory):
+    gcs = gcs_factory()
 
-        # Verify that _get_storage_layout was called
-        mock_get_layout.assert_called_once()
+    assert isinstance(gcs, gcsfs.GCSFileSystem), "Expected File system instance to be GCSFileSystem"
+    assert not isinstance(gcs,
+                      gcsfs.gcsfilesystem_adapter.GCSFileSystemAdapter), "Expected File system instance to be GCSFileSystem"
 
-        # Verify that the bucket_type attribute on the gcs instance is set
-        assert gcs.bucket_type == GCSFileSystem.BucketType.ZONAL_HIERARCHICAL
+def test_gcs_filesystem_adapter_when_experimental_zonal_toggle_is_true(gcs_factory):
+    gcs = gcs_factory(experimental_zb_hns_support=True)
 
+    assert isinstance(gcs,
+                      gcsfs.gcsfilesystem_adapter.GCSFileSystemAdapter), "Expected File system instance to be GCSFileSystemAdapter"
 
-def test_storage_layout_not_called_when_toggle_is_default_off(gcs_factory):
-    with mock.patch(
-        "gcsfs.core.GCSFileSystem._sync_get_storage_layout"
-    ) as mock_get_layout:
-        gcs = gcs_factory()
-
-        # Verify that _get_storage_layout was not called
-        mock_get_layout.assert_not_called()
-
-        # Verify that the bucket_type attribute on the gcs instance is UNKNOWN
-        assert gcs.bucket_type == gcs.BucketType.UNKNOWN
-
-def test_storage_layout_zonal(gcs_factory):
-    with mock.patch("gcsfs.core.GCSFileSystem._sync_get_storage_layout", return_value=GCSFileSystem.BucketType.ZONAL_HIERARCHICAL) as mock_get_layout:
-        gcs = gcs_factory(experimental_zb_hns_support=True)
-
-        # Verify that _get_storage_layout was called with the BUCKET name
-        mock_get_layout.assert_called_once()
-
-        # Verify that the bucket_type attribute on the gcs instance is set to ZONAL
-        assert gcs.bucket_type == gcs.BucketType.ZONAL_HIERARCHICAL
-
-
-def test_default_bucket_type(gcs_factory):
-    with mock.patch("gcsfs.core.GCSFileSystem._sync_get_storage_layout", return_value=GCSFileSystem.BucketType.NON_HIERARCHICAL) as mock_get_layout:
-        gcs = gcs_factory()
-
-        # Verify that _get_storage_layout was called with the BUCKET name
-        mock_get_layout.assert_not_called()
-
-        # Verify that the bucket_type attribute on the gcs instance is set to ZONAL
-        assert gcs.bucket_type == gcs.BucketType.UNKNOWN
-
-def test_non_hierarchical_bucket_type(gcs_factory):
-    with mock.patch("gcsfs.core.GCSFileSystem._sync_get_storage_layout", return_value=GCSFileSystem.BucketType.NON_HIERARCHICAL) as mock_get_layout:
-        gcs = gcs_factory(experimental_zb_hns_support=True)
-
-        # Verify that _get_storage_layout was called with the BUCKET name
-        mock_get_layout.assert_called_once()
-
-        # Verify that the bucket_type attribute on the gcs instance is set to ZONAL
-        assert gcs.bucket_type == gcs.BucketType.NON_HIERARCHICAL
-
-def test_gcs_adapter_called_for_zonal_bucket(gcs_factory):
-    with mock.patch("gcsfs.core.GCSFileSystem._sync_get_storage_layout", return_value=GCSFileSystem.BucketType.ZONAL_HIERARCHICAL) as mock_get_layout, \
-         mock.patch("gcsfs.core.GCSAdapter.handle", return_value=(200, {}, {}, b"some data")) as mock_handle:
-
-        gcs = gcs_factory(experimental_zb_hns_support=True)
-
-        # This call should be routed to the gcs adapter and this test should be
-        # updated with real data assertions instead of mock_handle once read functionality is added in adapter
-        gcs.cat_file(f"{TEST_BUCKET}/some/file")
-
-        assert gcs.bucket_type == GCSFileSystem.BucketType.ZONAL_HIERARCHICAL
-        mock_handle.assert_called_once()
-
-
-def test_gcs_adapter_not_called_when_bucket_type_is_not_set(gcs):
-    with mock.patch("gcsfs.core.GCSAdapter.handle",
-                   return_value=(200, {}, {}, b"some data")) as mock_handle:
-
-        assert gcs.bucket_type == gcs.BucketType.UNKNOWN
-        # Use an existing file from the test setup
-        test_file = f"{TEST_BUCKET}/test/accounts.1.json"
-
-        # This call should NOT be routed to the adapter
-        data = gcs.cat(test_file)
-        assert data == files["test/accounts.1.json"]
-        mock_handle.assert_not_called()
