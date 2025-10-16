@@ -27,14 +27,21 @@ gcs_file_types = {
 class GCSHNSFileSystem(GCSFileSystem):
     """
     An subclass of GCSFileSystem that will contain specialized
-    logic for Zonal and HNS buckets.
+    logic for HNS Filesystem.
     """
 
     def __init__(self, *args, **kwargs):
         kwargs.pop('experimental_zb_hns_support', None)
         super().__init__(*args, **kwargs)
-        self.grpc_client = None
+        self.grpc_client=None
+        self.grpc_client = asyn.sync(self.loop, self._create_grpc_client)
         self._storage_layout_cache = {}
+
+    async def _create_grpc_client(self):
+        if self.grpc_client is None:
+            return AsyncGrpcClient().grpc_client
+        else:
+            return self.grpc_client
 
     async def _get_storage_layout(self, bucket):
         if bucket in self._storage_layout_cache:

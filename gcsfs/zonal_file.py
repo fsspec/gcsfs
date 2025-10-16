@@ -34,9 +34,6 @@ class ZonalFile(GCSFile):
         """
         Initializes the AsyncMultiRangeDownloader.
         """
-        if self.gcsfs.grpc_client is None:
-            self.gcsfs.grpc_client = AsyncGrpcClient().grpc_client
-
         return await self._create_mrd(self.gcsfs.grpc_client, bucket_name, object_name, generation)
 
     @classmethod
