@@ -90,8 +90,6 @@ class GCSHNSFileSystem(GCSFileSystem):
         """
         mrd = kwargs.pop("mrd", None)
         if mrd is None:
-            if self.grpc_client is None:
-                self.grpc_client = AsyncGrpcClient().grpc_client
             bucket, object_name, generation = self.split_path(path)
             mrd = await ZonalFile._create_mrd(self.grpc_client, bucket, object_name, generation)
 
