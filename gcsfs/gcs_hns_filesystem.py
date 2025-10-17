@@ -4,6 +4,7 @@ from enum import Enum
 from fsspec import asyn
 from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 
+from . import zb_hns_utils
 from .core import GCSFileSystem, GCSFile
 from .zonal_file import ZonalFile
 
@@ -19,8 +20,9 @@ class BucketType(Enum):
 
 gcs_file_types = {
     BucketType.ZONAL_HIERARCHICAL: ZonalFile,
+    BucketType.NON_HIERARCHICAL: GCSFile,
+    BucketType.HIERARCHICAL: GCSFile,
     BucketType.UNKNOWN: GCSFile,
-    None: GCSFile,
 }
 
 
@@ -33,7 +35,7 @@ class GCSHNSFileSystem(GCSFileSystem):
     def __init__(self, *args, **kwargs):
         kwargs.pop('experimental_zb_hns_support', None)
         super().__init__(*args, **kwargs)
-        self.grpc_client=None
+        self.grpc_client = None
         self.grpc_client = asyn.sync(self.loop, self._create_grpc_client)
         self._storage_layout_cache = {}
 
@@ -91,7 +93,7 @@ class GCSHNSFileSystem(GCSFileSystem):
         mrd = kwargs.pop("mrd", None)
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
-            mrd = await ZonalFile._create_mrd(self.grpc_client, bucket, object_name, generation)
+            mrd = await zb_hns_utils.create_mrd(self.grpc_client, bucket, object_name, generation)
 
         offset, length = self._process_limits(start, end)
-        return await ZonalFile.download_range(offset=offset, length=length, mrd=mrd)
+        return await zb_hns_utils.download_range(offset=offset, length=length, mrd=mrd)
