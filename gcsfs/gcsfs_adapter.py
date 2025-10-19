@@ -26,10 +26,10 @@ gcs_file_types = {
 }
 
 
-class GCSHNSFileSystem(GCSFileSystem):
+class GCSFileSystemAdapter(GCSFileSystem):
     """
     An subclass of GCSFileSystem that will contain specialized
-    logic for HNS Filesystem.
+    logic for ZB and HNS buckets.
     """
 
     def __init__(self, *args, **kwargs):
@@ -130,6 +130,10 @@ class GCSHNSFileSystem(GCSFileSystem):
 
         return offset, length
 
+    async def is_zonal_bucket(self, bucket):
+        layout = await self._get_storage_layout(bucket)
+        return layout == BucketType.ZONAL_HIERARCHICAL
+
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         """
         Fetch a file's contents as bytes.
@@ -137,6 +141,10 @@ class GCSHNSFileSystem(GCSFileSystem):
         mrd = kwargs.pop("mrd", None)
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
+            # Fall back to default implementation if not a zonal bucket
+            if not await self.is_zonal_bucket(bucket):
+                return await super()._cat_file(path, start=start, end=end, **kwargs)
+
             mrd = await zb_hns_utils.create_mrd(self.grpc_client, bucket, object_name, generation)
 
         offset, length = await self.process_limits_to_offset_and_length(path, start, end)
