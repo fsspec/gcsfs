@@ -78,13 +78,57 @@ class GCSHNSFileSystem(GCSFileSystem):
         bucket_type = self._sync_get_storage_layout(bucket)
         return gcs_file_types[bucket_type](gcsfs=self, path=path, mode=mode, **kwargs)
 
-    def _process_limits(self, start, end):
-        # Dummy method to process start and end
+    async def process_limits_to_offset_and_length(self, path, start, end):
+        """
+        Calculates the read offset and length from start and end parameters.
+
+        Args:
+            path (str): The path to the file.
+            start (int | None): The starting byte position.
+            end (int | None): The ending byte position.
+
+        Returns:
+            tuple: A tuple containing (offset, length).
+
+        Raises:
+            ValueError: If the calculated range is invalid.
+        """
+        size = None
+
         if start is None:
-            start = 0
+            offset = 0
+        elif start < 0:
+            size = size or (await self._info(path))["size"]
+            offset = size + start
+        else:
+            offset = start
+
         if end is None:
-            end = 100
-        return start, end - start + 1
+            size = size or (await self._info(path))["size"]
+            effective_end = size
+        elif end < 0:
+            size = size or (await self._info(path))["size"]
+            effective_end = size + end
+        else:
+            effective_end = end
+
+        size = size or (await self._info(path))["size"]
+        if offset < 0:
+            raise ValueError(f"Calculated start offset ({offset}) cannot be negative.")
+        if effective_end < offset:
+            raise ValueError(f"Calculated end position ({effective_end}) cannot be before start offset ({offset}).")
+        elif effective_end == offset:
+            length = 0  # Handle zero-length slice
+        elif effective_end > size:
+            length = size - offset  # Clamp length to file size
+        else:
+            length = effective_end - offset  # Normal case
+
+        if offset + length > size:
+            # This might happen with large positive end values
+            length = max(0, size - offset)
+
+        return offset, length
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         """
@@ -95,5 +139,9 @@ class GCSHNSFileSystem(GCSFileSystem):
             bucket, object_name, generation = self.split_path(path)
             mrd = await zb_hns_utils.create_mrd(self.grpc_client, bucket, object_name, generation)
 
-        offset, length = self._process_limits(start, end)
+        offset, length = await self.process_limits_to_offset_and_length(path, start, end)
+        # If length = 0, mrd returns till end of file, so handle that case here
+        if length == 0:
+            return b""
+
         return await zb_hns_utils.download_range(offset=offset, length=length, mrd=mrd)
