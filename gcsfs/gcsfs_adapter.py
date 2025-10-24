@@ -51,17 +51,15 @@ class GCSFileSystemAdapter(GCSFileSystem):
         try:
             response = await self._call("GET", f"b/{bucket}/storageLayout", json_out=True)
             if response.get("locationType") == "zone":
-                bucket_type = BucketType.ZONAL_HIERARCHICAL
+                self._storage_layout_cache[bucket] = BucketType.ZONAL_HIERARCHICAL
             else:
                 # This should be updated to include HNS in the future
-                bucket_type = BucketType.NON_HIERARCHICAL
-            self._storage_layout_cache[bucket] = bucket_type
-            return bucket_type
+                self._storage_layout_cache[bucket] = BucketType.NON_HIERARCHICAL
         except Exception as e:
             logger.error(f"Could not determine storage layout for bucket {bucket}: {e}")
             # Default to UNKNOWN
             self._storage_layout_cache[bucket] = BucketType.UNKNOWN
-            return BucketType.UNKNOWN
+        return self._storage_layout_cache[bucket]
 
     _sync_get_storage_layout = asyn.sync_wrapper(_get_storage_layout)
 
