@@ -67,6 +67,14 @@ class GCSFileSystemAdapter(GCSFileSystem):
             self,
             path,
             mode="rb",
+            block_size=None,
+            cache_options=None,
+            acl=None,
+            consistency=None,
+            metadata=None,
+            autocommit=True,
+            fixed_key_metadata=None,
+            generation=None,
             **kwargs,
     ):
         """
@@ -74,7 +82,16 @@ class GCSFileSystemAdapter(GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_type = self._sync_get_storage_layout(bucket)
-        return gcs_file_types[bucket_type](gcsfs=self, path=path, mode=mode, **kwargs)
+        return gcs_file_types[bucket_type](self, path,
+            mode,
+            block_size,
+            cache_options=cache_options,
+            consistency=consistency,
+            metadata=metadata,
+            acl=acl,
+            autocommit=autocommit,
+            fixed_key_metadata=fixed_key_metadata,
+            **kwargs,)
 
     # Replacement method for _process_limits to support new params (offset and length) for MRD.
     async def process_limits_to_offset_and_length(self, path, start, end):
