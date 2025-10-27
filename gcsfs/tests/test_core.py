@@ -18,7 +18,7 @@ import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
-from gcsfs.gcs_hns_filesystem import GCSHNSFileSystem
+from gcsfs.gcsfs_adapter import GCSFileSystemAdapter
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
 
@@ -1710,11 +1710,11 @@ def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_passed(gcs_factory
 
     assert isinstance(gcs, gcsfs.GCSFileSystem), "Expected File system instance to be GCSFileSystem"
     assert not isinstance(gcs,
-                      gcsfs.gcs_hns_filesystem.GCSHNSFileSystem), "Expected File system instance to be GCSFileSystem"
+                      GCSFileSystemAdapter), "Expected File system instance to be GCSFileSystem"
 
 def test_gcs_filesystem_adapter_when_experimental_zonal_toggle_is_true(gcs_factory):
     gcs = gcs_factory(experimental_zb_hns_support=True)
 
     assert isinstance(gcs,
-                      gcsfs.gcs_hns_filesystem.GCSHNSFileSystem), "Expected File system instance to be GCSFileSystemAdapter"
+                      GCSFileSystemAdapter), "Expected File system instance to be GCSFileSystemAdapter"
 

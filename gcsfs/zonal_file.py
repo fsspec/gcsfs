@@ -1,9 +1,6 @@
-from io import BytesIO
-
 from fsspec import asyn
-from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import AsyncMultiRangeDownloader
 
+from . import zb_hns_utils
 from .core import GCSFile
 
 
@@ -20,30 +17,11 @@ class ZonalFile(GCSFile):
         super().__init__(*args, **kwargs)
         self.mrd = asyn.sync(self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation)
 
-    @classmethod
-    async def _create_mrd(cls, grpc_client, bucket_name, object_name, generation=None):
-        """
-        Creates the AsyncMultiRangeDownloader.
-        """
-        mrd = await AsyncMultiRangeDownloader.create_mrd(
-            grpc_client, bucket_name, object_name, generation
-        )
-        return mrd
-
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """
         Initializes the AsyncMultiRangeDownloader.
         """
-        return await self._create_mrd(self.gcsfs.grpc_client, bucket_name, object_name, generation)
-
-    @classmethod
-    async def download_range(cls, offset, length, mrd):
-        """
-        Downloads a byte range from the file asynchronously.
-        """
-        buffer = BytesIO()
-        await mrd.download_ranges([(offset, length, buffer)])
-        return buffer.getvalue()
+        return await zb_hns_utils.create_mrd(self.gcsfs.grpc_client, bucket_name, object_name, generation)
 
     def _fetch_range(self, start, end):
         """
