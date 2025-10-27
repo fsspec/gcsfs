@@ -76,6 +76,7 @@ class GCSFileSystemAdapter(GCSFileSystem):
         bucket_type = self._sync_get_storage_layout(bucket)
         return gcs_file_types[bucket_type](gcsfs=self, path=path, mode=mode, **kwargs)
 
+    # Replacement method for _process_limits to support new params (offset and length) for MRD.
     async def process_limits_to_offset_and_length(self, path, start, end):
         """
         Calculates the read offset and length from start and end parameters.
@@ -137,6 +138,9 @@ class GCSFileSystemAdapter(GCSFileSystem):
         Fetch a file's contents as bytes.
         """
         mrd = kwargs.pop("mrd", None)
+
+        # A new MRD is required when read is done directly by the
+        # GCSFilesystem class without creating a GCSFile object first.
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
             # Fall back to default implementation if not a zonal bucket
