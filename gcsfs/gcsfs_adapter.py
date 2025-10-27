@@ -163,8 +163,4 @@ class GCSFileSystemAdapter(GCSFileSystem):
             mrd = await zb_hns_utils.create_mrd(self.grpc_client, bucket, object_name, generation)
 
         offset, length = await self.process_limits_to_offset_and_length(path, start, end)
-        # If length = 0, mrd returns till end of file, so handle that case here
-        if length == 0:
-            return b""
-
         return await zb_hns_utils.download_range(offset=offset, length=length, mrd=mrd)
