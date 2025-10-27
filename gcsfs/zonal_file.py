@@ -15,7 +15,9 @@ class ZonalFile(GCSFile):
         Initializes the ZonalFile object.
         """
         super().__init__(*args, **kwargs)
-        self.mrd = asyn.sync(self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation)
+        self.mrd = None
+        if "r" in self.mode:
+            self.mrd = asyn.sync(self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation)
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """
