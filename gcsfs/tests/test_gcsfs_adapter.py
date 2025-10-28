@@ -78,20 +78,22 @@ read_block_params = [
 ]
 
 
-@pytest.mark.parametrize("offset, length, delimiter, expected_data", read_block_params)
-def test_read_block_zb(gcs_adapter, zonal_mocks, offset, length, delimiter, expected_data):
-    path = file_path
+def test_read_block_zb(gcs_adapter, zonal_mocks, subtests):
+    for param in read_block_params:
+        with subtests.test(id=param.id):
+            offset, length, delimiter, expected_data = param.values
+            path = file_path
 
-    with zonal_mocks(json_data) as mocks:
-        result = gcs_adapter.read_block(path, offset, length, delimiter)
+            with zonal_mocks(json_data) as mocks:
+                result = gcs_adapter.read_block(path, offset, length, delimiter)
 
-        assert result == expected_data
-        if mocks:
-            mocks["sync_layout"].assert_called_once_with(TEST_BUCKET)
-            if expected_data:
-                mocks["downloader"].download_ranges.assert_called_with([(offset, mock.ANY, mock.ANY)])
-            else:
-                mocks["downloader"].download_ranges.assert_not_called()
+                assert result == expected_data
+                if mocks:
+                    mocks["sync_layout"].assert_called_once_with(TEST_BUCKET)
+                    if expected_data:
+                        mocks["downloader"].download_ranges.assert_called_with([(offset, mock.ANY, mock.ANY)])
+                    else:
+                        mocks["downloader"].download_ranges.assert_not_called()
 
 
 def test_read_small_zb(gcs_adapter, zonal_mocks):
