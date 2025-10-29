@@ -5,7 +5,8 @@ from itertools import chain
 from unittest import mock
 
 import pytest
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import AsyncMultiRangeDownloader
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import \
+    AsyncMultiRangeDownloader
 
 from gcsfs.gcsfs_adapter import BucketType
 from gcsfs.tests.conftest import a, b, c, csv_files, files, text_files
@@ -25,34 +26,51 @@ def zonal_mocks():
     @contextlib.contextmanager
     def _zonal_mocks_factory(file_data):
         """Creates mocks for a given file content."""
-        is_real_gcs = os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+        is_real_gcs = (
+            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+        )
         if is_real_gcs:
             yield None
             return
-        patch_target_get_layout = "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._get_storage_layout"
-        patch_target_sync_layout = "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._sync_get_storage_layout"
+        patch_target_get_layout = (
+            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._get_storage_layout"
+        )
+        patch_target_sync_layout = (
+            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._sync_get_storage_layout"
+        )
         patch_target_create_mrd = "gcsfs.gcsfs_adapter.zb_hns_utils.create_mrd"
         patch_target_gcsfs_cat_file = "gcsfs.core.GCSFileSystem._cat_file"
 
         async def download_side_effect(read_requests, **kwargs):
             if read_requests and len(read_requests) == 1:
                 param_offset, param_length, buffer_arg = read_requests[0]
-                if hasattr(buffer_arg, 'write'):
-                    buffer_arg.write(file_data[param_offset:param_offset + param_length])
+                if hasattr(buffer_arg, "write"):
+                    buffer_arg.write(
+                        file_data[param_offset : param_offset + param_length]
+                    )
             return [mock.Mock(error=None)]
 
         mock_downloader = mock.Mock(spec=AsyncMultiRangeDownloader)
-        mock_downloader.download_ranges = mock.AsyncMock(side_effect=download_side_effect)
+        mock_downloader.download_ranges = mock.AsyncMock(
+            side_effect=download_side_effect
+        )
 
         mock_create_mrd = mock.AsyncMock(return_value=mock_downloader)
-        with mock.patch(patch_target_sync_layout, return_value=BucketType.ZONAL_HIERARCHICAL) as mock_sync_layout, \
-                mock.patch(patch_target_get_layout, return_value=BucketType.ZONAL_HIERARCHICAL), \
-                mock.patch(patch_target_create_mrd, mock_create_mrd), \
-                mock.patch(patch_target_gcsfs_cat_file, new_callable=mock.AsyncMock) as mock_cat_file:
-            mocks = {"sync_layout": mock_sync_layout,
-                     "create_mrd": mock_create_mrd,
-                     "downloader": mock_downloader,
-                     "cat_file": mock_cat_file}
+        with mock.patch(
+            patch_target_sync_layout, return_value=BucketType.ZONAL_HIERARCHICAL
+        ) as mock_sync_layout, mock.patch(
+            patch_target_get_layout, return_value=BucketType.ZONAL_HIERARCHICAL
+        ), mock.patch(
+            patch_target_create_mrd, mock_create_mrd
+        ), mock.patch(
+            patch_target_gcsfs_cat_file, new_callable=mock.AsyncMock
+        ) as mock_cat_file:
+            mocks = {
+                "sync_layout": mock_sync_layout,
+                "create_mrd": mock_create_mrd,
+                "downloader": mock_downloader,
+                "cat_file": mock_cat_file,
+            }
             yield mocks
             # Common assertion for all tests using this mock
             mock_cat_file.assert_not_called()
@@ -62,7 +80,7 @@ def zonal_mocks():
 
 read_block_params = [
     # Read specific chunk
-    pytest.param(3, 10, None, json_data[3:3 + 10], id="offset=3, length=10"),
+    pytest.param(3, 10, None, json_data[3 : 3 + 10], id="offset=3, length=10"),
     # Read from beginning up to length
     pytest.param(0, 5, None, json_data[0:5], id="offset=0, length=5"),
     # Read from offset to end (simulate large length)
@@ -72,9 +90,11 @@ read_block_params = [
     # Read exactly at the end (zero length)
     pytest.param(file_size, 10, None, b"", id="offset=size, length=10"),
     # Read with delimiter
-    pytest.param(1, 35, b'\n', lines[1], id="offset=1, length=35, delimiter=newline"),
-    pytest.param(0, 30, b'\n', lines[0], id="offset=0, length=35, delimiter=newline"),
-    pytest.param(0, 35, b'\n', lines[0] + lines[1], id="offset=0, length=35, delimiter=newline"),
+    pytest.param(1, 35, b"\n", lines[1], id="offset=1, length=35, delimiter=newline"),
+    pytest.param(0, 30, b"\n", lines[0], id="offset=0, length=35, delimiter=newline"),
+    pytest.param(
+        0, 35, b"\n", lines[0] + lines[1], id="offset=0, length=35, delimiter=newline"
+    ),
 ]
 
 
@@ -91,7 +111,9 @@ def test_read_block_zb(gcs_adapter, zonal_mocks, subtests):
                 if mocks:
                     mocks["sync_layout"].assert_called_once_with(TEST_BUCKET)
                     if expected_data:
-                        mocks["downloader"].download_ranges.assert_called_with([(offset, mock.ANY, mock.ANY)])
+                        mocks["downloader"].download_ranges.assert_called_with(
+                            [(offset, mock.ANY, mock.ANY)]
+                        )
                     else:
                         mocks["downloader"].download_ranges.assert_not_called()
 
@@ -165,18 +187,18 @@ def test_readline_empty_zb(gcs_adapter, zonal_mocks):
 
 
 def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
-    data = b"ab\n" + b"a" * (2 ** 18) + b"\nab"
+    data = b"ab\n" + b"a" * (2**18) + b"\nab"
     with zonal_mocks(data) as mocks:
         if mocks:
             with gcs_adapter.open(c, "wb") as f:
                 f.write(data)
-        with gcs_adapter.open(c, "rb", block_size=2 ** 18) as f:
+        with gcs_adapter.open(c, "rb", block_size=2**18) as f:
             result = f.readline()
             expected = b"ab\n"
             assert result == expected
 
             result = f.readline()
-            expected = b"a" * (2 ** 18) + b"\n"
+            expected = b"a" * (2**18) + b"\n"
             assert result == expected
 
             result = f.readline()

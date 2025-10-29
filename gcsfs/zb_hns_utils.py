@@ -1,6 +1,7 @@
 from io import BytesIO
 
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import AsyncMultiRangeDownloader
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import \
+    AsyncMultiRangeDownloader
 
 
 async def create_mrd(grpc_client, bucket_name, object_name, generation=None):

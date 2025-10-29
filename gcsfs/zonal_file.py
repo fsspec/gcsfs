@@ -17,13 +17,17 @@ class ZonalFile(GCSFile):
         super().__init__(*args, **kwargs)
         self.mrd = None
         if "r" in self.mode:
-            self.mrd = asyn.sync(self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation)
+            self.mrd = asyn.sync(
+                self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation
+            )
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """
         Initializes the AsyncMultiRangeDownloader.
         """
-        return await zb_hns_utils.create_mrd(self.gcsfs.grpc_client, bucket_name, object_name, generation)
+        return await zb_hns_utils.create_mrd(
+            self.gcsfs.grpc_client, bucket_name, object_name, generation
+        )
 
     def _fetch_range(self, start, end):
         """

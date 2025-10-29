@@ -2,10 +2,11 @@ import logging
 from enum import Enum
 
 from fsspec import asyn
-from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
+from google.cloud.storage._experimental.asyncio.async_grpc_client import \
+    AsyncGrpcClient
 
 from . import zb_hns_utils
-from .core import GCSFileSystem, GCSFile
+from .core import GCSFile, GCSFileSystem
 from .zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
@@ -34,7 +35,7 @@ class GCSFileSystemAdapter(GCSFileSystem):
     """
 
     def __init__(self, *args, **kwargs):
-        kwargs.pop('experimental_zb_hns_support', None)
+        kwargs.pop("experimental_zb_hns_support", None)
         super().__init__(*args, **kwargs)
         self.grpc_client = None
         # grpc client initialisation is not a resource blocking operation hence
@@ -53,7 +54,9 @@ class GCSFileSystemAdapter(GCSFileSystem):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
         try:
-            response = await self._call("GET", f"b/{bucket}/storageLayout", json_out=True)
+            response = await self._call(
+                "GET", f"b/{bucket}/storageLayout", json_out=True
+            )
             if response.get("locationType") == "zone":
                 self._storage_layout_cache[bucket] = BucketType.ZONAL_HIERARCHICAL
             else:
@@ -68,25 +71,27 @@ class GCSFileSystemAdapter(GCSFileSystem):
     _sync_get_storage_layout = asyn.sync_wrapper(_get_storage_layout)
 
     def _open(
-            self,
-            path,
-            mode="rb",
-            block_size=None,
-            cache_options=None,
-            acl=None,
-            consistency=None,
-            metadata=None,
-            autocommit=True,
-            fixed_key_metadata=None,
-            generation=None,
-            **kwargs,
+        self,
+        path,
+        mode="rb",
+        block_size=None,
+        cache_options=None,
+        acl=None,
+        consistency=None,
+        metadata=None,
+        autocommit=True,
+        fixed_key_metadata=None,
+        generation=None,
+        **kwargs,
     ):
         """
         Open a file.
         """
         bucket, _, _ = self.split_path(path)
         bucket_type = self._sync_get_storage_layout(bucket)
-        return gcs_file_types[bucket_type](self, path,
+        return gcs_file_types[bucket_type](
+            self,
+            path,
             mode,
             block_size,
             cache_options=cache_options,
@@ -95,7 +100,8 @@ class GCSFileSystemAdapter(GCSFileSystem):
             acl=acl,
             autocommit=autocommit,
             fixed_key_metadata=fixed_key_metadata,
-            **kwargs,)
+            **kwargs,
+        )
 
     # Replacement method for _process_limits to support new params (offset and length) for MRD.
     async def process_limits_to_offset_and_length(self, path, start, end):
@@ -136,7 +142,9 @@ class GCSFileSystemAdapter(GCSFileSystem):
         if offset < 0:
             raise ValueError(f"Calculated start offset ({offset}) cannot be negative.")
         if effective_end < offset:
-            raise ValueError(f"Calculated end position ({effective_end}) cannot be before start offset ({offset}).")
+            raise ValueError(
+                f"Calculated end position ({effective_end}) cannot be before start offset ({offset})."
+            )
         elif effective_end == offset:
             length = 0  # Handle zero-length slice
         elif effective_end > size:
@@ -168,7 +176,11 @@ class GCSFileSystemAdapter(GCSFileSystem):
             if not await self.is_zonal_bucket(bucket):
                 return await super()._cat_file(path, start=start, end=end, **kwargs)
 
-            mrd = await zb_hns_utils.create_mrd(self.grpc_client, bucket, object_name, generation)
+            mrd = await zb_hns_utils.create_mrd(
+                self.grpc_client, bucket, object_name, generation
+            )
 
-        offset, length = await self.process_limits_to_offset_and_length(path, start, end)
+        offset, length = await self.process_limits_to_offset_and_length(
+            path, start, end
+        )
         return await zb_hns_utils.download_range(offset=offset, length=length, mrd=mrd)

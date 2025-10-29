@@ -68,6 +68,7 @@ SUPPORTED_FIXED_KEY_METADATA = {
     "custom_time": "customTime",
 }
 
+
 def quote(s):
     """
     Quote characters to be safe for URL paths.
@@ -287,10 +288,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         Factory to return a GCSFileSystemAdapter instance if the experimental
         flag is enabled.
         """
-        experimental_support = kwargs.pop('experimental_zb_hns_support', False)
+        experimental_support = kwargs.pop("experimental_zb_hns_support", False)
 
         if experimental_support:
             from .gcsfs_adapter import GCSFileSystemAdapter
+
             return object.__new__(GCSFileSystemAdapter)
         else:
             return object.__new__(cls)
