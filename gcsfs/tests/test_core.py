@@ -230,6 +230,10 @@ def test_info_on_directory_with_only_subdirectories(gcs):
     gcs.touch(path)
     path = f"{TEST_BUCKET}/dir_with_only_subdirs/subdir2/file.txt"
     gcs.touch(path)
+    path = f"{TEST_BUCKET}/dir_with_only_subdirs/subdir3/file.txt"
+    gcs.touch(path)
+    path = f"{TEST_BUCKET}/dir_with_only_subdirs/subdir4/file.txt"
+    gcs.touch(path)
 
     # The path to test with info()
     dir_path = f"{TEST_BUCKET}/dir_with_only_subdirs"
@@ -242,7 +246,7 @@ def test_info_on_directory_with_only_subdirectories(gcs):
         # Assertions
         assert info['type'] == 'directory'
         assert info['name'] == dir_path
-        # one call to check for exact file and one for directory
+        # one call is for exact file check and one call for directory
         assert mock_call.call_count == 2, "info() should only make two calls to GCS for a directory."
 
 def test_ls2(gcs):
