@@ -796,7 +796,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         items.extend(page.get("items", []))
         next_page_token = page.get("nextPageToken", None)
 
-        while len(items) < max_results and next_page_token is not None:
+        while len(items) + len(prefixes) < max_results and next_page_token is not None:
             num_items = min(items_per_call, max_results - len(items), 1000)
             page = await self._call(
                 "GET",
