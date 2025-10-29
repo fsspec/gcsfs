@@ -6,8 +6,8 @@ from .core import GCSFile
 
 class ZonalFile(GCSFile):
     """
-    GCSFile subclass designed to handle reads from
-    Zonal buckets using a high-performance gRPC path.
+    ZonalFile is subclass of GCSFile and handles data operations from
+    Zonal buckets only using a high-performance gRPC path.
     """
 
     def __init__(self, *args, **kwargs):

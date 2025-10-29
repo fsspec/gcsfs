@@ -28,14 +28,18 @@ gcs_file_types = {
 
 class GCSFileSystemAdapter(GCSFileSystem):
     """
-    An subclass of GCSFileSystem that will contain specialized
-    logic for ZB and HNS buckets.
+    This class will be used when experimental_zb_hns_support is set to true for all bucket types.
+    GCSFileSystemAdapter is a subclass of GCSFileSystem that adds specialized
+    logic to support Zonal and Hierarchical buckets.
     """
 
     def __init__(self, *args, **kwargs):
         kwargs.pop('experimental_zb_hns_support', None)
         super().__init__(*args, **kwargs)
         self.grpc_client = None
+        # grpc client initialisation is not a resource blocking operation hence
+        # initialising the client in early to reduce code duplication for initialisation in
+        # multiple methods
         self.grpc_client = asyn.sync(self.loop, self._create_grpc_client)
         self._storage_layout_cache = {}
 
