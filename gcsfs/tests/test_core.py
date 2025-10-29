@@ -223,6 +223,7 @@ def test_info(gcs):
     assert gcs.info(a)["ctime"] == gcs.created(a)
     assert gcs.info(a)["mtime"] == gcs.modified(a)
 
+
 def test_info_on_directory_with_only_subdirectories(gcs):
     """Test info() on a path that contains no direct files but has subdirectories."""
     # Setup: create a file inside a nested directory
@@ -244,10 +245,13 @@ def test_info_on_directory_with_only_subdirectories(gcs):
         info = gcs.info(dir_path)
 
         # Assertions
-        assert info['type'] == 'directory'
-        assert info['name'] == dir_path
+        assert info["type"] == "directory"
+        assert info["name"] == dir_path
         # one call is for exact file check and one call for directory
-        assert mock_call.call_count == 2, "info() should only make two calls to GCS for a directory."
+        assert (
+            mock_call.call_count == 2
+        ), "info() should only make two calls to GCS for a directory."
+
 
 def test_ls2(gcs):
     assert TEST_BUCKET + "/" in gcs.ls("")
