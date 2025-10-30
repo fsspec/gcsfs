@@ -369,3 +369,8 @@ Version 0.4.0
 * Added contributing instructions (:pr:`185`)
 * Improved performance for :meth:`gcsfs.GCSFileSystem.info` (:pr:`187`)
 * Fixed bug in :meth:`gcsfs.GCSFileSystem.info` raising an error (:pr:`190`)
+
+.. raw:: html
+
+    <script data-goatcounter="https://gcsfs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
