@@ -23,3 +23,8 @@ as setting your default google credentials (or providing them via the
 fsspec config).
 
 .. _fake-gcs-server: https://github.com/fsouza/fake-gcs-server
+
+.. raw:: html
+
+    <script data-goatcounter="https://gcsfs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
