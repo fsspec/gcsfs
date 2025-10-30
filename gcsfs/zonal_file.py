@@ -20,6 +20,10 @@ class ZonalFile(GCSFile):
             self.mrd = asyn.sync(
                 self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation
             )
+        else:
+            raise NotImplementedError(
+                "Only read operations are currently supported for Zonal buckets."
+            )
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """

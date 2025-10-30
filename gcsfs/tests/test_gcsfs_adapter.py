@@ -3,6 +3,7 @@ import io
 import os
 from itertools import chain
 from unittest import mock
+from google.cloud.storage.exceptions import DataCorruption
 
 import pytest
 from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
@@ -155,10 +156,10 @@ def test_readline_zb(gcs_adapter, zonal_mocks):
 
 def test_readline_from_cache_zb(gcs_adapter, zonal_mocks):
     data = b"a,b\n11,22\n3,4"
+    if not gcs_adapter.on_google:
+        with gcs_adapter.open(a, "wb") as f:
+            f.write(data)    
     with zonal_mocks(data) as mocks:
-        if mocks:
-            with gcs_adapter.open(a, "wb") as f:
-                f.write(data)
         with gcs_adapter.open(a, "rb") as f:
             result = f.readline()
             assert result == b"a,b\n"
@@ -178,10 +179,10 @@ def test_readline_from_cache_zb(gcs_adapter, zonal_mocks):
 
 def test_readline_empty_zb(gcs_adapter, zonal_mocks):
     data = b""
+    if not gcs_adapter.on_google:
+        with gcs_adapter.open(b, "wb") as f:
+            f.write(data)    
     with zonal_mocks(data) as mocks:
-        if mocks:
-            with gcs_adapter.open(b, "wb") as f:
-                f.write(data)
         with gcs_adapter.open(b, "rb") as f:
             result = f.readline()
             assert result == data
@@ -189,10 +190,10 @@ def test_readline_empty_zb(gcs_adapter, zonal_mocks):
 
 def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
     data = b"ab\n" + b"a" * (2**18) + b"\nab"
+    if not gcs_adapter.on_google:
+        with gcs_adapter.open(c, "wb") as f:
+            f.write(data)    
     with zonal_mocks(data) as mocks:
-        if mocks:
-            with gcs_adapter.open(c, "wb") as f:
-                f.write(data)
         with gcs_adapter.open(c, "rb", block_size=2**18) as f:
             result = f.readline()
             expected = b"ab\n"
@@ -238,3 +239,32 @@ def test_process_limits_parametrized(
         )
         assert offset == exp_offset
         assert length == exp_length
+
+
+@pytest.mark.parametrize(
+    "exception_to_raise",
+    [ValueError, DataCorruption, Exception],
+)
+def test_mrd_exception_handling(gcs_adapter, zonal_mocks, exception_to_raise):
+    """
+    Tests that _cat_file correctly propagates exceptions from mrd.download_ranges.
+    """
+    with zonal_mocks(json_data) as mocks:
+        if gcs_adapter.on_google:
+            pytest.skip("Cannot mock exceptions on real GCS")
+
+        # Configure the mock to raise a specified exception
+        if exception_to_raise is DataCorruption:
+            # The first argument is 'response', the message is in '*args'
+            mocks["downloader"].download_ranges.side_effect = exception_to_raise(
+                None, "Test exception raised"
+            )
+        else:
+            mocks["downloader"].download_ranges.side_effect = exception_to_raise(
+                "Test exception raised"
+            )
+
+        with pytest.raises(exception_to_raise, match="Test exception raised"):
+            gcs_adapter.read_block(file_path, 0, 10)
+
+        mocks["downloader"].download_ranges.assert_called_once()
