@@ -2,8 +2,7 @@ import logging
 from enum import Enum
 
 from fsspec import asyn
-from google.cloud.storage._experimental.asyncio.async_grpc_client import \
-    AsyncGrpcClient
+from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 
 from . import zb_hns_utils
 from .core import GCSFile, GCSFileSystem
@@ -38,8 +37,8 @@ class GCSFileSystemAdapter(GCSFileSystem):
         kwargs.pop("experimental_zb_hns_support", None)
         super().__init__(*args, **kwargs)
         self.grpc_client = None
-        # grpc client initialisation is not a resource blocking operation hence
-        # initialising the client in early to reduce code duplication for initialisation in
+        # grpc client initialization is not a resource blocking operation hence
+        # initializing the client in early to reduce code duplication for initialization in
         # multiple methods
         self.grpc_client = asyn.sync(self.loop, self._create_grpc_client)
         self._storage_layout_cache = {}
@@ -100,11 +99,12 @@ class GCSFileSystemAdapter(GCSFileSystem):
             acl=acl,
             autocommit=autocommit,
             fixed_key_metadata=fixed_key_metadata,
+            generation=generation,
             **kwargs,
         )
 
     # Replacement method for _process_limits to support new params (offset and length) for MRD.
-    async def process_limits_to_offset_and_length(self, path, start, end):
+    async def _process_limits_to_offset_and_length(self, path, start, end):
         """
         Calculates the read offset and length from start and end parameters.
 
@@ -148,17 +148,17 @@ class GCSFileSystemAdapter(GCSFileSystem):
         elif effective_end == offset:
             length = 0  # Handle zero-length slice
         elif effective_end > size:
-            length = size - offset  # Clamp length to file size
+            length = max(0, size - offset)  # Clamp and ensure non-negative
         else:
             length = effective_end - offset  # Normal case
 
-        if offset + length > size:
-            # This might happen with large positive end values
-            length = max(0, size - offset)
-
         return offset, length
 
-    async def is_zonal_bucket(self, bucket):
+    sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
+        _process_limits_to_offset_and_length
+    )
+
+    async def _is_zonal_bucket(self, bucket):
         layout = await self._get_storage_layout(bucket)
         return layout == BucketType.ZONAL_HIERARCHICAL
 
@@ -173,14 +173,14 @@ class GCSFileSystemAdapter(GCSFileSystem):
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
             # Fall back to default implementation if not a zonal bucket
-            if not await self.is_zonal_bucket(bucket):
+            if not await self._is_zonal_bucket(bucket):
                 return await super()._cat_file(path, start=start, end=end, **kwargs)
 
             mrd = await zb_hns_utils.create_mrd(
                 self.grpc_client, bucket, object_name, generation
             )
 
-        offset, length = await self.process_limits_to_offset_and_length(
+        offset, length = await self._process_limits_to_offset_and_length(
             path, start, end
         )
         return await zb_hns_utils.download_range(offset=offset, length=length, mrd=mrd)

@@ -5,8 +5,9 @@ from itertools import chain
 from unittest import mock
 
 import pytest
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import \
-    AsyncMultiRangeDownloader
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
+    AsyncMultiRangeDownloader,
+)
 
 from gcsfs.gcsfs_adapter import BucketType
 from gcsfs.tests.conftest import a, b, c, csv_files, files, text_files
@@ -204,3 +205,36 @@ def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
             result = f.readline()
             expected = b"ab"
             assert result == expected
+
+
+@pytest.mark.parametrize(
+    "start,end,exp_offset,exp_length,exp_exc",
+    [
+        (None, None, 0, file_size, None),  # full file
+        (-10, None, file_size - 10, 10, None),  # start negative
+        (10, -10, 10, file_size - 20, None),  # end negative
+        (20, 20, 20, 0, None),  # zero-length slice
+        (50, 40, None, None, ValueError),  # end before start -> raises
+        (-200, None, None, None, ValueError),  # offset negative -> raises
+        (file_size - 10, 200, file_size - 10, 10, None),  # end > size clamps
+        (
+            file_size + 10,
+            file_size + 20,
+            file_size + 10,
+            0,
+            None,
+        ),  # offset > size -> empty
+    ],
+)
+def test_process_limits_parametrized(
+    gcs_adapter, start, end, exp_offset, exp_length, exp_exc
+):
+    if exp_exc is not None:
+        with pytest.raises(exp_exc):
+            gcs_adapter.sync_process_limits_to_offset_and_length(file_path, start, end)
+    else:
+        offset, length = gcs_adapter.sync_process_limits_to_offset_and_length(
+            file_path, start, end
+        )
+        assert offset == exp_offset
+        assert length == exp_length
