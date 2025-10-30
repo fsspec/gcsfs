@@ -4,6 +4,14 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2025.10.0
+---------
+
+* fix info() performance regression (#705)
+* add CoC (#703)
+* mkdir should not create bucket by default (#701)
+* add anonymous tracker to docs (#700)
+
 2025.9.0
 --------
 
