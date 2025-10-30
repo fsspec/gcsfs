@@ -2,9 +2,11 @@ import logging
 from enum import Enum
 
 from fsspec import asyn
+from google.api_core.client_info import ClientInfo
 from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 
 from . import zb_hns_utils
+from . import __version__ as version
 from .core import GCSFile, GCSFileSystem
 from .zonal_file import ZonalFile
 
@@ -45,7 +47,9 @@ class GCSFileSystemAdapter(GCSFileSystem):
 
     async def _create_grpc_client(self):
         if self.grpc_client is None:
-            return AsyncGrpcClient().grpc_client
+            return AsyncGrpcClient(
+                client_info=ClientInfo(user_agent=f"python-gcsfs/{version}")
+            ).grpc_client
         else:
             return self.grpc_client
 
