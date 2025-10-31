@@ -3,15 +3,19 @@ from enum import Enum
 
 from fsspec import asyn
 from google.api_core.client_info import ClientInfo
+from google.api_core import gapic_v1
 from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
+from google.api_core import exceptions as api_exceptions
 
 from . import zb_hns_utils
 from . import __version__ as version
 from .core import GCSFile, GCSFileSystem
 from .zonal_file import ZonalFile
+from google.cloud import storage_control_v2
 
 logger = logging.getLogger("gcsfs")
 
+USER_AGENT="python-gcsfs"
 
 class BucketType(Enum):
     ZONAL_HIERARCHICAL = "ZONAL_HIERARCHICAL"
@@ -39,34 +43,51 @@ class GCSFileSystemAdapter(GCSFileSystem):
         kwargs.pop("experimental_zb_hns_support", None)
         super().__init__(*args, **kwargs)
         self.grpc_client = None
-        # grpc client initialization is not a resource blocking operation hence
-        # initializing the client in early to reduce code duplication for initialization in
-        # multiple methods
+        self.storage_control_client = None
+        # initializing grpc and storage control client for Hierarchical and
+        # zonal bucket operations
         self.grpc_client = asyn.sync(self.loop, self._create_grpc_client)
+        self._storage_control_client = asyn.sync(self.loop, self._create_control_plane_client)
         self._storage_layout_cache = {}
 
     async def _create_grpc_client(self):
         if self.grpc_client is None:
             return AsyncGrpcClient(
-                client_info=ClientInfo(user_agent=f"python-gcsfs/{version}")
+                client_info=ClientInfo(user_agent=f"{USER_AGENT}/{version}"),
             ).grpc_client
         else:
             return self.grpc_client
+
+    async def _create_control_plane_client(self):
+        # Initialize the storage control plane client for bucket
+        # metadata operations
+        client_info = gapic_v1.client_info.ClientInfo(user_agent=f"{USER_AGENT}/{version}")
+        return storage_control_v2.StorageControlAsyncClient(
+            credentials=self.credentials.credentials,
+            client_info=client_info
+        )
 
     async def _get_storage_layout(self, bucket):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
         try:
-            response = await self._call(
-                "GET", f"b/{bucket}/storageLayout", json_out=True
-            )
-            if response.get("locationType") == "zone":
+
+            # Bucket name details
+            bucket_name_value=f"projects/_/buckets/{bucket}/storageLayout"
+            # Make the request to get bucket type
+            response = await self._storage_control_client.get_storage_layout(name=bucket_name_value)
+
+            if response.location_type == "zone":
                 self._storage_layout_cache[bucket] = BucketType.ZONAL_HIERARCHICAL
             else:
                 # This should be updated to include HNS in the future
                 self._storage_layout_cache[bucket] = BucketType.NON_HIERARCHICAL
+        except api_exceptions.NotFound:
+            print(
+                f"Error: Bucket {bucket} not found or you lack permissions.")
+            return None
         except Exception as e:
-            logger.error(f"Could not determine storage layout for bucket {bucket}: {e}")
+            logger.error(f"Could not determine bucket type for bucket name {bucket}: {e}")
             # Default to UNKNOWN
             self._storage_layout_cache[bucket] = BucketType.UNKNOWN
         return self._storage_layout_cache[bucket]
