@@ -2,20 +2,22 @@ import logging
 from enum import Enum
 
 from fsspec import asyn
-from google.api_core.client_info import ClientInfo
-from google.api_core import gapic_v1
-from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 from google.api_core import exceptions as api_exceptions
+from google.api_core import gapic_v1
+from google.api_core.client_info import ClientInfo
+from google.cloud import storage_control_v2
+from google.cloud.storage._experimental.asyncio.async_grpc_client import \
+    AsyncGrpcClient
 
-from . import zb_hns_utils
 from . import __version__ as version
+from . import zb_hns_utils
 from .core import GCSFile, GCSFileSystem
 from .zonal_file import ZonalFile
-from google.cloud import storage_control_v2
 
 logger = logging.getLogger("gcsfs")
 
-USER_AGENT="python-gcsfs"
+USER_AGENT = "python-gcsfs"
+
 
 class BucketType(Enum):
     ZONAL_HIERARCHICAL = "ZONAL_HIERARCHICAL"
@@ -47,7 +49,9 @@ class GCSFileSystemAdapter(GCSFileSystem):
         # initializing grpc and storage control client for Hierarchical and
         # zonal bucket operations
         self.grpc_client = asyn.sync(self.loop, self._create_grpc_client)
-        self._storage_control_client = asyn.sync(self.loop, self._create_control_plane_client)
+        self._storage_control_client = asyn.sync(
+            self.loop, self._create_control_plane_client
+        )
         self._storage_layout_cache = {}
 
     async def _create_grpc_client(self):
@@ -61,10 +65,11 @@ class GCSFileSystemAdapter(GCSFileSystem):
     async def _create_control_plane_client(self):
         # Initialize the storage control plane client for bucket
         # metadata operations
-        client_info = gapic_v1.client_info.ClientInfo(user_agent=f"{USER_AGENT}/{version}")
+        client_info = gapic_v1.client_info.ClientInfo(
+            user_agent=f"{USER_AGENT}/{version}"
+        )
         return storage_control_v2.StorageControlAsyncClient(
-            credentials=self.credentials.credentials,
-            client_info=client_info
+            credentials=self.credentials.credentials, client_info=client_info
         )
 
     async def _get_storage_layout(self, bucket):
@@ -73,9 +78,11 @@ class GCSFileSystemAdapter(GCSFileSystem):
         try:
 
             # Bucket name details
-            bucket_name_value=f"projects/_/buckets/{bucket}/storageLayout"
+            bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
             # Make the request to get bucket type
-            response = await self._storage_control_client.get_storage_layout(name=bucket_name_value)
+            response = await self._storage_control_client.get_storage_layout(
+                name=bucket_name_value
+            )
 
             if response.location_type == "zone":
                 self._storage_layout_cache[bucket] = BucketType.ZONAL_HIERARCHICAL
@@ -83,11 +90,12 @@ class GCSFileSystemAdapter(GCSFileSystem):
                 # This should be updated to include HNS in the future
                 self._storage_layout_cache[bucket] = BucketType.NON_HIERARCHICAL
         except api_exceptions.NotFound:
-            print(
-                f"Error: Bucket {bucket} not found or you lack permissions.")
+            print(f"Error: Bucket {bucket} not found or you lack permissions.")
             return None
         except Exception as e:
-            logger.error(f"Could not determine bucket type for bucket name {bucket}: {e}")
+            logger.error(
+                f"Could not determine bucket type for bucket name {bucket}: {e}"
+            )
             # Default to UNKNOWN
             self._storage_layout_cache[bucket] = BucketType.UNKNOWN
         return self._storage_layout_cache[bucket]

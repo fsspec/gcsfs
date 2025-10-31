@@ -3,12 +3,11 @@ import io
 import os
 from itertools import chain
 from unittest import mock
-from google.cloud.storage.exceptions import DataCorruption
 
 import pytest
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
-    AsyncMultiRangeDownloader,
-)
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import \
+    AsyncMultiRangeDownloader
+from google.cloud.storage.exceptions import DataCorruption
 
 from gcsfs.gcsfs_adapter import BucketType
 from gcsfs.tests.conftest import a, b, c, csv_files, files, text_files
@@ -158,7 +157,7 @@ def test_readline_from_cache_zb(gcs_adapter, zonal_mocks):
     data = b"a,b\n11,22\n3,4"
     if not gcs_adapter.on_google:
         with gcs_adapter.open(a, "wb") as f:
-            f.write(data)    
+            f.write(data)
     with zonal_mocks(data) as mocks:
         with gcs_adapter.open(a, "rb") as f:
             result = f.readline()
@@ -181,7 +180,7 @@ def test_readline_empty_zb(gcs_adapter, zonal_mocks):
     data = b""
     if not gcs_adapter.on_google:
         with gcs_adapter.open(b, "wb") as f:
-            f.write(data)    
+            f.write(data)
     with zonal_mocks(data) as mocks:
         with gcs_adapter.open(b, "rb") as f:
             result = f.readline()
@@ -192,7 +191,7 @@ def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
     data = b"ab\n" + b"a" * (2**18) + b"\nab"
     if not gcs_adapter.on_google:
         with gcs_adapter.open(c, "wb") as f:
-            f.write(data)    
+            f.write(data)
     with zonal_mocks(data) as mocks:
         with gcs_adapter.open(c, "rb", block_size=2**18) as f:
             result = f.readline()
