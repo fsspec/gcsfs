@@ -13,6 +13,7 @@ import re
 import warnings
 import weakref
 from datetime import datetime, timedelta
+from enum import Enum
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
@@ -282,6 +283,20 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     protocol = "gs", "gcs"
     async_impl = True
 
+    def __new__(cls, *args, **kwargs):
+        """
+        Factory to return a GCSFileSystemAdapter instance if the experimental
+        flag is enabled.
+        """
+        experimental_support = kwargs.pop("experimental_zb_hns_support", False)
+
+        if experimental_support:
+            from .gcsfs_adapter import GCSFileSystemAdapter
+
+            return object.__new__(GCSFileSystemAdapter)
+        else:
+            return object.__new__(cls)
+
     def __init__(
         self,
         project=DEFAULT_PROJECT,
@@ -301,6 +316,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
+        experimental_zb_hns_support=False,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -327,6 +343,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
+        self.experimental_zb_hns_support = experimental_zb_hns_support
 
         if check_connection:
             warnings.warn(

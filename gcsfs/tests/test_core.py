@@ -18,6 +18,7 @@ import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
+from gcsfs.gcsfs_adapter import GCSFileSystemAdapter
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
 
@@ -1731,3 +1732,22 @@ def test_near_find(gcs):
 def test_get_error(gcs):
     with pytest.raises(FileNotFoundError):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
+
+
+def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_passed(gcs_factory):
+    gcs = gcs_factory()
+
+    assert isinstance(
+        gcs, gcsfs.GCSFileSystem
+    ), "Expected File system instance to be GCSFileSystem"
+    assert not isinstance(
+        gcs, GCSFileSystemAdapter
+    ), "Expected File system instance to be GCSFileSystem"
+
+
+def test_gcs_filesystem_adapter_when_experimental_zonal_toggle_is_true(gcs_factory):
+    gcs = gcs_factory(experimental_zb_hns_support=True)
+
+    assert isinstance(
+        gcs, GCSFileSystemAdapter
+    ), "Expected File system instance to be GCSFileSystemAdapter"
