@@ -54,3 +54,8 @@ Furthermore:
    - permissions on GCS are complicated, so all files will be shown as fully-open
      0o777, regardless of state. If a read fails, you likely don't have the right
      permissions.
+
+.. raw:: html
+
+    <script data-goatcounter="https://gcsfs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>

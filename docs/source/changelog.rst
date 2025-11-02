@@ -4,6 +4,14 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2025.10.0
+---------
+
+* fix info() performance regression (#705)
+* add CoC (#703)
+* mkdir should not create bucket by default (#701)
+* add anonymous tracker to docs (#700)
+
 2025.9.0
 --------
 
@@ -361,3 +369,8 @@ Version 0.4.0
 * Added contributing instructions (:pr:`185`)
 * Improved performance for :meth:`gcsfs.GCSFileSystem.info` (:pr:`187`)
 * Fixed bug in :meth:`gcsfs.GCSFileSystem.info` raising an error (:pr:`190`)
+
+.. raw:: html
+
+    <script data-goatcounter="https://gcsfs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
