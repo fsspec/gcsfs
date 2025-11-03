@@ -2,6 +2,7 @@ import os
 import shlex
 import subprocess
 import time
+from unittest.mock import patch
 
 import fsspec
 import pytest
@@ -126,11 +127,12 @@ def gcs(gcs_factory, populate=True):
 
 @pytest.fixture
 def gcs_adapter(gcs_factory, populate=True):
-    gcs_adapter = gcs_factory(experimental_zb_hns_support=True)
-    # Check if we are running against a real GCS endpoint
-    is_real_gcs = (
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-    )
+    with patch("google.auth.default", return_value=(None, "fake-project")):
+        gcs_adapter = gcs_factory(experimental_zb_hns_support=True)
+        # Check if we are running against a real GCS endpoint
+        is_real_gcs = (
+            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+        )
     try:
         # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint
         if not is_real_gcs:
