@@ -6,8 +6,7 @@ from google.api_core import exceptions as api_exceptions
 from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
 from google.cloud import storage_control_v2
-from google.cloud.storage._experimental.asyncio.async_grpc_client import \
-    AsyncGrpcClient
+from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 
 from . import __version__ as version
 from . import zb_hns_utils

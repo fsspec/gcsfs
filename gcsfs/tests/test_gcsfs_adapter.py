@@ -5,8 +5,9 @@ from itertools import chain
 from unittest import mock
 
 import pytest
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import \
-    AsyncMultiRangeDownloader
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
+    AsyncMultiRangeDownloader,
+)
 from google.cloud.storage.exceptions import DataCorruption
 
 from gcsfs.gcsfs_adapter import BucketType
