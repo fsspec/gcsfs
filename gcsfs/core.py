@@ -13,7 +13,6 @@ import re
 import warnings
 import weakref
 from datetime import datetime, timedelta
-from enum import Enum
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
