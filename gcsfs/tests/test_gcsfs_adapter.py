@@ -147,10 +147,11 @@ def test_readline_zb(gcs_adapter, zonal_mocks):
         [files.items(), csv_files.items(), text_files.items()]
     )
     for k, data in all_items:
-        with gcs_adapter.open("/".join([TEST_BUCKET, k]), "rb") as f:
-            result = f.readline()
-            expected = data.split(b"\n")[0] + (b"\n" if data.count(b"\n") else b"")
-        assert result == expected
+        with zonal_mocks(data):
+            with gcs_adapter.open("/".join([TEST_BUCKET, k]), "rb") as f:
+                result = f.readline()
+                expected = data.split(b"\n")[0] + (b"\n" if data.count(b"\n") else b"")
+            assert result == expected
 
 
 def test_readline_from_cache_zb(gcs_adapter, zonal_mocks):
@@ -158,21 +159,22 @@ def test_readline_from_cache_zb(gcs_adapter, zonal_mocks):
     if not gcs_adapter.on_google:
         with gcs_adapter.open(a, "wb") as f:
             f.write(data)
-    with gcs_adapter.open(a, "rb") as f:
-        result = f.readline()
-        assert result == b"a,b\n"
-        assert f.loc == 4
-        assert f.cache.cache == data
+    with zonal_mocks(data):
+        with gcs_adapter.open(a, "rb") as f:
+            result = f.readline()
+            assert result == b"a,b\n"
+            assert f.loc == 4
+            assert f.cache.cache == data
 
-        result = f.readline()
-        assert result == b"11,22\n"
-        assert f.loc == 10
-        assert f.cache.cache == data
+            result = f.readline()
+            assert result == b"11,22\n"
+            assert f.loc == 10
+            assert f.cache.cache == data
 
-        result = f.readline()
-        assert result == b"3,4"
-        assert f.loc == 13
-        assert f.cache.cache == data
+            result = f.readline()
+            assert result == b"3,4"
+            assert f.loc == 13
+            assert f.cache.cache == data
 
 
 def test_readline_empty_zb(gcs_adapter, zonal_mocks):
@@ -180,9 +182,10 @@ def test_readline_empty_zb(gcs_adapter, zonal_mocks):
     if not gcs_adapter.on_google:
         with gcs_adapter.open(b, "wb") as f:
             f.write(data)
-    with gcs_adapter.open(b, "rb") as f:
-        result = f.readline()
-        assert result == data
+    with zonal_mocks(data):
+        with gcs_adapter.open(b, "rb") as f:
+            result = f.readline()
+            assert result == data
 
 
 def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
@@ -190,18 +193,19 @@ def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
     if not gcs_adapter.on_google:
         with gcs_adapter.open(c, "wb") as f:
             f.write(data)
-    with gcs_adapter.open(c, "rb", block_size=2**18) as f:
-        result = f.readline()
-        expected = b"ab\n"
-        assert result == expected
+    with zonal_mocks(data):
+        with gcs_adapter.open(c, "rb", block_size=2**18) as f:
+            result = f.readline()
+            expected = b"ab\n"
+            assert result == expected
 
-        result = f.readline()
-        expected = b"a" * (2**18) + b"\n"
-        assert result == expected
+            result = f.readline()
+            expected = b"a" * (2**18) + b"\n"
+            assert result == expected
 
-        result = f.readline()
-        expected = b"ab"
-        assert result == expected
+            result = f.readline()
+            expected = b"ab"
+            assert result == expected
 
 
 @pytest.mark.parametrize(
@@ -264,3 +268,22 @@ def test_mrd_exception_handling(gcs_adapter, zonal_mocks, exception_to_raise):
             gcs_adapter.read_block(file_path, 0, 10)
 
         mocks["downloader"].download_ranges.assert_called_once()
+
+
+def test_mrd_stream_cleanup(gcs_adapter, zonal_mocks):
+    """
+    Tests that mrd stream is properly closed with file closure.
+    """
+    with zonal_mocks(json_data) as mocks:
+        if not gcs_adapter.on_google:
+
+            def close_side_effect():
+                mocks["downloader"].is_stream_open = False
+
+            mocks["downloader"].close.side_effect = close_side_effect
+
+        with gcs_adapter.open(file_path, "rb") as f:
+            assert f.mrd is not None
+
+        assert True is f.closed
+        assert False is f.mrd.is_stream_open

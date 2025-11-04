@@ -38,4 +38,17 @@ class ZonalFile(GCSFile):
         Overrides the default _fetch_range to implement the gRPC read path.
 
         """
-        return self.gcsfs.cat_file(self.path, start=start, end=end, mrd=self.mrd)
+        try:
+            return self.gcsfs.cat_file(self.path, start=start, end=end, mrd=self.mrd)
+        except RuntimeError as e:
+            if "not satisfiable" in str(e):
+                return b""
+            raise
+
+    def close(self):
+        """
+        Closes the ZonalFile and the underlying AsyncMultiRangeDownloader.
+        """
+        if self.mrd:
+            asyn.sync(self.gcsfs.loop, self.mrd.close)
+        super().close()

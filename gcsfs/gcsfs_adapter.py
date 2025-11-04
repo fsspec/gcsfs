@@ -200,6 +200,7 @@ class GCSFileSystemAdapter(GCSFileSystem):
         Fetch a file's contents as bytes.
         """
         mrd = kwargs.pop("mrd", None)
+        mrd_created = False
 
         # A new MRD is required when read is done directly by the
         # GCSFilesystem class without creating a GCSFile object first.
@@ -212,8 +213,16 @@ class GCSFileSystemAdapter(GCSFileSystem):
             mrd = await zb_hns_utils.create_mrd(
                 self.grpc_client, bucket, object_name, generation
             )
+            mrd_created = True
 
         offset, length = await self._process_limits_to_offset_and_length(
             path, start, end
         )
-        return await zb_hns_utils.download_range(offset=offset, length=length, mrd=mrd)
+        try:
+            return await zb_hns_utils.download_range(
+                offset=offset, length=length, mrd=mrd
+            )
+        finally:
+            # Explicit cleanup if we created the MRD and it has a close method
+            if mrd_created:
+                await mrd.close()

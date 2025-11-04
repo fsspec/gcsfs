@@ -2,6 +2,7 @@ import os
 import shlex
 import subprocess
 import time
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import fsspec
@@ -127,37 +128,44 @@ def gcs(gcs_factory, populate=True):
 
 @pytest.fixture
 def gcs_adapter(gcs_factory, populate=True):
-    with patch("google.auth.default", return_value=(None, "fake-project")):
+    # Check if we are running against a real GCS endpoint
+    is_real_gcs = (
+        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+    )
+
+    patch_manager = (
+        patch("google.auth.default", return_value=(None, "fake-project"))
+        if not is_real_gcs
+        else nullcontext()
+    )
+
+    with patch_manager:
         gcs_adapter = gcs_factory(experimental_zb_hns_support=True)
-        # Check if we are running against a real GCS endpoint
-        is_real_gcs = (
-            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-        )
-    try:
-        # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint
-        if not is_real_gcs:
+        try:
+            # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint
+            if not is_real_gcs:
+                try:
+                    gcs_adapter.rm(TEST_BUCKET, recursive=True)
+                except FileNotFoundError:
+                    pass
+                try:
+                    gcs_adapter.mkdir(TEST_BUCKET)
+                except Exception:
+                    pass
+                if populate:
+                    gcs_adapter.pipe(
+                        {TEST_BUCKET + "/" + k: v for k, v in allfiles.items()}
+                    )
+            gcs_adapter.invalidate_cache()
+            yield gcs_adapter
+        finally:
             try:
-                gcs_adapter.rm(TEST_BUCKET, recursive=True)
-            except FileNotFoundError:
-                pass
-            try:
-                gcs_adapter.mkdir(TEST_BUCKET)
+                # Only remove the bucket/contents if we are NOT using the real GCS
+                if not is_real_gcs:
+                    gcs_adapter.rm(gcs_adapter.find(TEST_BUCKET), recursive=True)
+                    gcs_adapter.rm(TEST_BUCKET)
             except Exception:
                 pass
-            if populate:
-                gcs_adapter.pipe(
-                    {TEST_BUCKET + "/" + k: v for k, v in allfiles.items()}
-                )
-        gcs_adapter.invalidate_cache()
-        yield gcs_adapter
-    finally:
-        try:
-            # Only remove the bucket/contents if we are NOT using the real GCS
-            if not is_real_gcs:
-                gcs_adapter.rm(gcs_adapter.find(TEST_BUCKET), recursive=True)
-                gcs_adapter.rm(TEST_BUCKET)
-        except Exception:
-            pass
 
 
 @pytest.fixture
