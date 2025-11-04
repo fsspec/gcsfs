@@ -35,10 +35,10 @@ def zonal_mocks():
             yield None
             return
         patch_target_get_layout = (
-            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._get_storage_layout"
+            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._get_bucket_type"
         )
         patch_target_sync_layout = (
-            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._sync_get_storage_layout"
+            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._sync_get_bucket_type"
         )
         patch_target_create_mrd = "gcsfs.gcsfs_adapter.zb_hns_utils.create_mrd"
         patch_target_gcsfs_cat_file = "gcsfs.core.GCSFileSystem._cat_file"
