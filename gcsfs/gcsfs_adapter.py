@@ -71,7 +71,7 @@ class GCSFileSystemAdapter(GCSFileSystem):
             credentials=self.credentials.credentials, client_info=client_info
         )
 
-    async def _get_storage_layout(self, bucket):
+    async def _get_bucket_type(self, bucket):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
         try:
@@ -84,22 +84,21 @@ class GCSFileSystemAdapter(GCSFileSystem):
             )
 
             if response.location_type == "zone":
-                self._storage_layout_cache[bucket] = BucketType.ZONAL_HIERARCHICAL
+                return BucketType.ZONAL_HIERARCHICAL
             else:
                 # This should be updated to include HNS in the future
-                self._storage_layout_cache[bucket] = BucketType.NON_HIERARCHICAL
+                return BucketType.NON_HIERARCHICAL
         except api_exceptions.NotFound:
             print(f"Error: Bucket {bucket} not found or you lack permissions.")
-            return None
+            return BucketType.UNKNOWN
         except Exception as e:
             logger.error(
                 f"Could not determine bucket type for bucket name {bucket}: {e}"
             )
             # Default to UNKNOWN
-            self._storage_layout_cache[bucket] = BucketType.UNKNOWN
-        return self._storage_layout_cache[bucket]
+            return BucketType.UNKNOWN
 
-    _sync_get_storage_layout = asyn.sync_wrapper(_get_storage_layout)
+    _sync_get_bucket_type = asyn.sync_wrapper(_get_bucket_type)
 
     def _open(
         self,
@@ -119,7 +118,8 @@ class GCSFileSystemAdapter(GCSFileSystem):
         Open a file.
         """
         bucket, _, _ = self.split_path(path)
-        bucket_type = self._sync_get_storage_layout(bucket)
+        bucket_type = self._sync_get_bucket_type(bucket)
+        self._storage_layout_cache[bucket] = bucket_type
         return gcs_file_types[bucket_type](
             self,
             path,
@@ -191,8 +191,9 @@ class GCSFileSystemAdapter(GCSFileSystem):
     )
 
     async def _is_zonal_bucket(self, bucket):
-        layout = await self._get_storage_layout(bucket)
-        return layout == BucketType.ZONAL_HIERARCHICAL
+        bucket_type = await self._get_bucket_type(bucket)
+        self._storage_layout_cache[bucket] = bucket_type
+        return bucket_type == BucketType.ZONAL_HIERARCHICAL
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         """
