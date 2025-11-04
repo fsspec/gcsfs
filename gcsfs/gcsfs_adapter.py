@@ -199,7 +199,7 @@ class GCSFileSystemAdapter(GCSFileSystem):
         Fetch a file's contents as bytes.
         """
         mrd = kwargs.pop("mrd", None)
-        mrd_created = False 
+        mrd_created = False
 
         # A new MRD is required when read is done directly by the
         # GCSFilesystem class without creating a GCSFile object first.
@@ -218,7 +218,9 @@ class GCSFileSystemAdapter(GCSFileSystem):
             path, start, end
         )
         try:
-            return await zb_hns_utils.download_range(offset=offset, length=length, mrd=mrd)
+            return await zb_hns_utils.download_range(
+                offset=offset, length=length, mrd=mrd
+            )
         finally:
             # Explicit cleanup if we created the MRD and it has a close method
             if mrd_created:
