@@ -1735,7 +1735,7 @@ def test_get_error(gcs):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
 
 
-def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_passed(gcs_factory):
+def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_present(gcs_factory):
     gcs = gcs_factory()
 
     assert isinstance(
@@ -1747,9 +1747,13 @@ def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_passed(gcs_factory
 
 
 def test_gcs_filesystem_adapter_when_experimental_zonal_toggle_is_true(gcs_factory):
-    with patch("google.auth.default", return_value=(None, "fake-project")):
-        gcs = gcs_factory(experimental_zb_hns_support=True)
+    try:
+        with patch("google.auth.default", return_value=(None, "fake-project")):
+            os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
+            gcs = gcs_factory()
 
-        assert isinstance(
-            gcs, GCSFileSystemAdapter
-        ), "Expected File system instance to be GCSFileSystemAdapter"
+            assert isinstance(
+                gcs, GCSFileSystemAdapter
+            ), "Expected File system instance to be GCSFileSystemAdapter"
+    finally:
+        del os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]

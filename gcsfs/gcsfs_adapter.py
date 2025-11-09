@@ -41,7 +41,6 @@ class GCSFileSystemAdapter(GCSFileSystem):
     """
 
     def __init__(self, *args, **kwargs):
-        kwargs.pop("experimental_zb_hns_support", None)
         super().__init__(*args, **kwargs)
         self.grpc_client = None
         self.storage_control_client = None

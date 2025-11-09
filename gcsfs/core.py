@@ -287,9 +287,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         Factory to return a GCSFileSystemAdapter instance if the experimental
         flag is enabled.
         """
-        experimental_support = kwargs.pop("experimental_zb_hns_support", False)
+        experimental_multi_bucket_support = os.environ.get(
+            "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false"
+        ).lower() in ("true", "1")
 
-        if experimental_support:
+        if experimental_multi_bucket_support:
             from .gcsfs_adapter import GCSFileSystemAdapter
 
             return object.__new__(GCSFileSystemAdapter)
@@ -315,7 +317,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
-        experimental_zb_hns_support=False,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -342,7 +343,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
-        self.experimental_zb_hns_support = experimental_zb_hns_support
 
         if check_connection:
             warnings.warn(

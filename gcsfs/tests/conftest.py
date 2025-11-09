@@ -140,7 +140,8 @@ def gcs_adapter(gcs_factory, populate=True):
     )
 
     with patch_manager:
-        gcs_adapter = gcs_factory(experimental_zb_hns_support=True)
+        os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
+        gcs_adapter = gcs_factory()
         try:
             # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint
             if not is_real_gcs:
@@ -159,6 +160,7 @@ def gcs_adapter(gcs_factory, populate=True):
             gcs_adapter.invalidate_cache()
             yield gcs_adapter
         finally:
+            del os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]
             try:
                 # Only remove the bucket/contents if we are NOT using the real GCS
                 if not is_real_gcs:
