@@ -11,7 +11,6 @@ import pytest
 from gcsfs.tests.settings import TEST_BUCKET
 
 
-@pytest.mark.timeout(180)
 @pytest.fixture
 def fsspec_fuse_run():
     """Fixture catches other errors on fuse import."""
