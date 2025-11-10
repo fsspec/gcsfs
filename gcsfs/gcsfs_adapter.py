@@ -8,10 +8,10 @@ from google.api_core.client_info import ClientInfo
 from google.cloud import storage_control_v2
 from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 
-from . import __version__ as version
-from . import zb_hns_utils
-from .core import GCSFile, GCSFileSystem
-from .zonal_file import ZonalFile
+from gcsfs import __version__ as version
+from gcsfs import zb_hns_utils
+from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
 
