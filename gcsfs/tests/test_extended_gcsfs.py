@@ -10,7 +10,7 @@ from google.cloud.storage._experimental.asyncio.async_multi_range_downloader imp
 )
 from google.cloud.storage.exceptions import DataCorruption
 
-from gcsfs.gcsfs_adapter import BucketType
+from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.conftest import a, b, c, csv_files, files, text_files
 from gcsfs.tests.settings import TEST_BUCKET
 
@@ -35,12 +35,12 @@ def zonal_mocks():
             yield None
             return
         patch_target_get_layout = (
-            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._get_bucket_type"
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type"
         )
         patch_target_sync_layout = (
-            "gcsfs.gcsfs_adapter.GCSFileSystemAdapter._sync_get_bucket_type"
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_get_bucket_type"
         )
-        patch_target_create_mrd = "gcsfs.gcsfs_adapter.zb_hns_utils.create_mrd"
+        patch_target_create_mrd = "gcsfs.extended_gcsfs.zb_hns_utils.create_mrd"
         patch_target_gcsfs_cat_file = "gcsfs.core.GCSFileSystem._cat_file"
 
         async def download_side_effect(read_requests, **kwargs):
@@ -100,14 +100,14 @@ read_block_params = [
 ]
 
 
-def test_read_block_zb(gcs_adapter, zonal_mocks, subtests):
+def test_read_block_zb(extended_gcsfs, zonal_mocks, subtests):
     for param in read_block_params:
         with subtests.test(id=param.id):
             offset, length, delimiter, expected_data = param.values
             path = file_path
 
             with zonal_mocks(json_data) as mocks:
-                result = gcs_adapter.read_block(path, offset, length, delimiter)
+                result = extended_gcsfs.read_block(path, offset, length, delimiter)
 
                 assert result == expected_data
                 if mocks:
@@ -120,13 +120,13 @@ def test_read_block_zb(gcs_adapter, zonal_mocks, subtests):
                         mocks["downloader"].download_ranges.assert_not_called()
 
 
-def test_read_small_zb(gcs_adapter, zonal_mocks):
+def test_read_small_zb(extended_gcsfs, zonal_mocks):
     csv_file = "2014-01-01.csv"
     csv_file_path = f"{TEST_BUCKET}/{csv_file}"
     csv_data = csv_files[csv_file]
 
     with zonal_mocks(csv_data) as mocks:
-        with gcs_adapter.open(csv_file_path, "rb", block_size=10) as f:
+        with extended_gcsfs.open(csv_file_path, "rb", block_size=10) as f:
             out = []
             i = 1
             while True:
@@ -135,32 +135,32 @@ def test_read_small_zb(gcs_adapter, zonal_mocks):
                 if data == b"":
                     break
                 out.append(data)
-            assert gcs_adapter.cat(csv_file_path) == b"".join(out)
+            assert extended_gcsfs.cat(csv_file_path) == b"".join(out)
             # cache drop
             assert len(f.cache.cache) < len(out)
             if mocks:
                 mocks["sync_layout"].assert_called_once_with(TEST_BUCKET)
 
 
-def test_readline_zb(gcs_adapter, zonal_mocks):
+def test_readline_zb(extended_gcsfs, zonal_mocks):
     all_items = chain.from_iterable(
         [files.items(), csv_files.items(), text_files.items()]
     )
     for k, data in all_items:
         with zonal_mocks(data):
-            with gcs_adapter.open("/".join([TEST_BUCKET, k]), "rb") as f:
+            with extended_gcsfs.open("/".join([TEST_BUCKET, k]), "rb") as f:
                 result = f.readline()
                 expected = data.split(b"\n")[0] + (b"\n" if data.count(b"\n") else b"")
             assert result == expected
 
 
-def test_readline_from_cache_zb(gcs_adapter, zonal_mocks):
+def test_readline_from_cache_zb(extended_gcsfs, zonal_mocks):
     data = b"a,b\n11,22\n3,4"
-    if not gcs_adapter.on_google:
-        with gcs_adapter.open(a, "wb") as f:
+    if not extended_gcsfs.on_google:
+        with extended_gcsfs.open(a, "wb") as f:
             f.write(data)
     with zonal_mocks(data):
-        with gcs_adapter.open(a, "rb") as f:
+        with extended_gcsfs.open(a, "rb") as f:
             result = f.readline()
             assert result == b"a,b\n"
             assert f.loc == 4
@@ -177,24 +177,24 @@ def test_readline_from_cache_zb(gcs_adapter, zonal_mocks):
             assert f.cache.cache == data
 
 
-def test_readline_empty_zb(gcs_adapter, zonal_mocks):
+def test_readline_empty_zb(extended_gcsfs, zonal_mocks):
     data = b""
-    if not gcs_adapter.on_google:
-        with gcs_adapter.open(b, "wb") as f:
+    if not extended_gcsfs.on_google:
+        with extended_gcsfs.open(b, "wb") as f:
             f.write(data)
     with zonal_mocks(data):
-        with gcs_adapter.open(b, "rb") as f:
+        with extended_gcsfs.open(b, "rb") as f:
             result = f.readline()
             assert result == data
 
 
-def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
+def test_readline_blocksize_zb(extended_gcsfs, zonal_mocks):
     data = b"ab\n" + b"a" * (2**18) + b"\nab"
-    if not gcs_adapter.on_google:
-        with gcs_adapter.open(c, "wb") as f:
+    if not extended_gcsfs.on_google:
+        with extended_gcsfs.open(c, "wb") as f:
             f.write(data)
     with zonal_mocks(data):
-        with gcs_adapter.open(c, "rb", block_size=2**18) as f:
+        with extended_gcsfs.open(c, "rb", block_size=2**18) as f:
             result = f.readline()
             expected = b"ab\n"
             assert result == expected
@@ -228,13 +228,15 @@ def test_readline_blocksize_zb(gcs_adapter, zonal_mocks):
     ],
 )
 def test_process_limits_parametrized(
-    gcs_adapter, start, end, exp_offset, exp_length, exp_exc
+    extended_gcsfs, start, end, exp_offset, exp_length, exp_exc
 ):
     if exp_exc is not None:
         with pytest.raises(exp_exc):
-            gcs_adapter.sync_process_limits_to_offset_and_length(file_path, start, end)
+            extended_gcsfs.sync_process_limits_to_offset_and_length(
+                file_path, start, end
+            )
     else:
-        offset, length = gcs_adapter.sync_process_limits_to_offset_and_length(
+        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
             file_path, start, end
         )
         assert offset == exp_offset
@@ -245,12 +247,12 @@ def test_process_limits_parametrized(
     "exception_to_raise",
     [ValueError, DataCorruption, Exception],
 )
-def test_mrd_exception_handling(gcs_adapter, zonal_mocks, exception_to_raise):
+def test_mrd_exception_handling(extended_gcsfs, zonal_mocks, exception_to_raise):
     """
     Tests that _cat_file correctly propagates exceptions from mrd.download_ranges.
     """
     with zonal_mocks(json_data) as mocks:
-        if gcs_adapter.on_google:
+        if extended_gcsfs.on_google:
             pytest.skip("Cannot mock exceptions on real GCS")
 
         # Configure the mock to raise a specified exception
@@ -265,24 +267,24 @@ def test_mrd_exception_handling(gcs_adapter, zonal_mocks, exception_to_raise):
             )
 
         with pytest.raises(exception_to_raise, match="Test exception raised"):
-            gcs_adapter.read_block(file_path, 0, 10)
+            extended_gcsfs.read_block(file_path, 0, 10)
 
         mocks["downloader"].download_ranges.assert_called_once()
 
 
-def test_mrd_stream_cleanup(gcs_adapter, zonal_mocks):
+def test_mrd_stream_cleanup(extended_gcsfs, zonal_mocks):
     """
     Tests that mrd stream is properly closed with file closure.
     """
     with zonal_mocks(json_data) as mocks:
-        if not gcs_adapter.on_google:
+        if not extended_gcsfs.on_google:
 
             def close_side_effect():
                 mocks["downloader"].is_stream_open = False
 
             mocks["downloader"].close.side_effect = close_side_effect
 
-        with gcs_adapter.open(file_path, "rb") as f:
+        with extended_gcsfs.open(file_path, "rb") as f:
             assert f.mrd is not None
 
         assert True is f.closed

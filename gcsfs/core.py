@@ -284,15 +284,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     def __new__(cls, *args, **kwargs):
         """
-        Factory to return a GCSFileSystemAdapter instance if the experimental
+        Factory to return a ExtendedGcsFileSystem instance if the experimental
         flag is enabled.
         """
         experimental_support = kwargs.pop("experimental_zb_hns_support", False)
 
         if experimental_support:
-            from .gcsfs_adapter import GCSFileSystemAdapter
+            from .extended_gcsfs import ExtendedGcsFileSystem
 
-            return object.__new__(GCSFileSystemAdapter)
+            return object.__new__(ExtendedGcsFileSystem)
         else:
             return object.__new__(cls)
 

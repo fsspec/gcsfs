@@ -33,10 +33,10 @@ gcs_file_types = {
 }
 
 
-class GCSFileSystemAdapter(GCSFileSystem):
+class ExtendedGcsFileSystem(GCSFileSystem):
     """
     This class will be used when experimental_zb_hns_support is set to true for all bucket types.
-    GCSFileSystemAdapter is a subclass of GCSFileSystem that adds specialized
+    ExtendedGcsFileSystem is a subclass of GCSFileSystem that adds specialized
     logic to support Zonal and Hierarchical buckets.
     """
 
