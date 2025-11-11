@@ -157,8 +157,11 @@ def test_readline_zb(extended_gcsfs, zonal_mocks):
 def test_readline_from_cache_zb(extended_gcsfs, zonal_mocks):
     data = b"a,b\n11,22\n3,4"
     if not extended_gcsfs.on_google:
-        with extended_gcsfs.open(a, "wb") as f:
-            f.write(data)
+        with mock.patch.object(
+            extended_gcsfs, "_sync_get_bucket_type", return_value=BucketType.UNKNOWN
+        ):
+            with extended_gcsfs.open(a, "wb") as f:
+                f.write(data)
     with zonal_mocks(data):
         with extended_gcsfs.open(a, "rb") as f:
             result = f.readline()
@@ -180,8 +183,11 @@ def test_readline_from_cache_zb(extended_gcsfs, zonal_mocks):
 def test_readline_empty_zb(extended_gcsfs, zonal_mocks):
     data = b""
     if not extended_gcsfs.on_google:
-        with extended_gcsfs.open(b, "wb") as f:
-            f.write(data)
+        with mock.patch.object(
+            extended_gcsfs, "_sync_get_bucket_type", return_value=BucketType.UNKNOWN
+        ):
+            with extended_gcsfs.open(b, "wb") as f:
+                f.write(data)
     with zonal_mocks(data):
         with extended_gcsfs.open(b, "rb") as f:
             result = f.readline()
@@ -191,8 +197,11 @@ def test_readline_empty_zb(extended_gcsfs, zonal_mocks):
 def test_readline_blocksize_zb(extended_gcsfs, zonal_mocks):
     data = b"ab\n" + b"a" * (2**18) + b"\nab"
     if not extended_gcsfs.on_google:
-        with extended_gcsfs.open(c, "wb") as f:
-            f.write(data)
+        with mock.patch.object(
+            extended_gcsfs, "_sync_get_bucket_type", return_value=BucketType.UNKNOWN
+        ):
+            with extended_gcsfs.open(c, "wb") as f:
+                f.write(data)
     with zonal_mocks(data):
         with extended_gcsfs.open(c, "rb", block_size=2**18) as f:
             result = f.readline()
