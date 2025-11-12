@@ -284,7 +284,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     def __new__(cls, *args, **kwargs):
         """
-        Factory to return a GCSFileSystemAdapter instance if the experimental
+        Factory to return a ExtendedGcsFileSystem instance if the experimental
         flag is enabled.
         """
         experimental_multi_bucket_support = os.environ.get(
@@ -292,9 +292,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         ).lower() in ("true", "1")
 
         if experimental_multi_bucket_support:
-            from .gcsfs_adapter import GCSFileSystemAdapter
+            from .extended_gcsfs import ExtendedGcsFileSystem
 
-            return object.__new__(GCSFileSystemAdapter)
+            return object.__new__(ExtendedGcsFileSystem)
         else:
             return object.__new__(cls)
 

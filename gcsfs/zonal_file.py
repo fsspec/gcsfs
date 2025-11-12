@@ -1,7 +1,7 @@
 from fsspec import asyn
 
-from . import zb_hns_utils
-from .core import GCSFile
+from gcsfs import zb_hns_utils
+from gcsfs.core import GCSFile
 
 
 class ZonalFile(GCSFile):

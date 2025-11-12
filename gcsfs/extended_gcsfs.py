@@ -8,10 +8,10 @@ from google.api_core.client_info import ClientInfo
 from google.cloud import storage_control_v2
 from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 
-from . import __version__ as version
-from . import zb_hns_utils
-from .core import GCSFile, GCSFileSystem
-from .zonal_file import ZonalFile
+from gcsfs import __version__ as version
+from gcsfs import zb_hns_utils
+from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
 
@@ -33,11 +33,12 @@ gcs_file_types = {
 }
 
 
-class GCSFileSystemAdapter(GCSFileSystem):
+class ExtendedGcsFileSystem(GCSFileSystem):
     """
-    This class will be used when experimental_zb_hns_support is set to true for all bucket types.
-    GCSFileSystemAdapter is a subclass of GCSFileSystem that adds specialized
-    logic to support Zonal and Hierarchical buckets.
+    This class will be used when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT env variable is set to true.
+    ExtendedGcsFileSystem is a subclass of GCSFileSystem that adds new logic for bucket types
+    including zonal and hierarchical. For buckets without special properties, it forwards requests
+    to the parent class GCSFileSystem for default processing.
     """
 
     def __init__(self, *args, **kwargs):

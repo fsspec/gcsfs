@@ -19,7 +19,7 @@ import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
-from gcsfs.gcsfs_adapter import GCSFileSystemAdapter
+from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
 
@@ -1742,18 +1742,18 @@ def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_present(gcs_factor
         gcs, gcsfs.GCSFileSystem
     ), "Expected File system instance to be GCSFileSystem"
     assert not isinstance(
-        gcs, GCSFileSystemAdapter
+        gcs, ExtendedGcsFileSystem
     ), "Expected File system instance to be GCSFileSystem"
 
 
-def test_gcs_filesystem_adapter_when_experimental_zonal_toggle_is_true(gcs_factory):
+def test_extended_gcs_filesystem_when_experimental_zonal_toggle_is_true(gcs_factory):
     try:
         with patch("google.auth.default", return_value=(None, "fake-project")):
             os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
             gcs = gcs_factory()
 
             assert isinstance(
-                gcs, GCSFileSystemAdapter
-            ), "Expected File system instance to be GCSFileSystemAdapter"
+                gcs, ExtendedGcsFileSystem
+            ), "Expected File system instance to be ExtendedGcsFileSystem"
     finally:
         del os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]
