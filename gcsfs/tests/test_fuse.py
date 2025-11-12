@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 import tempfile
 import threading
 import time
@@ -26,7 +25,6 @@ def fsspec_fuse_run():
         pytest.skip("Error importing fuse.")
 
 
-@pytest.mark.skipif(sys.version_info < (3, 9), reason="Test fuse causes hang.")
 @pytest.mark.xfail(reason="Failing test not previously tested.")
 @pytest.mark.timeout(180)
 def test_fuse(gcs, fsspec_fuse_run):
@@ -40,7 +38,7 @@ def test_fuse(gcs, fsspec_fuse_run):
     timeout = 20
     n = 40
     for i in range(n):
-        logging.debug(f"Attempt # {i+1}/{n} to create lock file.")
+        logging.debug(f"Attempt # {i + 1}/{n} to create lock file.")
         try:
             open(os.path.join(mountpath, "lock"), "w").close()
             os.remove(os.path.join(mountpath, "lock"))

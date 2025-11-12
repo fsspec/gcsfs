@@ -3,19 +3,19 @@
 exclude: versioneer.py
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
+    rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
       - id: requirements-txt-fixer
       - id: trailing-whitespace
-  - repo: https://github.com/psf/black
-    rev: 22.10.0
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 25.11.0
     hooks:
       - id: black
         args:
-          - --target-version=py37
+          - --target-version=py310
   - repo: https://github.com/pycqa/flake8
-    rev: 6.0.0
+    rev: 7.3.0
     hooks:
       - id: flake8
   - repo: https://github.com/asottile/seed-isort-config
@@ -23,6 +23,6 @@ repos:
     hooks:
       - id: seed-isort-config
   - repo: https://github.com/pre-commit/mirrors-isort
-    rev: v5.7.0
+    rev: v5.10.1
     hooks:
       - id: isort
