@@ -1,7 +1,6 @@
 import base64
 from base64 import b64encode
 from hashlib import md5
-from typing import Optional
 
 from .retry import ChecksumError
 
@@ -104,7 +103,7 @@ class Crc32cChecker(ConsistencyChecker):
         return self.validate_headers(r.headers)
 
 
-def get_consistency_checker(consistency: Optional[str]) -> ConsistencyChecker:
+def get_consistency_checker(consistency: str | None) -> ConsistencyChecker:
     if consistency == "size":
         return SizeChecker()
     elif consistency == "md5":

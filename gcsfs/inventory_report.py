@@ -623,7 +623,7 @@ class InventoryReport:
         return datetime.fromisoformat(str.replace("Z", "+00:00"))
 
 
-class InventoryReportConfig(object):
+class InventoryReportConfig:
     """
     Represents the configuration for fetching inventory reports.
 

@@ -8,7 +8,7 @@ from gcsfs.core import GCSFileSystem
 from gcsfs.inventory_report import InventoryReport, InventoryReportConfig
 
 
-class TestInventoryReport(object):
+class TestInventoryReport:
     """
     Unit tests for the inventory report logic, see 'inventory_report.py'.
 

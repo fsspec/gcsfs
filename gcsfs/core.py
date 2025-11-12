@@ -146,7 +146,7 @@ def _coalesce_generation(*args):
     if len(generations) > 1:
         raise ValueError(
             "Cannot coalesce generations where more than one are defined,"
-            " {}".format(generations)
+            f" {generations}"
         )
     elif len(generations) == 0:
         return None
