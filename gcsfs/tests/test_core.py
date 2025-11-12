@@ -4,7 +4,6 @@ from builtins import FileNotFoundError
 from datetime import datetime, timezone
 from itertools import chain
 from unittest import mock
-from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
@@ -19,7 +18,6 @@ import gcsfs.tests.settings
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
-from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
 
@@ -1733,27 +1731,3 @@ def test_near_find(gcs):
 def test_get_error(gcs):
     with pytest.raises(FileNotFoundError):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
-
-
-def test_gcs_filesystem_when_experimental_zonal_toggle_is_not_present(gcs_factory):
-    gcs = gcs_factory()
-
-    assert isinstance(
-        gcs, gcsfs.GCSFileSystem
-    ), "Expected File system instance to be GCSFileSystem"
-    assert not isinstance(
-        gcs, ExtendedGcsFileSystem
-    ), "Expected File system instance to be GCSFileSystem"
-
-
-def test_extended_gcs_filesystem_when_experimental_zonal_toggle_is_true(gcs_factory):
-    try:
-        with patch("google.auth.default", return_value=(None, "fake-project")):
-            os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
-            gcs = gcs_factory()
-
-            assert isinstance(
-                gcs, ExtendedGcsFileSystem
-            ), "Expected File system instance to be ExtendedGcsFileSystem"
-    finally:
-        del os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]

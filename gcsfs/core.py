@@ -282,22 +282,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     protocol = "gs", "gcs"
     async_impl = True
 
-    def __new__(cls, *args, **kwargs):
-        """
-        Factory to return a ExtendedGcsFileSystem instance if the experimental
-        flag is enabled.
-        """
-        experimental_multi_bucket_support = os.environ.get(
-            "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false"
-        ).lower() in ("true", "1")
-
-        if experimental_multi_bucket_support:
-            from .extended_gcsfs import ExtendedGcsFileSystem
-
-            return object.__new__(ExtendedGcsFileSystem)
-        else:
-            return object.__new__(cls)
-
     def __init__(
         self,
         project=DEFAULT_PROJECT,
