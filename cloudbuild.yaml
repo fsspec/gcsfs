@@ -8,7 +8,7 @@ steps:
       - "compute"
       - "instances"
       - "create"
-      - "gcsfs-test-vm-3"
+      - "gcsfs-test-vm-4"
       - "--project=gcs-tess"
       - "--zone=us-central1-b"
       - "--machine-type=e2-medium"
@@ -17,25 +17,25 @@ steps:
       - "--service-account=222564316065-compute@developer.gserviceaccount.com"
       - "--scopes=https://www.googleapis.com/auth/cloud-platform" # Full access to project APIs
       - "--metadata=enable-oslogin=TRUE"
-
+    waitFor: ["-"]
   # Step 2: SSH into the VM and clone the repository
   - name: "gcr.io/cloud-builders/gcloud"
     id: "ssh"
+    entrypoint: "bash"
     args:
-      - "compute"
-      - "ssh"
-      - "gcsfs-test-vm-3"
-      - "--project=gcs-tess"
-      - "--zone=us-central1-b"
-      - "--command"
+      - "-c"
       - |
         set -e
-        # Create the .ssh directory before using it
-        echo "Inside the VM....ssh complete"
+        echo "Waiting for VM to initialize..."
+        sleep 60  # Wait for 60 seconds
 
+        echo "Attempting to SSH..."
+        gcloud compute ssh gcsfs-test-vm-4 --project gcs-tess --zone us-central1-b --quiet -- -o Hostname=nic0.gcsfs-test-vm-4.us-central1-b.c.gcs-tess.internal.gcpnode.com << EOF
+          set -e
+          # Create the .ssh directory before using it
+          echo "SSH complete"
     waitFor: ["create-vm"]
 
-    waitFor: ["-"]
   # Step 3: SSH into the VM and clone the repository
   - name: "gcr.io/cloud-builders/gcloud"
     id: "ssh-and-clone"
@@ -48,7 +48,7 @@ steps:
         sleep 60  # Wait for 60 seconds
 
         echo "Attempting to SSH..."
-        gcloud compute ssh gcsfs-test-vm-3 --project gcs-tess --zone us-central1-b --quiet -- -o Hostname=nic0.gcsfs-test-vm-3.us-central1-b.c.gcs-tess.internal.gcpnode.com << EOF
+        gcloud compute ssh gcsfs-test-vm-4 --project gcs-tess --zone us-central1-b --quiet -- -o Hostname=nic0.gcsfs-test-vm-4.us-central1-b.c.gcs-tess.internal.gcpnode.com << EOF
           set -e
           # Create the .ssh directory before using it
           mkdir -p ~/.ssh
