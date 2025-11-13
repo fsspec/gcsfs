@@ -4,21 +4,19 @@ steps:
   # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
   - name: "gcr.io/cloud-builders/gcloud"
     id: "create-vm"
-    entrypoint: "gcloud"
     args:
       - "compute"
       - "instances"
       - "create"
-      - "gcsfs-test-vm-8"
+      - "gcsfs-test-vm-9"
       - "--project=gcs-tess"
       - "--zone=us-central1-b"
       - "--machine-type=e2-medium"
       - "--image-family=debian-11"
       - "--image-project=debian-cloud"
-      - "--service-account=222564316065@cloudbuild.gserviceaccount.com"
-      - "--tags=allow-ssh"
+      - "--no-address"
+      - "--service-account=222564316065-compute@developer.gserviceaccount.com"
       - "--scopes=https://www.googleapis.com/auth/cloud-platform" # Full access to project APIs
-      - "--metadata=enable-oslogin=TRUE"
     waitFor: ["-"]
   # Step 1: Clone the private tessellations repository using the SSH key
   - name: 'gcr.io/cloud-builders/git'
