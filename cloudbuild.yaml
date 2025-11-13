@@ -1,4 +1,26 @@
 steps:
-# Step 1: Clone the private tessellations repository
-- name: 'gcr.io/cloud-builders/git'
-  args: ['clone', 'https://github.com/google-partners/tessellations.git']
+  # Step 1: Clone the private tessellations repository using the SSH key
+  - name: 'gcr.io/cloud-builders/git'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Create the .ssh directory before using it
+        mkdir -p /root/.ssh
+
+        # Set up SSH
+        echo "$$SSH_KEY" > /root/.ssh/id_rsa
+        chmod 400 /root/.ssh/id_rsa
+        ssh-keyscan github.com > /root/.ssh/known_hosts
+
+        # Clone the repository using the SSH URL
+        git clone git@github.com:google-partners/tessellations.git
+    secretEnv: ['SSH_KEY']
+
+substitutions:
+  _HEAD_BRANCH: ${HEAD_BRANCH}
+
+availableSecrets:
+  secretManager:
+  - versionName: projects/gcs-tess/secrets/github-deploy-key-tessellations-amaloo/versions/latest
+    env: 'SSH_KEY'
