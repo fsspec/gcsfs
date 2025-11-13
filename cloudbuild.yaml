@@ -30,10 +30,11 @@ steps:
         sleep 60  # Wait for 60 seconds
 
         echo "Attempting to SSH..."
-        gcloud compute ssh gcsfs-test-vm-4 --project gcs-tess --zone us-central1-b --quiet -- -o Hostname=nic0.gcsfs-test-vm-4.us-central1-b.c.gcs-tess.internal.gcpnode.com << EOF
+        gcloud compute ssh gcsfs-test-vm-4 --project gcs-tess --zone us-central1-b --tunnel-through-iap --quiet -- -o Hostname=nic0.gcsfs-test-vm-4.us-central1-b.c.gcs-tess.internal.gcpnode.com  << EOF
           set -e
           # Create the .ssh directory before using it
           echo "SSH complete"
+    # waitFor: ["create-vm"]
 
 #   # Step 3: SSH into the VM and clone the repository
 #   - name: "gcr.io/cloud-builders/gcloud"
