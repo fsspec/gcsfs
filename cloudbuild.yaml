@@ -15,6 +15,19 @@ steps:
 
         # Clone the repository using the SSH URL
         git clone git@github.com:google-partners/tessellations.git
+        echo '--- Installing Python and dependencies on VM ---'
+        python3 -m venv env
+        source env/bin/activate
+
+        pip install --upgrade pip
+        # Install testing libraries explicitly, as they are not in setup.py
+        pip install pytest pytest-timeout pytest-asyncio
+        pip install -e .
+
+        echo '--- Preparing test environment on VM ---'
+        cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
+        python main.py 8192_gcs_central1 --benchmark init-delete-dataset
+        python main.py 8192_gcs_central1 --benchmark delete
     secretEnv: ['SSH_KEY']
 
 substitutions:
