@@ -19,25 +19,31 @@ steps:
       - "--metadata=enable-oslogin=TRUE"
 
     waitFor: ["-"]
-  # Step 1: Clone the private tessellations repository using the SSH key
-  - name: 'gcr.io/cloud-builders/gcloud'
-    entrypoint: 'bash'
+  # Step 2: SSH into the VM and clone the repository
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "ssh-and-clone"
     args:
-      - '-c'
+      - "compute"
+      - "ssh"
+      - "gcsfs-test-vm-12"
+      - "--project=gcs-tess"
+      - "--zone=us-central1-b"
+      - "--command"
       - |
         set -e
         # Create the .ssh directory before using it
-        mkdir -p /root/.ssh
+        mkdir -p ~/.ssh
 
         # Set up SSH
-        echo "$$SSH_KEY" > /root/.ssh/id_rsa
-        chmod 400 /root/.ssh/id_rsa
-        ssh-keyscan github.com > /root/.ssh/known_hosts
+        echo "$$SSH_KEY" > ~/.ssh/id_rsa
+        chmod 400 ~/.ssh/id_rsa
+        ssh-keyscan github.com > ~/.ssh/known_hosts
 
         # Clone the repository using the SSH URL
         git clone git@github.com:google-partners/tessellations.git
         cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
     secretEnv: ['SSH_KEY']
+    waitFor: ["create-vm"]
 
 substitutions:
   _HEAD_BRANCH: ${HEAD_BRANCH}
