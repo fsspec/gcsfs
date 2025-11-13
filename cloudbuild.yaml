@@ -17,6 +17,8 @@ steps:
       - "--no-address"
       - "--service-account=222564316065-compute@developer.gserviceaccount.com"
       - "--scopes=https://www.googleapis.com/auth/cloud-platform" # Full access to project APIs
+      - "--metadata=enable-oslogin=TRUE"
+
     waitFor: ["-"]
   # Step 1: Clone the private tessellations repository using the SSH key
   - name: 'gcr.io/cloud-builders/git'
