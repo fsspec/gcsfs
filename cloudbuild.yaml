@@ -16,13 +16,10 @@ steps:
         # Clone the repository using the SSH URL
         git clone git@github.com:google-partners/tessellations.git
         echo '--- Installing Python and dependencies on VM ---'
+        sudo apt install python3.10-venv
         python3 -m venv env
         source env/bin/activate
 
-        pip install --upgrade pip
-        # Install testing libraries explicitly, as they are not in setup.py
-        pip install pytest pytest-timeout pytest-asyncio
-        pip install -e .
 
         echo '--- Preparing test environment on VM ---'
         cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
