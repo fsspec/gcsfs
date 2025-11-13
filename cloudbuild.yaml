@@ -14,7 +14,7 @@ steps:
       - "compute"
       - "instances"
       - "create"
-      - "gcsfs-test-vm-6"
+      - "gcsfs-test-vm-7"
       - "--project=gcs-tess"
       - "--zone=us-central1-b"
       - "--machine-type=e2-medium"
@@ -36,7 +36,7 @@ steps:
         set -e
         # Wait for the VM to be fully initialized and SSH to be ready.
         for i in {1..10}; do
-          if gcloud compute ssh gcsfs-test-vm-6 --zone=${_ZONE} --command="echo VM is ready"; then
+          if gcloud compute ssh gcsfs-test-vm-7 --zone=${_ZONE} --command="echo VM is ready"; then
             break
           fi
           echo "Waiting for VM to become available... (attempt $$i/10)"
@@ -55,14 +55,11 @@ steps:
           mkdir -p /root/.ssh
 
           # Set up SSH
-          echo "Setup SSH key"
           echo "$$SSH_KEY" > /root/.ssh/id_rsa
           chmod 400 /root/.ssh/id_rsa
           ssh-keyscan github.com > /root/.ssh/known_hosts
-          echo "SSH key saved"
 
           # Clone the repository using the SSH URL
-          echo "Clone githut repo"
           git clone git@github.com:google-partners/tessellations.git
 
           echo '--- Installing Python and dependencies on VM ---'
@@ -82,7 +79,7 @@ steps:
         "
 
         # Execute the script on the VM via SSH.
-        gcloud compute ssh gcsfs-test-vm-6 --zone=${_ZONE} --command="$$VM_SCRIPT"
+        gcloud compute ssh gcsfs-test-vm-7 --zone=${_ZONE} --command="$$VM_SCRIPT"
     secretEnv: ['SSH_KEY']
     waitFor:
       - "create-vm"
@@ -98,7 +95,7 @@ steps:
       - "compute"
       - "instances"
       - "delete"
-      - "gcsfs-test-vm-6"
+      - "gcsfs-test-vm-7"
       - "--zone=${_ZONE}"
       - "--quiet"
     waitFor:
