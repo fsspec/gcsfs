@@ -1,32 +1,31 @@
 substitutions:
   _REGION: "us-central1"
-  _ZONE: "us-central1-a"
+  _ZONE: "us-central1-b"
   _SHORT_BUILD_ID: ${BUILD_ID:0:8}
+  _SERVICE_ACCOUNT: "222564316065-compute@developer.gserviceaccount.com"
+  _PROJECT_ID: "gcs-tess"
 
 steps:
 
   # Step 3: Create a GCE VM to run the tests.
-  # The VM is created in the same zone as the buckets to test zonal bucket features.
-  # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
   - name: "gcr.io/cloud-builders/gcloud"
     id: "create-vm"
     args:
       - "compute"
       - "instances"
       - "create"
-      - "gcsfs-test-vm-${_SHORT_BUILD_ID}"
-      - "--project=${PROJECT_ID}"
-      - "--zone=${_ZONE}"
+      - "gcsfs-test-vm-6"
+      - "--project=gcs-tess"
+      - "--zone=us-central1-b"
       - "--machine-type=e2-medium"
       - "--image-family=debian-11"
       - "--image-project=debian-cloud"
       - "--no-address"
-      - "--service-account=${_SERVICE_ACCOUNT}"
-      - "--scopes=https://www.googleapis.com/auth/cloud-platform" # Full access to project APIs
+      - "--service-account=222564316065-compute@developer.gserviceaccount.com"
+      - "--scopes=https://www.googleapis.com/auth/cloud-platform"
     waitFor: ["-"]
 
   # Step 4: Run the integration tests inside the newly created VM.
-  # This step uses 'gcloud compute ssh' to execute a remote script.
   - name: "gcr.io/cloud-builders/gcloud"
     id: "run-tests-on-vm"
     entrypoint: "bash"
@@ -34,71 +33,93 @@ steps:
       - "-c"
       - |
         set -e
-        # Wait for the VM to be fully initialized and SSH to be ready.
+        # --- SSH Readiness Check ---
+        # The gcloud builder already handles SSH key generation.
+        # This loop waits for the VM to be fully initialized and SSH to be ready.
+        echo "Starting SSH readiness check loop..."
         for i in {1..10}; do
-          if gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --command="echo VM is ready"; then
+          # Use 'gcloud compute ssh --tunnel-through-iap' for reliable connection without external IP.
+          # We use `exit 0` to prevent the loop from exiting early on connection failure.
+          if gcloud compute ssh gcsfs-test-vm-6 --zone=${_ZONE} --command="echo VM is ready" --tunnel-through-iap; then
+            echo "VM is ready for command execution."
             break
           fi
-          echo "Waiting for VM to become available... (attempt $$i/10)"
+          echo "Waiting for VM to become available... (attempt $i/10)"
           sleep 15
         done
+        
+        # Check if the loop finished without connecting (i.e., i reached 11)
+        if [ "$i" -gt 10 ]; then
+          echo "Error: VM failed to become available after 10 attempts."
+          exit 1
+        fi
 
+        # --- Define & Execute Remote Script ---
         # Define the script to be executed on the VM.
-        # This script installs dependencies, sets environment variables, and runs pytest.
-        VM_SCRIPT="
+        # Use single quotes for the main VM_SCRIPT block to avoid premature variable expansion,
+        # but escape the environment variable $SSH_KEY to use the secret.
+        VM_SCRIPT='
           set -e
-          echo '--- Installing git and cloning repository on VM ---'
+          echo "--- Installing git and cloning repository on VM ---"
+          # Check for successful installation
           sudo apt-get update
           sudo apt-get install -y git python3-pip python3-venv
 
-          # Create the .ssh directory before using it
+          # Set up SSH Key for GitHub Clone
+          # Note: Since we are using an internal IP with no-address, the 
+          # gcloud SSH mechanism handles the initial connection, but the SSH key
+          # is needed specifically for the `git clone` command.
           mkdir -p /root/.ssh
-
-          # Set up SSH
+          
+          # Use single quotes on the VM to make sure we escape the outer shell's
+          # interpretation of the variable substitution. We'll use the Cloud Build
+          # shell's `$$SSH_KEY` to pass the value in.
+          echo "Setup SSH key"
           echo "$$SSH_KEY" > /root/.ssh/id_rsa
           chmod 400 /root/.ssh/id_rsa
           ssh-keyscan github.com > /root/.ssh/known_hosts
+          echo "SSH key saved"
 
           # Clone the repository using the SSH URL
+          echo "Clone git repo"
           git clone git@github.com:google-partners/tessellations.git
 
-
-          echo '--- Installing Python and dependencies on VM ---'
+          echo "--- Installing Python and dependencies on VM ---"
           python3 -m venv env
           source env/bin/activate
 
           pip install --upgrade pip
-          # Install testing libraries explicitly, as they are not in setup.py
           pip install pytest pytest-timeout pytest-asyncio
+          
+          # Assuming the project root is 'tessellations'
+          cd tessellations
           pip install -e .
 
-          echo '--- Preparing test environment on VM ---'
-          cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
+          echo "--- Preparing test environment on VM ---"
+          cd benchmarks/proof-of-concept/microbenchmark/gcsfs
           python main.py 8192_gcs_central1 --benchmark init-delete-dataset
           python main.py 8192_gcs_central1 --benchmark delete
-
-        "
+        '
 
         # Execute the script on the VM via SSH.
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --command="$$VM_SCRIPT"
+        # Use --tunnel-through-iap since --no-address was used during creation.
+        gcloud compute ssh gcsfs-test-vm-6 --zone=${_ZONE} --command="${VM_SCRIPT}" --tunnel-through-iap
+
     secretEnv: ['SSH_KEY']
     waitFor:
       - "create-vm"
-      - "create-standard-bucket"
-      - "create-hns-bucket"
 
   # --- Cleanup Steps ---
-  # These steps will run after the test step, regardless of its success or failure,
-  # to ensure resources are not left orphaned.
 
   # Step 5: Delete the GCE VM.
+  # The wait condition ensures this only runs after the test step.
   - name: "gcr.io/cloud-builders/gcloud"
     id: "delete-vm"
     args:
       - "compute"
       - "instances"
       - "delete"
-      - "gcsfs-test-vm-${_SHORT_BUILD_ID}"
+      - "gcsfs-test-vm-6"
       - "--zone=${_ZONE}"
       - "--quiet"
     waitFor:
