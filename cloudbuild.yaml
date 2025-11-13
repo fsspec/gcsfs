@@ -8,7 +8,7 @@ steps:
       - "compute"
       - "instances"
       - "create"
-      - "gcsfs-test-vm-2"
+      - "gcsfs-test-vm-12"
       - "--project=gcs-tess"
       - "--zone=us-central1-b"
       - "--machine-type=e2-medium"
@@ -22,26 +22,29 @@ steps:
   # Step 2: SSH into the VM and clone the repository
   - name: "gcr.io/cloud-builders/gcloud"
     id: "ssh-and-clone"
+    entrypoint: "bash"
     args:
-      - "compute"
-      - "ssh"
-      - "gcsfs-test-vm-2"
-      - "--project=gcs-tess"
-      - "--zone=us-central1-b"
-      - "--command"
+      - "-c"
       - |
         set -e
-        # Create the .ssh directory before using it
-        mkdir -p ~/.ssh
+        echo "Waiting for VM to initialize..."
+        sleep 60  # Wait for 60 seconds
 
-        # Set up SSH
-        echo "$$SSH_KEY" > ~/.ssh/id_rsa
-        chmod 400 ~/.ssh/id_rsa
-        ssh-keyscan github.com > ~/.ssh/known_hosts
+        echo "Attempting to SSH..."
+        gcloud compute ssh gcsfs-test-vm-12 --project gcs-tess --zone us-central1-b --quiet -- -o Hostname=nic0.gcsfs-test-vm-12.us-central1-b.c.gcs-tess.internal.gcpnode.com << EOF
+          set -e
+          # Create the .ssh directory before using it
+          mkdir -p ~/.ssh
 
-        # Clone the repository using the SSH URL
-        git clone git@github.com:google-partners/tessellations.git
-        cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
+          # Set up SSH
+          echo "$$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 400 ~/.ssh/id_rsa
+          ssh-keyscan github.com > ~/.ssh/known_hosts
+
+          # Clone the repository using the SSH URL
+          git clone git@github.com:google-partners/tessellations.git
+          cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
+          echo "Successfully cloned repo."
     secretEnv: ['SSH_KEY']
     waitFor: ["create-vm"]
 
