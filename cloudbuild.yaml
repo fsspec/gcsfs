@@ -8,7 +8,7 @@ steps:
       - "compute"
       - "instances"
       - "create"
-      - "gcsfs-test-vm-11"
+      - "gcsfs-test-vm-12"
       - "--project=gcs-tess"
       - "--zone=us-central1-b"
       - "--machine-type=e2-medium"
@@ -20,7 +20,7 @@ steps:
 
     waitFor: ["-"]
   # Step 1: Clone the private tessellations repository using the SSH key
-  - name: 'gcr.io/cloud-builders/git'
+  - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
       - '-c'
