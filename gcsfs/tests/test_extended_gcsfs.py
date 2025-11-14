@@ -58,15 +58,18 @@ def zonal_mocks():
         )
 
         mock_create_mrd = mock.AsyncMock(return_value=mock_downloader)
-        with mock.patch(
-            patch_target_sync_layout, return_value=BucketType.ZONAL_HIERARCHICAL
-        ) as mock_sync_layout, mock.patch(
-            patch_target_get_layout, return_value=BucketType.ZONAL_HIERARCHICAL
-        ), mock.patch(
-            patch_target_create_mrd, mock_create_mrd
-        ), mock.patch(
-            patch_target_gcsfs_cat_file, new_callable=mock.AsyncMock
-        ) as mock_cat_file:
+        with (
+            mock.patch(
+                patch_target_sync_layout, return_value=BucketType.ZONAL_HIERARCHICAL
+            ) as mock_sync_layout,
+            mock.patch(
+                patch_target_get_layout, return_value=BucketType.ZONAL_HIERARCHICAL
+            ),
+            mock.patch(patch_target_create_mrd, mock_create_mrd),
+            mock.patch(
+                patch_target_gcsfs_cat_file, new_callable=mock.AsyncMock
+            ) as mock_cat_file,
+        ):
             mocks = {
                 "sync_layout": mock_sync_layout,
                 "create_mrd": mock_create_mrd,
