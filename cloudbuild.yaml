@@ -29,7 +29,7 @@ steps:
       - "--metadata=enable-oslogin=TRUE"
     waitFor: ["-"]
 
-  - name: 'gcr.io/cloud-builders/git'
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: "clone"
     entrypoint: 'bash'
     args:
@@ -64,7 +64,7 @@ steps:
           echo "Waiting for VM to become available... (attempt $$i/10)"
           sleep 15
         done
-
+        ENCODED_KEY=$(echo "$$SSH_KEY" | base64 -w 0)
         # Script to be executed on the VM.
         # This script installs dependencies, sets environment variables, and runs pytest.
         VM_SCRIPT="
@@ -73,7 +73,7 @@ steps:
           mkdir -p ~/.ssh
 
           # Set up SSH
-          echo "$$SSH_KEY" | base64 -d > ~/.ssh/id_rsa
+          echo "$$ENCODED_KEY" | base64 -d > ~/.ssh/id_rsa
           chmod 400 ~/.ssh/id_rsa
           ssh-keyscan github.com > ~/.ssh/known_hosts
 
