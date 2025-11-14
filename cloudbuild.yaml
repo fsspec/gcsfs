@@ -65,6 +65,7 @@ steps:
 
         # Execute the script on the VM via SSH.
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="$$VM_SCRIPT"
+    secretEnv: ['SSH_KEY']
     waitFor:
       - "create-vm"
 
