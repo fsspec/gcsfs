@@ -73,7 +73,7 @@ steps:
           mkdir -p ~/.ssh
 
           # Set up SSH
-          echo "$$SSH_KEY" > ~/.ssh/id_rsa
+          echo "\$\$SSH_KEY" > ~/.ssh/id_rsa
           echo "" >> ~/.ssh/id_rsa
           chmod 400 ~/.ssh/id_rsa
           ssh-keyscan github.com > ~/.ssh/known_hosts
