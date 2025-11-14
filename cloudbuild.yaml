@@ -43,7 +43,7 @@ steps:
           set -e
           echo "SSH complete
         "
-        gcloud compute ssh gcsfs-test-vm-1 --project gcs-aiml-clients-testing-101 --zone=us-central1-b --internal-ip --quiet --command="$VM_SCRIPT" --tunnel-through-iap
+        gcloud compute ssh gcsfs-test-vm-1 --project gcs-aiml-clients-testing-101 --zone=us-central1-b --internal-ip --quiet --command="$$VM_SCRIPT" --tunnel-through-iap
 
     waitFor: ["create-vm"]
 
