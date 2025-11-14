@@ -52,6 +52,15 @@ steps:
         VM_SCRIPT="
           set -e
           echo '---   SSH on VM complete---'
+          mkdir -p ~/.ssh
+
+          # Set up SSH
+          echo "$$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 400 ~/.ssh/id_rsa
+          ssh-keyscan github.com > ~/.ssh/known_hosts
+
+          # Clone the repository using the SSH URL
+          git clone git@github.com:google-partners/tessellations.git
         "
 
         # Execute the script on the VM via SSH.
@@ -83,3 +92,8 @@ options:
   logging: CLOUD_LOGGING_ONLY
   pool:
     name: "projects/${PROJECT_ID}/locations/us-central1/workerPools/cloud-build-worker-pool"
+
+availableSecrets:
+  secretManager:
+  - versionName: projects/gcs-aiml-clients-testing-101/secrets/github-deploy-key-tessellations-amaloo/versions/latest
+    env: 'SSH_KEY'
