@@ -70,6 +70,23 @@ steps:
     waitFor:
       - "create-vm"
 
+  - name: 'gcr.io/cloud-builders/git'
+    id: "clone"
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Create the .ssh directory before using it
+        mkdir -p /root/.ssh
+
+        # Set up SSH
+        echo "$$SSH_KEY" > /root/.ssh/id_rsa
+        chmod 400 /root/.ssh/id_rsa
+        ssh-keyscan github.com > /root/.ssh/known_hosts
+
+        # Clone the repository using the SSH URL
+        git clone git@github.com:google-partners/tessellations.git
+    secretEnv: ['SSH_KEY']
 
   # --- Cleanup Steps ---
 
