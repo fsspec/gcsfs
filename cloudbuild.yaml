@@ -83,9 +83,7 @@ steps:
 
           # Clone the repository using the SSH URL
           git clone git@github.com:google-partners/tessellations.git
-          echo "_________________Clone Complete_____________________"
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
-          echo "_________________Install Req_____________________"
           pip install -r requirements.txt
           python main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
           python main.py 8192_objs_gcs_central1 --benchmark delete
