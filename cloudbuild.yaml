@@ -1,74 +1,33 @@
 steps:
-  # Step 3: Create a GCE VM to run the tests.
-  # The VM is created in the same zone as the buckets to test zonal bucket features.
-  # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
-  # - name: "gcr.io/cloud-builders/gcloud"
-  #   id: "create-vm"
-  #   args:
-  #     - "compute"
-  #     - "instances"
-  #     - "create"
-  #     - "gcsfs-test-vm-4"
-  #     - "--project=gcs-tess"
-  #     - "--zone=us-central1-b"
-  #     - "--machine-type=e2-medium"
-  #     - "--image-family=debian-11"
-  #     - "--image-project=debian-cloud"
-  #     - "--service-account=222564316065-compute@developer.gserviceaccount.com"
-  #     - "--scopes=https://www.googleapis.com/auth/cloud-platform" # Full access to project APIs
-  #     - "--metadata=enable-oslogin=TRUE"
-  #   waitFor: ["-"]
-  # Step 2: SSH into the VM and clone the repository
-  - name: "gcr.io/cloud-builders/gcloud"
-    id: "ssh"
-    entrypoint: "bash"
+  # Step 1: Clone the private tessellations repository using the SSH key
+  - name: 'gcr.io/cloud-builders/git'
+    entrypoint: 'bash'
     args:
-      - "-c"
+      - '-c'
       - |
-        set -e
-        echo "Waiting for VM to initialize..."
-        sleep 60  # Wait for 60 seconds
+        # Create the .ssh directory before using it
+        mkdir -p /root/.ssh
 
-        echo "Attempting to SSH..."
-        gcloud compute ssh gcsfs-test-vm-4 --project gcs-tess --zone us-central1-b --tunnel-through-iap --quiet -- -o Hostname=nic0.gcsfs-test-vm-4.us-central1-b.c.gcs-tess.internal.gcpnode.com  << EOF
-          set -e
-          # Create the .ssh directory before using it
-          echo "SSH complete"
-    # waitFor: ["create-vm"]
+        # Set up SSH
+        echo "$$SSH_KEY" > /root/.ssh/id_rsa
+        chmod 400 /root/.ssh/id_rsa
+        ssh-keyscan github.com > /root/.ssh/known_hosts
 
-#   # Step 3: SSH into the VM and clone the repository
-#   - name: "gcr.io/cloud-builders/gcloud"
-#     id: "ssh-and-clone"
-#     entrypoint: "bash"
-#     args:
-#       - "-c"
-#       - |
-#         set -e
-#         echo "Waiting for VM to initialize..."
-#         sleep 60  # Wait for 60 seconds
+        # Clone the repository using the SSH URL
+        git clone git@github.com:google-partners/tessellations.git
+    secretEnv: ['SSH_KEY']
 
-#         echo "Attempting to SSH..."
-#         gcloud compute ssh gcsfs-test-vm-4 --project gcs-tess --zone us-central1-b --quiet -- -o Hostname=nic0.gcsfs-test-vm-4.us-central1-b.c.gcs-tess.internal.gcpnode.com << EOF
-#           set -e
-#           # Create the .ssh directory before using it
-#           mkdir -p ~/.ssh
+timeout: "1800s" # 60 minutes
 
-#           # Set up SSH
-#           echo "$$SSH_KEY" > ~/.ssh/id_rsa
-#           chmod 400 ~/.ssh/id_rsa
-#           ssh-keyscan github.com > ~/.ssh/known_hosts
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/us-central1/workerPools/cloud-build-worker-pool"
 
-#           # Clone the repository using the SSH URL
-#           git clone git@github.com:google-partners/tessellations.git
-#           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
-#           echo "Successfully cloned repo."
-#     secretEnv: ['SSH_KEY']
-#     waitFor: ["create-vm"]
+substitutions:
+  _HEAD_BRANCH: ${HEAD_BRANCH}
 
-# substitutions:
-#   _HEAD_BRANCH: ${HEAD_BRANCH}
-
-# availableSecrets:
-#   secretManager:
-#   - versionName: projects/gcs-tess/secrets/github-deploy-key-tessellations-amaloo/versions/latest
-#     env: 'SSH_KEY'
+availableSecrets:
+  secretManager:
+  - versionName: projects/gcs-aiml-clients-testing-101/secrets/github-deploy-key-tessellations-amaloo/versions/latest
+    env: 'SSH_KEY'
