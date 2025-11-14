@@ -17,8 +17,12 @@ steps:
         git clone git@github.com:google-partners/tessellations.git
     secretEnv: ['SSH_KEY']
 
+timeout: "1800s" # 60 minutes
+
 options:
-      logging: CLOUD_LOGGING_ONLY
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/us-central1/workerPools/cloud-build-worker-pool"
 
 substitutions:
   _HEAD_BRANCH: ${HEAD_BRANCH}
