@@ -129,12 +129,10 @@ def gcs(gcs_factory, populate=True):
 
 def _cleanup_gcs(gcs, is_real_gcs):
     """Only remove the bucket/contents if we are NOT using the real GCS, logging a warning on failure."""
-    del os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]
     if is_real_gcs:
         return
     try:
-        gcs.rm(gcs.find(TEST_BUCKET), recursive=True)
-        gcs.rm(TEST_BUCKET)
+        gcs.rm(TEST_BUCKET, recursive=True)
     except Exception as e:
         logging.warning(f"Failed to clean up GCS bucket {TEST_BUCKET}: {e}")
 
@@ -155,7 +153,6 @@ def extended_gcsfs(gcs_factory, populate=True):
     )
 
     with mock_authentication_manager:
-        os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
         extended_gcsfs = gcs_factory()
         try:
             # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint
@@ -164,10 +161,7 @@ def extended_gcsfs(gcs_factory, populate=True):
                     extended_gcsfs.rm(TEST_BUCKET, recursive=True)
                 except FileNotFoundError:
                     pass
-                try:
-                    extended_gcsfs.mkdir(TEST_BUCKET)
-                except Exception:
-                    pass
+                extended_gcsfs.mkdir(TEST_BUCKET)
                 if populate:
                     extended_gcsfs.pipe(
                         {TEST_BUCKET + "/" + k: v for k, v in allfiles.items()}
