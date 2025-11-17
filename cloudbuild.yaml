@@ -1,6 +1,36 @@
+substitutions:
+  _REGION: "us-central1"
+  _ZONE: "us-central1-a"
+  _SHORT_BUILD_ID: ${BUILD_ID:0:8}
+  _HEAD_BRANCH: ${HEAD_BRANCH}
+
+
 steps:
-  # Step 1: Clone the private tessellations repository using the SSH key
+
+  # Step 3: Create a GCE VM to run the tests.
+  # The VM is created in the same zone as the buckets to test zonal bucket features.
+  # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-vm"
+    entrypoint: "gcloud"
+    args:
+      - "compute"
+      - "instances"
+      - "create"
+      - "gcsfs-test-vm-${_SHORT_BUILD_ID}"
+      - "--project=${PROJECT_ID}"
+      - "--zone=${_ZONE}"
+      - "--machine-type=e2-medium"
+      - "--image-family=debian-11"
+      - "--image-project=debian-cloud"
+      - "--service-account=369568738723-compute@developer.gserviceaccount.com"
+      - "--tags=allow-ssh"
+      - "--scopes=https://www.googleapis.com/auth/cloud-platform" # Full access to project APIs
+      - "--metadata=enable-oslogin=TRUE"
+    waitFor: ["-"]
+
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: "clone"
     entrypoint: 'bash'
     args:
       - '-c'
@@ -17,12 +47,81 @@ steps:
         git clone git@github.com:google-partners/tessellations.git
     secretEnv: ['SSH_KEY']
 
-timeout: "1800s" # 60 minutes
+  # Step 4: Run the integration tests inside the newly created VM.
+  # This step uses 'gcloud compute ssh' to execute a remote script.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-tests-on-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        # Wait for the VM to be fully initialized and SSH to be ready.
+        for i in {1..10}; do
+          if gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --quiet --command="whoami"; then
+            break
+          fi
+          echo "Waiting for VM to become available... (attempt $$i/10)"
+          sleep 15
+        done
+        ENCODED_KEY=$(echo "$$SSH_KEY" | base64 -w 0)
+        # Script to be executed on the VM.
+        # This script installs dependencies, sets environment variables, and runs pytest.
+        VM_SCRIPT="
+          set -e
+          echo '---   SSH on VM complete---'
+          mkdir -p ~/.ssh
 
-substitutions:
-  _HEAD_BRANCH: ${HEAD_BRANCH}
+          # Set up SSH
+          echo "$$ENCODED_KEY" | base64 -d > ~/.ssh/id_rsa
+          chmod 400 ~/.ssh/id_rsa
+          ssh-keyscan github.com > ~/.ssh/known_hosts
+
+          # Install git and python
+          sudo apt-get update
+          sudo apt-get install -y git python3-pip python3-venv
+
+          # Clone the repository using the SSH URL
+          git clone git@github.com:google-partners/tessellations.git
+          cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
+          pip install -r requirements.txt
+          python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
+          python3 main.py 8192_objs_gcs_central1 --benchmark delete
+
+        "
+
+        # Execute the script on the VM via SSH.
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="$$VM_SCRIPT"
+    secretEnv: ['SSH_KEY']
+    waitFor:
+      - "create-vm"
+
+
+  # --- Cleanup Steps ---
+
+  # Step 5: Delete the GCE VM.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-vm"
+    entrypoint: "gcloud"
+    args:
+      - "compute"
+      - "instances"
+      - "delete"
+      - "gcsfs-test-vm-${_SHORT_BUILD_ID}"
+      - "--zone=${_ZONE}"
+      - "--quiet"
+    waitFor:
+      - "run-tests-on-vm"
+
+timeout: "3600s" # 30 minutes
+
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/us-central1/workerPools/cloud-build-worker-pool"
 
 availableSecrets:
   secretManager:
-  - versionName: projects/gcs-tess/secrets/github-deploy-key-tessellations-amaloo/versions/latest
+  - versionName: projects/gcs-aiml-clients-testing-101/secrets/github-deploy-key-tessellations-amaloo/versions/latest
     env: 'SSH_KEY'
