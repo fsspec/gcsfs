@@ -1,9 +1,13 @@
+import logging
+
 from fsspec import asyn
 from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )
 
 from gcsfs.core import GCSFile
+
+logger = logging.getLogger("gcsfs.zonal_file")
 
 
 class ZonalFile(GCSFile):
@@ -65,19 +69,51 @@ class ZonalFile(GCSFile):
             self.gcsfs.grpc_client, bucket_name, object_name, generation, overwrite
         )
 
+    def write(self, data):
+        """
+        Writes data using AsyncAppendableObjectWriter.
+        """
+        if not self.writable():
+            raise ValueError("File not in write mode")
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
+        if self.forced:
+            raise ValueError("This file has been force-flushed, can only close")
+
+        asyn.sync(self.gcsfs.loop, self.aaow.append, data)
+
     def flush(self, force=False):
-        raise NotImplementedError(
-            "Write operations are not yet implemented for Zonal buckets."
-        )
+        """
+        Flushes the AsyncAppendableObjectWriter, sending all buffered data
+        to the server.
+        """
+        if self.closed:
+            raise ValueError("Flush on closed file")
+        if force and self.forced:
+            raise ValueError("Force flush cannot be called more than once")
+        if force:
+            self.forced = True
+
+        if self.readable():
+            # no-op to flush on read-mode
+            return
+
+        asyn.sync(self.gcsfs.loop, self.aaow.flush)
 
     def commit(self):
-        raise NotImplementedError(
-            "Write operations are not yet implemented for Zonal buckets."
-        )
+        """
+        Commits the write by finalizing the AsyncAppendableObjectWriter.
+        """
+        if not self.writable():
+            raise ValueError("File not in write mode")
+        self.autocommit = True
+        asyn.sync(self.gcsfs.loop, self.aaow.finalize)
 
     def discard(self):
-        raise NotImplementedError(
-            "Write operations are not yet implemented for Zonal buckets."
+        """Discard is not applicable for Zonal Buckets. Log a warning instead."""
+        logger.warning(
+            "Discard is unavailable for Zonal Buckets. \
+            Data is uploaded via streaming and cannot be cancelled."
         )
 
     async def initiate_upload(
@@ -91,7 +127,7 @@ class ZonalFile(GCSFile):
         kms_key_name=None,
     ):
         raise NotImplementedError(
-            "Write operations are not yet implemented for Zonal buckets."
+            "Initiate_upload operation is not applicable for Zonal buckets. Please use write() instead."
         )
 
     async def simple_upload(
@@ -107,20 +143,23 @@ class ZonalFile(GCSFile):
         kms_key_name=None,
     ):
         raise NotImplementedError(
-            "Write operations are not yet implemented for Zonal buckets."
+            "Simple_upload operation is not applicable for Zonal buckets. Please use write() instead."
         )
 
     async def upload_chunk(fs, location, data, offset, size, content_type):
         raise NotImplementedError(
-            "Write operations are not yet implemented for Zonal buckets."
+            "Upload_chunk operation is not applicable for Zonal buckets. Please use write() instead."
         )
 
     def close(self):
         """
-        Closes the ZonalFile and the underlying AsyncMultiRangeDownloader.
+        Closes the ZonalFile and the underlying AsyncMultiRangeDownloader and AsyncAppendableObjectWriter.
+        If in write mode, finalizes the write if autocommit is True.
         """
-        if self.mrd:
+        if hasattr(self, "mrd") and self.mrd:
             asyn.sync(self.gcsfs.loop, self.mrd.close)
-        if self.aaow:
-            asyn.sync(self.gcsfs.loop, self.aaow.close)
+        if hasattr(self, "aaow") and self.aaow:
+            asyn.sync(
+                self.gcsfs.loop, self.aaow.close, finalize_on_close=self.autocommit
+            )
         super().close()
