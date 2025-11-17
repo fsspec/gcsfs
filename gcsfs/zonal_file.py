@@ -28,7 +28,7 @@ class ZonalFile(GCSFile):
             )
         elif "w" in self.mode:
             self.aaow = asyn.sync(
-                self.gcsfs.loop, self._init_aaow, self.bucket, self.key, self.generation
+                self.gcsfs.loop, self._init_aaow, self.bucket, self.key
             )
         else:
             raise NotImplementedError(
@@ -56,17 +56,14 @@ class ZonalFile(GCSFile):
             raise
 
     async def _init_aaow(
-        self, bucket_name, object_name, generation=None, overwrite=True
+        self, bucket_name, object_name, generation=None
     ):
         """
         Initializes the AsyncAppendableObjectWriter.
         """
-        if generation is None and await self.gcsfs._exists(self.path):
-            info = self.gcsfs.info(self.path)
-            generation = info.get("generation")
 
         return await zb_hns_utils.init_aaow(
-            self.gcsfs.grpc_client, bucket_name, object_name, generation, overwrite
+            self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
     def write(self, data):
