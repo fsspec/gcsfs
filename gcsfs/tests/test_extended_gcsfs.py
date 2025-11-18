@@ -34,11 +34,11 @@ def zonal_mocks():
         if is_real_gcs:
             yield None
             return
-        patch_target_get_layout = (
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type"
+        patch_target_lookup_bucket_type = (
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_type"
         )
-        patch_target_sync_layout = (
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_get_bucket_type"
+        patch_target_sync_lookup_bucket_type = (
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
         )
         patch_target_create_mrd = "gcsfs.extended_gcsfs.zb_hns_utils.create_mrd"
         patch_target_gcsfs_cat_file = "gcsfs.core.GCSFileSystem._cat_file"
@@ -60,10 +60,12 @@ def zonal_mocks():
         mock_create_mrd = mock.AsyncMock(return_value=mock_downloader)
         with (
             mock.patch(
-                patch_target_sync_layout, return_value=BucketType.ZONAL_HIERARCHICAL
-            ) as mock_sync_layout,
+                patch_target_sync_lookup_bucket_type,
+                return_value=BucketType.ZONAL_HIERARCHICAL,
+            ) as mock_sync_lookup_bucket_type,
             mock.patch(
-                patch_target_get_layout, return_value=BucketType.ZONAL_HIERARCHICAL
+                patch_target_lookup_bucket_type,
+                return_value=BucketType.ZONAL_HIERARCHICAL,
             ),
             mock.patch(patch_target_create_mrd, mock_create_mrd),
             mock.patch(
@@ -71,7 +73,7 @@ def zonal_mocks():
             ) as mock_cat_file,
         ):
             mocks = {
-                "sync_layout": mock_sync_layout,
+                "sync_lookup_bucket_type": mock_sync_lookup_bucket_type,
                 "create_mrd": mock_create_mrd,
                 "downloader": mock_downloader,
                 "cat_file": mock_cat_file,
@@ -114,7 +116,9 @@ def test_read_block_zb(extended_gcsfs, zonal_mocks, subtests):
 
                 assert result == expected_data
                 if mocks:
-                    mocks["sync_layout"].assert_called_once_with(TEST_BUCKET)
+                    mocks["sync_lookup_bucket_type"].assert_called_once_with(
+                        TEST_BUCKET
+                    )
                     if expected_data:
                         mocks["downloader"].download_ranges.assert_called_with(
                             [(offset, mock.ANY, mock.ANY)]
@@ -142,7 +146,7 @@ def test_read_small_zb(extended_gcsfs, zonal_mocks):
             # cache drop
             assert len(f.cache.cache) < len(out)
             if mocks:
-                mocks["sync_layout"].assert_called_once_with(TEST_BUCKET)
+                mocks["sync_lookup_bucket_type"].assert_called_once_with(TEST_BUCKET)
 
 
 def test_readline_zb(extended_gcsfs, zonal_mocks):
@@ -161,7 +165,7 @@ def test_readline_from_cache_zb(extended_gcsfs, zonal_mocks):
     data = b"a,b\n11,22\n3,4"
     if not extended_gcsfs.on_google:
         with mock.patch.object(
-            extended_gcsfs, "_sync_get_bucket_type", return_value=BucketType.UNKNOWN
+            extended_gcsfs, "_sync_lookup_bucket_type", return_value=BucketType.UNKNOWN
         ):
             with extended_gcsfs.open(a, "wb") as f:
                 f.write(data)
@@ -187,7 +191,7 @@ def test_readline_empty_zb(extended_gcsfs, zonal_mocks):
     data = b""
     if not extended_gcsfs.on_google:
         with mock.patch.object(
-            extended_gcsfs, "_sync_get_bucket_type", return_value=BucketType.UNKNOWN
+            extended_gcsfs, "_sync_lookup_bucket_type", return_value=BucketType.UNKNOWN
         ):
             with extended_gcsfs.open(b, "wb") as f:
                 f.write(data)
@@ -201,7 +205,7 @@ def test_readline_blocksize_zb(extended_gcsfs, zonal_mocks):
     data = b"ab\n" + b"a" * (2**18) + b"\nab"
     if not extended_gcsfs.on_google:
         with mock.patch.object(
-            extended_gcsfs, "_sync_get_bucket_type", return_value=BucketType.UNKNOWN
+            extended_gcsfs, "_sync_lookup_bucket_type", return_value=BucketType.UNKNOWN
         ):
             with extended_gcsfs.open(c, "wb") as f:
                 f.write(data)

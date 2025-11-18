@@ -71,14 +71,21 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             credentials=self.credentials.credentials, client_info=client_info
         )
 
-    async def _get_bucket_type(self, bucket):
+    async def _lookup_bucket_type(self, bucket):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
-        try:
+        bucket_type = await self._get_bucket_type(bucket)
+        # Dont cache UNKNOWN type
+        if bucket_type == BucketType.UNKNOWN:
+            return BucketType.UNKNOWN
+        self._storage_layout_cache[bucket] = bucket_type
+        return self._storage_layout_cache[bucket]
 
-            # Bucket name details
+    _sync_lookup_bucket_type = asyn.sync_wrapper(_lookup_bucket_type)
+
+    async def _get_bucket_type(self, bucket):
+        try:
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
-            # Make the request to get bucket type
             response = await self._storage_control_client.get_storage_layout(
                 name=bucket_name_value
             )
@@ -89,16 +96,14 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 # This should be updated to include HNS in the future
                 return BucketType.NON_HIERARCHICAL
         except api_exceptions.NotFound:
-            print(f"Error: Bucket {bucket} not found or you lack permissions.")
+            logger.warning(f"Error: Bucket {bucket} not found or you lack permissions.")
             return BucketType.UNKNOWN
         except Exception as e:
             logger.error(
                 f"Could not determine bucket type for bucket name {bucket}: {e}"
             )
-            # Default to UNKNOWN
+            # Default to UNKNOWN in case bucket type is not obtained
             return BucketType.UNKNOWN
-
-    _sync_get_bucket_type = asyn.sync_wrapper(_get_bucket_type)
 
     def _open(
         self,
@@ -118,8 +123,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Open a file.
         """
         bucket, _, _ = self.split_path(path)
-        bucket_type = self._sync_get_bucket_type(bucket)
-        self._storage_layout_cache[bucket] = bucket_type
+        bucket_type = self._sync_lookup_bucket_type(bucket)
         return gcs_file_types[bucket_type](
             self,
             path,
@@ -191,8 +195,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     )
 
     async def _is_zonal_bucket(self, bucket):
-        bucket_type = await self._get_bucket_type(bucket)
-        self._storage_layout_cache[bucket] = bucket_type
+        bucket_type = await self._lookup_bucket_type(bucket)
         return bucket_type == BucketType.ZONAL_HIERARCHICAL
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
