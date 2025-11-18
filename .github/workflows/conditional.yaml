@@ -43,3 +43,21 @@ jobs:
                 summary: 'The /gcbrun command was not found. Merge is allowed.',
               }
             });
+      - name: Post Initial PENDING Status (if GCB IS requested)
+        # This step runs ONLY if the command WAS found, indicating GCB will run.
+        if: steps.check.outputs.gcbrun_requested == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'amaloo-gcsfs-v2 (gcs-aiml-clients-testing-101)', // THIS MUST BE THE EXACT NAME GCB USES
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'in_progress', // Set the status to pending
+              output: {
+                title: 'GCB Execution Requested',
+                summary: 'The /gcbrun command was found. Waiting for Google Cloud Build status...',
+              }
+            });
