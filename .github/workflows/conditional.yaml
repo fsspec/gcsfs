@@ -1,63 +1,48 @@
-name: Conditional GCBrin Check
+name: Conditional GCB Gatekeeper
 
 on:
   pull_request:
-    types: [opened, synchronize, edited, reopened,]
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
-  check_gcbrun_comment:
+  # This single job will be our required status check.
+  gcb-gatekeeper:
+    # Only run on comments that are on a pull request, or on the PR event itself.
+    if: github.event_name == 'pull_request' || github.event.issue.pull_request
     runs-on: ubuntu-latest
-    outputs:
-      gcbrun_requested: ${{ steps.check.outputs.gcbrun_requested }}
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Required for authenticating to Google Cloud
+
     steps:
+      # Step 1: Check if the triggering event is a PR comment that contains '/gcbrun'.
+      # The 'id' gives this step a name we can reference later.
       - name: Check for /gcbrun comment
-        id: check
-        run: |
-          # Get the PR body and all comments
-          PR_TEXT="${{ github.event.pull_request.body }}"
-          # You may need a more advanced logic to fetch comments via the GitHub API
-          # For simplicity, we often check the PR body or title on pull_request events.
-
-          if [[ "$PR_TEXT" == *"/gcbrun"* ]]; then
-            echo "gcbrun_requested=true" >> $GITHUB_OUTPUT
-          else
-            echo "gcbrun_requested=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Set Status to Success if /gcbrun is NOT requested
-        # This step runs ONLY if the comment is NOT present.
-        if: steps.check.outputs.gcbrun_requested == 'false'
+        id: check_comment
+        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
-            // Post a successful status for the required check
-            github.rest.checks.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: 'amaloo-gcsfs-v2', // The exact check name required by Branch Protection
-              head_sha: context.payload.pull_request.head.sha,
-              status: 'completed',
-              conclusion: 'success',
-              output: {
-                title: 'GCB Not Required',
-                summary: 'The /gcbrun command was not found. Merge is allowed.',
-              }
-            });
-      # - name: Post Initial PENDING Status (if GCB IS requested)
-      #   # This step runs ONLY if the command WAS found, indicating GCB will run.
-      #   if: steps.check.outputs.gcbrun_requested == 'true'
-      #   uses: actions/github-script@v7
-      #   with:
-      #     github-token: ${{ secrets.GITHUB_TOKEN }}
-      #     script: |
-      #       github.rest.checks.create({
-      #         owner: context.repo.owner,
-      #         repo: context.repo.repo,
-      #         name: 'amaloo-gcsfs-v2', // THIS MUST BE THE EXACT NAME GCB USES
-      #         head_sha: context.payload.pull_request.head.sha,
-      #         status: 'fail', // Set the status to pending
-      #         output: {
-      #           title: 'GCB Execution Requested',
-      #           summary: 'The /gcbrun command was found. Waiting for Google Cloud Build status...',
-      #         }
-      #       });
+            const comment = context.payload.comment.body;
+            if (comment.includes('/gcbrun')) {
+              // This output is set to 'true' only if the comment is found.
+              core.setOutput('run_build', 'true');
+            }
+
+      # If the comment is found, the 'run_build' output will be true. If not, this step is skipped.
+      - name: 'Checkout code'
+        if: steps.check_comment.outputs.run_build == 'true'
+        uses: actions/checkout@v3
+
+
+      # Step 3: Trigger the build. This step also only runs if the comment was found.
+      # The '--wait' flag is critical. It makes the action wait for the build to complete.
+      # The action will then fail if the build fails, which fails the whole job.
+      - name: Trigger and wait for Google Cloud Build
+        if: steps.check_comment.outputs.run_build == 'true'
+        run: |
+          echo "Build triggered by /gcbrun comment. Waiting for result..."
+          gcloud builds submit . --config cloudbuild.yaml --wait
+
