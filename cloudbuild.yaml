@@ -51,7 +51,7 @@ steps:
   # Step 4: Run the integration tests inside the newly created VM.
   # This step uses 'gcloud compute ssh' to execute a remote script.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "fail-test"
+    id: "fail-test-v1"
     entrypoint: "bash"
     args:
       - "-c"
@@ -74,7 +74,7 @@ steps:
           mkdir -p ~/.ssh
 
           # Set up SSH
-          echo "$$ENCODED_KEY" | base64 -d > ~/.ssh/id_rsa
+          echo "$$SSH_KEY" | base64 -d > ~/.ssh/id_rsa
           chmod 400 ~/.ssh/id_rsa
           ssh-keyscan github.com > ~/.ssh/known_hosts
 
