@@ -35,13 +35,22 @@ jobs:
       - name: install
         run: |
           pip install -e .
-      - name: Run tests
+      - name: Run Standard Tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
           pytest -vv -s \
           --log-format="%(asctime)s %(levelname)s %(message)s" \
           --log-date-format="%H:%M:%S" \
-          gcsfs/
+          gcsfs/ \
+          --ignore=gcsfs/tests/test_extended_gcsfs.py
+      - name: Run Extended Tests
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
+          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
+          pytest -vv -s \
+            --log-format="%(asctime)s %(levelname)s %(message)s" \
+            --log-date-format="%H:%M:%S" \
+            gcsfs/tests/test_extended_gcsfs.py
 
   lint:
     name: lint

@@ -37,7 +37,7 @@ def test_fuse(gcs, fsspec_fuse_run):
     timeout = 20
     n = 40
     for i in range(n):
-        logging.debug(f"Attempt # {i + 1}/{n} to create lock file.")
+        logging.debug(f"Attempt # {i + 1} / {n} to create lock file.")
         try:
             open(os.path.join(mountpath, "lock"), "w").close()
             os.remove(os.path.join(mountpath, "lock"))
