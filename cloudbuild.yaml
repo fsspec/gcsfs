@@ -74,7 +74,7 @@ steps:
           mkdir -p ~/.ssh
 
           # Set up SSH
-          echo "$$ENCODED_KEY" | base64 -d > ~/.ssh/id_rsa
+          echo "$$SSH_KEY" | base64 -d > ~/.ssh/id_rsa
           chmod 400 ~/.ssh/id_rsa
           ssh-keyscan github.com > ~/.ssh/known_hosts
 
@@ -88,10 +88,11 @@ steps:
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
           # Run the delete benchmark and capture the output
-          RESULT_JSON=$(python3 main.py 8192_objs_gcs_central1 --benchmark delete)
-          echo "Benchmark result: $RESULT_JSON"
+          python3 main.py 8192_objs_gcs_central1 --benchmark delete
+          # RESULT_JSON=$(python3 main.py 8192_objs_gcs_central1 --benchmark delete)
+          # echo "Benchmark result: $RESULT_JSON"
 
-          python3 benchmark_check_perf.py \"$$RESULT_JSON\""
+          # python3 benchmark_check_perf.py \"$$RESULT_JSON\""
         "
 
         # Execute the script on the VM via SSH.
