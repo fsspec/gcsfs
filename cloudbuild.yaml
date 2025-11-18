@@ -48,7 +48,7 @@ steps:
         git clone git@github.com:google-partners/tessellations.git
     secretEnv: ['SSH_KEY']
 
-  # Step 2: Run the integration tests inside the newly created VM.
+  # Step 4: Run the integration tests inside the newly created VM.
   # This step uses 'gcloud compute ssh' to execute a remote script.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-tests-on-vm"
@@ -74,7 +74,7 @@ steps:
           mkdir -p ~/.ssh
 
           # Set up SSH
-          echo "$$SSH_KEY" | base64 -d > ~/.ssh/id_rsa
+          echo "$$ENCODED_KEY" | base64 -d > ~/.ssh/id_rsa
           chmod 400 ~/.ssh/id_rsa
           ssh-keyscan github.com > ~/.ssh/known_hosts
 
@@ -87,12 +87,8 @@ steps:
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
-          # Run the delete benchmark and capture the output
           python3 main.py 8192_objs_gcs_central1 --benchmark delete
-          # RESULT_JSON=$(python3 main.py 8192_objs_gcs_central1 --benchmark delete)
-          # echo "Benchmark result: $RESULT_JSON"
 
-          # python3 benchmark_check_perf.py \"$$RESULT_JSON\""
         "
 
         # Execute the script on the VM via SSH.
