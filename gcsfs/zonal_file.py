@@ -1,6 +1,8 @@
 from fsspec import asyn
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
+    AsyncMultiRangeDownloader,
+)
 
-from gcsfs import zb_hns_utils
 from gcsfs.core import GCSFile
 
 
@@ -29,7 +31,7 @@ class ZonalFile(GCSFile):
         """
         Initializes the AsyncMultiRangeDownloader.
         """
-        return await zb_hns_utils.create_mrd(
+        return await AsyncMultiRangeDownloader.create_mrd(
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 

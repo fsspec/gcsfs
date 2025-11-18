@@ -7,6 +7,9 @@ from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
 from google.cloud import storage_control_v2
 from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
+from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
+    AsyncMultiRangeDownloader,
+)
 
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
@@ -160,21 +163,20 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if start is None:
             offset = 0
         elif start < 0:
-            size = size or (await self._info(path))["size"]
+            size = (await self._info(path))["size"] if size is None else size
             offset = size + start
         else:
             offset = start
 
         if end is None:
-            size = size or (await self._info(path))["size"]
+            size = (await self._info(path))["size"] if size is None else size
             effective_end = size
         elif end < 0:
-            size = size or (await self._info(path))["size"]
+            size = (await self._info(path))["size"] if size is None else size
             effective_end = size + end
         else:
             effective_end = end
 
-        size = size or (await self._info(path))["size"]
         if offset < 0:
             raise ValueError(f"Calculated start offset ({offset}) cannot be negative.")
         if effective_end < offset:
@@ -183,10 +185,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             )
         elif effective_end == offset:
             length = 0  # Handle zero-length slice
-        elif effective_end > size:
-            length = max(0, size - offset)  # Clamp and ensure non-negative
         else:
             length = effective_end - offset  # Normal case
+            size = (await self._info(path))["size"] if size is None else size
+            if effective_end > size:
+                length = max(0, size - offset)  # Clamp and ensure non-negative
 
         return offset, length
 
@@ -198,9 +201,20 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket_type = await self._lookup_bucket_type(bucket)
         return bucket_type == BucketType.ZONAL_HIERARCHICAL
 
-    async def _cat_file(self, path, start=None, end=None, **kwargs):
-        """
-        Fetch a file's contents as bytes.
+    async def _cat_file(self, path, start=None, end=None, mrd=None, **kwargs):
+        """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
+
+        This method overrides the parent `_cat_file` to read objects in Zonal buckets using gRPC.
+
+        Args:
+            path (str): The full GCS path to the file (e.g., "bucket/object").
+            start (int, optional): The starting byte position to read from.
+            end (int, optional): The ending byte position to read to.
+            mrd (AsyncMultiRangeDownloader, optional): An existing multi-range
+                downloader instance. If not provided, a new one will be created for Zonal buckets.
+
+        Returns:
+            bytes: The content of the file or file range.
         """
         mrd = kwargs.pop("mrd", None)
         mrd_created = False
@@ -213,7 +227,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             if not await self._is_zonal_bucket(bucket):
                 return await super()._cat_file(path, start=start, end=end, **kwargs)
 
-            mrd = await zb_hns_utils.create_mrd(
+            mrd = await AsyncMultiRangeDownloader.create_mrd(
                 self.grpc_client, bucket, object_name, generation
             )
             mrd_created = True
@@ -226,6 +240,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 offset=offset, length=length, mrd=mrd
             )
         finally:
-            # Explicit cleanup if we created the MRD and it has a close method
+            # Explicit cleanup if we created the MRD
             if mrd_created:
                 await mrd.close()

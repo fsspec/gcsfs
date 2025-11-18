@@ -40,7 +40,10 @@ def zonal_mocks():
         patch_target_sync_lookup_bucket_type = (
             "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
         )
-        patch_target_create_mrd = "gcsfs.extended_gcsfs.zb_hns_utils.create_mrd"
+        patch_target_create_mrd = (
+            "google.cloud.storage._experimental.asyncio.async_multi_range_downloader"
+            ".AsyncMultiRangeDownloader.create_mrd"
+        )
         patch_target_gcsfs_cat_file = "gcsfs.core.GCSFileSystem._cat_file"
 
         async def download_side_effect(read_requests, **kwargs):
