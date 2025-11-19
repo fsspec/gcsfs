@@ -74,6 +74,25 @@ steps:
         ENCODED_KEY=$(echo "$$SSH_KEY" | base64 -w 0)
         # Script to be executed on the VM.
         # This script installs dependencies, sets environment variables, and runs pytest.
+        PARALLEL_COMMANDS="
+          # Parallel benchmarks
+          python3 main.py medium_gcs_west1 --benchmark delete &
+          PID1=\$!
+          python3 main.py 8192_objs_gcs_central1 --benchmark rename &
+          PID2=\$!
+          
+          # Wait and check status
+          wait \$PID1; STATUS1=\$?
+          wait \$PID2; STATUS2=\$?
+
+          if [ \$STATUS1 -ne 0 ] || [ \$STATUS2 -ne 0 ]; then
+            echo 'One or more parallel benchmarks failed!'
+            exit 1 
+          else
+            echo 'All parallel benchmarks completed successfully.'
+          fi
+        "
+
         VM_SCRIPT="
           set -e
           echo '---   SSH on VM complete---'
@@ -93,20 +112,7 @@ steps:
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
-          python3 main.py medium_gcs_west1 --benchmark delete &
-          PID1=\\$!
-          python3 main.py 8192_objs_gcs_central1 --benchmark rename &
-          PID2=\\$!
-          wait \\$PID1
-          STATUS1=\\$?
-          wait \\$PID2
-          STATUS2=\\$?
-          if [ \\$STATUS1 -ne 0 ] || [ \\$STATUS2 -ne 0 ]; then
-            echo 'One or more parallel benchmarks failed!'
-            exit 1 
-          else
-            echo 'All parallel benchmarks completed successfully.'
-          fi
+          $$PARALLEL_COMMANDS
         "
 
         # Execute the script on the VM via SSH.
