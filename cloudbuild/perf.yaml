@@ -94,7 +94,21 @@ steps:
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
           python3 main.py medium_gcs_west1 --benchmark delete &
+          pid1=$!
           python3 main.py 8192_objs_gcs_central1 --benchmark rename &
+          pid2=$!
+
+          wait $pid1
+          if [ $? -ne 0 ]; then
+            echo "Delete benchmark failed"
+            exit 1
+          fi
+
+          wait $pid2
+          if [ $? -ne 0 ]; then
+            echo "Rename benchmark failed"
+            exit 1
+          fi
         "
 
         # Execute the script on the VM via SSH.
