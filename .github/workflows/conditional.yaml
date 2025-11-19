@@ -1,45 +1,78 @@
-name: Conditional GCBrin Check
+name: GCB Gatekeeper
 
 on:
   pull_request:
-    types: [opened, synchronize, edited]
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
-  check_gcbrun_comment:
+  # This single job will be our required status check.
+  gcb-gatekeeper:
+    # Only run this job if the event is a PR or a comment on a PR.
+    if: github.event_name == 'pull_request' || github.event.issue.pull_request
     runs-on: ubuntu-latest
-    outputs:
-      gcbrun_requested: ${{ steps.check.outputs.gcbrun_requested }}
+    permissions:
+      # This permission is required to read checks and comments.
+      checks: 'read'
+      contents: 'read'
+
     steps:
-      - name: Check for /gcbrun comment
-        id: check
-        run: |
-          # Get the PR body and all comments
-          PR_TEXT="${{ github.event.pull_request.body }}"
-          # You may need a more advanced logic to fetch comments via the GitHub API
-          # For simplicity, we often check the PR body or title on pull_request events.
-
-          if [[ "$PR_TEXT" == *"/gcbrun"* ]]; then
-            echo "gcbrun_requested=true" >> $GITHUB_OUTPUT
-          else
-            echo "gcbrun_requested=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Set Status to Success if /gcbrun is NOT requested
-        # This step runs ONLY if the comment is NOT present.
-        if: steps.check.outputs.gcbrun_requested == 'false'
+      - name: Track GCB status on /gcbrun
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // Post a successful status for the required check
-            github.rest.checks.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: 'amaloo-gcsfs-v2 (gcs-aiml-clients-testing-101)', // The exact check name required by Branch Protection
-              head_sha: context.payload.pull_request.head.sha,
-              status: 'completed',
-              conclusion: 'success',
-              output: {
-                title: 'GCB Not Required',
-                summary: 'The /gcbrun command was not found. Merge is allowed.',
-              }
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.issue.number;
+            const checkName = 'amaloo-gcsfs-v2 (gcs-aiml-clients-testing-101)'; // The exact name of the GCB check
+
+            // 1. Check if the /gcbrun command exists in any comment
+            console.log('Checking for /gcbrun comment...');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: prNumber,
             });
+
+            const runRequested = comments.some(comment => comment.body.includes('/gcbrun'));
+
+            if (!runRequested) {
+              console.log('No /gcbrun comment found. This check is successful.');
+              return; // Exit successfully, allowing merge
+            }
+
+            console.log('/gcbrun comment found. Tracking the build status...');
+
+            // 2. If command exists, track the status of the Cloud Build check
+            const headSha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.payload.issue.pull_request.head.sha;
+            const timeoutMinutes = 15;
+            const pollIntervalSeconds = 30;
+            const startTime = Date.now();
+
+            while (Date.now() - startTime < timeoutMinutes * 60 * 1000) {
+              const { data: checks } = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: headSha,
+                check_name: checkName,
+              });
+
+              const gcbCheck = checks.check_runs[0];
+
+              if (gcbCheck && gcbCheck.status === 'completed') {
+                if (gcbCheck.conclusion === 'success') {
+                  console.log(`'${checkName}' completed successfully.`);
+                  return; // Success, allow merge
+                } else {
+                  core.setFailed(`'${checkName}' failed with conclusion: ${gcbCheck.conclusion}.`);
+                  return; // Failure, block merge
+                }
+              }
+
+              console.log(`'${checkName}' is pending... Polling again in ${pollIntervalSeconds}s.`);
+              await new Promise(r => setTimeout(r, pollIntervalSeconds * 1000));
+            }
+
+            core.setFailed(`Timed out after ${timeoutMinutes} minutes waiting for '${checkName}' to complete.`);
