@@ -5,6 +5,7 @@ from google.cloud.storage._experimental.asyncio.async_multi_range_downloader imp
     AsyncMultiRangeDownloader,
 )
 
+from gcsfs import zb_hns_utils
 from gcsfs.core import GCSFile
 
 logger = logging.getLogger("gcsfs.zonal_file")
@@ -28,7 +29,11 @@ class ZonalFile(GCSFile):
             )
         elif "w" in self.mode:
             self.aaow = asyn.sync(
-                self.gcsfs.loop, self._init_aaow, self.bucket, self.key
+                self.gcsfs.loop,
+                zb_hns_utils.init_aaow,
+                self.gcsfs.grpc_client,
+                self.bucket,
+                self.key,
             )
         else:
             raise NotImplementedError(
@@ -54,17 +59,6 @@ class ZonalFile(GCSFile):
             if "not satisfiable" in str(e):
                 return b""
             raise
-
-    async def _init_aaow(
-        self, bucket_name, object_name, generation=None
-    ):
-        """
-        Initializes the AsyncAppendableObjectWriter.
-        """
-
-        return await zb_hns_utils.init_aaow(
-            self.gcsfs.grpc_client, bucket_name, object_name, generation
-        )
 
     def write(self, data):
         """

@@ -1,5 +1,9 @@
 from io import BytesIO
 
+from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
+    AsyncAppendableObjectWriter,
+)
+
 
 async def download_range(offset, length, mrd):
     """
