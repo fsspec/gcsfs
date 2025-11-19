@@ -38,7 +38,7 @@ steps:
         fi
         
         # --- Original Logic Starts Here ---
-        gcloud compute instances create gcsfs-test-vm-${_SHORT_BUILD_ID} \
+        gcloud compute instances create gcsfs-perf-test-vm-${_SHORT_BUILD_ID} \
           --project=${PROJECT_ID} \
           --zone=${_ZONE} \
           --machine-type=e2-medium \
@@ -67,7 +67,7 @@ steps:
         set -e
         # Wait for the VM to be fully initialized and SSH to be ready.
         for i in {1..10}; do
-          if gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --quiet --command="whoami"; then
+          if gcloud compute ssh gcsfs-perf-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --quiet --command="whoami"; then
             break
           fi
           echo "Waiting for VM to become available... (attempt $$i/10)"
@@ -95,12 +95,12 @@ steps:
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
-          python3 main.py 8192_objs_gcs_centra --benchmark delete
+          python3 main.py medium_gcs_west1 --benchmark delete
           python3 main.py 8192_objs_gcs_central1 --benchmark rename
         "
 
         # Execute the script on the VM via SSH.
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="$$VM_SCRIPT"
+        gcloud compute ssh gcsfs-perf-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="$$VM_SCRIPT"
     secretEnv: ['SSH_KEY']
     waitFor:
       - "create-vm"
@@ -120,7 +120,7 @@ steps:
           exit 0
         fi
         
-        gcloud compute instances delete gcsfs-test-vm-${_SHORT_BUILD_ID} \
+        gcloud compute instances delete gcsfs-perf-test-vm-${_SHORT_BUILD_ID} \
           --zone=${_ZONE} \
           --quiet
     waitFor:
