@@ -81,16 +81,15 @@ steps:
           python3 main.py 8192_objs_gcs_central1 --benchmark rename &
           PID2=$$!
           
-          wait $$PID1
-          if [ $$? -ne 0 ]; then
-            echo "Delete benchmark failed"
-            exit 1
-          fi
+          # Wait and check status
+          wait $$PID1; STATUS1=$?
+          wait $$PID2; STATUS2=$?
 
-          wait $$PID2
-          if [ $$? -ne 0 ]; then
-            echo "Rename benchmark failed"
-            exit 1
+          if [ $$STATUS1 -ne 0 ] || [ $$STATUS2 -ne 0 ]; then
+            echo 'One or more parallel benchmarks failed!'
+            exit 1 
+          else
+            echo 'All parallel benchmarks completed successfully.'
           fi
         "
 
