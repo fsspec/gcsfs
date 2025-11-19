@@ -72,12 +72,12 @@ steps:
 
           # Run benchmarks in parallel
           python3 main.py 8192_objs_gcs_central1 --benchmark delete &
-          PID1=$!
+          PID1=$$!
           python3 main.py 8192_objs_gcs_central1 --benchmark rename &
-          PID2=$!
+          PID2=$$!
 
           # Wait for benchmarks to finish and check exit codes
-          if wait $PID1 && wait $PID2; then
+          if wait $$PID1 && wait $$PID2; then
             echo "Benchmarks completed successfully"
           else
             echo "One or more benchmarks failed"
