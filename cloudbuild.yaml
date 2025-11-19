@@ -12,8 +12,10 @@ steps:
     args:
       - '-c'
       - |
+        # _PR_LABELS="${{ github.event.pull_request.body }}"
+        echo "tHIS IS LAbels: ${_PR_LABELS}"
         # Check if the label 'gcb-required' is in the _PR_LABELS variable's JSON output
-        if echo "$_PR_LABELS" | grep -q '"name": "gcb-required"'; then
+        if echo "$_PR_LABELS" | grep -q "gcb-required"; then
           echo "Label 'gcb-required' found. Proceeding with full CI/CD run."
         else
           echo "Label 'gcb-required' not found. Skipping critical steps and exiting successfully."
@@ -93,20 +95,8 @@ steps:
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
-
-          # Run benchmarks in parallel
-          python3 main.py 8192_objs_gcs_central1 --benchmark delete &
-          PID1=$$!
-          python3 main.py 8192_objs_gcs_central1 --benchmark rename &
-          PID2=$$!
-
-          # Wait for benchmarks to finish and check exit codes
-          if wait $$PID1 && wait $$PID2; then
-            echo "Benchmarks completed successfully"
-          else
-            echo "One or more benchmarks failed"
-            exit 1
-          fi
+          python3 main.py 8192_objs_gcs_central1 --benchmark delete
+          python3 main.py 8192_objs_gcs_central1 --benchmark rename
         "
 
         # Execute the script on the VM via SSH.
