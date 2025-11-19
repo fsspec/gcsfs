@@ -77,15 +77,15 @@ steps:
         PARALLEL_COMMANDS="
           # Parallel benchmarks
           python3 main.py medium_gcs_west1 --benchmark delete &
-          PID1=\$!
+          PID1=$$!
           python3 main.py 8192_objs_gcs_central1 --benchmark rename &
-          PID2=\$!
+          PID2=$$!
           
           # Wait and check status
-          wait \$PID1; STATUS1=\$?
-          wait \$PID2; STATUS2=\$?
+          wait $$PID1; STATUS1=$$?
+          wait $$PID2; STATUS2=$$?
 
-          if [ \$STATUS1 -ne 0 ] || [ \$STATUS2 -ne 0 ]; then
+          if [ $$STATUS1 -ne 0 ] || [ $$STATUS2 -ne 0 ]; then
             echo 'One or more parallel benchmarks failed!'
             exit 1 
           else
