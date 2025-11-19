@@ -12,13 +12,11 @@ steps:
     args:
       - '-c'
       - |
-        # _PR_LABELS="${{ github.event.pull_request.body }}"
-        echo "tHIS IS LAbels: ${_PR_LABELS}"
-        # Check if the label 'gcb-required' is in the _PR_LABELS variable's JSON output
-        if echo "$_PR_LABELS" | grep -q "gcb-required"; then
-          echo "Label 'gcb-required' found. Proceeding with full CI/CD run."
+        # Check if the label 'gcb-perf' is in the _PR_LABELS variable's JSON output
+        if echo "$_PR_LABELS" | grep -q "gcb-perf"; then
+          echo "Label 'gcb-perf' found. Proceeding with full CI/CD run."
         else
-          echo "Label 'gcb-required' not found. Skipping critical steps and exiting successfully."
+          echo "Label 'gcb-perf' not found. Skipping critical steps and exiting successfully."
           # If the label is NOT present, we exit with status 0 (Success).
           # This makes the Cloud Build status on GitHub green, allowing the merge.
           echo "Skipped" > /workspace/SKIP_CI
@@ -38,7 +36,7 @@ steps:
         fi
         
         # --- Original Logic Starts Here ---
-        gcloud compute instances create gcsfs-test-vm-${_SHORT_BUILD_ID} \
+        gcloud compute instances create gcsfs-perf-test-vm-${_SHORT_BUILD_ID} \
           --project=${PROJECT_ID} \
           --zone=${_ZONE} \
           --machine-type=e2-medium \
@@ -67,15 +65,15 @@ steps:
         set -e
         # Wait for the VM to be fully initialized and SSH to be ready.
         for i in {1..10}; do
-          if gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --quiet --command="whoami"; then
+          if gcloud compute ssh gcsfs-perf-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --quiet --command="whoami"; then
             break
           fi
           echo "Waiting for VM to become available... (attempt $$i/10)"
           sleep 15
         done
         ENCODED_KEY=$(echo "$$SSH_KEY" | base64 -w 0)
-        # Script to be executed on the VM.
-        # This script installs dependencies, sets environment variables, and runs pytest.
+
+
         VM_SCRIPT="
           set -e
           echo '---   SSH on VM complete---'
@@ -100,7 +98,7 @@ steps:
         "
 
         # Execute the script on the VM via SSH.
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="$$VM_SCRIPT"
+        gcloud compute ssh gcsfs-perf-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="$$VM_SCRIPT"
     secretEnv: ['SSH_KEY']
     waitFor:
       - "create-vm"
@@ -120,7 +118,7 @@ steps:
           exit 0
         fi
         
-        gcloud compute instances delete gcsfs-test-vm-${_SHORT_BUILD_ID} \
+        gcloud compute instances delete gcsfs-perf-test-vm-${_SHORT_BUILD_ID} \
           --zone=${_ZONE} \
           --quiet
     waitFor:
