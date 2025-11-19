@@ -72,13 +72,7 @@ steps:
           sleep 15
         done
         ENCODED_KEY=$(echo "$$SSH_KEY" | base64 -w 0)
-        # Script to be executed on the VM.
-        # This script installs dependencies, sets environment variables, and runs pytest.
-        PARALLEL_COMMANDS="
-          # Parallel benchmarks
-          python3 main.py medium_gcs_west1 --benchmark delete
-          python3 main.py 8192_objs_gcs_central1 --benchmark rename
-        "
+
 
         VM_SCRIPT="
           set -e
@@ -99,7 +93,8 @@ steps:
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
-          $$PARALLEL_COMMANDS
+          python3 main.py medium_gcs_west1 --benchmark delete
+          python3 main.py 8192_objs_gcs_central1 --benchmark rename
         "
 
         # Execute the script on the VM via SSH.
