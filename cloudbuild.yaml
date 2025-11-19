@@ -8,7 +8,6 @@ substitutions:
 steps:
 
   # Step 1: Create a GCE VM to run the tests.
-  # The VM is created in the same zone as the buckets to test zonal bucket features.
   # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create-vm"
@@ -23,35 +22,18 @@ steps:
       - "--machine-type=e2-medium"
       - "--image-family=debian-11"
       - "--image-project=debian-cloud"
-      - "--service-account=369568738723-compute@developer.gserviceaccount.com"
+      - "--service-account=${_VM_SERVICE_ACCOUNT}"
       - "--tags=allow-ssh"
       - "--scopes=https://www.googleapis.com/auth/cloud-platform" # Full access to project APIs
       - "--network-tier=PREMIUM"
       - "--metadata=enable-oslogin=TRUE"
     waitFor: ["-"]
 
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: "clone"
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        # Create the .ssh directory before using it
-        mkdir -p /root/.ssh
 
-        # Set up SSH
-        echo "$$SSH_KEY" > /root/.ssh/id_rsa
-        chmod 400 /root/.ssh/id_rsa
-        ssh-keyscan github.com > /root/.ssh/known_hosts
-
-        # Clone the repository using the SSH URL
-        git clone git@github.com:google-partners/tessellations.git
-    secretEnv: ['SSH_KEY']
-
-  # Step 4: Run the integration tests inside the newly created VM.
+  # Step 2: Run the performance tests inside the newly created VM.
   # This step uses 'gcloud compute ssh' to execute a remote script.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "run-tests-on-vm"
+    id: "fail-test-v1"
     entrypoint: "bash"
     args:
       - "-c"
@@ -87,9 +69,20 @@ steps:
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
           pip install -r requirements.txt
           python3 main.py 8192_objs_gcs_central1 --benchmark init-source-dataset
-          python3 main.py 8192_objs_gcs_central1 --benchmark delete &
-          python3 main.py 8192_objs_gcs_central1 --benchmark rename &
 
+          # Run benchmarks in parallel
+          python3 main.py 8192_objs_gcs_central1 --benchmark delete &
+          PID1=$!
+          python3 main.py 8192_objs_gcs_central1 --benchmark rename &
+          PID2=$!
+
+          # Wait for benchmarks to finish and check exit codes
+          if wait $PID1 && wait $PID2; then
+            echo "Benchmarks completed successfully"
+          else
+            echo "One or more benchmarks failed"
+            exit 1
+          fi
         "
 
         # Execute the script on the VM via SSH.
@@ -101,7 +94,7 @@ steps:
 
   # --- Cleanup Steps ---
 
-  # Step 5: Delete the GCE VM.
+  # Step 3: Delete the GCE VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-vm"
     entrypoint: "gcloud"
