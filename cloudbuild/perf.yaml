@@ -76,14 +76,8 @@ steps:
         # This script installs dependencies, sets environment variables, and runs pytest.
         PARALLEL_COMMANDS="
           # Parallel benchmarks
-          python3 main.py medium_gcs_west1 --benchmark delete &
-          PID1=$$!
-          python3 main.py 8192_objs_gcs_central1 --benchmark rename &
-          PID2=$$!
-          
-          # Wait and check status
-          wait $$PID1;
-          wait $$PID2;
+          python3 main.py medium_gcs_west1 --benchmark delete
+          python3 main.py 8192_objs_gcs_central1 --benchmark rename
         "
 
         VM_SCRIPT="
