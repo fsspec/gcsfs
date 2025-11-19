@@ -13,6 +13,7 @@ steps:
       - '-c'
       - |
         _PR_LABELS="${{ github.event.pull_request.labels }}"
+        echo "tHIS IS LAbels: ${_PR_LABELS}"
         # Check if the label 'gcb-required' is in the _PR_LABELS variable's JSON output
         if echo "$_PR_LABELS" | grep -q "gcb-required"'; then
           echo "Label 'gcb-required' found. Proceeding with full CI/CD run."
