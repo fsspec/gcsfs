@@ -33,7 +33,7 @@ steps:
   # Step 2: Run the performance tests inside the newly created VM.
   # This step uses 'gcloud compute ssh' to execute a remote script.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "fail-test-v1"
+    id: "run-tests-on-vm"
     entrypoint: "bash"
     args:
       - "-c"
@@ -118,5 +118,5 @@ options:
 
 availableSecrets:
   secretManager:
-  - versionName: projects/gcs-aiml-clients-testing-101/secrets/github-deploy-key-tessellations-amaloo/versions/latest
+  - versionName: projects/${PROJECT_ID}/secrets/github-deploy-key-tessellations-amaloo/versions/latest
     env: 'SSH_KEY'
