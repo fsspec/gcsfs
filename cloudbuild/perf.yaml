@@ -12,8 +12,6 @@ steps:
     args:
       - '-c'
       - |
-        # _PR_LABELS="${{ github.event.pull_request.body }}"
-        echo "tHIS IS LAbels: ${_PR_LABELS}"
         # Check if the label 'gcb-perf' is in the _PR_LABELS variable's JSON output
         if echo "$_PR_LABELS" | grep -q "gcb-perf"; then
           echo "Label 'gcb-perf' found. Proceeding with full CI/CD run."
