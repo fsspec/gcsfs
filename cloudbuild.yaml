@@ -12,10 +12,10 @@ steps:
     args:
       - '-c'
       - |
-        _PR_LABELS="${{ github.event.pull_request.body }}"
+        # _PR_LABELS="${{ github.event.pull_request.body }}"
         echo "tHIS IS LAbels: ${_PR_LABELS}"
         # Check if the label 'gcb-required' is in the _PR_LABELS variable's JSON output
-        if echo "$_PR_LABELS" | grep -q "gcb-required"'; then
+        if echo "$_PR_LABELS" | grep -q "gcb-required"; then
           echo "Label 'gcb-required' found. Proceeding with full CI/CD run."
         else
           echo "Label 'gcb-required' not found. Skipping critical steps and exiting successfully."
