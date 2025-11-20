@@ -41,8 +41,7 @@ jobs:
           pytest -vv -s \
           --log-format="%(asctime)s %(levelname)s %(message)s" \
           --log-date-format="%H:%M:%S" \
-          gcsfs/ \
-          --ignore=gcsfs/tests/test_extended_gcsfs.py
+          gcsfs/
       - name: Run Extended Tests
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
