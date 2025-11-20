@@ -118,7 +118,7 @@ class ZonalFile(GCSFile):
         kms_key_name=None,
     ):
         raise NotImplementedError(
-            "Initiate_upload operation is not applicable for Zonal buckets. Please use write() instead."
+            "Initiate_upload operation is not implemented yet for Zonal buckets. Please use write() instead."
         )
 
     async def simple_upload(
@@ -134,12 +134,12 @@ class ZonalFile(GCSFile):
         kms_key_name=None,
     ):
         raise NotImplementedError(
-            "Simple_upload operation is not applicable for Zonal buckets. Please use write() instead."
+            "Simple_upload operation is not implemented yet for Zonal buckets. Please use write() instead."
         )
 
     async def upload_chunk(fs, location, data, offset, size, content_type):
         raise NotImplementedError(
-            "Upload_chunk operation is not applicable for Zonal buckets. Please use write() instead."
+            "Upload_chunk operation is not implemented yet for Zonal buckets. Please use write() instead."
         )
 
     def close(self):
