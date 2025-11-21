@@ -20,6 +20,17 @@ json_data = files[file]
 lines = io.BytesIO(json_data).readlines()
 file_size = len(json_data)
 
+REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
+
+# If the condition is True, only then tests in this file are run.
+should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
+    "true",
+    "1",
+)
+pytestmark = pytest.mark.skipif(
+    not should_run, reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set"
+)
+
 
 @pytest.fixture
 def zonal_mocks():
