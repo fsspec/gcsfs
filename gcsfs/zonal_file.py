@@ -75,10 +75,10 @@ class ZonalFile(GCSFile):
         """
         Writes data using AsyncAppendableObjectWriter.
         """
-        if not self.writable():
-            raise ValueError("File not in write mode")
         if self.closed:
             raise ValueError("I/O operation on closed file.")
+        if not self.writable():
+            raise ValueError("File not in write mode")
         if self.forced:
             raise ValueError("This file has been force-flushed, can only close")
 
@@ -118,39 +118,49 @@ class ZonalFile(GCSFile):
             Data is uploaded via streaming and cannot be cancelled."
         )
 
-    async def initiate_upload(
-        fs,
-        bucket,
-        key,
-        content_type="application/octet-stream",
-        metadata=None,
-        fixed_key_metadata=None,
-        mode="overwrite",
-        kms_key_name=None,
-    ):
-        raise NotImplementedError(
-            "Initiate_upload operation is not implemented yet for Zonal buckets. Please use write() instead."
+    def _initiate_upload(self):
+        """Initiates the upload for Zonal buckets using gRPC."""
+        from gcsfs.extended_gcsfs import initiate_upload
+
+        self.location = asyn.sync(
+            self.gcsfs.loop,
+            initiate_upload,
+            self.gcsfs,
+            self.bucket,
+            self.key,
+            self.content_type,
+            self.metadata,
+            self.fixed_key_metadata,
+            mode="create" if "x" in self.mode else "overwrite",
+            kms_key_name=self.kms_key_name,
+            timeout=self.timeout,
         )
 
-    async def simple_upload(
-        fs,
-        bucket,
-        key,
-        datain,
-        metadatain=None,
-        consistency=None,
-        content_type="application/octet-stream",
-        fixed_key_metadata=None,
-        mode="overwrite",
-        kms_key_name=None,
-    ):
-        raise NotImplementedError(
-            "Simple_upload operation is not implemented yet for Zonal buckets. Please use write() instead."
+    def _simple_upload(self):
+        """Performs a simple upload for Zonal buckets using gRPC."""
+        from gcsfs.extended_gcsfs import simple_upload
+
+        self.buffer.seek(0)
+        data = self.buffer.read()
+        asyn.sync(
+            self.gcsfs.loop,
+            simple_upload,
+            self.gcsfs,
+            self.bucket,
+            self.key,
+            data,
+            self.metadata,
+            self.consistency,
+            self.content_type,
+            self.fixed_key_metadata,
+            mode="create" if "x" in self.mode else "overwrite",
+            kms_key_name=self.kms_key_name,
+            timeout=self.timeout,
         )
 
-    async def upload_chunk(fs, location, data, offset, size, content_type):
+    def _upload_chunk(self, final=False):
         raise NotImplementedError(
-            "Upload_chunk operation is not implemented yet for Zonal buckets. Please use write() instead."
+            "_upload_chunk is not implemented yet for ZonalFile. Please use write() instead."
         )
 
     def close(self):

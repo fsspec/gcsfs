@@ -264,3 +264,41 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             # Explicit cleanup if we created the MRD
             if mrd_created:
                 await mrd.close()
+
+
+async def upload_chunk(fs, location, data, offset, size, content_type):
+    raise NotImplementedError(
+        "upload_chunk is not implemented yet for ExtendedGcsFileSystem. Please use write() instead."
+    )
+
+
+async def initiate_upload(
+    fs,
+    bucket,
+    key,
+    content_type="application/octet-stream",
+    metadata=None,
+    fixed_key_metadata=None,
+    mode="overwrite",
+    kms_key_name=None,
+):
+    raise NotImplementedError(
+        "initiate_upload is not implemented yet for ExtendedGcsFileSystem. Please use write() instead."
+    )
+
+
+async def simple_upload(
+    fs,
+    bucket,
+    key,
+    datain,
+    metadatain=None,
+    consistency=None,
+    content_type="application/octet-stream",
+    fixed_key_metadata=None,
+    mode="overwrite",
+    kms_key_name=None,
+):
+    raise NotImplementedError(
+        "simple_upload is not implemented yet for ExtendedGcsFileSystem. Please use write() instead."
+    )
