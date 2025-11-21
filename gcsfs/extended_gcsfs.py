@@ -129,7 +129,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         acl=None,
         consistency=None,
         metadata=None,
-        autocommit=None,
+        autocommit=True,
         fixed_key_metadata=None,
         generation=None,
         **kwargs,
@@ -138,16 +138,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Open a file.
         """
         bucket, _, _ = self.split_path(path)
-
-        # Determine the final autocommit value based on bucket type. For zonal
-        # buckets, default autocommit is False; for others, it is True.
-        final_autocommit = autocommit
         bucket_type = self._sync_lookup_bucket_type(bucket)
-        if autocommit is None:
-            if bucket_type == BucketType.ZONAL_HIERARCHICAL:
-                final_autocommit = False
-            else:
-                final_autocommit = True
         return gcs_file_types[bucket_type](
             self,
             path,
@@ -157,7 +148,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             consistency=consistency or self.consistency,
             metadata=metadata,
             acl=acl,
-            autocommit=final_autocommit,
+            autocommit=autocommit,
             fixed_key_metadata=fixed_key_metadata,
             generation=generation,
             **kwargs,

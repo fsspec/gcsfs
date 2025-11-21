@@ -10,8 +10,6 @@ from gcsfs.core import GCSFile
 
 logger = logging.getLogger("gcsfs.zonal_file")
 
-DEFAULT_BLOCK_SIZE = 5 * 2**20
-
 
 class ZonalFile(GCSFile):
     """
@@ -19,20 +17,11 @@ class ZonalFile(GCSFile):
     Zonal buckets only using a high-performance gRPC path.
     """
 
-    def __init__(
-        self,
-        gcsfs,
-        path,
-        mode="rb",
-        block_size=DEFAULT_BLOCK_SIZE,
-        autocommit=False,
-        *args,
-        **kwargs,
-    ):
+    def __init__(self, *args, **kwargs):
         """
         Initializes the ZonalFile object.
         """
-        super().__init__(gcsfs, path, mode, block_size, autocommit, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.mrd = None
         if "r" in self.mode:
             self.mrd = asyn.sync(
@@ -48,7 +37,7 @@ class ZonalFile(GCSFile):
             )
         else:
             raise NotImplementedError(
-                "Only 'r' and 'w' modes are currently supported for Zonal buckets."
+                "Only read operations are currently supported for Zonal buckets."
             )
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
