@@ -1,0 +1,103 @@
+name: GCB Gatekeeper
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled]
+  workflow_dispatch:
+
+
+jobs:
+  # This single job will be our required status check.
+  gcb-gatekeeper:
+    # Only run this job if the event is a PR or a comment on a PR.
+    runs-on: ubuntu-latest
+    permissions:
+      # This permission is required to read checks and comments.
+      checks: 'read'
+      contents: 'read'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: gcs-aiml-clients-testing-101
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+
+
+      - name: Wait for GCB Check to complete
+        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'gcb-perf')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.issue.number;
+            const headSha = context.payload.pull_request.head.sha;
+            const checkName = 'amaloo-gcsfs-v2 (gcs-aiml-clients-testing-101)';
+            const labelName = 'gcb-perf';
+            const timeoutMinutes = 15;
+            const pollIntervalSeconds = 30;
+            const startTime = Date.now();
+
+            core.info(`Waiting for check '${checkName}' on ref ${headSha}...`);
+
+            while (Date.now() - startTime < timeoutMinutes * 60 * 1000) {
+              // 1. Check if the label is still present
+              try {
+                const { data: pull } = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                });
+                const labels = pull.labels.map(label => label.name);
+                if (!labels.includes(labelName)) {
+                  core.info(`Label '${labelName}' removed, stopping wait. Check passed.`);
+                  return; // Exit successfully
+                }
+              } catch (error) {
+                core.warning(`Failed to get PR labels: ${error.message}`);
+                // Continue polling, don't fail the job on label check failure
+              }
+
+              // 2. Check the GCB Check status
+              try {
+                const { data: checks } = await github.rest.checks.listForRef({
+                  owner,
+                  repo,
+                  ref: headSha,
+                  check_name: checkName,
+                  per_page: 5, // Get a few recent runs
+                });
+
+                if (checks.check_runs.length > 0) {
+                  // Sort by creation time to get the latest
+                  checks.check_runs.sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
+                  const gcbCheck = checks.check_runs[0];
+                  core.info(`Current status for '${checkName}' (ID: ${gcbCheck.id}): ${gcbCheck.status}, Conclusion: ${gcbCheck.conclusion}`);
+
+                  if (gcbCheck.status === 'completed') {
+                    if (gcbCheck.conclusion === 'success') {
+                      core.info(`'${checkName}' completed successfully.`);
+                      return; // Success
+                    } else {
+                      core.setFailed(`'${checkName}' failed with conclusion: ${gcbCheck.conclusion}. Details: ${gcbCheck.output.summary}`);
+                      return; // Failure
+                    }
+                  }
+                } else {
+                  core.info(`No check run found yet for '${checkName}'.`);
+                }
+              } catch (error) {
+                core.error(`Error fetching checks: ${error.message}`);
+              }
+
+              await new Promise(r => setTimeout(r, pollIntervalSeconds * 1000));
+            }
+
+            core.setFailed(`Timed out after ${timeoutMinutes} minutes waiting for '${checkName}' to complete.`);
