@@ -1,0 +1,61 @@
+name: GCB Gatekeeper
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled]
+  workflow_dispatch:
+
+
+jobs:
+  # This single job will be our required status check.
+  gcb-gatekeeper:
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: gcs-aiml-clients-testing-101
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Trigger performance cloud build
+        if: contains(github.event.pull_request.labels.*.name, 'gcb-perf')
+        id: trigger_build
+        run: |
+          BUILD_INFO=$(gcloud beta builds triggers run amaloo-gcsfs-v2 --region=us-central1 --branch=${{ github.head_ref }} --format=json)
+          BUILD_ID=$(echo $BUILD_INFO | jq -r '.metadata.build.id')
+          echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+          echo "Started Cloud Build with ID: $BUILD_ID"
+        env:
+          PROJECT_ID: gcs-aiml-clients-testing-101
+
+      - name: Wait for Cloud Build to complete
+        if: contains(github.event.pull_request.labels.*.name, 'gcb-perf')
+        run: |
+          echo "Waiting for build ${{ env.BUILD_ID }} to complete..."
+          while true;
+            do
+            BUILD_STATUS=$(gcloud builds describe ${{ env.BUILD_ID }} --region=us-central1 --format=json | jq -r '.status')
+            echo "Current build status: $BUILD_STATUS"
+            if [[ "$BUILD_STATUS" != "PENDING" && "$BUILD_STATUS" != "QUEUING" && "$BUILD_STATUS" != "WORKING" ]] ; then
+              break
+            fi
+            sleep 30
+          done
+        env:
+          PROJECT_ID: gcs-aiml-clients-testing-101
+
+      - name: Check Cloud Build status
+        if: contains(github.event.pull_request.labels.*.name, 'gcb-perf')
+        run: |
+          BUILD_STATUS=$(gcloud builds describe ${{ env.BUILD_ID }} --region=us-central1 --format=json | jq -r '.status')
+          echo "Final build status: $BUILD_STATUS"
+          if [[ "$BUILD_STATUS" != "SUCCESS" ]]; then
+            echo "Cloud Build failed with status: $BUILD_STATUS"
+            exit 1
+          fi
+        env:
+          PROJECT_ID: gcs-aiml-clients-testing-101
