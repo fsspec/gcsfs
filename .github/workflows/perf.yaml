@@ -11,7 +11,6 @@ jobs:
   # This single job will be our required status check.
   gcb-gatekeeper:
     # Only run this job if the event is a PR or a comment on a PR.
-    if: github.event_name == 'pull_request' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     permissions:
       # This permission is required to read checks and comments.
