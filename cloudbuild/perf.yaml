@@ -21,7 +21,7 @@ steps:
           --machine-type=e2-medium \
           --image-family=debian-13 \
           --image-project=debian-cloud \
-          --service-account=${_VM_SERVICE_ACCOUNT} \
+          --service-account=gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com \
           --tags=allow-ssh \
           --scopes=https://www.googleapis.com/auth/cloud-platform \
           --network-tier=PREMIUM \
@@ -70,9 +70,6 @@ steps:
           pip install -e .
           cd ..
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
-          export GRPC_VERBOSITY=DEBUG
-          export GRPC_TRACE=all
-
 
           # Clone the repository using the SSH URL
           git clone git@github.com:google-partners/tessellations.git
