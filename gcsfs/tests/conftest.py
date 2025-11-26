@@ -9,9 +9,10 @@ from unittest.mock import patch
 import fsspec
 import pytest
 import requests
+from google.cloud import storage
 
 from gcsfs import GCSFileSystem
-from gcsfs.tests.settings import TEST_BUCKET
+from gcsfs.tests.settings import TEST_BUCKET, TEST_VERSIONED_BUCKET
 
 files = {
     "test/accounts.1.json": (
@@ -176,21 +177,68 @@ def extended_gcsfs(gcs_factory, populate=True):
 def gcs_versioned(gcs_factory):
     gcs = gcs_factory()
     gcs.version_aware = True
-    try:
-        try:
-            gcs.rm(gcs.find(TEST_BUCKET, versions=True))
-        except FileNotFoundError:
-            pass
-
-        try:
-            gcs.mkdir(TEST_BUCKET, enable_versioning=True)
-        except Exception:
-            pass
+    is_real_gcs = (
+        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+    )
+    try:  # ensure we're empty.
+        if is_real_gcs:
+            # For real GCS, we assume the bucket exists and only clean its contents.
+            try:
+                cleanup_versioned_bucket(gcs, TEST_VERSIONED_BUCKET)
+            except Exception as e:
+                logging.warning(
+                    f"Failed to empty versioned bucket {TEST_VERSIONED_BUCKET}: {e}"
+                )
+        else:
+            # For emulators, we delete and recreate the bucket for a clean state.
+            try:
+                gcs.rm(TEST_VERSIONED_BUCKET, recursive=True)
+            except FileNotFoundError:
+                pass
+            gcs.mkdir(TEST_VERSIONED_BUCKET, enable_versioning=True)
         gcs.invalidate_cache()
         yield gcs
     finally:
         try:
-            gcs.rm(gcs.find(TEST_BUCKET, versions=True))
-            gcs.rm(TEST_BUCKET)
+            if not is_real_gcs:
+                gcs.rm(gcs.find(TEST_VERSIONED_BUCKET, versions=True))
+                gcs.rm(TEST_VERSIONED_BUCKET)
         except:  # noqa: E722
             pass
+
+
+def cleanup_versioned_bucket(gcs, bucket_name, prefix=None):
+    """
+    Deletes all object versions in a bucket using the google-cloud-storage client,
+    ensuring it uses the same credentials as the gcsfs instance.
+    """
+    # Define a retry policy for API calls to handle rate limiting.
+    # This can retry on 429 Too Many Requests errors, which can happen
+    # when deleting many object versions quickly.
+    from google.api_core.retry import Retry
+
+    retry_policy = Retry(
+        initial=1.0,  # Initial delay in seconds
+        maximum=30.0,  # Maximum delay in seconds
+        multiplier=1.2,  # Backoff factor
+    )
+
+    client = storage.Client(
+        credentials=gcs.credentials.credentials, project=gcs.project
+    )
+
+    # List all blobs, including old versions
+    blobs_to_delete = list(client.list_blobs(bucket_name, versions=True, prefix=prefix))
+
+    if not blobs_to_delete:
+        logging.info("No object versions to delete in %s.", bucket_name)
+        return
+
+    logging.info(
+        "Deleting %d object versions from %s.", len(blobs_to_delete), bucket_name
+    )
+    time.sleep(2)
+    for blob in blobs_to_delete:
+        blob.delete(retry=retry_policy)
+
+    logging.info("Successfully deleted %d object versions.", len(blobs_to_delete))
