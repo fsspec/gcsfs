@@ -18,9 +18,10 @@ real GCS. A small number of tests run differently or are skipped.
 
 If you want to actually test against real GCS, then you should set
 STORAGE_EMULATOR_HOST to "https://storage.googleapis.com" and also
-provide appropriate GCSFS_TEST_BUCKET and GCSFS_TEST_PROJECT, as well
-as setting your default google credentials (or providing them via the
-fsspec config).
+provide appropriate GCSFS_TEST_BUCKET, GCSFS_TEST_VERSIONED_BUCKET
+(To use for tests that target GCS object versioning, this bucket must have object versioning enabled)
+and GCSFS_TEST_PROJECT, as well as setting your default google
+credentials (or providing them via the fsspec config).
 
 .. _fake-gcs-server: https://github.com/fsouza/fake-gcs-server
 
