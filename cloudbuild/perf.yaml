@@ -88,6 +88,12 @@ steps:
           sudo apt-get update
           sudo apt-get install -y git python3-pip python3-venv
 
+          # Install gcsfs
+          git clone https://github.com/fsspec/gcsfs/
+          cd gcsfs/
+          pip install -e ./gcsfs/
+
+
           # Clone the repository using the SSH URL
           git clone git@github.com:google-partners/tessellations.git
           cd tessellations/benchmarks/proof-of-concept/microbenchmark/gcsfs
