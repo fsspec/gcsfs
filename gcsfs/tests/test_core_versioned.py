@@ -1,3 +1,4 @@
+import logging
 import os
 import posixpath
 
@@ -10,6 +11,9 @@ from gcsfs.tests.settings import TEST_VERSIONED_BUCKET
 a = TEST_VERSIONED_BUCKET + "/tmp/test/a"
 b = TEST_VERSIONED_BUCKET + "/tmp/test/b"
 
+# Flag to track if the bucket was created by this test run.
+_VERSIONED_BUCKET_CREATED_BY_TESTS = False
+
 
 def is_versioning_enabled():
     """
@@ -17,10 +21,18 @@ def is_versioning_enabled():
     Returns a tuple of (bool, reason_string).
     """
     # Don't skip when using an emulator, as we create the versioned bucket ourselves.
+    global _VERSIONED_BUCKET_CREATED_BY_TESTS
     if os.environ.get("STORAGE_EMULATOR_HOST") != "https://storage.googleapis.com":
         return True, ""
     try:
         gcs = GCSFileSystem(project=os.getenv("GCSFS_TEST_PROJECT", "project"))
+        if not gcs.exists(TEST_VERSIONED_BUCKET):
+            logging.info(
+                f"Creating versioned bucket for tests: {TEST_VERSIONED_BUCKET}"
+            )
+            gcs.mkdir(TEST_VERSIONED_BUCKET, enable_versioning=True)
+            _VERSIONED_BUCKET_CREATED_BY_TESTS = True
+
         client = storage.Client(
             credentials=gcs.credentials.credentials, project=gcs.project
         )

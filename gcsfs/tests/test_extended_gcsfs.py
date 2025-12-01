@@ -11,16 +11,20 @@ from google.cloud.storage._experimental.asyncio.async_multi_range_downloader imp
 from google.cloud.storage.exceptions import DataCorruption
 
 from gcsfs.extended_gcsfs import BucketType
-from gcsfs.tests.conftest import a, b, c, csv_files, files, text_files
-from gcsfs.tests.settings import TEST_BUCKET
+from gcsfs.tests.conftest import csv_files, files, text_files
+from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 
 file = "test/accounts.1.json"
-file_path = f"{TEST_BUCKET}/{file}"
+file_path = f"{TEST_ZONAL_BUCKET}/{file}"
 json_data = files[file]
 lines = io.BytesIO(json_data).readlines()
 file_size = len(json_data)
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
+
+a = TEST_ZONAL_BUCKET + "/tmp/test/a"
+b = TEST_ZONAL_BUCKET + "/tmp/test/b"
+c = TEST_ZONAL_BUCKET + "/tmp/test/c"
 
 # If the condition is True, only then tests in this file are run.
 should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
@@ -131,7 +135,7 @@ def test_read_block_zb(extended_gcsfs, zonal_mocks, subtests):
                 assert result == expected_data
                 if mocks:
                     mocks["sync_lookup_bucket_type"].assert_called_once_with(
-                        TEST_BUCKET
+                        TEST_ZONAL_BUCKET
                     )
                     if expected_data:
                         mocks["downloader"].download_ranges.assert_called_with(
@@ -143,7 +147,7 @@ def test_read_block_zb(extended_gcsfs, zonal_mocks, subtests):
 
 def test_read_small_zb(extended_gcsfs, zonal_mocks):
     csv_file = "2014-01-01.csv"
-    csv_file_path = f"{TEST_BUCKET}/{csv_file}"
+    csv_file_path = f"{TEST_ZONAL_BUCKET}/{csv_file}"
     csv_data = csv_files[csv_file]
 
     with zonal_mocks(csv_data) as mocks:
@@ -160,7 +164,9 @@ def test_read_small_zb(extended_gcsfs, zonal_mocks):
             # cache drop
             assert len(f.cache.cache) < len(out)
             if mocks:
-                mocks["sync_lookup_bucket_type"].assert_called_once_with(TEST_BUCKET)
+                mocks["sync_lookup_bucket_type"].assert_called_once_with(
+                    TEST_ZONAL_BUCKET
+                )
 
 
 def test_readline_zb(extended_gcsfs, zonal_mocks):
@@ -169,7 +175,7 @@ def test_readline_zb(extended_gcsfs, zonal_mocks):
     )
     for k, data in all_items:
         with zonal_mocks(data):
-            with extended_gcsfs.open("/".join([TEST_BUCKET, k]), "rb") as f:
+            with extended_gcsfs.open("/".join([TEST_ZONAL_BUCKET, k]), "rb") as f:
                 result = f.readline()
                 expected = data.split(b"\n")[0] + (b"\n" if data.count(b"\n") else b"")
             assert result == expected

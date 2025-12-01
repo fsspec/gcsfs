@@ -12,7 +12,7 @@ import requests
 from google.cloud import storage
 
 from gcsfs import GCSFileSystem
-from gcsfs.tests.settings import TEST_BUCKET, TEST_VERSIONED_BUCKET
+from gcsfs.tests.settings import TEST_BUCKET, TEST_VERSIONED_BUCKET, TEST_ZONAL_BUCKET
 
 files = {
     "test/accounts.1.json": (
@@ -60,7 +60,7 @@ def stop_docker(container):
         subprocess.call(["docker", "rm", "-f", "-v", cid])
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def docker_gcs():
     if "STORAGE_EMULATOR_HOST" in os.environ:
         # assume using real API or otherwise have a server already set up
@@ -91,7 +91,7 @@ def docker_gcs():
     stop_docker(container)
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def gcs_factory(docker_gcs):
     params["endpoint_url"] = docker_gcs
 
@@ -102,44 +102,83 @@ def gcs_factory(docker_gcs):
     return factory
 
 
+@pytest.fixture(scope="session")
+def buckets_to_delete():
+    """A set to keep track of buckets created during the test session."""
+    return set()
+
+
 @pytest.fixture
-def gcs(gcs_factory, populate=True):
+def gcs(gcs_factory, buckets_to_delete, populate=True):
     gcs = gcs_factory()
-    try:
-        # ensure we're empty.
-        try:
-            gcs.rm(TEST_BUCKET, recursive=True)
-        except FileNotFoundError:
-            pass
-        try:
+    try:  # ensure we're empty.
+        # Create the bucket if it doesn't exist, otherwise clean it.
+        if not gcs.exists(TEST_BUCKET):
             gcs.mkdir(TEST_BUCKET)
-        except Exception:
-            pass
+            buckets_to_delete.add(TEST_BUCKET)
+        else:
+            try:
+                gcs.rm(gcs.find(TEST_BUCKET))
+            except Exception as e:
+                logging.warning(f"Failed to empty bucket {TEST_BUCKET}: {e}")
 
         if populate:
             gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
         gcs.invalidate_cache()
         yield gcs
     finally:
-        try:
-            gcs.rm(gcs.find(TEST_BUCKET))
-            gcs.rm(TEST_BUCKET)
-        except:  # noqa: E722
-            pass
+        _cleanup_gcs(gcs)
 
 
-def _cleanup_gcs(gcs, is_real_gcs):
-    """Only remove the bucket/contents if we are NOT using the real GCS, logging a warning on failure."""
-    if is_real_gcs:
-        return
+def _cleanup_gcs(gcs):
+    """Clean the bucket contents, logging a warning on failure."""
     try:
-        gcs.rm(TEST_BUCKET, recursive=True)
+        gcs.rm(gcs.find(TEST_BUCKET))
     except Exception as e:
         logging.warning(f"Failed to clean up GCS bucket {TEST_BUCKET}: {e}")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def final_cleanup(gcs_factory, buckets_to_delete):
+    """A session-scoped fixture to delete the test buckets after all tests are run."""
+    yield
+    # This code runs after the entire test session finishes
+    use_extended_gcs = os.getenv(
+        "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false"
+    ).lower() in (
+        "true",
+        "1",
+    )
+
+    if use_extended_gcs:
+        is_real_gcs = (
+            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+        )
+        mock_authentication_manager = (
+            patch("google.auth.default", return_value=(None, "fake-project"))
+            if not is_real_gcs
+            else nullcontext()
+        )
+    else:
+        mock_authentication_manager = nullcontext()
+
+    with mock_authentication_manager:
+        gcs = gcs_factory()
+        for bucket in buckets_to_delete:
+            # For real GCS, only delete if created by the test suite.
+            # For emulators, always delete.
+            try:
+                if gcs.exists(bucket):
+                    gcs.rm(bucket, recursive=True)
+                    logging.info(f"Cleaned up bucket: {bucket}")
+            except Exception as e:
+                logging.warning(
+                    f"Failed to perform final cleanup for bucket {bucket}: {e}"
+                )
+
+
 @pytest.fixture
-def extended_gcsfs(gcs_factory, populate=True):
+def extended_gcsfs(gcs_factory, buckets_to_delete, populate=True):
     # Check if we are running against a real GCS endpoint
     is_real_gcs = (
         os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
@@ -159,52 +198,62 @@ def extended_gcsfs(gcs_factory, populate=True):
             # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint
             if not is_real_gcs:
                 try:
-                    extended_gcsfs.rm(TEST_BUCKET, recursive=True)
+                    extended_gcsfs.rm(TEST_ZONAL_BUCKET, recursive=True)
                 except FileNotFoundError:
                     pass
-                extended_gcsfs.mkdir(TEST_BUCKET)
+                extended_gcsfs.mkdir(TEST_ZONAL_BUCKET)
+                buckets_to_delete.add(TEST_ZONAL_BUCKET)
                 if populate:
                     extended_gcsfs.pipe(
-                        {TEST_BUCKET + "/" + k: v for k, v in allfiles.items()}
+                        {TEST_ZONAL_BUCKET + "/" + k: v for k, v in allfiles.items()}
                     )
             extended_gcsfs.invalidate_cache()
             yield extended_gcsfs
         finally:
-            _cleanup_gcs(extended_gcsfs, is_real_gcs)
+            _cleanup_gcs(extended_gcsfs)
 
 
 @pytest.fixture
-def gcs_versioned(gcs_factory):
+def gcs_versioned(gcs_factory, buckets_to_delete):
     gcs = gcs_factory()
     gcs.version_aware = True
     is_real_gcs = (
         os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
     )
     try:  # ensure we're empty.
+        # The versioned bucket might be created by `is_versioning_enabled`
+        # in test_core_versioned.py. We must register it for cleanup only if
+        # it was created by this test run.
+        try:
+            from gcsfs.tests.test_core_versioned import (
+                _VERSIONED_BUCKET_CREATED_BY_TESTS,
+            )
+
+            if _VERSIONED_BUCKET_CREATED_BY_TESTS:
+                buckets_to_delete.add(TEST_VERSIONED_BUCKET)
+        except ImportError:
+            pass  # test_core_versioned is not being run
         if is_real_gcs:
-            # For real GCS, we assume the bucket exists and only clean its contents.
-            try:
-                cleanup_versioned_bucket(gcs, TEST_VERSIONED_BUCKET)
-            except Exception as e:
-                logging.warning(
-                    f"Failed to empty versioned bucket {TEST_VERSIONED_BUCKET}: {e}"
-                )
+            cleanup_versioned_bucket(gcs, TEST_VERSIONED_BUCKET)
         else:
-            # For emulators, we delete and recreate the bucket for a clean state.
+            # For emulators, we delete and recreate the bucket for a clean state
             try:
                 gcs.rm(TEST_VERSIONED_BUCKET, recursive=True)
             except FileNotFoundError:
                 pass
             gcs.mkdir(TEST_VERSIONED_BUCKET, enable_versioning=True)
+            buckets_to_delete.add(TEST_VERSIONED_BUCKET)
         gcs.invalidate_cache()
         yield gcs
     finally:
+        # Ensure the bucket is empty after the test.
         try:
-            if not is_real_gcs:
-                gcs.rm(gcs.find(TEST_VERSIONED_BUCKET, versions=True))
-                gcs.rm(TEST_VERSIONED_BUCKET)
-        except:  # noqa: E722
-            pass
+            if is_real_gcs:
+                cleanup_versioned_bucket(gcs, TEST_VERSIONED_BUCKET)
+        except Exception as e:
+            logging.warning(
+                f"Failed to clean up versioned bucket {TEST_VERSIONED_BUCKET} after test: {e}"
+            )
 
 
 def cleanup_versioned_bucket(gcs, bucket_name, prefix=None):
