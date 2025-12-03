@@ -4,6 +4,14 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2025.12.0
+---------
+
+* Fix CI when run against rela SGC buckets (#71)
+* Run extended rests when env var is set (#712)
+* Support py3.14 and drop 3.9 (#709)
+* Introduce ExtendedGcsFileSystem for Zonal Bucket gRPC Read Path (#707)
+
 2025.10.0
 ---------
 
