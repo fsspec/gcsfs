@@ -259,7 +259,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     raise NotImplementedError(
-        "upload_chunk is not implemented yet for ExtendedGcsFileSystem. Please use write() instead."
+        "upload_chunk is not implemented yet for Zonal experimental feature. Please use write() instead."
     )
 
 
@@ -274,7 +274,7 @@ async def initiate_upload(
     kms_key_name=None,
 ):
     raise NotImplementedError(
-        "initiate_upload is not implemented yet for ExtendedGcsFileSystem. Please use write() instead."
+        "initiate_upload is not implemented yet for Zonal experimental feature. Please use write() instead."
     )
 
 
@@ -291,5 +291,5 @@ async def simple_upload(
     kms_key_name=None,
 ):
     raise NotImplementedError(
-        "simple_upload is not implemented yet for ExtendedGcsFileSystem. Please use write() instead."
+        "simple_upload is not implemented yet for Zonal experimental feature. Please use write() instead."
     )

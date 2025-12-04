@@ -2081,6 +2081,10 @@ def _convert_fixed_key_metadata(metadata, *, from_google=False):
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
+    """
+    Uploads a chunk of data. This function has a conditional path to support
+    experimental features for Zonal buckets to append data using gRPC.
+    """
     from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
         AsyncAppendableObjectWriter,
     )
@@ -2121,6 +2125,11 @@ async def initiate_upload(
     mode="overwrite",
     kms_key_name=None,
 ):
+    """
+    Initiates a resumable upload. This function has a conditional path to support
+    experimental features for Zonal buckets to append data using gRPC, returning an
+    "AsyncAppendableObjectWriter" instance as location.
+    """
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import initiate_upload as ext_initiate_upload
 
@@ -2171,6 +2180,10 @@ async def simple_upload(
     mode="overwrite",
     kms_key_name=None,
 ):
+    """
+    Performs a simple, single-request upload. This function has a conditional path to support
+    experimental features for Zonal buckets to upload data using gRPC.
+    """
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 

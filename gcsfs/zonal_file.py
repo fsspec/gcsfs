@@ -63,6 +63,9 @@ class ZonalFile(GCSFile):
     def write(self, data):
         """
         Writes data using AsyncAppendableObjectWriter.
+
+        For more details, see the documentation for AsyncAppendableObjectWriter:
+        https://github.com/googleapis/python-storage/blob/9e6fefdc24a12a9189f7119bc9119e84a061842f/google/cloud/storage/_experimental/asyncio/async_appendable_object_writer.py#L38
         """
         if self.closed:
             raise ValueError("I/O operation on closed file.")
@@ -103,7 +106,7 @@ class ZonalFile(GCSFile):
     def discard(self):
         """Discard is not applicable for Zonal Buckets. Log a warning instead."""
         logger.warning(
-            "Discard is unavailable for Zonal Buckets. \
+            "Discard is not applicable for Zonal Buckets. \
             Data is uploaded via streaming and cannot be cancelled."
         )
 
