@@ -44,6 +44,11 @@ class ChecksumError(Exception):
     pass
 
 
+class NonRetryableError(Exception):
+    """Raised when the underlying error can not be retried, or continued further."""
+    pass
+
+
 RETRIABLE_EXCEPTIONS = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
@@ -69,6 +74,8 @@ errs = set(errs + [str(e) for e in errs])
 
 def is_retriable(exception):
     """Returns True if this exception is retriable."""
+    if isinstance(exception, NonRetryableError):
+        return False
 
     if isinstance(exception, HttpError):
         # Add 401 to retriable errors when it's an auth expiration issue
