@@ -15,8 +15,8 @@ from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
 import gcsfs.tests.settings
+from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
-from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
@@ -99,6 +99,8 @@ def test_simple_upload_with_kms(gcs):
 
 
 def test_large_upload(gcs):
+    import gcsfs.core
+
     orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
     gcsfs.core.GCS_MAX_BLOCK_SIZE = 262144  # minimum block size
     try:
@@ -112,6 +114,8 @@ def test_large_upload(gcs):
 
 
 def test_large_upload_with_kms(gcs):
+    import gcsfs.core
+
     if not gcs.on_google:
         pytest.skip("emulator does not support kmsKeyName")
     orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
@@ -434,6 +438,8 @@ def test_read_keys_from_bucket(gcs):
 
 
 def test_url(gcs):
+    from gcsfs.core import quote
+
     fn = TEST_BUCKET + "/nested/file1"
     url = gcs.url(fn)
     assert "http" in url
