@@ -93,7 +93,8 @@ steps:
           # Clone the repository and checkout the specific commit from the build trigger.
           git clone https://github.com/${_REPO_OWNER}/gcsfs.git
           cd gcsfs
-          git checkout ${COMMIT_SHA}
+          git fetch origin pull/${_PR_NUMBER}/head:pr
+          git checkout pr
 
 
           echo '--- Installing Python and dependencies on VM ---'
