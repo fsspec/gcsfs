@@ -122,12 +122,13 @@ steps:
           gcsfs/ \
           --deselect gcsfs/tests/test_core.py::test_sign
 
-          echo '--- Running Zonal tests on VM ---'
-          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
-          pytest -vv -s \
-          --log-format='%(asctime)s %(levelname)s %(message)s' \
-          --log-date-format='%H:%M:%S' \
-          gcsfs/tests/test_extended_gcsfs.py
+         # Zonal tests will be added back once the Rapid storage is enabled
+         # echo '--- Running Zonal tests on VM ---'
+         # export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
+         # pytest -vv -s \
+         # --log-format='%(asctime)s %(levelname)s %(message)s' \
+         # --log-date-format='%H:%M:%S' \
+         # gcsfs/tests/test_extended_gcsfs.py
         "
 
         # Execute the script on the VM via SSH.
