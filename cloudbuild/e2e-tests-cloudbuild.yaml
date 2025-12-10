@@ -76,26 +76,22 @@ steps:
         # Wait for the VM to be fully initialized and SSH to be ready.
         for i in {1..10}; do
           if gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="echo VM is ready"; then
-            break
+            break # Break if SSH is successful
           fi
           echo "Waiting for VM to become available... (attempt $$i/10)"
           sleep 15
         done
 
+        # Copy the source code from the Cloud Build workspace to the VM's home directory.
+        gcloud compute scp --recurse . gcsfs-test-vm-${_SHORT_BUILD_ID}:~ --zone=${_ZONE} --internal-ip
+
         # Script to be executed on the VM.
         # This script installs dependencies, sets environment variables, and runs pytest.
         VM_SCRIPT="
           set -e
-          echo '--- Installing git and cloning repository on VM ---'
+          echo '--- Installing dependencies on VM ---'
           sudo apt-get update > /dev/null
-          sudo apt-get install -y git python3-pip python3-venv fuse fuse3 libfuse2 > /dev/null
-
-          # Clone the repository and checkout the specific commit from the build trigger.
-          git clone https://github.com/${_REPO_OWNER}/gcsfs.git
-          cd gcsfs
-          git fetch origin pull/${_PR_NUMBER}/head:pr
-          git checkout pr
-
+          sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 > /dev/null
 
           echo '--- Installing Python and dependencies on VM ---'
           python3 -m venv env
@@ -119,6 +115,7 @@ steps:
           pytest -vv -s \
           --log-format='%(asctime)s %(levelname)s %(message)s' \
           --log-date-format='%H:%M:%S' \
+          --color=no \
           gcsfs/ \
           --deselect gcsfs/tests/test_core.py::test_sign
 
@@ -128,6 +125,7 @@ steps:
          # pytest -vv -s \
          # --log-format='%(asctime)s %(levelname)s %(message)s' \
          # --log-date-format='%H:%M:%S' \
+         # --color=no \
          # gcsfs/tests/test_extended_gcsfs.py
         "
 
