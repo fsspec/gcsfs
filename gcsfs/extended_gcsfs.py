@@ -5,6 +5,7 @@ from fsspec import asyn
 from google.api_core import exceptions as api_exceptions
 from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
+from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
 from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
 from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
@@ -48,6 +49,16 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         super().__init__(*args, **kwargs)
         self.grpc_client = None
         self.storage_control_client = None
+        # Adds user-passed credentials to ExtendedGcsFileSystem to pass to gRPC/Storage Control clients.
+        # We unwrap the nested credentials here because self.credentials is a GCSFS wrapper,
+        # but the clients expect the underlying google.auth credentials object.
+        self.credential = self.credentials.credentials
+        # When token="anon", self.credentials.credentials is None. This is
+        # often used for testing with emulators. However, the gRPC and storage
+        # control clients require a credentials object for initialization.
+        # We explicitly use AnonymousCredentials() to allow unauthenticated access.
+        if self.credentials.token == "anon":
+            self.credential = AnonymousCredentials()
         # initializing grpc and storage control client for Hierarchical and
         # zonal bucket operations
         self.grpc_client = asyn.sync(self.loop, self._create_grpc_client)
@@ -59,6 +70,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     async def _create_grpc_client(self):
         if self.grpc_client is None:
             return AsyncGrpcClient(
+                credentials=self.credential,
                 client_info=ClientInfo(user_agent=f"{USER_AGENT}/{version}"),
             ).grpc_client
         else:
@@ -71,7 +83,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             user_agent=f"{USER_AGENT}/{version}"
         )
         return storage_control_v2.StorageControlAsyncClient(
-            credentials=self.credentials.credentials, client_info=client_info
+            credentials=self.credential, client_info=client_info
         )
 
     async def _lookup_bucket_type(self, bucket):
@@ -131,9 +143,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             self,
             path,
             mode,
-            block_size,
+            block_size=block_size or self.default_block_size,
             cache_options=cache_options,
-            consistency=consistency,
+            consistency=consistency or self.consistency,
             metadata=metadata,
             acl=acl,
             autocommit=autocommit,

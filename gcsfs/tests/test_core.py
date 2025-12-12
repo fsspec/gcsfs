@@ -15,8 +15,8 @@ from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
 import gcsfs.tests.settings
+from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
-from gcsfs.core import GCSFileSystem, quote
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
@@ -48,13 +48,13 @@ def test_dircache_filled(gcs):
     assert len(gcs.dircache)
 
 
-def test_many_connect(docker_gcs):
+def test_many_connect(gcs_factory):
     from multiprocessing.pool import ThreadPool
 
-    GCSFileSystem(endpoint_url=docker_gcs)
+    gcs_factory()
 
     def task(i):
-        GCSFileSystem(endpoint_url=docker_gcs).ls("")
+        gcs_factory().ls("")
         return True
 
     pool = ThreadPool(processes=20)
@@ -64,12 +64,12 @@ def test_many_connect(docker_gcs):
     pool.join()
 
 
-def test_many_connect_new(docker_gcs):
+def test_many_connect_new(gcs_factory):
     from multiprocessing.pool import ThreadPool
 
     def task(i):
         # first instance is made within thread - creating loop
-        GCSFileSystem(endpoint_url=docker_gcs).ls("")
+        gcs_factory().ls("")
         return True
 
     pool = ThreadPool(processes=20)
@@ -99,6 +99,8 @@ def test_simple_upload_with_kms(gcs):
 
 
 def test_large_upload(gcs):
+    import gcsfs.core
+
     orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
     gcsfs.core.GCS_MAX_BLOCK_SIZE = 262144  # minimum block size
     try:
@@ -112,6 +114,8 @@ def test_large_upload(gcs):
 
 
 def test_large_upload_with_kms(gcs):
+    import gcsfs.core
+
     if not gcs.on_google:
         pytest.skip("emulator does not support kmsKeyName")
     orig = gcsfs.core.GCS_MAX_BLOCK_SIZE
@@ -434,6 +438,8 @@ def test_read_keys_from_bucket(gcs):
 
 
 def test_url(gcs):
+    from gcsfs.core import quote
+
     fn = TEST_BUCKET + "/nested/file1"
     url = gcs.url(fn)
     assert "http" in url
@@ -1048,10 +1054,8 @@ def test_attrs(gcs):
     assert gcs.getxattr(a, "something") == "not"
 
 
-def test_request_user_project(gcs):
-    gcs = GCSFileSystem(
-        endpoint_url=gcs._endpoint, requester_pays=True, project=TEST_PROJECT
-    )
+def test_request_user_project(gcs_factory):
+    gcs = gcs_factory(requester_pays=True, project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",
@@ -1067,8 +1071,8 @@ def test_request_user_project(gcs):
     assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_request_user_project_string(gcs):
-    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=TEST_PROJECT)
+def test_request_user_project_string(gcs_factory):
+    gcs = gcs_factory(requester_pays=TEST_PROJECT)
     assert gcs.requester_pays == TEST_PROJECT
     # test directly against `_call` to inspect the result
     r = gcs.call(
@@ -1085,8 +1089,8 @@ def test_request_user_project_string(gcs):
     assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_request_header(gcs):
-    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=True)
+def test_request_header(gcs_factory):
+    gcs = gcs_factory(requester_pays=True)
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",
