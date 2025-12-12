@@ -48,13 +48,13 @@ def test_dircache_filled(gcs):
     assert len(gcs.dircache)
 
 
-def test_many_connect(docker_gcs):
+def test_many_connect(gcs_factory):
     from multiprocessing.pool import ThreadPool
 
-    GCSFileSystem(endpoint_url=docker_gcs)
+    gcs_factory()
 
     def task(i):
-        GCSFileSystem(endpoint_url=docker_gcs).ls("")
+        gcs_factory().ls("")
         return True
 
     pool = ThreadPool(processes=20)
@@ -64,12 +64,12 @@ def test_many_connect(docker_gcs):
     pool.join()
 
 
-def test_many_connect_new(docker_gcs):
+def test_many_connect_new(gcs_factory):
     from multiprocessing.pool import ThreadPool
 
     def task(i):
         # first instance is made within thread - creating loop
-        GCSFileSystem(endpoint_url=docker_gcs).ls("")
+        gcs_factory().ls("")
         return True
 
     pool = ThreadPool(processes=20)
@@ -1054,10 +1054,8 @@ def test_attrs(gcs):
     assert gcs.getxattr(a, "something") == "not"
 
 
-def test_request_user_project(gcs):
-    gcs = GCSFileSystem(
-        endpoint_url=gcs._endpoint, requester_pays=True, project=TEST_PROJECT
-    )
+def test_request_user_project(gcs_factory):
+    gcs = gcs_factory(requester_pays=True, project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",
@@ -1073,8 +1071,8 @@ def test_request_user_project(gcs):
     assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_request_user_project_string(gcs):
-    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=TEST_PROJECT)
+def test_request_user_project_string(gcs_factory):
+    gcs = gcs_factory(requester_pays=TEST_PROJECT)
     assert gcs.requester_pays == TEST_PROJECT
     # test directly against `_call` to inspect the result
     r = gcs.call(
@@ -1091,8 +1089,8 @@ def test_request_user_project_string(gcs):
     assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_request_header(gcs):
-    gcs = GCSFileSystem(endpoint_url=gcs._endpoint, requester_pays=True)
+def test_request_header(gcs_factory):
+    gcs = gcs_factory(requester_pays=True)
     # test directly against `_call` to inspect the result
     r = gcs.call(
         "GET",

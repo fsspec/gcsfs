@@ -3,8 +3,6 @@ import os
 import shlex
 import subprocess
 import time
-from contextlib import nullcontext
-from unittest.mock import patch
 
 import fsspec
 import pytest
@@ -183,41 +181,18 @@ def final_cleanup(gcs_factory, buckets_to_delete):
     """
     yield
     # This code runs after the entire test session finishes
-    use_extended_gcs = os.getenv(
-        "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false"
-    ).lower() in (
-        "true",
-        "1",
-    )
 
-    if use_extended_gcs:
-        is_real_gcs = (
-            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-        )
-        # Mock authentication if not using a real GCS endpoint,
-        # since grpc client in extended_gcsfs does not work with anon access
-        mock_authentication_manager = (
-            patch("google.auth.default", return_value=(None, "fake-project"))
-            if not is_real_gcs
-            else nullcontext()
-        )
-    else:
-        mock_authentication_manager = nullcontext()
-
-    with mock_authentication_manager:
-        gcs = gcs_factory()
-        for bucket in buckets_to_delete:
-            # The cleanup logic attempts to delete every bucket that was
-            # added to the set during the session. For real GCS, only delete if
-            # created by the test suite.
-            try:
-                if gcs.exists(bucket):
-                    gcs.rm(bucket, recursive=True)
-                    logging.info(f"Cleaned up bucket: {bucket}")
-            except Exception as e:
-                logging.warning(
-                    f"Failed to perform final cleanup for bucket {bucket}: {e}"
-                )
+    gcs = gcs_factory()
+    for bucket in buckets_to_delete:
+        # The cleanup logic attempts to delete every bucket that was
+        # added to the set during the session. For real GCS, only delete if
+        # created by the test suite.
+        try:
+            if gcs.exists(bucket):
+                gcs.rm(bucket, recursive=True)
+                logging.info(f"Cleaned up bucket: {bucket}")
+        except Exception as e:
+            logging.warning(f"Failed to perform final cleanup for bucket {bucket}: {e}")
 
 
 @pytest.fixture
@@ -305,27 +280,18 @@ def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate=True, **kwar
         os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
     )
 
-    # Mock authentication if not using a real GCS endpoint,
-    # since grpc client in extended_gcsfs does not work with anon access
-    mock_authentication_manager = (
-        patch("google.auth.default", return_value=(None, "fake-project"))
-        if not is_real_gcs
-        else nullcontext()
-    )
-
-    with mock_authentication_manager:
-        extended_gcsfs = gcs_factory(**kwargs)
-        # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint
-        if not is_real_gcs:
-            try:
-                extended_gcsfs.rm(TEST_ZONAL_BUCKET, recursive=True)
-            except FileNotFoundError:
-                pass
-            extended_gcsfs.mkdir(TEST_ZONAL_BUCKET)
-            buckets_to_delete.add(TEST_ZONAL_BUCKET)
-            if populate:
-                extended_gcsfs.pipe(
-                    {TEST_ZONAL_BUCKET + "/" + k: v for k, v in allfiles.items()}
-                )
-        extended_gcsfs.invalidate_cache()
-        return extended_gcsfs
+    extended_gcsfs = gcs_factory(**kwargs)
+    # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint.
+    if not is_real_gcs:
+        try:
+            extended_gcsfs.rm(TEST_ZONAL_BUCKET, recursive=True)
+        except FileNotFoundError:
+            pass
+        extended_gcsfs.mkdir(TEST_ZONAL_BUCKET)
+        buckets_to_delete.add(TEST_ZONAL_BUCKET)
+        if populate:
+            extended_gcsfs.pipe(
+                {TEST_ZONAL_BUCKET + "/" + k: v for k, v in allfiles.items()}
+            )
+    extended_gcsfs.invalidate_cache()
+    return extended_gcsfs
