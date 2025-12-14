@@ -34,6 +34,29 @@ When running tests against a real GCS endpoint, you have two options for test bu
   the test suite will create them for the test run and automatically delete them
   during final cleanup.
 
+End-to-end Testing CI Pipeline
+---------------------------
+
+We have a Cloud Build pipeline for end-to-end tests which includes tests on zonal
+and regional buckets. When a pull request is created for the ``main`` branch,
+there will be a ``end-to-end-tests-trigger`` check in the GitHub checks section.
+
+The pipeline's behavior depends on the author of the pull request:
+
+- If the PR is created by an owner or a collaborator, the pipeline will be
+  triggered immediately.
+- If the PR is from an external contributor, an owner or collaborator must add
+  the comment ``/gcbrun`` to the PR to trigger the pipeline,
+  until then pipeline would be in failure state.
+
+The pipeline will also be triggered when a new commit is added to the PR. For
+external contributors, a new ``/gcbrun`` comment is required from an owner or
+collaborator after the new commit. The pipeline can also be manually
+re-triggered by adding a ``/gcbrun`` comment or by using re-run option from Github UI.
+
+The logs from the test run are available in the "details" section of the Checks
+tab in the pull request.
+
 .. _fake-gcs-server: https://github.com/fsouza/fake-gcs-server
 
 .. raw:: html
