@@ -6,9 +6,9 @@ from unittest import mock
 import pytest
 
 from gcsfs.extended_gcsfs import BucketType
-from gcsfs.tests.settings import TEST_BUCKET
+from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 
-file_path = f"{TEST_BUCKET}/zonal-file-test"
+file_path = f"{TEST_ZONAL_BUCKET}/zonal-file-test"
 test_data = b"hello world"
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
@@ -113,7 +113,7 @@ def test_zonal_file_discard(extended_gcsfs, zonal_write_mocks):  # noqa: F841
             f.discard()
         mock_logger.warning.assert_called_once()
         assert (
-            "Discard is unavailable for Zonal Buckets"
+            "Discard is not applicable for Zonal Buckets"
             in mock_logger.warning.call_args[0][0]
         )
 
@@ -150,3 +150,38 @@ def test_zonal_file_not_implemented_methods(
         method_to_call = getattr(f, method_name)
         with pytest.raises(NotImplementedError):
             method_to_call()
+
+
+@pytest.mark.skipif(
+    os.environ.get("STORAGE_EMULATOR_HOST") != "https://storage.googleapis.com",
+    reason="This test class is for real GCS only.",
+)
+class TestZonalFileRealGCS:
+    """
+    Contains tests for ZonalFile write operations that run only against a
+    real GCS backend. These tests validate end-to-end write behavior.
+    """
+
+    def test_simple_upload_overwrite_behavior(self, extended_gcsfs):
+        """Tests simple writes to a ZonalFile and verifies the content is overwritten"""
+        with extended_gcsfs.open(file_path, "wb") as f:
+            f.write(test_data)
+        with extended_gcsfs.open(file_path, "wb", content_type="text/plain") as f:
+            f.write(b"Sample text data.")
+        assert extended_gcsfs.cat(file_path) == b"Sample text data."
+
+    def test_large_upload(self, extended_gcsfs):
+        """Tests writing a large chunk of data to a ZonalFile."""
+        large_data = b"a" * (5 * 1024 * 1024)  # 5MB
+        with extended_gcsfs.open(file_path, "wb") as f:
+            f.write(large_data)
+        assert extended_gcsfs.cat(file_path) == large_data
+
+    def test_multiple_writes(self, extended_gcsfs):
+        """Tests multiple write calls to the same ZonalFile handle."""
+        data1 = b"first part "
+        data2 = b"second part"
+        with extended_gcsfs.open(file_path, "wb") as f:
+            f.write(data1)
+            f.write(data2)
+        assert extended_gcsfs.cat(file_path) == data1 + data2
