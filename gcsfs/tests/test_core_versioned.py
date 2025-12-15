@@ -117,3 +117,19 @@ def test_find_versioned(gcs_versioned):
     versions = {f"{a}#{v1}", f"{a}#{v2}"}
     assert versions == set(gcs_versioned.find(a, versions=True))
     assert versions == set(gcs_versioned.find(a, detail=True, versions=True))
+
+
+def test_write_captures_generation(gcs_versioned):
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"test content")
+    assert wo.generation is not None
+    assert wo.generation == gcs_versioned.info(a)["generation"]
+
+
+def test_write_captures_generation_multipart(gcs_versioned):
+    with gcs_versioned.open(b, "wb") as wo:
+        wo.write(b"first chunk")
+        wo.flush()
+        wo.write(b"second chunk")
+    assert wo.generation is not None
+    assert wo.generation == gcs_versioned.info(b)["generation"]
