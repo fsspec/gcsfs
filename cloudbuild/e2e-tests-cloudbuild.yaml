@@ -58,7 +58,22 @@ steps:
     waitFor:
       - "create-versioned-bucket"
 
-  # Step 3: Create a GCE VM to run the tests.
+  # Step 3: Create a unique HNS GCS bucket for the test run.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-hns-bucket"
+    entrypoint: "gcloud"
+    args:
+      - "storage"
+      - "buckets"
+      - "create"
+      - "gs://gcsfs-test-hns-${_SHORT_BUILD_ID}"
+      - "--project=${PROJECT_ID}"
+      - "--location=${_REGION}"
+      - "--enable-hierarchical-namespace"
+      - "--uniform-bucket-level-access"
+    waitFor: ["-"]
+
+  # Step 4: Create a GCE VM to run the tests.
   # The VM is created in the same zone as the buckets to test rapid storage features.
   # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -79,7 +94,7 @@ steps:
       - "--metadata=enable-oslogin=TRUE"
     waitFor: ["-"]
 
-  # Step 4: Run the integration tests inside the newly created VM.
+  # Step 5: Run the integration tests inside the newly created VM.
   # This step uses 'gcloud compute ssh' to execute a remote script.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-tests-on-vm"
@@ -121,6 +136,7 @@ steps:
           export GCSFS_TEST_BUCKET='gcsfs-test-standard-${_SHORT_BUILD_ID}'
           export GCSFS_TEST_VERSIONED_BUCKET='gcsfs-test-versioned-${_SHORT_BUILD_ID}'
           export GCSFS_ZONAL_TEST_BUCKET='${_GCSFS_ZONAL_TEST_BUCKET}'
+          export GCSFS_HNS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}'
 
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com
           export GCSFS_TEST_PROJECT=${PROJECT_ID}
@@ -134,7 +150,8 @@ steps:
           gcsfs/ \
           --deselect gcsfs/tests/test_core.py::test_sign
 
-         echo '--- Running Zonal tests on VM ---'
+         # Run Zonal and HNS tests
+         echo '--- Running Zonal and HNS tests on VM ---'
          # Increased the ulimit temporarily to avoid too many open files error
          ulimit -n 2048
          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
@@ -152,10 +169,11 @@ steps:
       - "create-standard-bucket"
       - "enable-bucket-versioning"
       - "generate-ssh-key"
+      - "create-hns-bucket"
 
   # --- Cleanup Steps ---
 
-  # Step 5: Clean up the SSH key from the OS Login profile.
+  # Step 6: Clean up the SSH key from the OS Login profile.
   # This step is crucial to prevent key accumulation.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-ssh-key"
@@ -169,7 +187,7 @@ steps:
     waitFor:
       - "run-tests-on-vm"
 
-  # Step 6: Delete the GCE VM.
+  # Step 7: Delete the GCE VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-vm"
     entrypoint: "gcloud"
@@ -183,7 +201,7 @@ steps:
     waitFor:
       - "cleanup-ssh-key"
 
-  # Step 7: Delete the standard GCS bucket.
+  # Step 8: Delete the standard GCS bucket.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-standard-bucket"
     entrypoint: "gcloud"
@@ -197,7 +215,7 @@ steps:
     waitFor:
       - "run-tests-on-vm"
 
-  # Step 8: Delete the versioned GCS bucket.
+  # Step 9: Delete the versioned GCS bucket.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-versioned-bucket"
     entrypoint: "gcloud"
@@ -208,6 +226,15 @@ steps:
         "--recursive",
         "gs://gcsfs-test-versioned-${_SHORT_BUILD_ID}",
       ]
+    waitFor:
+      - "run-tests-on-vm"
+
+  # Step 10: Delete the HNS GCS bucket.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-hns-bucket"
+    entrypoint: "gcloud"
+    args:
+      ["storage", "rm", "--recursive", "gs://gcsfs-test-hns-${_SHORT_BUILD_ID}"]
     waitFor:
       - "run-tests-on-vm"
 
