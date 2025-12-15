@@ -1,6 +1,6 @@
-import asyncio
 import logging
 from enum import Enum
+from functools import partial
 
 from fsspec import asyn
 from google.api_core import exceptions as api_exceptions
@@ -334,7 +334,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, super().mv, path1, path2, **kwargs)
+        # Use functools.partial to pass kwargs to super().mv inside the executor
+        loop = self.loop
+        func = partial(super().mv, path1, path2, **kwargs)
+        return await loop.run_in_executor(None, func)
 
     mv = asyn.sync_wrapper(_mv)
