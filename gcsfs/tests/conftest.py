@@ -10,7 +10,12 @@ import requests
 from google.cloud import storage
 
 from gcsfs import GCSFileSystem
-from gcsfs.tests.settings import TEST_BUCKET, TEST_VERSIONED_BUCKET, TEST_ZONAL_BUCKET
+from gcsfs.tests.settings import (
+    TEST_BUCKET,
+    TEST_HNS_BUCKET,
+    TEST_VERSIONED_BUCKET,
+    TEST_ZONAL_BUCKET,
+)
 
 files = {
     "test/accounts.1.json": (
@@ -140,7 +145,9 @@ def gcs(gcs_factory, buckets_to_delete, populate=True):
             buckets_to_delete.add(TEST_BUCKET)
         else:
             try:
-                gcs.rm(gcs.find(TEST_BUCKET))
+                files_to_delete = gcs.find(TEST_BUCKET)
+                if files_to_delete:
+                    gcs.rm(files_to_delete)
             except Exception as e:
                 logging.warning(f"Failed to empty bucket {TEST_BUCKET}: {e}")
 
@@ -176,12 +183,15 @@ def extended_gcsfs(gcs_factory, buckets_to_delete, populate=True):
         _cleanup_gcs(extended_gcsfs)
 
 
-def _cleanup_gcs(gcs):
+def _cleanup_gcs(gcs, bucket=TEST_BUCKET):
     """Clean the bucket contents, logging a warning on failure."""
     try:
-        gcs.rm(gcs.find(TEST_BUCKET))
+        if gcs.exists(bucket):
+            files_to_delete = gcs.find(bucket)
+            if files_to_delete:
+                gcs.rm(files_to_delete)
     except Exception as e:
-        logging.warning(f"Failed to clean up GCS bucket {TEST_BUCKET}: {e}")
+        logging.warning(f"Failed to clean up GCS bucket {bucket}: {e}")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -306,3 +316,30 @@ def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate=True, **kwar
             )
     extended_gcsfs.invalidate_cache()
     return extended_gcsfs
+
+
+@pytest.fixture
+def gcs_hns(gcs_factory, buckets_to_delete):
+    """
+    Provides a GCSFileSystem instance pointed at a HNS-enabled bucket.
+
+    - Creates the bucket if it doesn't exist.
+    - Cleans the bucket before the test.
+    - Yields the filesystem instance.
+    - Cleans the bucket after the test.
+    """
+    gcs = gcs_factory()
+
+    try:
+        if not gcs.exists(TEST_HNS_BUCKET):
+            # Note: Emulators may not fully support HNS features like real GCS.
+            gcs.mkdir(TEST_HNS_BUCKET)
+            buckets_to_delete.add(TEST_HNS_BUCKET)
+        else:
+            files_to_delete = gcs.find(TEST_HNS_BUCKET)
+            if files_to_delete:
+                gcs.rm(files_to_delete)
+        gcs.invalidate_cache()
+        yield gcs
+    finally:
+        _cleanup_gcs(gcs, bucket=TEST_HNS_BUCKET)

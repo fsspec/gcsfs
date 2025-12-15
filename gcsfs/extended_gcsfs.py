@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from enum import Enum
 
@@ -82,8 +83,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         client_info = gapic_v1.client_info.ClientInfo(
             user_agent=f"{USER_AGENT}/{version}"
         )
+        # Remove with_quota_project parameter once b/442805436 is fixed.
+        creds = self.credential
+        if hasattr(creds, "with_quota_project"):
+            creds = creds.with_quota_project(None)
+
         return storage_control_v2.StorageControlAsyncClient(
-            credentials=self.credential, client_info=client_info
+            credentials=creds, client_info=client_info
         )
 
     async def _lookup_bucket_type(self, bucket):
@@ -107,8 +113,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             if response.location_type == "zone":
                 return BucketType.ZONAL_HIERARCHICAL
+            elif (
+                response.hierarchical_namespace
+                and response.hierarchical_namespace.enabled
+            ):
+                return BucketType.HIERARCHICAL
             else:
-                # This should be updated to include HNS in the future
                 return BucketType.NON_HIERARCHICAL
         except api_exceptions.NotFound:
             logger.warning(f"Error: Bucket {bucket} not found or you lack permissions.")
@@ -254,3 +264,77 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             # Explicit cleanup if we created the MRD
             if mrd_created:
                 await mrd.close()
+
+    async def _is_bucket_hns_enabled(self, bucket):
+        """Checks if a bucket has Hierarchical Namespace enabled."""
+        bucket_type = await self._lookup_bucket_type(bucket)
+        return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
+
+    # The rename method in fsspec's AbstractFileSystem calls self.mv, which in turn calls self._mv.
+    # By overriding _mv, we ensure that all rename/move operations go through this HNS-aware logic.
+    async def _mv(self, path1, path2, **kwargs):
+        if path1 == path2:
+            logger.debug(
+                "%s mv: The paths are the same, so no files/directories were moved.",
+                self,
+            )
+            return
+
+        bucket1, key1, _ = self.split_path(path1)
+        bucket2, key2, _ = self.split_path(path2)
+
+        print("in hns aware mv implementation", path1, path2)
+
+        try:
+            is_hns = await self._is_bucket_hns_enabled(bucket1)
+            info1 = await self._info(path1)
+            is_folder = info1.get("type") == "directory"
+
+            # We only use HNS rename if it's an HNS bucket, the source is a folder,
+            # and the move is within the same bucket.
+            if is_hns and is_folder and bucket1 == bucket2 and key1 and key2:
+                logger.info(
+                    f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
+                )
+                source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
+                destination_folder_id = key2
+
+                request = storage_control_v2.RenameFolderRequest(
+                    name=source_folder_name,
+                    destination_folder_id=destination_folder_id,
+                )
+
+                await self._storage_control_client.rename_folder(request=request)
+                self.invalidate_cache(path1)
+                self.invalidate_cache(path2)
+                self.invalidate_cache(self._parent(path1))
+                self.invalidate_cache(self._parent(path2))
+                print("successfully renamed folder")
+                return
+
+        except api_exceptions.NotFound as e:
+            raise FileNotFoundError(
+                f"Source folder '{path1}' not found for HNS rename."
+            ) from e
+        except api_exceptions.Conflict as e:
+            # This occurs if the destination folder already exists.
+            logger.error(
+                f"HNS rename failed because destination '{path2}' already exists: {e}"
+            )
+            # Raise FileExistsError for fsspec compatibility.
+            raise FileExistsError(
+                f"HNS rename failed: Destination already exists: {path2}"
+            ) from e
+        except api_exceptions.FailedPrecondition as e:
+            logger.error(
+                f"HNS rename failed due to precondition for '{path1}' to '{path2}': {e}"
+            )
+            raise OSError(f"HNS rename failed: {e}") from e
+        except Exception as e:
+            logger.warning(f"Could not perform HNS-aware mv: {e}")
+
+        logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, super().mv, path1, path2, **kwargs)
+
+    mv = asyn.sync_wrapper(_mv)
