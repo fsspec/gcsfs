@@ -1,6 +1,9 @@
 import contextlib
 import io
 import os
+import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
 from unittest import mock
 
@@ -12,7 +15,12 @@ from google.cloud.storage.exceptions import DataCorruption
 
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import BucketType
-from gcsfs.tests.conftest import csv_files, files, text_files
+from gcsfs.tests.conftest import (
+    _MULTI_THREADED_TEST_DATA_SIZE,
+    csv_files,
+    files,
+    text_files,
+)
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 
 file = "test/accounts.1.json"
@@ -23,9 +31,9 @@ file_size = len(json_data)
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
 
-a = TEST_ZONAL_BUCKET + "/tmp/test/a"
-b = TEST_ZONAL_BUCKET + "/tmp/test/b"
-c = TEST_ZONAL_BUCKET + "/tmp/test/c"
+a = TEST_ZONAL_BUCKET + "/zonal/test/a"
+b = TEST_ZONAL_BUCKET + "/zonal/test/b"
+c = TEST_ZONAL_BUCKET + "/zonal/test/c"
 
 # If the condition is True, only then tests in this file are run.
 should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
@@ -63,13 +71,11 @@ def gcs_bucket_mocks():
         patch_target_gcsfs_cat_file = "gcsfs.core.GCSFileSystem._cat_file"
 
         async def download_side_effect(read_requests, **kwargs):
-            if read_requests and len(read_requests) == 1:
-                param_offset, param_length, buffer_arg = read_requests[0]
+            for param_offset, param_length, buffer_arg in read_requests:
                 if hasattr(buffer_arg, "write"):
                     buffer_arg.write(
                         file_data[param_offset : param_offset + param_length]
                     )
-            return [mock.Mock(error=None)]
 
         mock_downloader = mock.Mock(spec=AsyncMultiRangeDownloader)
         mock_downloader.download_ranges = mock.AsyncMock(
@@ -226,13 +232,7 @@ def test_readline_zb(extended_gcsfs, gcs_bucket_mocks):
 
 
 def test_readline_from_cache_zb(extended_gcsfs, gcs_bucket_mocks):
-    data = b"a,b\n11,22\n3,4"
-    if not extended_gcsfs.on_google:
-        with mock.patch.object(
-            extended_gcsfs, "_sync_lookup_bucket_type", return_value=BucketType.UNKNOWN
-        ):
-            with extended_gcsfs.open(a, "wb") as f:
-                f.write(data)
+    data = text_files["zonal/test/a"]
     with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
         with extended_gcsfs.open(a, "rb") as f:
             result = f.readline()
@@ -252,13 +252,7 @@ def test_readline_from_cache_zb(extended_gcsfs, gcs_bucket_mocks):
 
 
 def test_readline_empty_zb(extended_gcsfs, gcs_bucket_mocks):
-    data = b""
-    if not extended_gcsfs.on_google:
-        with mock.patch.object(
-            extended_gcsfs, "_sync_lookup_bucket_type", return_value=BucketType.UNKNOWN
-        ):
-            with extended_gcsfs.open(b, "wb") as f:
-                f.write(data)
+    data = text_files["zonal/test/b"]
     with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
         with extended_gcsfs.open(b, "rb") as f:
             result = f.readline()
@@ -266,13 +260,7 @@ def test_readline_empty_zb(extended_gcsfs, gcs_bucket_mocks):
 
 
 def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
-    data = b"ab\n" + b"a" * (2**18) + b"\nab"
-    if not extended_gcsfs.on_google:
-        with mock.patch.object(
-            extended_gcsfs, "_sync_lookup_bucket_type", return_value=BucketType.UNKNOWN
-        ):
-            with extended_gcsfs.open(c, "wb") as f:
-                f.write(data)
+    data = text_files["zonal/test/c"]
     with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
         with extended_gcsfs.open(c, "rb", block_size=2**18) as f:
             result = f.readline()
@@ -354,6 +342,299 @@ def test_mrd_exception_handling(extended_gcsfs, gcs_bucket_mocks, exception_to_r
         mocks["downloader"].download_ranges.assert_called_once()
 
 
+_MULTI_THREADED_TEST_FILE = "multi_threaded_test_file"
+_MULTI_THREADED_TEST_DATA = text_files[_MULTI_THREADED_TEST_FILE]
+_MULTI_THREADED_TEST_FILE_PATH = f"{TEST_ZONAL_BUCKET}/{_MULTI_THREADED_TEST_FILE}"
+
+_TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY = 1 * 1024 * 1024  # 1MB
+_NUM_CONCURRENCY_THREADS = 30
+_READ_LENGTH_CONCURRENCY = 1024  # 1KB
+_NUM_FAIL_SURVIVE_THREADS = 5
+
+
+def run_in_threads(func, args_list, num_threads):
+    """Runs a function in multiple threads and collects results or exceptions."""
+    results = []
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(func, *args) for args in args_list]
+        for future in futures:
+            results.append(
+                future.result()
+            )  # This will re-raise exceptions from threads
+    return results
+
+
+def _read_range_from_fs(fs, path, offset, length, block_size=None):
+    """Helper function for Case when each thread opens its own file handle."""
+    with fs.open(path, "rb", block_size=block_size) as f:
+        f.seek(offset)
+        return f.read(length)
+
+
+def test_multithreaded_read_disjoint_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests concurrent reads of disjoint ranges from the same file.
+    Verifies that different parts of the file can be fetched simultaneously without data mix-up.
+    """
+    with gcs_bucket_mocks(
+        _MULTI_THREADED_TEST_DATA, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        read_tasks = [
+            (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 0, 1024),
+            (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 2048, 1024),
+            (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 4096, 1024),
+        ]
+
+        results = run_in_threads(
+            _read_range_from_fs, read_tasks, num_threads=len(read_tasks)
+        )
+
+        assert results[0] == _MULTI_THREADED_TEST_DATA[0:1024]
+        assert results[1] == _MULTI_THREADED_TEST_DATA[2048:3072]
+        assert results[2] == _MULTI_THREADED_TEST_DATA[4096:5120]
+
+        if mocks:
+            assert mocks["create_mrd"].call_count == len(read_tasks)
+            assert mocks["downloader"].download_ranges.call_count == len(read_tasks)
+            assert mocks["downloader"].close.call_count == len(read_tasks)
+
+
+def test_multithreaded_read_overlapping_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests concurrent reads of overlapping ranges from the same file.
+    """
+    with gcs_bucket_mocks(
+        _MULTI_THREADED_TEST_DATA, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        read_tasks = [
+            (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 0, 2048),
+            (
+                extended_gcsfs,
+                _MULTI_THREADED_TEST_FILE_PATH,
+                1024,
+                2048,
+            ),  # Overlaps with first
+            (
+                extended_gcsfs,
+                _MULTI_THREADED_TEST_FILE_PATH,
+                0,
+                2048,
+            ),  # Identical to first
+        ]
+
+        results = run_in_threads(
+            _read_range_from_fs, read_tasks, num_threads=len(read_tasks)
+        )
+
+        assert results[0] == _MULTI_THREADED_TEST_DATA[0:2048]
+        assert results[1] == _MULTI_THREADED_TEST_DATA[1024:3072]
+        assert results[2] == _MULTI_THREADED_TEST_DATA[0:2048]
+
+        if mocks:
+            assert mocks["create_mrd"].call_count == len(read_tasks)
+            assert mocks["downloader"].download_ranges.call_count == len(read_tasks)
+            assert mocks["downloader"].close.call_count == len(read_tasks)
+
+
+def test_multithreaded_read_chunk_boundary_zb(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests concurrent reads that straddle internal buffering chunk boundaries.
+    Verifies correct stitching of data from multiple internal requests.
+    """
+    with gcs_bucket_mocks(
+        _MULTI_THREADED_TEST_DATA, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        # Read ranges that straddle _TEST_BLOCK_SIZE boundaries
+        read_tasks = [
+            (
+                extended_gcsfs,
+                _MULTI_THREADED_TEST_FILE_PATH,
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY - 512,
+                1024,
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY,
+            ),  # Crosses 1MB boundary
+            (
+                extended_gcsfs,
+                _MULTI_THREADED_TEST_FILE_PATH,
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY + 512,
+                1024,
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY,
+            ),  # Starts after 1MB boundary
+            (
+                extended_gcsfs,
+                _MULTI_THREADED_TEST_FILE_PATH,
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY * 2 - 256,
+                512,
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY,
+            ),  # Crosses 2MB boundary
+        ]
+
+        results = run_in_threads(
+            _read_range_from_fs, read_tasks, num_threads=len(read_tasks)
+        )
+
+        assert (
+            results[0]
+            == _MULTI_THREADED_TEST_DATA[
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY
+                - 512 : _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY
+                - 512
+                + 1024
+            ]
+        )
+        assert (
+            results[1]
+            == _MULTI_THREADED_TEST_DATA[
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY
+                + 512 : _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY
+                + 512
+                + 1024
+            ]
+        )
+        assert (
+            results[2]
+            == _MULTI_THREADED_TEST_DATA[
+                _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY * 2
+                - 256 : _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY * 2
+                - 256
+                + 512
+            ]
+        )
+
+        if mocks:
+            assert mocks["create_mrd"].call_count == len(read_tasks)
+            assert mocks["downloader"].download_ranges.call_count == len(read_tasks)
+            assert mocks["downloader"].close.call_count == len(read_tasks)
+
+
+def _read_random_range(fs, path, file_size, read_length):
+    """Helper function to read a random range from a file."""
+    offset = random.randint(0, file_size - read_length)
+    with fs.open(path, "rb") as f:
+        f.seek(offset)
+        return f.read(read_length)
+
+
+def test_multithreaded_read_high_concurrency_zb(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests high-concurrency reads to stress the connection pooling and handling.
+    Verifies that many concurrent requests do not lead to crashes or deadlocks.
+    """
+    with gcs_bucket_mocks(
+        _MULTI_THREADED_TEST_DATA, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        read_tasks = [
+            (
+                extended_gcsfs,
+                _MULTI_THREADED_TEST_FILE_PATH,
+                _MULTI_THREADED_TEST_DATA_SIZE,
+                _READ_LENGTH_CONCURRENCY,
+            )
+            for _ in range(_NUM_CONCURRENCY_THREADS)
+        ]
+
+        results = run_in_threads(
+            _read_random_range, read_tasks, num_threads=_NUM_CONCURRENCY_THREADS
+        )
+
+        assert len(results) == _NUM_CONCURRENCY_THREADS
+        for res in results:
+            assert len(res) == _READ_LENGTH_CONCURRENCY
+            assert res in _MULTI_THREADED_TEST_DATA  # Ensure the content is valid
+
+        if mocks:
+            assert mocks["create_mrd"].call_count == _NUM_CONCURRENCY_THREADS
+            assert (
+                mocks["downloader"].download_ranges.call_count
+                == _NUM_CONCURRENCY_THREADS
+            )
+            assert mocks["downloader"].close.call_count == _NUM_CONCURRENCY_THREADS
+
+
+def test_multithreaded_read_one_fails_others_survive_zb(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    """
+    Tests fault tolerance: one thread's read operation fails, but others complete successfully.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot mock failures on real GCS")
+
+    with gcs_bucket_mocks(
+        _MULTI_THREADED_TEST_DATA, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        original_download_ranges_side_effect = mocks[
+            "downloader"
+        ].download_ranges.side_effect
+
+        call_counter = 0
+        counter_lock = threading.Lock()
+
+        async def failing_download_ranges_side_effect(read_requests):
+            nonlocal call_counter
+            with counter_lock:
+                current_call_idx = call_counter
+                call_counter += 1
+            if current_call_idx == 2:  # Make the 3rd call (index 2) fail
+                raise DataCorruption(None, "Simulated data corruption for thread 3")
+
+            await original_download_ranges_side_effect(read_requests)
+
+        mocks["downloader"].download_ranges.side_effect = (
+            failing_download_ranges_side_effect
+        )
+
+        read_tasks_args = [
+            (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, i * 1024, 1024)
+            for i in range(_NUM_FAIL_SURVIVE_THREADS)
+        ]
+
+        thread_results = [None] * _NUM_FAIL_SURVIVE_THREADS
+        thread_exceptions = [None] * _NUM_FAIL_SURVIVE_THREADS
+
+        def _run_task_and_store_result(task_idx, fs, path, offset, length):
+            try:
+                thread_results[task_idx] = _read_range_from_fs(fs, path, offset, length)
+            except Exception as e:
+                thread_exceptions[task_idx] = e
+
+        with ThreadPoolExecutor(max_workers=_NUM_FAIL_SURVIVE_THREADS) as executor:
+            futures = [
+                executor.submit(_run_task_and_store_result, i, *read_tasks_args[i])
+                for i in range(_NUM_FAIL_SURVIVE_THREADS)
+            ]
+            for future in futures:
+                future.result()  # Wait for all threads to complete or for exceptions to be raised
+
+        failed_count = sum(1 for exc in thread_exceptions if exc is not None)
+        succeeded_count = sum(1 for exc in thread_exceptions if exc is None)
+
+        assert failed_count == 1, f"Expected 1 failure, got {failed_count}"
+        assert succeeded_count == _NUM_FAIL_SURVIVE_THREADS - 1
+
+        failed_thread_idx = next(
+            i for i, exc in enumerate(thread_exceptions) if exc is not None
+        )
+
+        for i in range(_NUM_FAIL_SURVIVE_THREADS):
+            if i == failed_thread_idx:
+                assert isinstance(thread_exceptions[i], DataCorruption)
+                assert "Simulated data corruption" in str(thread_exceptions[i])
+                assert thread_results[i] is None
+            else:  # Other threads should have succeeded
+                assert thread_exceptions[i] is None
+                assert (
+                    thread_results[i]
+                    == _MULTI_THREADED_TEST_DATA[i * 1024 : i * 1024 + 1024]
+                )
+
+        assert mocks["create_mrd"].call_count == _NUM_FAIL_SURVIVE_THREADS
+        assert (
+            mocks["downloader"].download_ranges.call_count == _NUM_FAIL_SURVIVE_THREADS
+        )
+        assert mocks["downloader"].close.call_count == _NUM_FAIL_SURVIVE_THREADS
+
+
 def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
     """
     Tests that mrd stream is properly closed with file closure.
@@ -373,3 +654,27 @@ def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
 
         assert True is f.closed
         assert False is f.mrd.is_stream_open
+
+
+def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests that the AsyncMultiRangeDownloader (MRD) is created only once when a
+    ZonalFile is opened, and not for each subsequent read operation.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Internal call counts cannot be verified against real GCS.")
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with extended_gcsfs.open(file_path, "rb") as f:
+            # The MRD should be created upon opening the file.
+            mocks["create_mrd"].assert_called_once()
+
+            f.read(10)
+            f.read(20)
+            f.seek(5)
+            f.read(5)
+
+        # Verify that create_mrd was not called again.
+        mocks["create_mrd"].assert_called_once()

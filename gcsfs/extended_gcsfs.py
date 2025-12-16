@@ -228,7 +228,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Returns:
             bytes: The content of the file or file range.
         """
-        mrd = kwargs.pop("mrd", None)
         mrd_created = False
 
         # A new MRD is required when read is done directly by the

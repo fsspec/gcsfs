@@ -1256,6 +1256,8 @@ def test_find_dircache(gcs):
         f"{TEST_BUCKET}/2014-01-01.csv",
         f"{TEST_BUCKET}/2014-01-02.csv",
         f"{TEST_BUCKET}/2014-01-03.csv",
+        f"{TEST_BUCKET}/multi_threaded_test_file",
+        f"{TEST_BUCKET}/zonal",
     }
     assert set(gcs.ls(f"{TEST_BUCKET}/nested")) == {
         f"{TEST_BUCKET}/nested/file1",
