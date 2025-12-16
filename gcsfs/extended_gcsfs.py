@@ -83,7 +83,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         client_info = gapic_v1.client_info.ClientInfo(
             user_agent=f"{USER_AGENT}/{version}"
         )
-        # Remove with_quota_project parameter once b/442805436 is fixed.
+        # TODO: Remove with_quota_project parameter once billing issue is fixed.
         creds = self.credential
         if hasattr(creds, "with_quota_project"):
             creds = creds.with_quota_project(None)
@@ -270,9 +270,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket_type = await self._lookup_bucket_type(bucket)
         return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
 
-    # The rename method in fsspec's AbstractFileSystem calls self.mv, which in turn calls self._mv.
-    # By overriding _mv, we ensure that all rename/move operations go through this HNS-aware logic.
     async def _mv(self, path1, path2, **kwargs):
+        """
+        Move a file or directory. Overrides the parent `_mv` to provide an
+        optimized, atomic implementation for renaming folders in HNS-enabled
+        buckets. Falls back to the parent's object-level copy-and-delete
+        implementation for files or for non-HNS buckets.
+        """
         if path1 == path2:
             logger.debug(
                 "%s mv: The paths are the same, so no files/directories were moved.",
@@ -283,16 +287,29 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket1, key1, _ = self.split_path(path1)
         bucket2, key2, _ = self.split_path(path2)
 
-        print("in hns aware mv implementation", path1, path2)
-
+        is_hns = False
         try:
             is_hns = await self._is_bucket_hns_enabled(bucket1)
+        except Exception as e:
+            logger.warning(
+                f"Could not determine if bucket '{bucket1}' is HNS-enabled, falling back to default mv: {e}"
+            )
+
+        if not is_hns:
+            logger.debug(
+                f"Not an HNS bucket. Falling back to object-level mv for '{path1}' to '{path2}'."
+            )
+            return await self.loop.run_in_executor(
+                None, partial(super().mv, path1, path2, **kwargs)
+            )
+
+        try:
             info1 = await self._info(path1)
             is_folder = info1.get("type") == "directory"
 
-            # We only use HNS rename if it's an HNS bucket, the source is a folder,
-            # and the move is within the same bucket.
-            if is_hns and is_folder and bucket1 == bucket2 and key1 and key2:
+            # We only use HNS rename if the source is a folder and the move is
+            # within the same bucket.
+            if is_folder and bucket1 == bucket2 and key1 and key2:
                 logger.info(
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
@@ -309,34 +326,32 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 self.invalidate_cache(path2)
                 self.invalidate_cache(self._parent(path1))
                 self.invalidate_cache(self._parent(path2))
-                print("successfully renamed folder")
+                logger.info(
+                    "Successfully renamed folder from '%s' to '%s'", path1, path2
+                )
                 return
-
-        except api_exceptions.NotFound as e:
-            raise FileNotFoundError(
-                f"Source folder '{path1}' not found for HNS rename."
-            ) from e
-        except api_exceptions.Conflict as e:
-            # This occurs if the destination folder already exists.
-            logger.error(
-                f"HNS rename failed because destination '{path2}' already exists: {e}"
-            )
-            # Raise FileExistsError for fsspec compatibility.
-            raise FileExistsError(
-                f"HNS rename failed: Destination already exists: {path2}"
-            ) from e
-        except api_exceptions.FailedPrecondition as e:
-            logger.error(
-                f"HNS rename failed due to precondition for '{path1}' to '{path2}': {e}"
-            )
-            raise OSError(f"HNS rename failed: {e}") from e
         except Exception as e:
+            if isinstance(e, FileNotFoundError):
+                # If the source doesn't exist, fail fast.
+                raise
+            if isinstance(e, api_exceptions.NotFound):
+                raise FileNotFoundError(
+                    f"Source '{path1}' not found for move operation."
+                ) from e
+            if isinstance(e, api_exceptions.Conflict):
+                # This occurs if the destination folder already exists.
+                # Raise FileExistsError for fsspec compatibility.
+                raise FileExistsError(
+                    f"HNS rename failed due to conflict for '{path1}' to '{path2}'"
+                ) from e
+            if isinstance(e, api_exceptions.FailedPrecondition):
+                raise OSError(f"HNS rename failed: {e}") from e
+
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
-        # Use functools.partial to pass kwargs to super().mv inside the executor
-        loop = self.loop
-        func = partial(super().mv, path1, path2, **kwargs)
-        return await loop.run_in_executor(None, func)
+        return await self.loop.run_in_executor(
+            None, partial(super().mv, path1, path2, **kwargs)
+        )
 
     mv = asyn.sync_wrapper(_mv)
