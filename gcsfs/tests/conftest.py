@@ -328,6 +328,7 @@ def gcs_hns(gcs_factory, buckets_to_delete):
     - Yields the filesystem instance.
     - Cleans the bucket after the test.
     """
+    # TODO: Re-use _create_extended_gcsfs once cleanup for real_gcs is added to it
     gcs = gcs_factory()
 
     try:
