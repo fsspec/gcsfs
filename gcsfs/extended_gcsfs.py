@@ -553,6 +553,54 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         # Fallback to standard GCS behavior for non-HNS buckets
         return await super()._get_directory_info(path, bucket, key, generation)
 
+    async def _rmdir(self, path):
+        """
+        Deletes an empty directory. Overrides the parent `_rmdir` to delete
+        empty directories in HNS-enabled buckets.
+        """
+        path = self._strip_protocol(path)
+        bucket, key, _ = self.split_path(path)
+
+        # The parent _rmdir is only for deleting buckets. If key is empty,
+        # given path is a bucket, so we can fall back.
+        if not key:
+            return await super()._rmdir(path)
+
+        is_hns = False
+        try:
+            is_hns = await self._is_bucket_hns_enabled(bucket)
+        except Exception as e:
+            logger.warning(
+                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default rmdir: {e}"
+            )
+
+        if not is_hns:
+            return await super()._rmdir(path)
+
+        try:
+            logger.info(f"Using HNS-aware rmdir for '{path}'.")
+            folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
+            request = storage_control_v2.DeleteFolderRequest(name=folder_name)
+
+            await self._storage_control_client.delete_folder(request=request)
+            self.invalidate_cache(path)
+            self.invalidate_cache(self._parent(path))
+            return
+        except api_exceptions.NotFound as e:
+            # This can happen if the directory does not exist, or if the path
+            # points to a file object instead of a directory.
+            raise FileNotFoundError(f"rmdir failed for path: {path}: {e}") from e
+        except api_exceptions.FailedPrecondition as e:
+            # This can happen if the directory is not empty.
+            raise OSError(
+                f"Pre condition failed for rmdir for path: {path}: {e}"
+            ) from e
+        except Exception as e:
+            logger.error(f"HNS rmdir: Failed to delete folder '{path}': {e}")
+            raise
+
+    rmdir = asyn.sync_wrapper(_rmdir)
+
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     raise NotImplementedError(

@@ -546,6 +546,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         """Return object information at the given path."""
         bucket, key, generation = self.split_path(path)
 
+        print("in get object")
         # Check if parent dir is in listing cache
         listing = self._ls_from_cache(path)
         if listing:
@@ -558,6 +559,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 ):
                     return file_details
             else:
+                print("throwing from here 1")
                 raise FileNotFoundError(path)
 
         if not key:
@@ -574,6 +576,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             )
         except OSError as e:
             if not str(e).startswith("Forbidden"):
+                print("throwing from here 2")
                 raise
             resp = await self._call(
                 "GET",
@@ -591,10 +594,12 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     res = item
                     break
             if res is None:
+                print("throwing from here")
                 raise FileNotFoundError(path)
         return self._process_object(bucket, res)
 
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
+        print("in list objects")
         bucket, key, generation = self.split_path(path)
         path = path.rstrip("/")
 
@@ -653,6 +658,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _do_list_objects(
         self, path, max_results=None, delimiter="/", prefix="", versions=False, **kwargs
     ):
+        print("in do list objects")
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, _path, generation = self.split_path(path)
         _path = "" if not _path else _path.rstrip("/") + "/"
@@ -693,6 +699,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         # If the user has not configured inventory report, proceed to use
         # sequential listing.
         else:
+            print("calling sequential list objects")
             return await self._sequential_list_objects_helper(
                 bucket=bucket,
                 delimiter=delimiter,
@@ -830,6 +837,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         items = [self._process_object(bucket, i) for i in items]
 
+        print("returning empty", items, prefixes)
         return items, prefixes
 
     async def _list_buckets(self):
@@ -984,6 +992,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             bucket name. If contains '/' (i.e., looks like subdir), will
             have no effect because GCS doesn't have real directories.
         """
+        print("in super rmdir")
         bucket = bucket.rstrip("/")
         if "/" in bucket:
             return
@@ -1007,18 +1016,23 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
+        logger.debug(f"gcsfs.core._info for path: {path}")
         path = self._strip_protocol(path).rstrip("/")
         if "/" not in path:
             try:
                 out = await self._call("GET", f"b/{path}", json_out=True)
                 out.update(size=0, type="directory")
+                logger.debug(f"Is bucket, {path=}")
             except OSError:
                 # GET bucket failed, try ls; will have no metadata
                 exists = await self._ls(path)
                 if exists:
                     out = {"name": path, "size": 0, "type": "directory"}
+                    logger.debug(f"Is bucket (from ls), {path=}")
                 else:
+                    logger.debug(f"Not bucket, {path=}")
                     raise FileNotFoundError(path)
+            logger.debug(f"Returning bucket info from initial block, {path=}")
             return out
         # Check directory cache for parent dir
         parent_path = self._parent(path)
@@ -1031,9 +1045,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 if o["name"].rstrip("/") == name and (
                     not generation or o.get("generation") == generation
                 ):
+                    logger.debug(f"Found in parent cache, {path=}")
                     return o
         if self._ls_from_cache(path):
             # this is a directory
+            logger.debug(f"Found in dircache, {path=}")
             return {
                 "bucket": bucket,
                 "name": path,
@@ -1041,13 +1057,16 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 "storageClass": "DIRECTORY",
                 "type": "directory",
             }
+        logger.debug("here in the info method")
         # Check exact file path
         try:
             exact = await self._get_object(path)
             # this condition finds a "placeholder" - still need to check if it's a directory
             if not _is_directory_marker(exact):
+                logger.debug(f"Found with get_object, {path=}")
                 return exact
         except FileNotFoundError:
+            print("FNE in info")
             pass
         return await self._get_directory_info(path, bucket, key, generation)
 
@@ -1056,12 +1075,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         Internal method to check if a path is a directory by listing objects.
         """
         out = await self._list_objects(path, max_results=1)
+        logger.debug(f"Response from list_objects: {out}")
         exact = next((o for o in out if o["name"].rstrip("/") == path), None)
         if exact and not _is_directory_marker(exact):
             # exact hit
+            logger.debug(f"Found with list_objects (exact), {path=}")
             return exact
         elif out:
             # other stuff - must be a directory
+            logger.debug(f"Found with list_objects (inferred dir), {path=}")
             return {
                 "bucket": bucket,
                 "name": path,
@@ -1070,6 +1092,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 "type": "directory",
             }
         else:
+            logger.debug(f"Not found, {path=}")
             raise FileNotFoundError(path)
 
     async def _ls(
