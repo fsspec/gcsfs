@@ -562,7 +562,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket, key, _ = self.split_path(path)
 
         # The parent _rmdir is only for deleting buckets. If key is empty,
-        # given path is a bucket, so we can fall back.
+        # given path is a bucket, we can fall back.
         if not key:
             return await super()._rmdir(path)
 
