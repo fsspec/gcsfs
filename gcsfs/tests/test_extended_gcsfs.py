@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 from google.api_core import exceptions as api_exceptions
+from google.cloud import storage_control_v2
 from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )

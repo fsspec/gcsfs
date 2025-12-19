@@ -83,7 +83,16 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         client_info = gapic_v1.client_info.ClientInfo(
             user_agent=f"{USER_AGENT}/{version}"
         )
-        # TODO: Remove with_quota_project parameter once billing issue is fixed.
+        # The HNS RenameFolder operation began failing with an "input/output error"
+        # after an authentication library change caused it to send a
+        # `quota_project_id` from application default credentials. The
+        # RenameFolder API rejects requests with this parameter.
+        #
+        # This workaround explicitly removes the `quota_project_id` to prevent
+        # the API from rejecting the request. A long-term fix is in progress
+        # in the GCS backend to relax this restriction.
+        #
+        # TODO: Remove this workaround once the GCS backend fix is deployed.
         creds = self.credential
         if hasattr(creds, "with_quota_project"):
             creds = creds.with_quota_project(None)
@@ -113,13 +122,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             if response.location_type == "zone":
                 return BucketType.ZONAL_HIERARCHICAL
-            elif (
+            if (
                 response.hierarchical_namespace
                 and response.hierarchical_namespace.enabled
             ):
                 return BucketType.HIERARCHICAL
-            else:
-                return BucketType.NON_HIERARCHICAL
+            return BucketType.NON_HIERARCHICAL
         except api_exceptions.NotFound:
             logger.warning(f"Error: Bucket {bucket} not found or you lack permissions.")
             return BucketType.UNKNOWN

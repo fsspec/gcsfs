@@ -144,12 +144,7 @@ def gcs(gcs_factory, buckets_to_delete, populate=True):
             # managed externally and should not be deleted by the tests.
             buckets_to_delete.add(TEST_BUCKET)
         else:
-            try:
-                files_to_delete = gcs.find(TEST_BUCKET)
-                if files_to_delete:
-                    gcs.rm(files_to_delete)
-            except Exception as e:
-                logging.warning(f"Failed to empty bucket {TEST_BUCKET}: {e}")
+            _cleanup_gcs(gcs, bucket=TEST_BUCKET)
 
         if populate:
             gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
@@ -337,9 +332,7 @@ def gcs_hns(gcs_factory, buckets_to_delete):
             gcs.mkdir(TEST_HNS_BUCKET)
             buckets_to_delete.add(TEST_HNS_BUCKET)
         else:
-            files_to_delete = gcs.find(TEST_HNS_BUCKET)
-            if files_to_delete:
-                gcs.rm(files_to_delete)
+            _cleanup_gcs(gcs, bucket=TEST_HNS_BUCKET)
         gcs.invalidate_cache()
         yield gcs
     finally:
