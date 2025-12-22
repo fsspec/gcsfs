@@ -135,6 +135,7 @@ steps:
           --deselect gcsfs/tests/test_core.py::test_sign
 
           echo '--- Running Zonal tests on VM ---'
+          ulimit -n 2048
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
           pytest -vv -s \
           --log-format='%(asctime)s %(levelname)s %(message)s' \
