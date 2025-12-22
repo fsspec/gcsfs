@@ -329,6 +329,7 @@ def gcs_hns(gcs_factory, buckets_to_delete):
     try:
         if not gcs.exists(TEST_HNS_BUCKET):
             # Note: Emulators may not fully support HNS features like real GCS.
+            # TODO: Update to create HNS bucket once mkdir supports creating HNS buckets.
             gcs.mkdir(TEST_HNS_BUCKET)
             buckets_to_delete.add(TEST_HNS_BUCKET)
         else:

@@ -8,8 +8,6 @@ from itertools import chain
 from unittest import mock
 
 import pytest
-from google.api_core import exceptions as api_exceptions
-from google.cloud import storage_control_v2
 from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )
@@ -109,66 +107,6 @@ def gcs_bucket_mocks():
             mock_cat_file.assert_not_called()
 
     return _gcs_bucket_mocks_factory
-
-
-@pytest.fixture
-def gcs_hns_mocks():
-    """A factory fixture for mocking bucket functionality for HNS mv tests."""
-
-    @contextlib.contextmanager
-    def _gcs_hns_mocks_factory(bucket_type_val, gcsfs):
-        """Creates mocks for a given file content and bucket type."""
-        is_real_gcs = (
-            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-        )
-        if is_real_gcs:
-            yield None
-            return
-
-        patch_target_lookup_bucket_type = (
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_type"
-        )
-        patch_target_sync_lookup_bucket_type = (
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
-        )
-        patch_target_super_mv = "gcsfs.core.GCSFileSystem.mv"
-
-        # Mock the async rename_folder method on the storage_control_client
-        mock_rename_folder = mock.AsyncMock()
-        mock_control_client_instance = mock.AsyncMock()
-        mock_control_client_instance.rename_folder = mock_rename_folder
-
-        with (
-            mock.patch(
-                patch_target_lookup_bucket_type, new_callable=mock.AsyncMock
-            ) as mock_async_lookup_bucket_type,
-            mock.patch(
-                patch_target_sync_lookup_bucket_type
-            ) as mock_sync_lookup_bucket_type,
-            mock.patch(
-                "gcsfs.core.GCSFileSystem._info", new_callable=mock.AsyncMock
-            ) as mock_info,
-            mock.patch.object(
-                gcsfs, "_storage_control_client", mock_control_client_instance
-            ),
-            mock.patch(patch_target_super_mv, new_callable=mock.Mock) as mock_super_mv,
-            mock.patch.object(
-                gcsfs, "invalidate_cache", wraps=gcsfs.invalidate_cache
-            ) as mock_invalidate_cache,
-        ):
-            mock_async_lookup_bucket_type.return_value = bucket_type_val
-            mock_sync_lookup_bucket_type.return_value = bucket_type_val
-            mocks = {
-                "async_lookup_bucket_type": mock_async_lookup_bucket_type,
-                "sync_lookup_bucket_type": mock_sync_lookup_bucket_type,
-                "info": mock_info,
-                "control_client": mock_control_client_instance,
-                "super_mv": mock_super_mv,
-                "invalidate_cache": mock_invalidate_cache,
-            }
-            yield mocks
-
-    return _gcs_hns_mocks_factory
 
 
 read_block_params = [
