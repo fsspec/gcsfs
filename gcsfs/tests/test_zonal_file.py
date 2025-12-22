@@ -9,6 +9,7 @@ from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 
 file_path = f"{TEST_ZONAL_BUCKET}/zonal-file-test"
+append_file_path = f"{TEST_ZONAL_BUCKET}/zonal-file-append-test"
 test_data = b"hello world"
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
@@ -31,19 +32,24 @@ def zonal_write_mocks():
         "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type"
     )
     patch_target_init_aaow = "gcsfs.zb_hns_utils.init_aaow"
+    patch_target_gcsfs_info = "gcsfs.core.GCSFileSystem._info"
 
     mock_aaow = mock.AsyncMock()
     mock_init_aaow = mock.AsyncMock(return_value=mock_aaow)
+    mock_gcsfs_info = mock.AsyncMock(return_value={"generation": "12345"})
+
     with (
         mock.patch(
             patch_target_get_bucket_type,
             return_value=BucketType.ZONAL_HIERARCHICAL,
         ),
+        mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),
         mock.patch(patch_target_init_aaow, mock_init_aaow),
     ):
         mocks = {
             "aaow": mock_aaow,
             "init_aaow": mock_init_aaow,
+            "_gcsfs_info": mock_gcsfs_info,
         }
         yield mocks
 
@@ -85,8 +91,42 @@ def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks):
         pass
 
     zonal_write_mocks["init_aaow"].assert_called_once_with(
-        extended_gcsfs.grpc_client, bucket, key
+        extended_gcsfs.grpc_client, bucket, key, None
     )
+
+
+def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks):
+    """Test that opening a ZonalFile in append mode initializes the writer with generation."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+
+    with extended_gcsfs.open(file_path, "ab"):
+        pass
+
+    # check _info is called to get the generation
+    zonal_write_mocks["_gcsfs_info"].assert_awaited_once_with(file_path)
+    zonal_write_mocks["init_aaow"].assert_called_once_with(
+        extended_gcsfs.grpc_client, bucket, key, "12345"
+    )
+
+
+def test_zonal_file_open_append_mode_nonexistent_file(
+    extended_gcsfs, zonal_write_mocks
+):
+    """Test that opening a non-existent ZonalFile in append mode initializes the writer without generation."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+
+    # Configure _info to raise FileNotFoundError to simulate non-existent file
+    extended_gcsfs._info.side_effect = FileNotFoundError
+
+    with extended_gcsfs.open(file_path, "ab"):
+        pass
+
+    # init_aaow should be called with generation=None
+    zonal_write_mocks["init_aaow"].assert_called_once_with(
+        extended_gcsfs.grpc_client, bucket, key, None
+    )
+    # _info is called to get the generation, but it fails
+    extended_gcsfs._info.assert_awaited_once()
 
 
 def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks):
@@ -202,20 +242,50 @@ class TestZonalFileRealGCS:
             file_path, "wb", content_type="text/plain", finalize_on_close=True
         ) as f:
             f.write(b"Sample text data.")
+
         assert extended_gcsfs.cat(file_path) == b"Sample text data."
 
     def test_large_upload(self, extended_gcsfs):
         """Tests writing a large chunk of data to a ZonalFile."""
         large_data = b"a" * (5 * 1024 * 1024)  # 5MB
+
         with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
             f.write(large_data)
+
         assert extended_gcsfs.cat(file_path) == large_data
 
     def test_multiple_writes(self, extended_gcsfs):
         """Tests multiple write calls to the same ZonalFile handle."""
         data1 = b"first part "
         data2 = b"second part"
+
         with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
             f.write(data1)
             f.write(data2)
+
         assert extended_gcsfs.cat(file_path) == data1 + data2
+
+    def test_append_mode_real_gcs(self, extended_gcsfs):
+        """Tests that append mode correctly adds data to an existing ZonalFile."""
+        data1 = b"initial data. "
+        data2 = b"appended data."
+        data3 = b"more appended data."
+
+        with extended_gcsfs.open(append_file_path, "ab") as f:
+            f.write(data1)
+        with extended_gcsfs.open(append_file_path, "ab", finalize_on_close=True) as f:
+            f.write(data2)
+            f.write(data3)
+
+        assert extended_gcsfs.cat(append_file_path) == data1 + data2 + data3
+
+    def test_append_to_empty_file(self, extended_gcsfs):
+        """Tests appending to an explicitly created empty file."""
+        path = f"{TEST_ZONAL_BUCKET}/zonal-append-empty-test"
+
+        with extended_gcsfs.open(path, "wb") as f:
+            f.write(b"")
+        with extended_gcsfs.open(path, "ab", finalize_on_close=True) as f:
+            f.write(test_data)
+
+        assert extended_gcsfs.cat(path) == test_data

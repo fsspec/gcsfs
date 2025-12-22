@@ -62,6 +62,8 @@ class ZonalFile(GCSFile):
             fixed_key_metadata,
             generation,
             kms_key_name,
+            # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
+            supports_append="a" in mode,
             **kwargs,
         )
         self.mrd = None
@@ -71,17 +73,17 @@ class ZonalFile(GCSFile):
             self.mrd = asyn.sync(
                 self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation
             )
-        elif "w" in self.mode:
+        elif "w" or "a" in self.mode:
             self.aaow = asyn.sync(
                 self.gcsfs.loop,
-                zb_hns_utils.init_aaow,
-                self.gcsfs.grpc_client,
+                self._init_aaow,
                 self.bucket,
                 self.key,
+                self.generation,
             )
         else:
             raise NotImplementedError(
-                "Only read and write operations are currently supported for Zonal buckets."
+                "Only read, write and append operations are currently supported for Zonal buckets."
             )
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
@@ -89,6 +91,22 @@ class ZonalFile(GCSFile):
         Initializes the AsyncMultiRangeDownloader.
         """
         return await AsyncMultiRangeDownloader.create_mrd(
+            self.gcsfs.grpc_client, bucket_name, object_name, generation
+        )
+
+    async def _init_aaow(self, bucket_name, object_name, generation=None):
+        """
+        Initializes the AsyncAppendableObjectWriter.
+        """
+        # generation is needed while creating aaow to append to existing objects
+        if "a" in self.mode and generation is None:
+            try:
+                info = await self.gcsfs._info(self.path)
+                generation = info.get("generation")
+            except FileNotFoundError:
+                # if file doesn't exist, we don't need generation
+                pass
+        return await zb_hns_utils.init_aaow(
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
