@@ -94,16 +94,53 @@ def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks):
     with extended_gcsfs.open(file_path, "wb") as f:
         f.flush()
 
-    zonal_write_mocks["aaow"].flush.assert_awaited()
+    zonal_write_mocks["aaow"].simple_flush.assert_awaited()
 
 
 def test_zonal_file_commit(extended_gcsfs, zonal_write_mocks):
-    """Test that commit finalizes the write and sets autocommit to True."""
+    """Test that commit finalizes the write, sets finalized to True and does not finalize on close."""
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+        f.commit()
+        zonal_write_mocks["aaow"].finalize.assert_awaited_once()
+        assert f.finalize_on_close is False
+        assert f.finalized is True
+    zonal_write_mocks["aaow"].close.assert_awaited_with(finalize_on_close=False)
+
+
+def test_zonal_file_finalize_on_close_true(extended_gcsfs, zonal_write_mocks):
+    """Test that finalize_on_close is correctly passed as True."""
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+        assert f.finalize_on_close is True
+    zonal_write_mocks["aaow"].close.assert_awaited_with(finalize_on_close=True)
+
+
+def test_zonal_file_finalize_on_close_default_false(extended_gcsfs, zonal_write_mocks):
+    """Test that finalize_on_close is False by default."""
+    with extended_gcsfs.open(file_path, "wb") as f:
+        assert f.finalize_on_close is False
+    zonal_write_mocks["aaow"].close.assert_awaited_with(finalize_on_close=False)
+
+
+def test_zonal_file_flush_after_finalize_logs_warning(
+    extended_gcsfs, zonal_write_mocks
+):
+    """Test that flushing after finalizing logs a warning."""
+    with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
+        with extended_gcsfs.open(file_path, "wb") as f:
+            f.commit()
+        # The file is closed automatically on exiting the 'with' block, which
+        # triggers a final flush. This should log a warning.
+        mock_logger.warning.assert_called_once_with(
+            "File is already finalized. Ignoring flush call."
+        )
+
+
+def test_zonal_file_double_finalize_error(extended_gcsfs, zonal_write_mocks):
+    """Test that finalizing a file twice raises a ValueError."""
     with extended_gcsfs.open(file_path, "wb") as f:
         f.commit()
-
-    zonal_write_mocks["aaow"].finalize.assert_awaited_once()
-    assert f.autocommit is True
+        with pytest.raises(ValueError, match="This file has already been finalized"):
+            f.commit()
 
 
 def test_zonal_file_discard(extended_gcsfs, zonal_write_mocks):  # noqa: F841
@@ -119,18 +156,9 @@ def test_zonal_file_discard(extended_gcsfs, zonal_write_mocks):  # noqa: F841
 
 
 def test_zonal_file_close(extended_gcsfs, zonal_write_mocks):
-    """Test that close finalizes the write by default (autocommit=True)."""
+    """Test that close does not finalizes the write by default."""
     with extended_gcsfs.open(file_path, "wb"):
         pass
-    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
-
-
-def test_zonal_file_close_with_autocommit_false(extended_gcsfs, zonal_write_mocks):
-    """Test that close does not finalize the write when autocommit is False."""
-
-    with extended_gcsfs.open(file_path, "wb", autocommit=False):
-        pass  # close is called on exit
-
     zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=False)
 
 

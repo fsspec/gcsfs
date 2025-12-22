@@ -2092,6 +2092,7 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import upload_chunk as ext_upload_chunk
 
+    # location is AsyncAppendableObjectWriter only when ExtendedGcsFileSystem is used
     if isinstance(fs, ExtendedGcsFileSystem) and isinstance(
         location, AsyncAppendableObjectWriter
     ):
@@ -2133,6 +2134,8 @@ async def initiate_upload(
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import initiate_upload as ext_initiate_upload
 
+    # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
+    # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
     if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
 
         return await ext_initiate_upload(
@@ -2187,6 +2190,8 @@ async def simple_upload(
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
+    # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
+    # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
     if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
 
         return await ext_simple_upload(
