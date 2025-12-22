@@ -188,20 +188,26 @@ class TestZonalFileRealGCS:
     """
     Contains tests for ZonalFile write operations that run only against a
     real GCS backend. These tests validate end-to-end write behavior.
+    `finalize_on_close` is set to `True` in these tests because the current
+    implementation does not return the correct size for unfinalized objects,
+    which would cause assertion failures in `cat()` when it checks the object's
+    size using HTTP call.
     """
 
     def test_simple_upload_overwrite_behavior(self, extended_gcsfs):
         """Tests simple writes to a ZonalFile and verifies the content is overwritten"""
-        with extended_gcsfs.open(file_path, "wb") as f:
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
             f.write(test_data)
-        with extended_gcsfs.open(file_path, "wb", content_type="text/plain") as f:
+        with extended_gcsfs.open(
+            file_path, "wb", content_type="text/plain", finalize_on_close=True
+        ) as f:
             f.write(b"Sample text data.")
         assert extended_gcsfs.cat(file_path) == b"Sample text data."
 
     def test_large_upload(self, extended_gcsfs):
         """Tests writing a large chunk of data to a ZonalFile."""
         large_data = b"a" * (5 * 1024 * 1024)  # 5MB
-        with extended_gcsfs.open(file_path, "wb") as f:
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
             f.write(large_data)
         assert extended_gcsfs.cat(file_path) == large_data
 
@@ -209,7 +215,7 @@ class TestZonalFileRealGCS:
         """Tests multiple write calls to the same ZonalFile handle."""
         data1 = b"first part "
         data2 = b"second part"
-        with extended_gcsfs.open(file_path, "wb") as f:
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
             f.write(data1)
             f.write(data2)
         assert extended_gcsfs.cat(file_path) == data1 + data2
