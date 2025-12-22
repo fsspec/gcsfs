@@ -116,6 +116,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     async def _get_bucket_type(self, bucket):
         try:
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
+            logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
             response = await self._storage_control_client.get_storage_layout(
                 name=bucket_name_value
             )
@@ -329,6 +330,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                     destination_folder_id=destination_folder_id,
                 )
 
+                logger.debug(f"rename_folder request: {request}")
                 await self._storage_control_client.rename_folder(request=request)
                 self.invalidate_cache(path1)
                 self.invalidate_cache(path2)
