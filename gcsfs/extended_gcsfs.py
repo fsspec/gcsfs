@@ -583,8 +583,16 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             request = storage_control_v2.DeleteFolderRequest(name=folder_name)
 
             await self._storage_control_client.delete_folder(request=request)
-            self.invalidate_cache(path)
-            self.invalidate_cache(self._parent(path))
+
+            # Remove the directory from the cache and from its parent's listing.
+            self.dircache.pop(path, None)
+            parent = self._parent(path)
+            if parent in self.dircache:
+                # Remove the deleted directory entry from the parent's listing.
+                for i, entry in enumerate(self.dircache[parent]):
+                    if entry.get("name") == path:
+                        self.dircache[parent].pop(i)
+                        break
             return
         except api_exceptions.NotFound as e:
             # This can happen if the directory does not exist, or if the path
