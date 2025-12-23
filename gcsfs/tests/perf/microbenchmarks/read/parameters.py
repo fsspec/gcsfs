@@ -1,11 +1,6 @@
 from dataclasses import dataclass
 
 from gcsfs.tests.perf.microbenchmarks.conftest import MB
-from gcsfs.tests.settings import (
-    BENCHMARK_BLOCK_SIZE_MB,
-    BENCHMARK_CHUNK_SIZE_MB,
-    BENCHMARK_ROUNDS,
-)
 
 
 @dataclass
@@ -36,13 +31,13 @@ class ReadBenchmarkParameters:
     num_files: int = 1
 
     # Number of rounds for the benchmark, default to 10.
-    rounds: int = BENCHMARK_ROUNDS
+    rounds: int = 10
 
     # The block size for gcsfs file buffering default to 16MB.
-    block_size_bytes: int = BENCHMARK_BLOCK_SIZE_MB * MB
+    block_size_bytes: int = 16 * MB
 
     # The size of each read or write operation in bytes default to 16MB.
-    chunk_size_bytes: int = BENCHMARK_CHUNK_SIZE_MB * MB
+    chunk_size_bytes: int = 16 * MB
 
     # Size of each file in bytes
     file_size_bytes: int = 128 * MB

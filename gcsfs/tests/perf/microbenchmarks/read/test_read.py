@@ -9,6 +9,7 @@ import pytest
 from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_benchmark_extra_info,
     publish_multi_process_benchmark_extra_info,
+    publish_resource_metrics,
 )
 from gcsfs.tests.perf.microbenchmarks.read.configs import get_read_benchmark_cases
 from gcsfs.tests.settings import BENCHMARK_SKIP_TESTS
@@ -34,7 +35,8 @@ def _read_op_seq(gcs, path, chunk_size):
 
 def _read_op_rand(gcs, path, chunk_size, offsets):
     start_time = time.perf_counter()
-    with gcs.open(path, "rb") as f:
+    # Random benchmarks should not prefetch
+    with gcs.open(path, "rb", cache_type="none") as f:
         for offset in offsets:
             f.seek(offset)
             f.read(chunk_size)
@@ -66,21 +68,26 @@ multi_process_cases = [p for p in all_benchmark_cases if p.num_processes > 1]
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_single_threaded(benchmark, gcsfs_benchmark_read_write):
+def test_read_single_threaded(benchmark, gcsfs_benchmark_read_write, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read_write
 
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
     path = file_paths[0]
 
+    op = None
+    op_args = None
     if params.pattern == "seq":
         op = _read_op_seq
         op_args = (gcs, path, params.chunk_size_bytes)
-        benchmark.pedantic(op, args=op_args, rounds=params.rounds)
     elif params.pattern == "rand":
         offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
         op = _random_read_worker
         op_args = (gcs, path, params.chunk_size_bytes, offsets)
-        benchmark.pedantic(op, args=op_args, rounds=params.rounds)
+
+    with monitor() as m:
+        benchmark.pedantic(op, rounds=params.rounds, args=op_args)
+
+    publish_resource_metrics(benchmark, m)
 
 
 @pytest.mark.parametrize(
@@ -89,7 +96,7 @@ def test_read_single_threaded(benchmark, gcsfs_benchmark_read_write):
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_multi_threaded(benchmark, gcsfs_benchmark_read_write):
+def test_read_multi_threaded(benchmark, gcsfs_benchmark_read_write, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read_write
 
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
@@ -126,7 +133,10 @@ def test_read_multi_threaded(benchmark, gcsfs_benchmark_read_write):
                 ]
                 list(futures)  # Wait for completion
 
-    benchmark.pedantic(run_benchmark, rounds=params.rounds)
+    with monitor() as m:
+        benchmark.pedantic(run_benchmark, rounds=params.rounds)
+
+    publish_resource_metrics(benchmark, m)
 
 
 def _process_worker(
@@ -167,7 +177,7 @@ def _process_worker(
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_multi_process(benchmark, gcsfs_benchmark_read_write, request):
+def test_read_multi_process(benchmark, gcsfs_benchmark_read_write, request, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read_write
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
 
@@ -179,42 +189,44 @@ def test_read_multi_process(benchmark, gcsfs_benchmark_read_write, request):
     threads_per_process = params.num_threads
 
     round_durations_s = []
-    for _ in range(params.rounds):
-        logging.info("Multi-process benchmark: Starting benchmark round.")
-        processes = []
+    with monitor() as m:
+        for _ in range(params.rounds):
+            logging.info("Multi-process benchmark: Starting benchmark round.")
+            processes = []
 
-        for i in range(params.num_processes):
-            if params.num_files > 1:
-                start_index = i * files_per_process
-                end_index = start_index + files_per_process
-                process_files = file_paths[start_index:end_index]
-            else:  # num_files == 1
-                # Each process will have its threads read from the same single file
-                process_files = [file_paths[0]] * threads_per_process
+            for i in range(params.num_processes):
+                if params.num_files > 1:
+                    start_index = i * files_per_process
+                    end_index = start_index + files_per_process
+                    process_files = file_paths[start_index:end_index]
+                else:  # num_files == 1
+                    # Each process will have its threads read from the same single file
+                    process_files = [file_paths[0]] * threads_per_process
 
-            p = multiprocessing.Process(
-                target=_process_worker,
-                args=(
-                    gcs,
-                    process_files,
-                    params.chunk_size_bytes,
-                    threads_per_process,
-                    params.pattern,
-                    params.file_size_bytes,
-                    process_durations_shared,
-                    i,
-                ),
-            )
-            processes.append(p)
-            p.start()
+                p = multiprocessing.Process(
+                    target=_process_worker,
+                    args=(
+                        gcs,
+                        process_files,
+                        params.chunk_size_bytes,
+                        threads_per_process,
+                        params.pattern,
+                        params.file_size_bytes,
+                        process_durations_shared,
+                        i,
+                    ),
+                )
+                processes.append(p)
+                p.start()
 
-        for p in processes:
-            p.join()
+            for p in processes:
+                p.join()
 
-        # The round duration is the time of the slowest process
-        round_durations_s.append(max(process_durations_shared[:]))
+            # The round duration is the time of the slowest process
+            round_durations_s.append(max(process_durations_shared[:]))
 
     publish_multi_process_benchmark_extra_info(benchmark, round_durations_s, params)
+    publish_resource_metrics(benchmark, m)
 
     # If --benchmark-json is passed, add a dummy benchmark run to generate a
     # report entry that can be updated via the hook with timings.

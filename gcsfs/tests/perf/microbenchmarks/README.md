@@ -6,15 +6,13 @@ This document describes the microbenchmark suite for `gcsfs`. These benchmarks a
 
 ## Prerequisites
 
-Before running the benchmarks, ensure you have the necessary packages installed. The required packages are listed in `gcsfs/tests/perf/microbenchmarks/requirements.txt`.
-
-You can install them using pip:
-
+Before running the benchmarks, ensure you have installed the project's dependencies for performance testing. This can be done by running the following command from the root of the repository:
 ```bash
 pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
 ```
 
-This will install `pytest`, `pytest-benchmark`, and other necessary dependencies. For more information on `pytest-benchmark`, you can refer to its official documentation. [1]
+This will install `pytest`, `pytest-benchmark`, and other necessary dependencies.
+For more information on `pytest-benchmark`, you can refer to its official documentation. [1]
 
 ## Read Benchmarks
 
@@ -40,7 +38,7 @@ By default, this is set to 10 rounds, but it can be configured via `rounds` para
 
 ### Configurations
 
-The base configurations in `read/configs.py` are simplified to just `read_seq` and `read_rand`. Decorators are then used to generate a full suite of test cases by creating variations for parallelism, file sizes, and bucket types.
+The base configurations in `read/configs.yaml` are simplified to just `read_seq` and `read_rand`. Decorators are then used to generate a full suite of test cases by creating variations for parallelism, file sizes, and bucket types.
 
 The benchmarks are split into three main test functions based on the execution model:
 
@@ -48,16 +46,10 @@ The benchmarks are split into three main test functions based on the execution m
 *   `test_read_multi_threaded`: Measures performance with multiple threads.
 *   `test_read_multi_process`: Measures performance using multiple processes, each with its own set of threads.
 
-These tests are parameterized using a set of decorators that generate the final benchmark cases:
-
-*   `@with_processes`: Creates variants for different process counts, configured via `GCSFS_BENCHMARK_PROCESSES`.
-*   `@with_threads`: Creates variants for different thread counts, configured via `GCSFS_BENCHMARK_THREADS`.
-*   `@with_file_sizes`: Creates variants for different file sizes, configured via `GCSFS_BENCHMARK_FILE_SIZES`.
-*   `@with_bucket_types`: Creates variants for different GCS bucket types (e.g., regional, zonal).
-
 ### Running Benchmarks with `pytest`
 
-You can use `pytest` to run the benchmarks directly. The `-k` option is useful for filtering tests by name.
+You can use `pytest` to run the benchmarks directly.
+The `GCSFS_BENCHMARK_FILTER` option is useful for filtering tests by name.
 
 **Examples:**
 
@@ -66,20 +58,13 @@ Run all read benchmarks:
 pytest gcsfs/tests/perf/microbenchmarks/read/
 ```
 
-Run only single-threaded read benchmarks:
-```bash
-pytest -k "test_read_single_threaded" gcsfs/tests/perf/microbenchmarks/read/test_read.py
-```
+Run a specific benchmark(s) configuration by setting `GCSFS_BENCHMARK_FILTER` environment variable which expect comma separated configuration names.
+This is useful for targeting specific configuration(s) defined in `read/configs.yaml`.
 
-Run multi-process benchmarks for a specific configuration (e.g., 4 processes, 4 threads):
+For example, if you want to run multi process sequential and random reads only, you can set:
 ```bash
-pytest -k "read_seq_4procs_4threads" gcsfs/tests/perf/microbenchmarks/read/
-```
-
-Run a specific benchmark configuration by setting `GCSFS_BENCHMARK_FILTER`. This is useful for targeting a single configuration defined in `read/configs.py`.
-```bash
-export GCSFS_BENCHMARK_FILTER="read_seq_1thread"
-pytest -k "read_seq_4procs_4threads" gcsfs/tests/perf/microbenchmarks/read/
+export GCSFS_BENCHMARK_FILTER="read_seq_multi_process, read_rand_multi_process"
+pytest gcsfs/tests/perf/microbenchmarks/read/
 ```
 
 ## Function-level Fixture: `gcsfs_benchmark_read_write`
@@ -120,18 +105,6 @@ export STORAGE_EMULATOR_HOST="https://storage.googleapis.com"
 export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
 ```
 
-### `settings.py`
-
-The `gcsfs/tests/perf/settings.py` file defines how benchmark parameters can be configured through environment variables:
-
-*   `GCSFS_BENCHMARK_FILTER`: A comma-separated list of names to filter which benchmark configurations to run.
-*   `GCSFS_BENCHMARK_FILE_SIZES`: A comma-separated list of file sizes in MB (e.g., "128,1024"). Defaults to "1024".
-*   `GCSFS_BENCHMARK_THREADS`: A comma-separated list of thread counts to test (e.g., "1,4,8,16"). Defaults to "16".
-*   `GCSFS_BENCHMARK_PROCESSES`: A comma-separated list of process counts to test (e.g., "1,4"). Defaults to "1".
-*   `GCSFS_BENCHMARK_CHUNK_SIZE_MB`: The size of each read operation in MB. Defaults to "64".
-*   `GCSFS_BENCHMARK_BLOCK_SIZE_MB`: The block size for gcsfs file buffering in MB. Defaults to "64".
-*   `GCSFS_BENCHMARK_ROUNDS`: The number of rounds for each benchmark test. Defaults to "10".
-
 ## Orchestrator Script (`run.py`)
 
 An orchestrator script, `run.py`, is provided to simplify running the benchmark suite. It wraps `pytest`, sets up the necessary environment variables, and generates a summary report.
@@ -142,7 +115,6 @@ The script accepts several command-line arguments:
 
 *   `--group`: The benchmark group to run (e.g., `read`).
 *   `--config`: The name of a specific benchmark configuration to run (e.g., `read_seq`).
-*   `--name`: A keyword to filter tests by name (passed to `pytest -k`).
 *   `--regional-bucket`: Name of the Regional GCS bucket.
 *   `--zonal-bucket`: Name of the Zonal GCS bucket.
 *   `--hns-bucket`: Name of the HNS GCS bucket.
@@ -175,7 +147,7 @@ Run only the single-threaded sequential read benchmark with 256MB and 512MB file
 ```bash
 python gcsfs/tests/perf/microbenchmarks/run.py \
   --group read \
-  --config "read_seq_1thread" \
+  --config "read_seq" \
   --regional-bucket your-regional-bucket
 ```
 
@@ -208,12 +180,13 @@ This file is a summarized view of the results generated in the JSON file and for
 *   Minimum, maximum, mean, and median execution times in secs.
 *   Standard deviation and percentile values (p90, p95, p99) for timing.
 *   The maximum throughput achieved, measured in Megabytes per second (MB/s).
+*   The maximum CPU and memory used during the test
 
 
 #### Summary Table
 The script also puts out a nice summary table like below, for quick glance at results.
 
-| Bucket Type | Group | Pattern | Files | Threads | Processes | File Size (MB) | Chunk Size (MB) | Block Size (MB) | Min Latency (s) | Mean Latency (s) | Max Throughput (MB/s) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| regional | read | seq | 1 | 1 | 1 | 128.00 | 16.00 | 16.00 | 0.6391 | 0.7953 | 200.2678 |
-| regional | read | rand | 1 | 1 | 1 | 128.00 | 16.00 | 16.00 | 0.6537 | 0.7843 | 195.8066 |
+| Bucket Type | Group | Pattern | Files | Threads | Processes | File Size (MB) | Chunk Size (MB) | Block Size (MB) | Min Latency (s) | Mean Latency (s) | Max Throughput (MB/s) | Max CPU (%) | Max Memory (MB) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| regional | read | seq | 1 | 1 | 1 | 128.00 | 16.00 | 16.00 | 0.6391 | 0.7953 | 200.2678 | 0.26 | 507
+| regional | read | rand | 1 | 1 | 1 | 128.00 | 16.00 | 16.00 | 0.6537 | 0.7843 | 195.8066 | 5.6 | 510

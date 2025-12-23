@@ -125,6 +125,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         path,
         mode="rb",
         block_size=None,
+        cache_type="readahead",
         cache_options=None,
         acl=None,
         consistency=None,
@@ -144,6 +145,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             path,
             mode,
             block_size=block_size or self.default_block_size,
+            cache_type=cache_type,
             cache_options=cache_options,
             consistency=consistency or self.consistency,
             metadata=metadata,
@@ -228,7 +230,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Returns:
             bytes: The content of the file or file range.
         """
-        mrd = kwargs.pop("mrd", None)
         mrd_created = False
 
         # A new MRD is required when read is done directly by the

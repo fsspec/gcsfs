@@ -2,9 +2,10 @@ import logging
 import os
 import statistics
 import uuid
-from typing import Any, Callable, List
+from typing import Any, List
 
 import pytest
+from resource_monitor import ResourceMonitor
 
 MB = 1024 * 1024
 
@@ -15,6 +16,15 @@ try:
     benchmark_plugin_installed = True
 except ImportError:
     benchmark_plugin_installed = False
+
+
+@pytest.fixture
+def monitor():
+    """
+    Provides the ResourceMonitor class.
+    Usage: with monitor() as m: ...
+    """
+    return ResourceMonitor
 
 
 @pytest.fixture
@@ -34,11 +44,13 @@ def gcsfs_benchmark_read_write(extended_gcs_factory, request):
 
     logging.info(
         f"Setting up benchmark '{params.name}': creating {params.num_files} file(s) "
-        f"of size {params.file_size_bytes / 1024 / 1024:.2f} MB each."
+        f"of size {params.file_size_bytes / MB:.2f} MB each."
     )
 
-    # Define a 16MB chunk size for writing
-    chunk_size = 16 * 1024 * 1024
+    # Define a 64MB chunk size for writing
+    chunk_size = 64 * MB
+
+    # Calculate the number of chunks to write and the remainder
     chunks_to_write = params.file_size_bytes // chunk_size
     remainder = params.file_size_bytes % chunk_size
 
@@ -56,7 +68,8 @@ def gcsfs_benchmark_read_write(extended_gcs_factory, request):
     # --- Teardown ---
     logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
     try:
-        gcs.rm(prefix, recursive=True)
+        for path in file_paths:
+            gcs.rm(path)
     except Exception as e:
         logging.error(f"Failed to clean up benchmark files: {e}")
 
@@ -104,6 +117,20 @@ def publish_benchmark_extra_info(
     benchmark.group = benchmark_group
 
 
+def publish_resource_metrics(benchmark: Any, monitor: ResourceMonitor) -> None:
+    """
+    Helper function to publish resource monitor results to the extra_info property.
+    """
+    benchmark.extra_info.update(
+        {
+            "cpu_max_global": f"{monitor.max_cpu:.2f}",
+            "mem_max": f"{monitor.max_mem:.2f}",
+            "net_throughput_mb_s": f"{monitor.throughput_mb_s:.2f}",
+            "vcpus": monitor.vcpus,
+        }
+    )
+
+
 def publish_multi_process_benchmark_extra_info(
     benchmark: Any, round_durations_s: List[float], params: Any
 ) -> None:
@@ -138,123 +165,3 @@ def publish_multi_process_benchmark_extra_info(
     benchmark.extra_info["mean_time"] = mean_time
     benchmark.extra_info["median_time"] = median_time
     benchmark.extra_info["stddev_time"] = stddev_time
-
-
-def with_processes(base_cases_func: Callable) -> Callable:
-    """
-    A decorator that generates benchmark cases for different process counts.
-
-    It reads process counts from the BENCHMARK_PROCESSES setting and creates
-    variants for each specified count, updating the case name, num_processes,
-    and num_files.
-    """
-    from gcsfs.tests.settings import BENCHMARK_PROCESSES
-
-    def wrapper():
-        base_cases = base_cases_func()
-        new_cases = []
-        for case in base_cases:
-            for procs in BENCHMARK_PROCESSES:
-                new_case = case.__class__(**case.__dict__)
-                new_case.num_processes = procs
-                new_case.num_files = new_case.num_threads * procs
-                new_case.name = f"{case.name}_{procs}procs"
-                new_cases.append(new_case)
-        return new_cases
-
-    return wrapper
-
-
-def with_threads(base_cases_func: Callable) -> Callable:
-    """
-    A decorator that generates benchmark cases for different thread counts.
-
-    It reads thread counts from the BENCHMARK_THREADS setting and creates
-    variants for each specified count, updating the case name and num_threads.
-    num_files will be updated by with_processes decorator.
-    """
-    from gcsfs.tests.settings import BENCHMARK_THREADS
-
-    def wrapper():
-        base_cases = base_cases_func()
-        new_cases = []
-        for case in base_cases:
-            for threads in BENCHMARK_THREADS:
-                new_case = case.__class__(**case.__dict__)
-                new_case.num_threads = threads
-                new_case.num_files = threads * new_case.num_processes
-                new_case.name = f"{case.name}_{threads}threads"
-                new_cases.append(new_case)
-        return new_cases
-
-    return wrapper
-
-
-def with_file_sizes(base_cases_func: Callable) -> Callable:
-    """
-    A decorator that generates benchmark cases for different file sizes.
-
-    It reads file sizes from the BENCHMARK_FILE_SIZES_MB setting and creates
-    variants for each specified size, updating the case name and file size parameter.
-    """
-    from gcsfs.tests.settings import BENCHMARK_FILE_SIZES_MB
-
-    if not BENCHMARK_FILE_SIZES_MB:
-        logging.error("No file sizes defined. Please set GCSFS_BENCHMARK_FILE_SIZES.")
-        pytest.fail("No file sizes defined")
-
-    def wrapper():
-        base_cases = base_cases_func()
-        new_cases = []
-        for case in base_cases:
-            for size_mb in BENCHMARK_FILE_SIZES_MB:
-                new_case = case.__class__(**case.__dict__)
-                new_case.file_size_bytes = size_mb * MB
-                new_case.name = f"{case.name}_{size_mb}MB_file"
-                new_cases.append(new_case)
-        return new_cases
-
-    return wrapper
-
-
-def _get_bucket_name_for_type(bucket_type: str) -> str:
-    """Returns the bucket name variable for a given bucket type."""
-    from gcsfs.tests.settings import TEST_BUCKET, TEST_HNS_BUCKET, TEST_ZONAL_BUCKET
-
-    if bucket_type == "regional":
-        return TEST_BUCKET
-    if bucket_type == "zonal":
-        return TEST_ZONAL_BUCKET
-    if bucket_type == "hns":
-        return TEST_HNS_BUCKET
-    return ""
-
-
-def with_bucket_types(bucket_types: List[str]) -> Callable:
-    """
-    A decorator that generates benchmark cases for different bucket types.
-
-    Args:
-        bucket_types: A list of bucket type tags (e.g., "regional", "zonal").
-    """
-
-    def decorator(base_cases_func):
-        def wrapper():
-            base_cases = base_cases_func()
-            all_cases = []
-            bucket_configs = [
-                (_get_bucket_name_for_type(tag), tag) for tag in bucket_types
-            ]
-            for case in base_cases:
-                for bucket_name, bucket_tag in bucket_configs:
-                    if bucket_name:  # Only create cases if bucket is specified
-                        new_case = case.__class__(**case.__dict__)
-                        new_case.bucket_name = bucket_name
-                        new_case.bucket_type = bucket_tag
-                        new_case.name = f"{case.name}_{bucket_tag}"
-                        all_cases.append(new_case)
-            return all_cases
-
-        return wrapper
-
-    return decorator

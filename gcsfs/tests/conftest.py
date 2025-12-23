@@ -10,7 +10,12 @@ import requests
 from google.cloud import storage
 
 from gcsfs import GCSFileSystem
-from gcsfs.tests.settings import TEST_BUCKET, TEST_VERSIONED_BUCKET, TEST_ZONAL_BUCKET
+from gcsfs.tests.settings import (
+    TEST_BUCKET,
+    TEST_HNS_BUCKET,
+    TEST_VERSIONED_BUCKET,
+    TEST_ZONAL_BUCKET,
+)
 
 files = {
     "test/accounts.1.json": (
@@ -49,6 +54,12 @@ c = TEST_BUCKET + "/tmp/test/c"
 d = TEST_BUCKET + "/tmp/test/d"
 
 params = dict()
+
+BUCKET_NAME_MAP = {
+    "regional": TEST_BUCKET,
+    "zonal": TEST_ZONAL_BUCKET,
+    "hns": TEST_HNS_BUCKET,
+}
 
 
 def stop_docker(container):

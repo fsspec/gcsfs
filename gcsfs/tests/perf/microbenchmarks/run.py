@@ -91,25 +91,23 @@ def _run_benchmarks(results_dir, args):
             ]
         )
 
-    if args.name:
-        pytest_command.append("-k")
-        pytest_command.append(args.name)
-
     logging.info(f"Executing command: {' '.join(pytest_command)}")
 
     try:
         env = os.environ.copy()
         subprocess.run(pytest_command, check=True, env=env, text=True)
         logging.info(f"Benchmark run completed. Results saved to {json_output_path}")
-        return json_output_path
     except subprocess.CalledProcessError as e:
-        logging.error(f"Pytest execution failed: {e}")
-        sys.exit(1)
+        logging.error(
+            f"Benchmark run completed with error: {e}, results saved to {json_output_path}"
+        )
     except FileNotFoundError:
         logging.error(
             "pytest not found. Please ensure it is installed in your environment."
         )
         sys.exit(1)
+
+    return json_output_path
 
 
 def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers):
@@ -151,9 +149,9 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
 
     min_time = bench["stats"].get("min")
     if min_time and min_time > 0:
-        row["max_throughput_MB/s"] = (total_bytes / min_time) / MB
+        row["max_throughput_mb_s"] = (total_bytes / min_time) / MB
     else:
-        row["max_throughput_MB/s"] = "0.0"
+        row["max_throughput_mb_s"] = "0.0"
 
     return row
 
@@ -180,7 +178,7 @@ def _generate_report(json_path, results_dir):
     first_benchmark = data["benchmarks"][0]
     extra_info_headers = sorted(first_benchmark["extra_info"].keys())
     stats_headers = ["min", "max", "mean", "median", "stddev"]
-    custom_headers = ["p90", "p95", "p99", "max_throughput_MB/s"]
+    custom_headers = ["p90", "p95", "p99", "max_throughput_mb_s"]
 
     headers = ["name", "group"] + extra_info_headers + stats_headers + custom_headers
 
@@ -210,9 +208,6 @@ def _create_table_row(row):
         list: A list of formatted values ready for printing in a table.
 
     """
-    max_throughput = row.get("max_throughput_MB/s", "")
-    if max_throughput:
-        max_throughput = f"{float(max_throughput):.4f}"
     return [
         row.get("bucket_type", ""),
         row.get("group", ""),
@@ -225,7 +220,9 @@ def _create_table_row(row):
         f"{float(row.get('block_size', 0)) / MB:.2f}",
         f"{float(row.get('min', 0)):.4f}",
         f"{float(row.get('mean', 0)):.4f}",
-        max_throughput,
+        float(row.get("max_throughput_mb_s", 0)),
+        f"{float(row.get('cpu_max_global', 0)):.2f}",
+        f"{float(row.get('mem_max', 0)) / MB:.2f}",
     ]
 
 
@@ -259,6 +256,8 @@ def _print_csv_to_shell(report_path):
             "Min Latency (s)",
             "Mean Latency (s)",
             "Max Throughput(MB/s)",
+            "Max CPU (%)",
+            "Max Memory (MB)",
         ]
         table = PrettyTable()
         table.field_names = display_headers
@@ -287,9 +286,6 @@ def main():
         "--config",
         nargs="+",
         help="The name(s) of the benchmark configuration(s) to run(e.g., --config read_seq_1thread,read_rand_1thread).",
-    )
-    parser.add_argument(
-        "--name", help="A keyword to filter tests by name (passed to pytest -k)."
     )
     parser.add_argument(
         "--regional-bucket",

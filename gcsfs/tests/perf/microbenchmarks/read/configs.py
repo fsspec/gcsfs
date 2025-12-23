@@ -1,39 +1,77 @@
+import itertools
 import logging
+import os
 
-from gcsfs.tests.perf.microbenchmarks.conftest import (
-    with_bucket_types,
-    with_file_sizes,
-    with_processes,
-    with_threads,
-)
+import yaml
+
+from gcsfs.tests.conftest import BUCKET_NAME_MAP
+from gcsfs.tests.perf.microbenchmarks.conftest import MB
 from gcsfs.tests.perf.microbenchmarks.read.parameters import ReadBenchmarkParameters
 from gcsfs.tests.settings import BENCHMARK_FILTER
 
-# Base configurations for benchmarks decorated with processes, threads, sizes and bucket types
-_base_read_benchmark_cases = [
-    # Sequential read
-    ReadBenchmarkParameters(name="read_seq", pattern="seq"),
-    # Random read
-    ReadBenchmarkParameters(name="read_rand", pattern="rand"),
-]
 
+def _generate_benchmark_cases():
+    """
+    Generates benchmark cases by reading the configuration from configs.yaml.
+    """
+    config_path = os.path.join(os.path.dirname(__file__), "configs.yaml")
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
 
-@with_bucket_types(["regional", "zonal"])
-@with_file_sizes
-@with_threads
-@with_processes
-def _filter_and_decorate_benchmark_cases():
-    cases_to_run = _base_read_benchmark_cases
+    common_config = config["common"]
+    scenarios = config["scenarios"]
+
     if BENCHMARK_FILTER:
         filter_names = [name.strip().lower() for name in BENCHMARK_FILTER.split(",")]
-        cases_to_run = [
-            case for case in cases_to_run if case.name.lower() in filter_names
-        ]
-    return cases_to_run
+        scenarios = [s for s in scenarios if s["name"].lower() in filter_names]
+    all_cases = []
+
+    for scenario in scenarios:
+        procs_list = scenario.get("processes", [1])
+        threads_list = scenario.get("threads", [1])
+        file_sizes_mb = common_config.get("file_sizes_mb", [128])
+        block_sizes_mb = common_config.get("block_sizes_mb", [16])
+        bucket_types = common_config.get("bucket_types", ["regional"])
+
+        param_combinations = itertools.product(
+            procs_list, threads_list, file_sizes_mb, block_sizes_mb, bucket_types
+        )
+
+        for procs, threads, size_mb, block_size_mb, bucket_type in param_combinations:
+            bucket_name = BUCKET_NAME_MAP.get(bucket_type)
+            if not bucket_name:
+                continue
+
+            name = (
+                f"{scenario['name']}_{procs}procs_{threads}threads_"
+                f"{size_mb}MB_file_{block_size_mb}MB_block_{bucket_type}"
+            )
+
+            params = ReadBenchmarkParameters(
+                name=name,
+                pattern=scenario["pattern"],
+                bucket_name=bucket_name,
+                bucket_type=bucket_type,
+                num_threads=threads,
+                num_processes=procs,
+                num_files=threads * procs,
+                rounds=common_config.get("rounds", 10),
+                block_size_bytes=block_size_mb * MB,
+                chunk_size_bytes=block_size_mb
+                * MB,  # Always keep chunk size same as block size for effective readahead caching
+                file_size_bytes=size_mb * MB,
+            )
+            all_cases.append(params)
+
+    return all_cases
 
 
 def get_read_benchmark_cases():
-    all_cases = _filter_and_decorate_benchmark_cases()
+    """
+    Returns a list of ReadBenchmarkParameters, optionally filtered by
+    the GCSFS_BENCHMARK_FILTER environment variable.
+    """
+    all_cases = _generate_benchmark_cases()
     logging.info(
         f"Benchmark cases to be triggered: {', '.join([case.name for case in all_cases])}"
     )
