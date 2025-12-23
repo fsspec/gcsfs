@@ -797,7 +797,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         next_page_token = page.get("nextPageToken", None)
 
         while len(items) + len(prefixes) < max_results and next_page_token is not None:
-            num_items = min(items_per_call, max_results - len(items), 1000)
+            num_items = min(
+                items_per_call, max_results - (len(items) + len(prefixes)), 1000
+            )
             page = await self._call(
                 "GET",
                 "b/{}/o",
@@ -1963,12 +1965,16 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     continue
                 else:
                     self.checker.update(data)
+                if final and contents:
+                    j = json.loads(contents)
+                    self.generation = j.get("generation")
             else:
                 assert final, "Response looks like upload is over"
                 if l:
                     j = json.loads(contents)
                     self.checker.update(data)
                     self.checker.validate_json_response(j)
+                    self.generation = j.get("generation")
             # Clear buffer and update offset when all is received
             self.buffer = UnclosableBytesIO()
             self.offset += l
@@ -2014,7 +2020,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
         data = self.buffer.read()
-        asyn.sync(
+        j = asyn.sync(
             self.gcsfs.loop,
             simple_upload,
             self.gcsfs,
@@ -2029,6 +2035,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
+        self.generation = j.get("generation")
 
     def _fetch_range(self, start=None, end=None):
         """Get data from GCS
@@ -2163,3 +2170,4 @@ async def simple_upload(
     )
     checker.update(datain)
     checker.validate_json_response(j)
+    return j

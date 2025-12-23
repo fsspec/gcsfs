@@ -4,6 +4,21 @@ substitutions:
   _SHORT_BUILD_ID: ${BUILD_ID:0:8}
 
 steps:
+  # Step 0: Generate a persistent SSH key for this build run.
+  # This prevents gcloud from adding a new key to the OS Login profile on every ssh/scp command.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "generate-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        mkdir -p /workspace/.ssh
+        # Generate the SSH key
+        ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
+        # Save the public key content to a file for the cleanup step
+        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+    waitFor: ["-"]
+
   # Step 1: Create a unique standard GCS bucket for the test run.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create-standard-bucket"
@@ -56,7 +71,7 @@ steps:
       - "gcsfs-test-vm-${_SHORT_BUILD_ID}"
       - "--project=${PROJECT_ID}"
       - "--zone=${_ZONE}"
-      - "--machine-type=e2-medium"
+      - "--machine-type=n2-standard-4"
       - "--image-family=debian-13"
       - "--image-project=debian-cloud"
       - "--service-account=${_ZONAL_VM_SERVICE_ACCOUNT}"
@@ -75,15 +90,15 @@ steps:
         set -e
         # Wait for the VM to be fully initialized and SSH to be ready.
         for i in {1..10}; do
-          if gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="echo VM is ready"; then
+          if gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
             break # Break if SSH is successful
           fi
           echo "Waiting for VM to become available... (attempt $$i/10)"
           sleep 15
         done
 
-        # Copy the source code from the Cloud Build workspace to the VM's home directory.
-        gcloud compute scp --recurse . gcsfs-test-vm-${_SHORT_BUILD_ID}:~ --zone=${_ZONE} --internal-ip
+        # Copy the source code from the Cloud Build workspace to the VM's home directory, using the generated key.
+        gcloud compute scp --recurse . gcsfs-test-vm-${_SHORT_BUILD_ID}:~ --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine
 
         # Script to be executed on the VM.
         # This script installs dependencies, sets environment variables, and runs pytest.
@@ -120,6 +135,8 @@ steps:
           --deselect gcsfs/tests/test_core.py::test_sign
 
          echo '--- Running Zonal tests on VM ---'
+         # Increased the ulimit temporarily to avoid too many open files error
+         ulimit -n 2048
          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
          pytest -vv -s \
          --log-format='%(asctime)s %(levelname)s %(message)s' \
@@ -129,15 +146,30 @@ steps:
         "
 
         # Execute the script on the VM via SSH.
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --command="$$VM_SCRIPT"
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$VM_SCRIPT"
     waitFor:
       - "create-vm"
       - "create-standard-bucket"
       - "enable-bucket-versioning"
+      - "generate-ssh-key"
 
   # --- Cleanup Steps ---
 
-  # Step 5: Delete the GCE VM.
+  # Step 5: Clean up the SSH key from the OS Login profile.
+  # This step is crucial to prevent key accumulation.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        echo "--- Removing SSH key from OS Login profile to prevent accumulation ---"
+        gcloud compute os-login ssh-keys remove \
+          --key-file=/workspace/gcb_ssh_key.pub || true
+    waitFor:
+      - "run-tests-on-vm"
+
+  # Step 6: Delete the GCE VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-vm"
     entrypoint: "gcloud"
@@ -149,9 +181,9 @@ steps:
       - "--zone=${_ZONE}"
       - "--quiet"
     waitFor:
-      - "run-tests-on-vm"
+      - "cleanup-ssh-key"
 
-  # Step 6: Delete the standard GCS bucket.
+  # Step 7: Delete the standard GCS bucket.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-standard-bucket"
     entrypoint: "gcloud"
@@ -165,7 +197,7 @@ steps:
     waitFor:
       - "run-tests-on-vm"
 
-  # Step 7: Delete the versioned GCS bucket.
+  # Step 8: Delete the versioned GCS bucket.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-versioned-bucket"
     entrypoint: "gcloud"

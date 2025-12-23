@@ -46,7 +46,18 @@ text_files = {
     "nested/file2": b"world",
     "nested/nested2/file1": b"hello\n",
     "nested/nested2/file2": b"world",
+    "zonal/test/a": b"a,b\n11,22\n3,4",
+    "zonal/test/b": b"",
+    "zonal/test/c": b"ab\n" + b"a" * (2**18) + b"\nab",
 }
+
+_MULTI_THREADED_TEST_DATA_SIZE = 5 * 1024 * 1024  # 5MB
+pattern = b"0123456789abcdef"
+text_files["multi_threaded_test_file"] = (
+    pattern * (_MULTI_THREADED_TEST_DATA_SIZE // len(pattern))
+    + pattern[: _MULTI_THREADED_TEST_DATA_SIZE % len(pattern)]
+)
+
 allfiles = dict(**files, **csv_files, **text_files)
 a = TEST_BUCKET + "/tmp/test/a"
 b = TEST_BUCKET + "/tmp/test/b"

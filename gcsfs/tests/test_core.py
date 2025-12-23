@@ -1256,6 +1256,8 @@ def test_find_dircache(gcs):
         f"{TEST_BUCKET}/2014-01-01.csv",
         f"{TEST_BUCKET}/2014-01-02.csv",
         f"{TEST_BUCKET}/2014-01-03.csv",
+        f"{TEST_BUCKET}/multi_threaded_test_file",
+        f"{TEST_BUCKET}/zonal",
     }
     assert set(gcs.ls(f"{TEST_BUCKET}/nested")) == {
         f"{TEST_BUCKET}/nested/file1",
@@ -1666,6 +1668,30 @@ def test_near_find(gcs):
     gcs.touch(f"{TEST_BUCKET}/inner/aa/file")
     out = gcs.find(f"{TEST_BUCKET}/inner/a")
     assert not out
+
+
+def test_ls_with_max_results(gcs):
+    """
+    Test that ls with max_results returns the correct number of items,
+    especially when the listing includes both files and directories (prefixes)
+    and requires pagination.
+    """
+    if not gcs.on_google:
+        pytest.skip("emulator does not respect max_results")
+    parent_dir = f"{TEST_BUCKET}/max_results_test"
+    # Create directories/prefixes under parent directory.
+    dirs_to_create = {f"{parent_dir}/xdir{i}/subfile{i}": b"" for i in range(50)}
+    # Create many files to ensure pagination is triggered.
+    files_to_create = {f"{parent_dir}/file{i}": b"" for i in range(1000)}
+    all_files_to_create = {**dirs_to_create, **files_to_create}
+    gcs.pipe(all_files_to_create)
+
+    # Test for triggering pagination, default page_size is 1000
+    results = gcs.ls(parent_dir, max_results=1020)
+    assert len(results) == 1020
+
+    results = gcs.ls(parent_dir, max_results=5)
+    assert len(results) == 5
 
 
 def test_get_error(gcs):
