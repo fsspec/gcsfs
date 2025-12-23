@@ -279,6 +279,50 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket_type = await self._lookup_bucket_type(bucket)
         return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
 
+    def _update_dircache_after_rename(self, path1, path2):
+        """
+        Performs a targeted update of the directory cache after a successful
+        folder rename operation.
+
+        This involves three main steps:
+        1. Removing the source folder and all its descendants from the cache.
+        2. Removing the source folder's entry from its parent's listing.
+        3. Adding the new destination folder's entry to its parent's listing.
+
+        Args:
+            path1 (str): The source path that was renamed.
+            path2 (str): The destination path.
+        """
+        # 1. Find and remove all descendant paths of the source from the cache.
+        source_prefix = f"{path1.rstrip('/')}/"
+        for key in list(self.dircache):
+            if key.startswith(source_prefix):
+                self.dircache.pop(key, None)
+
+        # 2. Remove the old source entry from its parent's listing.
+        self.dircache.pop(path1, None)
+        parent1 = self._parent(path1)
+        if parent1 in self.dircache:
+            for i, entry in enumerate(self.dircache[parent1]):
+                if entry.get("name") == path1:
+                    self.dircache[parent1].pop(i)
+                    break
+
+        # 3. Invalidate the destination path and update its parent's cache.
+        self.dircache.pop(path2, None)
+        parent2 = self._parent(path2)
+        if parent2 in self.dircache:
+            _, key2, _ = self.split_path(path2)
+            new_entry = {
+                "Key": key2,
+                "Size": 0,
+                "name": path2,
+                "size": 0,
+                "type": "directory",
+                "storageClass": "DIRECTORY",
+            }
+            self.dircache[parent2].append(new_entry)
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
@@ -332,10 +376,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
                 logger.debug(f"rename_folder request: {request}")
                 await self._storage_control_client.rename_folder(request=request)
-                self.invalidate_cache(path1)
-                self.invalidate_cache(path2)
-                self.invalidate_cache(self._parent(path1))
-                self.invalidate_cache(self._parent(path2))
+                self._update_dircache_after_rename(path1, path2)
+
                 logger.info(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
                 )

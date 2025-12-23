@@ -62,9 +62,6 @@ def gcs_hns_mocks():
                 gcsfs, "_storage_control_client", mock_control_client_instance
             ),
             mock.patch(patch_target_super_mv, new_callable=mock.Mock) as mock_super_mv,
-            mock.patch.object(
-                gcsfs, "invalidate_cache", wraps=gcsfs.invalidate_cache
-            ) as mock_invalidate_cache,
         ):
             mock_async_lookup_bucket_type.return_value = bucket_type_val
             mock_sync_lookup_bucket_type.return_value = bucket_type_val
@@ -74,7 +71,6 @@ def gcs_hns_mocks():
                 "info": mock_info,
                 "control_client": mock_control_client_instance,
                 "super_mv": mock_super_mv,
-                "invalidate_cache": mock_invalidate_cache,
             }
             yield mocks
 
@@ -94,17 +90,6 @@ class TestExtendedGcsFileSystemMv:
         )
         mocks["control_client"].rename_folder.assert_called_once_with(
             request=expected_request
-        )
-
-    def _assert_invalidate_cache_called(self, mocks, gcsfs, path1, path2):
-        """Asserts that invalidate_cache was called for the correct paths."""
-        mocks["invalidate_cache"].assert_has_calls(
-            [
-                mock.call(path1),
-                mock.call(path2),
-                mock.call(gcsfs._parent(path1)),
-                mock.call(gcsfs._parent(path2)),
-            ],
         )
 
     def _assert_hns_rename_called_using_logs(self, mocks, caplog, path1, path2):
@@ -185,9 +170,6 @@ class TestExtendedGcsFileSystemMv:
 
                 self._assert_rename_folder_called_with(mocks, path1, path2)
                 mocks["super_mv"].assert_not_called()
-                # Verify that invalidate_cache was called for the old path, new path,
-                # and their parents.
-                self._assert_invalidate_cache_called(mocks, gcsfs, path1, path2)
 
     def test_hns_folder_rename_with_protocol(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test successful HNS folder rename when paths include the protocol."""
@@ -229,7 +211,6 @@ class TestExtendedGcsFileSystemMv:
                 self._assert_rename_folder_called_with(
                     mocks, path1_no_proto, path2_no_proto
                 )
-                self._assert_invalidate_cache_called(mocks, gcsfs, path1, path2)
                 mocks["super_mv"].assert_not_called()
 
     @pytest.mark.skipif(
@@ -278,7 +259,6 @@ class TestExtendedGcsFileSystemMv:
                 mocks["info"].assert_has_awaits(expected_info_calls)
                 self._assert_rename_folder_called_with(mocks, path1, path2)
                 mocks["super_mv"].assert_not_called()
-                self._assert_invalidate_cache_called(mocks, gcsfs, path1, path2)
 
     def test_file_rename_fallback_to_super_mv(
         self,
@@ -481,6 +461,74 @@ class TestExtendedGcsFileSystemMv:
                 self._assert_rename_folder_called_with(mocks, path1, path2)
                 mocks["info"].assert_awaited_with(path1)
                 mocks["super_mv"].assert_not_called()
+
+    def test_hns_folder_rename_cache_invalidation(self, gcs_hns, gcs_hns_mocks):
+        """Test that HNS folder rename correctly invalidates and updates the cache."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/cache_test"
+        path1 = f"{base_dir}/old_dir"
+        destination_parent = f"{base_dir}/destination_parent"
+        path2 = f"{destination_parent}/new_nested_dir"
+        sibling_dir = f"{base_dir}/sibling_dir"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+            # --- Setup ---
+            gcsfs.touch(f"{path1}/sub/file.txt")
+            gcsfs.touch(f"{sibling_dir}/sibling_file.txt")
+            gcsfs.touch(f"{destination_parent}/file.txt")
+
+            # --- Populate Cache ---
+            # Use find() to deeply populate the cache for the entire base directory
+            gcsfs.find(base_dir, withdirs=True)
+
+            # --- Pre-Rename Assertions ---
+            # Ensure all relevant paths are in the cache before the rename
+            assert base_dir in gcsfs.dircache
+            assert path1 in gcsfs.dircache
+            assert destination_parent in gcsfs.dircache
+            assert f"{path1}/sub" in gcsfs.dircache
+            assert sibling_dir in gcsfs.dircache
+
+            if mocks:
+                # Mock the info call for the mv operation itself
+                mocks["info"].return_value = {"type": "directory", "name": path1}
+
+            # --- Perform Rename ---
+            gcsfs.mv(path1, path2)
+
+            # --- Post-Rename Cache Assertions ---
+            # 1. Source directory and its descendants should be removed from the cache
+            assert path1 not in gcsfs.dircache
+            assert f"{path1}/sub" not in gcsfs.dircache
+
+            # 2. The destination path should be removed from cache
+            assert (
+                path2 not in gcsfs.dircache
+            ), "Destination path should not be in dircache"
+
+            # 3. The parent directory of the source should have been updated, not cleared.
+            # It should now just contain the original sibling.
+            assert base_dir in gcsfs.dircache
+            source_parent_listing = gcsfs.dircache[base_dir]
+
+            # Check that the old directory is gone from the parent's listing
+            assert not any(
+                entry["name"] == path1 for entry in source_parent_listing
+            ), "Old directory should be removed from parent cache"
+
+            # Check that the sibling directory is still there
+            assert any(
+                entry["name"] == sibling_dir for entry in source_parent_listing
+            ), "Sibling directory should remain in parent cache"
+
+            # 4. The destination parent's cache should be updated with the new path
+            assert destination_parent in gcsfs.dircache
+            assert any(
+                entry["name"] == path2 for entry in gcsfs.dircache[destination_parent]
+            ), "New path should be added to destination parent cache"
+
+            # Cache for sibling folder should be untouched
+            assert sibling_dir in gcsfs.dircache
 
     def test_hns_rename_raises_file_not_found(self, gcs_hns, gcs_hns_mocks):
         """Test that NotFound from API raises FileNotFoundError."""

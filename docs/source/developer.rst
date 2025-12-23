@@ -20,8 +20,9 @@ If you want to actually test against real GCS, then you should set
 STORAGE_EMULATOR_HOST to "https://storage.googleapis.com" and also
 provide appropriate GCSFS_TEST_BUCKET, GCSFS_TEST_VERSIONED_BUCKET
 (To use for tests that target GCS object versioning, this bucket must have versioning enabled),
-GCSFS_ZONAL_TEST_BUCKET(To use for testing Rapid storage features) and GCSFS_TEST_PROJECT,
-as well as setting your default google credentials (or providing them via the fsspec config).
+GCSFS_ZONAL_TEST_BUCKET(To use for testing Rapid storage features), GCSFS_HNS_TEST_BUCKET
+(To use for testing HNS features) and GCSFS_TEST_PROJECT, as well as setting your
+default google credentials (or providing them via the fsspec config).
 
 When running tests against a real GCS endpoint, you have two options for test buckets:
 
