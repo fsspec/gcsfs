@@ -582,6 +582,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
             request = storage_control_v2.DeleteFolderRequest(name=folder_name)
 
+            logger.debug(f"delete_folder request: {request}")
             await self._storage_control_client.delete_folder(request=request)
 
             # Remove the directory from the cache and from its parent's listing.
