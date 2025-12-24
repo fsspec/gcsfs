@@ -153,8 +153,9 @@ class TestExtendedGcsFileSystemMv:
             self._assert_hns_rename_called_using_logs(mocks, caplog, path1, path2)
 
             if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
+                # gcsfs.touch opens gcsfile internally which triggers bucket type lookup, hence +2 calls
+                mocks["async_lookup_bucket_type"].assert_has_awaits(
+                    [mock.call(TEST_HNS_BUCKET)] * 3
                 )
                 # Verify the sequence of _info calls for mv and exists checks.
                 expected_info_calls = [
@@ -199,8 +200,9 @@ class TestExtendedGcsFileSystemMv:
             self._assert_hns_rename_called_using_logs(mocks, caplog, path1, path2)
 
             if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
+                # gcsfs.touch opens gcsfile internally which triggers bucket type lookup, hence +1 call
+                mocks["async_lookup_bucket_type"].assert_has_awaits(
+                    [mock.call(TEST_HNS_BUCKET)] * 2
                 )
                 expected_info_calls = [
                     mock.call(path1),  # from _mv
@@ -248,8 +250,9 @@ class TestExtendedGcsFileSystemMv:
             self._assert_hns_rename_called_using_logs(mocks, caplog, path1, path2)
 
             if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
+                # gcsfs.touch opens gcsfile internally which triggers bucket type lookup, hence +1 call
+                mocks["async_lookup_bucket_type"].assert_has_awaits(
+                    [mock.call(TEST_HNS_BUCKET)] * 2
                 )
                 expected_info_calls = [
                     mock.call(path1),  # from _mv
