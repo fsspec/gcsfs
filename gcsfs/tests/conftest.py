@@ -150,10 +150,7 @@ def gcs(gcs_factory, buckets_to_delete, populate=True):
             # managed externally and should not be deleted by the tests.
             buckets_to_delete.add(TEST_BUCKET)
         else:
-            try:
-                gcs.rm(gcs.find(TEST_BUCKET))
-            except Exception as e:
-                logging.warning(f"Failed to empty bucket {TEST_BUCKET}: {e}")
+            _cleanup_gcs(gcs, bucket=TEST_BUCKET)
 
         if populate:
             gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
@@ -187,12 +184,15 @@ def extended_gcsfs(gcs_factory, buckets_to_delete, populate=True):
         _cleanup_gcs(extended_gcsfs)
 
 
-def _cleanup_gcs(gcs):
+def _cleanup_gcs(gcs, bucket=TEST_BUCKET):
     """Clean the bucket contents, logging a warning on failure."""
     try:
-        gcs.rm(gcs.find(TEST_BUCKET))
+        if gcs.exists(bucket):
+            files_to_delete = gcs.find(bucket)
+            if files_to_delete:
+                gcs.rm(files_to_delete)
     except Exception as e:
-        logging.warning(f"Failed to clean up GCS bucket {TEST_BUCKET}: {e}")
+        logging.warning(f"Failed to clean up GCS bucket {bucket}: {e}")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -317,3 +317,30 @@ def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate=True, **kwar
             )
     extended_gcsfs.invalidate_cache()
     return extended_gcsfs
+
+
+@pytest.fixture
+def gcs_hns(gcs_factory, buckets_to_delete):
+    """
+    Provides a GCSFileSystem instance pointed at a HNS-enabled bucket.
+
+    - Creates the bucket if it doesn't exist.
+    - Cleans the bucket before the test.
+    - Yields the filesystem instance.
+    - Cleans the bucket after the test.
+    """
+    # TODO: Re-use _create_extended_gcsfs once cleanup for real_gcs is added to it
+    gcs = gcs_factory()
+
+    try:
+        if not gcs.exists(TEST_HNS_BUCKET):
+            # Note: Emulators may not fully support HNS features like real GCS.
+            # TODO: Update to create HNS bucket once mkdir supports creating HNS buckets.
+            gcs.mkdir(TEST_HNS_BUCKET)
+            buckets_to_delete.add(TEST_HNS_BUCKET)
+        else:
+            _cleanup_gcs(gcs, bucket=TEST_HNS_BUCKET)
+        gcs.invalidate_cache()
+        yield gcs
+    finally:
+        _cleanup_gcs(gcs, bucket=TEST_HNS_BUCKET)

@@ -20,7 +20,7 @@ class GcsfsFixtures(AbstractFixtures):
                 gcs.mkdir(TEST_BUCKET)
             else:
                 try:
-                    gcs.rm(gcs.find(TEST_BUCKET))
+                    _cleanup_gcs(gcs)
                 except Exception as e:
                     logging.warning(f"Failed to empty bucket {TEST_BUCKET}: {e}")
 
