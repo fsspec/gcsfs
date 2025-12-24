@@ -402,6 +402,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
+        # TODO: Check feasibility to call async copy and rm methods instead of sync mv method
         return await self.loop.run_in_executor(
             None, partial(super().mv, path1, path2, **kwargs)
         )
