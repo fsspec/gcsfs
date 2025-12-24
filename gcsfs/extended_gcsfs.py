@@ -1,5 +1,6 @@
 import logging
 from enum import Enum
+from functools import partial
 
 from fsspec import asyn
 from google.api_core import exceptions as api_exceptions
@@ -82,8 +83,22 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         client_info = gapic_v1.client_info.ClientInfo(
             user_agent=f"{USER_AGENT}/{version}"
         )
+        # The HNS RenameFolder operation began failing with an "input/output error"
+        # after an authentication library change caused it to send a
+        # `quota_project_id` from application default credentials. The
+        # RenameFolder API rejects requests with this parameter.
+        #
+        # This workaround explicitly removes the `quota_project_id` to prevent
+        # the API from rejecting the request. A long-term fix is in progress
+        # in the GCS backend to relax this restriction.
+        #
+        # TODO: Remove this workaround once the GCS backend fix is deployed.
+        creds = self.credential
+        if hasattr(creds, "with_quota_project"):
+            creds = creds.with_quota_project(None)
+
         return storage_control_v2.StorageControlAsyncClient(
-            credentials=self.credential, client_info=client_info
+            credentials=creds, client_info=client_info
         )
 
     async def _lookup_bucket_type(self, bucket):
@@ -101,15 +116,19 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     async def _get_bucket_type(self, bucket):
         try:
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
+            logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
             response = await self._storage_control_client.get_storage_layout(
                 name=bucket_name_value
             )
 
             if response.location_type == "zone":
                 return BucketType.ZONAL_HIERARCHICAL
-            else:
-                # This should be updated to include HNS in the future
-                return BucketType.NON_HIERARCHICAL
+            if (
+                response.hierarchical_namespace
+                and response.hierarchical_namespace.enabled
+            ):
+                return BucketType.HIERARCHICAL
+            return BucketType.NON_HIERARCHICAL
         except api_exceptions.NotFound:
             logger.warning(f"Error: Bucket {bucket} not found or you lack permissions.")
             return BucketType.UNKNOWN
@@ -254,3 +273,138 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             # Explicit cleanup if we created the MRD
             if mrd_created:
                 await mrd.close()
+
+    async def _is_bucket_hns_enabled(self, bucket):
+        """Checks if a bucket has Hierarchical Namespace enabled."""
+        bucket_type = await self._lookup_bucket_type(bucket)
+        return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
+
+    def _update_dircache_after_rename(self, path1, path2):
+        """
+        Performs a targeted update of the directory cache after a successful
+        folder rename operation.
+
+        This involves three main steps:
+        1. Removing the source folder and all its descendants from the cache.
+        2. Removing the source folder's entry from its parent's listing.
+        3. Adding the new destination folder's entry to its parent's listing.
+
+        Args:
+            path1 (str): The source path that was renamed.
+            path2 (str): The destination path.
+        """
+        # 1. Find and remove all descendant paths of the source from the cache.
+        source_prefix = f"{path1.rstrip('/')}/"
+        for key in list(self.dircache):
+            if key.startswith(source_prefix):
+                self.dircache.pop(key, None)
+
+        # 2. Remove the old source entry from its parent's listing.
+        self.dircache.pop(path1, None)
+        parent1 = self._parent(path1)
+        if parent1 in self.dircache:
+            for i, entry in enumerate(self.dircache[parent1]):
+                if entry.get("name") == path1:
+                    self.dircache[parent1].pop(i)
+                    break
+
+        # 3. Invalidate the destination path and update its parent's cache.
+        self.dircache.pop(path2, None)
+        parent2 = self._parent(path2)
+        if parent2 in self.dircache:
+            _, key2, _ = self.split_path(path2)
+            new_entry = {
+                "Key": key2,
+                "Size": 0,
+                "name": path2,
+                "size": 0,
+                "type": "directory",
+                "storageClass": "DIRECTORY",
+            }
+            self.dircache[parent2].append(new_entry)
+
+    async def _mv(self, path1, path2, **kwargs):
+        """
+        Move a file or directory. Overrides the parent `_mv` to provide an
+        optimized, atomic implementation for renaming folders in HNS-enabled
+        buckets. Falls back to the parent's object-level copy-and-delete
+        implementation for files or for non-HNS buckets.
+        """
+        if path1 == path2:
+            logger.debug(
+                "%s mv: The paths are the same, so no files/directories were moved.",
+                self,
+            )
+            return
+
+        bucket1, key1, _ = self.split_path(path1)
+        bucket2, key2, _ = self.split_path(path2)
+
+        is_hns = False
+        try:
+            is_hns = await self._is_bucket_hns_enabled(bucket1)
+        except Exception as e:
+            logger.warning(
+                f"Could not determine if bucket '{bucket1}' is HNS-enabled, falling back to default mv: {e}"
+            )
+
+        if not is_hns:
+            logger.debug(
+                f"Not an HNS bucket. Falling back to object-level mv for '{path1}' to '{path2}'."
+            )
+            return await self.loop.run_in_executor(
+                None, partial(super().mv, path1, path2, **kwargs)
+            )
+
+        try:
+            info1 = await self._info(path1)
+            is_folder = info1.get("type") == "directory"
+
+            # We only use HNS rename if the source is a folder and the move is
+            # within the same bucket.
+            if is_folder and bucket1 == bucket2 and key1 and key2:
+                logger.info(
+                    f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
+                )
+                source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
+                destination_folder_id = key2
+
+                request = storage_control_v2.RenameFolderRequest(
+                    name=source_folder_name,
+                    destination_folder_id=destination_folder_id,
+                )
+
+                logger.debug(f"rename_folder request: {request}")
+                await self._storage_control_client.rename_folder(request=request)
+                self._update_dircache_after_rename(path1, path2)
+
+                logger.info(
+                    "Successfully renamed folder from '%s' to '%s'", path1, path2
+                )
+                return
+        except Exception as e:
+            if isinstance(e, FileNotFoundError):
+                # If the source doesn't exist, fail fast.
+                raise
+            if isinstance(e, api_exceptions.NotFound):
+                raise FileNotFoundError(
+                    f"Source '{path1}' not found for move operation."
+                ) from e
+            if isinstance(e, api_exceptions.Conflict):
+                # This occurs if the destination folder already exists.
+                # Raise FileExistsError for fsspec compatibility.
+                raise FileExistsError(
+                    f"HNS rename failed due to conflict for '{path1}' to '{path2}'"
+                ) from e
+            if isinstance(e, api_exceptions.FailedPrecondition):
+                raise OSError(f"HNS rename failed: {e}") from e
+
+            logger.warning(f"Could not perform HNS-aware mv: {e}")
+
+        logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
+        # TODO: Check feasibility to call async copy and rm methods instead of sync mv method
+        return await self.loop.run_in_executor(
+            None, partial(super().mv, path1, path2, **kwargs)
+        )
+
+    mv = asyn.sync_wrapper(_mv)
