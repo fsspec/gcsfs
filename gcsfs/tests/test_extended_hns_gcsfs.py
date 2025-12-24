@@ -122,6 +122,9 @@ class TestExtendedGcsFileSystemMv:
         file_in_root = f"{path1}/file1.txt"
         nested_file = f"{path1}/sub_dir/file2.txt"
 
+        gcsfs.touch(file_in_root)
+        gcsfs.touch(nested_file)
+
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
                 # Configure mocks
@@ -138,8 +141,6 @@ class TestExtendedGcsFileSystemMv:
                     {"type": "file", "name": f"{path2}/sub_dir/file2.txt"},
                 ]
 
-            gcsfs.touch(file_in_root)
-            gcsfs.touch(nested_file)
             gcsfs.mv(path1, path2)
 
             # Verify that the old path no longer exist
@@ -153,9 +154,8 @@ class TestExtendedGcsFileSystemMv:
             self._assert_hns_rename_called_using_logs(mocks, caplog, path1, path2)
 
             if mocks:
-                # gcsfs.touch opens gcsfile internally which triggers bucket type lookup, hence +2 calls
-                mocks["async_lookup_bucket_type"].assert_has_awaits(
-                    [mock.call(TEST_HNS_BUCKET)] * 3
+                mocks["async_lookup_bucket_type"].assert_called_once_with(
+                    TEST_HNS_BUCKET
                 )
                 # Verify the sequence of _info calls for mv and exists checks.
                 expected_info_calls = [
@@ -181,6 +181,7 @@ class TestExtendedGcsFileSystemMv:
         path2 = f"gs://{path2_no_proto}"
 
         file_in_root = f"{path1}/file1.txt"
+        gcsfs.touch(file_in_root)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
@@ -191,7 +192,6 @@ class TestExtendedGcsFileSystemMv:
                     {"type": "directory", "name": path2},
                 ]
 
-            gcsfs.touch(file_in_root)
             gcsfs.mv(path1, path2)
 
             assert not gcsfs.exists(path1)
@@ -200,9 +200,8 @@ class TestExtendedGcsFileSystemMv:
             self._assert_hns_rename_called_using_logs(mocks, caplog, path1, path2)
 
             if mocks:
-                # gcsfs.touch opens gcsfile internally which triggers bucket type lookup, hence +1 call
-                mocks["async_lookup_bucket_type"].assert_has_awaits(
-                    [mock.call(TEST_HNS_BUCKET)] * 2
+                mocks["async_lookup_bucket_type"].assert_called_once_with(
+                    TEST_HNS_BUCKET
                 )
                 expected_info_calls = [
                     mock.call(path1),  # from _mv
@@ -227,6 +226,12 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/empty_old_dir"
         path2 = f"{TEST_HNS_BUCKET}/empty_new_dir"
 
+        # Simulate creating an empty directory by creating and then deleting a file inside a
+        # folder as mkdir is still not supported on HNS buckets.
+        placeholder_file = f"{path1}/placeholder.txt"
+        gcsfs.touch(placeholder_file)
+        gcsfs.rm(placeholder_file)
+
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
                 # Configure mocks for the sequence of calls
@@ -236,12 +241,6 @@ class TestExtendedGcsFileSystemMv:
                     {"type": "directory", "name": path2},  # exists(path2) after move
                 ]
 
-            # Simulate creating an empty directory by creating and then deleting a file inside a
-            # folder as mkdir is still not supported on HNS buckets.
-            placeholder_file = f"{path1}/placeholder.txt"
-            gcsfs.touch(placeholder_file)
-            gcsfs.rm(placeholder_file)
-
             gcsfs.mv(path1, path2)
 
             assert not gcsfs.exists(path1)
@@ -250,9 +249,8 @@ class TestExtendedGcsFileSystemMv:
             self._assert_hns_rename_called_using_logs(mocks, caplog, path1, path2)
 
             if mocks:
-                # gcsfs.touch opens gcsfile internally which triggers bucket type lookup, hence +1 call
-                mocks["async_lookup_bucket_type"].assert_has_awaits(
-                    [mock.call(TEST_HNS_BUCKET)] * 2
+                mocks["async_lookup_bucket_type"].assert_called_once_with(
+                    TEST_HNS_BUCKET
                 )
                 expected_info_calls = [
                     mock.call(path1),  # from _mv
