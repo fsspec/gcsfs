@@ -150,6 +150,7 @@ steps:
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:
       - "setup-vm"
+      - "create-buckets"
 
   # Run tests on HNS bucket (in parallel with other tests).
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
