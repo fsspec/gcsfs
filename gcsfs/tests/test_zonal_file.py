@@ -271,6 +271,9 @@ class TestZonalFileRealGCS:
         data2 = b"appended data."
         data3 = b"more appended data."
 
+        if extended_gcsfs.exists(append_file_path):
+            extended_gcsfs.rm(append_file_path)
+
         with extended_gcsfs.open(append_file_path, "ab") as f:
             f.write(data1)
         with extended_gcsfs.open(append_file_path, "ab", finalize_on_close=True) as f:
