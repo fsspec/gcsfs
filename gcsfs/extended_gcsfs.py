@@ -408,7 +408,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
 
     mv = asyn.sync_wrapper(_mv)
-    
+
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     raise NotImplementedError(
