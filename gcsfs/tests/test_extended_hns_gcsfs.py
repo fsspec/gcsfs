@@ -122,9 +122,6 @@ class TestExtendedGcsFileSystemMv:
         file_in_root = f"{path1}/file1.txt"
         nested_file = f"{path1}/sub_dir/file2.txt"
 
-        gcsfs.touch(file_in_root)
-        gcsfs.touch(nested_file)
-
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
                 # Configure mocks
@@ -141,6 +138,8 @@ class TestExtendedGcsFileSystemMv:
                     {"type": "file", "name": f"{path2}/sub_dir/file2.txt"},
                 ]
 
+            gcsfs.touch(file_in_root)
+            gcsfs.touch(nested_file)
             gcsfs.mv(path1, path2)
 
             # Verify that the old path no longer exist
@@ -181,7 +180,6 @@ class TestExtendedGcsFileSystemMv:
         path2 = f"gs://{path2_no_proto}"
 
         file_in_root = f"{path1}/file1.txt"
-        gcsfs.touch(file_in_root)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
@@ -192,6 +190,7 @@ class TestExtendedGcsFileSystemMv:
                     {"type": "directory", "name": path2},
                 ]
 
+            gcsfs.touch(file_in_root)
             gcsfs.mv(path1, path2)
 
             assert not gcsfs.exists(path1)
@@ -226,12 +225,6 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/empty_old_dir"
         path2 = f"{TEST_HNS_BUCKET}/empty_new_dir"
 
-        # Simulate creating an empty directory by creating and then deleting a file inside a
-        # folder as mkdir is still not supported on HNS buckets.
-        placeholder_file = f"{path1}/placeholder.txt"
-        gcsfs.touch(placeholder_file)
-        gcsfs.rm(placeholder_file)
-
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
                 # Configure mocks for the sequence of calls
@@ -240,6 +233,12 @@ class TestExtendedGcsFileSystemMv:
                     FileNotFoundError(path1),  # exists(path1) after move
                     {"type": "directory", "name": path2},  # exists(path2) after move
                 ]
+
+            # Simulate creating an empty directory by creating and then deleting a file inside a
+            # folder as mkdir is still not supported on HNS buckets.
+            placeholder_file = f"{path1}/placeholder.txt"
+            gcsfs.touch(placeholder_file)
+            gcsfs.rm(placeholder_file)
 
             gcsfs.mv(path1, path2)
 

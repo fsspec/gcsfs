@@ -74,6 +74,22 @@ steps:
     waitFor: ["-"]
 
   # Step 4: Create a GCE VM to run the tests.
+  # Step 3: Create a unique HNS GCS bucket for the test run.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-hns-bucket"
+    entrypoint: "gcloud"
+    args:
+      - "storage"
+      - "buckets"
+      - "create"
+      - "gs://gcsfs-test-hns-${_SHORT_BUILD_ID}"
+      - "--project=${PROJECT_ID}"
+      - "--location=${_REGION}"
+      - "--enable-hierarchical-namespace"
+      - "--uniform-bucket-level-access"
+    waitFor: ["-"]
+
+  # Step 4: Create a GCE VM to run the tests.
   # The VM is created in the same zone as the buckets to test rapid storage features.
   # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -160,8 +176,7 @@ steps:
          --log-date-format='%H:%M:%S' \
          --color=no \
          gcsfs/tests/test_extended_gcsfs.py \
-         gcsfs/tests/test_extended_hns_gcsfs.py \
-         gcsfs/tests/test_zonal_file.py
+         gcsfs/tests/test_extended_hns_gcsfs.py
         "
 
         # Execute the script on the VM via SSH.

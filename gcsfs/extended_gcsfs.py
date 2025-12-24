@@ -1,6 +1,7 @@
 import logging
 from enum import Enum
 from functools import partial
+from functools import partial
 
 from fsspec import asyn
 from google.api_core import exceptions as api_exceptions
@@ -97,7 +98,22 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if hasattr(creds, "with_quota_project"):
             creds = creds.with_quota_project(None)
 
+        # The HNS RenameFolder operation began failing with an "input/output error"
+        # after an authentication library change caused it to send a
+        # `quota_project_id` from application default credentials. The
+        # RenameFolder API rejects requests with this parameter.
+        #
+        # This workaround explicitly removes the `quota_project_id` to prevent
+        # the API from rejecting the request. A long-term fix is in progress
+        # in the GCS backend to relax this restriction.
+        #
+        # TODO: Remove this workaround once the GCS backend fix is deployed.
+        creds = self.credential
+        if hasattr(creds, "with_quota_project"):
+            creds = creds.with_quota_project(None)
+
         return storage_control_v2.StorageControlAsyncClient(
+            credentials=creds, client_info=client_info
             credentials=creds, client_info=client_info
         )
 
@@ -117,12 +133,19 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         try:
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
             logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
+            logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
             response = await self._storage_control_client.get_storage_layout(
                 name=bucket_name_value
             )
 
             if response.location_type == "zone":
                 return BucketType.ZONAL_HIERARCHICAL
+            if (
+                response.hierarchical_namespace
+                and response.hierarchical_namespace.enabled
+            ):
+                return BucketType.HIERARCHICAL
+            return BucketType.NON_HIERARCHICAL
             if (
                 response.hierarchical_namespace
                 and response.hierarchical_namespace.enabled
@@ -410,41 +433,3 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
 
     mv = asyn.sync_wrapper(_mv)
-
-
-async def upload_chunk(fs, location, data, offset, size, content_type):
-    raise NotImplementedError(
-        "upload_chunk is not implemented yet for Zonal experimental feature. Please use write() instead."
-    )
-
-
-async def initiate_upload(
-    fs,
-    bucket,
-    key,
-    content_type="application/octet-stream",
-    metadata=None,
-    fixed_key_metadata=None,
-    mode="overwrite",
-    kms_key_name=None,
-):
-    raise NotImplementedError(
-        "initiate_upload is not implemented yet for Zonal experimental feature. Please use write() instead."
-    )
-
-
-async def simple_upload(
-    fs,
-    bucket,
-    key,
-    datain,
-    metadatain=None,
-    consistency=None,
-    content_type="application/octet-stream",
-    fixed_key_metadata=None,
-    mode="overwrite",
-    kms_key_name=None,
-):
-    raise NotImplementedError(
-        "simple_upload is not implemented yet for Zonal experimental feature. Please use write() instead."
-    )
