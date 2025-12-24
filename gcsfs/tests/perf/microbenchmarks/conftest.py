@@ -1,6 +1,8 @@
 import logging
+import multiprocessing
 import os
 import statistics
+import time
 import uuid
 from typing import Any, List
 
@@ -16,6 +18,24 @@ try:
     benchmark_plugin_installed = True
 except ImportError:
     benchmark_plugin_installed = False
+
+
+def _write_file(gcs, path, file_size, chunk_size):
+    chunks_to_write = file_size // chunk_size
+    remainder = file_size % chunk_size
+    with gcs.open(path, "wb") as f:
+        for _ in range(chunks_to_write):
+            f.write(os.urandom(chunk_size))
+        if remainder > 0:
+            f.write(os.urandom(remainder))
+
+
+def _prepare_files(gcs, file_paths, file_size):
+    chunk_size = min(100 * MB, file_size)
+    args = [(gcs, path, file_size, chunk_size) for path in file_paths]
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(16) as pool:
+        pool.starmap(_write_file, args)
 
 
 @pytest.fixture
@@ -47,21 +67,14 @@ def gcsfs_benchmark_read_write(extended_gcs_factory, request):
         f"of size {params.file_size_bytes / MB:.2f} MB each."
     )
 
-    # Define a 64MB chunk size for writing
-    chunk_size = 64 * MB
+    start_time = time.perf_counter()
+    # Create all files in parallel, 16 at a time
+    _prepare_files(gcs, file_paths, params.file_size_bytes)
 
-    # Calculate the number of chunks to write and the remainder
-    chunks_to_write = params.file_size_bytes // chunk_size
-    remainder = params.file_size_bytes % chunk_size
-
-    # Create files by writing random chunks to avoid high memory usage
-    for path in file_paths:
-        logging.info(f"Creating file {path}.")
-        with gcs.open(path, "wb") as f:
-            for _ in range(chunks_to_write):
-                f.write(os.urandom(chunk_size))
-            if remainder > 0:
-                f.write(os.urandom(remainder))
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    logging.info(
+        f"Benchmark '{params.name}' setup created {params.num_files} files in {duration_ms:.2f} ms."
+    )
 
     yield gcs, file_paths, params
 
