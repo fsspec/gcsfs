@@ -4,6 +4,11 @@ import pytest
 
 from gcsfs import zb_hns_utils
 
+mock_grpc_client = mock.Mock()
+bucket_name = "test-bucket"
+object_name = "test-object"
+generation = "12345"
+
 
 @pytest.mark.asyncio
 async def test_download_range():
@@ -27,3 +32,29 @@ async def test_download_range():
 
     mock_mrd.download_ranges.assert_called_once_with([(offset, length, mock.ANY)])
     assert result == expected_data
+
+
+@pytest.mark.asyncio
+async def test_init_aaow():
+    """
+    Tests that init_aaow calls the underlying AsyncAppendableObjectWriter.open
+    method and returns its result.
+    """
+    mock_writer_instance = mock.AsyncMock()
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",  # The class to patch
+        new_callable=mock.Mock,  # Use a regular Mock for the class
+        return_value=mock_writer_instance,
+    ) as mock_writer_class:
+        result = await zb_hns_utils.init_aaow(
+            mock_grpc_client, bucket_name, object_name, generation
+        )
+
+        mock_writer_class.assert_called_once_with(
+            client=mock_grpc_client,
+            bucket_name=bucket_name,
+            object_name=object_name,
+            generation=generation,
+        )
+        mock_writer_instance.open.assert_awaited_once()
+        assert result is mock_writer_instance
