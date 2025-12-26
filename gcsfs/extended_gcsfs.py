@@ -416,6 +416,74 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     mv = asyn.sync_wrapper(_mv)
 
+    async def _mkdir(self, path, create_parents=True, enable_hns=False, **kwargs):
+        """
+        For HNS-enabled buckets, this creates a folder object.
+        For non-HNS buckets, it falls back to the parent implementation which
+        may involve creating a bucket or doing nothing (as GCS has no true empty directories).
+        """
+        path = self._strip_protocol(path)
+        bucket, key, _ = self.split_path(path)
+
+        # If key is empty, it's a bucket operation. Defer to parent.
+        if not key:
+            if enable_hns:
+                kwargs["hierarchicalNamespace"] = {"enabled": True}
+            return await super()._mkdir(path, create_parents=create_parents, **kwargs)
+        is_hns = False
+        try:
+            is_hns = await self._is_bucket_hns_enabled(bucket)
+        except Exception as e:
+            logger.warning(
+                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default mkdir: {e}"
+            )
+
+        if not is_hns:
+            return await super()._mkdir(path, create_parents=create_parents, **kwargs)
+
+        logger.info(f"Using HNS-aware mkdir for '{path}'.")
+        parent = f"projects/_/buckets/{bucket}"
+        folder_id = key.rstrip("/")
+        request = storage_control_v2.CreateFolderRequest(
+            parent=parent,
+            folder_id=folder_id,
+            recursive=create_parents,
+        )
+        try:
+            await self._storage_control_client.create_folder(request=request)
+            # Instead of invalidating the parent cache, surgically add the new entry.
+            parent_path = self._parent(path)
+            if parent_path in self.dircache:
+                new_entry = {
+                    "Key": key.rstrip("/"),
+                    "Size": 0,
+                    "name": path,
+                    "size": 0,
+                    "type": "directory",
+                    "storageClass": "DIRECTORY",
+                }
+                self.dircache[parent_path].append(new_entry)
+        except api_exceptions.Conflict as e:
+            # This error occurs if the folder already exists.
+            # For mkdir, this is not an error, so we can pass silently.
+            # However, if it's a file, we should raise.
+            if await self._is_file(path):
+                raise FileExistsError(
+                    f"Path already exists and is a file: {path}"
+                ) from e
+            logger.debug(f"Directory already exists: {path}")
+        except api_exceptions.FailedPrecondition as e:
+            # This error can occur if create_parents=False and the parent dir doesn't exist.
+            # We translate it to FileNotFoundError for fsspec compatibility.
+            logger.warning(
+                f"HNS mkdir failed for '{path}', likely missing parent. Original error: {e}"
+            )
+            raise FileNotFoundError(
+                f"mkdir for '{path}' failed due to a precondition error."
+            ) from e
+
+    mkdir = asyn.sync_wrapper(_mkdir)
+
     async def _get_directory_info(self, path, bucket, key, generation):
         """
         Override to use Storage Control API's get_folder for HNS buckets.
