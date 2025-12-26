@@ -620,7 +620,7 @@ class TestExtendedGcsFileSystemInternal:
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_true_hierarchical(self):
         """Verifies HNS is enabled when bucket type is HIERARCHICAL."""
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
         with mock.patch.object(
             fs, "_lookup_bucket_type", return_value=BucketType.HIERARCHICAL
         ):
@@ -629,7 +629,7 @@ class TestExtendedGcsFileSystemInternal:
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_true_zonal_hierarchical(self):
         """Verifies HNS is enabled when bucket type is ZONAL_HIERARCHICAL."""
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
         with mock.patch.object(
             fs, "_lookup_bucket_type", return_value=BucketType.ZONAL_HIERARCHICAL
         ):
@@ -638,7 +638,7 @@ class TestExtendedGcsFileSystemInternal:
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_false(self):
         """Verifies HNS is disabled for STANDARD/non-hierarchical bucket types."""
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
         # Mocking a non-hierarchical return value (e.g., standard bucket)
         with mock.patch.object(fs, "_lookup_bucket_type", return_value="STANDARD"):
             assert await fs._is_bucket_hns_enabled("my-bucket") is False
@@ -649,7 +649,7 @@ class TestExtendedGcsFileSystemInternal:
         Verifies that if _lookup_bucket_type fails, we log a warning and return False
         (fail-open to non-HNS behavior).
         """
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
 
         with (
             mock.patch.object(
@@ -670,7 +670,7 @@ class TestExtendedGcsFileSystemInternal:
         """
         Verifies _get_directory_info uses storage_control_client.get_folder when HNS is enabled.
         """
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
         fs._storage_control_client = mock.AsyncMock()
 
         path = "bucket/folder"
@@ -686,7 +686,12 @@ class TestExtendedGcsFileSystemInternal:
         fs._storage_control_client.get_folder.return_value = mock_response
 
         # Force HNS enabled path
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+        with (
+            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
+            mock.patch(
+                "gcsfs.core.GCSFileSystem._get_directory_info"
+            ) as mock_super_method,
+        ):
             info = await fs._get_directory_info(path, bucket, key, generation=None)
 
             # Verify the returned structure matches expected directory metadata
@@ -704,13 +709,14 @@ class TestExtendedGcsFileSystemInternal:
                 "projects/_/buckets/bucket/folders/folder"
                 == call_kwargs["request"].name
             )
+            mock_super_method.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_directory_info_hns_not_found(self):
         """
         Verifies _get_directory_info raises FileNotFoundError if the folder is missing in HNS bucket.
         """
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
         fs._storage_control_client = mock.AsyncMock()
 
         # Mock NotFound exception fromExtendedGCSFileSystem the API
@@ -729,7 +735,7 @@ class TestExtendedGcsFileSystemInternal:
         """
         Verifies that unexpected exceptions during HNS lookup are logged and re-raised.
         """
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
         fs._storage_control_client = mock.AsyncMock()
 
         test_exception = Exception("Unexpected API Failure")
@@ -751,7 +757,7 @@ class TestExtendedGcsFileSystemInternal:
         Verifies that we fall back to the superclass (standard GCS) implementation
         if the bucket is NOT HNS-enabled.
         """
-        fs = ExtendedGcsFileSystem()
+        fs = ExtendedGcsFileSystem(token="anon")
         fs._storage_control_client = mock.AsyncMock()
 
         # We patch the superclass method on the class itself to verify delegation
