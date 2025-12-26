@@ -278,7 +278,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """Checks if a bucket has Hierarchical Namespace enabled."""
         try:
             bucket_type = await self._lookup_bucket_type(bucket)
-        except Exception as e:
+        except Exception:
             logger.warning(
                 f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS"
             )
@@ -428,14 +428,16 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             try:
                 # folder_id is the path relative to the bucket
                 folder_id = key.rstrip("/")
-                folder_resource_name = f"projects/_/buckets/{bucket}/folders/{folder_id}"
+                folder_resource_name = (
+                    f"projects/_/buckets/{bucket}/folders/{folder_id}"
+                )
 
-                request = storage_control_v2.GetFolderRequest(
-                    name=folder_resource_name)
+                request = storage_control_v2.GetFolderRequest(name=folder_resource_name)
 
                 # Verify existence using get_folder API
                 response = await self._storage_control_client.get_folder(
-                    request=request)
+                    request=request
+                )
 
                 # If successful, return directory metadata
                 return {
@@ -458,7 +460,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Fallback to standard GCS behavior for non-HNS buckets
         return await super()._get_directory_info(path, bucket, key, generation)
-
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
