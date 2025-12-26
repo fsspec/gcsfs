@@ -532,16 +532,23 @@ def test_move(gcs):
     assert not gcs.exists(fn)
 
 
-@pytest.mark.parametrize("slash_from", ([False, True]))
-def test_move_recursive(gcs, slash_from):
+def test_move_recursive_no_slash(gcs):
     # See issue #489
     dir_from = TEST_BUCKET + "/nested"
-    if slash_from:
-        dir_from += "/"
     dir_to = TEST_BUCKET + "/new_name"
 
     gcs.mv(dir_from, dir_to, recursive=True)
     assert not gcs.exists(dir_from)
+    assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
+
+
+def test_move_recursive_with_slash(gcs):
+    # See issue #489
+    dir_from = TEST_BUCKET + "/nested/"
+    dir_to = TEST_BUCKET + "/new_name_with_slash"
+
+    gcs.mv(dir_from, dir_to, recursive=True)
+    assert not gcs.exists(dir_from.rstrip("/"))
     assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
 
 
