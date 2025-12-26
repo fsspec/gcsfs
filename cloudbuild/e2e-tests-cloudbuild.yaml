@@ -4,7 +4,7 @@ substitutions:
   _SHORT_BUILD_ID: ${BUILD_ID:0:8}
 
 steps:
-  # Step 0: Generate a persistent SSH key for this build run.
+  # Generate a persistent SSH key for this build run.
   # This prevents gcloud from adding a new key to the OS Login profile on every ssh/scp command.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "generate-ssh-key"
@@ -19,62 +19,29 @@ steps:
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
     waitFor: ["-"]
 
-  # Step 1: Create a unique standard GCS bucket for the test run.
+  # Create all necessary GCS buckets in parallel.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-standard-bucket"
-    entrypoint: "gcloud"
+    id: "create-buckets"
+    entrypoint: "bash"
     args:
-      - "storage"
-      - "buckets"
-      - "create"
-      - "gs://gcsfs-test-standard-${_SHORT_BUILD_ID}"
-      - "--project=${PROJECT_ID}"
-      - "--location=${_REGION}"
+      - "-c"
+      - |
+        set -e
+        echo "--- Creating standard bucket ---"
+        gcloud storage buckets create gs://gcsfs-test-standard-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} &
+        echo "--- Creating versioned bucket ---"
+        gcloud storage buckets create gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} &
+        echo "--- Creating HNS bucket ---"
+        gcloud storage buckets create gs://gcsfs-test-hns-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+
+        wait
+
+        echo "--- Enabling versioning on versioned bucket ---"
+        gcloud storage buckets update gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} --versioning
     waitFor: ["-"]
 
-  # Step 2: Create a unique versioned GCS bucket for the test run.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-versioned-bucket"
-    entrypoint: "gcloud"
-    args:
-      - "storage"
-      - "buckets"
-      - "create"
-      - "gs://gcsfs-test-versioned-${_SHORT_BUILD_ID}"
-      - "--project=${PROJECT_ID}"
-      - "--location=${_REGION}"
-    waitFor: ["-"]
-
-  # Step 2a: Enable versioning on the versioned bucket.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "enable-bucket-versioning"
-    entrypoint: "gcloud"
-    args:
-      - "storage"
-      - "buckets"
-      - "update"
-      - "gs://gcsfs-test-versioned-${_SHORT_BUILD_ID}"
-      - "--versioning"
-    waitFor:
-      - "create-versioned-bucket"
-
-  # Step 3: Create a unique HNS GCS bucket for the test run.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-hns-bucket"
-    entrypoint: "gcloud"
-    args:
-      - "storage"
-      - "buckets"
-      - "create"
-      - "gs://gcsfs-test-hns-${_SHORT_BUILD_ID}"
-      - "--project=${PROJECT_ID}"
-      - "--location=${_REGION}"
-      - "--enable-hierarchical-namespace"
-      - "--uniform-bucket-level-access"
-    waitFor: ["-"]
-
-  # Step 4: Create a GCE VM to run the tests.
-  # The VM is created in the same zone as the buckets to test rapid storage features.
+  # Create a GCE VM to run the tests.
+  # The VM is created in the same zone as the zonal bucket to test rapid storage features.
   # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create-vm"
@@ -94,10 +61,10 @@ steps:
       - "--metadata=enable-oslogin=TRUE"
     waitFor: ["-"]
 
-  # Step 5: Run the integration tests inside the newly created VM.
-  # This step uses 'gcloud compute ssh' to execute a remote script.
+  # Set up the VM for integration tests.
+  # This step uses 'gcloud compute ssh' to execute a script.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "run-tests-on-vm"
+    id: "setup-vm"
     entrypoint: "bash"
     args:
       - "-c"
@@ -117,7 +84,7 @@ steps:
 
         # Script to be executed on the VM.
         # This script installs dependencies, sets environment variables, and runs pytest.
-        VM_SCRIPT="
+        SETUP_SCRIPT="
           set -e
           echo '--- Installing dependencies on VM ---'
           sudo apt-get update > /dev/null
@@ -131,51 +98,87 @@ steps:
           # Install testing libraries explicitly, as they are not in setup.py
           pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
           pip install -e . > /dev/null
-
-          echo '--- Preparing test environment on VM ---'
-          export GCSFS_TEST_BUCKET='gcsfs-test-standard-${_SHORT_BUILD_ID}'
-          export GCSFS_TEST_VERSIONED_BUCKET='gcsfs-test-versioned-${_SHORT_BUILD_ID}'
-          export GCSFS_ZONAL_TEST_BUCKET='${_GCSFS_ZONAL_TEST_BUCKET}'
-          export GCSFS_HNS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}'
-
-          export STORAGE_EMULATOR_HOST=https://storage.googleapis.com
-          export GCSFS_TEST_PROJECT=${PROJECT_ID}
-          export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME}
-
-          echo '--- Running standard tests on VM ---'
-          pytest -vv -s \
-          --log-format='%(asctime)s %(levelname)s %(message)s' \
-          --log-date-format='%H:%M:%S' \
-          --color=no \
-          gcsfs/ \
-          --deselect gcsfs/tests/test_core.py::test_sign
-
-         # Run Zonal and HNS tests
-         echo '--- Running Zonal and HNS tests on VM ---'
-         # Increased the ulimit temporarily to avoid too many open files error
-         ulimit -n 2048
-         export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
-         pytest -vv -s \
-         --log-format='%(asctime)s %(levelname)s %(message)s' \
-         --log-date-format='%H:%M:%S' \
-         --color=no \
-         gcsfs/tests/test_extended_gcsfs.py \
-         gcsfs/tests/test_extended_hns_gcsfs.py \
-         gcsfs/tests/test_zonal_file.py
         "
 
         # Execute the script on the VM via SSH.
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$VM_SCRIPT"
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"
     waitFor:
       - "create-vm"
-      - "create-standard-bucket"
-      - "enable-bucket-versioning"
       - "generate-ssh-key"
-      - "create-hns-bucket"
+
+  # Run standard tests (in parallel with other tests).
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-standard-tests"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        TEST_SCRIPT="
+          source env/bin/activate && \
+          echo '--- Preparing test environment for standard tests ---' && \
+          export GCSFS_TEST_BUCKET='gcsfs-test-standard-${_SHORT_BUILD_ID}' && \
+          export GCSFS_TEST_VERSIONED_BUCKET='gcsfs-test-versioned-${_SHORT_BUILD_ID}' && \
+          export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
+          export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
+          export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
+          echo '--- Running standard tests on VM ---' && \
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/ --deselect gcsfs/tests/test_core.py::test_sign
+        "
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
+    waitFor:
+      - "setup-vm"
+      - "create-buckets"
+
+  # Run extended tests on Zonal bucket (in parallel with other tests).
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-zonal-tests"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        TEST_SCRIPT="
+          source env/bin/activate && \
+          echo '--- Preparing test environment for zonal tests ---' && \
+          export GCSFS_ZONAL_TEST_BUCKET='${_GCSFS_ZONAL_TEST_BUCKET}' && \
+          export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
+          export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
+          export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
+          echo '--- Running Zonal tests on VM ---' && \
+          ulimit -n 2048 && export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py
+        "
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
+    waitFor:
+      - "setup-vm"
+      - "create-buckets"
+
+  # Run tests on HNS bucket (in parallel with other tests).
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-hns-tests"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        TEST_SCRIPT="
+          source env/bin/activate && \
+          echo '--- Preparing test environment for HNS tests ---' && \
+          export GCSFS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}' && \
+          export GCSFS_HNS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}' && \
+          export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
+          export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
+          export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
+          echo '--- Running HNS tests on VM ---' && \
+          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/ --deselect gcsfs/tests/test_extended_gcsfs.py --deselect gcsfs/tests/test_core_versioned.py --deselect gcsfs/tests/test_core.py::test_sign --deselect gcsfs/tests/test_zonal_file.py
+        "
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
+    waitFor:
+      - "setup-vm"
+      - "create-buckets"
 
   # --- Cleanup Steps ---
 
-  # Step 6: Clean up the SSH key from the OS Login profile.
+  # Clean up the SSH key from the OS Login profile.
   # This step is crucial to prevent key accumulation.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-ssh-key"
@@ -187,9 +190,11 @@ steps:
         gcloud compute os-login ssh-keys remove \
           --key-file=/workspace/gcb_ssh_key.pub || true
     waitFor:
-      - "run-tests-on-vm"
+      - "run-standard-tests"
+      - "run-zonal-tests"
+      - "run-hns-tests"
 
-  # Step 7: Delete the GCE VM.
+  # Delete the GCE VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-vm"
     entrypoint: "gcloud"
@@ -203,42 +208,23 @@ steps:
     waitFor:
       - "cleanup-ssh-key"
 
-  # Step 8: Delete the standard GCS bucket.
+  # Delete all GCS buckets in parallel.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "delete-standard-bucket"
-    entrypoint: "gcloud"
+    id: "delete-buckets"
+    entrypoint: "bash"
     args:
-      [
-        "storage",
-        "rm",
-        "--recursive",
-        "gs://gcsfs-test-standard-${_SHORT_BUILD_ID}",
-      ]
+      - "-c"
+      - |
+        set -e
+        echo "--- Deleting test buckets in parallel ---"
+        gcloud storage rm --recursive gs://gcsfs-test-standard-${_SHORT_BUILD_ID} &
+        gcloud storage rm --recursive gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} &
+        gcloud storage rm --recursive gs://gcsfs-test-hns-${_SHORT_BUILD_ID} &
+        wait
     waitFor:
-      - "run-tests-on-vm"
-
-  # Step 9: Delete the versioned GCS bucket.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "delete-versioned-bucket"
-    entrypoint: "gcloud"
-    args:
-      [
-        "storage",
-        "rm",
-        "--recursive",
-        "gs://gcsfs-test-versioned-${_SHORT_BUILD_ID}",
-      ]
-    waitFor:
-      - "run-tests-on-vm"
-
-  # Step 10: Delete the HNS GCS bucket.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "delete-hns-bucket"
-    entrypoint: "gcloud"
-    args:
-      ["storage", "rm", "--recursive", "gs://gcsfs-test-hns-${_SHORT_BUILD_ID}"]
-    waitFor:
-      - "run-tests-on-vm"
+      - "run-standard-tests"
+      - "run-zonal-tests"
+      - "run-hns-tests"
 
 timeout: "3600s" # 60 minutes
 
