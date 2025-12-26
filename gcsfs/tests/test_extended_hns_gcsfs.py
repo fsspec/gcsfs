@@ -1222,6 +1222,10 @@ class TestExtendedGcsFileSystemRmdir:
         dir_name = "empty_dir"
         dir_path = f"{TEST_HNS_BUCKET}/{dir_name}"
 
+        # Create an empty directory, can be replaced with mkdir once it is implemented for HNS buckets.
+        gcsfs.touch(f"{dir_path}/placeholder")
+        gcsfs.rm(f"{dir_path}/placeholder")
+
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
                 # Configure mocks
@@ -1231,10 +1235,6 @@ class TestExtendedGcsFileSystemRmdir:
                     {"type": "directory", "name": dir_path},
                     FileNotFoundError(dir_path),
                 ]
-
-            # Create an empty directory, can be replaced with mkdir once it is implemented for HNS buckets.
-            gcsfs.touch(f"{dir_path}/placeholder")
-            gcsfs.rm(f"{dir_path}/placeholder")
 
             assert gcsfs.exists(dir_path)
 
