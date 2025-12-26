@@ -1,5 +1,9 @@
 from io import BytesIO
 
+from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
+    AsyncAppendableObjectWriter,
+)
+
 
 async def download_range(offset, length, mrd):
     """
@@ -11,3 +15,18 @@ async def download_range(offset, length, mrd):
     buffer = BytesIO()
     await mrd.download_ranges([(offset, length, buffer)])
     return buffer.getvalue()
+
+
+async def init_aaow(grpc_client, bucket_name, object_name, generation=None):
+    """
+    Creates and opens the AsyncAppendableObjectWriter.
+    """
+
+    writer = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+        generation=generation,
+    )
+    await writer.open()
+    return writer
