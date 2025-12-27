@@ -276,7 +276,14 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
-        bucket_type = await self._lookup_bucket_type(bucket)
+        try:
+            bucket_type = await self._lookup_bucket_type(bucket)
+        except Exception:
+            logger.warning(
+                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS"
+            )
+            return False
+
         return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
 
     def _update_dircache_after_rename(self, path1, path2):
@@ -408,6 +415,51 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
 
     mv = asyn.sync_wrapper(_mv)
+
+    async def _get_directory_info(self, path, bucket, key, generation):
+        """
+        Override to use Storage Control API's get_folder for HNS buckets.
+        For HNS, we avoid calling _ls (_list_objects) entirely.
+        """
+        is_hns = await self._is_bucket_hns_enabled(bucket)
+
+        # If bucket is HNS, use get folder metadata api to determine a directory
+        if is_hns:
+            try:
+                # folder_id is the path relative to the bucket
+                folder_id = key.rstrip("/")
+                folder_resource_name = (
+                    f"projects/_/buckets/{bucket}/folders/{folder_id}"
+                )
+
+                request = storage_control_v2.GetFolderRequest(name=folder_resource_name)
+
+                # Verify existence using get_folder API
+                response = await self._storage_control_client.get_folder(
+                    request=request
+                )
+
+                # If successful, return directory metadata
+                return {
+                    "bucket": bucket,
+                    "name": path,
+                    "size": 0,
+                    "storageClass": "DIRECTORY",
+                    "type": "directory",
+                    "ctime": response.create_time,
+                    "mtime": response.update_time,
+                    "metageneration": response.metageneration,
+                }
+            except api_exceptions.NotFound:
+                # If get_folder fails, the folder does not exist.
+                raise FileNotFoundError(path)
+            except Exception as e:
+                # Log unexpected errors
+                logger.error(f"Error fetching folder metadata for {path}: {e}")
+                raise e
+
+        # Fallback to standard GCS behavior for non-HNS buckets
+        return await super()._get_directory_info(path, bucket, key, generation)
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
