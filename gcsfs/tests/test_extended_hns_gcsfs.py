@@ -696,7 +696,7 @@ class TestExtendedGcsFileSystemInternal:
 
             # Verify the returned structure matches expected directory metadata
             assert info["bucket"] == bucket
-            assert info["name"] == path.rstrip("/") + "/"
+            assert info["name"] == path
             assert info["type"] == "directory"
             assert info["storageClass"] == "DIRECTORY"
             assert info["ctime"] == mock_response.create_time

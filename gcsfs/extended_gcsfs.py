@@ -442,7 +442,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 # If successful, return directory metadata
                 return {
                     "bucket": bucket,
-                    "name": path.rstrip("/") + "/",
+                    "name": path,
                     "size": 0,
                     "storageClass": "DIRECTORY",
                     "type": "directory",
