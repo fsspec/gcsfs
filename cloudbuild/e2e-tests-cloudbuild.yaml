@@ -152,7 +152,7 @@ steps:
       - "setup-vm"
       - "create-buckets"
 
-  # Run tests on HNS bucket (in parallel with other tests).
+  # Run tests on HNS bucket (in parallel with other tests, derived tests should be added back once rmdir is implemented).
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-hns-tests"
     entrypoint: "bash"
@@ -169,7 +169,6 @@ steps:
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running HNS tests on VM ---' && \
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-#          TODO: derived tests should be added back once rmdir is implemented
           pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/ --deselect gcsfs/tests/test_extended_gcsfs.py --deselect gcsfs/tests/test_core_versioned.py --deselect gcsfs/tests/test_core.py::test_sign --deselect gcsfs/tests/test_zonal_file.py --deselect gcsfs/tests/derived/gcsfs_test.py
         "
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
