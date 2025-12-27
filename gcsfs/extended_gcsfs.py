@@ -368,8 +368,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             is_folder = info1.get("type") == "directory"
 
             # We only use HNS rename if the source is a folder and the move is
-            # within the same bucket.
-            if is_folder and bucket1 == bucket2 and key1 and key2:
+            # within the same bucket. Allow key2 to be empty (which means moving to the bucket root)
+            if is_folder and bucket1 == bucket2 and key1 and (key2 or key2 == ""):
                 logger.info(
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
