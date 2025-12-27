@@ -289,7 +289,12 @@ def test_pickle(gcs):
 
 
 def test_ls_touch(gcs):
-    assert not gcs.exists(TEST_BUCKET + "/tmp/test")
+    path = TEST_BUCKET + "/tmp/test"
+    if gcs.exists(path):
+        try:
+            gcs.rm(path, recursive=True)
+        except Exception:
+            pass
 
     gcs.touch(a)
     gcs.touch(b)
