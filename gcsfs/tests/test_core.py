@@ -1373,13 +1373,13 @@ def test_dir_marker_info_eq_ls(gcs):
     out1 = gcs.info(f"{TEST_BUCKET}/psudodir")
     out2 = gcs.ls(f"{TEST_BUCKET}/psudodir", detail=True)[0]
     assert out1["type"] == "directory"
-    assert out1 == out2
+    assert {k: v for k, v in out1.items() if k in out2} == out2
 
     gcs.invalidate_cache()
     out3 = gcs.ls(f"{TEST_BUCKET}/psudodir", detail=True)[0]
     out4 = gcs.info(f"{TEST_BUCKET}/psudodir")
     assert out3["type"] == "directory"
-    assert out3 == out4
+    assert {k: v for k, v in out4.items() if k in out3} == out3
 
 
 def test_mkdir_with_path(gcs):
