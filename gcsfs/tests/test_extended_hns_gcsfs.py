@@ -875,6 +875,7 @@ class TestExtendedGcsFileSystemMkdir:
         """Test that calling mkdir on an existing HNS folder is a no-op."""
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/existing_dir"
+        gcsfs.touch(f"{dir_path}/file.txt")
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
