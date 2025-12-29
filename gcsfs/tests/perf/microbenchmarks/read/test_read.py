@@ -63,13 +63,13 @@ multi_process_cases = [p for p in all_benchmark_cases if p.num_processes > 1]
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_read_write",
+    "gcsfs_benchmark_read",
     single_threaded_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_single_threaded(benchmark, gcsfs_benchmark_read_write, monitor):
-    gcs, file_paths, params = gcsfs_benchmark_read_write
+def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
+    gcs, file_paths, params = gcsfs_benchmark_read
 
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
     path = file_paths[0]
@@ -91,13 +91,13 @@ def test_read_single_threaded(benchmark, gcsfs_benchmark_read_write, monitor):
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_read_write",
+    "gcsfs_benchmark_read",
     multi_threaded_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_multi_threaded(benchmark, gcsfs_benchmark_read_write, monitor):
-    gcs, file_paths, params = gcsfs_benchmark_read_write
+def test_read_multi_threaded(benchmark, gcsfs_benchmark_read, monitor):
+    gcs, file_paths, params = gcsfs_benchmark_read
 
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
 
@@ -172,13 +172,15 @@ def _process_worker(
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_read_write",
+    "gcsfs_benchmark_read",
     multi_process_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_multi_process(benchmark, gcsfs_benchmark_read_write, request, monitor):
-    gcs, file_paths, params = gcsfs_benchmark_read_write
+def test_read_multi_process(
+    benchmark, gcsfs_benchmark_read, extended_gcs_factory, request, monitor
+):
+    gcs, file_paths, params = gcsfs_benchmark_read
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
 
     if multiprocessing.get_start_method(allow_none=True) != "spawn":
@@ -187,6 +189,12 @@ def test_read_multi_process(benchmark, gcsfs_benchmark_read_write, request, moni
     process_durations_shared = multiprocessing.Array("d", params.num_processes)
     files_per_process = params.num_files // params.num_processes
     threads_per_process = params.num_threads
+
+    # Create a new gcsfs instance for every process
+    worker_gcs_instances = [
+        extended_gcs_factory(block_size=params.block_size_bytes)
+        for _ in range(params.num_processes)
+    ]
 
     round_durations_s = []
     with monitor() as m:
@@ -206,7 +214,7 @@ def test_read_multi_process(benchmark, gcsfs_benchmark_read_write, request, moni
                 p = multiprocessing.Process(
                     target=_process_worker,
                     args=(
-                        gcs,
+                        worker_gcs_instances[i],
                         process_files,
                         params.chunk_size_bytes,
                         threads_per_process,

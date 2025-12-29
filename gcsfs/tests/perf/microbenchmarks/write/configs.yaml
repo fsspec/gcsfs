@@ -1,0 +1,22 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+  file_sizes_mb:
+    - 1024 # 1GB
+  chunk_sizes_mb:
+    - 100
+  rounds: 1
+
+scenarios:
+  - name: "write_seq"
+    threads: [1,4,8]
+    processes: [1]
+
+  - name: "write_seq_multi_process_single_thread"
+    threads: [1]
+    processes: [4,8]
+
+  - name: "write_seq_multi_process_multi_thread"
+    threads: [2]
+    processes: [4,8]
