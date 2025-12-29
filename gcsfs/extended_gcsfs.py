@@ -461,6 +461,30 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         # Fallback to standard GCS behavior for non-HNS buckets
         return await super()._get_directory_info(path, bucket, key, generation)
 
+    async def _do_list_objects(
+        self,
+        path,
+        max_results=None,
+        delimiter="/",
+        prefix="",
+        versions=False,
+        inventory_report_info=None,
+        **kwargs,
+    ):
+        bucket, _, _ = self.split_path(path)
+        if await self._is_bucket_hns_enabled(bucket):
+            kwargs["includeFoldersAsPrefixes"] = "true"
+
+        return await super()._do_list_objects(
+            path,
+            max_results=max_results,
+            delimiter=delimiter,
+            prefix=prefix,
+            versions=versions,
+            inventory_report_info=inventory_report_info,
+            **kwargs,
+        )
+
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     raise NotImplementedError(

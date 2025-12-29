@@ -609,7 +609,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     raise
 
         items, prefixes = await self._do_list_objects(
-            path, prefix=prefix, versions=versions, **kwargs
+            path,
+            prefix=prefix,
+            versions=versions,
+            inventory_report_info=inventory_report_info,
+            **kwargs,
         )
 
         pseudodirs = [
@@ -642,7 +646,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         return out
 
     async def _do_list_objects(
-        self, path, max_results=None, delimiter="/", prefix="", versions=False, **kwargs
+        self,
+        path,
+        max_results=None,
+        delimiter="/",
+        prefix="",
+        versions=False,
+        inventory_report_info=None,
+        **kwargs,
     ):
         """Object listing for the given {bucket}/{prefix}/ path."""
         bucket, _path, generation = self.split_path(path)
@@ -652,9 +663,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         # Page size of 5000 is officially supported across GCS.
         default_page_size = 5000
-
-        # NOTE: the inventory report logic is experimental.
-        inventory_report_info = kwargs.get("inventory_report_info", None)
 
         # Check if the user has configured inventory report option.
         if inventory_report_info is not None:
