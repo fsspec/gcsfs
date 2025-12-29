@@ -6,7 +6,7 @@ import pytest
 from google.api_core import exceptions as api_exceptions
 from google.cloud import storage_control_v2
 
-from gcsfs.extended_gcsfs import BucketType
+from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
@@ -612,3 +612,166 @@ class TestExtendedGcsFileSystemMv:
                 self._assert_rename_folder_called_with(mocks, path1, path2)
                 mocks["info"].assert_awaited_with(path1)
                 mocks["super_mv"].assert_not_called()
+
+
+class TestExtendedGcsFileSystemInternal:
+    """Unit tests for internal methods and overrides in ExtendedGcsFileSystem."""
+
+    @pytest.mark.asyncio
+    async def test_is_bucket_hns_enabled_true_hierarchical(self):
+        """Verifies HNS is enabled when bucket type is HIERARCHICAL."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        with mock.patch.object(
+            fs, "_lookup_bucket_type", return_value=BucketType.HIERARCHICAL
+        ):
+            assert await fs._is_bucket_hns_enabled("my-bucket") is True
+
+    @pytest.mark.asyncio
+    async def test_is_bucket_hns_enabled_true_zonal_hierarchical(self):
+        """Verifies HNS is enabled when bucket type is ZONAL_HIERARCHICAL."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        with mock.patch.object(
+            fs, "_lookup_bucket_type", return_value=BucketType.ZONAL_HIERARCHICAL
+        ):
+            assert await fs._is_bucket_hns_enabled("my-bucket") is True
+
+    @pytest.mark.asyncio
+    async def test_is_bucket_hns_enabled_false(self):
+        """Verifies HNS is disabled for STANDARD/non-hierarchical bucket types."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        # Mocking a non-hierarchical return value (e.g., standard bucket)
+        with mock.patch.object(fs, "_lookup_bucket_type", return_value="STANDARD"):
+            assert await fs._is_bucket_hns_enabled("my-bucket") is False
+
+    @pytest.mark.asyncio
+    async def test_is_bucket_hns_enabled_exception_handling(self):
+        """
+        Verifies that if _lookup_bucket_type fails, we log a warning and return False
+        (fail-open to non-HNS behavior).
+        """
+        fs = ExtendedGcsFileSystem(token="anon")
+
+        with (
+            mock.patch.object(
+                fs, "_lookup_bucket_type", side_effect=Exception("API Error")
+            ),
+            mock.patch("gcsfs.extended_gcsfs.logger") as mock_logger,
+        ):
+            assert await fs._is_bucket_hns_enabled("error-bucket") is False
+
+            # Verify warning was logged
+            mock_logger.warning.assert_called_once()
+            assert (
+                "Could not determine if bucket" in mock_logger.warning.call_args[0][0]
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_directory_info_hns_success(self):
+        """
+        Verifies _get_directory_info uses storage_control_client.get_folder when HNS is enabled.
+        """
+        fs = ExtendedGcsFileSystem(token="anon")
+        fs._storage_control_client = mock.AsyncMock()
+
+        path = "bucket/folder"
+        bucket = "bucket"
+        key = "folder"
+
+        # Mock the Storage Control API response
+        mock_response = mock.Mock()
+        mock_response.create_time = "2024-01-01T12:00:00Z"
+        mock_response.update_time = "2024-01-02T12:00:00Z"
+        mock_response.metageneration = "10"
+
+        fs._storage_control_client.get_folder.return_value = mock_response
+
+        # Force HNS enabled path
+        with (
+            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
+            mock.patch(
+                "gcsfs.core.GCSFileSystem._get_directory_info"
+            ) as mock_super_method,
+        ):
+            info = await fs._get_directory_info(path, bucket, key, generation=None)
+
+            # Verify the returned structure matches expected directory metadata
+            assert info["bucket"] == bucket
+            assert info["name"] == path
+            assert info["type"] == "directory"
+            assert info["storageClass"] == "DIRECTORY"
+            assert info["ctime"] == mock_response.create_time
+
+            # Verify correct API call
+            fs._storage_control_client.get_folder.assert_called_once()
+            call_kwargs = fs._storage_control_client.get_folder.call_args[1]
+            # Verify resource name format in the request
+            assert (
+                "projects/_/buckets/bucket/folders/folder"
+                == call_kwargs["request"].name
+            )
+            mock_super_method.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_directory_info_hns_not_found(self):
+        """
+        Verifies _get_directory_info raises FileNotFoundError if the folder is missing in HNS bucket.
+        """
+        fs = ExtendedGcsFileSystem(token="anon")
+        fs._storage_control_client = mock.AsyncMock()
+
+        # Mock NotFound exception fromExtendedGCSFileSystem the API
+        fs._storage_control_client.get_folder.side_effect = api_exceptions.NotFound(
+            "Folder not found"
+        )
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            with pytest.raises(FileNotFoundError):
+                await fs._get_directory_info(
+                    "bucket/missing", "bucket", "missing", None
+                )
+
+    @pytest.mark.asyncio
+    async def test_get_directory_info_hns_generic_error(self):
+        """
+        Verifies that unexpected exceptions during HNS lookup are logged and re-raised.
+        """
+        fs = ExtendedGcsFileSystem(token="anon")
+        fs._storage_control_client = mock.AsyncMock()
+
+        test_exception = Exception("Unexpected API Failure")
+        fs._storage_control_client.get_folder.side_effect = test_exception
+
+        with (
+            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
+            mock.patch("gcsfs.extended_gcsfs.logger") as mock_logger,
+        ):
+            with pytest.raises(Exception) as exc_info:
+                await fs._get_directory_info("bucket/err", "bucket", "err", None)
+
+            assert exc_info.value is test_exception
+            mock_logger.error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_directory_info_fallback_non_hns(self):
+        """
+        Verifies that we fall back to the superclass (standard GCS) implementation
+        if the bucket is NOT HNS-enabled.
+        """
+        fs = ExtendedGcsFileSystem(token="anon")
+        fs._storage_control_client = mock.AsyncMock()
+
+        # We patch the superclass method on the class itself to verify delegation
+        with (
+            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False),
+            mock.patch(
+                "gcsfs.core.GCSFileSystem._get_directory_info"
+            ) as mock_super_method,
+        ):
+            expected_result = {"type": "directory", "mocked": True}
+            mock_super_method.return_value = expected_result
+
+            result = await fs._get_directory_info("bucket/std", "bucket", "std", None)
+
+            assert result == expected_result
+            mock_super_method.assert_called_once()
+            fs._storage_control_client.get_folder.assert_not_called()

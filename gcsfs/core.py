@@ -1040,6 +1040,12 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 return exact
         except FileNotFoundError:
             pass
+        return await self._get_directory_info(path, bucket, key, generation)
+
+    async def _get_directory_info(self, path, bucket, key, generation):
+        """
+        Internal method to check if a path is a directory by listing objects.
+        """
         out = await self._list_objects(path, max_results=1)
         exact = next((o for o in out if o["name"].rstrip("/") == path), None)
         if exact and not _is_directory_marker(exact):
