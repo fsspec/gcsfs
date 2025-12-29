@@ -232,11 +232,7 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/empty_old_dir"
         path2 = f"{TEST_HNS_BUCKET}/empty_new_dir"
 
-        # Simulate creating an empty directory by creating and then deleting a file inside a
-        # folder as mkdir is still not supported on HNS buckets.
-        placeholder_file = f"{path1}/placeholder.txt"
-        gcsfs.touch(placeholder_file)
-        gcsfs.rm(placeholder_file)
+        gcsfs.mkdir(path1)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             if mocks:
