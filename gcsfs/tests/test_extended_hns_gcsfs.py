@@ -226,13 +226,6 @@ class TestExtendedGcsFileSystemMv:
                 )
                 mocks["super_mv"].assert_not_called()
 
-    @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
-        reason=(
-            "Skipping on real GCS, info method throws FileNotFoundError for empty directories on HNS buckets. "
-            "TODO: This can be unskipped once info supports HNS buckets."
-        ),
-    )
     def test_hns_empty_folder_rename_success(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test successful HNS rename of an empty folder."""
         gcsfs = gcs_hns
@@ -1209,13 +1202,6 @@ class TestExtendedGcsFileSystemRmdir:
             hns_log_message in record.message for record in caplog.records
         ), "HNS rmdir log message not found."
 
-    @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
-        reason=(
-            "Skipping on real GCS, info method throws FileNotFoundError for empty directories on HNS buckets. "
-            "TODO: This can be unskipped once info supports HNS buckets."
-        ),
-    )
     def test_hns_rmdir_success(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test successful HNS empty directory deletion."""
         gcsfs = gcs_hns
