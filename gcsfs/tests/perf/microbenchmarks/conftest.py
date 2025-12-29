@@ -38,14 +38,6 @@ def _prepare_files(gcs, file_paths, file_size):
         pool.starmap(_write_file, args)
 
 
-def _get_zonal_file_paths(bucket_name: str, num_files: int) -> List[str]:
-    """
-    Generates a list of file paths for pre-existing zonal benchmark files.
-    """
-    prefix = f"{bucket_name}/zonal-file-bench"
-    return [f"{prefix}-{i}" for i in range(num_files)]
-
-
 @pytest.fixture
 def monitor():
     """
@@ -66,12 +58,6 @@ def gcsfs_benchmark_read(extended_gcs_factory, request):
     """
     params = request.param
     gcs = extended_gcs_factory(block_size=params.block_size_bytes)
-
-    if params.bucket_type == "zonal":
-        logging.info(f"Using pre-existing zonal files for benchmark '{params.name}'.")
-        file_paths = _get_zonal_file_paths(params.bucket_name, params.num_files)
-        yield gcs, file_paths, params
-        return  # Skip cleanup for zonal files
 
     prefix = f"{params.bucket_name}/benchmark-files-{uuid.uuid4()}"
     file_paths = [f"{prefix}/file_{i}" for i in range(params.num_files)]
