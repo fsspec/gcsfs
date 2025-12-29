@@ -590,7 +590,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         path = path.rstrip("/")
 
         # NOTE: the inventory report logic is experimental.
-        inventory_report_info = kwargs.get("inventory_report_info", None)
+        inventory_report_info = kwargs.pop("inventory_report_info", None)
 
         # Only attempt to list from the cache when the user does not use
         # the inventory report service.
@@ -679,6 +679,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 prefix=prefix,
                 versions=versions,
                 page_size=default_page_size,
+                **kwargs,
             )
 
         # If the user has not configured inventory report, proceed to use
@@ -692,10 +693,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 prefix=prefix,
                 versions=versions,
                 max_results=max_results,
+                **kwargs,
             )
 
     async def _concurrent_list_objects_helper(
-        self, items, bucket, delimiter, prefix, versions, page_size
+        self, items, bucket, delimiter, prefix, versions, page_size, **kwargs
     ):
         """
         Lists objects using coroutines, using the object names from the inventory
@@ -745,6 +747,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     prefix=prefix,
                     versions=versions,
                     max_results=page_size,
+                    **kwargs,
                 )
                 for i in range(0, len(start_offsets))
             ]
@@ -771,6 +774,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         versions,
         max_results,
         items_per_call=1000,
+        **kwargs,
     ):
         """
         Sequential list objects within the start and end offset range.
@@ -790,6 +794,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             maxResults=num_items,
             json_out=True,
             versions="true" if versions else None,
+            **kwargs,
         )
 
         prefixes.extend(page.get("prefixes", []))
