@@ -24,15 +24,15 @@ or use the orchestrator script at gcsfs/tests/perf/microbenchmarks/run.py""",
 BENCHMARK_GROUP = "write"
 
 
-def _write_op_seq(gcs, path, chunk_size, file_size, data_chunk):
+def _write_op_seq(gcs, path, chunk_size, file_size):
     chunks = file_size // chunk_size
     remainder = file_size % chunk_size
     start_time = time.perf_counter()
     with gcs.open(path, "wb") as f:
         for _ in range(chunks):
-            f.write(data_chunk)
+            f.write(os.urandom(chunk_size))
         if remainder:
-            f.write(data_chunk[:remainder])
+            f.write(os.urandom(remainder))
     duration_ms = (time.perf_counter() - start_time) * 1000
     logging.info(f"SEQ_WRITE : {path} - {duration_ms:.2f} ms.")
 
@@ -60,10 +60,7 @@ def test_write_single_threaded(benchmark, gcsfs_benchmark_write, monitor):
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
     path = file_paths[0]
 
-    # Pre-generate data chunk to avoid overhead during write loop
-    data_chunk = os.urandom(params.chunk_size_bytes)
-
-    op_args = (gcs, path, params.chunk_size_bytes, params.file_size_bytes, data_chunk)
+    op_args = (gcs, path, params.chunk_size_bytes, params.file_size_bytes)
 
     with monitor() as m:
         benchmark.pedantic(_write_op_seq, rounds=params.rounds, args=op_args)
@@ -82,8 +79,6 @@ def test_write_multi_threaded(benchmark, gcsfs_benchmark_write, monitor):
 
     publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
 
-    data_chunk = os.urandom(params.chunk_size_bytes)
-
     def run_benchmark():
         logging.info("Multi-threaded benchmark: Starting benchmark round.")
         with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
@@ -94,7 +89,6 @@ def test_write_multi_threaded(benchmark, gcsfs_benchmark_write, monitor):
                     path,
                     params.chunk_size_bytes,
                     params.file_size_bytes,
-                    data_chunk,
                 )
                 for path in file_paths
             ]
@@ -116,15 +110,10 @@ def _process_worker(
     index,
 ):
     """A worker function for each process to write a list of files."""
-    # Generate data chunk inside process to avoid pickling large data
-    data_chunk = os.urandom(chunk_size)
-
     start_time = time.perf_counter()
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = [
-            executor.submit(
-                _write_op_seq, gcs, path, chunk_size, file_size_bytes, data_chunk
-            )
+            executor.submit(_write_op_seq, gcs, path, chunk_size, file_size_bytes)
             for path in file_paths
         ]
         list(futures)
