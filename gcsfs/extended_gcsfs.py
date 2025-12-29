@@ -432,22 +432,21 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         may involve creating a bucket or doing nothing (as GCS has no true empty directories).
         """
         path = self._strip_protocol(path)
-        bucket, key, _ = self.split_path(path)
+        if create_hns_bucket:
+            kwargs["hierarchicalNamespace"] = {"enabled": True}
+            # HNS buckets require uniform bucket-level access.
+            kwargs["iamConfiguration"] = {"uniformBucketLevelAccess": {"enabled": True}}
+            # When uniformBucketLevelAccess is enabled, ACLs cannot be used.
+            # We must explicitly set them to None to prevent the parent
+            # method from using default ACLs.
+            kwargs["acl"] = None
+            kwargs["default_acl"] = None
 
+        bucket, key, _ = self.split_path(path)
         # If key is empty, it's a bucket operation. Defer to parent.
         if not key:
-            if create_hns_bucket:
-                kwargs["hierarchicalNamespace"] = {"enabled": True}
-                # HNS buckets require uniform bucket-level access.
-                kwargs["iamConfiguration"] = {
-                    "uniformBucketLevelAccess": {"enabled": True}
-                }
-                # When uniformBucketLevelAccess is enabled, ACLs cannot be used.
-                # We must explicitly set them to None to prevent the parent
-                # method from using default ACLs.
-                kwargs["acl"] = None
-                kwargs["default_acl"] = None
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
+
         is_hns = False
         try:
             is_hns = await self._is_bucket_hns_enabled(bucket)

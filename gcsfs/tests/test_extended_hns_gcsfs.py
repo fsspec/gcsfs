@@ -780,6 +780,75 @@ class TestExtendedGcsFileSystemMkdir:
                 )
                 mocks["control_client"].create_folder.assert_not_called()
 
+    def test_mkdir_in_non_existent_bucket_with_create_parents_succeeds(
+        self, gcs_hns, gcs_hns_mocks, buckets_to_delete
+    ):
+        """Test that mkdir with create_parents=True creates the bucket."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-bucket-mkdir-{uuid.uuid4()}"
+        dir_path = f"{bucket_name}/some_dir"
+        buckets_to_delete.add(bucket_name)
+
+        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+            if mocks:
+                # Simulate the bucket not existing initially, then existing after creation.
+                mocks["info"].side_effect = [
+                    FileNotFoundError,  # For the `exists` check on the bucket
+                    {"type": "directory", "name": bucket_name},  # For `exists` after
+                ]
+
+            assert not gcsfs.exists(bucket_name)
+            # This should create the bucket `bucket_name` and then do nothing for `some_dir`
+            gcsfs.mkdir(dir_path, create_parents=True)
+            assert gcsfs.exists(bucket_name)
+
+            if mocks:
+                mocks["async_lookup_bucket_type"].assert_called_once_with(bucket_name)
+                # The call should fall back to the parent's mkdir to create the bucket.
+                mocks["super_mkdir"].assert_called_once_with(
+                    dir_path, create_parents=True
+                )
+                mocks["control_client"].create_folder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mkdir_hns_bucket_with_create_parents_succeeds(
+        self, gcs_hns, gcs_hns_mocks, buckets_to_delete
+    ):
+        """Test mkdir with create_parents and create_hns_bucket creates an HNS bucket."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-hns-bucket-mkdir-{uuid.uuid4()}"
+        dir_path = f"{bucket_name}/some_dir"
+        buckets_to_delete.add(bucket_name)
+
+        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+            if mocks:
+                # Simulate the bucket not existing initially, then existing after creation.
+                mocks["info"].side_effect = [
+                    FileNotFoundError,  # For the `exists` check on the bucket before
+                    {"type": "directory", "name": bucket_name},  # For `exists` after
+                ]
+
+            assert not gcsfs.exists(bucket_name)
+            # This should create the HNS bucket `bucket_name` and then do nothing for `some_dir`
+            gcsfs.mkdir(dir_path, create_parents=True, create_hns_bucket=True)
+            assert gcsfs.exists(bucket_name)
+
+            # Verify that the filesystem recognizes the new bucket as HNS-enabled.
+            # TODO: Uncomment once the async behaviour is fixed in the tests
+            # assert await gcsfs._is_bucket_hns_enabled(bucket_path)
+
+            if mocks:
+                # The call should fall back to the parent's mkdir to create the bucket.
+                mocks["super_mkdir"].assert_called_once_with(
+                    dir_path,
+                    create_parents=True,
+                    hierarchicalNamespace={"enabled": True},
+                    iamConfiguration={"uniformBucketLevelAccess": {"enabled": True}},
+                    acl=None,
+                    default_acl=None,
+                )
+                mocks["control_client"].create_folder.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_mkdir_create_non_hns_bucket(
         self, gcs_hns, gcs_hns_mocks, buckets_to_delete
@@ -804,12 +873,9 @@ class TestExtendedGcsFileSystemMkdir:
 
             if mocks:
                 mocks["control_client"].create_folder.assert_not_called()
-                mocks["super_mkdir"].assert_called_once()
-                args, kwargs = mocks["super_mkdir"].call_args
-                assert args == (bucket_path,)
-                # Verify that no HNS-specific parameters are passed
-                assert "hierarchicalNamespace" not in kwargs
-                assert "iamConfiguration" not in kwargs
+                mocks["super_mkdir"].assert_called_once_with(
+                    bucket_path, create_parents=False
+                )
 
     def test_mkdir_create_bucket_with_parent_params(
         self, gcs_hns, gcs_hns_mocks, buckets_to_delete
