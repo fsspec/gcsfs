@@ -90,6 +90,7 @@ class ZonalFile(GCSFile):
         """
         Initializes the AsyncMultiRangeDownloader.
         """
+        await self.gcsfs._get_grpc_client()
         return await AsyncMultiRangeDownloader.create_mrd(
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
@@ -106,6 +107,7 @@ class ZonalFile(GCSFile):
             except FileNotFoundError:
                 # if file doesn't exist, we don't need generation
                 pass
+        await self.gcsfs._get_grpc_client()
         return await zb_hns_utils.init_aaow(
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
@@ -183,7 +185,6 @@ class ZonalFile(GCSFile):
         """Initiates the upload for Zonal buckets using gRPC."""
         from gcsfs.extended_gcsfs import initiate_upload
 
-        # Warning: This method is not yet implemented and will raise a NotImplementedError.
         self.location = asyn.sync(
             self.gcsfs.loop,
             initiate_upload,
@@ -202,7 +203,6 @@ class ZonalFile(GCSFile):
         """Performs a simple upload for Zonal buckets using gRPC."""
         from gcsfs.extended_gcsfs import simple_upload
 
-        # Warning: This method is not yet implemented and will raise a NotImplementedError.
         self.buffer.seek(0)
         data = self.buffer.read()
         asyn.sync(
@@ -219,6 +219,7 @@ class ZonalFile(GCSFile):
             mode="create" if "x" in self.mode else "overwrite",
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
+            finalize_on_close=self.finalize_on_close,
         )
 
     def _upload_chunk(self, final=False):
@@ -237,7 +238,8 @@ class ZonalFile(GCSFile):
         super().close()
         if hasattr(self, "mrd") and self.mrd:
             asyn.sync(self.gcsfs.loop, self.mrd.close)
-        if hasattr(self, "aaow") and self.aaow:
+        # Don't try to close aaow if object is already finalized
+        if not self.finalized and hasattr(self, "aaow") and self.aaow:
             asyn.sync(
                 self.gcsfs.loop,
                 self.aaow.close,
