@@ -639,13 +639,6 @@ class TestExtendedGcsFileSystemMkdir:
             hns_log_message in record.message for record in caplog.records
         ), "HNS mkdir log message not found."
 
-    @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
-        reason=(
-            "Skipping on real GCS, info method throws FileNotFoundError for empty directories on HNS buckets. "
-            "TODO: This can be unskipped once info supports HNS buckets."
-        ),
-    )
     def test_hns_mkdir_success(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test successful HNS folder creation."""
         gcsfs = gcs_hns
@@ -671,13 +664,6 @@ class TestExtendedGcsFileSystemMkdir:
                 self._assert_create_folder_called_with(mocks, dir_path)
                 mocks["super_mkdir"].assert_not_called()
 
-    @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
-        reason=(
-            "Skipping on real GCS, info method throws FileNotFoundError for empty directories on HNS buckets. "
-            "TODO: This can be unskipped once info supports HNS buckets."
-        ),
-    )
     def test_hns_mkdir_nested_success_with_create_parents(
         self, gcs_hns, gcs_hns_mocks, caplog
     ):
