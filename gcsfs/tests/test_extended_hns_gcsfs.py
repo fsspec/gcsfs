@@ -76,7 +76,7 @@ def gcs_hns_mocks():
                 "info": mock_info,
                 "control_client": mock_control_client_instance,
                 "super_mv": mock_super_mv,
-                "super_rmdir": mock_super_rmdir,
+                "super_mkdir": mock_super_mkdir,
             }
             yield mocks
 
