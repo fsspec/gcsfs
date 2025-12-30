@@ -108,6 +108,10 @@ class UnclosableBytesIO(io.BytesIO):
         self.seek(0)
 
 
+def _gcp_universe_domain():
+    return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "googleapis.com")
+
+
 def _location():
     """
     Resolves GCS HTTP location as http[s]://host
@@ -125,7 +129,8 @@ def _location():
         ):
             _emulator_location = f"http://{_emulator_location}"
         return _emulator_location
-    return "https://storage.googleapis.com"
+
+    return f"https://storage.{_gcp_universe_domain()}"
 
 
 def _chunks(lst, n):
@@ -345,6 +350,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     @property
     def base(self):
         return f"{self._location}/storage/v1/"
+
+    @property
+    def batch_url_base(self):
+        return f"{self._location}/batch/storage/v1"
+
 
     @property
     def project(self):
@@ -1300,7 +1310,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             body = "".join(parts)
             headers, content = await self._call(
                 "POST",
-                f"{self._location}/batch/storage/v1",
+                self.batch_url_base,
                 headers={
                     "Content-Type": 'multipart/mixed; boundary="=========='
                     '=====7330845974216740156=="'
@@ -1339,7 +1349,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     @property
     def on_google(self):
-        return "torage.googleapis.com" in self._location
+        return f"torage.{_gcp_universe_domain()}" in self._location
 
     async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)

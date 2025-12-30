@@ -195,6 +195,17 @@ For further reference check `aiohttp proxy support`_.
 
 .. _aiohttp proxy support: https://docs.aiohttp.org/en/stable/client_advanced.html#proxy-support
 
+Alternative GCP Universes
+-------------------------
+
+To target an alternative GCP universe, the ``GOOGLE_CLOUD_UNIVERSE_DOMAIN``
+environment variable should be set to your desired unverse domain for ``gcsfs``
+to target the `Google Cloud Storage`_ API in your alternative universe.
+
+For instance, set ``GOOGLE_CLOUD_UNIVERSE_DOMAIN=s3nsapis.fr`` to target the
+S3NS_ universe.
+
+.. _S3NS: https://www.s3ns.io/en/offers/premi3ns-trusted-cloud
 
 Contents
 ========

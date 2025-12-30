@@ -1709,3 +1709,26 @@ def test_ls_with_max_results(gcs):
 def test_get_error(gcs):
     with pytest.raises(FileNotFoundError):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
+
+
+def test_default_gcp_universe():
+    fs = fsspec.filesystem("gcs")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert fs.on_google is True
+    assert (
+        fs.url("/test/path")
+        == "https://storage.googleapis.com/download/storage/v1/b/test/o/path?alt=media"
+    )
+    assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
+
+
+def test_custom_gcp_universe(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "s3nsapis.fr")
+    fs = fsspec.filesystem("gcs")
+    assert fs.base == "https://storage.s3nsapis.fr/storage/v1/"
+    assert fs.on_google is True
+    assert (
+        fs.url("/test/path")
+        == "https://storage.s3nsapis.fr/download/storage/v1/b/test/o/path?alt=media"
+    )
+    assert fs.batch_url_base == "https://storage.s3nsapis.fr/batch/storage/v1"
