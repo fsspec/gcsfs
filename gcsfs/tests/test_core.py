@@ -1711,18 +1711,11 @@ def test_get_error(gcs):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
 
 
-def test_default_gcp_universe():
-    fs = fsspec.filesystem("gcs")
-    assert fs.base == "https://storage.googleapis.com/storage/v1/"
-    assert fs.on_google is True
-    assert (
-        fs.url("/test/path")
-        == "https://storage.googleapis.com/download/storage/v1/b/test/o/path?alt=media"
-    )
-    assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
-
-
 def test_custom_gcp_universe(monkeypatch):
+    # Make sure we simulate a mock less connection
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+
     monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "s3nsapis.fr")
     fs = fsspec.filesystem("gcs")
     assert fs.base == "https://storage.s3nsapis.fr/storage/v1/"
@@ -1732,3 +1725,18 @@ def test_custom_gcp_universe(monkeypatch):
         == "https://storage.s3nsapis.fr/download/storage/v1/b/test/o/path?alt=media"
     )
     assert fs.batch_url_base == "https://storage.s3nsapis.fr/batch/storage/v1"
+
+
+def test_default_gcp_universe(monkeypatch):
+    # Make sure we simulate a mock less connection
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+
+    fs = fsspec.filesystem("gcs")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert fs.on_google is True
+    assert (
+        fs.url("/test/path")
+        == "https://storage.googleapis.com/download/storage/v1/b/test/o/path?alt=media"
+    )
+    assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"

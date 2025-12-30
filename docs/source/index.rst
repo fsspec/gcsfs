@@ -199,7 +199,7 @@ Alternative GCP Universes
 -------------------------
 
 To target an alternative GCP universe, the ``GOOGLE_CLOUD_UNIVERSE_DOMAIN``
-environment variable should be set to your desired unverse domain for ``gcsfs``
+environment variable should be set to your desired universe domain for ``gcsfs``
 to target the `Google Cloud Storage`_ API in your alternative universe.
 
 For instance, set ``GOOGLE_CLOUD_UNIVERSE_DOMAIN=s3nsapis.fr`` to target the
