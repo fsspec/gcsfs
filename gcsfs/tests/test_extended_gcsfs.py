@@ -1,5 +1,6 @@
 import contextlib
 import io
+import logging
 import os
 import random
 import threading
@@ -14,7 +15,12 @@ from google.cloud.storage._experimental.asyncio.async_multi_range_downloader imp
 from google.cloud.storage.exceptions import DataCorruption
 
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
-from gcsfs.extended_gcsfs import BucketType
+from gcsfs.extended_gcsfs import (
+    BucketType,
+    initiate_upload,
+    simple_upload,
+    upload_chunk,
+)
 from gcsfs.tests.conftest import (
     _MULTI_THREADED_TEST_DATA_SIZE,
     csv_files,
@@ -22,6 +28,7 @@ from gcsfs.tests.conftest import (
     text_files,
 )
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
+from gcsfs.tests.utils import tmpfile
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -678,3 +685,336 @@ def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
 
         # Verify that create_mrd was not called again.
         mocks["create_mrd"].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_simple_upload_zonal(extended_gcsfs, zonal_write_mocks):
+    """Test simple_upload for Zonal buckets calls the correct writer methods."""
+    data = b"test data for simple_upload"
+    rpath = f"{TEST_ZONAL_BUCKET}/test-obj"
+
+    await simple_upload(
+        extended_gcsfs,
+        bucket=TEST_ZONAL_BUCKET,
+        key="test-obj",
+        datain=data,
+        finalize_on_close=True,  # Finalize on close to make the object immediately readable
+    )
+    if zonal_write_mocks:
+        zonal_write_mocks["init_aaow"].assert_awaited_once_with(
+            extended_gcsfs.grpc_client, TEST_ZONAL_BUCKET, "test-obj"
+        )
+        zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
+        zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
+    else:
+        assert await extended_gcsfs._cat(rpath) == data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsupported_kwarg",
+    [
+        {"metadatain": {"key": "value"}},
+        {"fixed_key_metadata": {"key": "value"}},
+        {"kms_key_name": "key_name"},
+        {"consistency": "md5"},
+        {"content_type": "text/plain"},
+    ],
+)
+async def test_simple_upload_zonal_unsupported_params(
+    extended_gcsfs, zonal_write_mocks, unsupported_kwarg, caplog
+):
+    """Test simple_upload for Zonal buckets warns on unsupported parameters."""
+
+    # Ensure caplog captures the warning by setting the level
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        await simple_upload(
+            extended_gcsfs,
+            bucket=TEST_ZONAL_BUCKET,
+            key="test-obj",
+            datain=b"",
+            **unsupported_kwarg,
+        )
+
+    assert any(
+        "will be ignored" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsupported_kwarg",
+    [
+        {"metadata": {"key": "value"}},
+        {"fixed_key_metadata": {"key": "value"}},
+        {"kms_key_name": "key_name"},
+        {"content_type": "text/plain"},
+    ],
+)
+async def test_initiate_upload_zonal_unsupported_params(
+    extended_gcsfs, zonal_write_mocks, unsupported_kwarg, caplog
+):
+    """Test initiate_upload for Zonal buckets warns on unsupported parameters."""
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        await initiate_upload(
+            fs=extended_gcsfs,
+            bucket=TEST_ZONAL_BUCKET,
+            key="test-obj",
+            **unsupported_kwarg,
+        )
+    assert any(
+        "will be ignored" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_initiate_upload_zonal(extended_gcsfs, zonal_write_mocks):
+    """Test initiate_upload for Zonal buckets returns a writer instance."""
+    writer = await initiate_upload(
+        fs=extended_gcsfs, bucket=TEST_ZONAL_BUCKET, key="test-obj"
+    )
+    if zonal_write_mocks:
+        zonal_write_mocks["init_aaow"].assert_awaited_once_with(
+            extended_gcsfs.grpc_client, TEST_ZONAL_BUCKET, "test-obj"
+        )
+        assert writer is zonal_write_mocks["aaow"]
+
+
+@pytest.mark.asyncio
+async def test_initiate_and_upload_chunk_zonal(extended_gcsfs, zonal_write_mocks):
+    """Test upload_chunk for Zonal buckets appends data."""
+    size_in_bytes = 1024  # 1KB
+    data1 = os.urandom(size_in_bytes - 1)
+    data2 = os.urandom(size_in_bytes)
+    file_name = "chunk_upload_test"
+    rpath = f"{TEST_ZONAL_BUCKET}/{file_name}"
+    writer = await initiate_upload(
+        fs=extended_gcsfs, bucket=TEST_ZONAL_BUCKET, key=file_name
+    )
+    await upload_chunk(
+        fs=extended_gcsfs,
+        location=writer,
+        data=data1,
+        offset=0,
+        size=2048,
+        content_type=None,
+    )
+
+    await upload_chunk(
+        fs=extended_gcsfs,
+        location=writer,
+        data=data2,
+        offset=0,
+        size=2048,
+        content_type=None,
+    )
+    assert writer.offset == (len(data1) + len(data2))
+    if zonal_write_mocks:
+        assert writer.append.await_args_list == [mock.call(data1), mock.call(data2)]
+        writer.close.assert_not_awaited()
+    else:
+        assert writer._is_stream_open
+        # Finalizing is required to be able to read the object instantly
+        await writer.close(finalize_on_close=True)
+        assert await extended_gcsfs._cat(rpath) == data1 + data2
+
+
+@pytest.mark.asyncio
+async def test_upload_chunk_zonal_final_chunk(extended_gcsfs, zonal_write_mocks):
+    """Test upload_chunk for Zonal buckets finalizes on the last chunk."""
+
+    data = b"final chunk"
+    rpath = f"{TEST_ZONAL_BUCKET}/final_chunk_test"
+    writer = await initiate_upload(
+        fs=extended_gcsfs, bucket=TEST_ZONAL_BUCKET, key="final_chunk_test"
+    )
+
+    await upload_chunk(
+        fs=extended_gcsfs,
+        location=writer,
+        data=b"",
+        offset=0,
+        size=len(data),
+        content_type=None,
+    )  # Try uploading empty chunk
+    await upload_chunk(
+        fs=extended_gcsfs,
+        location=writer,
+        data=data,
+        offset=0,
+        size=len(data),
+        content_type=None,
+    )  # stream should be closed now
+
+    # The writer detects that (offset + len(data)) >= size, so it automatically
+    # closes the stream here. Attempts to write again should fail.
+    with pytest.raises(
+        ValueError, match="Writer is closed. Please initiate a new upload."
+    ):
+        await upload_chunk(
+            fs=extended_gcsfs,
+            location=writer,
+            data=b"",
+            offset=0,
+            size=len(data),
+            content_type=None,
+        )
+    if zonal_write_mocks:
+        assert writer.append.await_args_list == [mock.call(b""), mock.call(data)]
+        writer.close.assert_awaited_once_with(finalize_on_close=True)
+    else:
+        assert writer._is_stream_open is False
+        assert await extended_gcsfs._cat(rpath) == data
+
+
+@pytest.mark.asyncio
+async def test_upload_chunk_zonal_exception_cleanup(extended_gcsfs, zonal_write_mocks):
+    """
+    Tests that upload_chunk correctly closes the stream when an
+    exception occurs during append, without finalizing the object.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot mock exceptions on real GCS")
+
+    writer = await initiate_upload(
+        fs=extended_gcsfs, bucket=TEST_ZONAL_BUCKET, key="final_chunk_test"
+    )
+
+    error_message = "Simulated network failure"
+    writer.append.side_effect = Exception(error_message)
+
+    with pytest.raises(Exception, match=error_message):
+        await upload_chunk(
+            fs=extended_gcsfs,
+            location=writer,
+            data=b"some data",
+            offset=0,
+            size=100,
+            content_type=None,
+        )
+
+    writer.close.assert_awaited_once_with(finalize_on_close=False)
+
+
+@pytest.mark.asyncio
+async def test_upload_chunk_zonal_wrong_type(extended_gcsfs):
+    """Test upload_chunk raises TypeError for incorrect location type."""
+    with pytest.raises(TypeError, match="expects an AsyncAppendableObjectWriter"):
+        await upload_chunk(
+            fs=extended_gcsfs,
+            location="not-a-writer",
+            data=b"",
+            offset=0,
+            size=0,
+            content_type=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_put_file_zonal(extended_gcsfs, zonal_write_mocks):
+    """Test _put_file for Zonal buckets."""
+    data = b"test data for put_file"
+    rpath = f"{TEST_ZONAL_BUCKET}/put_file_test"
+
+    with tmpfile() as lpath:
+        with open(lpath, "wb") as f:
+            f.write(data)
+
+        # Finalize on close to make the object immediately readable
+        await extended_gcsfs._put_file(lpath, rpath, finalize_on_close=True)
+
+        if zonal_write_mocks:
+            grpc_client = await extended_gcsfs._get_grpc_client()
+            zonal_write_mocks["init_aaow"].assert_awaited_once_with(
+                grpc_client, TEST_ZONAL_BUCKET, "put_file_test"
+            )
+            zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
+            args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
+
+            file_obj_arg = args[0]
+            assert hasattr(file_obj_arg, "read"), "Argument must be a file-like object"
+            assert (
+                file_obj_arg.name == lpath
+            ), "File object must point to the correct path"
+
+            zonal_write_mocks["aaow"].close.assert_awaited_once_with(
+                finalize_on_close=True
+            )
+        else:
+            assert await extended_gcsfs._cat(rpath) == data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsupported_kwarg",
+    [
+        {"metadata": {"key": "value"}},
+        {"fixed_key_metadata": {"key": "value"}},
+        {"consistency": "md5"},
+        {"content_type": "text/plain"},
+    ],
+)
+async def test_put_file_zonal_unsupported_params(
+    extended_gcsfs, zonal_write_mocks, unsupported_kwarg, caplog
+):
+    """Test _put_file for Zonal buckets warns on unsupported parameters."""
+    rpath = f"{TEST_ZONAL_BUCKET}/put_file_unsupported"
+    with tmpfile() as lpath:
+        with open(lpath, "wb") as f:
+            f.write(b"data")
+
+        with caplog.at_level(logging.WARNING, logger="gcsfs"):
+            await extended_gcsfs._put_file(lpath, rpath, **unsupported_kwarg)
+
+    assert any(
+        "will be ignored" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_zonal(extended_gcsfs, zonal_write_mocks):
+    """Test _pipe_file for Zonal buckets."""
+    data = b"test data for pipe_file"
+    rpath = f"{TEST_ZONAL_BUCKET}/pipe_file_test"
+
+    # Finalize on close to make the object immediately readable
+    await extended_gcsfs._pipe_file(rpath, data, finalize_on_close=True)
+
+    if zonal_write_mocks:
+        grpc_client = await extended_gcsfs._get_grpc_client()
+        zonal_write_mocks["init_aaow"].assert_awaited_once_with(
+            grpc_client, TEST_ZONAL_BUCKET, "pipe_file_test"
+        )
+        zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
+        zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
+    else:
+        assert await extended_gcsfs._cat(rpath) == data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsupported_kwarg",
+    [
+        {"metadata": {"key": "value"}},
+        {"fixed_key_metadata": {"key": "value"}},
+        {"content_type": "text/plain"},
+        {"chunksize": 1024},
+    ],
+)
+async def test_pipe_file_zonal_unsupported_params(
+    extended_gcsfs, zonal_write_mocks, unsupported_kwarg, caplog
+):
+    """Test _pipe_file for Zonal buckets warns on unsupported parameters."""
+    rpath = f"{TEST_ZONAL_BUCKET}/pipe_file_unsupported"
+    data = b"data"
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        await extended_gcsfs._pipe_file(rpath, data, **unsupported_kwarg)
+
+    assert any(
+        "will be ignored" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
