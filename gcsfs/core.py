@@ -355,7 +355,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     def batch_url_base(self):
         return f"{self._location}/batch/storage/v1"
 
-
     @property
     def project(self):
         return self.credentials.project

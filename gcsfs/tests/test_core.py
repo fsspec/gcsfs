@@ -1717,7 +1717,7 @@ def test_custom_gcp_universe(monkeypatch):
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
 
     monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "s3nsapis.fr")
-    fs = fsspec.filesystem("gcs")
+    fs = fsspec.filesystem("gcs", token="anon")
     assert fs.base == "https://storage.s3nsapis.fr/storage/v1/"
     assert fs.on_google is True
     assert (
@@ -1732,7 +1732,7 @@ def test_default_gcp_universe(monkeypatch):
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
 
-    fs = fsspec.filesystem("gcs")
+    fs = fsspec.filesystem("gcs", token="anon")
     assert fs.base == "https://storage.googleapis.com/storage/v1/"
     assert fs.on_google is True
     assert (
