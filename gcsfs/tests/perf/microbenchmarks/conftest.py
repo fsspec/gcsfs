@@ -136,15 +136,11 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
 
     prefix = f"{params.bucket_name}/benchmark-listing-{uuid.uuid4()}"
 
-    target_dirs = []
-    if params.depth == 0:
-        target_dirs = [prefix]
-    else:
-        path = prefix
+    target_dirs = [prefix]
+    path = prefix
+    for d in range(params.depth):
+        path = f"{path}/level_{d}"
         target_dirs.append(path)
-        for d in range(params.depth):
-            path = f"{path}/level_{d}"
-            target_dirs.append(path)
 
     file_paths = []
     for i in range(params.num_files):
@@ -153,12 +149,12 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
 
     logging.info(
         f"Setting up listing benchmark '{params.name}': creating {params.num_files} "
-        f"files distributed across {len(target_dirs)} folders at depth {params.depth}."
+        f"files distributed across {len(target_dirs)} folders at depth {params.depth + 1}."
     )
 
     _prepare_listing_files(gcs, file_paths)
 
-    yield gcs, prefix, params
+    yield gcs, target_dirs, params
 
     # --- Teardown ---
     logging.info(
@@ -221,7 +217,7 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["file_size"] = getattr(params, "file_size_bytes", "N/A")
     benchmark.extra_info["chunk_size"] = getattr(params, "chunk_size_bytes", "N/A")
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
-    benchmark.extra_info["pattern"] = getattr(params, "pattern", "seq")
+    benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
     benchmark.extra_info["threads"] = params.num_threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name

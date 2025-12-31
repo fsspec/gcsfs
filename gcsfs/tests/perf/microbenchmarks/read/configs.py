@@ -72,7 +72,8 @@ def get_read_benchmark_cases():
     the GCSFS_BENCHMARK_FILTER environment variable.
     """
     all_cases = _generate_benchmark_cases()
-    logging.info(
-        f"Read Benchmark cases to be triggered: {', '.join([case.name for case in all_cases])}"
-    )
+    if all_cases:
+        logging.info(
+            f"Read Benchmark cases to be triggered: {', '.join([case.name for case in all_cases])}"
+        )
     return all_cases

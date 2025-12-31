@@ -151,11 +151,11 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
 
         min_time = bench["stats"].get("min")
         if min_time and min_time > 0:
-            row["max_throughput_mb_s"] = (total_bytes / min_time) / MB
+            row["max_throughput"] = total_bytes / min_time
         else:
-            row["max_throughput_mb_s"] = "0.0"
+            row["max_throughput"] = "0.0"
     else:
-        row["max_throughput_mb_s"] = "N/A"
+        row["max_throughput"] = "N/A"
 
     return row
 
@@ -182,7 +182,7 @@ def _generate_report(json_path, results_dir):
     first_benchmark = data["benchmarks"][0]
     extra_info_headers = sorted(first_benchmark["extra_info"].keys())
     stats_headers = ["min", "max", "mean", "median", "stddev"]
-    custom_headers = ["p90", "p95", "p99", "max_throughput_mb_s"]
+    custom_headers = ["p90", "p95", "p99", "max_throughput"]
 
     headers = ["name", "group"] + extra_info_headers + stats_headers + custom_headers
 
@@ -231,9 +231,9 @@ def _create_table_row(row):
         _format_mb(row.get("block_size", 0)),
         f"{float(row.get('min', 0)):.4f}",
         f"{float(row.get('mean', 0)):.4f}",
-        float(row.get("max_throughput_mb_s", 0)),
+        _format_mb(row.get("max_throughput", 0)),
         f"{float(row.get('cpu_max_global', 0)):.2f}",
-        f"{float(row.get('mem_max', 0)) / MB:.2f}",
+        _format_mb(row.get("mem_max", 0)),
     ]
 
 
@@ -262,14 +262,14 @@ def _print_csv_to_shell(report_path):
             "Threads",
             "Processes",
             "Depth",
-            "File Size (MB)",
-            "Chunk Size (MB)",
-            "Block Size (MB)",
+            "File Size (MiB)",
+            "Chunk Size (MiB)",
+            "Block Size (MiB)",
             "Min Latency (s)",
             "Mean Latency (s)",
-            "Max Throughput(MB/s)",
+            "Max Throughput(MiB/s)",
             "Max CPU (%)",
-            "Max Memory (MB)",
+            "Max Memory (MiB)",
         ]
         table = PrettyTable()
         table.field_names = display_headers
