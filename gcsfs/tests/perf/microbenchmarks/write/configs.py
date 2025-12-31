@@ -1,44 +1,25 @@
 import itertools
-import logging
-import os
 
-import yaml
-
-from gcsfs.tests.conftest import BUCKET_NAME_MAP
+from gcsfs.tests.perf.microbenchmarks.configs import BaseBenchmarkConfigurator
 from gcsfs.tests.perf.microbenchmarks.conftest import MB
 from gcsfs.tests.perf.microbenchmarks.write.parameters import WriteBenchmarkParameters
-from gcsfs.tests.settings import BENCHMARK_FILTER
 
 
-def _generate_benchmark_cases():
-    """
-    Generates benchmark cases by reading the configuration from configs.yaml.
-    """
-    config_path = os.path.join(os.path.dirname(__file__), "configs.yaml")
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    common_config = config["common"]
-    scenarios = config["scenarios"]
-
-    if BENCHMARK_FILTER:
-        filter_names = [name.strip().lower() for name in BENCHMARK_FILTER.split(",")]
-        scenarios = [s for s in scenarios if s["name"].lower() in filter_names]
-    all_cases = []
-
-    for scenario in scenarios:
+class WriteConfigurator(BaseBenchmarkConfigurator):
+    def build_cases(self, scenario, common_config):
         procs_list = scenario.get("processes", [1])
         threads_list = scenario.get("threads", [1])
+        bucket_types = common_config.get("bucket_types", ["regional"])
         file_sizes_mb = common_config.get("file_sizes_mb", [1024])
         chunk_sizes_mb = common_config.get("chunk_sizes_mb", [64, 100])
-        bucket_types = common_config.get("bucket_types", ["regional"])
 
+        cases = []
         param_combinations = itertools.product(
             procs_list, threads_list, file_sizes_mb, chunk_sizes_mb, bucket_types
         )
 
         for procs, threads, size_mb, chunk_size_mb, bucket_type in param_combinations:
-            bucket_name = BUCKET_NAME_MAP.get(bucket_type)
+            bucket_name = self.get_bucket_name(bucket_type)
             if not bucket_name:
                 continue
 
@@ -58,19 +39,9 @@ def _generate_benchmark_cases():
                 chunk_size_bytes=chunk_size_mb * MB,
                 file_size_bytes=size_mb * MB,
             )
-            all_cases.append(params)
-
-    return all_cases
+            cases.append(params)
+        return cases
 
 
 def get_write_benchmark_cases():
-    """
-    Returns a list of WriteBenchmarkParameters, optionally filtered by
-    the GCSFS_BENCHMARK_FILTER environment variable.
-    """
-    all_cases = _generate_benchmark_cases()
-    if all_cases:
-        logging.info(
-            f"Write Benchmark cases to be triggered: {', '.join([case.name for case in all_cases])}"
-        )
-    return all_cases
+    return WriteConfigurator(__file__).generate_cases()

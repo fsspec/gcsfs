@@ -1,15 +1,15 @@
 import logging
-import multiprocessing
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gcsfs.tests.perf.microbenchmarks.conftest import (
-    publish_benchmark_extra_info,
-    publish_multi_process_benchmark_extra_info,
-    publish_resource_metrics,
+from gcsfs.tests.perf.microbenchmarks.runner import (
+    filter_test_cases,
+    run_multi_process,
+    run_multi_threaded,
+    run_single_threaded,
 )
 from gcsfs.tests.perf.microbenchmarks.write.configs import get_write_benchmark_cases
 from gcsfs.tests.settings import BENCHMARK_SKIP_TESTS
@@ -38,14 +38,9 @@ def _write_op_seq(gcs, path, chunk_size, file_size):
 
 
 all_benchmark_cases = get_write_benchmark_cases()
-
-single_threaded_cases = [
-    p for p in all_benchmark_cases if p.num_threads == 1 and p.num_processes == 1
-]
-multi_threaded_cases = [
-    p for p in all_benchmark_cases if p.num_threads > 1 and p.num_processes == 1
-]
-multi_process_cases = [p for p in all_benchmark_cases if p.num_processes > 1]
+single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_cases(
+    all_benchmark_cases
+)
 
 
 @pytest.mark.parametrize(
@@ -57,15 +52,10 @@ multi_process_cases = [p for p in all_benchmark_cases if p.num_processes > 1]
 def test_write_single_threaded(benchmark, gcsfs_benchmark_write, monitor):
     gcs, file_paths, params = gcsfs_benchmark_write
 
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
-    path = file_paths[0]
-
-    op_args = (gcs, path, params.chunk_size_bytes, params.file_size_bytes)
-
-    with monitor() as m:
-        benchmark.pedantic(_write_op_seq, rounds=params.rounds, args=op_args)
-
-    publish_resource_metrics(benchmark, m)
+    op_args = (gcs, file_paths[0], params.chunk_size_bytes, params.file_size_bytes)
+    run_single_threaded(
+        benchmark, monitor, params, _write_op_seq, op_args, BENCHMARK_GROUP
+    )
 
 
 @pytest.mark.parametrize(
@@ -77,9 +67,7 @@ def test_write_single_threaded(benchmark, gcsfs_benchmark_write, monitor):
 def test_write_multi_threaded(benchmark, gcsfs_benchmark_write, monitor):
     gcs, file_paths, params = gcsfs_benchmark_write
 
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
-
-    def run_benchmark():
+    def workload():
         logging.info("Multi-threaded benchmark: Starting benchmark round.")
         with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
             futures = [
@@ -94,10 +82,7 @@ def test_write_multi_threaded(benchmark, gcsfs_benchmark_write, monitor):
             ]
             list(futures)  # Wait for completion
 
-    with monitor() as m:
-        benchmark.pedantic(run_benchmark, rounds=params.rounds)
-
-    publish_resource_metrics(benchmark, m)
+    run_multi_threaded(benchmark, monitor, params, workload, BENCHMARK_GROUP)
 
 
 def _process_worker(
@@ -130,52 +115,30 @@ def _process_worker(
 def test_write_multi_process(
     benchmark, gcsfs_benchmark_write, extended_gcs_factory, request, monitor
 ):
-    gcs, file_paths, params = gcsfs_benchmark_write
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
-
-    if multiprocessing.get_start_method(allow_none=True) != "spawn":
-        multiprocessing.set_start_method("spawn", force=True)
-
-    process_durations_shared = multiprocessing.Array("d", params.num_processes)
+    _, file_paths, params = gcsfs_benchmark_write
     files_per_process = params.num_files // params.num_processes
-    threads_per_process = params.num_threads
 
-    # Create a new gcsfs instance for every process
-    worker_gcs_instances = [extended_gcs_factory() for _ in range(params.num_processes)]
+    def args_builder(gcs_instance, i, shared_arr):
+        start_index = i * files_per_process
+        end_index = start_index + files_per_process
+        process_files = file_paths[start_index:end_index]
+        return (
+            gcs_instance,
+            process_files,
+            params.chunk_size_bytes,
+            params.num_threads,
+            params.file_size_bytes,
+            shared_arr,
+            i,
+        )
 
-    round_durations_s = []
-    with monitor() as m:
-        for _ in range(params.rounds):
-            logging.info("Multi-process benchmark: Starting benchmark round.")
-            processes = []
-
-            for i in range(params.num_processes):
-                start_index = i * files_per_process
-                end_index = start_index + files_per_process
-                process_files = file_paths[start_index:end_index]
-
-                p = multiprocessing.Process(
-                    target=_process_worker,
-                    args=(
-                        worker_gcs_instances[i],
-                        process_files,
-                        params.chunk_size_bytes,
-                        threads_per_process,
-                        params.file_size_bytes,
-                        process_durations_shared,
-                        i,
-                    ),
-                )
-                processes.append(p)
-                p.start()
-
-            for p in processes:
-                p.join()
-
-            round_durations_s.append(max(process_durations_shared[:]))
-
-    publish_multi_process_benchmark_extra_info(benchmark, round_durations_s, params)
-    publish_resource_metrics(benchmark, m)
-
-    if request.config.getoption("benchmark_json"):
-        benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)
+    run_multi_process(
+        benchmark,
+        monitor,
+        params,
+        extended_gcs_factory,
+        worker_target=_process_worker,
+        args_builder=args_builder,
+        benchmark_group=BENCHMARK_GROUP,
+        request=request,
+    )

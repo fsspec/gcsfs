@@ -236,7 +236,7 @@ def publish_resource_metrics(benchmark: Any, monitor: ResourceMonitor) -> None:
         {
             "cpu_max_global": f"{monitor.max_cpu:.2f}",
             "mem_max": f"{monitor.max_mem:.2f}",
-            "net_throughput_mb_s": f"{monitor.throughput_mb_s:.2f}",
+            "net_throughput_s": f"{monitor.throughput_s:.2f}",
             "vcpus": monitor.vcpus,
         }
     )

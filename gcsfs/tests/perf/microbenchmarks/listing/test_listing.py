@@ -1,16 +1,16 @@
 import logging
-import multiprocessing
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gcsfs.tests.perf.microbenchmarks.conftest import (
-    publish_benchmark_extra_info,
-    publish_multi_process_benchmark_extra_info,
-    publish_resource_metrics,
-)
 from gcsfs.tests.perf.microbenchmarks.listing.configs import get_listing_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.runner import (
+    filter_test_cases,
+    run_multi_process,
+    run_multi_threaded,
+    run_single_threaded,
+)
 from gcsfs.tests.settings import BENCHMARK_SKIP_TESTS
 
 pytestmark = pytest.mark.skipif(
@@ -41,14 +41,9 @@ def _chunk_list(data, n):
 
 
 all_benchmark_cases = get_listing_benchmark_cases()
-
-single_threaded_cases = [
-    p for p in all_benchmark_cases if p.num_threads == 1 and p.num_processes == 1
-]
-multi_threaded_cases = [
-    p for p in all_benchmark_cases if p.num_threads > 1 and p.num_processes == 1
-]
-multi_process_cases = [p for p in all_benchmark_cases if p.num_processes > 1]
+single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_cases(
+    all_benchmark_cases
+)
 
 
 @pytest.mark.parametrize(
@@ -60,12 +55,9 @@ multi_process_cases = [p for p in all_benchmark_cases if p.num_processes > 1]
 def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
     gcs, target_dirs, params = gcsfs_benchmark_listing
 
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
-
-    with monitor() as m:
-        benchmark.pedantic(_list_dirs, rounds=params.rounds, args=(gcs, target_dirs))
-
-    publish_resource_metrics(benchmark, m)
+    run_single_threaded(
+        benchmark, monitor, params, _list_dirs, (gcs, target_dirs), BENCHMARK_GROUP
+    )
 
 
 @pytest.mark.parametrize(
@@ -77,9 +69,7 @@ def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
 def test_listing_multi_threaded(benchmark, gcsfs_benchmark_listing, monitor):
     gcs, target_dirs, params = gcsfs_benchmark_listing
 
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
-
-    def run_benchmark():
+    def workload():
         logging.info("Multi-threaded listing benchmark: Starting benchmark round.")
         chunks = _chunk_list(target_dirs, params.num_threads)
         with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
@@ -89,10 +79,7 @@ def test_listing_multi_threaded(benchmark, gcsfs_benchmark_listing, monitor):
             ]
             list(futures)  # Wait for completion
 
-    with monitor() as m:
-        benchmark.pedantic(run_benchmark, rounds=params.rounds)
-
-    publish_resource_metrics(benchmark, m)
+    run_multi_threaded(benchmark, monitor, params, workload, BENCHMARK_GROUP)
 
 
 def _process_worker(gcs, target_dirs, num_threads, process_durations_shared, index):
@@ -117,42 +104,25 @@ def _process_worker(gcs, target_dirs, num_threads, process_durations_shared, ind
 def test_listing_multi_process(
     benchmark, gcsfs_benchmark_listing, extended_gcs_factory, request, monitor
 ):
-    gcs, target_dirs, params = gcsfs_benchmark_listing
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
+    _, target_dirs, params = gcsfs_benchmark_listing
 
-    if multiprocessing.get_start_method(allow_none=True) != "spawn":
-        multiprocessing.set_start_method("spawn", force=True)
+    def args_builder(gcs_instance, i, shared_arr):
+        chunks = _chunk_list(target_dirs, params.num_processes)
+        return (
+            gcs_instance,
+            chunks[i],
+            params.num_threads,
+            shared_arr,
+            i,
+        )
 
-    process_durations_shared = multiprocessing.Array("d", params.num_processes)
-    worker_gcs_instances = [extended_gcs_factory() for _ in range(params.num_processes)]
-
-    round_durations_s = []
-    with monitor() as m:
-        for _ in range(params.rounds):
-            logging.info("Multi-process listing benchmark: Starting benchmark round.")
-            chunks = _chunk_list(target_dirs, params.num_processes)
-            processes = []
-            for i in range(params.num_processes):
-                p = multiprocessing.Process(
-                    target=_process_worker,
-                    args=(
-                        worker_gcs_instances[i],
-                        chunks[i],
-                        params.num_threads,
-                        process_durations_shared,
-                        i,
-                    ),
-                )
-                processes.append(p)
-                p.start()
-
-            for p in processes:
-                p.join()
-
-            round_durations_s.append(max(process_durations_shared[:]))
-
-    publish_multi_process_benchmark_extra_info(benchmark, round_durations_s, params)
-    publish_resource_metrics(benchmark, m)
-
-    if request.config.getoption("benchmark_json"):
-        benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)
+    run_multi_process(
+        benchmark,
+        monitor,
+        params,
+        extended_gcs_factory,
+        worker_target=_process_worker,
+        args_builder=args_builder,
+        benchmark_group=BENCHMARK_GROUP,
+        request=request,
+    )

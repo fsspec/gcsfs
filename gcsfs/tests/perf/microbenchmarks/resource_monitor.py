@@ -16,8 +16,8 @@ class ResourceMonitor:
         self.start_time = 0.0
         self.duration = 0.0
         self.start_net = None
-        self.net_sent_mb = 0.0
-        self.net_recv_mb = 0.0
+        self.net_sent = 0.0
+        self.net_recv = 0.0
 
         self._stop_event = threading.Event()
         self._thread = None
@@ -33,12 +33,8 @@ class ResourceMonitor:
         self.duration = time.perf_counter() - self.start_time
         end_net = psutil.net_io_counters()
 
-        self.net_sent_mb = (end_net.bytes_sent - self.start_net.bytes_sent) / (
-            1024 * 1024
-        )
-        self.net_recv_mb = (end_net.bytes_recv - self.start_net.bytes_recv) / (
-            1024 * 1024
-        )
+        self.net_sent = end_net.bytes_sent - self.start_net.bytes_sent
+        self.net_recv = end_net.bytes_recv - self.start_net.bytes_recv
 
     def _monitor(self):
         psutil.cpu_percent(interval=None)
@@ -79,8 +75,8 @@ class ResourceMonitor:
             self._thread.join()
 
     @property
-    def throughput_mb_s(self):
+    def throughput_s(self):
         """Calculates combined network throughput."""
         if self.duration <= 0:
             return 0.0
-        return (self.net_sent_mb + self.net_recv_mb) / self.duration
+        return (self.net_sent + self.net_recv) / self.duration
