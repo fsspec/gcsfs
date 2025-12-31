@@ -1,0 +1,23 @@
+common:
+  bucket_types:
+    - "regional"
+    - "hns"
+  num_files:
+    - 1000
+  depths:
+    - 0
+    - 3
+  rounds: 10
+
+scenarios:
+  - name: "list_seq"
+    threads: [1]
+    processes: [1]
+
+  - name: "list_multi_thread"
+    threads: [4, 8]
+    processes: [1]
+
+  - name: "list_multi_process"
+    threads: [1]
+    processes: [4, 8]

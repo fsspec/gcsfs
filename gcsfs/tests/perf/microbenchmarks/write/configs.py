@@ -70,6 +70,6 @@ def get_write_benchmark_cases():
     """
     all_cases = _generate_benchmark_cases()
     logging.info(
-        f"Benchmark cases to be triggered: {', '.join([case.name for case in all_cases])}"
+        f"Write Benchmark cases to be triggered: {', '.join([case.name for case in all_cases])}"
     )
     return all_cases

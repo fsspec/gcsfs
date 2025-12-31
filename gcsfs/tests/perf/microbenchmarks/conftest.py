@@ -1,6 +1,7 @@
 import logging
 import multiprocessing
 import os
+import random
 import statistics
 import time
 import uuid
@@ -36,6 +37,17 @@ def _prepare_files(gcs, file_paths, file_size):
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(16) as pool:
         pool.starmap(_write_file, args)
+
+
+def _touch_file(gcs, path):
+    with gcs.open(path, "wb"):
+        pass
+
+
+def _prepare_listing_files(gcs, file_paths):
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(16) as pool:
+        pool.starmap(_touch_file, [(gcs, path) for path in file_paths])
 
 
 @pytest.fixture
@@ -81,8 +93,7 @@ def gcsfs_benchmark_read(extended_gcs_factory, request):
     # --- Teardown ---
     logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
     try:
-        for path in file_paths:
-            gcs.rm(path)
+        gcs.rm(prefix, recursive=True)
     except Exception as e:
         logging.error(f"Failed to clean up benchmark files: {e}")
 
@@ -110,6 +121,68 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
     logging.info(f"Tearing down write benchmark '{params.name}': deleting files.")
     try:
         gcs.rm(prefix, recursive=True)
+    except Exception as e:
+        logging.error(f"Failed to clean up benchmark files: {e}")
+
+
+@pytest.fixture
+def gcsfs_benchmark_listing(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a listing benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    gcs = extended_gcs_factory()
+
+    prefix = f"{params.bucket_name}/benchmark-listing-{uuid.uuid4()}"
+
+    target_dirs = []
+    if params.depth == 0:
+        target_dirs = [prefix]
+    else:
+        path = prefix
+        target_dirs.append(path)
+        for d in range(params.depth):
+            path = f"{path}/level_{d}"
+            target_dirs.append(path)
+
+    file_paths = []
+    for i in range(params.num_files):
+        folder = random.choice(target_dirs)
+        file_paths.append(f"{folder}/file_{i}")
+
+    logging.info(
+        f"Setting up listing benchmark '{params.name}': creating {params.num_files} "
+        f"files distributed across {len(target_dirs)} folders at depth {params.depth}."
+    )
+
+    _prepare_listing_files(gcs, file_paths)
+
+    yield gcs, prefix, params
+
+    # --- Teardown ---
+    logging.info(
+        f"Tearing down listing benchmark '{params.name}': deleting files and folders."
+    )
+    try:
+        gcs.rm(file_paths)
+        if params.bucket_type != "regional":
+            cleanup_dirs = [prefix]
+            path = prefix
+            for d in range(params.depth):
+                path = f"{path}/level_{d}"
+                cleanup_dirs.append(path)
+
+            for d in reversed(cleanup_dirs):
+                try:
+                    gcs.rmdir(d)
+                except Exception:
+                    pass
+        else:
+            try:
+                gcs.rmdir(prefix)
+            except Exception:
+                pass
     except Exception as e:
         logging.error(f"Failed to clean up benchmark files: {e}")
 
@@ -145,15 +218,17 @@ def publish_benchmark_extra_info(
     Helper function to publish benchmark parameters to the extra_info property.
     """
     benchmark.extra_info["num_files"] = params.num_files
-    benchmark.extra_info["file_size"] = params.file_size_bytes
-    benchmark.extra_info["chunk_size"] = params.chunk_size_bytes
-    benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "0")
+    benchmark.extra_info["file_size"] = getattr(params, "file_size_bytes", "N/A")
+    benchmark.extra_info["chunk_size"] = getattr(params, "chunk_size_bytes", "N/A")
+    benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "seq")
     benchmark.extra_info["threads"] = params.num_threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name
     benchmark.extra_info["bucket_type"] = params.bucket_type
     benchmark.extra_info["processes"] = params.num_processes
+    benchmark.extra_info["depth"] = getattr(params, "depth", "N/A")
+
     benchmark.group = benchmark_group
 
 

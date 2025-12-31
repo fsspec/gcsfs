@@ -145,13 +145,17 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
     # Calculate max throughput
     file_size = bench["extra_info"].get("file_size", 0)
     num_files = bench["extra_info"].get("num_files", 1)
-    total_bytes = file_size * num_files
 
-    min_time = bench["stats"].get("min")
-    if min_time and min_time > 0:
-        row["max_throughput_mb_s"] = (total_bytes / min_time) / MB
+    if file_size != "N/A":
+        total_bytes = file_size * num_files
+
+        min_time = bench["stats"].get("min")
+        if min_time and min_time > 0:
+            row["max_throughput_mb_s"] = (total_bytes / min_time) / MB
+        else:
+            row["max_throughput_mb_s"] = "0.0"
     else:
-        row["max_throughput_mb_s"] = "0.0"
+        row["max_throughput_mb_s"] = "N/A"
 
     return row
 
@@ -197,6 +201,12 @@ def _generate_report(json_path, results_dir):
     return report_path
 
 
+def _format_mb(value):
+    if value == "N/A":
+        return "N/A"
+    return f"{float(value) / MB:.2f}"
+
+
 def _create_table_row(row):
     """
     Format a dictionary of benchmark results into a list for table display.
@@ -215,9 +225,10 @@ def _create_table_row(row):
         row.get("num_files", ""),
         row.get("threads", ""),
         row.get("processes", ""),
-        f"{float(row.get('file_size', 0)) / MB:.2f}",
-        f"{float(row.get('chunk_size', 0)) / MB:.2f}",
-        f"{float(row.get('block_size', 0)) / MB:.2f}",
+        row.get("depth", ""),
+        _format_mb(row.get("file_size", 0)),
+        _format_mb(row.get("chunk_size", 0)),
+        _format_mb(row.get("block_size", 0)),
         f"{float(row.get('min', 0)):.4f}",
         f"{float(row.get('mean', 0)):.4f}",
         float(row.get("max_throughput_mb_s", 0)),
@@ -250,6 +261,7 @@ def _print_csv_to_shell(report_path):
             "Files",
             "Threads",
             "Processes",
+            "Depth",
             "File Size (MB)",
             "Chunk Size (MB)",
             "Block Size (MB)",
