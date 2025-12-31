@@ -2,19 +2,24 @@ common:
   bucket_types:
     - "regional"
     - "zonal"
+    - "hns"
   num_files:
     - 10000
-  rounds: 10
 
 scenarios:
   - name: "list_flat"
     threads: [1]
     processes: [1]
 
+  - name: "list_flat_recursive"
+    threads: [1]
+    processes: [1]
+    depth: 8
+
   - name: "list_recursive_multi_thread"
     threads: [4, 8]
     processes: [1]
 
   - name: "list_recursive_multi_process"
-    threads: [1]
+    threads: [1,2]
     processes: [4, 8]

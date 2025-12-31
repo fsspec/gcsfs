@@ -26,7 +26,7 @@ class ListingBenchmarkParameters:
     num_files: int = 1000
 
     # Number of rounds for the benchmark, default to 10.
-    rounds: int = 10
+    rounds: int = 1
 
     # The nested depth of object structure.
     depth: int = 0

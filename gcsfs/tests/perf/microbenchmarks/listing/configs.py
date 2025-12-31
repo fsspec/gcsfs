@@ -32,6 +32,7 @@ def _generate_benchmark_cases():
         threads_list = scenario.get("threads", [1])
         num_files_list = common_config.get("num_files", [1000])
         bucket_types = common_config.get("bucket_types", ["regional"])
+        depth = scenario.get("depth", 0)
 
         param_combinations = itertools.product(
             procs_list, threads_list, num_files_list, bucket_types
@@ -42,7 +43,7 @@ def _generate_benchmark_cases():
             if not bucket_name:
                 continue
 
-            depth = (threads * procs) - 1
+            depth = ((threads * procs) - 1) if depth == 0 else depth
 
             name = (
                 f"{scenario['name']}_{procs}procs_{threads}threads_"
