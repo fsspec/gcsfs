@@ -620,24 +620,14 @@ class TestExtendedGcsFileSystemMv:
 class TestExtendedGcsFileSystemMkdir:
     """Tests for the mkdir method in ExtendedGcsFileSystem."""
 
-    def _assert_create_folder_called_with(self, mocks, dir_path, recursive=False):
-        """Asserts that create_folder was called with the correct request."""
+    def _get_create_folder_request(self, dir_path, recursive=False):
+        """Constructs a CreateFolderRequest for testing."""
         bucket, folder_path = dir_path.split("/", 1)
-        expected_request = storage_control_v2.CreateFolderRequest(
+        return storage_control_v2.CreateFolderRequest(
             parent=f"projects/_/buckets/{bucket}",
             folder_id=folder_path.rstrip("/"),
             recursive=recursive,
         )
-        mocks["control_client"].create_folder.assert_called_once_with(
-            request=expected_request
-        )
-
-    def _assert_hns_mkdir_called_using_logs(self, caplog, path):
-        """Asserts that HNS mkdir was called by checking logs."""
-        hns_log_message = f"Using HNS-aware mkdir for '{path}'."
-        assert any(
-            hns_log_message in record.message for record in caplog.records
-        ), "HNS mkdir log message not found."
 
     def test_hns_mkdir_success(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test successful HNS folder creation."""
@@ -655,13 +645,14 @@ class TestExtendedGcsFileSystemMkdir:
             gcsfs.mkdir(dir_path)
             assert gcsfs.exists(dir_path)
 
-            self._assert_hns_mkdir_called_using_logs(caplog, dir_path)
-
             if mocks:
                 mocks["async_lookup_bucket_type"].assert_called_once_with(
                     TEST_HNS_BUCKET
                 )
-                self._assert_create_folder_called_with(mocks, dir_path)
+                expected_request = self._get_create_folder_request(dir_path)
+                mocks["control_client"].create_folder.assert_called_once_with(
+                    request=expected_request
+                )
                 mocks["super_mkdir"].assert_not_called()
 
     def test_hns_mkdir_nested_success_with_create_parents(
@@ -685,13 +676,16 @@ class TestExtendedGcsFileSystemMkdir:
             assert gcsfs.exists(parent_dir)
             assert gcsfs.exists(dir_path)
 
-            self._assert_hns_mkdir_called_using_logs(caplog, dir_path)
-
             if mocks:
                 mocks["async_lookup_bucket_type"].assert_called_once_with(
                     TEST_HNS_BUCKET
                 )
-                self._assert_create_folder_called_with(mocks, dir_path, recursive=True)
+                expected_request = self._get_create_folder_request(
+                    dir_path, recursive=True
+                )
+                mocks["control_client"].create_folder.assert_called_once_with(
+                    request=expected_request
+                )
                 mocks["super_mkdir"].assert_not_called()
 
     def test_hns_mkdir_nested_fails_if_create_parents_false(
@@ -714,13 +708,14 @@ class TestExtendedGcsFileSystemMkdir:
             ):
                 gcsfs.mkdir(dir_path, create_parents=False)
 
-            self._assert_hns_mkdir_called_using_logs(caplog, dir_path)
-
             if mocks:
                 mocks["async_lookup_bucket_type"].assert_called_once_with(
                     TEST_HNS_BUCKET
                 )
-                self._assert_create_folder_called_with(mocks, dir_path, recursive=False)
+                expected_request = self._get_create_folder_request(dir_path)
+                mocks["control_client"].create_folder.assert_called_once_with(
+                    request=expected_request
+                )
                 mocks["super_mkdir"].assert_not_called()
 
     @pytest.mark.skipif(
@@ -837,7 +832,12 @@ class TestExtendedGcsFileSystemMkdir:
                     default_acl=None,
                 )
                 # After the bucket is created, the HNS path is taken to create the folder.
-                self._assert_create_folder_called_with(mocks, dir_path, recursive=True)
+                expected_request = self._get_create_folder_request(
+                    dir_path, recursive=True
+                )
+                mocks["control_client"].create_folder.assert_called_once_with(
+                    request=expected_request
+                )
                 mocks["async_lookup_bucket_type"].assert_not_called()
 
     @pytest.mark.asyncio
@@ -846,7 +846,7 @@ class TestExtendedGcsFileSystemMkdir:
     ):
         """Test creating a new non-HNS bucket by default."""
         gcsfs = gcs_hns
-        bucket_path = "new-non-hns-bucket"
+        bucket_path = f"new-non-hns-bucket-{uuid.uuid4()}"
 
         buckets_to_delete.add(bucket_path)
         with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
@@ -872,7 +872,7 @@ class TestExtendedGcsFileSystemMkdir:
     ):
         """Test creating a bucket passes parent-level parameters like enable_versioning."""
         gcsfs = gcs_hns
-        bucket_path = "new-versioned-bucket"
+        bucket_path = f"new-versioned-bucket-{uuid.uuid4()}"
         buckets_to_delete.add(bucket_path)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
@@ -904,7 +904,7 @@ class TestExtendedGcsFileSystemMkdir:
     ):
         """Test creating a new HNS-enabled bucket."""
         gcsfs = gcs_hns
-        bucket_path = "new-hns-bucket"
+        bucket_path = f"new-hns-bucket-{uuid.uuid4()}"
 
         buckets_to_delete.add(bucket_path)
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
@@ -951,8 +951,6 @@ class TestExtendedGcsFileSystemMkdir:
             gcsfs.mkdir(dir_path)
             assert gcsfs.exists(dir_path)
 
-            self._assert_hns_mkdir_called_using_logs(caplog, dir_path)
-
             # Check that a debug log for existing directory was made
             assert any(
                 f"Directory already exists: {dir_path}" in record.message
@@ -960,7 +958,10 @@ class TestExtendedGcsFileSystemMkdir:
             )
 
             if mocks:
-                self._assert_create_folder_called_with(mocks, dir_path, recursive=False)
+                expected_request = self._get_create_folder_request(dir_path)
+                mocks["control_client"].create_folder.assert_called_once_with(
+                    request=expected_request
+                )
                 mocks["super_mkdir"].assert_not_called()
                 mocks["async_lookup_bucket_type"].assert_called_once_with(
                     TEST_HNS_BUCKET

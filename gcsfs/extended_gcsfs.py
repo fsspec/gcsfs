@@ -425,11 +425,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         For HNS-enabled buckets, this method creates a folder object. If
         `create_parents` is True, any missing parent folders are also created.
-        
-        If bucket doesn't exist, create_hns_bucket and create_parents are set to True 
+
+        If bucket doesn't exist, create_hns_bucket and create_parents are set to True
         and the path includes a key then HNS-enabled bucket will be created
         and also the folders within that bucket.
-        
+
         If `create_parents` is False and a parent does not exist, a
         FileNotFoundError is raised.
 
@@ -448,7 +448,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             kwargs["default_acl"] = None
 
         bucket, key, _ = self.split_path(path)
-        # If key is empty, it's a bucket operation. Defer to parent.
+        # If the key is empty, the path refers to a bucket, not an object.
+        # Defer to the parent method to handle bucket creation.
         if not key:
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
 
