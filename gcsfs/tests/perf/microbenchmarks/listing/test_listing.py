@@ -69,17 +69,12 @@ def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
 def test_listing_multi_threaded(benchmark, gcsfs_benchmark_listing, monitor):
     gcs, target_dirs, params = gcsfs_benchmark_listing
 
-    def workload():
-        logging.info("Multi-threaded listing benchmark: Starting benchmark round.")
-        chunks = _chunk_list(target_dirs, params.num_threads)
-        with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
-            futures = [
-                executor.submit(_list_dirs, gcs, chunks[i])
-                for i in range(params.num_threads)
-            ]
-            list(futures)  # Wait for completion
+    chunks = _chunk_list(target_dirs, params.num_threads)
+    args_list = [(gcs, chunks[i]) for i in range(params.num_threads)]
 
-    run_multi_threaded(benchmark, monitor, params, workload, BENCHMARK_GROUP)
+    run_multi_threaded(
+        benchmark, monitor, params, _list_dirs, args_list, BENCHMARK_GROUP
+    )
 
 
 def _process_worker(gcs, target_dirs, num_threads, process_durations_shared, index):

@@ -1,5 +1,6 @@
 import logging
 import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 
 from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_benchmark_extra_info,
@@ -30,18 +31,29 @@ def run_single_threaded(benchmark, monitor_cls, params, func, args, benchmark_gr
     publish_resource_metrics(benchmark, m)
 
 
-def run_multi_threaded(benchmark, monitor_cls, params, workload_func, benchmark_group):
+def run_multi_threaded(
+    benchmark, monitor_cls, params, worker_func, args_list, benchmark_group
+):
     """
     Runs a multi-threaded benchmark.
 
     Args:
-        workload_func: A callable that executes the logic (usually creating a
-                       ThreadPoolExecutor and submitting tasks).
+        worker_func: The function to run in each thread.
+        args_list: A list of tuples, where each tuple contains arguments for one thread.
     """
     publish_benchmark_extra_info(benchmark, params, benchmark_group)
 
+    def workload():
+        logging.info(
+            f"Multi-threaded {benchmark_group} benchmark: Starting benchmark round."
+        )
+        with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
+            futures = [executor.submit(worker_func, *args) for args in args_list]
+            for f in futures:
+                f.result()
+
     with monitor_cls() as m:
-        benchmark.pedantic(workload_func, rounds=params.rounds)
+        benchmark.pedantic(workload, rounds=params.rounds)
 
     publish_resource_metrics(benchmark, m)
 

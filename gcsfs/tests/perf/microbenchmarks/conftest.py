@@ -46,7 +46,7 @@ def _touch_file(gcs, path):
 
 def _prepare_listing_files(gcs, file_paths):
     ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(16) as pool:
+    with ctx.Pool(100) as pool:
         pool.starmap(_touch_file, [(gcs, path) for path in file_paths])
 
 
@@ -152,7 +152,13 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
         f"files distributed across {len(target_dirs)} folders at depth {params.depth + 1}."
     )
 
+    start_time = time.perf_counter()
     _prepare_listing_files(gcs, file_paths)
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    logging.info(
+        f"Benchmark '{params.name}' setup created {params.num_files} files in {duration_ms:.2f} ms."
+    )
 
     yield gcs, target_dirs, params
 

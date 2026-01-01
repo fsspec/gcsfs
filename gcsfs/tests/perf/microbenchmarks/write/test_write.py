@@ -67,22 +67,14 @@ def test_write_single_threaded(benchmark, gcsfs_benchmark_write, monitor):
 def test_write_multi_threaded(benchmark, gcsfs_benchmark_write, monitor):
     gcs, file_paths, params = gcsfs_benchmark_write
 
-    def workload():
-        logging.info("Multi-threaded benchmark: Starting benchmark round.")
-        with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
-            futures = [
-                executor.submit(
-                    _write_op_seq,
-                    gcs,
-                    path,
-                    params.chunk_size_bytes,
-                    params.file_size_bytes,
-                )
-                for path in file_paths
-            ]
-            list(futures)  # Wait for completion
+    args_list = [
+        (gcs, path, params.chunk_size_bytes, params.file_size_bytes)
+        for path in file_paths
+    ]
 
-    run_multi_threaded(benchmark, monitor, params, workload, BENCHMARK_GROUP)
+    run_multi_threaded(
+        benchmark, monitor, params, _write_op_seq, args_list, BENCHMARK_GROUP
+    )
 
 
 def _process_worker(

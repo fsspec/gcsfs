@@ -88,39 +88,24 @@ def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
 def test_read_multi_threaded(benchmark, gcsfs_benchmark_read, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read
 
-    def workload():
-        logging.info("Multi-threaded benchmark: Starting benchmark round.")
-        with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
-            if params.pattern == "seq":
-                # Each thread reads one full file sequentially.
-                futures = [
-                    executor.submit(_read_op_seq, gcs, path, params.chunk_size_bytes)
-                    for path in file_paths
-                ]
-                list(futures)  # Wait for completion
+    worker_func = None
+    args_list = []
 
-            elif params.pattern == "rand":
+    if params.pattern == "seq":
+        worker_func = _read_op_seq
+        args_list = [(gcs, path, params.chunk_size_bytes) for path in file_paths]
 
-                offsets = list(
-                    range(0, params.file_size_bytes, params.chunk_size_bytes)
-                )
+    elif params.pattern == "rand":
+        worker_func = _random_read_worker
+        offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
 
-                if params.num_files == 1:
-                    # All threads read the same file randomly.
-                    paths_to_read = [file_paths[0]] * params.num_threads
-                else:
-                    # Each thread reads a different file randomly.
-                    paths_to_read = file_paths
+        args_list = [
+            (gcs, path, params.chunk_size_bytes, offsets) for path in file_paths
+        ]
 
-                futures = [
-                    executor.submit(
-                        _random_read_worker, gcs, path, params.chunk_size_bytes, offsets
-                    )
-                    for path in paths_to_read
-                ]
-                list(futures)  # Wait for completion
-
-    run_multi_threaded(benchmark, monitor, params, workload, BENCHMARK_GROUP)
+    run_multi_threaded(
+        benchmark, monitor, params, worker_func, args_list, BENCHMARK_GROUP
+    )
 
 
 def _process_worker(
