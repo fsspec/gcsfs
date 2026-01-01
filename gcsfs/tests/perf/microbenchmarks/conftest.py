@@ -31,23 +31,18 @@ def _write_file(gcs, path, file_size, chunk_size):
             f.write(os.urandom(remainder))
 
 
-def _prepare_files(gcs, file_paths, file_size):
-    chunk_size = min(100 * MB, file_size)
+def _prepare_files(gcs, file_paths, file_size=0):
+    if file_size > 0:
+        chunk_size = min(100 * MB, file_size)
+        pool_size = 16
+    else:
+        chunk_size = 1
+        pool_size = min(100, len(file_paths))
+
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(16) as pool:
+    with ctx.Pool(pool_size) as pool:
         pool.starmap(_write_file, args)
-
-
-def _touch_file(gcs, path):
-    with gcs.open(path, "wb"):
-        pass
-
-
-def _prepare_listing_files(gcs, file_paths):
-    ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(100) as pool:
-        pool.starmap(_touch_file, [(gcs, path) for path in file_paths])
 
 
 @pytest.fixture
@@ -153,7 +148,7 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
     )
 
     start_time = time.perf_counter()
-    _prepare_listing_files(gcs, file_paths)
+    _prepare_files(gcs, file_paths)
 
     duration_ms = (time.perf_counter() - start_time) * 1000
     logging.info(
