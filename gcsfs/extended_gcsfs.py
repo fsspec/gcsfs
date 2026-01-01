@@ -425,6 +425,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         For HNS-enabled buckets, this method creates a folder object. If
         `create_parents` is True, any missing parent folders are also created.
+        
+        If bucket doesn't exist, create_hns_bucket and create_parents are set to True 
+        and the path includes a key then HNS-enabled bucket will be created
+        and also the folders within that bucket.
+        
         If `create_parents` is False and a parent does not exist, a
         FileNotFoundError is raised.
 
@@ -448,12 +453,20 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
 
         is_hns = False
-        try:
-            is_hns = await self._is_bucket_hns_enabled(bucket)
-        except Exception as e:
-            logger.warning(
-                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default mkdir: {e}"
-            )
+        # If creating an HNS bucket, check for its existence first.
+        if create_parents and create_hns_bucket:
+            if not await self._exists(bucket):
+                await super()._mkdir(bucket, create_parents=True, **kwargs)
+                is_hns = True  # Skip HNS check since we just created it.
+
+        if not is_hns:
+            # If the bucket was not created above, we need to check its type.
+            try:
+                is_hns = await self._is_bucket_hns_enabled(bucket)
+            except Exception as e:
+                logger.warning(
+                    f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default mkdir: {e}"
+                )
 
         if not is_hns:
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
