@@ -472,7 +472,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         **kwargs,
     ):
         bucket, _, _ = self.split_path(path)
-        if await self._is_bucket_hns_enabled(bucket):
+        if await self._is_bucket_hns_enabled(bucket) and delimiter == "/":
             kwargs["includeFoldersAsPrefixes"] = "true"
 
         return await super()._do_list_objects(
