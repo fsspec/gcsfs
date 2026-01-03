@@ -3,6 +3,7 @@ import os
 import shlex
 import subprocess
 import time
+import uuid
 from unittest import mock
 
 import fsspec
@@ -354,10 +355,8 @@ def gcs_hns(gcs_factory, buckets_to_delete):
 @pytest.fixture
 def zonal_write_mocks():
     """A fixture for mocking Zonal bucket write functionality."""
-    is_real_gcs = (
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-    )
-    if is_real_gcs:
+
+    if os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com":
         yield None
         return
 
@@ -397,3 +396,10 @@ def zonal_write_mocks():
             "_gcsfs_info": mock_gcsfs_info,
         }
         yield mocks
+
+
+@pytest.fixture
+def file_path():
+    """Generates a unique test file path and cleans it up after the test."""
+    path = f"{TEST_ZONAL_BUCKET}/zonal-test-{uuid.uuid4()}"
+    yield path
