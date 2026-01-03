@@ -83,7 +83,11 @@ steps:
       - "create"
       - "gs://gcsfs-test-zonal-${_SHORT_BUILD_ID}"
       - "--project=${PROJECT_ID}"
-      - "--location=${_ZONE}"
+      - "--location=${_REGION}"
+      - "--placement=${_ZONE}"
+      - "--default-storage-class=RAPID"
+      - "--enable-hierarchical-namespace"
+      - "--uniform-bucket-level-access"
     waitFor: ["-"]
 
   # Step 4: Create a GCE VM to run the tests.
