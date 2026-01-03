@@ -414,5 +414,7 @@ def file_path():
 @pytest_asyncio.fixture
 async def async_gcs():
     """Fixture to provide an asynchronous GCSFileSystem instance."""
-    gcs = GCSFileSystem(asynchronous=True, skip_instance_cache=True)
+    token = "anon" if not os.getenv("STORAGE_EMULATOR_HOST") else None
+    GCSFileSystem.clear_instance_cache()
+    gcs = GCSFileSystem(asynchronous=True, token=token)
     yield gcs

@@ -170,7 +170,7 @@ steps:
           # Run Zonal and HNS tests
           echo '--- Running Zonal and HNS tests on VM ---'
           # Increased the ulimit temporarily to avoid too many open files error
-          ulimit -n 2048
+          ulimit -n 4096
           pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
           pytest -vv -s \
