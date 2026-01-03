@@ -8,6 +8,7 @@ from unittest import mock
 
 import fsspec
 import pytest
+import pytest_asyncio
 import requests
 from google.cloud import storage
 from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
@@ -317,10 +318,15 @@ def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate=True, **kwar
             pass
         extended_gcsfs.mkdir(TEST_ZONAL_BUCKET)
         buckets_to_delete.add(TEST_ZONAL_BUCKET)
+    try:
         if populate:
             extended_gcsfs.pipe(
-                {TEST_ZONAL_BUCKET + "/" + k: v for k, v in allfiles.items()}
+                {TEST_ZONAL_BUCKET + "/" + k: v for k, v in allfiles.items()},
+                finalize_on_close=True,
             )
+    except Exception as e:
+        logging.warning(f"Failed to populate Zonal bucket: {e}")
+
     extended_gcsfs.invalidate_cache()
     return extended_gcsfs
 
@@ -402,3 +408,10 @@ def file_path():
     """Generates a unique test file path and cleans it up after the test."""
     path = f"{TEST_ZONAL_BUCKET}/zonal-test-{uuid.uuid4()}"
     yield path
+
+
+@pytest_asyncio.fixture
+async def async_gcs():
+    """Fixture to provide an asynchronous GCSFileSystem instance."""
+    gcs = GCSFileSystem(asynchronous=True, skip_instance_cache=True)
+    yield gcs

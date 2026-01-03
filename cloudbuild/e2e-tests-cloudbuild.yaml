@@ -33,6 +33,8 @@ steps:
         gcloud storage buckets create gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} &
         echo "--- Creating HNS bucket ---"
         gcloud storage buckets create gs://gcsfs-test-hns-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        echo "--- Creating Zonal bucket ---"
+        gcloud storage buckets create gs://gcsfs-test-zonal-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
 
         wait
 
@@ -102,7 +104,7 @@ steps:
           echo '--- Preparing test environment on VM ---'
           export GCSFS_TEST_BUCKET='gcsfs-test-standard-${_SHORT_BUILD_ID}'
           export GCSFS_TEST_VERSIONED_BUCKET='gcsfs-test-versioned-${_SHORT_BUILD_ID}'
-          export GCSFS_ZONAL_TEST_BUCKET='${_GCSFS_ZONAL_TEST_BUCKET}'
+          export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}'
           export GCSFS_HNS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}'
 
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com
@@ -130,7 +132,8 @@ steps:
          --color=no \
          gcsfs/tests/test_extended_gcsfs.py \
          gcsfs/tests/test_extended_hns_gcsfs.py \
-         gcsfs/tests/test_zonal_file.py
+         gcsfs/tests/test_zonal_file.py \
+         gcsfs/tests/test_async_gcsfs.py
         "
 
         # Execute the script on the VM via SSH.
@@ -252,6 +255,7 @@ steps:
         gcloud storage rm --recursive gs://gcsfs-test-standard-${_SHORT_BUILD_ID} &
         gcloud storage rm --recursive gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} &
         gcloud storage rm --recursive gs://gcsfs-test-hns-${_SHORT_BUILD_ID} &
+        gcloud storage rm --recursive gs://gcsfs-test-zonal-${_SHORT_BUILD_ID} &
         wait
     waitFor:
       - "run-standard-tests"
