@@ -53,7 +53,7 @@ single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_c
     ids=lambda p: p.name,
 )
 def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
-    gcs, target_dirs, params = gcsfs_benchmark_listing
+    gcs, target_dirs, _, params = gcsfs_benchmark_listing
 
     run_single_threaded(
         benchmark, monitor, params, _list_dirs, (gcs, target_dirs), BENCHMARK_GROUP
@@ -67,7 +67,7 @@ def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
     ids=lambda p: p.name,
 )
 def test_listing_multi_threaded(benchmark, gcsfs_benchmark_listing, monitor):
-    gcs, target_dirs, params = gcsfs_benchmark_listing
+    gcs, target_dirs, _, params = gcsfs_benchmark_listing
 
     chunks = _chunk_list(target_dirs, params.num_threads)
     args_list = [(gcs, chunks[i]) for i in range(params.num_threads)]
@@ -99,7 +99,7 @@ def _process_worker(gcs, target_dirs, num_threads, process_durations_shared, ind
 def test_listing_multi_process(
     benchmark, gcsfs_benchmark_listing, extended_gcs_factory, request, monitor
 ):
-    _, target_dirs, params = gcsfs_benchmark_listing
+    _, target_dirs, _, params = gcsfs_benchmark_listing
 
     def args_builder(gcs_instance, i, shared_arr):
         chunks = _chunk_list(target_dirs, params.num_processes)

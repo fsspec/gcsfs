@@ -132,10 +132,14 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
     prefix = f"{params.bucket_name}/benchmark-listing-{uuid.uuid4()}"
 
     target_dirs = [prefix]
-    path = prefix
-    for d in range(params.depth):
-        path = f"{path}/level_{d}"
-        target_dirs.append(path)
+    candidates = [(prefix, 0)]
+
+    for i in range(params.num_folders):
+        valid_parents = [p for p in candidates if p[1] <= params.depth]
+        parent_path, parent_depth = random.choice(valid_parents)
+        new_path = f"{parent_path}/folder_{i}"
+        target_dirs.append(new_path)
+        candidates.append((new_path, parent_depth + 1))
 
     file_paths = []
     for i in range(params.num_files):
@@ -143,8 +147,8 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
         file_paths.append(f"{folder}/file_{i}")
 
     logging.info(
-        f"Setting up listing benchmark '{params.name}': creating {params.num_files} "
-        f"files distributed across {len(target_dirs)} folders at depth {params.depth + 1}."
+        f"Setting up {params.group} benchmark '{params.name}': creating {params.num_files} "
+        f"files distributed across {len(target_dirs) - 1} folders at depth {params.depth}."
     )
 
     start_time = time.perf_counter()
@@ -155,22 +159,17 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
         f"Benchmark '{params.name}' setup created {params.num_files} files in {duration_ms:.2f} ms."
     )
 
-    yield gcs, target_dirs, params
+    yield gcs, target_dirs, prefix, params
 
     # --- Teardown ---
     logging.info(
-        f"Tearing down listing benchmark '{params.name}': deleting files and folders."
+        f"Tearing down {params.group} benchmark '{params.name}': deleting files and folders."
     )
     try:
         gcs.rm(file_paths)
         if params.bucket_type != "regional":
-            cleanup_dirs = [prefix]
-            path = prefix
-            for d in range(params.depth):
-                path = f"{path}/level_{d}"
-                cleanup_dirs.append(path)
-
-            for d in reversed(cleanup_dirs):
+            # Sort by length descending to delete children first
+            for d in sorted(target_dirs, key=len, reverse=True):
                 try:
                     gcs.rmdir(d)
                 except Exception:
@@ -225,6 +224,7 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["bucket_type"] = params.bucket_type
     benchmark.extra_info["processes"] = params.num_processes
     benchmark.extra_info["depth"] = getattr(params, "depth", "N/A")
+    benchmark.extra_info["num_folders"] = getattr(params, "num_folders", "N/A")
 
     benchmark.group = benchmark_group
 

@@ -11,3 +11,6 @@ class ListingBenchmarkParameters(BaseBenchmarkParameters):
 
     # The nested depth of object structure.
     depth: int
+
+    # The number of folders to create.
+    num_folders: int

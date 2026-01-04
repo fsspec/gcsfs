@@ -1,0 +1,21 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+    - "hns"
+  num_files:
+    - 65536
+    - 100000
+
+scenarios:
+  - name: "rename_flat"
+    depth: 0
+    num_folders: [256, 512, 1024, 2048]
+
+  - name: "rename_recursive"
+    depth: 8
+    num_folders: [256, 512, 1024, 2048]
+
+  - name: "rename_recursive_deep"
+    depth: 24
+    num_folders: [256, 512, 1024, 2048]
