@@ -320,10 +320,19 @@ def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate=True, **kwar
         buckets_to_delete.add(TEST_ZONAL_BUCKET)
     try:
         if populate:
-            extended_gcsfs.pipe(
-                {TEST_ZONAL_BUCKET + "/" + k: v for k, v in allfiles.items()},
-                finalize_on_close=True,
-            )
+            # To avoid hitting object mutation limits, only pipe files if they
+            # don't exist or if their size has changed.
+            existing_files = extended_gcsfs.find(TEST_ZONAL_BUCKET, detail=True)
+            files_to_pipe = {}
+            for k, v in allfiles.items():
+                remote_path = f"{TEST_ZONAL_BUCKET}/{k}"
+                if remote_path not in existing_files or existing_files[remote_path][
+                    "size"
+                ] != len(v):
+                    files_to_pipe[remote_path] = v
+
+            if files_to_pipe:
+                extended_gcsfs.pipe(files_to_pipe, finalize_on_close=True)
     except Exception as e:
         logging.warning(f"Failed to populate Zonal bucket: {e}")
 
