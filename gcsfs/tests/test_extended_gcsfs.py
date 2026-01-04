@@ -1000,7 +1000,6 @@ async def test_pipe_file_zonal(async_gcs, zonal_write_mocks, file_path):
         {"metadata": {"key": "value"}},
         {"fixed_key_metadata": {"key": "value"}},
         {"content_type": "text/plain"},
-        {"chunksize": 1024},
     ],
 )
 async def test_pipe_file_zonal_unsupported_params(

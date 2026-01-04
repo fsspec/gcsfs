@@ -651,18 +651,17 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if (
             metadata
             or fixed_key_metadata
-            or chunksize != 50 * 2**20
             or (content_type and content_type != "application/octet-stream")
         ):
             logger.warning(
-                "Zonal buckets do not support content_type, metadata, "
-                "fixed_key_metadata or chunksize during upload. These "
-                "parameters will be ignored."
+                "Zonal buckets do not support content_type, metadata or "
+                "fixed_key_metadata during upload. These parameters will be ignored."
             )
         await self._get_grpc_client()
         writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
         try:
-            await writer.append(data)
+            for i in range(0, len(data), chunksize):
+                await writer.append(data[i : i + chunksize])
         finally:
             finalize_on_close = kwargs.get("finalize_on_close", False)
             await writer.close(finalize_on_close=finalize_on_close)
