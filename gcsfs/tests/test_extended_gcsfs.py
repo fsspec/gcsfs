@@ -879,7 +879,7 @@ async def test_upload_chunk_zonal_exception_cleanup(
     Tests that upload_chunk correctly closes the stream when an
     exception occurs during append, without finalizing the object.
     """
-    if async_gcs.on_google:
+    if zonal_write_mocks is None:
         pytest.skip("Cannot mock exceptions on real GCS")
     bucket, object_name, _ = async_gcs.split_path(file_path)
     writer = await initiate_upload(fs=async_gcs, bucket=bucket, key=object_name)
