@@ -66,6 +66,12 @@ d = TEST_BUCKET + "/tmp/test/d"
 
 params = dict()
 
+BUCKET_NAME_MAP = {
+    "regional": TEST_BUCKET,
+    "zonal": TEST_ZONAL_BUCKET,
+    "hns": TEST_HNS_BUCKET,
+}
+
 
 def stop_docker(container):
     cmd = shlex.split('docker ps -a -q --filter "name=%s"' % container)
