@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from enum import Enum
 from functools import partial
@@ -49,7 +50,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.grpc_client = None
-        self.storage_control_client = None
+        self._storage_control_client = None
         # Adds user-passed credentials to ExtendedGcsFileSystem to pass to gRPC/Storage Control clients.
         # We unwrap the nested credentials here because self.credentials is a GCSFS wrapper,
         # but the clients expect the underlying google.auth credentials object.
@@ -107,7 +108,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket_type = await self._get_bucket_type(bucket)
         # Dont cache UNKNOWN type
         if bucket_type == BucketType.UNKNOWN:
-            return BucketType.UNKNOWN
+            return bucket_type
         self._storage_layout_cache[bucket] = bucket_type
         return self._storage_layout_cache[bucket]
 
@@ -552,6 +553,137 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Fallback to standard GCS behavior for non-HNS buckets
         return await super()._get_directory_info(path, bucket, key, generation)
+
+    async def _find(
+        self,
+        path,
+        withdirs=False,
+        detail=False,
+        prefix="",
+        versions=False,
+        maxdepth=None,
+        **kwargs,
+    ):
+        """
+        HNS-aware find. Overrides the parent to correctly list empty folders in HNS buckets.
+
+        For HNS buckets with `withdirs=True`, this method uses a hybrid approach:
+        1. It fetches all files in a single recursive API call (like the parent).
+        2. It concurrently fetches all folder objects (including empty ones)
+           using a recursive walk with the Storage Control API.
+        3. It merges these results for a complete listing.
+
+        For all other cases (non-HNS buckets or `withdirs=False`), it falls
+        back to the efficient parent implementation.
+        """
+        path = self._strip_protocol(path)
+        bucket, _, _ = self.split_path(path)
+
+        is_hns = await self._is_bucket_hns_enabled(bucket)
+        if not is_hns or not withdirs:
+            # Use parent implementation if not HNS or if dirs are not requested.
+            return await super()._find(
+                path,
+                withdirs=withdirs,
+                detail=detail,
+                prefix=prefix,
+                versions=versions,
+                maxdepth=maxdepth,
+                **kwargs,
+            )
+
+        print("in hns aware find implementation")
+
+        # Hybrid HNS approach for withdirs=True
+        # 1. Fetch all files from super find() method by passing withdirs as False.
+        files_task = self.loop.create_task(
+            super()._find(
+                path,
+                withdirs=False,  # Fetch files only
+                detail=True,  # Get full details for merging
+                prefix=prefix,
+                versions=versions,
+                maxdepth=maxdepth,
+                update_cache=False,  # Defer caching until after merge
+                **kwargs,
+            )
+        )
+
+        # 2. Fetch all explicit folder objects recursively. This is necessary
+        # to find all folders, especially empty ones.
+        folders_task = self.loop.create_task(
+            self._get_all_folders(path, bucket, prefix=prefix)
+        )
+        # 3. Run tasks concurrently and merge results.
+        files_result, folders_result = await asyncio.gather(files_task, folders_task)
+        all_objects = list(files_result.values()) + folders_result
+        all_objects.sort(key=lambda o: o["name"])
+
+        self._get_dirs_and_update_cache(path, all_objects, prefix=prefix)
+
+        # Final filtering and formatting. `all_objects` now contains a complete
+        # list of all files and all explicit/implicit folder objects.
+        if maxdepth:
+            depth = path.rstrip("/").count("/") + maxdepth
+            all_objects = [o for o in all_objects if o["name"].count("/") <= depth]
+
+        if detail:
+            if versions:
+                return {
+                    (
+                        f"{o['name']}#{o['generation']}"
+                        if "generation" in o
+                        else o["name"]
+                    ): o
+                    for o in all_objects
+                }
+            return {o["name"]: o for o in all_objects}
+
+        if versions:
+            return [
+                f"{o['name']}#{o['generation']}" if "generation" in o else o["name"]
+                for o in all_objects
+            ]
+        return [o["name"] for o in all_objects]
+
+    async def _get_all_folders(self, path, bucket, prefix=""):
+        """
+        Recursively fetches all folder objects under a given path using the
+        Storage Control API.
+        """
+        folders = []
+        base_path = self.split_path(path)[1].rstrip("/")
+        full_prefix = f"{base_path}/{prefix}".strip("/") if base_path else prefix
+
+        folder_id = full_prefix
+        if folder_id and not folder_id.endswith("/"):
+            folder_id += "/"
+        parent = f"projects/_/buckets/{bucket}"
+        request = storage_control_v2.ListFoldersRequest(parent=parent, prefix=folder_id)
+        logger.debug(f"list_folders request: {request}")
+
+        async for folder in await self._storage_control_client.list_folders(
+            request=request
+        ):
+            folders.append(self._create_folder_entry(bucket, folder))
+
+        return folders
+
+    def _create_folder_entry(self, bucket, folder):
+        """Helper to create a dictionary representing a folder entry."""
+        path = f"{bucket}/{folder.name.split('/folders/')[1]}".rstrip("/")
+        _, key, _ = self.split_path(path)
+        return {
+            "Key": key,
+            "Size": 0,
+            "name": path,
+            "size": 0,
+            "type": "directory",
+            "storageClass": "DIRECTORY",
+            "ctime": folder.create_time,
+            "mtime": folder.update_time,
+            "metageneration": folder.metageneration,
+        }
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
