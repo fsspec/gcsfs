@@ -795,7 +795,7 @@ class TestExtendedGcsFileSystemMkdir:
     async def test_mkdir_hns_bucket_with_create_parents_succeeds(
         self, gcs_hns, gcs_hns_mocks, buckets_to_delete
     ):
-        """Test mkdir with create_parents and create_hns_bucket creates an HNS bucket."""
+        """Test mkdir with create_parents and enable_hierarchial_namespace creates an HNS bucket."""
         gcsfs = gcs_hns
         bucket_name = f"gcsfs-hns-bucket-mkdir-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some_dir"
@@ -813,7 +813,7 @@ class TestExtendedGcsFileSystemMkdir:
 
             assert not gcsfs.exists(bucket_name)
             # This should create the HNS bucket `bucket_name` and then do nothing for `some_dir`
-            gcsfs.mkdir(dir_path, create_parents=True, create_hns_bucket=True)
+            gcsfs.mkdir(dir_path, create_parents=True, enable_hierarchial_namespace=True)
             assert gcsfs.exists(bucket_name)
             assert gcsfs.exists(dir_path)
 
@@ -899,7 +899,7 @@ class TestExtendedGcsFileSystemMkdir:
                 mocks["control_client"].create_folder.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mkdir_create_hns_bucket(
+    async def test_mkdir_enable_hierarchial_namespace(
         self, gcs_hns, gcs_hns_mocks, buckets_to_delete
     ):
         """Test creating a new HNS-enabled bucket."""
@@ -915,7 +915,7 @@ class TestExtendedGcsFileSystemMkdir:
                 ]
 
             assert not gcsfs.exists(bucket_path)
-            gcsfs.mkdir(bucket_path, create_hns_bucket=True)
+            gcsfs.mkdir(bucket_path, enable_hierarchial_namespace=True)
             assert gcsfs.exists(bucket_path)
 
             # Verify that the filesystem recognizes the new bucket as HNS-enabled.
