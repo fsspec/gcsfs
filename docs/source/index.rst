@@ -195,12 +195,22 @@ For further reference check `aiohttp proxy support`_.
 
 .. _aiohttp proxy support: https://docs.aiohttp.org/en/stable/client_advanced.html#proxy-support
 
-Alternative GCP Universes
--------------------------
+Targeting specific GCP endpoints
+--------------------------------
+
+There are multiple ways to target non-default Google Cloud storage endpoints:
+
+- setting the ``FSSPEC_GCS_ENDPOINT_URL`` environment variable to the desired
+  endpoint URL.
+- passing the ``endpoint_url`` parameter to the ``GCSFileSystem`` constructor.
+- setting the ``STORAGE_EMULATOR_HOST`` environment variable to the desired endpoint
+  URL (usage is reserved for testing purposes).
 
 To target an alternative GCP universe, the ``GOOGLE_CLOUD_UNIVERSE_DOMAIN``
 environment variable should be set to your desired universe domain for ``gcsfs``
 to target the `Google Cloud Storage`_ API in your alternative universe.
+
+When doing so, `gcsfs` will target the ``https://storage.{universe_domain}`` endpoint.
 
 For instance, set ``GOOGLE_CLOUD_UNIVERSE_DOMAIN=s3nsapis.fr`` to target the
 S3NS_ universe.
