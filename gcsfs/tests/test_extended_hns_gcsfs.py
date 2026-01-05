@@ -813,7 +813,9 @@ class TestExtendedGcsFileSystemMkdir:
 
             assert not gcsfs.exists(bucket_name)
             # This should create the HNS bucket `bucket_name` and then do nothing for `some_dir`
-            gcsfs.mkdir(dir_path, create_parents=True, enable_hierarchial_namespace=True)
+            gcsfs.mkdir(
+                dir_path, create_parents=True, enable_hierarchial_namespace=True
+            )
             assert gcsfs.exists(bucket_name)
             assert gcsfs.exists(dir_path)
 
