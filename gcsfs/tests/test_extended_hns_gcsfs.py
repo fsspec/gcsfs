@@ -1181,7 +1181,6 @@ class TestExtendedGcsFileSystemInternal:
             assert result == expected_result
             mock_super_method.assert_called_once()
             fs._storage_control_client.get_folder.assert_not_called()
-                mocks["control_client"].rename_folder.assert_called()
 
 
 class TestExtendedGcsFileSystemRmdir:
