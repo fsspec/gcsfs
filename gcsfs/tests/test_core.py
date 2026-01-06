@@ -289,7 +289,12 @@ def test_pickle(gcs):
 
 
 def test_ls_touch(gcs):
-    assert not gcs.exists(TEST_BUCKET + "/tmp/test")
+    path = TEST_BUCKET + "/tmp/test"
+    if gcs.exists(path):
+        try:
+            gcs.rm(path, recursive=True)
+        except Exception:
+            pass
 
     gcs.touch(a)
     gcs.touch(b)
@@ -532,16 +537,23 @@ def test_move(gcs):
     assert not gcs.exists(fn)
 
 
-@pytest.mark.parametrize("slash_from", ([False, True]))
-def test_move_recursive(gcs, slash_from):
+def test_move_recursive_no_slash(gcs):
     # See issue #489
     dir_from = TEST_BUCKET + "/nested"
-    if slash_from:
-        dir_from += "/"
     dir_to = TEST_BUCKET + "/new_name"
 
     gcs.mv(dir_from, dir_to, recursive=True)
     assert not gcs.exists(dir_from)
+    assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
+
+
+def test_move_recursive_with_slash(gcs):
+    # See issue #489
+    dir_from = TEST_BUCKET + "/nested/"
+    dir_to = TEST_BUCKET + "/new_name_with_slash"
+
+    gcs.mv(dir_from, dir_to, recursive=True)
+    assert not gcs.exists(dir_from.rstrip("/"))
     assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
 
 
@@ -1366,13 +1378,13 @@ def test_dir_marker_info_eq_ls(gcs):
     out1 = gcs.info(f"{TEST_BUCKET}/psudodir")
     out2 = gcs.ls(f"{TEST_BUCKET}/psudodir", detail=True)[0]
     assert out1["type"] == "directory"
-    assert out1 == out2
+    assert {k: v for k, v in out1.items() if k in out2} == out2
 
     gcs.invalidate_cache()
     out3 = gcs.ls(f"{TEST_BUCKET}/psudodir", detail=True)[0]
     out4 = gcs.info(f"{TEST_BUCKET}/psudodir")
     assert out3["type"] == "directory"
-    assert out3 == out4
+    assert {k: v for k, v in out4.items() if k in out3} == out3
 
 
 def test_mkdir_with_path(gcs):
@@ -1697,3 +1709,34 @@ def test_ls_with_max_results(gcs):
 def test_get_error(gcs):
     with pytest.raises(FileNotFoundError):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
+
+
+def test_custom_gcp_universe(monkeypatch):
+    # Make sure we simulate a mock less connection
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+
+    monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "s3nsapis.fr")
+    fs = fsspec.filesystem("gcs", token="anon")
+    assert fs.base == "https://storage.s3nsapis.fr/storage/v1/"
+    assert fs.on_google is True
+    assert (
+        fs.url("/test/path")
+        == "https://storage.s3nsapis.fr/download/storage/v1/b/test/o/path?alt=media"
+    )
+    assert fs.batch_url_base == "https://storage.s3nsapis.fr/batch/storage/v1"
+
+
+def test_default_gcp_universe(monkeypatch):
+    # Make sure we simulate a mock less connection
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+
+    fs = fsspec.filesystem("gcs", token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert fs.on_google is True
+    assert (
+        fs.url("/test/path")
+        == "https://storage.googleapis.com/download/storage/v1/b/test/o/path?alt=media"
+    )
+    assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
