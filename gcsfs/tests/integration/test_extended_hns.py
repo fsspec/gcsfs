@@ -3,9 +3,6 @@ import uuid
 
 import pytest
 
-# Make sure the experimental flag is set for HNS features
-os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
-
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
 # Skip these tests if not running against a real GCS backend
