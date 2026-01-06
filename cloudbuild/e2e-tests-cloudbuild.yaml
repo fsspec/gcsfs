@@ -100,39 +100,6 @@ steps:
           # Install testing libraries explicitly, as they are not in setup.py
           pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage psutil PyYAML > /dev/null
           pip install -e . > /dev/null
-
-          echo '--- Preparing test environment on VM ---'
-          export GCSFS_TEST_BUCKET='gcsfs-test-standard-${_SHORT_BUILD_ID}'
-          export GCSFS_TEST_VERSIONED_BUCKET='gcsfs-test-versioned-${_SHORT_BUILD_ID}'
-          export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}'
-          export GCSFS_HNS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}'
-
-          export STORAGE_EMULATOR_HOST=https://storage.googleapis.com
-          export GCSFS_TEST_PROJECT=${PROJECT_ID}
-          export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME}
-
-          echo '--- Running standard tests on VM ---'
-          pytest -vv -s \
-          --log-format='%(asctime)s %(levelname)s %(message)s' \
-          --log-date-format='%H:%M:%S' \
-          --color=no \
-          gcsfs/ \
-          --deselect gcsfs/tests/test_core.py::test_sign
-
-          # Run Zonal and HNS tests
-          echo '--- Running Zonal and HNS tests on VM ---'
-          # Increased the ulimit temporarily to avoid too many open files error
-          ulimit -n 2048
-          pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main
-          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
-          pytest -vv -s \
-          --log-format='%(asctime)s %(levelname)s %(message)s' \
-          --log-date-format='%H:%M:%S' \
-          --color=no \
-          gcsfs/tests/test_extended_gcsfs.py \
-          gcsfs/tests/test_extended_hns_gcsfs.py \
-          gcsfs/tests/test_zonal_file.py \
-          gcsfs/tests/test_async_gcsfs.py
         "
 
         # Execute the script on the VM via SSH.
@@ -174,13 +141,14 @@ steps:
         TEST_SCRIPT="
           source env/bin/activate && \
           echo '--- Preparing test environment for zonal tests ---' && \
-          export GCSFS_ZONAL_TEST_BUCKET='${_GCSFS_ZONAL_TEST_BUCKET}' && \
+          export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}' && \
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
           export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running Zonal tests on VM ---' && \
           ulimit -n 2048 && export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py
+          pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main && \
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py gcsfs/tests/test_async_gcsfs.py
         "
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:

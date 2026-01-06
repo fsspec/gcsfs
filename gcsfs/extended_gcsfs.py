@@ -497,6 +497,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
         try:
             logger.debug(f"create_folder request: {request}")
+            await self._get_control_plane_client()
             await self._storage_control_client.create_folder(request=request)
             # Instead of invalidating the parent cache, update it to add the new entry.
             parent_path = self._parent(path)
