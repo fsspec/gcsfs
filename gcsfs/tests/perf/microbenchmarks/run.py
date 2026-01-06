@@ -144,10 +144,10 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
 
     # Calculate max throughput
     file_size = bench["extra_info"].get("file_size", 0)
-    num_files = bench["extra_info"].get("num_files", 1)
+    files = bench["extra_info"].get("files", 1)
 
     if file_size != "N/A":
-        total_bytes = file_size * num_files
+        total_bytes = file_size * files
 
         min_time = bench["stats"].get("min")
         if min_time and min_time > 0:
@@ -222,8 +222,8 @@ def _create_table_row(row):
         row.get("bucket_type", ""),
         row.get("group", ""),
         row.get("pattern", ""),
-        row.get("num_files", ""),
-        row.get("num_folders", ""),
+        row.get("files", ""),
+        row.get("folders", ""),
         row.get("threads", ""),
         row.get("processes", ""),
         row.get("depth", ""),

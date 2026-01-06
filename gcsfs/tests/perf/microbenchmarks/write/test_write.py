@@ -81,14 +81,14 @@ def _process_worker(
     gcs,
     file_paths,
     chunk_size,
-    num_threads,
+    threads,
     file_size_bytes,
     process_durations_shared,
     index,
 ):
     """A worker function for each process to write a list of files."""
     start_time = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+    with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [
             executor.submit(_write_op_seq, gcs, path, chunk_size, file_size_bytes)
             for path in file_paths
@@ -108,7 +108,7 @@ def test_write_multi_process(
     benchmark, gcsfs_benchmark_write, extended_gcs_factory, request, monitor
 ):
     _, file_paths, params = gcsfs_benchmark_write
-    files_per_process = params.num_files // params.num_processes
+    files_per_process = params.files // params.processes
 
     def args_builder(gcs_instance, i, shared_arr):
         start_index = i * files_per_process
@@ -118,7 +118,7 @@ def test_write_multi_process(
             gcs_instance,
             process_files,
             params.chunk_size_bytes,
-            params.num_threads,
+            params.threads,
             params.file_size_bytes,
             shared_arr,
             i,

@@ -11,13 +11,9 @@ from gcsfs.tests.perf.microbenchmarks.conftest import (
 
 def filter_test_cases(all_cases):
     """Separates cases into single-threaded, multi-threaded, and multi-process."""
-    single_threaded = [
-        p for p in all_cases if p.num_threads == 1 and p.num_processes == 1
-    ]
-    multi_threaded = [
-        p for p in all_cases if p.num_threads > 1 and p.num_processes == 1
-    ]
-    multi_process = [p for p in all_cases if p.num_processes > 1]
+    single_threaded = [p for p in all_cases if p.threads == 1 and p.processes == 1]
+    multi_threaded = [p for p in all_cases if p.threads > 1 and p.processes == 1]
+    multi_process = [p for p in all_cases if p.processes > 1]
     return single_threaded, multi_threaded, multi_process
 
 
@@ -47,7 +43,7 @@ def run_multi_threaded(
         logging.info(
             f"Multi-threaded {benchmark_group} benchmark: Starting benchmark round."
         )
-        with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
+        with ThreadPoolExecutor(max_workers=params.threads) as executor:
             futures = [executor.submit(worker_func, *args) for args in args_list]
             for f in futures:
                 f.result()
@@ -83,12 +79,12 @@ def run_multi_process(
     if multiprocessing.get_start_method(allow_none=True) != "spawn":
         multiprocessing.set_start_method("spawn", force=True)
 
-    process_durations_shared = multiprocessing.Array("d", params.num_processes)
+    process_durations_shared = multiprocessing.Array("d", params.processes)
 
     # Create GCS instances for workers
     gcs_kwargs = gcs_kwargs or {}
     worker_gcs_instances = [
-        extended_gcs_factory(**gcs_kwargs) for _ in range(params.num_processes)
+        extended_gcs_factory(**gcs_kwargs) for _ in range(params.processes)
     ]
 
     round_durations_s = []
@@ -99,7 +95,7 @@ def run_multi_process(
             )
             processes = []
 
-            for i in range(params.num_processes):
+            for i in range(params.processes):
                 # Build arguments specific to this process (e.g. file slice)
                 p_args = args_builder(
                     worker_gcs_instances[i], i, process_durations_shared

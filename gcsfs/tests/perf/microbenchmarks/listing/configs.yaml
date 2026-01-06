@@ -3,19 +3,23 @@ common:
     - "regional"
     - "zonal"
     - "hns"
-  num_files:
-    - 10000
-    - 100000
+  files:
+    - 65536
 
 scenarios:
   - name: "list_flat"
     threads: [1]
     processes: [1]
 
-  - name: "list_flat_recursive"
+  - name: "list_recursive"
     threads: [1]
     processes: [1]
     depth: 8
+
+  - name: "list_recursive_deep"
+    threads: [1]
+    processes: [1]
+    depth: 24
 
   - name: "list_recursive_multi_thread"
     threads: [4,8]
@@ -24,3 +28,21 @@ scenarios:
   - name: "list_recursive_multi_process"
     threads: [1,2]
     processes: [4,8]
+
+  - name: "find_flat"
+    threads: [1]
+    processes: [1]
+    depth: 1
+    pattern: "find"
+
+  - name: "find_recursive"
+    threads: [1]
+    processes: [1]
+    depth: 8
+    pattern: "find"
+
+  - name: "find_recursive_deep"
+    threads: [1]
+    processes: [1]
+    depth: 24
+    pattern: "find"

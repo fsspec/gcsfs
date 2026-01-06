@@ -13,17 +13,17 @@ class BaseBenchmarkParameters:
     # The name of the GCS bucket to use for the benchmark.
     bucket_name: str
 
-    # The type of the bucket, e.g., "regional", "zonal".
+    # The type of the bucket, e.g., "regional", "zonal", "hns".
     bucket_type: str
 
     # Number of threads for multi-threaded tests.
-    num_threads: int
+    threads: int
 
     # Number of processes for multi-process tests.
-    num_processes: int
+    processes: int
 
     # Number of files to create for the benchmark.
-    num_files: int
+    files: int
 
     # Number of rounds for the benchmark.
     rounds: int

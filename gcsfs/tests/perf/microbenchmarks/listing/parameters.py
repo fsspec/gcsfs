@@ -13,4 +13,7 @@ class ListingBenchmarkParameters(BaseBenchmarkParameters):
     depth: int
 
     # The number of folders to create.
-    num_folders: int
+    folders: int
+
+    # The listing pattern to use: "ls" or "find".
+    pattern: str = "ls"

@@ -67,10 +67,10 @@ def gcsfs_benchmark_read(extended_gcs_factory, request):
     gcs = extended_gcs_factory(block_size=params.block_size_bytes)
 
     prefix = f"{params.bucket_name}/benchmark-files-{uuid.uuid4()}"
-    file_paths = [f"{prefix}/file_{i}" for i in range(params.num_files)]
+    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
 
     logging.info(
-        f"Setting up benchmark '{params.name}': creating {params.num_files} file(s) "
+        f"Setting up benchmark '{params.name}': creating {params.files} file(s) "
         f"of size {params.file_size_bytes / MB:.2f} MB each."
     )
 
@@ -80,7 +80,7 @@ def gcsfs_benchmark_read(extended_gcs_factory, request):
 
     duration_ms = (time.perf_counter() - start_time) * 1000
     logging.info(
-        f"Benchmark '{params.name}' setup created {params.num_files} files in {duration_ms:.2f} ms."
+        f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
     )
 
     yield gcs, file_paths, params
@@ -103,10 +103,10 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
     gcs = extended_gcs_factory()
 
     prefix = f"{params.bucket_name}/benchmark-write-{uuid.uuid4()}"
-    file_paths = [f"{prefix}/file_{i}" for i in range(params.num_files)]
+    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
 
     logging.info(
-        f"Setting up write benchmark '{params.name}': targeting {params.num_files} file(s) "
+        f"Setting up write benchmark '{params.name}': targeting {params.files} file(s) "
         f"of size {params.file_size_bytes / MB:.2f} MB each."
     )
 
@@ -134,7 +134,7 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
     target_dirs = [prefix]
     candidates = [(prefix, 0)]
 
-    for i in range(params.num_folders):
+    for i in range(params.folders):
         valid_parents = [p for p in candidates if p[1] <= params.depth]
         parent_path, parent_depth = random.choice(valid_parents)
         new_path = f"{parent_path}/folder_{i}"
@@ -142,12 +142,12 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
         candidates.append((new_path, parent_depth + 1))
 
     file_paths = []
-    for i in range(params.num_files):
+    for i in range(params.files):
         folder = random.choice(target_dirs)
         file_paths.append(f"{folder}/file_{i}")
 
     logging.info(
-        f"Setting up {params.group} benchmark '{params.name}': creating {params.num_files} "
+        f"Setting up benchmark '{params.name}': creating {params.files} "
         f"files distributed across {len(target_dirs) - 1} folders at depth {params.depth}."
     )
 
@@ -156,15 +156,13 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
 
     duration_ms = (time.perf_counter() - start_time) * 1000
     logging.info(
-        f"Benchmark '{params.name}' setup created {params.num_files} files in {duration_ms:.2f} ms."
+        f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
     )
 
     yield gcs, target_dirs, prefix, params
 
     # --- Teardown ---
-    logging.info(
-        f"Tearing down {params.group} benchmark '{params.name}': deleting files and folders."
-    )
+    logging.info(f"Tearing down benchmark '{params.name}': deleting files and folders.")
     try:
         gcs.rm(file_paths)
         if params.bucket_type != "regional":
@@ -213,18 +211,18 @@ def publish_benchmark_extra_info(
     """
     Helper function to publish benchmark parameters to the extra_info property.
     """
-    benchmark.extra_info["num_files"] = params.num_files
+    benchmark.extra_info["files"] = params.files
     benchmark.extra_info["file_size"] = getattr(params, "file_size_bytes", "N/A")
     benchmark.extra_info["chunk_size"] = getattr(params, "chunk_size_bytes", "N/A")
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
-    benchmark.extra_info["threads"] = params.num_threads
+    benchmark.extra_info["threads"] = params.threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name
     benchmark.extra_info["bucket_type"] = params.bucket_type
-    benchmark.extra_info["processes"] = params.num_processes
+    benchmark.extra_info["processes"] = params.processes
     benchmark.extra_info["depth"] = getattr(params, "depth", "N/A")
-    benchmark.extra_info["num_folders"] = getattr(params, "num_folders", "N/A")
+    benchmark.extra_info["folders"] = getattr(params, "folders", "N/A")
 
     benchmark.group = benchmark_group
 

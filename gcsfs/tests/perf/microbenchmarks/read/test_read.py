@@ -112,7 +112,7 @@ def _process_worker(
     gcs,
     file_paths,
     chunk_size,
-    num_threads,
+    threads,
     pattern,
     file_size_bytes,
     process_durations_shared,
@@ -120,7 +120,7 @@ def _process_worker(
 ):
     """A worker function for each process to read a list of files."""
     start_time = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+    with ThreadPoolExecutor(max_workers=threads) as executor:
         if pattern == "seq":
             futures = [
                 executor.submit(_read_op_seq, gcs, path, chunk_size)
@@ -150,22 +150,22 @@ def test_read_multi_process(
     benchmark, gcsfs_benchmark_read, extended_gcs_factory, request, monitor
 ):
     _, file_paths, params = gcsfs_benchmark_read
-    files_per_process = params.num_files // params.num_processes
+    files_per_process = params.files // params.processes
 
     def args_builder(gcs_instance, i, shared_arr):
-        if params.num_files > 1:
+        if params.files > 1:
             start_index = i * files_per_process
             end_index = start_index + files_per_process
             process_files = file_paths[start_index:end_index]
-        else:  # num_files == 1
+        else:  # files == 1
             # Each process will have its threads read from the same single file
-            process_files = [file_paths[0]] * params.num_threads
+            process_files = [file_paths[0]] * params.threads
 
         return (
             gcs_instance,
             process_files,
             params.chunk_size_bytes,
-            params.num_threads,
+            params.threads,
             params.pattern,
             params.file_size_bytes,
             shared_arr,

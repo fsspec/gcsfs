@@ -23,16 +23,21 @@ or use the orchestrator script at gcsfs/tests/perf/microbenchmarks/run.py""",
 BENCHMARK_GROUP = "listing"
 
 
-def _list_op(gcs, path):
+def _list_op(gcs, path, pattern="ls"):
     start_time = time.perf_counter()
-    items = gcs.ls(path)
+    if pattern == "find":
+        items = gcs.find(path)
+    else:
+        items = gcs.ls(path)
     duration_ms = (time.perf_counter() - start_time) * 1000
-    logging.info(f"LIST : {path} - {len(items)} items - {duration_ms:.2f} ms.")
+    logging.info(
+        f"{pattern.upper()} : {path} - {len(items)} items - {duration_ms:.2f} ms."
+    )
 
 
-def _list_dirs(gcs, paths):
+def _list_dirs(gcs, paths, pattern="ls"):
     for path in paths:
-        _list_op(gcs, path)
+        _list_op(gcs, path, pattern=pattern)
 
 
 def _chunk_list(data, n):
@@ -56,7 +61,12 @@ def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
     gcs, target_dirs, _, params = gcsfs_benchmark_listing
 
     run_single_threaded(
-        benchmark, monitor, params, _list_dirs, (gcs, target_dirs), BENCHMARK_GROUP
+        benchmark,
+        monitor,
+        params,
+        _list_dirs,
+        (gcs, target_dirs, params.pattern),
+        BENCHMARK_GROUP,
     )
 
 
@@ -69,21 +79,23 @@ def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
 def test_listing_multi_threaded(benchmark, gcsfs_benchmark_listing, monitor):
     gcs, target_dirs, _, params = gcsfs_benchmark_listing
 
-    chunks = _chunk_list(target_dirs, params.num_threads)
-    args_list = [(gcs, chunks[i]) for i in range(params.num_threads)]
+    chunks = _chunk_list(target_dirs, params.threads)
+    args_list = [(gcs, chunks[i], params.pattern) for i in range(params.threads)]
 
     run_multi_threaded(
         benchmark, monitor, params, _list_dirs, args_list, BENCHMARK_GROUP
     )
 
 
-def _process_worker(gcs, target_dirs, num_threads, process_durations_shared, index):
+def _process_worker(
+    gcs, target_dirs, threads, process_durations_shared, index, pattern="ls"
+):
     """A worker function for each process to list the directory."""
     start_time = time.perf_counter()
-    chunks = _chunk_list(target_dirs, num_threads)
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+    chunks = _chunk_list(target_dirs, threads)
+    with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [
-            executor.submit(_list_dirs, gcs, chunks[i]) for i in range(num_threads)
+            executor.submit(_list_dirs, gcs, chunks[i], pattern) for i in range(threads)
         ]
         list(futures)
     duration_s = time.perf_counter() - start_time
@@ -102,13 +114,14 @@ def test_listing_multi_process(
     _, target_dirs, _, params = gcsfs_benchmark_listing
 
     def args_builder(gcs_instance, i, shared_arr):
-        chunks = _chunk_list(target_dirs, params.num_processes)
+        chunks = _chunk_list(target_dirs, params.processes)
         return (
             gcs_instance,
             chunks[i],
-            params.num_threads,
+            params.threads,
             shared_arr,
             i,
+            params.pattern,
         )
 
     run_multi_process(
