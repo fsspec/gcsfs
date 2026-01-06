@@ -567,21 +567,20 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """
         HNS-aware find. Overrides the parent to correctly list empty folders in HNS buckets.
 
-        For HNS buckets with `withdirs=True`, this method uses a hybrid approach:
+        For HNS buckets this method uses a hybrid approach for fetching files and directories:
         1. It fetches all files in a single recursive API call (like the parent).
         2. It concurrently fetches all folder objects (including empty ones)
            using a recursive walk with the Storage Control API.
         3. It merges these results for a complete listing.
 
-        For all other cases (non-HNS buckets or `withdirs=False`), it falls
-        back to the efficient parent implementation.
+        For buckets with flat structure, it falls back to the parent implementation.
         """
         path = self._strip_protocol(path)
         bucket, _, _ = self.split_path(path)
 
         is_hns = await self._is_bucket_hns_enabled(bucket)
-        if not is_hns or not withdirs:
-            # Use parent implementation if not HNS or if dirs are not requested.
+        if not is_hns:
+            # Use parent implementation if bucket is not HNS.
             return await super()._find(
                 path,
                 withdirs=withdirs,
@@ -592,15 +591,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 **kwargs,
             )
 
-        print("in hns aware find implementation")
-
-        # Hybrid HNS approach for withdirs=True
+        # Hybrid approach for HNS enabled buckets
         # 1. Fetch all files from super find() method by passing withdirs as False.
         files_task = self.loop.create_task(
             super()._find(
                 path,
                 withdirs=False,  # Fetch files only
-                detail=True,  # Get full details for merging
+                detail=True,  # Get full details for merging and populating cache
                 prefix=prefix,
                 versions=versions,
                 maxdepth=maxdepth,
@@ -616,10 +613,18 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
         # 3. Run tasks concurrently and merge results.
         files_result, folders_result = await asyncio.gather(files_task, folders_task)
-        all_objects = list(files_result.values()) + folders_result
-        all_objects.sort(key=lambda o: o["name"])
 
-        self._get_dirs_and_update_cache(path, all_objects, prefix=prefix)
+        # Always update the cache with both files and folders for consistency.
+        cacheable_objects = list(files_result.values()) + folders_result
+        self._get_dirs_and_update_cache(path, cacheable_objects, prefix=prefix)
+
+        if not withdirs:
+            # If not including directories, the final output should only contain files.
+            all_objects = list(files_result.values())
+        else:
+            all_objects = cacheable_objects
+
+        all_objects.sort(key=lambda o: o["name"])
 
         # Final filtering and formatting. `all_objects` now contains a complete
         # list of all files and all explicit/implicit folder objects.

@@ -128,14 +128,17 @@ class TestExtendedGcsFileSystemFindIntegration:
             file_path
         ], "find on a file path should return a list containing only that file."
 
-    def test_find_updates_dircache_without_prefix(self, gcs_hns, test_structure):
+    @pytest.mark.parametrize("withdirs_param", [True, False])
+    def test_find_updates_dircache_without_prefix(
+        self, gcs_hns, test_structure, withdirs_param
+    ):
         """Test that find() populates the dircache when no prefix is given."""
         base_dir = test_structure["base_dir"]
         gcs_hns.invalidate_cache()
         assert not gcs_hns.dircache
 
         # Run find to populate the cache
-        gcs_hns.find(base_dir, withdirs=True)
+        gcs_hns.find(base_dir, withdirs=withdirs_param)
 
         # Verify that the cache is now populated for the found directories
         assert base_dir in gcs_hns.dircache
