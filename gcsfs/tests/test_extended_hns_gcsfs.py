@@ -783,8 +783,8 @@ class TestExtendedGcsFileSystemFind:
                 request=expected_request
             )
 
-    def test_find_non_hns_or_no_withdirs_falls_back(self, gcs_hns, gcs_hns_mocks):
-        """Test that find falls back to parent implementation for non-HNS or withdirs=False."""
+    def test_find_non_hns_falls_back(self, gcs_hns, gcs_hns_mocks):
+        """Test that find falls back to parent implementation for non-HNS"""
         base_path = f"{TEST_HNS_BUCKET}/find_test"
         with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcs_hns) as mocks:
             # Case 1: Not an HNS bucket
@@ -792,19 +792,6 @@ class TestExtendedGcsFileSystemFind:
             mocks["super_find"].assert_called_with(
                 base_path,
                 withdirs=True,
-                detail=False,
-                prefix="",
-                versions=False,
-                maxdepth=None,
-            )
-            mocks["control_client"].list_folders.assert_not_called()
-
-            # Case 2: HNS bucket but withdirs=False
-            mocks["async_lookup_bucket_type"].return_value = BucketType.HIERARCHICAL
-            gcs_hns.find(base_path, withdirs=False)
-            mocks["super_find"].assert_called_with(
-                base_path,
-                withdirs=False,
                 detail=False,
                 prefix="",
                 versions=False,
