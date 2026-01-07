@@ -1,6 +1,7 @@
 import contextlib
 import io
 import logging
+import multiprocessing
 import os
 import random
 import threading
@@ -9,6 +10,7 @@ from itertools import chain
 from unittest import mock
 
 import pytest
+from google.api_core.exceptions import NotFound
 from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
@@ -20,6 +22,7 @@ from google.cloud.storage.exceptions import DataCorruption
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import (
     BucketType,
+    ExtendedGcsFileSystem,
     initiate_upload,
     simple_upload,
     upload_chunk,
@@ -352,6 +355,52 @@ def test_mrd_exception_handling(extended_gcsfs, gcs_bucket_mocks, exception_to_r
         mocks["downloader"].download_ranges.assert_called_once()
 
 
+def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests that mrd stream is properly closed with file closure.
+    """
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        if not extended_gcsfs.on_google:
+
+            def close_side_effect():
+                mocks["downloader"].is_stream_open = False
+
+            mocks["downloader"].close.side_effect = close_side_effect
+
+        with extended_gcsfs.open(file_path, "rb") as f:
+            assert f.mrd is not None
+
+        assert True is f.closed
+        assert False is f.mrd.is_stream_open
+
+
+def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests that the AsyncMultiRangeDownloader (MRD) is created only once when a
+    ZonalFile is opened, and not for each subsequent read operation.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Internal call counts cannot be verified against real GCS.")
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with extended_gcsfs.open(file_path, "rb") as f:
+            # The MRD should be created upon opening the file.
+            mocks["create_mrd"].assert_called_once()
+
+            f.read(10)
+            f.read(20)
+            f.seek(5)
+            f.read(5)
+
+        # Verify that create_mrd was not called again.
+        mocks["create_mrd"].assert_called_once()
+
+
+# ========================== Zonal Multithreaded Read Tests ===========================
 _MULTI_THREADED_TEST_FILE = "multi_threaded_test_file"
 _MULTI_THREADED_TEST_DATA = text_files[_MULTI_THREADED_TEST_FILE]
 _MULTI_THREADED_TEST_FILE_PATH = f"{TEST_ZONAL_BUCKET}/{_MULTI_THREADED_TEST_FILE}"
@@ -645,51 +694,164 @@ def test_multithreaded_read_one_fails_others_survive_zb(
         assert mocks["downloader"].close.call_count == _NUM_FAIL_SURVIVE_THREADS
 
 
-def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
+# =========================== Zonal Multiprocess Read Tests ===========================
+def run_in_processes(func, args_list):
+    """Runs a function in multiple processes and collects results."""
+    # Use 'spawn' context to avoid deadlocks from libraries that are not fork-safe.
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=len(args_list)) as pool:
+        results = pool.starmap(func, args_list)
+    return results
+
+
+def _read_range_and_get_pid(path, offset, length, block_size=None):
     """
-    Tests that mrd stream is properly closed with file closure.
+    Helper function for multiprocessing tests. Creates a new fs instance
+    in the new process and reads a range from a file.
+    Returns the data and the process ID.
     """
-    with gcs_bucket_mocks(
-        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
-    ) as mocks:
-        if not extended_gcsfs.on_google:
-
-            def close_side_effect():
-                mocks["downloader"].is_stream_open = False
-
-            mocks["downloader"].close.side_effect = close_side_effect
-
-        with extended_gcsfs.open(file_path, "rb") as f:
-            assert f.mrd is not None
-
-        assert True is f.closed
-        assert False is f.mrd.is_stream_open
+    fs = ExtendedGcsFileSystem()
+    with fs.open(path, "rb", block_size=block_size) as f:
+        f.seek(offset)
+        data = f.read(length)
+    return data, os.getpid()
 
 
-def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
+def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
     """
-    Tests that the AsyncMultiRangeDownloader (MRD) is created only once when a
-    ZonalFile is opened, and not for each subsequent read operation.
+    Tests concurrent reads of disjoint ranges from the same file in different processes.
     """
-    if extended_gcsfs.on_google:
-        pytest.skip("Internal call counts cannot be verified against real GCS.")
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
 
-    with gcs_bucket_mocks(
-        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
-    ) as mocks:
-        with extended_gcsfs.open(file_path, "rb") as f:
-            # The MRD should be created upon opening the file.
-            mocks["create_mrd"].assert_called_once()
+    read_tasks = [
+        (_MULTI_THREADED_TEST_FILE_PATH, 0, 1024),
+        (_MULTI_THREADED_TEST_FILE_PATH, 2048, 1024),
+        (_MULTI_THREADED_TEST_FILE_PATH, 4096, 1024),
+    ]
 
-            f.read(10)
-            f.read(20)
-            f.seek(5)
-            f.read(5)
+    results = run_in_processes(_read_range_and_get_pid, read_tasks)
 
-        # Verify that create_mrd was not called again.
-        mocks["create_mrd"].assert_called_once()
+    # Unpack results
+    read_data = [res[0] for res in results]
+    pids = [res[1] for res in results]
+
+    # Verify data correctness
+    assert read_data[0] == _MULTI_THREADED_TEST_DATA[0:1024]
+    assert read_data[1] == _MULTI_THREADED_TEST_DATA[2048:3072]
+    assert read_data[2] == _MULTI_THREADED_TEST_DATA[4096:5120]
+
+    # Verify that reads happened in different processes
+    assert len(set(pids)) == len(read_tasks)
+    assert os.getpid() not in pids
 
 
+def test_multiprocess_read_overlapping_ranges_zb(extended_gcsfs):
+    """
+    Tests concurrent reads of overlapping ranges from the same file in different processes.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    read_tasks = [
+        (_MULTI_THREADED_TEST_FILE_PATH, 0, 2048),
+        (_MULTI_THREADED_TEST_FILE_PATH, 1024, 2048),  # Overlaps with first
+        (_MULTI_THREADED_TEST_FILE_PATH, 0, 2048),  # Identical to first
+    ]
+
+    results = run_in_processes(_read_range_and_get_pid, read_tasks)
+
+    # Unpack results
+    read_data = [res[0] for res in results]
+    pids = [res[1] for res in results]
+
+    # Verify data correctness
+    assert read_data[0] == _MULTI_THREADED_TEST_DATA[0:2048]
+    assert read_data[1] == _MULTI_THREADED_TEST_DATA[1024:3072]
+    assert read_data[2] == _MULTI_THREADED_TEST_DATA[0:2048]
+
+    # Verify that reads happened in different processes
+    assert len(set(pids)) == len(read_tasks)
+    assert os.getpid() not in pids
+
+
+def _read_with_passed_fs(fs, path, offset, length):
+    """
+    Worker that receives an existing FS instance.
+    Tests if ExtendedGcsFileSystem can be shared correctly.
+    """
+    with fs.open(path, "rb") as f:
+        f.seek(offset)
+        return f.read(length)
+
+
+def test_multiprocess_shared_fs_zb(extended_gcsfs):
+    """
+    Tests passing the filesystem object itself to child processes.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    # Force initialization of the client/session beforehand
+    # to ensure we test handling of active connections
+    extended_gcsfs.ls(TEST_ZONAL_BUCKET)
+
+    read_tasks = [
+        (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 0, 100),
+        (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 100, 100),
+    ]
+
+    results = run_in_processes(_read_with_passed_fs, read_tasks)
+
+    assert results[0] == _MULTI_THREADED_TEST_DATA[0:100]
+    assert results[1] == _MULTI_THREADED_TEST_DATA[100:200]
+
+
+def _cat_file_worker(fs, path):
+    """Simple worker to cat a file."""
+    return fs.cat(path)
+
+
+def test_multiprocess_shared_fs_read_multiple_files_zb(extended_gcsfs, file_path):
+    """
+    Tests reading completely different files in parallel using same filesystem.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    # Setup: Create 3 distinct files
+    files = {
+        f"{file_path}_1": b"data_one",
+        f"{file_path}_2": b"data_two",
+        f"{file_path}_3": b"data_three",
+    }
+
+    for path, data in files.items():
+        extended_gcsfs.pipe(path, data, finalize_on_close=True)
+
+    # Run list of paths in parallel
+    task_args = [(extended_gcsfs, path) for path in files.keys()]
+    results = run_in_processes(_cat_file_worker, task_args)
+
+    # Verify we got the correct data for each file
+    # Note: Results order matches input order in starmap
+    assert results == [b"data_one", b"data_two", b"data_three"]
+
+
+def test_multiprocess_error_handling_zb(extended_gcsfs):
+    """
+    Tests that exceptions in child processes are correctly raised in the parent.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    missing_file = f"{TEST_ZONAL_BUCKET}/this_does_not_exist"
+
+    with pytest.raises(NotFound):
+        run_in_processes(_cat_file_worker, [(extended_gcsfs, missing_file)])
+
+
+# =========================== Zonal Upload Tests ===========================
 @pytest.mark.asyncio
 async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
     """Test simple_upload for Zonal buckets calls the correct writer methods."""
