@@ -58,6 +58,36 @@ async def test_async_put(async_gcs, tmp_path, file_path):
 
 
 @pytest.mark.asyncio
+async def test_async_get(async_gcs, tmp_path, file_path):
+    """Test async _get_file."""
+    local_file_out = tmp_path / "output.txt"
+    data = b"file data for get"
+    await async_gcs._pipe_file(file_path, data)
+
+    # Download
+    await async_gcs._get_file(file_path, str(local_file_out))
+
+    # Verify
+    assert local_file_out.read_bytes() == data
+
+
+@pytest.mark.asyncio
+async def test_get_file_to_directory(async_gcs, tmp_path, file_path):
+    """
+    Tests that _get_file does nothing if the local path is a directory.
+    """
+    ldir = tmp_path / "output_dir"
+    ldir.mkdir()
+    await async_gcs._pipe_file(file_path, b"some data", finalize_on_close=True)
+
+    # Call _get_file with a directory as the local path
+    await async_gcs._get_file(file_path, str(ldir))
+
+    # Check that no file was created inside the directory
+    assert not list(ldir.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_async_ls(async_gcs, file_path):
     """Test async _ls."""
     prefix = file_path

@@ -4,6 +4,7 @@ from enum import Enum
 from functools import partial
 
 from fsspec import asyn
+from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
 from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
@@ -738,6 +739,66 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             await writer.close(finalize_on_close=finalize_on_close)
 
         self.invalidate_cache(self._parent(path))
+
+    async def _get_file(self, rpath, lpath, callback=None, **kwargs):
+        bucket, key, generation = self.split_path(rpath)
+        if not await self._is_zonal_bucket(bucket):
+            return await super()._get_file(
+                rpath,
+                lpath,
+                callback=callback,
+                **kwargs,
+            )
+
+        if os.path.isdir(lpath):
+            return
+        callback = callback or NoOpCallback()
+
+        mrd = None
+        try:
+            await self._get_grpc_client()
+            mrd = await AsyncMultiRangeDownloader.create_mrd(
+                self.grpc_client, bucket, key, generation
+            )
+
+            size = mrd.persisted_size
+            if size is None:
+                logger.warning(
+                    "AsyncMultiRangeDownloader (MRD) has no 'persisted_size'. "
+                    "Falling back to _info() to get the file size. "
+                    "This may result in incorrect behavior for unfinalized objects."
+                )
+                size = (await self._info(rpath))["size"]
+            callback.set_size(size)
+
+            lparent = os.path.dirname(lpath) or os.curdir
+            os.makedirs(lparent, exist_ok=True)
+
+            chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
+            offset = 0
+
+            with open(lpath, "wb") as f2:
+                while True:
+                    if offset >= size:
+                        break
+
+                    data = await zb_hns_utils.download_range(
+                        offset=offset, length=chunksize, mrd=mrd
+                    )
+                    if not data:
+                        break
+
+                    f2.write(data)
+                    offset += len(data)
+                    callback.relative_update(len(data))
+        except Exception as e:
+            # Clean up the corrupted file before raising error
+            if os.path.exists(lpath):
+                os.remove(lpath)
+            raise e
+        finally:
+            if mrd:
+                await mrd.close()
 
     async def _do_list_objects(
         self,

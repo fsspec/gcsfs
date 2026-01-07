@@ -34,13 +34,17 @@ from gcsfs.tests.conftest import (
     text_files,
 )
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import tmpfile
+from gcsfs.tests.utils import tempdir, tmpfile
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
 json_data = files[file]
 lines = io.BytesIO(json_data).readlines()
 file_size = len(json_data)
+
+file2 = "test/accounts.2.json"
+file2_path = f"{TEST_ZONAL_BUCKET}/{file2}"
+json_data2 = files[file2]
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
 
@@ -1417,3 +1421,178 @@ async def test_upload_chunk_delegates_to_core_for_http_url(async_gcs, http_locat
             content_type,
         )
         assert result == {"kind": "storage#object"}
+
+
+def test_get_file_from_zonal_bucket(extended_gcsfs, gcs_bucket_mocks):
+    """Test getting a file from a Zonal bucket with mocks."""
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        bucket, key, _ = extended_gcsfs.split_path(file_path)
+
+        with tmpfile() as local_f:
+            extended_gcsfs.get(file_path, local_f)
+            with open(local_f, "rb") as f:
+                assert f.read() == json_data
+        if mocks:
+            mocks["downloader"].download_ranges.assert_awaited()
+            mocks["downloader"].close.assert_awaited_once()
+
+
+async def create_mrd_side_effect(client, bucket, object_name, generation):
+    """Side effect function to create a mocked AsyncMultiRangeDownloader."""
+    file_data = files[object_name]
+
+    async def download_side_effect(read_requests, **kwargs):
+        for param_offset, param_length, buffer_arg in read_requests:
+            if hasattr(buffer_arg, "write"):
+                buffer_arg.write(file_data[param_offset : param_offset + param_length])
+
+    downloader = mock.Mock(spec=AsyncMultiRangeDownloader)
+    downloader.download_ranges = mock.AsyncMock(side_effect=download_side_effect)
+    downloader.persisted_size = len(file_data)
+    downloader.close = mock.AsyncMock()
+    return downloader
+
+
+def test_get_list_from_zonal_bucket(extended_gcsfs):
+    """Test batch downloading a list of files with mocks."""
+    if extended_gcsfs.on_google:
+        with tmpfile() as l1, tmpfile() as l2:
+            extended_gcsfs.get([file_path, file2_path], [l1, l2])
+
+            with open(l1, "rb") as f:
+                assert f.read() == files[file]
+            with open(l2, "rb") as f:
+                assert f.read() == files[file2]
+        return
+
+    mock_create_mrd = mock.AsyncMock(side_effect=create_mrd_side_effect)
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            return_value=True,
+        ),
+        mock.patch(
+            "google.cloud.storage._experimental.asyncio."
+            "async_multi_range_downloader.AsyncMultiRangeDownloader.create_mrd",
+            mock_create_mrd,
+        ),
+    ):
+        with tmpfile() as l1, tmpfile() as l2:
+            extended_gcsfs.get([file_path, file2_path], [l1, l2])
+
+            with open(l1, "rb") as f:
+                assert f.read() == files[file]
+            with open(l2, "rb") as f:
+                assert f.read() == files[file2]
+
+    assert mock_create_mrd.call_count == 2
+
+
+def test_get_directory_from_zonal_bucket(extended_gcsfs):
+    """Test getting a directory recursively from a Zonal bucket with mocks."""
+    remote_dir = f"{TEST_ZONAL_BUCKET}/test"
+    file1 = "test/accounts.1.json"
+    file2 = "test/accounts.2.json"
+    if extended_gcsfs.on_google:
+        with tempdir() as tmp_root:
+            # define a path that DOES NOT exist yet
+            local_dir = os.path.join(tmp_root, "downloaded_data")
+
+            # This should create 'downloaded_data' AND put files inside it
+            extended_gcsfs.get(remote_dir, local_dir, recursive=True)
+
+            # Assert folder was created
+            assert os.path.isdir(local_dir)
+            with open(os.path.join(local_dir, "accounts.1.json"), "rb") as f:
+                assert f.read() == files[file1]
+            with open(os.path.join(local_dir, "accounts.2.json"), "rb") as f:
+                assert f.read() == files[file2]
+        return
+
+    mock_create_mrd = mock.AsyncMock(side_effect=create_mrd_side_effect)
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            return_value=True,
+        ),
+        mock.patch(
+            "google.cloud.storage._experimental.asyncio."
+            "async_multi_range_downloader.AsyncMultiRangeDownloader.create_mrd",
+            mock_create_mrd,
+        ),
+    ):
+        with tempdir() as tmp_root:
+            local_dir = os.path.join(tmp_root, "downloaded_data")
+
+            extended_gcsfs.get(remote_dir, local_dir, recursive=True)
+
+            assert os.path.isdir(local_dir)
+            with open(os.path.join(local_dir, "accounts.1.json"), "rb") as f:
+                assert f.read() == files[file1]
+            with open(os.path.join(local_dir, "accounts.2.json"), "rb") as f:
+                assert f.read() == files[file2]
+
+    assert mock_create_mrd.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_file_warning_on_missing_persisted_size(
+    async_gcs, gcs_bucket_mocks, caplog, tmp_path, file_path
+):
+    """
+    Tests that a warning is logged in _get_file when MRD has no 'persisted_size' attribute.
+    """
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        if not mocks:
+            pytest.skip("Cannot simulate missing attributes on real GCS.")
+
+        lpath = tmp_path / "output.txt"
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            await async_gcs._get_file(file_path, str(lpath))
+            assert "Falling back to _info() to get the file size" in caplog.text
+            assert lpath.read_bytes() == json_data
+
+
+@pytest.mark.asyncio
+async def test_get_file_exception_cleanup(
+    async_gcs, gcs_bucket_mocks, tmp_path, file_path
+):
+    """
+    Tests that _get_file correctly removes the local file when an
+    exception occurs during download.
+    """
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        if not mocks:
+            pytest.skip("Cannot mock exceptions on real GCS.")
+
+        lpath = tmp_path / "output.txt"
+        error_message = "Simulated network failure during download"
+        with (
+            mock.patch(
+                "gcsfs.zb_hns_utils.download_range",
+                side_effect=Exception(error_message),
+            ),
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            with pytest.raises(Exception, match=error_message):
+                await async_gcs._get_file(file_path, str(lpath))
+
+            # The local file should not exist after the failed download
+            assert not lpath.exists()
