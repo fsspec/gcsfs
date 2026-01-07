@@ -16,4 +16,4 @@ class ListingBenchmarkParameters(BaseBenchmarkParameters):
     folders: int
 
     # The listing pattern to use: "ls" or "find".
-    pattern: str = "ls"
+    pattern: str

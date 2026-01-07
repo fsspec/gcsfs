@@ -15,9 +15,9 @@ class ListingConfigurator(BaseBenchmarkConfigurator):
         rounds = common_config.get("rounds", 1)
         bucket_types = common_config.get("bucket_types", ["regional"])
         files_list = common_config.get("files", [10000])
-        scenario_depth = scenario.get("depth")
+        scenario_depth = scenario.get("depth", 0)
         folders_list = scenario.get("folders", [1])
-        pattern = scenario.get("pattern")
+        pattern = scenario.get("pattern", "N/A")
 
         cases = []
         param_combinations = itertools.product(
@@ -38,25 +38,22 @@ class ListingConfigurator(BaseBenchmarkConfigurator):
                 f"{scenario['name']}_{procs}procs_{threads}threads_"
                 f"{files}files_{depth}depth_{folders}folders"
             )
-            if pattern:
-                name += f"_{pattern}pattern"
+            if pattern != "N/A":
+                name += f"_{pattern}"
             name += f"_{bucket_type}"
 
-            kwargs = {
-                "name": name,
-                "bucket_name": bucket_name,
-                "bucket_type": bucket_type,
-                "threads": threads,
-                "processes": procs,
-                "files": files,
-                "depth": depth,
-                "folders": folders,
-                "rounds": rounds,
-            }
-            if pattern:
-                kwargs["pattern"] = pattern
-
-            params = self.param_class(**kwargs)
+            params = self.param_class(
+                name=name,
+                bucket_name=bucket_name,
+                bucket_type=bucket_type,
+                threads=threads,
+                processes=procs,
+                files=files,
+                rounds=rounds,
+                depth=depth,
+                folders=folders,
+                pattern=pattern,
+            )
             cases.append(params)
         return cases
 

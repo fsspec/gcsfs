@@ -45,6 +45,40 @@ def _prepare_files(gcs, file_paths, file_size=0):
         pool.starmap(_write_file, args)
 
 
+def _benchmark_io_fixture_helper(
+    extended_gcs_factory, params, prefix_tag, create_files=False, gcs_kwargs=None
+):
+    gcs_kwargs = gcs_kwargs or {}
+    gcs = extended_gcs_factory(**gcs_kwargs)
+
+    prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
+    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
+
+    action = "creating" if create_files else "targeting"
+    logging.info(
+        f"Setting up benchmark '{params.name}': {action} {params.files} file(s) "
+        f"of size {params.file_size_bytes / MB:.2f} MB each."
+    )
+
+    if create_files:
+        start_time = time.perf_counter()
+        _prepare_files(gcs, file_paths, params.file_size_bytes)
+
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logging.info(
+            f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
+        )
+
+    yield gcs, file_paths, params
+
+    # --- Teardown ---
+    logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
+    try:
+        gcs.rm(prefix, recursive=True)
+    except Exception as e:
+        logging.error(f"Failed to clean up benchmark files: {e}")
+
+
 @pytest.fixture
 def monitor():
     """
@@ -60,37 +94,17 @@ def gcsfs_benchmark_read(extended_gcs_factory, request):
     A fixture that creates temporary files for a benchmark run and cleans
     them up afterward.
 
-    It uses the `BenchmarkParameters` object from the test's parametrization
+    It uses the parameters from the test's parametrization
     to determine how many files to create and of what size.
     """
     params = request.param
-    gcs = extended_gcs_factory(block_size=params.block_size_bytes)
-
-    prefix = f"{params.bucket_name}/benchmark-files-{uuid.uuid4()}"
-    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
-
-    logging.info(
-        f"Setting up benchmark '{params.name}': creating {params.files} file(s) "
-        f"of size {params.file_size_bytes / MB:.2f} MB each."
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-read",
+        create_files=True,
+        gcs_kwargs={"block_size": params.block_size_bytes},
     )
-
-    start_time = time.perf_counter()
-    # Create all files in parallel, 16 at a time
-    _prepare_files(gcs, file_paths, params.file_size_bytes)
-
-    duration_ms = (time.perf_counter() - start_time) * 1000
-    logging.info(
-        f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
-    )
-
-    yield gcs, file_paths, params
-
-    # --- Teardown ---
-    logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
-    try:
-        gcs.rm(prefix, recursive=True)
-    except Exception as e:
-        logging.error(f"Failed to clean up benchmark files: {e}")
 
 
 @pytest.fixture
@@ -100,24 +114,12 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
     It provides a GCSFS instance and a list of file paths to write to.
     """
     params = request.param
-    gcs = extended_gcs_factory()
-
-    prefix = f"{params.bucket_name}/benchmark-write-{uuid.uuid4()}"
-    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
-
-    logging.info(
-        f"Setting up write benchmark '{params.name}': targeting {params.files} file(s) "
-        f"of size {params.file_size_bytes / MB:.2f} MB each."
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-write",
+        create_files=False,
     )
-
-    yield gcs, file_paths, params
-
-    # --- Teardown ---
-    logging.info(f"Tearing down write benchmark '{params.name}': deleting files.")
-    try:
-        gcs.rm(prefix, recursive=True)
-    except Exception as e:
-        logging.error(f"Failed to clean up benchmark files: {e}")
 
 
 @pytest.fixture
