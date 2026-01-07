@@ -187,7 +187,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
 
     # Replacement method for _process_limits to support new params (offset and length) for MRD.
-    async def _process_limits_to_offset_and_length(self, path, start, end):
+    async def _process_limits_to_offset_and_length(
+        self, path, start, end, file_size=None
+    ):
         """
         Calculates the read offset and length from start and end parameters.
 
@@ -195,6 +197,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             path (str): The path to the file.
             start (int | None): The starting byte position.
             end (int | None): The ending byte position.
+            file_size (int | None): The total size of the file. If None, it will be fetched via _info().
 
         Returns:
             tuple: A tuple containing (offset, length).
@@ -202,7 +205,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Raises:
             ValueError: If the calculated range is invalid.
         """
-        size = None
+        size = file_size
 
         if start is None:
             offset = 0
@@ -277,8 +280,15 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 )
                 mrd_created = True
 
+            file_size = mrd.persisted_size
+            if file_size is None:
+                logger.warning(
+                    "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
+                    "Falling back to _info() to get the file size. "
+                    "This may result in incorrect behavior for unfinalized objects."
+                )
             offset, length = await self._process_limits_to_offset_and_length(
-                path, start, end
+                path, start, end, file_size
             )
 
             return await zb_hns_utils.download_range(

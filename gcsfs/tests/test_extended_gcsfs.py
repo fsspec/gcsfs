@@ -94,6 +94,7 @@ def gcs_bucket_mocks():
         mock_downloader.download_ranges = mock.AsyncMock(
             side_effect=download_side_effect
         )
+        mock_downloader.persisted_size = None
 
         mock_create_mrd = mock.AsyncMock(return_value=mock_downloader)
         with (
@@ -398,6 +399,111 @@ def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
 
         # Verify that create_mrd was not called again.
         mocks["create_mrd"].assert_called_once()
+
+
+def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
+    "Tests that mrd can read from an unfinalized file successfully"
+    if not extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+
+    # Files are not finalized by default
+    with extended_gcsfs.open(file_path, "wb") as f:
+        f.write(b"Hello, ")
+        f.write(b"world!")
+
+    with extended_gcsfs.open(file_path, "rb") as f:
+        assert f.read() == b"Hello, world!"
+        f.seek(4)
+        assert f.read() == b"o, world!"  # Check cache works as well
+
+
+def test_zonal_file_warning_on_missing_persisted_size(
+    extended_gcsfs, gcs_bucket_mocks, caplog
+):
+    """
+    Tests that a warning is logged when MRD has no 'persisted_size' attribute when opening ZonalFile.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate missing attributes on real GCS.")
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        # 'persisted_size' is set to None in the mock downloader
+        with caplog.at_level(logging.WARNING, logger="gcsfs"):
+            with extended_gcsfs.open(file_path, "rb"):
+                pass
+            assert "has no 'persisted_size'" in caplog.text
+
+
+def test_process_limits_when_file_size_passed(extended_gcsfs):
+    """
+    Tests that process_limits works correctly when file_size is provided,
+    without calling _info().
+    """
+    with mock.patch.object(
+        extended_gcsfs, "_info", new_callable=mock.AsyncMock
+    ) as mock_info:
+        test_file_size = 1000
+
+        # Case: start and end provided
+        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
+            file_path, start=100, end=200, file_size=test_file_size
+        )
+        assert offset == 100
+        assert length == 100
+
+        # Case: only end provided
+        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
+            file_path, start=None, end=50, file_size=test_file_size
+        )
+        assert offset == 0
+        assert length == 50
+
+        # Case: only start provided
+        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
+            file_path, start=950, end=None, file_size=test_file_size
+        )
+        assert offset == 950
+        assert length == 50
+
+        mock_info.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cat_file_warning_on_missing_persisted_size(
+    extended_gcsfs, gcs_bucket_mocks, caplog
+):
+    """
+    Tests that a warning is logged in cat_file when MRD has no 'persisted_size' attribute.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate missing attributes on real GCS.")
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        # 'persisted_size' is set to None in the mock downloader
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                extended_gcsfs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            result = await extended_gcsfs._cat_file(file_path, start=0, end=10)
+            assert "Falling back to _info() to get the file size" in caplog.text
+            assert result == json_data[:10]
+
+
+@pytest.mark.asyncio
+async def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
+    """
+    Tests that cat_file can read from an unfinalized file successfully
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+
+    await extended_gcsfs._pipe_file(file_path, b"Hello, world!")
+
+    data = await extended_gcsfs._cat_file(file_path)
+    assert data == b"Hello, world!"
 
 
 # ========================== Zonal Multithreaded Read Tests ===========================
