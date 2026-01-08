@@ -1020,6 +1020,7 @@ class TestExtendedGcsFileSystemMkdir:
             assert len(updated_listing) == len(original_listing) + 1
 
 
+# This test class validates that info API retrieves folder data for HNS buckets.
 class TestExtendedGcsFileSystemInternal:
     """Unit tests for internal methods and overrides in ExtendedGcsFileSystem."""
 
