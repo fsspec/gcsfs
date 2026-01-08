@@ -5,18 +5,12 @@ common:
   file_sizes_mb:
     - 1024 # 1GB
   chunk_sizes_mb:
-    - 100
+    - 16
+    - 64
   rounds: 3
 
 scenarios:
   - name: "write_seq"
-    threads: [1,4,8]
-    processes: [1]
 
   - name: "write_seq_multi_process_single_thread"
-    threads: [1]
-    processes: [16,32,64]
-
-  - name: "write_seq_multi_process_multi_thread"
-    threads: [2]
-    processes: [8,16,32]
+    processes: [16,40,96]
