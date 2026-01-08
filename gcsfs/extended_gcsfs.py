@@ -673,16 +673,25 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
     Uploads a chunk of data using AsyncAppendableObjectWriter.
+    Delegates to core upload_chunk implementaion for Non-Zonal buckets.
     """
-    if offset or size or content_type:
-        logger.warning(
-            "Zonal buckets do not support offset, or content_type during upload. These parameters will be ignored."
-        )
+    # If `location` is an HTTP resumable-upload URL (string), delegate to core upload_chunk
+    # for Standard buckets.
+    if isinstance(location, (str, bytes)):
+        from gcsfs.core import upload_chunk as core_upload_chunk
+
+        return await core_upload_chunk(fs, location, data, offset, size, content_type)
 
     if not isinstance(location, AsyncAppendableObjectWriter):
         raise TypeError(
             "upload_chunk for Zonal buckets expects an AsyncAppendableObjectWriter instance."
         )
+
+    if offset or size or content_type:
+        logger.warning(
+            "Zonal buckets do not support offset, or content_type during upload. These parameters will be ignored."
+        )
+
     if not location._is_stream_open:
         raise ValueError("Writer is closed. Please initiate a new upload.")
 
@@ -713,7 +722,22 @@ async def initiate_upload(
 ):
     """
     Initiates an upload for Zonal buckets by creating an AsyncAppendableObjectWriter.
+    Delegates to core initiate_upload implementaion for Non-Zonal buckets.
     """
+    if not await fs._is_zonal_bucket(bucket):
+        from gcsfs.core import initiate_upload as core_initiate_upload
+
+        return await core_initiate_upload(
+            fs,
+            bucket,
+            key,
+            content_type,
+            metadata,
+            fixed_key_metadata,
+            mode,
+            kms_key_name,
+        )
+
     if (
         metadata
         or fixed_key_metadata
@@ -746,7 +770,24 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload to Zonal bucket using gRPC.
+    Delegates to core simple_upload implementaion for Non-Zonal buckets.
     """
+    if not await fs._is_zonal_bucket(bucket):
+        from gcsfs.core import simple_upload as core_simple_upload
+
+        return await core_simple_upload(
+            fs,
+            bucket,
+            key,
+            datain,
+            metadatain,
+            consistency,
+            content_type,
+            fixed_key_metadata,
+            mode,
+            kms_key_name,
+        )
+
     if (
         metadatain
         or fixed_key_metadata
