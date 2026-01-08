@@ -695,12 +695,10 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
         # Don't finalize the upload on error
         await location.close(finalize_on_close=False)
         raise
-    finally:
-        if (location.offset or 0) >= size:
-            logger.debug(
-                "Uploaded data is equal or greater than size. Finalizing upload."
-            )
-            await location.close(finalize_on_close=True)
+
+    if (location.offset or 0) >= size:
+        logger.debug("Uploaded data is equal or greater than size. Finalizing upload.")
+        await location.close(finalize_on_close=True)
 
 
 async def initiate_upload(

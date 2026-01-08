@@ -414,7 +414,7 @@ def zonal_write_mocks():
 
 @pytest.fixture
 def file_path():
-    """Generates a unique test file path and cleans it up after the test."""
+    """Generates a unique test file path for every test."""
     path = f"{TEST_ZONAL_BUCKET}/zonal-test-{uuid.uuid4()}"
     yield path
 
