@@ -66,6 +66,12 @@ d = TEST_BUCKET + "/tmp/test/d"
 
 params = dict()
 
+BUCKET_NAME_MAP = {
+    "regional": TEST_BUCKET,
+    "zonal": TEST_ZONAL_BUCKET,
+    "hns": TEST_HNS_BUCKET,
+}
+
 
 def stop_docker(container):
     cmd = shlex.split('docker ps -a -q --filter "name=%s"' % container)
@@ -329,8 +335,7 @@ def gcs_hns(gcs_factory, buckets_to_delete):
     try:
         if not gcs.exists(TEST_HNS_BUCKET):
             # Note: Emulators may not fully support HNS features like real GCS.
-            # TODO: Update to create HNS bucket once mkdir supports creating HNS buckets.
-            gcs.mkdir(TEST_HNS_BUCKET)
+            gcs.mkdir(TEST_HNS_BUCKET, enable_hierarchial_namespace=True)
             buckets_to_delete.add(TEST_HNS_BUCKET)
         else:
             _cleanup_gcs(gcs, bucket=TEST_HNS_BUCKET)
