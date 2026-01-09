@@ -419,16 +419,16 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     mv = asyn.sync_wrapper(_mv)
 
     async def _mkdir(
-        self, path, create_parents=False, enable_hierarchial_namespace=False, **kwargs
+        self, path, create_parents=False, enable_hierarchical_namespace=False, **kwargs
     ):
         """
         If the path does not contain an object key, a new bucket is created.
-        If `enable_hierarchial_namespace` is True, the bucket will have Hierarchical Namespace enabled.
+        If `enable_hierarchical_namespace` is True, the bucket will have Hierarchical Namespace enabled.
 
         For HNS-enabled buckets, this method creates a folder object. If
         `create_parents` is True, any missing parent folders are also created.
 
-        If bucket doesn't exist, enable_hierarchial_namespace and create_parents are set to True
+        If bucket doesn't exist, enable_hierarchical_namespace and create_parents are set to True
         and the path includes a key then HNS-enabled bucket will be created
         and also the folders within that bucket.
 
@@ -439,7 +439,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         may involve creating a bucket or doing nothing (as GCS has no true empty directories).
         """
         path = self._strip_protocol(path)
-        if enable_hierarchial_namespace:
+        if enable_hierarchical_namespace:
             kwargs["hierarchicalNamespace"] = {"enabled": True}
             # HNS buckets require uniform bucket-level access.
             kwargs["iamConfiguration"] = {"uniformBucketLevelAccess": {"enabled": True}}
@@ -457,7 +457,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         is_hns = False
         # If creating an HNS bucket, check for its existence first.
-        if create_parents and enable_hierarchial_namespace:
+        if create_parents and enable_hierarchical_namespace:
             if not await self._exists(bucket):
                 await super()._mkdir(bucket, create_parents=True, **kwargs)
                 is_hns = True  # Skip HNS check since we just created it.

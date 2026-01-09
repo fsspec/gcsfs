@@ -1,3 +1,11 @@
+"""
+This module contains unit tests for the ExtendedGcsFileSystem, focusing on
+Hierarchical Namespace (HNS) enabled features.
+
+These tests are designed to run with mocked GCS backends to isolate and verify
+the logic within the filesystem extension without making real API calls.
+"""
+
 import contextlib
 import os
 import uuid
@@ -512,25 +520,21 @@ class TestExtendedGcsFileSystemMkdir:
         dir_path = f"{TEST_HNS_BUCKET}/new_mkdir_dir"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].side_effect = [
-                    FileNotFoundError,  # exists check before mkdir
-                    {"type": "directory", "name": dir_path},  # exists check after
-                ]
+            mocks["info"].side_effect = [
+                FileNotFoundError,  # exists check before mkdir
+                {"type": "directory", "name": dir_path},  # exists check after
+            ]
 
             assert not gcsfs.exists(dir_path)
             gcsfs.mkdir(dir_path)
             assert gcsfs.exists(dir_path)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                expected_request = self._get_create_folder_request(dir_path)
-                mocks["control_client"].create_folder.assert_called_once_with(
-                    request=expected_request
-                )
-                mocks["super_mkdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_create_folder_request(dir_path)
+            mocks["control_client"].create_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_mkdir"].assert_not_called()
 
     def test_hns_mkdir_nested_success_with_create_parents(
         self, gcs_hns, gcs_hns_mocks, caplog
@@ -541,29 +545,23 @@ class TestExtendedGcsFileSystemMkdir:
         dir_path = f"{parent_dir}/new_nested_dir"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].side_effect = [
-                    FileNotFoundError,  # exists check before mkdir
-                    {"type": "directory", "name": parent_dir},  # parent exists check
-                    {"type": "directory", "name": dir_path},  # exists check after
-                ]
+            mocks["info"].side_effect = [
+                FileNotFoundError,  # exists check before mkdir
+                {"type": "directory", "name": parent_dir},  # parent exists check
+                {"type": "directory", "name": dir_path},  # exists check after
+            ]
 
             assert not gcsfs.exists(dir_path)
             gcsfs.mkdir(dir_path, create_parents=True)
             assert gcsfs.exists(parent_dir)
             assert gcsfs.exists(dir_path)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                expected_request = self._get_create_folder_request(
-                    dir_path, recursive=True
-                )
-                mocks["control_client"].create_folder.assert_called_once_with(
-                    request=expected_request
-                )
-                mocks["super_mkdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_create_folder_request(dir_path, recursive=True)
+            mocks["control_client"].create_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_mkdir"].assert_not_called()
 
     def test_hns_mkdir_nested_fails_if_create_parents_false(
         self, gcs_hns, gcs_hns_mocks, caplog
@@ -573,27 +571,21 @@ class TestExtendedGcsFileSystemMkdir:
         dir_path = f"{TEST_HNS_BUCKET}/non_existent_parent/new_dir"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["control_client"].create_folder.side_effect = (
-                    api_exceptions.FailedPrecondition(
-                        "failed due to a precondition error"
-                    )
-                )
+            mocks["control_client"].create_folder.side_effect = (
+                api_exceptions.FailedPrecondition("failed due to a precondition error")
+            )
 
             with pytest.raises(
                 FileNotFoundError, match="failed due to a precondition error"
             ):
                 gcsfs.mkdir(dir_path, create_parents=False)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                expected_request = self._get_create_folder_request(dir_path)
-                mocks["control_client"].create_folder.assert_called_once_with(
-                    request=expected_request
-                )
-                mocks["super_mkdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_create_folder_request(dir_path)
+            mocks["control_client"].create_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_mkdir"].assert_not_called()
 
     @pytest.mark.skipif(
         os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
@@ -606,14 +598,9 @@ class TestExtendedGcsFileSystemMkdir:
 
         with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
             gcsfs.mkdir(dir_path)
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                mocks["control_client"].create_folder.assert_not_called()
-                mocks["super_mkdir"].assert_called_once_with(
-                    dir_path, create_parents=False
-                )
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["control_client"].create_folder.assert_not_called()
+            mocks["super_mkdir"].assert_called_once_with(dir_path, create_parents=False)
 
     def test_mkdir_in_non_existent_bucket_fails(self, gcs_hns, gcs_hns_mocks):
         """Test that mkdir fails when the target bucket does not exist."""
@@ -622,144 +609,115 @@ class TestExtendedGcsFileSystemMkdir:
         dir_path = f"{bucket_name}/some_dir"
 
         with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
-            if mocks:
-                # Simulate the parent mkdir raising an error because the bucket doesn't exist
-                mocks["super_mkdir"].side_effect = FileNotFoundError(
-                    f"Bucket {bucket_name} does not exist."
-                )
+            # Simulate the parent mkdir raising an error because the bucket doesn't exist
+            mocks["super_mkdir"].side_effect = FileNotFoundError(
+                f"Bucket {bucket_name} does not exist."
+            )
 
             with pytest.raises(FileNotFoundError, match=f"{bucket_name}"):
                 gcsfs.mkdir(dir_path, create_parents=False)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(bucket_name)
-                mocks["super_mkdir"].assert_called_once_with(
-                    dir_path, create_parents=False
-                )
-                mocks["control_client"].create_folder.assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(bucket_name)
+            mocks["super_mkdir"].assert_called_once_with(dir_path, create_parents=False)
+            mocks["control_client"].create_folder.assert_not_called()
 
     def test_mkdir_in_non_existent_bucket_with_create_parents_succeeds(
-        self, gcs_hns, gcs_hns_mocks, buckets_to_delete
+        self, gcs_hns, gcs_hns_mocks
     ):
         """Test that mkdir with create_parents=True creates the bucket."""
         gcsfs = gcs_hns
         bucket_name = f"gcsfs-bucket-mkdir-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some_dir"
-        buckets_to_delete.add(bucket_name)
 
         with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
-            if mocks:
-                # Simulate the bucket not existing initially, then existing after creation.
-                mocks["info"].side_effect = [
-                    FileNotFoundError,  # For the `exists` check on the bucket
-                    {"type": "directory", "name": bucket_name},  # For `exists` after
-                ]
+            # Simulate the bucket not existing initially, then existing after creation.
+            mocks["info"].side_effect = [
+                FileNotFoundError,  # For the `exists` check on the bucket
+                {"type": "directory", "name": bucket_name},  # For `exists` after
+            ]
 
             assert not gcsfs.exists(bucket_name)
             # This should create the bucket `bucket_name` and then do nothing for `some_dir`
             gcsfs.mkdir(dir_path, create_parents=True)
             assert gcsfs.exists(bucket_name)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(bucket_name)
-                # The call should fall back to the parent's mkdir to create the bucket.
-                mocks["super_mkdir"].assert_called_once_with(
-                    dir_path, create_parents=True
-                )
-                mocks["control_client"].create_folder.assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(bucket_name)
+            # The call should fall back to the parent's mkdir to create the bucket.
+            mocks["super_mkdir"].assert_called_once_with(dir_path, create_parents=True)
+            mocks["control_client"].create_folder.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_mkdir_hns_bucket_with_create_parents_succeeds(
-        self, gcs_hns, gcs_hns_mocks, buckets_to_delete
+    def test_mkdir_hns_bucket_with_create_parents_succeeds(
+        self, gcs_hns, gcs_hns_mocks
     ):
-        """Test mkdir with create_parents and enable_hierarchial_namespace creates an HNS bucket."""
+        """Test mkdir with create_parents and enable_hierarchical_namespace creates an HNS bucket."""
         gcsfs = gcs_hns
         bucket_name = f"gcsfs-hns-bucket-mkdir-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some_dir"
-        buckets_to_delete.add(bucket_name)
 
         with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
-            if mocks:
-                # Simulate the bucket not existing initially, then existing after creation.
-                mocks["info"].side_effect = [
-                    FileNotFoundError,  # For the exists check on the bucket before mkdir call
-                    FileNotFoundError,  # For bucket exists check in mkdir method
-                    {"type": "directory", "name": bucket_name},  # For exists on bucket
-                    {"type": "directory", "name": dir_path},  # For exists on directory
-                ]
+            # Simulate the bucket not existing initially, then existing after creation.
+            mocks["info"].side_effect = [
+                FileNotFoundError,  # For the exists check on the bucket before mkdir call
+                FileNotFoundError,  # For bucket exists check in mkdir method
+                {"type": "directory", "name": bucket_name},  # For exists on bucket
+                {"type": "directory", "name": dir_path},  # For exists on directory
+            ]
 
             assert not gcsfs.exists(bucket_name)
             # This should create the HNS bucket `bucket_name` and then do nothing for `some_dir`
             gcsfs.mkdir(
-                dir_path, create_parents=True, enable_hierarchial_namespace=True
+                dir_path, create_parents=True, enable_hierarchical_namespace=True
             )
             assert gcsfs.exists(bucket_name)
             assert gcsfs.exists(dir_path)
 
-            # Verify that the filesystem recognizes the new bucket as HNS-enabled.
-            # TODO: Uncomment once the async behaviour is fixed in the tests
-            # assert await gcsfs._is_bucket_hns_enabled(bucket_path)
+            # The call should fall back to the parent's mkdir to create the bucket.
+            mocks["super_mkdir"].assert_called_once_with(
+                bucket_name,
+                create_parents=True,
+                hierarchicalNamespace={"enabled": True},
+                iamConfiguration={"uniformBucketLevelAccess": {"enabled": True}},
+                acl=None,
+                default_acl=None,
+            )
+            # After the bucket is created, the HNS path is taken to create the folder.
+            expected_request = self._get_create_folder_request(dir_path, recursive=True)
+            mocks["control_client"].create_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["async_lookup_bucket_type"].assert_not_called()
 
-            if mocks:
-                # The call should fall back to the parent's mkdir to create the bucket.
-                mocks["super_mkdir"].assert_called_once_with(
-                    bucket_name,
-                    create_parents=True,
-                    hierarchicalNamespace={"enabled": True},
-                    iamConfiguration={"uniformBucketLevelAccess": {"enabled": True}},
-                    acl=None,
-                    default_acl=None,
-                )
-                # After the bucket is created, the HNS path is taken to create the folder.
-                expected_request = self._get_create_folder_request(
-                    dir_path, recursive=True
-                )
-                mocks["control_client"].create_folder.assert_called_once_with(
-                    request=expected_request
-                )
-                mocks["async_lookup_bucket_type"].assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_mkdir_create_non_hns_bucket(
-        self, gcs_hns, gcs_hns_mocks, buckets_to_delete
-    ):
+    def test_mkdir_create_non_hns_bucket(self, gcs_hns, gcs_hns_mocks):
         """Test creating a new non-HNS bucket by default."""
         gcsfs = gcs_hns
         bucket_path = f"new-non-hns-bucket-{uuid.uuid4()}"
 
-        buckets_to_delete.add(bucket_path)
         with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].side_effect = [
-                    FileNotFoundError,  # For the `exists` check before mkdir
-                    {"type": "directory", "name": bucket_path},  # For `exists` after
-                ]
+            mocks["info"].side_effect = [
+                FileNotFoundError,  # For the `exists` check before mkdir
+                {"type": "directory", "name": bucket_path},  # For `exists` after
+            ]
 
             assert not gcsfs.exists(bucket_path)
             gcsfs.mkdir(bucket_path)
             assert gcsfs.exists(bucket_path)
 
-            if mocks:
-                mocks["control_client"].create_folder.assert_not_called()
-                mocks["super_mkdir"].assert_called_once_with(
-                    bucket_path, create_parents=False
-                )
-                mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["control_client"].create_folder.assert_not_called()
+            mocks["super_mkdir"].assert_called_once_with(
+                bucket_path, create_parents=False
+            )
+            mocks["async_lookup_bucket_type"].assert_not_called()
 
-    def test_mkdir_create_bucket_with_parent_params(
-        self, gcs_hns, gcs_hns_mocks, buckets_to_delete
-    ):
+    def test_mkdir_create_bucket_with_parent_params(self, gcs_hns, gcs_hns_mocks):
         """Test creating a bucket passes parent-level parameters like enable_versioning."""
         gcsfs = gcs_hns
         bucket_path = f"new-versioned-bucket-{uuid.uuid4()}"
-        buckets_to_delete.add(bucket_path)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].side_effect = [
-                    FileNotFoundError,  # For the `exists` check before mkdir
-                    {"type": "directory", "name": bucket_path},  # For `exists` after
-                ]
+            mocks["info"].side_effect = [
+                FileNotFoundError,  # For the `exists` check before mkdir
+                {"type": "directory", "name": bucket_path},  # For `exists` after
+            ]
 
             assert not gcsfs.exists(bucket_path)
             gcsfs.mkdir(
@@ -767,51 +725,40 @@ class TestExtendedGcsFileSystemMkdir:
             )
             assert gcsfs.exists(bucket_path)
 
-            if mocks:
-                mocks["super_mkdir"].assert_called_once_with(
-                    bucket_path,
-                    create_parents=False,
-                    enable_versioning=True,
-                    enable_object_retention=True,
-                )
-                mocks["async_lookup_bucket_type"].assert_not_called()
-                mocks["control_client"].create_folder.assert_not_called()
+            mocks["super_mkdir"].assert_called_once_with(
+                bucket_path,
+                create_parents=False,
+                enable_versioning=True,
+                enable_object_retention=True,
+            )
+            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["control_client"].create_folder.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_mkdir_enable_hierarchial_namespace(
-        self, gcs_hns, gcs_hns_mocks, buckets_to_delete
-    ):
+    def test_mkdir_enable_hierarchical_namespace(self, gcs_hns, gcs_hns_mocks):
         """Test creating a new HNS-enabled bucket."""
         gcsfs = gcs_hns
         bucket_path = f"new-hns-bucket-{uuid.uuid4()}"
 
-        buckets_to_delete.add(bucket_path)
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].side_effect = [
-                    FileNotFoundError,  # For the `exists` check before mkdir
-                    {"type": "directory", "name": bucket_path},  # For `exists` after
-                ]
+            mocks["info"].side_effect = [
+                FileNotFoundError,  # For the `exists` check before mkdir
+                {"type": "directory", "name": bucket_path},  # For `exists` after
+            ]
 
             assert not gcsfs.exists(bucket_path)
-            gcsfs.mkdir(bucket_path, enable_hierarchial_namespace=True)
+            gcsfs.mkdir(bucket_path, enable_hierarchical_namespace=True)
             assert gcsfs.exists(bucket_path)
 
-            # Verify that the filesystem recognizes the new bucket as HNS-enabled.
-            # TODO: Uncomment once the async behaviour is fixed in the tests
-            # assert await gcsfs._is_bucket_hns_enabled(bucket_path)
-
-            if mocks:
-                mocks["control_client"].create_folder.assert_not_called()
-                mocks["super_mkdir"].assert_called_once_with(
-                    bucket_path,
-                    create_parents=False,
-                    hierarchicalNamespace={"enabled": True},
-                    iamConfiguration={"uniformBucketLevelAccess": {"enabled": True}},
-                    acl=None,
-                    default_acl=None,
-                )
-                mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["control_client"].create_folder.assert_not_called()
+            mocks["super_mkdir"].assert_called_once_with(
+                bucket_path,
+                create_parents=False,
+                hierarchicalNamespace={"enabled": True},
+                iamConfiguration={"uniformBucketLevelAccess": {"enabled": True}},
+                acl=None,
+                default_acl=None,
+            )
+            mocks["async_lookup_bucket_type"].assert_not_called()
 
     def test_mkdir_existing_hns_folder_is_noop(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test that calling mkdir on an existing HNS folder is a no-op."""
@@ -820,11 +767,10 @@ class TestExtendedGcsFileSystemMkdir:
         gcsfs.touch(f"{dir_path}/file.txt")
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].return_value = {"type": "directory", "name": dir_path}
-                mocks["control_client"].create_folder.side_effect = (
-                    api_exceptions.Conflict("Folder already exists")
-                )
+            mocks["info"].return_value = {"type": "directory", "name": dir_path}
+            mocks["control_client"].create_folder.side_effect = api_exceptions.Conflict(
+                "Folder already exists"
+            )
 
             assert gcsfs.exists(dir_path)
             gcsfs.mkdir(dir_path)
@@ -836,65 +782,12 @@ class TestExtendedGcsFileSystemMkdir:
                 for record in caplog.records
             )
 
-            if mocks:
-                expected_request = self._get_create_folder_request(dir_path)
-                mocks["control_client"].create_folder.assert_called_once_with(
-                    request=expected_request
-                )
-                mocks["super_mkdir"].assert_not_called()
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-
-    def test_hns_mkdir_cache_update(self, gcs_hns, gcs_hns_mocks):
-        """Test that HNS mkdir correctly updates the cache."""
-        gcsfs = gcs_hns
-        parent_dir = f"{TEST_HNS_BUCKET}/mkdir_cache_test"
-        new_dir = f"{parent_dir}/newly_created_dir"
-        sibling_file = f"{parent_dir}/sibling.txt"
-
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
-            # --- Setup ---
-            gcsfs.touch(sibling_file)
-
-            # --- Populate Cache for parent ---
-            gcsfs.ls(parent_dir)
-
-            # --- Pre-mkdir Assertions ---
-            assert parent_dir in gcsfs.dircache
-            original_listing = list(gcsfs.dircache[parent_dir])
-            assert not any(
-                entry["name"] == new_dir for entry in original_listing
-            ), "New directory should not be in cache before mkdir"
-            assert any(
-                entry["name"] == sibling_file for entry in original_listing
-            ), "Sibling file should be in cache before mkdir"
-
-            # --- Perform mkdir ---
-            gcsfs.mkdir(new_dir)
-
-            # --- Post-mkdir Cache Assertions ---
-            assert (
-                parent_dir in gcsfs.dircache
-            ), "Parent directory should remain in cache"
-            updated_listing = gcsfs.dircache[parent_dir]
-
-            # Verify the new directory is now in the parent's listing
-            new_dir_entry = next(
-                (entry for entry in updated_listing if entry["name"] == new_dir), None
+            expected_request = self._get_create_folder_request(dir_path)
+            mocks["control_client"].create_folder.assert_called_once_with(
+                request=expected_request
             )
-            assert (
-                new_dir_entry is not None
-            ), "New directory should be added to parent's cache"
-            assert new_dir_entry["type"] == "directory"
-
-            # Verify the original sibling file is still present
-            assert any(
-                entry["name"] == sibling_file for entry in updated_listing
-            ), "Sibling file should remain in parent's cache"
-
-            # Verify the number of items increased by one
-            assert len(updated_listing) == len(original_listing) + 1
+            mocks["super_mkdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
 
 
 class TestExtendedGcsFileSystemInternal:

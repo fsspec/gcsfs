@@ -1,7 +1,23 @@
+"""
+This module contains integration tests for Hierarchical Namespace (HNS) enabled buckets.
+
+These tests are designed to run against a real GCS backend and require specific
+configuration:
+- A GCS bucket with HNS enabled must be specified in the environment variable mentioned in `gcsfs/tests/settings.py`.
+- `STORAGE_EMULATOR_HOST` must be set to "https://storage.googleapis.com" to use the real GCS endpoint.
+- The `GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT` environment variable must be set to 'true'.
+
+Each test class within this module should focus on a specific filesystem operation
+that has been extended or modified to support HNS features, such as `mv` (rename)
+and `mkdir`.
+"""
+
 import os
+import uuid
 
 import pytest
 
+from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
 should_run_hns = os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false").lower() in (
@@ -208,3 +224,102 @@ class TestExtendedGcsFileSystemMv:
         expected_msg = f"HNS rename failed due to conflict for '{path1}' to '{path2}'"
         with pytest.raises(FileExistsError, match=expected_msg):
             gcsfs.mv(path1, path2)
+
+
+class TestExtendedGcsFileSystemMkdir:
+    """Integration tests for the mkdir method in ExtendedGcsFileSystem."""
+
+    def test_hns_mkdir_success(self, gcs_hns):
+        """Test successful HNS folder creation."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/new_dir_integration"
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.isdir(dir_path)
+
+    def test_hns_mkdir_nested_success_with_create_parents(self, gcs_hns):
+        """Test successful HNS folder creation for a nested path with create_parents=True."""
+        gcsfs = gcs_hns
+        parent_dir = f"{TEST_HNS_BUCKET}/nested_parent"
+        dir_path = f"{parent_dir}/new_nested_dir"
+        gcsfs.mkdir(dir_path, create_parents=True)
+        assert gcsfs.exists(parent_dir) and gcsfs.isdir(parent_dir)
+        assert gcsfs.exists(dir_path) and gcsfs.isdir(dir_path)
+
+    def test_hns_mkdir_nested_fails_if_create_parents_false(self, gcs_hns):
+        """Test HNS mkdir fails for nested path if create_parents=False and parent doesn't exist."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/non_existent_parent/new_dir"
+        with pytest.raises(FileNotFoundError):
+            gcsfs.mkdir(dir_path, create_parents=False)
+
+    def test_mkdir_in_non_existent_bucket_fails(self, gcs_hns):
+        """Test that mkdir fails when the target bucket does not exist."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-non-existent-bucket-{uuid.uuid4()}"
+        dir_path = f"{bucket_name}/some_dir"
+
+        with pytest.raises(FileNotFoundError, match=f"{bucket_name}"):
+            gcsfs.mkdir(dir_path, create_parents=False)
+
+    def test_mkdir_in_non_existent_bucket_with_create_parents_succeeds(
+        self, gcs_hns, buckets_to_delete
+    ):
+        """Test that mkdir with create_parents=True creates the bucket."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-bucket-mkdir-{uuid.uuid4()}"
+        dir_path = f"{bucket_name}/some_dir"
+        buckets_to_delete.add(bucket_name)
+
+        assert not gcsfs.exists(bucket_name)
+        gcsfs.mkdir(dir_path, create_parents=True)
+        assert gcsfs.exists(bucket_name)
+
+    def test_mkdir_hns_bucket_with_create_parents_succeeds(
+        self, gcs_hns, buckets_to_delete
+    ):
+        """Test mkdir with create_parents and enable_hierarchical_namespace creates an HNS bucket."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-hns-bucket-mkdir-{uuid.uuid4()}"
+        dir_path = f"{bucket_name}/some_dir"
+        buckets_to_delete.add(bucket_name)
+
+        assert not gcsfs.exists(bucket_name)
+        gcsfs.mkdir(dir_path, create_parents=True, enable_hierarchical_namespace=True)
+        assert gcsfs.exists(bucket_name)
+        assert gcsfs.exists(dir_path)
+
+        assert gcsfs._sync_lookup_bucket_type(bucket_name) is BucketType.HIERARCHICAL
+
+    def test_mkdir_create_non_hns_bucket(self, gcs_hns, buckets_to_delete):
+        """Test creating a new non-HNS bucket by default."""
+        gcsfs = gcs_hns
+        bucket_path = f"new-non-hns-bucket-{uuid.uuid4()}"
+        buckets_to_delete.add(bucket_path)
+
+        assert not gcsfs.exists(bucket_path)
+        gcsfs.mkdir(bucket_path)
+        assert gcsfs.exists(bucket_path)
+        assert (
+            gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.NON_HIERARCHICAL
+        )
+
+    def test_mkdir_create_bucket_with_parent_params(self, gcs_hns, buckets_to_delete):
+        """Test creating a bucket passes parent-level parameters like enable_versioning."""
+        gcsfs = gcs_hns
+        bucket_path = f"new-versioned-bucket-{uuid.uuid4()}"
+        buckets_to_delete.add(bucket_path)
+
+        assert not gcsfs.exists(bucket_path)
+        gcsfs.mkdir(bucket_path, enable_versioning=True, enable_object_retention=True)
+        assert gcsfs.exists(bucket_path)
+
+    def test_mkdir_enable_hierarchical_namespace(self, gcs_hns, buckets_to_delete):
+        """Test creating a new HNS-enabled bucket."""
+        gcsfs = gcs_hns
+        bucket_path = f"new-hns-bucket-{uuid.uuid4()}"
+        buckets_to_delete.add(bucket_path)
+
+        assert not gcsfs.exists(bucket_path)
+        gcsfs.mkdir(bucket_path, enable_hierarchical_namespace=True)
+        assert gcsfs.exists(bucket_path)
+        assert gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.HIERARCHICAL
