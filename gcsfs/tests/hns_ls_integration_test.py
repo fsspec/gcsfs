@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestExtendedGcsFileSystemLsIntegration:
-    """Integration tests for ls method edge cases on HNS buckets."""
+    """Integration tests for ls method on HNS buckets."""
 
     @pytest.fixture
     def base_test_dir(self, gcs_hns):
@@ -66,7 +66,7 @@ class TestExtendedGcsFileSystemLsIntegration:
         path_parent = f"{base_test_dir}/parent_empty"
         path_child = f"{path_parent}/sub_empty"
 
-        # FIX: Use create_parents=True to create 'parent_empty' automatically
+        # Use create_parents=True to create 'parent_empty' automatically
         gcs_hns.mkdir(path_child, create_parents=True)
 
         # 1. Verify parent appears in root listing
@@ -111,3 +111,11 @@ class TestExtendedGcsFileSystemLsIntegration:
         assert (
             path_sub_folder in items_parent_cleaned
         ), f"Subfolder '{path_sub_folder}' missing from parent listing"
+
+        # 3. Verify file appears in sub-folder listing
+        items_sub = gcs_hns.ls(path_sub_folder, detail=False)
+        items_sub_cleaned = [item.rstrip("/") for item in items_sub]
+
+        assert (
+            path_file in items_sub_cleaned
+        ), f"File '{path_file}' missing from sub-folder listing"

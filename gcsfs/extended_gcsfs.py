@@ -676,7 +676,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         delimiter="/",
         prefix="",
         versions=False,
-        inventory_report_info=None,
         **kwargs,
     ):
         bucket, _, _ = self.split_path(path)
@@ -689,7 +688,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             delimiter=delimiter,
             prefix=prefix,
             versions=versions,
-            inventory_report_info=inventory_report_info,
             **kwargs,
         )
 
