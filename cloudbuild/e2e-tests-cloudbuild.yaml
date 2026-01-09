@@ -33,6 +33,8 @@ steps:
         gcloud storage buckets create gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} &
         echo "--- Creating HNS bucket ---"
         gcloud storage buckets create gs://gcsfs-test-hns-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        echo "--- Creating Zonal bucket ---"
+        gcloud storage buckets create gs://gcsfs-test-zonal-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
 
         wait
 
@@ -88,7 +90,7 @@ steps:
           set -e
           echo '--- Installing dependencies on VM ---'
           sudo apt-get update > /dev/null
-          sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 > /dev/null
+          sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git> /dev/null
 
           echo '--- Installing Python and dependencies on VM ---'
           python3 -m venv env
@@ -139,13 +141,14 @@ steps:
         TEST_SCRIPT="
           source env/bin/activate && \
           echo '--- Preparing test environment for zonal tests ---' && \
-          export GCSFS_ZONAL_TEST_BUCKET='${_GCSFS_ZONAL_TEST_BUCKET}' && \
+          export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}' && \
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
           export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running Zonal tests on VM ---' && \
           ulimit -n 2048 && export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py
+          pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main && \
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py gcsfs/tests/test_async_gcsfs.py
         "
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:
@@ -219,6 +222,7 @@ steps:
         gcloud storage rm --recursive gs://gcsfs-test-standard-${_SHORT_BUILD_ID} &
         gcloud storage rm --recursive gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} &
         gcloud storage rm --recursive gs://gcsfs-test-hns-${_SHORT_BUILD_ID} &
+        gcloud storage rm --recursive gs://gcsfs-test-zonal-${_SHORT_BUILD_ID} &
         wait
     waitFor:
       - "run-standard-tests"
