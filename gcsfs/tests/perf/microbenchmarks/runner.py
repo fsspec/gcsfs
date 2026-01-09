@@ -76,10 +76,8 @@ def run_multi_process(
     """
     publish_benchmark_extra_info(benchmark, params, benchmark_group)
 
-    if multiprocessing.get_start_method(allow_none=True) != "spawn":
-        multiprocessing.set_start_method("spawn", force=True)
-
-    process_durations_shared = multiprocessing.Array("d", params.processes)
+    ctx = multiprocessing.get_context("spawn")
+    process_durations_shared = ctx.Array("d", params.processes)
 
     # Create GCS instances for workers
     gcs_kwargs = gcs_kwargs or {}
@@ -101,7 +99,7 @@ def run_multi_process(
                     worker_gcs_instances[i], i, process_durations_shared
                 )
 
-                p = multiprocessing.Process(target=worker_target, args=p_args)
+                p = ctx.Process(target=worker_target, args=p_args)
                 processes.append(p)
                 p.start()
 

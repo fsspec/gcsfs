@@ -8,8 +8,11 @@ import sys
 from datetime import datetime
 
 import numpy as np
-from conftest import MB
 from prettytable import PrettyTable
+
+from gcsfs.tests.perf.microbenchmarks.conftest import MB
+
+MIN_TIME_THRESHOLD = 1e-6  # 1 microsecond
 
 
 def _setup_environment(args):
@@ -150,7 +153,7 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
         total_bytes = file_size * files
 
         min_time = bench["stats"].get("min")
-        if min_time and min_time > 0:
+        if min_time and min_time > MIN_TIME_THRESHOLD:
             row["max_throughput"] = total_bytes / min_time
         else:
             row["max_throughput"] = "0.0"
