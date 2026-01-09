@@ -1021,3 +1021,72 @@ class TestExtendedGcsFileSystemLs:
             mock_super_ls.assert_called_once()
             _, kwargs = mock_super_ls.call_args
             assert "includeFoldersAsPrefixes" not in kwargs
+
+
+# This test class validates that list API retrieves all folders for HNS buckets.
+class TestExtendedGcsFileSystemLs:
+    """Unit tests for _do_list_objects in ExtendedGcsFileSystem."""
+
+    @pytest.mark.asyncio
+    async def test_ls_hns_enabled_delimiter(self):
+        # Arrange: Mock the HNS check to return True
+        with (
+            mock.patch.object(
+                ExtendedGcsFileSystem, "_is_bucket_hns_enabled", return_value=True
+            ),
+            mock.patch(
+                "gcsfs.core.GCSFileSystem._do_list_objects", new_callable=mock.AsyncMock
+            ) as mock_super_ls,
+        ):
+            fs = ExtendedGcsFileSystem(token="anon")
+
+            # Act: Call _do_list_objects with delimiter="/"
+            await fs._do_list_objects("gs://my-bucket/path", delimiter="/")
+
+            # Assert: Verify includeFoldersAsPrefixes="true" is passed to the super method
+            mock_super_ls.assert_called_once()
+            _, kwargs = mock_super_ls.call_args
+            assert kwargs.get("includeFoldersAsPrefixes") == "true"
+            assert kwargs.get("delimiter") == "/"
+
+    @pytest.mark.asyncio
+    async def test_ls_hns_disabled(self):
+        # Arrange: Mock the HNS check to return False
+        with (
+            mock.patch.object(
+                ExtendedGcsFileSystem, "_is_bucket_hns_enabled", return_value=False
+            ),
+            mock.patch(
+                "gcsfs.core.GCSFileSystem._do_list_objects", new_callable=mock.AsyncMock
+            ) as mock_super_ls,
+        ):
+            fs = ExtendedGcsFileSystem(token="anon")
+
+            # Act: Call _do_list_objects
+            await fs._do_list_objects("gs://my-bucket/path", delimiter="/")
+
+            # Assert: Verify includeFoldersAsPrefixes is NOT present
+            mock_super_ls.assert_called_once()
+            _, kwargs = mock_super_ls.call_args
+            assert "includeFoldersAsPrefixes" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_ls_hns_enabled_non_slash_delimiter(self):
+        # Arrange: HNS is enabled, but we use a different delimiter
+        with (
+            mock.patch.object(
+                ExtendedGcsFileSystem, "_is_bucket_hns_enabled", return_value=True
+            ),
+            mock.patch(
+                "gcsfs.core.GCSFileSystem._do_list_objects", new_callable=mock.AsyncMock
+            ) as mock_super_ls,
+        ):
+            fs = ExtendedGcsFileSystem(token="anon")
+
+            # Act: Call with an empty delimiter (or any non-slash)
+            await fs._do_list_objects("gs://my-bucket/path", delimiter="")
+
+            # Assert: Verify includeFoldersAsPrefixes is NOT present
+            mock_super_ls.assert_called_once()
+            _, kwargs = mock_super_ls.call_args
+            assert "includeFoldersAsPrefixes" not in kwargs
