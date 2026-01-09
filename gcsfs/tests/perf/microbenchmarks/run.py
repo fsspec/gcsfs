@@ -173,8 +173,18 @@ def _generate_report(json_path, results_dir):
     """
     logging.info(f"Generating CSV report from {json_path}")
 
-    with open(json_path, "r") as f:
-        data = json.load(f)
+    try:
+        with open(json_path, "r") as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        logging.error(
+            f"Failed to parse JSON results from {json_path}. The file might be empty or malformed."
+        )
+        return None
+
+    if not data:
+        logging.error(f"JSON results from {json_path} are empty.")
+        return None
 
     report_path = os.path.join(results_dir, "results.csv")
 

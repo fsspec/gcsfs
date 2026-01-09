@@ -24,11 +24,18 @@ except ImportError:
 def _write_file(gcs, path, file_size, chunk_size):
     chunks_to_write = file_size // chunk_size
     remainder = file_size % chunk_size
-    with gcs.open(path, "wb") as f:
+    with gcs.open(path, "wb", finalize_on_close=True) as f:
         for _ in range(chunks_to_write):
             f.write(os.urandom(chunk_size))
         if remainder > 0:
             f.write(os.urandom(remainder))
+
+    actual_size = gcs.info(path)["size"]
+    if actual_size != file_size:
+        raise RuntimeError(
+            f"Data integrity check failed for {path}. "
+            f"Expected size: {file_size}, Actual size: {actual_size}"
+        )
 
 
 def _prepare_files(gcs, file_paths, file_size=0):
@@ -42,7 +49,10 @@ def _prepare_files(gcs, file_paths, file_size=0):
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(pool_size) as pool:
-        pool.starmap(_write_file, args)
+        try:
+            pool.starmap(_write_file, args)
+        except RuntimeError as e:
+            pytest.fail(str(e))
 
 
 def _benchmark_io_fixture_helper(
