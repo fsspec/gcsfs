@@ -1,17 +1,17 @@
 import logging
-import multiprocessing
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gcsfs.tests.perf.microbenchmarks.conftest import (
-    publish_benchmark_extra_info,
-    publish_multi_process_benchmark_extra_info,
-    publish_resource_metrics,
-)
 from gcsfs.tests.perf.microbenchmarks.read.configs import get_read_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.runner import (
+    filter_test_cases,
+    run_multi_process,
+    run_multi_threaded,
+    run_single_threaded,
+)
 from gcsfs.tests.settings import BENCHMARK_SKIP_TESTS
 
 pytestmark = pytest.mark.skipif(
@@ -52,98 +52,67 @@ def _random_read_worker(gcs, path, chunk_size, offsets):
 
 
 all_benchmark_cases = get_read_benchmark_cases()
-
-single_threaded_cases = [
-    p for p in all_benchmark_cases if p.num_threads == 1 and p.num_processes == 1
-]
-multi_threaded_cases = [
-    p for p in all_benchmark_cases if p.num_threads > 1 and p.num_processes == 1
-]
-multi_process_cases = [p for p in all_benchmark_cases if p.num_processes > 1]
+single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_cases(
+    all_benchmark_cases
+)
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_read_write",
+    "gcsfs_benchmark_read",
     single_threaded_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_single_threaded(benchmark, gcsfs_benchmark_read_write, monitor):
-    gcs, file_paths, params = gcsfs_benchmark_read_write
-
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
-    path = file_paths[0]
+def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
+    gcs, file_paths, params = gcsfs_benchmark_read
 
     op = None
     op_args = None
     if params.pattern == "seq":
         op = _read_op_seq
-        op_args = (gcs, path, params.chunk_size_bytes)
+        op_args = (gcs, file_paths[0], params.chunk_size_bytes)
     elif params.pattern == "rand":
         offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
         op = _random_read_worker
-        op_args = (gcs, path, params.chunk_size_bytes, offsets)
+        op_args = (gcs, file_paths[0], params.chunk_size_bytes, offsets)
 
-    with monitor() as m:
-        benchmark.pedantic(op, rounds=params.rounds, args=op_args)
-
-    publish_resource_metrics(benchmark, m)
+    run_single_threaded(benchmark, monitor, params, op, op_args, BENCHMARK_GROUP)
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_read_write",
+    "gcsfs_benchmark_read",
     multi_threaded_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_multi_threaded(benchmark, gcsfs_benchmark_read_write, monitor):
-    gcs, file_paths, params = gcsfs_benchmark_read_write
+def test_read_multi_threaded(benchmark, gcsfs_benchmark_read, monitor):
+    gcs, file_paths, params = gcsfs_benchmark_read
 
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
+    worker_func = None
+    args_list = []
 
-    def run_benchmark():
-        logging.info("Multi-threaded benchmark: Starting benchmark round.")
-        with ThreadPoolExecutor(max_workers=params.num_threads) as executor:
-            if params.pattern == "seq":
-                # Each thread reads one full file sequentially.
-                futures = [
-                    executor.submit(_read_op_seq, gcs, path, params.chunk_size_bytes)
-                    for path in file_paths
-                ]
-                list(futures)  # Wait for completion
+    if params.pattern == "seq":
+        worker_func = _read_op_seq
+        args_list = [(gcs, path, params.chunk_size_bytes) for path in file_paths]
 
-            elif params.pattern == "rand":
+    elif params.pattern == "rand":
+        worker_func = _random_read_worker
+        offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
 
-                offsets = list(
-                    range(0, params.file_size_bytes, params.chunk_size_bytes)
-                )
+        args_list = [
+            (gcs, path, params.chunk_size_bytes, offsets) for path in file_paths
+        ]
 
-                if params.num_files == 1:
-                    # All threads read the same file randomly.
-                    paths_to_read = [file_paths[0]] * params.num_threads
-                else:
-                    # Each thread reads a different file randomly.
-                    paths_to_read = file_paths
-
-                futures = [
-                    executor.submit(
-                        _random_read_worker, gcs, path, params.chunk_size_bytes, offsets
-                    )
-                    for path in paths_to_read
-                ]
-                list(futures)  # Wait for completion
-
-    with monitor() as m:
-        benchmark.pedantic(run_benchmark, rounds=params.rounds)
-
-    publish_resource_metrics(benchmark, m)
+    run_multi_threaded(
+        benchmark, monitor, params, worker_func, args_list, BENCHMARK_GROUP
+    )
 
 
 def _process_worker(
     gcs,
     file_paths,
     chunk_size,
-    num_threads,
+    threads,
     pattern,
     file_size_bytes,
     process_durations_shared,
@@ -151,7 +120,7 @@ def _process_worker(
 ):
     """A worker function for each process to read a list of files."""
     start_time = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+    with ThreadPoolExecutor(max_workers=threads) as executor:
         if pattern == "seq":
             futures = [
                 executor.submit(_read_op_seq, gcs, path, chunk_size)
@@ -172,63 +141,45 @@ def _process_worker(
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_read_write",
+    "gcsfs_benchmark_read",
     multi_process_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_read_multi_process(benchmark, gcsfs_benchmark_read_write, request, monitor):
-    gcs, file_paths, params = gcsfs_benchmark_read_write
-    publish_benchmark_extra_info(benchmark, params, BENCHMARK_GROUP)
+def test_read_multi_process(
+    benchmark, gcsfs_benchmark_read, extended_gcs_factory, request, monitor
+):
+    _, file_paths, params = gcsfs_benchmark_read
+    files_per_process = params.files // params.processes
 
-    if multiprocessing.get_start_method(allow_none=True) != "spawn":
-        multiprocessing.set_start_method("spawn", force=True)
+    def args_builder(gcs_instance, i, shared_arr):
+        if params.files > 1:
+            start_index = i * files_per_process
+            end_index = start_index + files_per_process
+            process_files = file_paths[start_index:end_index]
+        else:  # files == 1
+            # Each process will have its threads read from the same single file
+            process_files = [file_paths[0]] * params.threads
 
-    process_durations_shared = multiprocessing.Array("d", params.num_processes)
-    files_per_process = params.num_files // params.num_processes
-    threads_per_process = params.num_threads
+        return (
+            gcs_instance,
+            process_files,
+            params.chunk_size_bytes,
+            params.threads,
+            params.pattern,
+            params.file_size_bytes,
+            shared_arr,
+            i,
+        )
 
-    round_durations_s = []
-    with monitor() as m:
-        for _ in range(params.rounds):
-            logging.info("Multi-process benchmark: Starting benchmark round.")
-            processes = []
-
-            for i in range(params.num_processes):
-                if params.num_files > 1:
-                    start_index = i * files_per_process
-                    end_index = start_index + files_per_process
-                    process_files = file_paths[start_index:end_index]
-                else:  # num_files == 1
-                    # Each process will have its threads read from the same single file
-                    process_files = [file_paths[0]] * threads_per_process
-
-                p = multiprocessing.Process(
-                    target=_process_worker,
-                    args=(
-                        gcs,
-                        process_files,
-                        params.chunk_size_bytes,
-                        threads_per_process,
-                        params.pattern,
-                        params.file_size_bytes,
-                        process_durations_shared,
-                        i,
-                    ),
-                )
-                processes.append(p)
-                p.start()
-
-            for p in processes:
-                p.join()
-
-            # The round duration is the time of the slowest process
-            round_durations_s.append(max(process_durations_shared[:]))
-
-    publish_multi_process_benchmark_extra_info(benchmark, round_durations_s, params)
-    publish_resource_metrics(benchmark, m)
-
-    # If --benchmark-json is passed, add a dummy benchmark run to generate a
-    # report entry that can be updated via the hook with timings.
-    if request.config.getoption("benchmark_json"):
-        benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)
+    run_multi_process(
+        benchmark,
+        monitor,
+        params,
+        extended_gcs_factory,
+        worker_target=_process_worker,
+        args_builder=args_builder,
+        benchmark_group=BENCHMARK_GROUP,
+        gcs_kwargs={"block_size": params.block_size_bytes},
+        request=request,
+    )

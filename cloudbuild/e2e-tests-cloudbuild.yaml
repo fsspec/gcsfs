@@ -98,7 +98,7 @@ steps:
 
           pip install --upgrade pip > /dev/null
           # Install testing libraries explicitly, as they are not in setup.py
-          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage psutil PyYAML > /dev/null
+          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage psutil PyYAML numpy prettytable > /dev/null
           pip install -e . > /dev/null
         "
 
@@ -172,7 +172,7 @@ steps:
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running HNS tests on VM ---' && \
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_hns_gcsfs.py gcsfs/tests/hns_ls_integration_test.py --deselect gcsfs/tests/test_extended_hns_gcsfs.py::TestExtendedGcsFileSystemMv::test_folder_rename_to_root_directory"
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/integration/test_extended_hns.py"
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:
       - "setup-vm"
