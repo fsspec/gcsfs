@@ -599,7 +599,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         path = path.rstrip("/")
 
         # NOTE: the inventory report logic is experimental.
-        inventory_report_info = kwargs.pop("inventory_report_info", None)
+        inventory_report_info = kwargs.get("inventory_report_info", None)
 
         # Only attempt to list from the cache when the user does not use
         # the inventory report service.
@@ -621,7 +621,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             path,
             prefix=prefix,
             versions=versions,
-            inventory_report_info=inventory_report_info,
             **kwargs,
         )
 
@@ -661,7 +660,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         delimiter="/",
         prefix="",
         versions=False,
-        inventory_report_info=None,
         **kwargs,
     ):
         """Object listing for the given {bucket}/{prefix}/ path."""
@@ -672,6 +670,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         # Page size of 5000 is officially supported across GCS.
         default_page_size = 5000
+
+        # NOTE: the inventory report logic is experimental.
+        # removing inventory_report_info parameter to pass kwargs directly to list api
+        inventory_report_info = kwargs.pop("inventory_report_info", None)
 
         # Check if the user has configured inventory report option.
         if inventory_report_info is not None:
