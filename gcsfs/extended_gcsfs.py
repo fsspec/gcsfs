@@ -669,6 +669,28 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         self.invalidate_cache(self._parent(path))
 
+    async def _do_list_objects(
+        self,
+        path,
+        max_results=None,
+        delimiter="/",
+        prefix="",
+        versions=False,
+        **kwargs,
+    ):
+        bucket, _, _ = self.split_path(path)
+        if await self._is_bucket_hns_enabled(bucket) and delimiter == "/":
+            kwargs["includeFoldersAsPrefixes"] = "true"
+
+        return await super()._do_list_objects(
+            path,
+            max_results=max_results,
+            delimiter=delimiter,
+            prefix=prefix,
+            versions=versions,
+            **kwargs,
+        )
+
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
