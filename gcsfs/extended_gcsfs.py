@@ -325,10 +325,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         self.dircache.pop(path1, None)
         parent1 = self._parent(path1)
         if parent1 in self.dircache:
-            for i, entry in enumerate(self.dircache[parent1]):
-                if entry.get("name") == path1:
-                    self.dircache[parent1].pop(i)
-                    break
+            self.dircache[parent1] = [
+                e for e in self.dircache[parent1] if e.get("name") != path1
+            ]
 
         # 3. Invalidate the destination path and update its parent's cache.
         self.dircache.pop(path2, None)
@@ -626,10 +625,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             parent = self._parent(path)
             if parent in self.dircache:
                 # Remove the deleted directory entry from the parent's listing.
-                for i, entry in enumerate(self.dircache[parent]):
-                    if entry.get("name") == path:
-                        self.dircache[parent].pop(i)
-                        break
+                self.dircache[parent] = [
+                    e for e in self.dircache[parent] if e.get("name") != path
+                ]
             return
         except api_exceptions.NotFound as e:
             # This can happen if the directory does not exist, or if the path
