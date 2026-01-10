@@ -1467,3 +1467,32 @@ class TestExtendedGcsFileSystemRmdir:
                 mocks["async_lookup_bucket_type"].assert_not_called()
                 mocks["control_client"].delete_folder.assert_not_called()
                 mocks["super_rmdir"].assert_called_once_with(bucket_path)
+
+    def test_rmdir_on_folder_with_placeholder_object(self, gcs_hns, gcs_hns_mocks):
+        """
+        Tests that rmdir successfully deletes a folder that contains its own
+        zero-byte placeholder object, a scenario common in HNS buckets when
+        folders are created via tools that simulate directories with placeholder files.
+        """
+        gcsfs = gcs_hns
+        folder_path = f"{TEST_HNS_BUCKET}/test-folder-with-placeholder"
+        placeholder_path = f"{folder_path}/"
+        gcsfs.touch(placeholder_path)
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+            if mocks:
+                mocks["info"].side_effect = [
+                    {"type": "directory", "name": folder_path},  # from isdir
+                    FileNotFoundError(folder_path),  # from exists after rm
+                ]
+
+            assert gcsfs.isdir(folder_path)
+            gcsfs.rmdir(folder_path)
+            assert not gcsfs.exists(folder_path)
+
+            if mocks:
+                mocks["async_lookup_bucket_type"].assert_called_once_with(
+                    TEST_HNS_BUCKET
+                )
+                self._assert_delete_folder_called_with(mocks, folder_path)
+                mocks["super_rmdir"].assert_not_called()

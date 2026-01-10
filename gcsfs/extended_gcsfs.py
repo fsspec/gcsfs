@@ -591,6 +591,28 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if not is_hns:
             return await super()._rmdir(path)
 
+        # In HNS buckets, a placeholder object (e.g., 'a/b/c/') might exist,
+        # which would cause rmdir('a/b/c') to fail because the directory is not empty.
+        # To handle this, we first attempt to delete the placeholder object.
+        # If it doesn't exist, _rm_file will raise a FileNotFoundError, which we can
+        # safely ignore and proceed with the directory deletion.
+        #
+        # Note: This may delete the placeholder even if the directory contains
+        # other files and the final `delete_folder` call fails. This side
+        # effect is acceptable because placeholder objects are used to simulate
+        # folders and are not strictly necessary in HNS-enabled buckets, which
+        # have native folder entities.
+        try:
+            placeholder_path = f"{path.rstrip('/')}/"
+
+            await self._rm_file(placeholder_path)
+            logger.debug(
+                f"Removed placeholder object '{placeholder_path}' before rmdir."
+            )
+        except FileNotFoundError:
+            # This is expected if no placeholder object exists.
+            pass
+
         try:
             logger.info(f"Using HNS-aware rmdir for '{path}'.")
             folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
