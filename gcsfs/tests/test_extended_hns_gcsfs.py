@@ -1101,20 +1101,11 @@ class TestExtendedGcsFileSystemLs:
 class TestExtendedGcsFileSystemRmdir:
     """Unit tests for the rmdir method in ExtendedGcsFileSystem."""
 
-    def _assert_delete_folder_called_with(self, mocks, dir_path):
-        """Asserts that delete_folder was called with the correct request."""
+    def _get_delete_folder_request(self, dir_path):
+        """Constructs a DeleteFolderRequest for testing."""
         bucket, folder_path = dir_path.split("/", 1)
         expected_folder_name = f"projects/_/buckets/{bucket}/folders/{folder_path}"
-        mocks["control_client"].delete_folder.assert_called_once_with(
-            request=storage_control_v2.DeleteFolderRequest(name=expected_folder_name)
-        )
-
-    def _assert_hns_rmdir_called_using_logs(self, caplog, path):
-        """Asserts that HNS rmdir was called by checking logs."""
-        hns_log_message = f"Using HNS-aware rmdir for '{path}'."
-        assert any(
-            hns_log_message in record.message for record in caplog.records
-        ), "HNS rmdir log message not found."
+        return storage_control_v2.DeleteFolderRequest(name=expected_folder_name)
 
     def test_hns_rmdir_success(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test successful HNS empty directory deletion."""
@@ -1122,34 +1113,27 @@ class TestExtendedGcsFileSystemRmdir:
         dir_name = "empty_dir"
         dir_path = f"{TEST_HNS_BUCKET}/{dir_name}"
 
-        # Create an empty directory, can be replaced with mkdir once it is implemented for HNS buckets.
-        gcsfs.touch(f"{dir_path}/placeholder")
-        gcsfs.rm(f"{dir_path}/placeholder")
+        gcsfs.mkdir(f"{dir_path}/placeholder", create_parents=True)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                # Configure mocks
-                # 1. exists(dir_path) before rmdir should succeed.
-                # 2. exists(dir_path) after rmdir should fail.
-                mocks["info"].side_effect = [
-                    {"type": "directory", "name": dir_path},
-                    FileNotFoundError(dir_path),
-                ]
-
+            # Configure mocks
+            # 1. exists(dir_path) before rmdir should succeed.
+            # 2. exists(dir_path) after rmdir should fail.
+            mocks["info"].side_effect = [
+                {"type": "directory", "name": dir_path},
+                FileNotFoundError(dir_path),
+            ]
             assert gcsfs.exists(dir_path)
 
             gcsfs.rmdir(dir_path)
 
             assert not gcsfs.exists(dir_path)
-
-            self._assert_hns_rmdir_called_using_logs(caplog, dir_path)
-
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                self._assert_delete_folder_called_with(mocks, dir_path)
-                mocks["super_rmdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_delete_folder_request(dir_path)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_rmdir"].assert_not_called()
 
     @pytest.mark.skipif(
         os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
@@ -1163,12 +1147,10 @@ class TestExtendedGcsFileSystemRmdir:
 
         with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
             gcsfs.rmdir(dir_path)
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                mocks["control_client"].delete_folder.assert_not_called()
-                mocks["super_rmdir"].assert_called_once_with(dir_path)
+
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["control_client"].delete_folder.assert_not_called()
+            mocks["super_rmdir"].assert_called_once_with(dir_path)
 
     def test_hns_rmdir_non_empty_raises_os_error(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test that HNS rmdir on a non-empty directory raises OSError."""
@@ -1177,22 +1159,19 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(f"{dir_path}/file.txt")
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["control_client"].delete_folder.side_effect = (
-                    api_exceptions.FailedPrecondition("")
-                )
+            mocks["control_client"].delete_folder.side_effect = (
+                api_exceptions.FailedPrecondition("")
+            )
 
             with pytest.raises(OSError, match="Pre condition failed for rmdir"):
                 gcsfs.rmdir(dir_path)
 
-            self._assert_hns_rmdir_called_using_logs(caplog, dir_path)
-
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                self._assert_delete_folder_called_with(mocks, dir_path)
-                mocks["super_rmdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_delete_folder_request(dir_path)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_rmdir"].assert_not_called()
 
     def test_hns_rmdir_dne_raises_not_found(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test that HNS rmdir on a non-existent directory raises FileNotFoundError."""
@@ -1201,22 +1180,19 @@ class TestExtendedGcsFileSystemRmdir:
         dir_path = f"{TEST_HNS_BUCKET}/{dir_name}"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["control_client"].delete_folder.side_effect = (
-                    api_exceptions.NotFound("")
-                )
+            mocks["control_client"].delete_folder.side_effect = api_exceptions.NotFound(
+                ""
+            )
 
             with pytest.raises(FileNotFoundError, match="rmdir failed for path"):
                 gcsfs.rmdir(dir_path)
 
-            self._assert_hns_rmdir_called_using_logs(caplog, dir_path)
-
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                self._assert_delete_folder_called_with(mocks, dir_path)
-                mocks["super_rmdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_delete_folder_request(dir_path)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_rmdir"].assert_not_called()
 
     def test_rmdir_on_file_raises_file_not_found(self, gcs_hns, gcs_hns_mocks, caplog):
         """
@@ -1229,22 +1205,19 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(file_path)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["control_client"].delete_folder.side_effect = (
-                    api_exceptions.NotFound("")
-                )
+            mocks["control_client"].delete_folder.side_effect = api_exceptions.NotFound(
+                ""
+            )
 
             with pytest.raises(FileNotFoundError, match="rmdir failed for path"):
                 gcsfs.rmdir(file_path)
 
-            self._assert_hns_rmdir_called_using_logs(caplog, file_path)
-
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                self._assert_delete_folder_called_with(mocks, file_path)
-                mocks["super_rmdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_delete_folder_request(file_path)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_rmdir"].assert_not_called()
 
     def test_hns_rmdir_with_empty_subfolder_raises_os_error(
         self, gcs_hns, gcs_hns_mocks, caplog
@@ -1259,22 +1232,19 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.rm(f"{sub_dir}/placeholder")
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["control_client"].delete_folder.side_effect = (
-                    api_exceptions.FailedPrecondition("Directory not empty")
-                )
+            mocks["control_client"].delete_folder.side_effect = (
+                api_exceptions.FailedPrecondition("Directory not empty")
+            )
 
             with pytest.raises(OSError, match="Pre condition failed for rmdir"):
                 gcsfs.rmdir(parent_dir)
 
-            self._assert_hns_rmdir_called_using_logs(caplog, parent_dir)
-
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                self._assert_delete_folder_called_with(mocks, parent_dir)
-                mocks["super_rmdir"].assert_not_called()
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_delete_folder_request(parent_dir)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_rmdir"].assert_not_called()
 
     def test_hns_rmdir_nested_directories_from_leaf(
         self, gcs_hns, gcs_hns_mocks, caplog
@@ -1290,30 +1260,25 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.rm(f"{grandchild_dir}/placeholder")
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].side_effect = [
-                    FileNotFoundError(grandchild_dir),
-                    FileNotFoundError(child_dir),
-                    FileNotFoundError(parent_dir),
-                ]
+            mocks["info"].side_effect = [
+                FileNotFoundError(grandchild_dir),
+                FileNotFoundError(child_dir),
+                FileNotFoundError(parent_dir),
+            ]
             # Delete leaf first
             gcsfs.rmdir(grandchild_dir)
             assert not gcsfs.exists(grandchild_dir)
-            self._assert_hns_rmdir_called_using_logs(caplog, grandchild_dir)
 
             # Delete child
             gcsfs.rmdir(child_dir)
             assert not gcsfs.exists(child_dir)
-            self._assert_hns_rmdir_called_using_logs(caplog, child_dir)
 
             # Delete parent
             gcsfs.rmdir(parent_dir)
             assert not gcsfs.exists(parent_dir)
-            self._assert_hns_rmdir_called_using_logs(caplog, parent_dir)
 
-            if mocks:
-                assert mocks["control_client"].delete_folder.call_count == 3
-                mocks["super_rmdir"].assert_not_called()
+            assert mocks["control_client"].delete_folder.call_count == 3
+            mocks["super_rmdir"].assert_not_called()
 
     def test_rmdir_on_non_empty_hns_bucket_raises_http_error(
         self, gcs_hns, gcs_hns_mocks
@@ -1324,23 +1289,18 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(f"{bucket_path}/file.txt")
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["super_rmdir"].side_effect = HttpError(
-                    {
-                        "code": 409,
-                        "message": "The bucket you tried to delete is not empty",
-                    }
-                )
+            mocks["super_rmdir"].side_effect = HttpError(
+                {"code": 409, "message": "The bucket you tried to delete is not empty"}
+            )
 
             with pytest.raises(
                 HttpError, match="The bucket you tried to delete is not empty"
             ):
                 gcsfs.rmdir(bucket_path)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_not_called()
-                mocks["control_client"].delete_folder.assert_not_called()
-                mocks["super_rmdir"].assert_called_once_with(bucket_path)
+            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["control_client"].delete_folder.assert_not_called()
+            mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
     def test_hns_rmdir_cache_invalidation(self, gcs_hns, gcs_hns_mocks):
         """Test that HNS rmdir correctly invalidates and updates the cache."""
@@ -1398,75 +1358,54 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(f"{bucket_path}/file.txt")
 
         with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["super_rmdir"].side_effect = HttpError(
-                    {
-                        "code": 409,
-                        "message": "The bucket you tried to delete is not empty",
-                    }
-                )
+            mocks["super_rmdir"].side_effect = HttpError(
+                {"code": 409, "message": "The bucket you tried to delete is not empty"}
+            )
 
             with pytest.raises(
                 HttpError, match="The bucket you tried to delete is not empty"
             ):
                 gcsfs.rmdir(bucket_path)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_not_called()
-                mocks["control_client"].delete_folder.assert_not_called()
-                mocks["super_rmdir"].assert_called_once_with(bucket_path)
+            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["control_client"].delete_folder.assert_not_called()
+            mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
-    @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
-        reason=(
-            "Deletes bucket. TODO: re-enable on real GCS once mkdir for HNS buckets"
-            " is implemented to recreate bucket in fixture."
-        ),
-    )
     def test_rmdir_on_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test that rmdir on a bucket falls back to parent method."""
         gcsfs = gcs_hns
         bucket_path = f"{TEST_HNS_BUCKET}"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                # exists(dir_path) after rmdir should fail.
-                mocks["info"].side_effect = [
-                    FileNotFoundError(bucket_path),
-                ]
+            # exists(dir_path) after rmdir should fail.
+            mocks["info"].side_effect = [
+                FileNotFoundError(bucket_path),
+            ]
 
             gcsfs.rmdir(bucket_path)
-            assert not gcsfs.exists(bucket_path)
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_not_called()
-                mocks["control_client"].delete_folder.assert_not_called()
-                mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
-    @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
-        reason=(
-            "Deletes bucket. TODO: re-enable on real GCS once mkdir for HNS buckets"
-            " is implemented to recreate bucket in fixture."
-        ),
-    )
+            assert not gcsfs.exists(bucket_path)
+            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["control_client"].delete_folder.assert_not_called()
+            mocks["super_rmdir"].assert_called_once_with(bucket_path)
+
     def test_rmdir_on_non_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks, caplog):
         """Test that rmdir on a bucket falls back to parent method."""
         gcsfs = gcs_hns
         bucket_path = f"{TEST_HNS_BUCKET}"
 
         with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                # exists(dir_path) after rmdir should fail.
-                mocks["info"].side_effect = [
-                    FileNotFoundError(bucket_path),
-                ]
+            # exists(dir_path) after rmdir should fail.
+            mocks["info"].side_effect = [
+                FileNotFoundError(bucket_path),
+            ]
 
             gcsfs.rmdir(bucket_path)
+
             assert not gcsfs.exists(bucket_path)
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_not_called()
-                mocks["control_client"].delete_folder.assert_not_called()
-                mocks["super_rmdir"].assert_called_once_with(bucket_path)
+            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["control_client"].delete_folder.assert_not_called()
+            mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
     def test_rmdir_on_folder_with_placeholder_object(self, gcs_hns, gcs_hns_mocks):
         """
@@ -1480,19 +1419,18 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(placeholder_path)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            if mocks:
-                mocks["info"].side_effect = [
-                    {"type": "directory", "name": folder_path},  # from isdir
-                    FileNotFoundError(folder_path),  # from exists after rm
-                ]
-
+            mocks["info"].side_effect = [
+                {"type": "directory", "name": folder_path},  # from isdir
+                FileNotFoundError(folder_path),  # from exists after rm
+            ]
             assert gcsfs.isdir(folder_path)
-            gcsfs.rmdir(folder_path)
-            assert not gcsfs.exists(folder_path)
 
-            if mocks:
-                mocks["async_lookup_bucket_type"].assert_called_once_with(
-                    TEST_HNS_BUCKET
-                )
-                self._assert_delete_folder_called_with(mocks, folder_path)
-                mocks["super_rmdir"].assert_not_called()
+            gcsfs.rmdir(folder_path)
+
+            assert not gcsfs.exists(folder_path)
+            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            expected_request = self._get_delete_folder_request(folder_path)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_rmdir"].assert_not_called()
