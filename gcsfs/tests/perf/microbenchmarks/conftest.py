@@ -1,6 +1,7 @@
 import logging
 import multiprocessing
 import os
+import random
 import statistics
 import time
 import uuid
@@ -23,19 +24,69 @@ except ImportError:
 def _write_file(gcs, path, file_size, chunk_size):
     chunks_to_write = file_size // chunk_size
     remainder = file_size % chunk_size
-    with gcs.open(path, "wb") as f:
+    with gcs.open(path, "wb", finalize_on_close=True) as f:
         for _ in range(chunks_to_write):
             f.write(os.urandom(chunk_size))
         if remainder > 0:
             f.write(os.urandom(remainder))
 
+    actual_size = gcs.info(path)["size"]
+    if actual_size != file_size:
+        raise RuntimeError(
+            f"Data integrity check failed for {path}. "
+            f"Expected size: {file_size}, Actual size: {actual_size}"
+        )
 
-def _prepare_files(gcs, file_paths, file_size):
-    chunk_size = min(100 * MB, file_size)
+
+def _prepare_files(gcs, file_paths, file_size=0):
+    if file_size > 0:
+        chunk_size = min(100 * MB, file_size)
+        pool_size = 16
+    else:
+        chunk_size = 1
+        pool_size = min(100, len(file_paths))
+
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(16) as pool:
-        pool.starmap(_write_file, args)
+    with ctx.Pool(pool_size) as pool:
+        try:
+            pool.starmap(_write_file, args)
+        except RuntimeError as e:
+            pytest.fail(str(e))
+
+
+def _benchmark_io_fixture_helper(
+    extended_gcs_factory, params, prefix_tag, create_files=False, gcs_kwargs=None
+):
+    gcs_kwargs = gcs_kwargs or {}
+    gcs = extended_gcs_factory(**gcs_kwargs)
+
+    prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
+    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
+
+    action = "creating" if create_files else "targeting"
+    logging.info(
+        f"Setting up benchmark '{params.name}': {action} {params.files} file(s) "
+        f"of size {params.file_size_bytes / MB:.2f} MB each."
+    )
+
+    if create_files:
+        start_time = time.perf_counter()
+        _prepare_files(gcs, file_paths, params.file_size_bytes)
+
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logging.info(
+            f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
+        )
+
+    yield gcs, file_paths, params
+
+    # --- Teardown ---
+    logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
+    try:
+        gcs.rm(prefix, recursive=True)
+    except Exception as e:
+        logging.error(f"Failed to clean up benchmark files: {e}")
 
 
 @pytest.fixture
@@ -48,41 +99,96 @@ def monitor():
 
 
 @pytest.fixture
-def gcsfs_benchmark_read_write(extended_gcs_factory, request):
+def gcsfs_benchmark_read(extended_gcs_factory, request):
     """
     A fixture that creates temporary files for a benchmark run and cleans
     them up afterward.
 
-    It uses the `BenchmarkParameters` object from the test's parametrization
+    It uses the parameters from the test's parametrization
     to determine how many files to create and of what size.
     """
     params = request.param
-    gcs = extended_gcs_factory(block_size=params.block_size_bytes)
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-read",
+        create_files=True,
+        gcs_kwargs={"block_size": params.block_size_bytes},
+    )
 
-    prefix = f"{params.bucket_name}/benchmark-files-{uuid.uuid4()}"
-    file_paths = [f"{prefix}/file_{i}" for i in range(params.num_files)]
+
+@pytest.fixture
+def gcsfs_benchmark_write(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a write benchmark run.
+    It provides a GCSFS instance and a list of file paths to write to.
+    """
+    params = request.param
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-write",
+        create_files=False,
+    )
+
+
+@pytest.fixture
+def gcsfs_benchmark_listing(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a listing benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    gcs = extended_gcs_factory()
+
+    prefix = f"{params.bucket_name}/benchmark-listing-{uuid.uuid4()}"
+
+    target_dirs = [prefix]
+    candidates = [(prefix, 0)]
+
+    for i in range(params.folders):
+        valid_parents = [p for p in candidates if p[1] <= params.depth]
+        parent_path, parent_depth = random.choice(valid_parents)
+        new_path = f"{parent_path}/folder_{i}"
+        target_dirs.append(new_path)
+        candidates.append((new_path, parent_depth + 1))
+
+    file_paths = []
+    for i in range(params.files):
+        folder = random.choice(target_dirs)
+        file_paths.append(f"{folder}/file_{i}")
 
     logging.info(
-        f"Setting up benchmark '{params.name}': creating {params.num_files} file(s) "
-        f"of size {params.file_size_bytes / MB:.2f} MB each."
+        f"Setting up benchmark '{params.name}': creating {params.files} "
+        f"files distributed across {len(target_dirs) - 1} folders at depth {params.depth}."
     )
 
     start_time = time.perf_counter()
-    # Create all files in parallel, 16 at a time
-    _prepare_files(gcs, file_paths, params.file_size_bytes)
+    _prepare_files(gcs, file_paths)
 
     duration_ms = (time.perf_counter() - start_time) * 1000
     logging.info(
-        f"Benchmark '{params.name}' setup created {params.num_files} files in {duration_ms:.2f} ms."
+        f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
     )
 
-    yield gcs, file_paths, params
+    yield gcs, target_dirs, prefix, params
 
     # --- Teardown ---
-    logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
+    logging.info(f"Tearing down benchmark '{params.name}': deleting files and folders.")
     try:
-        for path in file_paths:
-            gcs.rm(path)
+        gcs.rm(file_paths)
+        if params.bucket_type != "regional":
+            # Sort by length descending to delete children first
+            for d in sorted(target_dirs, key=len, reverse=True):
+                try:
+                    gcs.rmdir(d)
+                except Exception:
+                    pass
+        else:
+            try:
+                gcs.rmdir(prefix)
+            except Exception:
+                pass
     except Exception as e:
         logging.error(f"Failed to clean up benchmark files: {e}")
 
@@ -117,16 +223,19 @@ def publish_benchmark_extra_info(
     """
     Helper function to publish benchmark parameters to the extra_info property.
     """
-    benchmark.extra_info["num_files"] = params.num_files
-    benchmark.extra_info["file_size"] = params.file_size_bytes
-    benchmark.extra_info["chunk_size"] = params.chunk_size_bytes
-    benchmark.extra_info["block_size"] = params.block_size_bytes
-    benchmark.extra_info["pattern"] = params.pattern
-    benchmark.extra_info["threads"] = params.num_threads
+    benchmark.extra_info["files"] = params.files
+    benchmark.extra_info["file_size"] = getattr(params, "file_size_bytes", "N/A")
+    benchmark.extra_info["chunk_size"] = getattr(params, "chunk_size_bytes", "N/A")
+    benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
+    benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
+    benchmark.extra_info["threads"] = params.threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name
     benchmark.extra_info["bucket_type"] = params.bucket_type
-    benchmark.extra_info["processes"] = params.num_processes
+    benchmark.extra_info["processes"] = params.processes
+    benchmark.extra_info["depth"] = getattr(params, "depth", "N/A")
+    benchmark.extra_info["folders"] = getattr(params, "folders", "N/A")
+
     benchmark.group = benchmark_group
 
 
@@ -138,7 +247,7 @@ def publish_resource_metrics(benchmark: Any, monitor: ResourceMonitor) -> None:
         {
             "cpu_max_global": f"{monitor.max_cpu:.2f}",
             "mem_max": f"{monitor.max_mem:.2f}",
-            "net_throughput_mb_s": f"{monitor.throughput_mb_s:.2f}",
+            "net_throughput_s": f"{monitor.throughput_s:.2f}",
             "vcpus": monitor.vcpus,
         }
     )

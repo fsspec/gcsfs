@@ -4,6 +4,20 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.1.0
+--------
+
+New opt-in support for hierarchical buckets.
+
+* Support alternative GCP Universes (#732)
+* overrides for HNS buckets (#731, 730, 727
+* CI for HNS and zonal buckets (#729, 721, 719)
+* Zonal bucket write mode (#726)
+* CI auth fixes (#720, 725
+* Microbenchmarks framework (#722)
+* capture generation value after upload (#718)
+
+
 2025.12.0
 ---------
 

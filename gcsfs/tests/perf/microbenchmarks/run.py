@@ -8,8 +8,11 @@ import sys
 from datetime import datetime
 
 import numpy as np
-from conftest import MB
 from prettytable import PrettyTable
+
+from gcsfs.tests.perf.microbenchmarks.conftest import MB
+
+MIN_TIME_THRESHOLD = 1e-6  # 1 microsecond
 
 
 def _setup_environment(args):
@@ -144,14 +147,18 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
 
     # Calculate max throughput
     file_size = bench["extra_info"].get("file_size", 0)
-    num_files = bench["extra_info"].get("num_files", 1)
-    total_bytes = file_size * num_files
+    files = bench["extra_info"].get("files", 1)
 
-    min_time = bench["stats"].get("min")
-    if min_time and min_time > 0:
-        row["max_throughput_mb_s"] = (total_bytes / min_time) / MB
+    if file_size != "N/A":
+        total_bytes = file_size * files
+
+        min_time = bench["stats"].get("min")
+        if min_time and min_time > MIN_TIME_THRESHOLD:
+            row["max_throughput"] = total_bytes / min_time
+        else:
+            row["max_throughput"] = "0.0"
     else:
-        row["max_throughput_mb_s"] = "0.0"
+        row["max_throughput"] = "N/A"
 
     return row
 
@@ -169,8 +176,18 @@ def _generate_report(json_path, results_dir):
     """
     logging.info(f"Generating CSV report from {json_path}")
 
-    with open(json_path, "r") as f:
-        data = json.load(f)
+    try:
+        with open(json_path, "r") as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        logging.error(
+            f"Failed to parse JSON results from {json_path}. The file might be empty or malformed."
+        )
+        return None
+
+    if not data:
+        logging.error(f"JSON results from {json_path} are empty.")
+        return None
 
     report_path = os.path.join(results_dir, "results.csv")
 
@@ -178,7 +195,7 @@ def _generate_report(json_path, results_dir):
     first_benchmark = data["benchmarks"][0]
     extra_info_headers = sorted(first_benchmark["extra_info"].keys())
     stats_headers = ["min", "max", "mean", "median", "stddev"]
-    custom_headers = ["p90", "p95", "p99", "max_throughput_mb_s"]
+    custom_headers = ["p90", "p95", "p99", "max_throughput"]
 
     headers = ["name", "group"] + extra_info_headers + stats_headers + custom_headers
 
@@ -197,6 +214,12 @@ def _generate_report(json_path, results_dir):
     return report_path
 
 
+def _format_mb(value):
+    if value == "N/A":
+        return "N/A"
+    return f"{float(value) / MB:.2f}"
+
+
 def _create_table_row(row):
     """
     Format a dictionary of benchmark results into a list for table display.
@@ -212,17 +235,19 @@ def _create_table_row(row):
         row.get("bucket_type", ""),
         row.get("group", ""),
         row.get("pattern", ""),
-        row.get("num_files", ""),
+        row.get("files", ""),
+        row.get("folders", ""),
         row.get("threads", ""),
         row.get("processes", ""),
-        f"{float(row.get('file_size', 0)) / MB:.2f}",
-        f"{float(row.get('chunk_size', 0)) / MB:.2f}",
-        f"{float(row.get('block_size', 0)) / MB:.2f}",
+        row.get("depth", ""),
+        _format_mb(row.get("file_size", 0)),
+        _format_mb(row.get("chunk_size", 0)),
+        _format_mb(row.get("block_size", 0)),
         f"{float(row.get('min', 0)):.4f}",
         f"{float(row.get('mean', 0)):.4f}",
-        float(row.get("max_throughput_mb_s", 0)),
+        _format_mb(row.get("max_throughput", 0)),
         f"{float(row.get('cpu_max_global', 0)):.2f}",
-        f"{float(row.get('mem_max', 0)) / MB:.2f}",
+        _format_mb(row.get("mem_max", 0)),
     ]
 
 
@@ -248,16 +273,18 @@ def _print_csv_to_shell(report_path):
             "Group",
             "Pattern",
             "Files",
+            "Folders",
             "Threads",
             "Processes",
-            "File Size (MB)",
-            "Chunk Size (MB)",
-            "Block Size (MB)",
+            "Depth",
+            "File Size (MiB)",
+            "Chunk Size (MiB)",
+            "Block Size (MiB)",
             "Min Latency (s)",
             "Mean Latency (s)",
-            "Max Throughput(MB/s)",
+            "Max Throughput(MiB/s)",
             "Max CPU (%)",
-            "Max Memory (MB)",
+            "Max Memory (MiB)",
         ]
         table = PrettyTable()
         table.field_names = display_headers
