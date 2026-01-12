@@ -384,7 +384,9 @@ def zonal_write_mocks():
     mock_aaow.offset = 0
     mock_aaow._is_stream_open = True
     mock_init_aaow = mock.AsyncMock(return_value=mock_aaow)
-    mock_gcsfs_info = mock.AsyncMock(return_value={"generation": "12345"})
+    mock_gcsfs_info = mock.AsyncMock(
+        return_value={"generation": "12345", "type": "file", "name": "mock_file"}
+    )
 
     async def append_side_effect(data):
         mock_aaow.offset += len(data)
