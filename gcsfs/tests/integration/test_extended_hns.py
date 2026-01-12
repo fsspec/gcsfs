@@ -427,6 +427,7 @@ class TestExtendedGcsFileSystemLsIntegration:
             path_file in items_sub_cleaned
         ), f"File '{path_file}' missing from sub-folder listing"
 
+
 @pytest.fixture()
 def test_structure(gcs_hns):
     """Sets up a standard directory structure for find tests and cleans it up afterward."""
