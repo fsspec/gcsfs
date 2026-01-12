@@ -652,12 +652,18 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         and then deletes directories individually.
 
         Args:
-            path (str): The path to delete.
+            path (str or list): The path(s) to delete.
             recursive (bool): If True, deletes directories and their contents.
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
         """
-        bucket, _, _ = self.split_path(path)
+        if isinstance(path, list):
+            expanded_paths = path
+            # For HNS check, we can check for bucket type from the first path.
+            bucket, _, _ = self.split_path(path[0]) if path else (None, None, None)
+        else:
+            bucket, _, _ = self.split_path(path)
+
         is_hns = False
         try:
             is_hns = await self._is_bucket_hns_enabled(bucket)
@@ -673,8 +679,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
             )
 
-        # For HNS buckets, we need to correctly distinguish files and directories.
-        # We get details to check the 'type' of each entry.
         expanded_paths = await self._expand_path(
             path, recursive=recursive, maxdepth=maxdepth
         )

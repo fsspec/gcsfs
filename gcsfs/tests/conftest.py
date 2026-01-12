@@ -195,7 +195,9 @@ def _cleanup_gcs(gcs, bucket=TEST_BUCKET):
     """Clean the bucket contents, logging a warning on failure."""
     try:
         if gcs.exists(bucket):
-            gcs.rm(f"{bucket}/*", recursive=True)
+            files_to_delete = gcs.find(bucket, withdirs=True)
+            if files_to_delete:
+                gcs.rm(files_to_delete)
     except Exception as e:
         logging.warning(f"Failed to clean up GCS bucket {bucket}: {e}")
 
