@@ -1365,13 +1365,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     def on_google(self):
         return f"torage.{_gcp_universe_domain()}" in self._location
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
-        paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
-        files = [p for p in paths if self.split_path(p)[1]]
-        dirs = [p for p in paths if not self.split_path(p)[1]]
+    async def _delete_files(self, files, batchsize):
+        """Helper to delete files in batches."""
         if self.on_google:
             # emulators do not support batch
-            exs = sum(
+            return sum(
                 await asyn._run_coros_in_chunks(
                     [
                         self._rm_files(files[i : i + batchsize])
@@ -1382,9 +1380,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 [],
             )
         else:
-            exs = await asyn._run_coros_in_chunks(
+            return await asyn._run_coros_in_chunks(
                 [self._rm_file(f) for f in files], return_exceptions=True, batch_size=5
             )
+
+    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+        paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
+        files = [p for p in paths if self.split_path(p)[1]]
+        dirs = [p for p in paths if not self.split_path(p)[1]]
+        exs = await self._delete_files(files, batchsize)
 
         # buckets
         exs.extend(
