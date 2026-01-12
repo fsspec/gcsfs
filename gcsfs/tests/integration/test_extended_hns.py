@@ -112,7 +112,6 @@ class TestExtendedGcsFileSystemMv:
         assert not gcsfs.exists(path1)
         assert gcsfs.exists(path2)
 
-    @pytest.mark.skip(reason="Skipping until rm is implemented for HNS buckets")
     def test_folder_rename_to_root_directory(
         self,
         gcs_hns,
@@ -516,6 +515,202 @@ class TestExtendedGcsFileSystemLsIntegration:
         assert (
             path_file in items_sub_cleaned
         ), f"File '{path_file}' missing from sub-folder listing"
+
+
+class TestExtendedGcsFileSystemRm:
+    """Integration tests for the rm method in ExtendedGcsFileSystem."""
+
+    def test_rm_single_file(self, gcs_hns):
+        """Test deleting a single file."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/rm_test_file.txt"
+        gcsfs.touch(file_path)
+        assert gcsfs.exists(file_path)
+
+        gcsfs.rm(file_path)
+        assert not gcsfs.exists(file_path)
+
+    def test_rm_empty_folder_recursive(self, gcs_hns):
+        """Test deleting an empty folder with recursive=True."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/rm_empty_dir"
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.isdir(dir_path)
+
+        gcsfs.rm(dir_path, recursive=True)
+        assert not gcsfs.exists(dir_path)
+
+    def test_rm_non_empty_folder_recursive(self, gcs_hns):
+        """Test recursively deleting a folder with files and subfolders."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_non_empty"
+        file1 = f"{base_dir}/file1.txt"
+        nested_dir = f"{base_dir}/nested"
+        nested_file = f"{nested_dir}/nested_file.txt"
+
+        gcsfs.touch(file1)
+        gcsfs.touch(nested_file)
+
+        assert gcsfs.exists(base_dir)
+        assert gcsfs.exists(file1)
+        assert gcsfs.exists(nested_dir)
+        assert gcsfs.exists(nested_file)
+
+        gcsfs.rm(base_dir, recursive=True)
+
+        assert not gcsfs.exists(base_dir)
+        assert not gcsfs.exists(file1)
+        assert not gcsfs.exists(nested_dir)
+        assert not gcsfs.exists(nested_file)
+
+    def test_rm_folder_with_placeholder(self, gcs_hns):
+        """Test deleting a folder that contains a placeholder object."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/rm_placeholder_dir"
+        placeholder = f"{dir_path}/"
+        gcsfs.touch(placeholder)
+        assert gcsfs.isdir(dir_path)
+
+        gcsfs.rm(dir_path, recursive=True)
+        assert not gcsfs.exists(dir_path)
+
+    def test_rm_non_existent_path_raises_error(self, gcs_hns):
+        """Test that rm on a non-existent path raises FileNotFoundError."""
+        gcsfs = gcs_hns
+        path = f"{TEST_HNS_BUCKET}/this_does_not_exist"
+        with pytest.raises(FileNotFoundError):
+            gcsfs.rm(path)
+
+    def test_rm_non_recursive_on_non_empty_dir_fails(self, gcs_hns):
+        """
+        Test that rm without recursive=True on a non-empty directory fails.
+        The implementation should see it as a directory and do nothing,
+        but because it's not empty, it won't be deleted.
+        """
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/rm_non_recursive_fail"
+        gcsfs.touch(f"{dir_path}/file.txt")
+
+        with pytest.raises(OSError, match="Pre condition failed"):
+            gcsfs.rm(dir_path, recursive=False)
+        assert gcsfs.exists(dir_path)
+
+    def test_rm_file_cache_invalidation(self, gcs_hns):
+        """
+        Test that rm on a file invalidates the cache for the file's direct
+        parent and all ancestor directories, but not sibling directories.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_file_cache_base"
+        parent_dir = f"{base_dir}/parent"
+        sibling_dir = f"{base_dir}/sibling"
+        file_to_delete = f"{parent_dir}/file_to_delete.txt"
+
+        # --- Setup ---
+        gcsfs.touch(file_to_delete)
+        gcsfs.touch(f"{sibling_dir}/sibling_file.txt")
+
+        # --- Populate Cache ---
+        gcsfs.find(base_dir, withdirs=True)
+        assert base_dir in gcsfs.dircache
+        assert parent_dir in gcsfs.dircache
+        assert sibling_dir in gcsfs.dircache
+
+        # --- Perform rm ---
+        gcsfs.rm(file_to_delete)
+
+        # --- Assert Cache Invalidation ---
+        # The parent of the deleted file and all its ancestors should be invalidated.
+        assert (
+            parent_dir not in gcsfs.dircache
+        ), "Direct parent of deleted file should be invalidated."
+        assert (
+            base_dir not in gcsfs.dircache
+        ), "Ancestor directory of deleted file should be invalidated."
+
+        # The cache for sibling directories should remain untouched.
+        assert (
+            sibling_dir in gcsfs.dircache
+        ), "Cache for sibling directories should not be invalidated."
+
+    def test_rm_recursive_cache_invalidation(self, gcs_hns):
+        """
+        Test that recursive rm invalidates the cache for the deleted directory,
+        its descendants, and its direct parent, but not unrelated directories.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_rec_cache_base"
+        dir_to_delete = f"{base_dir}/dir_to_delete"
+        nested_dir = f"{dir_to_delete}/nested"
+        sibling_dir = f"{base_dir}/sibling_dir"
+
+        # --- Setup ---
+        gcsfs.touch(f"{nested_dir}/file.txt")
+        gcsfs.touch(f"{sibling_dir}/sibling_file.txt")
+
+        # --- Populate Cache ---
+        gcsfs.find(base_dir, withdirs=True)
+        assert base_dir in gcsfs.dircache
+        assert dir_to_delete in gcsfs.dircache
+        assert nested_dir in gcsfs.dircache
+        assert sibling_dir in gcsfs.dircache
+
+        # --- Perform rm ---
+        gcsfs.rm(dir_to_delete, recursive=True)
+
+        # The deleted directory and its children should be gone from the cache.
+        assert dir_to_delete not in gcsfs.dircache, "Deleted directory should be gone."
+        assert (
+            nested_dir not in gcsfs.dircache
+        ), "Descendant of deleted dir should be gone."
+
+        # The direct parent's cache should be invalidated.
+        assert (
+            base_dir not in gcsfs.dircache
+        ), "Parent of deleted dir should be invalidated."
+
+        # The cache for sibling directories should remain untouched.
+        assert (
+            sibling_dir in gcsfs.dircache
+        ), "Cache for sibling directories should not be invalidated."
+
+    def test_rm_empty_folder_cache_invalidation(self, gcs_hns):
+        """
+        Test that rm on an empty folder invalidates the parent cache but not
+        the cache of sibling directories.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_empty_folder_cache"
+        dir_to_delete = f"{base_dir}/empty_to_delete"
+        sibling_dir = f"{base_dir}/sibling_dir"
+
+        # --- Setup ---
+        gcsfs.mkdir(dir_to_delete, create_parents=True)
+        gcsfs.touch(f"{sibling_dir}/file.txt")
+
+        # --- Populate Cache ---
+        gcsfs.find(base_dir, withdirs=True)
+        assert base_dir in gcsfs.dircache
+        assert sibling_dir in gcsfs.dircache
+
+        # --- Perform rm ---
+        gcsfs.rm(dir_to_delete, recursive=True)
+
+        # The parent's cache should be updated, not invalidated.
+        assert (
+            base_dir in gcsfs.dircache
+        ), "Parent of deleted dir should not be invalidated."
+
+        # The deleted directory should be removed from the parent's listing.
+        parent_listing = gcsfs.dircache[base_dir]
+        assert not any(
+            e["name"] == dir_to_delete for e in parent_listing
+        ), "Deleted directory should be removed from parent's cache listing."
+
+        # The cache for sibling directories should remain untouched.
+        assert (
+            sibling_dir in gcsfs.dircache
+        ), "Sibling directory cache should not be invalidated."
 
 
 @pytest.fixture()

@@ -639,6 +639,114 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     rmdir = asyn.sync_wrapper(_rmdir)
 
+    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+        """
+        Deletes files and directories.
+
+        This method overrides the parent `_rm` to correctly handle directory
+        deletion in HNS-enabled buckets. For non-HNS buckets, it falls back
+        to the parent implementation.
+
+        For HNS buckets, it first expands the path to get a list of all files
+        and directories, then categorizes them. It deletes files in batches
+        and then deletes directories individually.
+
+        Args:
+            path (str): The path to delete.
+            recursive (bool): If True, deletes directories and their contents.
+            maxdepth (int, optional): The maximum depth to traverse for deletion.
+            batchsize (int): The number of files to delete in a single batch request.
+        """
+        bucket, _, _ = self.split_path(path)
+        is_hns = False
+        try:
+            is_hns = await self._is_bucket_hns_enabled(bucket)
+        except Exception as e:
+            logger.warning(
+                f"Could not determine if bucket '{bucket}' is HNS-enabled, "
+                f"falling back to default rm: {e}"
+            )
+
+        if not is_hns:
+            # Fall back to the parent's async rm implementation for non-HNS buckets.
+            return await super()._rm(
+                path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
+            )
+
+        # For HNS buckets, we need to correctly distinguish files and directories.
+        # We get details to check the 'type' of each entry.
+        expanded_paths = await self._expand_path(
+            path, recursive=recursive, maxdepth=maxdepth
+        )
+
+        # Get detailed information for each expanded path to determine its type.
+        # We gather info concurrently and filter out paths that don't exist.
+        info_tasks = [self._info(p) for p in expanded_paths]
+        results = await asyncio.gather(*info_tasks, return_exceptions=True)
+        paths = [
+            res for res in results if not isinstance(res, (FileNotFoundError, OSError))
+        ]
+
+        # Separate files and directories based on their type.
+        # Directories must be deleted from the deepest first.
+        files = list({p["name"] for p in paths if p["type"] == "file"})
+        dirs = sorted(
+            list({p["name"] for p in paths if p["type"] == "directory"}),
+            reverse=True,
+        )
+
+        return await self._perform_rm(files, dirs, path, batchsize=batchsize)
+
+    async def _perform_rm(self, files, dirs, path, batchsize):
+        """
+        Helper method to perform the deletion of files and directories.
+
+        Args:
+            files (list[str]): A list of file paths to delete.
+            dirs (list[str]): A list of directory paths to delete, sorted from
+                              deepest to shallowest.
+            path (str): The original path for the rm operation, for error reporting.
+            batchsize (int): The number of files to delete in a single batch request.
+
+        Returns:
+            list: A list of exceptions that occurred during deletion.
+        """
+        # If no files or directories were found to delete, raise FileNotFoundError.
+        if not files and not dirs:
+            raise FileNotFoundError(path)
+
+        exs = await self._delete_files(files, batchsize)
+        # For directories, we must delete them sequentially from deepest to shallowest
+        # to avoid race conditions where a parent is deleted before its child.
+        # The `dirs` list is assumed to be pre-sorted.
+        for d in dirs:
+            try:
+                await self._rmdir(d)
+            except Exception as e:
+                exs.append(e)
+
+        errors = [
+            ex
+            for ex in exs
+            if isinstance(ex, Exception)
+            and not isinstance(ex, (FileNotFoundError, api_exceptions.NotFound))
+            and "No such object" not in str(ex)
+        ]
+        if errors:
+            raise errors[0]
+
+        # Filter out non-critical "not found" errors from the final list.
+        # A successful rm should return an empty list.
+        return [
+            e
+            for e in exs
+            if e is not None
+            and not isinstance(e, (FileNotFoundError, api_exceptions.NotFound))
+            and "No such object" not in str(e)
+        ]
+
+    rm = asyn.sync_wrapper(_rm)
+
     async def _find(
         self,
         path,
@@ -734,6 +842,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 f"{o['name']}#{o['generation']}" if "generation" in o else o["name"]
                 for o in all_objects
             ]
+
         return [o["name"] for o in all_objects]
 
     async def _get_all_folders(self, path, bucket, prefix=""):
