@@ -126,7 +126,7 @@ def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks, file_path):
         f.flush()
 
     if zonal_write_mocks:
-        zonal_write_mocks["aaow"].simple_flush.assert_awaited()
+        zonal_write_mocks["aaow"].flush.assert_awaited()
 
 
 def test_zonal_file_commit(extended_gcsfs, zonal_write_mocks, file_path):

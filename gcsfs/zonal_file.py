@@ -174,8 +174,7 @@ class ZonalFile(GCSFile):
             # no-op to flush on read-mode
             return
 
-        # Use simple_flush which does not return persisted_size for faster performance
-        asyn.sync(self.gcsfs.loop, self.aaow.simple_flush)
+        asyn.sync(self.gcsfs.loop, self.aaow.flush)
 
     def commit(self):
         """
