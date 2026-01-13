@@ -132,7 +132,7 @@ class TestExtendedGcsFileSystemMv:
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}")
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
 
-    def test_hns_rename_fails_if_parent_dne(self, gcs_hns):
+    def test_hns_rename_fails_if_parent_does_not_exist(self, gcs_hns):
         """Test that HNS rename fails if the destination's parent does not exist."""
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/dir_to_move"
@@ -207,7 +207,7 @@ class TestExtendedGcsFileSystemMv:
     def test_hns_rename_raises_file_not_found(self, gcs_hns):
         """Test that NotFound from API raises FileNotFoundError."""
         gcsfs = gcs_hns
-        path1 = f"{TEST_HNS_BUCKET}/dne"
+        path1 = f"{TEST_HNS_BUCKET}/non_existent_source"
         path2 = f"{TEST_HNS_BUCKET}/new_dir"
         with pytest.raises(FileNotFoundError):
             gcsfs.mv(path1, path2)
@@ -348,10 +348,10 @@ class TestExtendedGcsFileSystemRmdir:
         with pytest.raises(OSError, match="Pre condition failed for rmdir"):
             gcsfs.rmdir(dir_path)
 
-    def test_hns_rmdir_dne_raises_not_found(self, gcs_hns):
+    def test_hns_rmdir_non_existing_dir_raises_not_found(self, gcs_hns):
         """Test that HNS rmdir on a non-existent directory raises FileNotFoundError."""
         gcsfs = gcs_hns
-        dir_path = f"{TEST_HNS_BUCKET}/dne_dir_rmdir"
+        dir_path = f"{TEST_HNS_BUCKET}/non_existent_dir_rmdir"
 
         with pytest.raises(FileNotFoundError, match="rmdir failed for path"):
             gcsfs.rmdir(dir_path)

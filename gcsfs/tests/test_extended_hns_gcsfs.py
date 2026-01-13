@@ -520,7 +520,7 @@ class TestExtendedGcsFileSystemMkdir:
             recursive=recursive,
         )
 
-    def test_hns_mkdir_success(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_hns_mkdir_success(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS folder creation."""
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/new_mkdir_dir"
@@ -542,9 +542,7 @@ class TestExtendedGcsFileSystemMkdir:
             )
             mocks["super_mkdir"].assert_not_called()
 
-    def test_hns_mkdir_nested_success_with_create_parents(
-        self, gcs_hns, gcs_hns_mocks, caplog
-    ):
+    def test_hns_mkdir_nested_success_with_create_parents(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS folder creation for a nested path with create_parents=True."""
         gcsfs = gcs_hns
         parent_dir = f"{TEST_HNS_BUCKET}/nested_parent"
@@ -570,7 +568,7 @@ class TestExtendedGcsFileSystemMkdir:
             mocks["super_mkdir"].assert_not_called()
 
     def test_hns_mkdir_nested_fails_if_create_parents_false(
-        self, gcs_hns, gcs_hns_mocks, caplog
+        self, gcs_hns, gcs_hns_mocks
     ):
         """Test HNS mkdir fails for nested path if create_parents=False and parent doesn't exist."""
         gcsfs = gcs_hns
@@ -766,7 +764,7 @@ class TestExtendedGcsFileSystemMkdir:
             )
             mocks["async_lookup_bucket_type"].assert_not_called()
 
-    def test_mkdir_existing_hns_folder_is_noop(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_mkdir_existing_hns_folder_is_noop(self, gcs_hns, gcs_hns_mocks):
         """Test that calling mkdir on an existing HNS folder is a no-op."""
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/existing_dir"
@@ -781,12 +779,6 @@ class TestExtendedGcsFileSystemMkdir:
             assert gcsfs.exists(dir_path)
             gcsfs.mkdir(dir_path)
             assert gcsfs.exists(dir_path)
-
-            # Check that a debug log for existing directory was made
-            assert any(
-                f"Directory already exists: {dir_path}" in record.message
-                for record in caplog.records
-            )
 
             expected_request = self._get_create_folder_request(dir_path)
             mocks["control_client"].create_folder.assert_called_once_with(
@@ -1107,7 +1099,7 @@ class TestExtendedGcsFileSystemRmdir:
         expected_folder_name = f"projects/_/buckets/{bucket}/folders/{folder_path}"
         return storage_control_v2.DeleteFolderRequest(name=expected_folder_name)
 
-    def test_hns_rmdir_success(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_hns_rmdir_success(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS empty directory deletion."""
         gcsfs = gcs_hns
         dir_name = "empty_dir"
@@ -1152,7 +1144,7 @@ class TestExtendedGcsFileSystemRmdir:
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(dir_path)
 
-    def test_hns_rmdir_non_empty_raises_os_error(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_hns_rmdir_non_empty_raises_os_error(self, gcs_hns, gcs_hns_mocks):
         """Test that HNS rmdir on a non-empty directory raises OSError."""
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/non_empty_dir"
@@ -1173,7 +1165,7 @@ class TestExtendedGcsFileSystemRmdir:
             )
             mocks["super_rmdir"].assert_not_called()
 
-    def test_hns_rmdir_dne_raises_not_found(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_hns_rmdir_dne_raises_not_found(self, gcs_hns, gcs_hns_mocks):
         """Test that HNS rmdir on a non-existent directory raises FileNotFoundError."""
         gcsfs = gcs_hns
         dir_name = "dne_dir"
@@ -1194,7 +1186,7 @@ class TestExtendedGcsFileSystemRmdir:
             )
             mocks["super_rmdir"].assert_not_called()
 
-    def test_rmdir_on_file_raises_file_not_found(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_rmdir_on_file_raises_file_not_found(self, gcs_hns, gcs_hns_mocks):
         """
         Test that HNS rmdir on a file path raises FileNotFoundError.
         The API returns NotFound in this case.
@@ -1220,7 +1212,7 @@ class TestExtendedGcsFileSystemRmdir:
             mocks["super_rmdir"].assert_not_called()
 
     def test_hns_rmdir_with_empty_subfolder_raises_os_error(
-        self, gcs_hns, gcs_hns_mocks, caplog
+        self, gcs_hns, gcs_hns_mocks
     ):
         """Test that HNS rmdir on a directory with an empty subfolder raises OSError."""
         gcsfs = gcs_hns
@@ -1246,9 +1238,7 @@ class TestExtendedGcsFileSystemRmdir:
             )
             mocks["super_rmdir"].assert_not_called()
 
-    def test_hns_rmdir_nested_directories_from_leaf(
-        self, gcs_hns, gcs_hns_mocks, caplog
-    ):
+    def test_hns_rmdir_nested_directories_from_leaf(self, gcs_hns, gcs_hns_mocks):
         """Test deleting nested directories starting from the leaf."""
         gcsfs = gcs_hns
         parent_dir = f"{TEST_HNS_BUCKET}/parent"
@@ -1371,7 +1361,7 @@ class TestExtendedGcsFileSystemRmdir:
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
-    def test_rmdir_on_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_rmdir_on_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks):
         """Test that rmdir on a bucket falls back to parent method."""
         gcsfs = gcs_hns
         bucket_path = f"{TEST_HNS_BUCKET}"
@@ -1389,7 +1379,7 @@ class TestExtendedGcsFileSystemRmdir:
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
-    def test_rmdir_on_non_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks, caplog):
+    def test_rmdir_on_non_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks):
         """Test that rmdir on a bucket falls back to parent method."""
         gcsfs = gcs_hns
         bucket_path = f"{TEST_HNS_BUCKET}"

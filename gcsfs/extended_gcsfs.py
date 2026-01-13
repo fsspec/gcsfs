@@ -293,9 +293,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """Checks if a bucket has Hierarchical Namespace enabled."""
         try:
             bucket_type = await self._lookup_bucket_type(bucket)
-        except Exception:
+        except Exception as e:
             logger.warning(
-                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS"
+                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS: {e}",
+                stack_info=True,
             )
             return False
 
@@ -361,13 +362,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket1, key1, _ = self.split_path(path1)
         bucket2, key2, _ = self.split_path(path2)
 
-        is_hns = False
-        try:
-            is_hns = await self._is_bucket_hns_enabled(bucket1)
-        except Exception as e:
-            logger.warning(
-                f"Could not determine if bucket '{bucket1}' is HNS-enabled, falling back to default mv: {e}"
-            )
+        is_hns = await self._is_bucket_hns_enabled(bucket1)
 
         if not is_hns:
             logger.debug(
@@ -476,12 +471,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         if not is_hns:
             # If the bucket was not created above, we need to check its type.
-            try:
-                is_hns = await self._is_bucket_hns_enabled(bucket)
-            except Exception as e:
-                logger.warning(
-                    f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default mkdir: {e}"
-                )
+            is_hns = await self._is_bucket_hns_enabled(bucket)
 
         if not is_hns:
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
@@ -579,14 +569,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if not key:
             return await super()._rmdir(path)
 
-        is_hns = False
-        try:
-            is_hns = await self._is_bucket_hns_enabled(bucket)
-        except Exception as e:
-            logger.warning(
-                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default rmdir: {e}"
-            )
-
+        is_hns = await self._is_bucket_hns_enabled(bucket)
         if not is_hns:
             return await super()._rmdir(path)
 
@@ -609,7 +592,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 f"Removed placeholder object '{placeholder_path}' before rmdir."
             )
         except FileNotFoundError:
-            # This is expected if no placeholder object exists.
+            # This is expected if no placeholder object exists and can be safely ignored.
             pass
 
         try:
