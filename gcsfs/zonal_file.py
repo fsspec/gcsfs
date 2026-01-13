@@ -253,8 +253,8 @@ class ZonalFile(GCSFile):
         super().close()
         if hasattr(self, "mrd") and self.mrd:
             asyn.sync(self.gcsfs.loop, self.mrd.close)
-        # Don't try to close aaow if object is already finalized
-        if not self.finalized and hasattr(self, "aaow") and self.aaow:
+        # Only close aaow if the stream is open
+        if hasattr(self, "aaow") and self.aaow and self.aaow._is_stream_open:
             asyn.sync(
                 self.gcsfs.loop,
                 self.aaow.close,
