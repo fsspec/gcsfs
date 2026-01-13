@@ -651,6 +651,34 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         mode="overwrite",
         **kwargs,
     ):
+        """Upload a local file.
+
+        This method is optimized for Zonal buckets, using gRPC for uploads.
+        In zonal buckets, file is left *unfinalized* by default unless
+        `finalize_on_close` is set to True.
+        For non-Zonal buckets, it delegates to the parent class's implementation.
+
+        Parameters
+        ----------
+        lpath: str
+            Path to the local file to be uploaded.
+        rpath: str
+            Path on GCS to upload the file to.
+        metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        consistency: str, optional
+            Unsupported for Zonal buckets and will be ignored.
+        content_type: str, optional
+            Unsupported for Zonal buckets and will be ignored except for the default.
+        chunksize: int, optional
+            The size of chunks to upload data in.
+        callback: fsspec.callbacks.Callback, optional
+            Callback to monitor the upload progress.
+        fixed_key_metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        mode: str, optional
+            The write mode, either 'overwrite' or 'create'.
+        """
         bucket, key, generation = self.split_path(rpath)
         if not await self._is_zonal_bucket(bucket):
             return await super()._put_file(
@@ -684,6 +712,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 "These parameters will be ignored."
             )
         await self._get_grpc_client()
+        # Works for both 'overwrite' and 'create' modes
         writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
 
         try:
@@ -707,6 +736,32 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         mode="overwrite",
         **kwargs,
     ):
+        """Upload bytes to a file.
+
+        This method is optimized for Zonal buckets, using gRPC for uploads.
+        In zonal buckets, file is left *unfinalized* by default unless
+        `finalize_on_close` is set to True.
+        For non-Zonal buckets, it delegates to the parent class's implementation.
+
+        Parameters
+        ----------
+        path: str
+            Path to the file to be written.
+        data: bytes
+            The content to write to the file.
+        metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        consistency: str, optional
+            Unsupported for Zonal buckets and will be ignored.
+        content_type: str, optional
+            Unsupported for Zonal buckets and will be ignored, except for the default.
+        fixed_key_metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        chunksize: int, optional
+            The size of chunks to upload data in.
+        mode: str, optional
+            The write mode, either 'overwrite' or 'create'.
+        """
         bucket, key, generation = self.split_path(path)
         if not await self._is_zonal_bucket(bucket):
             return await super()._pipe_file(
@@ -730,6 +785,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 "fixed_key_metadata during upload. These parameters will be ignored."
             )
         await self._get_grpc_client()
+        # Works for both 'overwrite' and 'create' modes
         writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
         try:
             for i in range(0, len(data), chunksize):
@@ -825,7 +881,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
-    Uploads a chunk of data using AsyncAppendableObjectWriter.
+    Uploads a chunk of data using AsyncAppendableObjectWriter for zonal buckets.
+    Finalizes the upload when the total uploaded data size reaches the specified size.
     Delegates to core upload_chunk implementaion for Non-Zonal buckets.
     """
     # If `location` is an HTTP resumable-upload URL (string), delegate to core upload_chunk
@@ -876,6 +933,25 @@ async def initiate_upload(
     """
     Initiates an upload for Zonal buckets by creating an AsyncAppendableObjectWriter.
     Delegates to core initiate_upload implementaion for Non-Zonal buckets.
+
+    Parameters
+    ----------
+    fs: GCSFileSystem
+        The GCS filesystem instance.
+    bucket: str
+        The target bucket name.
+    key: str
+        The target object key.
+    content_type: str, optional
+        Unsupported for Zonal buckets and will be ignored, except for the default.
+    metadata: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    fixed_key_metadata: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    mode: str, optional
+        The write mode, either 'overwrite' or 'create'.
+    kms_key_name: str, optional
+        Unsupported for Zonal buckets and will be ignored.
     """
     if not await fs._is_zonal_bucket(bucket):
         from gcsfs.core import initiate_upload as core_initiate_upload
@@ -923,7 +999,32 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload to Zonal bucket using gRPC.
+    In zonal buckets, file is left *unfinalized* by default unless
+    `finalize_on_close` is set to True.
     Delegates to core simple_upload implementaion for Non-Zonal buckets.
+
+    Parameters
+    ----------
+    fs: GCSFileSystem
+        The GCS filesystem instance.
+    bucket: str
+        The target bucket name.
+    key: str
+        The target object key.
+    datain: bytes
+        The data to be uploaded.
+    metadatain: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    consistency: str, optional
+        Unsupported for Zonal buckets and will be ignored.
+    content_type: str, optional
+        Unsupported for Zonal buckets and will be ignored, except for the default.
+    fixed_key_metadata: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    mode: str, optional
+        The write mode, either 'overwrite' or 'create'.
+    kms_key_name: str, optional
+        Unsupported for Zonal buckets and will be ignored.
     """
     if not await fs._is_zonal_bucket(bucket):
         from gcsfs.core import simple_upload as core_simple_upload

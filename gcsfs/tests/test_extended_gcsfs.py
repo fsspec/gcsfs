@@ -504,6 +504,7 @@ async def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
     if not extended_gcsfs.on_google:
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
 
+    # Files are not finalized by default
     await extended_gcsfs._pipe_file(file_path, b"Hello, world!")
 
     data = await extended_gcsfs._cat_file(file_path)
