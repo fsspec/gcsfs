@@ -293,9 +293,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """Checks if a bucket has Hierarchical Namespace enabled."""
         try:
             bucket_type = await self._lookup_bucket_type(bucket)
-        except Exception:
+        except Exception as e:
             logger.warning(
-                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS"
+                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS: {e}",
+                stack_info=True,
             )
             return False
 
@@ -325,10 +326,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         self.dircache.pop(path1, None)
         parent1 = self._parent(path1)
         if parent1 in self.dircache:
-            for i, entry in enumerate(self.dircache[parent1]):
-                if entry.get("name") == path1:
-                    self.dircache[parent1].pop(i)
-                    break
+            self.dircache[parent1] = [
+                e for e in self.dircache[parent1] if e.get("name") != path1
+            ]
 
         # 3. Invalidate the destination path and update its parent's cache.
         self.dircache.pop(path2, None)
@@ -362,13 +362,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         bucket1, key1, _ = self.split_path(path1)
         bucket2, key2, _ = self.split_path(path2)
 
-        is_hns = False
-        try:
-            is_hns = await self._is_bucket_hns_enabled(bucket1)
-        except Exception as e:
-            logger.warning(
-                f"Could not determine if bucket '{bucket1}' is HNS-enabled, falling back to default mv: {e}"
-            )
+        is_hns = await self._is_bucket_hns_enabled(bucket1)
 
         if not is_hns:
             logger.debug(
@@ -477,12 +471,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         if not is_hns:
             # If the bucket was not created above, we need to check its type.
-            try:
-                is_hns = await self._is_bucket_hns_enabled(bucket)
-            except Exception as e:
-                logger.warning(
-                    f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default mkdir: {e}"
-                )
+            is_hns = await self._is_bucket_hns_enabled(bucket)
 
         if not is_hns:
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
@@ -566,6 +555,77 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Fallback to standard GCS behavior for non-HNS buckets
         return await super()._get_directory_info(path, bucket, key, generation)
+
+    async def _rmdir(self, path):
+        """
+        Deletes an empty directory. Overrides the parent `_rmdir` to delete
+        empty directories in HNS-enabled buckets.
+        """
+        path = self._strip_protocol(path)
+        bucket, key, _ = self.split_path(path)
+
+        # The parent _rmdir is only for deleting buckets. If key is empty,
+        # given path is a bucket, we can fall back.
+        if not key:
+            return await super()._rmdir(path)
+
+        is_hns = await self._is_bucket_hns_enabled(bucket)
+        if not is_hns:
+            return await super()._rmdir(path)
+
+        # In HNS buckets, a placeholder object (e.g., 'a/b/c/') might exist,
+        # which would cause rmdir('a/b/c') to fail because the directory is not empty.
+        # To handle this, we first attempt to delete the placeholder object.
+        # If it doesn't exist, _rm_file will raise a FileNotFoundError, which we can
+        # safely ignore and proceed with the directory deletion.
+        #
+        # Note: This may delete the placeholder even if the directory contains
+        # other files and the final `delete_folder` call fails. This side
+        # effect is acceptable because placeholder objects are used to simulate
+        # folders and are not strictly necessary in HNS-enabled buckets, which
+        # have native folder entities.
+        try:
+            placeholder_path = f"{path.rstrip('/')}/"
+
+            await self._rm_file(placeholder_path)
+            logger.debug(
+                f"Removed placeholder object '{placeholder_path}' before rmdir."
+            )
+        except FileNotFoundError:
+            # This is expected if no placeholder object exists and can be safely ignored.
+            pass
+
+        try:
+            logger.info(f"Using HNS-aware rmdir for '{path}'.")
+            folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
+            request = storage_control_v2.DeleteFolderRequest(name=folder_name)
+
+            logger.debug(f"delete_folder request: {request}")
+            await self._storage_control_client.delete_folder(request=request)
+
+            # Remove the directory from the cache and from its parent's listing.
+            self.dircache.pop(path, None)
+            parent = self._parent(path)
+            if parent in self.dircache:
+                # Remove the deleted directory entry from the parent's listing.
+                self.dircache[parent] = [
+                    e for e in self.dircache[parent] if e.get("name") != path
+                ]
+            return
+        except api_exceptions.NotFound as e:
+            # This can happen if the directory does not exist, or if the path
+            # points to a file object instead of a directory.
+            raise FileNotFoundError(f"rmdir failed for path: {path}: {e}") from e
+        except api_exceptions.FailedPrecondition as e:
+            # This can happen if the directory is not empty.
+            raise OSError(
+                f"Pre condition failed for rmdir for path: {path}: {e}"
+            ) from e
+        except Exception as e:
+            logger.error(f"HNS rmdir: Failed to delete folder '{path}': {e}")
+            raise
+
+    rmdir = asyn.sync_wrapper(_rmdir)
 
     async def _put_file(
         self,
