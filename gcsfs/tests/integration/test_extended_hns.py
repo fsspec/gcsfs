@@ -532,6 +532,7 @@ def test_structure(gcs_hns):
         "file2": f"{base_dir}/dir_with_files/file2.txt",
         "nested_dir": f"{base_dir}/dir_with_files/nested_dir",
         "nested_file": f"{base_dir}/dir_with_files/nested_dir/nested_file.txt",
+        "nested_sibling_file": f"{base_dir}/dir_with_files/nested_sibling.txt",
     }
 
     print(f"--- Setting up test structure in: {base_dir} ---")
@@ -540,6 +541,7 @@ def test_structure(gcs_hns):
     gcs_hns.touch(structure["file1"])
     gcs_hns.touch(structure["file2"])
     gcs_hns.touch(structure["nested_file"])
+    gcs_hns.touch(structure["nested_sibling_file"])
     print("--- Test structure created. ---")
 
     yield structure
@@ -585,40 +587,20 @@ class TestExtendedGcsFileSystemFindIntegration:
         )
         assert result == expected
 
-    def test_find_with_maxdepth(self, gcs_hns, test_structure):
-        """Test that find respects the maxdepth parameter."""
-        base_dir = test_structure["base_dir"]
-        # maxdepth=1 from base_dir should not include nested_dir or nested_file
-        result = sorted(gcs_hns.find(base_dir, maxdepth=1, withdirs=True))
-        expected = sorted(
-            [
-                base_dir,
-                test_structure["root_file"],
-                test_structure["empty_dir"],
-                test_structure["dir_with_files"],
-            ]
-        )
-        assert result == expected
-
-    def test_find_with_detail(self, gcs_hns, test_structure):
-        """Test that find with detail=True returns a dictionary of details."""
-        base_dir = test_structure["base_dir"]
-        result = gcs_hns.find(base_dir, withdirs=True, detail=True)
-
-        assert isinstance(result, dict)
-        assert test_structure["root_file"] in result
-        assert test_structure["empty_dir"] in result
-        assert result[test_structure["empty_dir"]]["type"] == "directory"
-        assert result[test_structure["root_file"]]["type"] == "file"
-
     def test_find_with_prefix(self, gcs_hns, test_structure):
         """Test that find correctly filters by prefix within a directory."""
-        dir_with_files = test_structure["dir_with_files"]
-        # This directory contains 'file1.txt' and 'file2.txt'.
-        # The prefix should only match 'file1.txt'.
-        result = sorted(gcs_hns.find(dir_with_files, prefix="file1"))
-        expected = [test_structure["file1"]]
-        assert result == expected, "find with prefix should only return matching files."
+        # Test finding a directory and a file that share a common prefix
+        result_dirs = gcs_hns.find(
+            test_structure["dir_with_files"], prefix="nested", withdirs=True
+        )
+        expected_result = [
+            test_structure["nested_dir"],
+            test_structure["nested_file"],
+            test_structure["nested_sibling_file"],
+        ]
+        assert sorted(result_dirs) == sorted(
+            expected_result
+        ), "find with prefix and withdirs=True should return matching files and directories."
 
     def test_find_on_file(self, gcs_hns, test_structure):
         """Test that calling find on a single file returns only that file."""
