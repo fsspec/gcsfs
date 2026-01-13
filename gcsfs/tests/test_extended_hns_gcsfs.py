@@ -885,9 +885,7 @@ class TestExtendedGcsFileSystemFind:
         ]
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = mock_files
-            mocks["control_client"].list_folders.return_value = self.AsyncIter(
-                mock_folders
-            )
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
             result = gcs_hns.find(base_path, withdirs=True, detail=True)
 
             assert isinstance(result, dict)
@@ -933,9 +931,7 @@ class TestExtendedGcsFileSystemFind:
         ]
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = mock_files
-            mocks["control_client"].list_folders.return_value = self.AsyncIter(
-                mock_folders
-            )
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
             result = gcs_hns.find(base_path, withdirs=True, maxdepth=1)
 
             assert len(result) == 4
@@ -972,12 +968,12 @@ class TestExtendedGcsFileSystemFind:
             file1_path: {"name": file1_path, "type": "file", "size": 10},
             nested_file_path: {"name": nested_file_path, "type": "file", "size": 20},
             f"{file1_path}#v2": {
-                "name": f"{file1_path}#v2",
+                "name": file1_path,
                 "type": "file",
                 "generation": "v2",
             },
             f"{file1_path}#v1": {
-                "name": f"{file1_path}#v1",
+                "name": file1_path,
                 "type": "file",
                 "generation": "v1",
             },
@@ -991,16 +987,14 @@ class TestExtendedGcsFileSystemFind:
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = mock_files
-            mocks["control_client"].list_folders.return_value = self.AsyncIter(
-                mock_folders
-            )
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
             result = gcs_hns.find(base_path, withdirs=True, versions=True)
 
             assert len(result) == 7
             assert base_path in result
             assert file1_path in result  # The unversioned path
-            assert f"{'file1_path'}#v1" in result
-            assert f"{'file1_path'}#v2" in result
+            assert f"{file1_path}#v1" in result
+            assert f"{file1_path}#v2" in result
             assert nested_file_path in result
 
             # Verify super_find call

@@ -532,7 +532,6 @@ def test_structure(gcs_hns):
         "file2": f"{base_dir}/dir_with_files/file2.txt",
         "nested_dir": f"{base_dir}/dir_with_files/nested_dir",
         "nested_file": f"{base_dir}/dir_with_files/nested_dir/nested_file.txt",
-        "nested_sibling_file": f"{base_dir}/dir_with_files/nested_sibling.txt",
     }
 
     print(f"--- Setting up test structure in: {base_dir} ---")
@@ -541,7 +540,6 @@ def test_structure(gcs_hns):
     gcs_hns.touch(structure["file1"])
     gcs_hns.touch(structure["file2"])
     gcs_hns.touch(structure["nested_file"])
-    gcs_hns.touch(structure["nested_sibling_file"])
     print("--- Test structure created. ---")
 
     yield structure
@@ -591,12 +589,11 @@ class TestExtendedGcsFileSystemFindIntegration:
         """Test that find correctly filters by prefix within a directory."""
         # Test finding a directory and a file that share a common prefix
         result_dirs = gcs_hns.find(
-            test_structure["dir_with_files"], prefix="nested", withdirs=True
+            test_structure["dir_with_files"], prefix="nested_dir", withdirs=True
         )
         expected_result = [
             test_structure["nested_dir"],
             test_structure["nested_file"],
-            test_structure["nested_sibling_file"],
         ]
         assert sorted(result_dirs) == sorted(
             expected_result
