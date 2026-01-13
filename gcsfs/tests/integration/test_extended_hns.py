@@ -132,7 +132,7 @@ class TestExtendedGcsFileSystemMv:
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}")
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
 
-    def test_hns_rename_fails_if_parent_dne(self, gcs_hns):
+    def test_hns_rename_fails_if_parent_does_not_exist(self, gcs_hns):
         """Test that HNS rename fails if the destination's parent does not exist."""
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/dir_to_move"
@@ -207,7 +207,7 @@ class TestExtendedGcsFileSystemMv:
     def test_hns_rename_raises_file_not_found(self, gcs_hns):
         """Test that NotFound from API raises FileNotFoundError."""
         gcsfs = gcs_hns
-        path1 = f"{TEST_HNS_BUCKET}/dne"
+        path1 = f"{TEST_HNS_BUCKET}/non_existent_source"
         path2 = f"{TEST_HNS_BUCKET}/new_dir"
         with pytest.raises(FileNotFoundError):
             gcsfs.mv(path1, path2)
@@ -323,6 +323,96 @@ class TestExtendedGcsFileSystemMkdir:
         gcsfs.mkdir(bucket_path, enable_hierarchical_namespace=True)
         assert gcsfs.exists(bucket_path)
         assert gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.HIERARCHICAL
+
+
+class TestExtendedGcsFileSystemRmdir:
+    """Integration tests for the rmdir method in ExtendedGcsFileSystem."""
+
+    def test_hns_rmdir_success(self, gcs_hns):
+        """Test successful HNS empty directory deletion."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/empty_dir_to_delete"
+
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.isdir(dir_path)
+
+        gcsfs.rmdir(dir_path)
+        assert not gcsfs.exists(dir_path)
+
+    def test_hns_rmdir_non_empty_raises_os_error(self, gcs_hns):
+        """Test that HNS rmdir on a non-empty directory raises OSError."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/non_empty_dir_rmdir"
+        gcsfs.touch(f"{dir_path}/file.txt")
+
+        with pytest.raises(OSError, match="Pre condition failed for rmdir"):
+            gcsfs.rmdir(dir_path)
+
+    def test_hns_rmdir_non_existing_dir_raises_not_found(self, gcs_hns):
+        """Test that HNS rmdir on a non-existent directory raises FileNotFoundError."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/non_existent_dir_rmdir"
+
+        with pytest.raises(FileNotFoundError, match="rmdir failed for path"):
+            gcsfs.rmdir(dir_path)
+
+    def test_rmdir_on_file_raises_file_not_found(self, gcs_hns):
+        """
+        Test that HNS rmdir on a file path raises FileNotFoundError.
+        The API returns NotFound in this case.
+        """
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/a_file_for_rmdir.txt"
+        gcsfs.touch(file_path)
+
+        with pytest.raises(FileNotFoundError, match="rmdir failed for path"):
+            gcsfs.rmdir(file_path)
+
+    def test_hns_rmdir_with_empty_subfolder_raises_os_error(self, gcs_hns):
+        """Test that HNS rmdir on a directory with an empty subfolder raises OSError."""
+        gcsfs = gcs_hns
+        parent_dir = f"{TEST_HNS_BUCKET}/parent_dir_rmdir"
+        sub_dir = f"{parent_dir}/sub_dir"
+
+        gcsfs.mkdir(sub_dir, create_parents=True)
+
+        with pytest.raises(OSError, match="Pre condition failed for rmdir"):
+            gcsfs.rmdir(parent_dir)
+
+    def test_hns_rmdir_nested_directories_from_leaf(self, gcs_hns):
+        """Test deleting nested directories starting from the leaf."""
+        gcsfs = gcs_hns
+        parent_dir = f"{TEST_HNS_BUCKET}/parent_rmdir"
+        child_dir = f"{parent_dir}/child"
+        grandchild_dir = f"{child_dir}/grandchild"
+
+        gcsfs.mkdir(grandchild_dir, create_parents=True)
+
+        # Delete leaf first
+        gcsfs.rmdir(grandchild_dir)
+        assert not gcsfs.exists(grandchild_dir)
+
+        # Delete child
+        gcsfs.rmdir(child_dir)
+        assert not gcsfs.exists(child_dir)
+
+        # Delete parent
+        gcsfs.rmdir(parent_dir)
+        assert not gcsfs.exists(parent_dir)
+
+    def test_rmdir_on_folder_with_placeholder_object(self, gcs_hns):
+        """
+        Tests that rmdir successfully deletes a folder that contains its own
+        zero-byte placeholder object.
+        """
+        gcsfs = gcs_hns
+        folder_path = f"{TEST_HNS_BUCKET}/test-folder-with-placeholder"
+        placeholder_path = f"{folder_path}/"
+        gcsfs.touch(placeholder_path)
+
+        assert gcsfs.isdir(folder_path)
+        gcsfs.rmdir(folder_path)
+        assert not gcsfs.exists(folder_path)
 
 
 class TestExtendedGcsFileSystemLsIntegration:
