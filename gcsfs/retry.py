@@ -46,6 +46,7 @@ class ChecksumError(Exception):
 
 class NonRetryableError(Exception):
     """Raised when the underlying error can not be retried, or continued further."""
+
     pass
 
 
