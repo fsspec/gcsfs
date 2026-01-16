@@ -720,9 +720,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             raise FileNotFoundError(path)
 
         exs = await self._delete_files(files, batchsize)
-        # For directories, we must delete them sequentially from deepest to shallowest
+        # For directories, we must delete them from deepest to shallowest
         # to avoid race conditions where a parent is deleted before its child.
         # The `dirs` list is assumed to be pre-sorted.
+        # TODO: There is scope to optimize the deletion logic by deleting the directories in the same level
+        # concurrently. As of now we are deleting sequentially as this code would be re-written to integrate
+        # with the recursive API which would that care of deleting both files and folders in HNS bucket.
         for d in dirs:
             try:
                 await self._rmdir(d)

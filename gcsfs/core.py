@@ -1280,6 +1280,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         bucket, key, generation = self.split_path(path)
         if key:
             await self._call("DELETE", "b/{}/o/{}", bucket, key, generation=generation)
+            # TODO: This can be optimized for HNS buckets by not invalidating the entire parent
+            # directory structure from cache but to just remove the deleted file entry from immediate parent's cache.
             self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
         else:
             await self._rmdir(path)
