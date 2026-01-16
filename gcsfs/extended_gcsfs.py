@@ -4,6 +4,7 @@ from enum import Enum
 from functools import partial
 
 from fsspec import asyn
+from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
 from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
@@ -187,7 +188,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
 
     # Replacement method for _process_limits to support new params (offset and length) for MRD.
-    async def _process_limits_to_offset_and_length(self, path, start, end):
+    async def _process_limits_to_offset_and_length(
+        self, path, start, end, file_size=None
+    ):
         """
         Calculates the read offset and length from start and end parameters.
 
@@ -195,6 +198,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             path (str): The path to the file.
             start (int | None): The starting byte position.
             end (int | None): The ending byte position.
+            file_size (int | None): The total size of the file. If None, it will be fetched via _info().
 
         Returns:
             tuple: A tuple containing (offset, length).
@@ -202,7 +206,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Raises:
             ValueError: If the calculated range is invalid.
         """
-        size = None
+        size = file_size
 
         if start is None:
             offset = 0
@@ -277,8 +281,15 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 )
                 mrd_created = True
 
+            file_size = mrd.persisted_size
+            if file_size is None:
+                logger.warning(
+                    "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
+                    "Falling back to _info() to get the file size. "
+                    "This may result in incorrect behavior for unfinalized objects."
+                )
             offset, length = await self._process_limits_to_offset_and_length(
-                path, start, end
+                path, start, end, file_size
             )
 
             return await zb_hns_utils.download_range(
@@ -640,6 +651,34 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         mode="overwrite",
         **kwargs,
     ):
+        """Upload a local file.
+
+        This method is optimized for Zonal buckets, using gRPC for uploads.
+        In zonal buckets, file is left *unfinalized* by default unless
+        `finalize_on_close` is set to True.
+        For non-Zonal buckets, it delegates to the parent class's implementation.
+
+        Parameters
+        ----------
+        lpath: str
+            Path to the local file to be uploaded.
+        rpath: str
+            Path on GCS to upload the file to.
+        metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        consistency: str, optional
+            Unsupported for Zonal buckets and will be ignored.
+        content_type: str, optional
+            Unsupported for Zonal buckets and will be ignored except for the default.
+        chunksize: int, optional
+            The size of chunks to upload data in.
+        callback: fsspec.callbacks.Callback, optional
+            Callback to monitor the upload progress.
+        fixed_key_metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        mode: str, optional
+            The write mode, either 'overwrite' or 'create'.
+        """
         bucket, key, generation = self.split_path(rpath)
         if not await self._is_zonal_bucket(bucket):
             return await super()._put_file(
@@ -673,6 +712,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 "These parameters will be ignored."
             )
         await self._get_grpc_client()
+        # Works for both 'overwrite' and 'create' modes
         writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
 
         try:
@@ -696,6 +736,32 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         mode="overwrite",
         **kwargs,
     ):
+        """Upload bytes to a file.
+
+        This method is optimized for Zonal buckets, using gRPC for uploads.
+        In zonal buckets, file is left *unfinalized* by default unless
+        `finalize_on_close` is set to True.
+        For non-Zonal buckets, it delegates to the parent class's implementation.
+
+        Parameters
+        ----------
+        path: str
+            Path to the file to be written.
+        data: bytes
+            The content to write to the file.
+        metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        consistency: str, optional
+            Unsupported for Zonal buckets and will be ignored.
+        content_type: str, optional
+            Unsupported for Zonal buckets and will be ignored, except for the default.
+        fixed_key_metadata: dict, optional
+            Unsupported for Zonal buckets and will be ignored.
+        chunksize: int, optional
+            The size of chunks to upload data in.
+        mode: str, optional
+            The write mode, either 'overwrite' or 'create'.
+        """
         bucket, key, generation = self.split_path(path)
         if not await self._is_zonal_bucket(bucket):
             return await super()._pipe_file(
@@ -719,6 +785,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 "fixed_key_metadata during upload. These parameters will be ignored."
             )
         await self._get_grpc_client()
+        # Works for both 'overwrite' and 'create' modes
         writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
         try:
             for i in range(0, len(data), chunksize):
@@ -728,6 +795,66 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             await writer.close(finalize_on_close=finalize_on_close)
 
         self.invalidate_cache(self._parent(path))
+
+    async def _get_file(self, rpath, lpath, callback=None, **kwargs):
+        bucket, key, generation = self.split_path(rpath)
+        if not await self._is_zonal_bucket(bucket):
+            return await super()._get_file(
+                rpath,
+                lpath,
+                callback=callback,
+                **kwargs,
+            )
+
+        if os.path.isdir(lpath):
+            return
+        callback = callback or NoOpCallback()
+
+        mrd = None
+        try:
+            await self._get_grpc_client()
+            mrd = await AsyncMultiRangeDownloader.create_mrd(
+                self.grpc_client, bucket, key, generation
+            )
+
+            size = mrd.persisted_size
+            if size is None:
+                logger.warning(
+                    "AsyncMultiRangeDownloader (MRD) has no 'persisted_size'. "
+                    "Falling back to _info() to get the file size. "
+                    "This may result in incorrect behavior for unfinalized objects."
+                )
+                size = (await self._info(rpath))["size"]
+            callback.set_size(size)
+
+            lparent = os.path.dirname(lpath) or os.curdir
+            os.makedirs(lparent, exist_ok=True)
+
+            chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
+            offset = 0
+
+            with open(lpath, "wb") as f2:
+                while True:
+                    if offset >= size:
+                        break
+
+                    data = await zb_hns_utils.download_range(
+                        offset=offset, length=chunksize, mrd=mrd
+                    )
+                    if not data:
+                        break
+
+                    f2.write(data)
+                    offset += len(data)
+                    callback.relative_update(len(data))
+        except Exception as e:
+            # Clean up the corrupted file before raising error
+            if os.path.exists(lpath):
+                os.remove(lpath)
+            raise e
+        finally:
+            if mrd:
+                await mrd.close()
 
     async def _do_list_objects(
         self,
@@ -754,7 +881,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
-    Uploads a chunk of data using AsyncAppendableObjectWriter.
+    Uploads a chunk of data using AsyncAppendableObjectWriter for zonal buckets.
+    Finalizes the upload when the total uploaded data size reaches the specified size.
     Delegates to core upload_chunk implementaion for Non-Zonal buckets.
     """
     # If `location` is an HTTP resumable-upload URL (string), delegate to core upload_chunk
@@ -805,6 +933,25 @@ async def initiate_upload(
     """
     Initiates an upload for Zonal buckets by creating an AsyncAppendableObjectWriter.
     Delegates to core initiate_upload implementaion for Non-Zonal buckets.
+
+    Parameters
+    ----------
+    fs: GCSFileSystem
+        The GCS filesystem instance.
+    bucket: str
+        The target bucket name.
+    key: str
+        The target object key.
+    content_type: str, optional
+        Unsupported for Zonal buckets and will be ignored, except for the default.
+    metadata: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    fixed_key_metadata: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    mode: str, optional
+        The write mode, either 'overwrite' or 'create'.
+    kms_key_name: str, optional
+        Unsupported for Zonal buckets and will be ignored.
     """
     if not await fs._is_zonal_bucket(bucket):
         from gcsfs.core import initiate_upload as core_initiate_upload
@@ -852,7 +999,32 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload to Zonal bucket using gRPC.
+    In zonal buckets, file is left *unfinalized* by default unless
+    `finalize_on_close` is set to True.
     Delegates to core simple_upload implementaion for Non-Zonal buckets.
+
+    Parameters
+    ----------
+    fs: GCSFileSystem
+        The GCS filesystem instance.
+    bucket: str
+        The target bucket name.
+    key: str
+        The target object key.
+    datain: bytes
+        The data to be uploaded.
+    metadatain: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    consistency: str, optional
+        Unsupported for Zonal buckets and will be ignored.
+    content_type: str, optional
+        Unsupported for Zonal buckets and will be ignored, except for the default.
+    fixed_key_metadata: dict, optional
+        Unsupported for Zonal buckets and will be ignored.
+    mode: str, optional
+        The write mode, either 'overwrite' or 'create'.
+    kms_key_name: str, optional
+        Unsupported for Zonal buckets and will be ignored.
     """
     if not await fs._is_zonal_bucket(bucket):
         from gcsfs.core import simple_upload as core_simple_upload

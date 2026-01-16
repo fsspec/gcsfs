@@ -46,6 +46,37 @@ class ZonalFile(GCSFile):
         ensure the write is finalized, `.commit()` must be called explicitly or
         `finalize_on_close` must be set to `True` when opening the file.
         """
+        bucket, key, generation = gcsfs._split_path(path)
+        if not key:
+            raise OSError("Attempt to open a bucket")
+        self.mrd = None
+        self.finalize_on_close = finalize_on_close
+        self.finalized = False
+        self.mode = mode
+        self.gcsfs = gcsfs
+        object_size = None
+        if "r" in self.mode:
+            self.mrd = asyn.sync(
+                self.gcsfs.loop, self._init_mrd, bucket, key, generation
+            )
+            object_size = self.mrd.persisted_size
+            if object_size is None:
+                logger.warning(
+                    "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
+                    "This may result in incorrect behavior for unfinalized objects."
+                )
+        elif "w" or "a" in self.mode:
+            self.aaow = asyn.sync(
+                self.gcsfs.loop,
+                self._init_aaow,
+                bucket,
+                key,
+                generation,
+            )
+        else:
+            raise NotImplementedError(
+                "Only read, write and append operations are currently supported for Zonal buckets."
+            )
         super().__init__(
             gcsfs,
             path,
@@ -64,27 +95,10 @@ class ZonalFile(GCSFile):
             kms_key_name,
             # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
             supports_append="a" in mode,
+            # pass persisted_size here so that Cache is initialized with correct object size
+            size=object_size,
             **kwargs,
         )
-        self.mrd = None
-        self.finalize_on_close = finalize_on_close
-        self.finalized = False
-        if "r" in self.mode:
-            self.mrd = asyn.sync(
-                self.gcsfs.loop, self._init_mrd, self.bucket, self.key, self.generation
-            )
-        elif "w" or "a" in self.mode:
-            self.aaow = asyn.sync(
-                self.gcsfs.loop,
-                self._init_aaow,
-                self.bucket,
-                self.key,
-                self.generation,
-            )
-        else:
-            raise NotImplementedError(
-                "Only read, write and append operations are currently supported for Zonal buckets."
-            )
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """
@@ -102,7 +116,8 @@ class ZonalFile(GCSFile):
         # generation is needed while creating aaow to append to existing objects
         if "a" in self.mode and generation is None:
             try:
-                info = await self.gcsfs._info(self.path)
+                # self.path might not be set yet, so reconstruct full path
+                info = await self.gcsfs._info(f"{bucket_name}/{object_name}")
                 generation = info.get("generation")
             except FileNotFoundError:
                 # if file doesn't exist, we don't need generation
@@ -159,8 +174,7 @@ class ZonalFile(GCSFile):
             # no-op to flush on read-mode
             return
 
-        # Use simple_flush which does not return persisted_size for faster performance
-        asyn.sync(self.gcsfs.loop, self.aaow.simple_flush)
+        asyn.sync(self.gcsfs.loop, self.aaow.flush)
 
     def commit(self):
         """
@@ -239,8 +253,8 @@ class ZonalFile(GCSFile):
         super().close()
         if hasattr(self, "mrd") and self.mrd:
             asyn.sync(self.gcsfs.loop, self.mrd.close)
-        # Don't try to close aaow if object is already finalized
-        if not self.finalized and hasattr(self, "aaow") and self.aaow:
+        # Only close aaow if the stream is open
+        if hasattr(self, "aaow") and self.aaow and self.aaow._is_stream_open:
             asyn.sync(
                 self.gcsfs.loop,
                 self.aaow.close,

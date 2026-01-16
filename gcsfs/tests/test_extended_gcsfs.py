@@ -1,6 +1,7 @@
 import contextlib
 import io
 import logging
+import multiprocessing
 import os
 import random
 import threading
@@ -9,6 +10,7 @@ from itertools import chain
 from unittest import mock
 
 import pytest
+from google.api_core.exceptions import NotFound
 from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
@@ -20,6 +22,7 @@ from google.cloud.storage.exceptions import DataCorruption
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import (
     BucketType,
+    ExtendedGcsFileSystem,
     initiate_upload,
     simple_upload,
     upload_chunk,
@@ -31,13 +34,17 @@ from gcsfs.tests.conftest import (
     text_files,
 )
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import tmpfile
+from gcsfs.tests.utils import tempdir, tmpfile
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
 json_data = files[file]
 lines = io.BytesIO(json_data).readlines()
 file_size = len(json_data)
+
+file2 = "test/accounts.2.json"
+file2_path = f"{TEST_ZONAL_BUCKET}/{file2}"
+json_data2 = files[file2]
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
 
@@ -91,6 +98,7 @@ def gcs_bucket_mocks():
         mock_downloader.download_ranges = mock.AsyncMock(
             side_effect=download_side_effect
         )
+        mock_downloader.persisted_size = None
 
         mock_create_mrd = mock.AsyncMock(return_value=mock_downloader)
         with (
@@ -352,6 +360,158 @@ def test_mrd_exception_handling(extended_gcsfs, gcs_bucket_mocks, exception_to_r
         mocks["downloader"].download_ranges.assert_called_once()
 
 
+def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests that mrd stream is properly closed with file closure.
+    """
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        if not extended_gcsfs.on_google:
+
+            def close_side_effect():
+                mocks["downloader"].is_stream_open = False
+
+            mocks["downloader"].close.side_effect = close_side_effect
+
+        with extended_gcsfs.open(file_path, "rb") as f:
+            assert f.mrd is not None
+
+        assert True is f.closed
+        assert False is f.mrd.is_stream_open
+
+
+def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests that the AsyncMultiRangeDownloader (MRD) is created only once when a
+    ZonalFile is opened, and not for each subsequent read operation.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Internal call counts cannot be verified against real GCS.")
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with extended_gcsfs.open(file_path, "rb") as f:
+            # The MRD should be created upon opening the file.
+            mocks["create_mrd"].assert_called_once()
+
+            f.read(10)
+            f.read(20)
+            f.seek(5)
+            f.read(5)
+
+        # Verify that create_mrd was not called again.
+        mocks["create_mrd"].assert_called_once()
+
+
+def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
+    "Tests that mrd can read from an unfinalized file successfully"
+    if not extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+
+    # Files are not finalized by default
+    with extended_gcsfs.open(file_path, "wb") as f:
+        f.write(b"Hello, ")
+        f.write(b"world!")
+
+    with extended_gcsfs.open(file_path, "rb") as f:
+        assert f.read() == b"Hello, world!"
+        f.seek(4)
+        assert f.read() == b"o, world!"  # Check cache works as well
+
+
+def test_zonal_file_warning_on_missing_persisted_size(
+    extended_gcsfs, gcs_bucket_mocks, caplog
+):
+    """
+    Tests that a warning is logged when MRD has no 'persisted_size' attribute when opening ZonalFile.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate missing attributes on real GCS.")
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        # 'persisted_size' is set to None in the mock downloader
+        with caplog.at_level(logging.WARNING, logger="gcsfs"):
+            with extended_gcsfs.open(file_path, "rb"):
+                pass
+            assert "has no 'persisted_size'" in caplog.text
+
+
+def test_process_limits_when_file_size_passed(extended_gcsfs):
+    """
+    Tests that process_limits works correctly when file_size is provided,
+    without calling _info().
+    """
+    with mock.patch.object(
+        extended_gcsfs, "_info", new_callable=mock.AsyncMock
+    ) as mock_info:
+        test_file_size = 1000
+
+        # Case: start and end provided
+        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
+            file_path, start=100, end=200, file_size=test_file_size
+        )
+        assert offset == 100
+        assert length == 100
+
+        # Case: only end provided
+        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
+            file_path, start=None, end=50, file_size=test_file_size
+        )
+        assert offset == 0
+        assert length == 50
+
+        # Case: only start provided
+        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
+            file_path, start=950, end=None, file_size=test_file_size
+        )
+        assert offset == 950
+        assert length == 50
+
+        mock_info.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cat_file_warning_on_missing_persisted_size(
+    extended_gcsfs, gcs_bucket_mocks, caplog
+):
+    """
+    Tests that a warning is logged in cat_file when MRD has no 'persisted_size' attribute.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate missing attributes on real GCS.")
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        # 'persisted_size' is set to None in the mock downloader
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                extended_gcsfs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            result = await extended_gcsfs._cat_file(file_path, start=0, end=10)
+            assert "Falling back to _info() to get the file size" in caplog.text
+            assert result == json_data[:10]
+
+
+@pytest.mark.asyncio
+async def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
+    """
+    Tests that cat_file can read from an unfinalized file successfully
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+
+    # Files are not finalized by default
+    await extended_gcsfs._pipe_file(file_path, b"Hello, world!")
+
+    data = await extended_gcsfs._cat_file(file_path)
+    assert data == b"Hello, world!"
+
+
+# ========================== Zonal Multithreaded Read Tests ===========================
 _MULTI_THREADED_TEST_FILE = "multi_threaded_test_file"
 _MULTI_THREADED_TEST_DATA = text_files[_MULTI_THREADED_TEST_FILE]
 _MULTI_THREADED_TEST_FILE_PATH = f"{TEST_ZONAL_BUCKET}/{_MULTI_THREADED_TEST_FILE}"
@@ -645,51 +805,164 @@ def test_multithreaded_read_one_fails_others_survive_zb(
         assert mocks["downloader"].close.call_count == _NUM_FAIL_SURVIVE_THREADS
 
 
-def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
+# =========================== Zonal Multiprocess Read Tests ===========================
+def run_in_processes(func, args_list):
+    """Runs a function in multiple processes and collects results."""
+    # Use 'spawn' context to avoid deadlocks from libraries that are not fork-safe.
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=len(args_list)) as pool:
+        results = pool.starmap(func, args_list)
+    return results
+
+
+def _read_range_and_get_pid(path, offset, length, block_size=None):
     """
-    Tests that mrd stream is properly closed with file closure.
+    Helper function for multiprocessing tests. Creates a new fs instance
+    in the new process and reads a range from a file.
+    Returns the data and the process ID.
     """
-    with gcs_bucket_mocks(
-        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
-    ) as mocks:
-        if not extended_gcsfs.on_google:
-
-            def close_side_effect():
-                mocks["downloader"].is_stream_open = False
-
-            mocks["downloader"].close.side_effect = close_side_effect
-
-        with extended_gcsfs.open(file_path, "rb") as f:
-            assert f.mrd is not None
-
-        assert True is f.closed
-        assert False is f.mrd.is_stream_open
+    fs = ExtendedGcsFileSystem()
+    with fs.open(path, "rb", block_size=block_size) as f:
+        f.seek(offset)
+        data = f.read(length)
+    return data, os.getpid()
 
 
-def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
+def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
     """
-    Tests that the AsyncMultiRangeDownloader (MRD) is created only once when a
-    ZonalFile is opened, and not for each subsequent read operation.
+    Tests concurrent reads of disjoint ranges from the same file in different processes.
     """
-    if extended_gcsfs.on_google:
-        pytest.skip("Internal call counts cannot be verified against real GCS.")
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
 
-    with gcs_bucket_mocks(
-        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
-    ) as mocks:
-        with extended_gcsfs.open(file_path, "rb") as f:
-            # The MRD should be created upon opening the file.
-            mocks["create_mrd"].assert_called_once()
+    read_tasks = [
+        (_MULTI_THREADED_TEST_FILE_PATH, 0, 1024),
+        (_MULTI_THREADED_TEST_FILE_PATH, 2048, 1024),
+        (_MULTI_THREADED_TEST_FILE_PATH, 4096, 1024),
+    ]
 
-            f.read(10)
-            f.read(20)
-            f.seek(5)
-            f.read(5)
+    results = run_in_processes(_read_range_and_get_pid, read_tasks)
 
-        # Verify that create_mrd was not called again.
-        mocks["create_mrd"].assert_called_once()
+    # Unpack results
+    read_data = [res[0] for res in results]
+    pids = [res[1] for res in results]
+
+    # Verify data correctness
+    assert read_data[0] == _MULTI_THREADED_TEST_DATA[0:1024]
+    assert read_data[1] == _MULTI_THREADED_TEST_DATA[2048:3072]
+    assert read_data[2] == _MULTI_THREADED_TEST_DATA[4096:5120]
+
+    # Verify that reads happened in different processes
+    assert len(set(pids)) == len(read_tasks)
+    assert os.getpid() not in pids
 
 
+def test_multiprocess_read_overlapping_ranges_zb(extended_gcsfs):
+    """
+    Tests concurrent reads of overlapping ranges from the same file in different processes.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    read_tasks = [
+        (_MULTI_THREADED_TEST_FILE_PATH, 0, 2048),
+        (_MULTI_THREADED_TEST_FILE_PATH, 1024, 2048),  # Overlaps with first
+        (_MULTI_THREADED_TEST_FILE_PATH, 0, 2048),  # Identical to first
+    ]
+
+    results = run_in_processes(_read_range_and_get_pid, read_tasks)
+
+    # Unpack results
+    read_data = [res[0] for res in results]
+    pids = [res[1] for res in results]
+
+    # Verify data correctness
+    assert read_data[0] == _MULTI_THREADED_TEST_DATA[0:2048]
+    assert read_data[1] == _MULTI_THREADED_TEST_DATA[1024:3072]
+    assert read_data[2] == _MULTI_THREADED_TEST_DATA[0:2048]
+
+    # Verify that reads happened in different processes
+    assert len(set(pids)) == len(read_tasks)
+    assert os.getpid() not in pids
+
+
+def _read_with_passed_fs(fs, path, offset, length):
+    """
+    Worker that receives an existing FS instance.
+    Tests if ExtendedGcsFileSystem can be shared correctly.
+    """
+    with fs.open(path, "rb") as f:
+        f.seek(offset)
+        return f.read(length)
+
+
+def test_multiprocess_shared_fs_zb(extended_gcsfs):
+    """
+    Tests passing the filesystem object itself to child processes.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    # Force initialization of the client/session beforehand
+    # to ensure we test handling of active connections
+    extended_gcsfs.ls(TEST_ZONAL_BUCKET)
+
+    read_tasks = [
+        (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 0, 100),
+        (extended_gcsfs, _MULTI_THREADED_TEST_FILE_PATH, 100, 100),
+    ]
+
+    results = run_in_processes(_read_with_passed_fs, read_tasks)
+
+    assert results[0] == _MULTI_THREADED_TEST_DATA[0:100]
+    assert results[1] == _MULTI_THREADED_TEST_DATA[100:200]
+
+
+def _cat_file_worker(fs, path):
+    """Simple worker to cat a file."""
+    return fs.cat(path)
+
+
+def test_multiprocess_shared_fs_read_multiple_files_zb(extended_gcsfs, file_path):
+    """
+    Tests reading completely different files in parallel using same filesystem.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    # Setup: Create 3 distinct files
+    files = {
+        f"{file_path}_1": b"data_one",
+        f"{file_path}_2": b"data_two",
+        f"{file_path}_3": b"data_three",
+    }
+
+    for path, data in files.items():
+        extended_gcsfs.pipe(path, data, finalize_on_close=True)
+
+    # Run list of paths in parallel
+    task_args = [(extended_gcsfs, path) for path in files.keys()]
+    results = run_in_processes(_cat_file_worker, task_args)
+
+    # Verify we got the correct data for each file
+    # Note: Results order matches input order in starmap
+    assert results == [b"data_one", b"data_two", b"data_three"]
+
+
+def test_multiprocess_error_handling_zb(extended_gcsfs):
+    """
+    Tests that exceptions in child processes are correctly raised in the parent.
+    """
+    if not extended_gcsfs.on_google:
+        pytest.skip("Multiprocessing tests require a live GCS backend.")
+
+    missing_file = f"{TEST_ZONAL_BUCKET}/this_does_not_exist"
+
+    with pytest.raises(NotFound):
+        run_in_processes(_cat_file_worker, [(extended_gcsfs, missing_file)])
+
+
+# =========================== Zonal Upload Tests ===========================
 @pytest.mark.asyncio
 async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
     """Test simple_upload for Zonal buckets calls the correct writer methods."""
@@ -1149,3 +1422,178 @@ async def test_upload_chunk_delegates_to_core_for_http_url(async_gcs, http_locat
             content_type,
         )
         assert result == {"kind": "storage#object"}
+
+
+def test_get_file_from_zonal_bucket(extended_gcsfs, gcs_bucket_mocks):
+    """Test getting a file from a Zonal bucket with mocks."""
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        bucket, key, _ = extended_gcsfs.split_path(file_path)
+
+        with tmpfile() as local_f:
+            extended_gcsfs.get(file_path, local_f)
+            with open(local_f, "rb") as f:
+                assert f.read() == json_data
+        if mocks:
+            mocks["downloader"].download_ranges.assert_awaited()
+            mocks["downloader"].close.assert_awaited_once()
+
+
+async def create_mrd_side_effect(client, bucket, object_name, generation):
+    """Side effect function to create a mocked AsyncMultiRangeDownloader."""
+    file_data = files[object_name]
+
+    async def download_side_effect(read_requests, **kwargs):
+        for param_offset, param_length, buffer_arg in read_requests:
+            if hasattr(buffer_arg, "write"):
+                buffer_arg.write(file_data[param_offset : param_offset + param_length])
+
+    downloader = mock.Mock(spec=AsyncMultiRangeDownloader)
+    downloader.download_ranges = mock.AsyncMock(side_effect=download_side_effect)
+    downloader.persisted_size = len(file_data)
+    downloader.close = mock.AsyncMock()
+    return downloader
+
+
+def test_get_list_from_zonal_bucket(extended_gcsfs):
+    """Test batch downloading a list of files with mocks."""
+    if extended_gcsfs.on_google:
+        with tmpfile() as l1, tmpfile() as l2:
+            extended_gcsfs.get([file_path, file2_path], [l1, l2])
+
+            with open(l1, "rb") as f:
+                assert f.read() == files[file]
+            with open(l2, "rb") as f:
+                assert f.read() == files[file2]
+        return
+
+    mock_create_mrd = mock.AsyncMock(side_effect=create_mrd_side_effect)
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            return_value=True,
+        ),
+        mock.patch(
+            "google.cloud.storage._experimental.asyncio."
+            "async_multi_range_downloader.AsyncMultiRangeDownloader.create_mrd",
+            mock_create_mrd,
+        ),
+    ):
+        with tmpfile() as l1, tmpfile() as l2:
+            extended_gcsfs.get([file_path, file2_path], [l1, l2])
+
+            with open(l1, "rb") as f:
+                assert f.read() == files[file]
+            with open(l2, "rb") as f:
+                assert f.read() == files[file2]
+
+    assert mock_create_mrd.call_count == 2
+
+
+def test_get_directory_from_zonal_bucket(extended_gcsfs):
+    """Test getting a directory recursively from a Zonal bucket with mocks."""
+    remote_dir = f"{TEST_ZONAL_BUCKET}/test"
+    file1 = "test/accounts.1.json"
+    file2 = "test/accounts.2.json"
+    if extended_gcsfs.on_google:
+        with tempdir() as tmp_root:
+            # define a path that DOES NOT exist yet
+            local_dir = os.path.join(tmp_root, "downloaded_data")
+
+            # This should create 'downloaded_data' AND put files inside it
+            extended_gcsfs.get(remote_dir, local_dir, recursive=True)
+
+            # Assert folder was created
+            assert os.path.isdir(local_dir)
+            with open(os.path.join(local_dir, "accounts.1.json"), "rb") as f:
+                assert f.read() == files[file1]
+            with open(os.path.join(local_dir, "accounts.2.json"), "rb") as f:
+                assert f.read() == files[file2]
+        return
+
+    mock_create_mrd = mock.AsyncMock(side_effect=create_mrd_side_effect)
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            return_value=True,
+        ),
+        mock.patch(
+            "google.cloud.storage._experimental.asyncio."
+            "async_multi_range_downloader.AsyncMultiRangeDownloader.create_mrd",
+            mock_create_mrd,
+        ),
+    ):
+        with tempdir() as tmp_root:
+            local_dir = os.path.join(tmp_root, "downloaded_data")
+
+            extended_gcsfs.get(remote_dir, local_dir, recursive=True)
+
+            assert os.path.isdir(local_dir)
+            with open(os.path.join(local_dir, "accounts.1.json"), "rb") as f:
+                assert f.read() == files[file1]
+            with open(os.path.join(local_dir, "accounts.2.json"), "rb") as f:
+                assert f.read() == files[file2]
+
+    assert mock_create_mrd.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_file_warning_on_missing_persisted_size(
+    async_gcs, gcs_bucket_mocks, caplog, tmp_path, file_path
+):
+    """
+    Tests that a warning is logged in _get_file when MRD has no 'persisted_size' attribute.
+    """
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        if not mocks:
+            pytest.skip("Cannot simulate missing attributes on real GCS.")
+
+        lpath = tmp_path / "output.txt"
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            await async_gcs._get_file(file_path, str(lpath))
+            assert "Falling back to _info() to get the file size" in caplog.text
+            assert lpath.read_bytes() == json_data
+
+
+@pytest.mark.asyncio
+async def test_get_file_exception_cleanup(
+    async_gcs, gcs_bucket_mocks, tmp_path, file_path
+):
+    """
+    Tests that _get_file correctly removes the local file when an
+    exception occurs during download.
+    """
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        if not mocks:
+            pytest.skip("Cannot mock exceptions on real GCS.")
+
+        lpath = tmp_path / "output.txt"
+        error_message = "Simulated network failure during download"
+        with (
+            mock.patch(
+                "gcsfs.zb_hns_utils.download_range",
+                side_effect=Exception(error_message),
+            ),
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            with pytest.raises(Exception, match=error_message):
+                await async_gcs._get_file(file_path, str(lpath))
+
+            # The local file should not exist after the failed download
+            assert not lpath.exists()

@@ -396,6 +396,12 @@ def zonal_write_mocks():
 
     mock_aaow.close.side_effect = close_side_effect
 
+    # Finalize closes the stream as well
+    async def finalize_side_effect():
+        mock_aaow._is_stream_open = False
+
+    mock_aaow.finalize.side_effect = finalize_side_effect
+
     with (
         mock.patch(
             patch_target_get_bucket_type,
