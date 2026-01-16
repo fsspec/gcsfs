@@ -17,7 +17,7 @@ from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from gcsfs.retry import HttpError
+from gcsfs.retry import HttpError, NonRetryableError
 
 logger = logging.getLogger("gcsfs.credentials")
 
@@ -37,6 +37,48 @@ client_config = {
         "token_uri": "https://accounts.google.com/o/oauth2/token",
     }
 }
+
+TOKEN_INFO_TIMEOUT_SECONDS = 10
+LOCAL_REFRESH_BUFFER = 300  # Greater than google.auth._helpers.REFRESH_THRESHOLD
+
+
+def _get_creds_from_raw_token(token):
+    # Default to True. Only disable if user explicitly says 'false', '0', or 'off'.
+    env_val = os.environ.get("FETCH_RAW_TOKEN_EXPIRY", "true").lower()
+    should_fetch_expiry = env_val not in ("false", "0", "off", "no")
+
+    if should_fetch_expiry:
+        response = requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"access_token": token},
+            timeout=TOKEN_INFO_TIMEOUT_SECONDS,
+        )
+
+        if response.status_code == 400:
+            # Token is likely expired or invalid format
+            raise ValueError("Provided token is either not valid, or expired.")
+
+        response.raise_for_status()
+        expiry = datetime.utcfromtimestamp(float(response.json()["exp"]))
+
+        time_remaining = max(
+            0,
+            (
+                expiry.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)
+            ).total_seconds(),
+        )
+        if time_remaining <= LOCAL_REFRESH_BUFFER:
+            raise ValueError(
+                f"The provided raw token expires in {time_remaining} seconds, "
+                f"which is less than the safety buffer ({LOCAL_REFRESH_BUFFER}). "
+                "This may cause immediate authentication failures. "
+                "To bypass this check and safety buffer, you can set the environment "
+                "variable FETCH_RAW_TOKEN_EXPIRY=false (expiry will be unknown)."
+            )
+    else:
+        expiry = None
+
+    return Credentials(token, expiry=expiry)
 
 
 class GoogleCredentials:
@@ -161,7 +203,7 @@ class GoogleCredentials:
                     with open(token) as data:
                         token = json.load(data)
             else:
-                token = Credentials(token)
+                token = _get_creds_from_raw_token(token)
         if isinstance(token, dict):
             credentials = self._dict_to_credentials(token)
         elif isinstance(token, google.auth.credentials.Credentials):
@@ -190,7 +232,7 @@ class GoogleCredentials:
             )
         )
 
-    def maybe_refresh(self, refresh_buffer=300):
+    def maybe_refresh(self, refresh_buffer=LOCAL_REFRESH_BUFFER):
         """
         Check and refresh credentials if needed
         """
@@ -210,6 +252,21 @@ class GoogleCredentials:
                 try:
                     self.credentials.refresh(req)
                 except gauth.exceptions.RefreshError as error:
+                    # There may be scenarios where this error is raised from the client side due
+                    # to missing necessary attributes to refresh the token, For instance
+                    # https://github.com/googleapis/google-auth-library-python/blob/main/google/oauth2/_credentials_async.py#L51
+                    # In such cases, the request gets retried
+                    # with backoff strategy, which can be avoided.
+
+                    # Check for client side errors (if any)
+                    if (
+                        "credentials do not contain the necessary fields need to refresh"
+                        in str(error)
+                    ):
+                        raise NonRetryableError(
+                            "Got error while refreshing credentials."
+                        ) from error
+
                     # Re-raise as HttpError with a 401 code and the expected message
                     raise HttpError(
                         {"code": 401, "message": "Invalid Credentials"}
