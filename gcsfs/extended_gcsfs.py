@@ -680,8 +680,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             )
         )
 
-        # 2. Fetch all explicit folder objects recursively. This is necessary
-        # to find all folders, especially empty ones.
+        # 2. Fetch all folders recursively. This is necessary to find all folders,
+        # especially empty ones.
         folders_task = self.loop.create_task(
             self._get_all_folders(path, bucket, prefix=prefix)
         )
@@ -701,7 +701,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         all_objects.sort(key=lambda o: o["name"])
 
         # Final filtering and formatting. `all_objects` now contains a complete
-        # list of all files and all explicit/implicit folder objects.
+        # list of all files and folders.
         if maxdepth:
             depth = path.rstrip("/").count("/") + maxdepth
             all_objects = [o for o in all_objects if o["name"].count("/") <= depth]
