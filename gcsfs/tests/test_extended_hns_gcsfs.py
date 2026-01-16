@@ -1027,6 +1027,56 @@ class TestExtendedGcsFileSystemFind:
             )
             mocks["control_client"].list_folders.assert_not_called()
 
+    def test_find_on_non_existent_path_returns_empty(self, gcs_hns, gcs_hns_mocks):
+        """Unit test for find on a non-existent path returning an empty list."""
+        gcs = gcs_hns
+        bucket = "test-bucket"
+        path = f"{bucket}/does/not/exist"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs) as mocks:
+            # Mock the underlying find/list calls to return empty results
+            mocks["super_find"].return_value = {}
+            mocks["control_client"].list_folders.return_value = AsyncIter([])
+
+            result = gcs.find(path, withdirs=True)
+
+            assert result == []
+            mocks["super_find"].assert_called_once()
+            mocks["control_client"].list_folders.assert_called_once()
+
+    def test_find_on_non_existent_bucket_raises_error(self, gcs_hns, gcs_hns_mocks):
+        """Unit test for find on a non-existent bucket raising FileNotFoundError."""
+        gcs = gcs_hns
+        bucket = "non-existent-bucket"
+        path = f"{bucket}/some/path"
+
+        with gcs_hns_mocks(BucketType.UNKNOWN, gcs) as mocks:
+            # Mock the super `_find` to simulate the GCS API error.
+            mocks["super_find"].side_effect = FileNotFoundError(bucket)
+
+            with pytest.raises(FileNotFoundError):
+                gcs.find(path)
+
+            mocks["super_find"].assert_called_once()
+            mocks["control_client"].list_folders.assert_not_called()
+
+    def test_find_list_folders_api_fails(self, gcs_hns, gcs_hns_mocks):
+        """Test that find propagates exceptions from the list_folders API call."""
+        gcs = gcs_hns
+        path = f"{TEST_HNS_BUCKET}/some/path"
+        error_message = "API Internal Error"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs) as mocks:
+            # Simulate the list_folders call failing
+            mocks["control_client"].list_folders.side_effect = (
+                api_exceptions.InternalServerError(error_message)
+            )
+            # super_find should still complete successfully
+            mocks["super_find"].return_value = {}
+
+            with pytest.raises(api_exceptions.InternalServerError, match=error_message):
+                gcs.find(path, withdirs=True)
+
 
 # This test class validates that info API retrieves folder data for HNS buckets.
 class TestExtendedGcsFileSystemInternal:
