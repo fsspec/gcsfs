@@ -645,6 +645,12 @@ class TestExtendedGcsFileSystemFindIntegration:
         }
         assert test_structure["nested_file"] in nested_dir_listing
 
+        # Check content of the 'empty_dir' cache
+        empty_dir_listing = {
+            d["name"] for d in gcs_hns.dircache[test_structure["empty_dir"]]
+        }
+        assert not empty_dir_listing
+
     def test_find_does_not_update_dircache_with_prefix(self, gcs_hns, test_structure):
         """Test that find() does NOT populate the dircache when a prefix is given."""
         base_dir = test_structure["base_dir"]
