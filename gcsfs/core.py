@@ -1564,6 +1564,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         prefix="",
         versions=False,
         maxdepth=None,
+        update_cache=True,
         **kwargs,
     ):
         path = self._strip_protocol(path)
@@ -1597,7 +1598,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 o for o in objects if o["name"].startswith(path2) or o["name"] == path
             ]
 
-        dirs = self._get_dirs_and_update_cache(path, objects, prefix=prefix)
+        dirs = self._get_dirs_and_update_cache(
+            path, objects, prefix=prefix, update_cache=update_cache
+        )
 
         if withdirs:
             objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
@@ -1644,6 +1647,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         cache_entries = {}
 
         for obj in objects:
+            # For native HNS empty folders, which are returned as directory types
+            # but are not placeholders, we need to ensure they have an entry in the cache.
+            if obj.get("type") == "directory":
+                cache_entries.setdefault(obj["name"], {})
+
             parent = self._parent(obj["name"])
             previous = obj
 

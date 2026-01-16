@@ -623,6 +623,7 @@ class TestExtendedGcsFileSystemFindIntegration:
         assert base_dir in gcs_hns.dircache
         assert test_structure["dir_with_files"] in gcs_hns.dircache
         assert test_structure["nested_dir"] in gcs_hns.dircache
+        assert test_structure["empty_dir"] in gcs_hns.dircache
 
         # Check content of the base directory's cache
         base_dir_listing = {d["name"] for d in gcs_hns.dircache[base_dir]}

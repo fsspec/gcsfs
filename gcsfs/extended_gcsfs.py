@@ -675,7 +675,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 prefix=prefix,
                 versions=versions,
                 maxdepth=maxdepth,
-                update_cache=False,  # Defer caching until after merge
+                update_cache=False,  # Defer caching until merging files and folders
                 **kwargs,
             )
         )
