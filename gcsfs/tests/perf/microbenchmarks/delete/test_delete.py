@@ -8,14 +8,6 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
     run_single_threaded,
 )
-from gcsfs.tests.settings import BENCHMARK_SKIP_TESTS
-
-pytestmark = pytest.mark.skipif(
-    BENCHMARK_SKIP_TESTS,
-    reason="""Skipping benchmark tests.
-Set GCSFS_BENCHMARK_SKIP_TESTS=false to run them,
-or use the orchestrator script at gcsfs/tests/perf/microbenchmarks/run.py""",
-)
 
 BENCHMARK_GROUP = "delete"
 

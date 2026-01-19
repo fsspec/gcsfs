@@ -432,3 +432,40 @@ async def async_gcs():
     GCSFileSystem.clear_instance_cache()
     gcs = GCSFileSystem(asynchronous=True, token=token)
     yield gcs
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-benchmarks",
+        action="store_true",
+        default=False,
+        help="run benchmark tests",
+    )
+    parser.addoption(
+        "--run-benchmarks-infra",
+        action="store_true",
+        default=False,
+        help="run benchmark infrastructure tests",
+    )
+
+
+def pytest_ignore_collect(path, config):
+    path_str = str(path)
+
+    if "gcsfs/tests/perf/microbenchmarks" in path_str:
+        # If no benchmark flags are passed, ignore the entire directory immediately.
+        if not (
+            config.getoption("--run-benchmarks")
+            or config.getoption("--run-benchmarks-infra")
+        ):
+            return True
+
+        # If only --run-benchmarks-infra is passed, ignore the actual benchmark subfolders.
+        if config.getoption("--run-benchmarks-infra") and not config.getoption(
+            "--run-benchmarks"
+        ):
+            benchmark_subdirs = {"delete", "listing", "read", "rename", "write"}
+            if any(subdir in path.parts for subdir in benchmark_subdirs):
+                return True
+
+    return None
