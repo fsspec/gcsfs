@@ -1564,6 +1564,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         prefix="",
         versions=False,
         maxdepth=None,
+        update_cache=True,
         **kwargs,
     ):
         path = self._strip_protocol(path)
@@ -1590,15 +1591,67 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         else:
             _prefix = prefix
 
-        dirs = {}
-        cache_entries = {}
         path2 = path.rstrip("/") + "/"
 
         if not prefix:
             objects = [
                 o for o in objects if o["name"].startswith(path2) or o["name"] == path
             ]
+
+        dirs = self._get_dirs_and_update_cache(
+            path, objects, prefix=prefix, update_cache=update_cache
+        )
+
+        if withdirs:
+            objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
+
+        if maxdepth:
+            # Filter returned objects based on requested maxdepth
+            depth = path.rstrip("/").count("/") + maxdepth
+            objects = list(filter(lambda o: o["name"].count("/") <= depth, objects))
+
+        if detail:
+            if versions:
+                return {f"{o['name']}#{o['generation']}": o for o in objects}
+            return {o["name"]: o for o in objects}
+
+        if versions:
+            return [f"{o['name']}#{o['generation']}" for o in objects]
+        return [o["name"] for o in objects]
+
+    def _get_dirs_and_update_cache(self, path, objects, prefix="", update_cache=True):
+        """
+        Populates the directory cache from a list of object details.
+
+        This method reconstructs the directory hierarchy from a flat list
+        of objects and update the cache, which improves the performance of
+        subsequent `ls` calls.
+
+        Parameters
+        ----------
+        path: str
+            The root path of the find operation.
+        objects: list[dict]
+            A list of objects from which directories are extracted and cache is updated.
+        prefix: str
+            If a prefix is provided, the directory cache will *not* be updated,
+            as the object list is considered partial.
+        update_cache: bool
+            Cache won't be updated if update_cache is False.
+
+        Returns
+        -------
+        dict: A dictionary of all pseudo-directory entries created.
+        """
+        dirs = {}
+        cache_entries = {}
+
         for obj in objects:
+            # For native HNS empty folders, which are returned as directory types
+            # but are not placeholders, we need to ensure they have an entry in the cache.
+            if obj.get("type") == "directory":
+                cache_entries.setdefault(obj["name"], {})
+
             parent = self._parent(obj["name"])
             previous = obj
 
@@ -1623,27 +1676,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
                 previous = dirs[parent]
                 parent = self._parent(parent)
-
-        if not prefix:
+        if not prefix and update_cache:
             cache_entries_list = {k: list(v.values()) for k, v in cache_entries.items()}
             self.dircache.update(cache_entries_list)
-
-        if withdirs:
-            objects = sorted(objects + list(dirs.values()), key=lambda x: x["name"])
-
-        if maxdepth:
-            # Filter returned objects based on requested maxdepth
-            depth = path.rstrip("/").count("/") + maxdepth
-            objects = list(filter(lambda o: o["name"].count("/") <= depth, objects))
-
-        if detail:
-            if versions:
-                return {f"{o['name']}#{o['generation']}": o for o in objects}
-            return {o["name"]: o for o in objects}
-
-        if versions:
-            return [f"{o['name']}#{o['generation']}" for o in objects]
-        return [o["name"] for o in objects]
+        return dirs
 
     @retry_request(retries=retries)
     async def _get_file_request(

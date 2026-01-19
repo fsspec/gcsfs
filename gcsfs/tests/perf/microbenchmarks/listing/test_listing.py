@@ -58,16 +58,27 @@ single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_c
     ids=lambda p: p.name,
 )
 def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
-    gcs, target_dirs, _, params = gcsfs_benchmark_listing
+    gcs, target_dirs, prefix, params = gcsfs_benchmark_listing
 
-    run_single_threaded(
-        benchmark,
-        monitor,
-        params,
-        _list_dirs,
-        (gcs, target_dirs, params.pattern),
-        BENCHMARK_GROUP,
-    )
+    if params.pattern == "find":
+        # For 'find', we want to measure a single recursive operation from the root.
+        run_single_threaded(
+            benchmark,
+            monitor,
+            params,
+            _list_op,
+            (gcs, prefix, params.pattern),
+            BENCHMARK_GROUP,
+        )
+    else:
+        run_single_threaded(
+            benchmark,
+            monitor,
+            params,
+            _list_dirs,
+            (gcs, target_dirs, params.pattern),
+            BENCHMARK_GROUP,
+        )
 
 
 @pytest.mark.parametrize(

@@ -31,9 +31,27 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def get_mock_folder(folder_path):
+    """Helper to create a mock folder object from the Storage Control API."""
+    mock_folder = mock.Mock()
+    mock_folder.name = f"projects/_/buckets/{TEST_HNS_BUCKET}/folders/{folder_path}"
+    return mock_folder
+
+
+class AsyncIter:
+    """A helper class to simulate an async iterator from a list."""
+
+    def __init__(self, items):
+        self._items = items
+
+    async def __aiter__(self):
+        for item in self._items:
+            yield item
+
+
 @pytest.fixture
 def gcs_hns_mocks():
-    """A factory fixture for mocking bucket functionality for HNS mv tests."""
+    """A factory fixture for mocking bucket functionality for HNS tests."""
 
     @contextlib.contextmanager
     def _gcs_hns_mocks_factory(bucket_type_val, gcsfs):
@@ -48,10 +66,12 @@ def gcs_hns_mocks():
         patch_target_super_mv = "gcsfs.core.GCSFileSystem.mv"
         patch_target_super_mkdir = "gcsfs.core.GCSFileSystem._mkdir"
         patch_target_super_rmdir = "gcsfs.core.GCSFileSystem._rmdir"
+        patch_target_super_find = "gcsfs.core.GCSFileSystem._find"
 
         # Mock the async rename_folder method on the storage_control_client
         mock_rename_folder = mock.AsyncMock()
         mock_control_client_instance = mock.AsyncMock()
+        mock_control_client_instance.list_folders = mock.AsyncMock()
         mock_control_client_instance.rename_folder = mock_rename_folder
 
         with (
@@ -74,6 +94,9 @@ def gcs_hns_mocks():
             mock.patch(
                 patch_target_super_rmdir, new_callable=mock.AsyncMock
             ) as mock_super_rmdir,
+            mock.patch(
+                patch_target_super_find, new_callable=mock.AsyncMock
+            ) as mock_super_find,
         ):
             mock_async_lookup_bucket_type.return_value = bucket_type_val
             mock_sync_lookup_bucket_type.return_value = bucket_type_val
@@ -85,6 +108,7 @@ def gcs_hns_mocks():
                 "super_mv": mock_super_mv,
                 "super_mkdir": mock_super_mkdir,
                 "super_rmdir": mock_super_rmdir,
+                "super_find": mock_super_find,
             }
             yield mocks
 
@@ -788,6 +812,272 @@ class TestExtendedGcsFileSystemMkdir:
             mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
 
 
+class TestExtendedGcsFileSystemFind:
+    """Tests for the find method in ExtendedGcsFileSystem."""
+
+    def test_hns_find_withdirs(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+    ):
+        """Test find with withdirs=True returns files and directories."""
+        base_path = f"{TEST_HNS_BUCKET}/find_test"
+        file1_path = f"{base_path}/file1.txt"
+        nested_file_path = f"{base_path}/sub/file2.txt"
+        empty_dir_path = f"{base_path}/empty"
+        # Mock results from GCSFileSystem._find (files only)
+        mock_files = {
+            file1_path: {"name": file1_path, "type": "file", "size": 10},
+            nested_file_path: {"name": nested_file_path, "type": "file", "size": 20},
+        }
+        # Mock results from storage_control.list_folders
+        mock_folders = [
+            get_mock_folder("find_test/sub"),
+            get_mock_folder("find_test/empty"),
+            get_mock_folder("find_test"),
+        ]
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+            mocks["super_find"].return_value = mock_files
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
+
+            result = gcs_hns.find(base_path, withdirs=True)
+
+            assert len(result) == 5
+            assert base_path in result
+            assert file1_path in result
+            assert f"{base_path}/sub" in result
+            assert empty_dir_path in result
+            assert nested_file_path in result
+
+            # Verify that the parent find was called correctly to fetch files
+            mocks["super_find"].assert_called_once()
+            call_args, call_kwargs = mocks["super_find"].call_args
+            assert call_args[0] == base_path
+            assert call_kwargs.get("withdirs") is False
+            assert call_kwargs.get("detail") is True
+
+            # Assert that list_folders was called with the correct request
+            expected_folder_id = "find_test/"
+            expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
+            expected_request = storage_control_v2.ListFoldersRequest(
+                parent=expected_parent, prefix=expected_folder_id
+            )
+            mocks["control_client"].list_folders.assert_called_once_with(
+                request=expected_request
+            )
+
+    def test_hns_find_withdirs_detail(self, gcs_hns, gcs_hns_mocks):
+        """Test find with withdirs=True and detail=True returns a dict."""
+        base_path = f"{TEST_HNS_BUCKET}/find_test"
+        file1_path = f"{base_path}/file1.txt"
+        nested_file_path = f"{base_path}/sub/file2.txt"
+        empty_dir_path = f"{base_path}/empty"
+        # Mock results from GCSFileSystem._find (files only)
+        mock_files = {
+            file1_path: {"name": file1_path, "type": "file", "size": 10},
+            nested_file_path: {"name": nested_file_path, "type": "file", "size": 20},
+        }
+        # Mock results from storage_control.list_folders
+        mock_folders = [
+            get_mock_folder("find_test/sub"),
+            get_mock_folder("find_test/empty"),
+            get_mock_folder("find_test"),
+        ]
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+            mocks["super_find"].return_value = mock_files
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
+            result = gcs_hns.find(base_path, withdirs=True, detail=True)
+
+            assert isinstance(result, dict)
+            assert len(result) == 5
+            assert file1_path in result
+            assert result[file1_path]["type"] == "file"
+            assert empty_dir_path in result
+            assert result[empty_dir_path]["type"] == "directory"
+
+            # Verify that the parent find was called correctly to fetch files
+            mocks["super_find"].assert_called_once()
+            call_args, call_kwargs = mocks["super_find"].call_args
+            assert call_args[0] == base_path
+            assert call_kwargs.get("withdirs") is False
+            assert call_kwargs.get("detail") is True
+
+            # Assert that list_folders was called with the correct request
+            expected_folder_id = "find_test/"
+            expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
+            expected_request = storage_control_v2.ListFoldersRequest(
+                parent=expected_parent, prefix=expected_folder_id
+            )
+            mocks["control_client"].list_folders.assert_called_once_with(
+                request=expected_request
+            )
+
+    def test_hns_find_withdirs_maxdepth(self, gcs_hns, gcs_hns_mocks):
+        """Test find with withdirs=True respects maxdepth."""
+        base_path = f"{TEST_HNS_BUCKET}/find_test"
+        file1_path = f"{base_path}/file1.txt"
+        nested_file_path = f"{base_path}/sub/file2.txt"
+        empty_dir_path = f"{base_path}/empty"
+        # Mock results from GCSFileSystem._find (files only)
+        mock_files = {
+            file1_path: {"name": file1_path, "type": "file", "size": 10},
+            nested_file_path: {"name": nested_file_path, "type": "file", "size": 20},
+        }
+        # Mock results from storage_control.list_folders
+        mock_folders = [
+            get_mock_folder("find_test/sub"),
+            get_mock_folder("find_test/empty"),
+            get_mock_folder("find_test"),
+        ]
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+            mocks["super_find"].return_value = mock_files
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
+            result = gcs_hns.find(base_path, withdirs=True, maxdepth=1)
+
+            assert len(result) == 4
+            assert base_path in result
+            assert file1_path in result
+            assert f"{base_path}/sub" in result
+            assert empty_dir_path in result
+            assert nested_file_path not in result
+
+            # Verify that the parent find was called correctly to fetch files
+            mocks["super_find"].assert_called_once()
+            _, call_kwargs = mocks["super_find"].call_args
+            assert call_kwargs.get("withdirs") is False
+            assert call_kwargs.get("detail") is True
+            assert call_kwargs.get("maxdepth") == 1
+
+            # Assert that list_folders was called with the correct request
+            expected_folder_id = "find_test/"
+            expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
+            expected_request = storage_control_v2.ListFoldersRequest(
+                parent=expected_parent, prefix=expected_folder_id
+            )
+            mocks["control_client"].list_folders.assert_called_once_with(
+                request=expected_request
+            )
+
+    def test_hns_find_withdirs_versions(self, gcs_hns, gcs_hns_mocks):
+        """Test find with withdirs=True and versions=True."""
+        base_path = f"{TEST_HNS_BUCKET}/find_test"
+        file1_path = f"{base_path}/file1.txt"
+        nested_file_path = f"{base_path}/sub/file2.txt"
+        # Mock results from GCSFileSystem._find (files only)
+        mock_files = {
+            file1_path: {"name": file1_path, "type": "file", "size": 10},
+            nested_file_path: {"name": nested_file_path, "type": "file", "size": 20},
+            f"{file1_path}#v2": {
+                "name": file1_path,
+                "type": "file",
+                "generation": "v2",
+            },
+            f"{file1_path}#v1": {
+                "name": file1_path,
+                "type": "file",
+                "generation": "v1",
+            },
+        }
+        # Mock results from storage_control.list_folders
+        mock_folders = [
+            get_mock_folder("find_test/sub"),
+            get_mock_folder("find_test/empty"),
+            get_mock_folder("find_test"),
+        ]
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+            mocks["super_find"].return_value = mock_files
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
+            result = gcs_hns.find(base_path, withdirs=True, versions=True)
+
+            assert len(result) == 7
+            assert base_path in result
+            assert file1_path in result  # The unversioned path
+            assert f"{file1_path}#v1" in result
+            assert f"{file1_path}#v2" in result
+            assert nested_file_path in result
+
+            # Verify super_find call
+            mocks["super_find"].assert_called_once()
+            _, call_kwargs = mocks["super_find"].call_args
+            assert call_kwargs.get("versions") is True
+
+            # Assert that list_folders was called with the correct request
+            expected_folder_id = "find_test/"
+            expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
+            expected_request = storage_control_v2.ListFoldersRequest(
+                parent=expected_parent, prefix=expected_folder_id
+            )
+            mocks["control_client"].list_folders.assert_called_once_with(
+                request=expected_request
+            )
+
+    def test_find_non_hns_falls_back(self, gcs_hns, gcs_hns_mocks):
+        """Test that find falls back to parent implementation for non-HNS"""
+        base_path = f"{TEST_HNS_BUCKET}/find_test"
+        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcs_hns) as mocks:
+            gcs_hns.find(base_path, withdirs=True)
+            mocks["super_find"].assert_called_with(
+                base_path,
+                withdirs=True,
+                detail=False,
+                prefix="",
+                versions=False,
+                maxdepth=None,
+            )
+            mocks["control_client"].list_folders.assert_not_called()
+
+    def test_find_on_non_existent_path_returns_empty(self, gcs_hns, gcs_hns_mocks):
+        """Unit test for find on a non-existent path returning an empty list."""
+        gcs = gcs_hns
+        bucket = "test-bucket"
+        path = f"{bucket}/does/not/exist"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs) as mocks:
+            # Mock the underlying find/list calls to return empty results
+            mocks["super_find"].return_value = {}
+            mocks["control_client"].list_folders.return_value = AsyncIter([])
+
+            result = gcs.find(path, withdirs=True)
+
+            assert result == []
+            mocks["super_find"].assert_called_once()
+            mocks["control_client"].list_folders.assert_called_once()
+
+    def test_find_on_non_existent_bucket_raises_error(self, gcs_hns, gcs_hns_mocks):
+        """Unit test for find on a non-existent bucket raising FileNotFoundError."""
+        gcs = gcs_hns
+        bucket = "non-existent-bucket"
+        path = f"{bucket}/some/path"
+
+        with gcs_hns_mocks(BucketType.UNKNOWN, gcs) as mocks:
+            # Mock the super `_find` to simulate the GCS API error.
+            mocks["super_find"].side_effect = FileNotFoundError(bucket)
+
+            with pytest.raises(FileNotFoundError):
+                gcs.find(path)
+
+            mocks["super_find"].assert_called_once()
+            mocks["control_client"].list_folders.assert_not_called()
+
+    def test_find_list_folders_api_fails(self, gcs_hns, gcs_hns_mocks):
+        """Test that find propagates exceptions from the list_folders API call."""
+        gcs = gcs_hns
+        path = f"{TEST_HNS_BUCKET}/some/path"
+        error_message = "API Internal Error"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs) as mocks:
+            # Simulate the list_folders call failing
+            mocks["control_client"].list_folders.side_effect = (
+                api_exceptions.InternalServerError(error_message)
+            )
+            # super_find should still complete successfully
+            mocks["super_find"].return_value = {}
+
+            with pytest.raises(api_exceptions.InternalServerError, match=error_message):
+                gcs.find(path, withdirs=True)
+
+
 # This test class validates that info API retrieves folder data for HNS buckets.
 class TestExtendedGcsFileSystemInternal:
     """Unit tests for internal methods and overrides in ExtendedGcsFileSystem."""
@@ -1299,11 +1589,31 @@ class TestExtendedGcsFileSystemRmdir:
         dir_to_delete = f"{base_dir}/dir_to_delete"
         sibling_dir = f"{base_dir}/sibling_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             # --- Setup ---
             gcsfs.touch(f"{dir_to_delete}/file.txt")
             gcsfs.touch(f"{sibling_dir}/sibling_file.txt")
+            # Configure mocks for the find() call to populate the cache.
+            # 1. Mock the return value for the parent's _find() method, which is called
+            #    to get all files. It should return a dictionary of file details.
+            mocks["super_find"].return_value = {
+                f"{dir_to_delete}/file.txt": {
+                    "name": f"{dir_to_delete}/file.txt",
+                    "type": "file",
+                },
+                f"{sibling_dir}/sibling_file.txt": {
+                    "name": f"{sibling_dir}/sibling_file.txt",
+                    "type": "file",
+                },
+            }
 
+            # 2. Mock the return value for list_folders, which is called to get all
+            #    explicit directory objects.
+            mock_folders = [
+                get_mock_folder("rmdir_cache_test/dir_to_delete"),
+                get_mock_folder("rmdir_cache_test/sibling_dir"),
+            ]
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
             # --- Populate Cache ---
             # Use find() to deeply populate the cache for the entire base directory
             gcsfs.find(base_dir, withdirs=True)
