@@ -663,3 +663,78 @@ class TestExtendedGcsFileSystemFindIntegration:
         assert (
             not gcs_hns.dircache
         ), "dircache should not be updated when using a prefix"
+
+
+class TestExtendedGcsFileSystemInfo:
+    """Integration tests for the info method on HNS buckets."""
+
+    def test_hns_info_nested_directory_success(self, gcs_hns):
+        """Test info() returns correct metadata for a nested HNS directory."""
+        gcsfs = gcs_hns
+        parent = f"info_parent_{uuid.uuid4().hex}"
+        child = "child_dir"
+        parent_dir_path = f"{TEST_HNS_BUCKET}/{parent}"
+        child_dir_path = f"{parent_dir_path}/{child}"
+
+        gcsfs.mkdir(child_dir_path, create_parents=True)
+
+        info = gcsfs.info(parent_dir_path)
+
+        assert info["type"] == "directory"
+        assert info["storageClass"] == "DIRECTORY"
+        assert info["name"].rstrip("/") == parent_dir_path
+        # Verify HNS-specific metadata fields provided by _get_directory_info
+        assert "ctime" in info
+        assert "mtime" in info
+        assert "metageneration" in info
+        assert info["size"] == 0
+
+        child_info = gcsfs.info(child_dir_path)
+
+        assert child_info["type"] == "directory"
+        assert child_info["storageClass"] == "DIRECTORY"
+        assert child_info["name"].rstrip("/") == child_dir_path
+        # Verify HNS-specific metadata fields provided by _get_directory_info
+        assert "ctime" in child_info
+        assert "mtime" in child_info
+        assert "metageneration" in child_info
+        assert child_info["size"] == 0
+
+    def test_hns_info_file_success(self, gcs_hns):
+        """Test info() behaves correctly for files in HNS buckets (fallback behavior)."""
+        gcsfs = gcs_hns
+        parent = f"info_parent_{uuid.uuid4().hex}"
+        file_name = "nested_file.txt"
+        dir_path = f"{TEST_HNS_BUCKET}/{parent}"
+        file_path = f"{dir_path}/{file_name}"
+
+        # touch implicitly creates folder if not already there
+        gcsfs.touch(file_path)
+
+        # verifies HNS overridden behaviour
+        info = gcsfs.info(dir_path)
+
+        assert info["type"] == "directory"
+        assert info["storageClass"] == "DIRECTORY"
+        assert info["name"].rstrip("/") == dir_path
+        # Verify HNS-specific metadata fields provided by _get_directory_info
+        assert "ctime" in info
+        assert "mtime" in info
+        assert "metageneration" in info
+        assert info["size"] == 0
+
+        # verifies HNS overridden behaviour
+        info = gcsfs.info(file_path)
+
+        assert info["type"] == "file"
+        assert info["name"] == file_path
+        assert info["size"] == 0
+
+    def test_hns_info_non_existent_path_raises(self, gcs_hns):
+        """Test info() raises FileNotFoundError for non-existent paths."""
+        gcsfs = gcs_hns
+        non_existent_path = f"{TEST_HNS_BUCKET}/non_existent_{uuid.uuid4().hex}"
+
+        # Should raise FileNotFoundError, mapping from api_exceptions.NotFound
+        with pytest.raises(FileNotFoundError):
+            gcsfs.info(non_existent_path)
