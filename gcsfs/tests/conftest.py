@@ -449,8 +449,8 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_ignore_collect(path, config):
-    path_str = str(path)
+def pytest_ignore_collect(collection_path, config):
+    path_str = str(collection_path)
 
     if "gcsfs/tests/perf/microbenchmarks" in path_str:
         # If no benchmark flags are passed, ignore the entire directory immediately.
@@ -461,11 +461,12 @@ def pytest_ignore_collect(path, config):
             return True
 
         # If only --run-benchmarks-infra is passed, ignore the actual benchmark subfolders.
-        if config.getoption("--run-benchmarks-infra") and not config.getoption(
-            "--run-benchmarks"
+        if config.getoption("--run-bench-infra") and not config.getoption(
+            "--run-bench-marks"
         ):
             benchmark_subdirs = {"delete", "listing", "read", "rename", "write"}
-            if any(subdir in path.parts for subdir in benchmark_subdirs):
+            path_parts = set(path_str.replace(os.sep, "/").split("/"))
+            if benchmark_subdirs.intersection(path_parts):
                 return True
 
     return None
