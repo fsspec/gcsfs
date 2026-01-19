@@ -1570,6 +1570,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         prefix="",
         versions=False,
         maxdepth=None,
+        update_cache=True,
         **kwargs,
     ):
         path = self._strip_protocol(path)

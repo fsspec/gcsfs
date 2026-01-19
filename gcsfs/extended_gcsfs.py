@@ -849,7 +849,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 f"{o['name']}#{o['generation']}" if "generation" in o else o["name"]
                 for o in all_objects
             ]
-
         return [o["name"] for o in all_objects]
 
     async def _get_all_folders(self, path, bucket, prefix=""):
