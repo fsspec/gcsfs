@@ -437,6 +437,21 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     mv = asyn.sync_wrapper(_mv)
 
+    async def _list_objects(self, path, prefix="", versions=False, **kwargs):
+        try:
+            return await super()._list_objects(
+                path, prefix=prefix, versions=versions, **kwargs
+            )
+        except FileNotFoundError:
+            bucket, key, _ = self.split_path(path)
+            if key and await self._is_bucket_hns_enabled(bucket):
+                try:
+                    await self._get_directory_info(path, bucket, key, None)
+                    return []
+                except (FileNotFoundError, Exception):
+                    pass
+            raise
+
     async def _mkdir(
         self, path, create_parents=False, enable_hierarchical_namespace=False, **kwargs
     ):

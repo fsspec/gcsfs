@@ -450,9 +450,13 @@ class TestExtendedGcsFileSystemLsIntegration:
         items_root = gcs_hns.ls(base_test_dir, detail=False)
         items_root_cleaned = [item.rstrip("/") for item in items_root]
 
+        # List the empty directory
+        items_empty_folder = gcs_hns.ls(path_empty_folder, detail=False)
+
         assert (
             path_empty_folder in items_root_cleaned
         ), f"Empty folder '{path_empty_folder}' missing from root listing"
+        assert items_empty_folder == []
 
     def test_ls_nested_empty_folder(self, gcs_hns, base_test_dir):
         """
@@ -523,12 +527,14 @@ class TestExtendedGcsFileSystemRm:
     def test_rm_single_file(self, gcs_hns):
         """Test deleting a single file."""
         gcsfs = gcs_hns
-        file_path = f"{TEST_HNS_BUCKET}/rm_test_file.txt"
+        dir_path = f"{TEST_HNS_BUCKET}/rm_single_file"
+        file_path = f"{dir_path}/rm_test_file.txt"
         gcsfs.touch(file_path)
         assert gcsfs.exists(file_path)
 
         gcsfs.rm(file_path)
         assert not gcsfs.exists(file_path)
+        assert gcsfs.exists(dir_path)
 
     def test_rm_empty_folder_recursive(self, gcs_hns):
         """Test deleting an empty folder with recursive=True."""

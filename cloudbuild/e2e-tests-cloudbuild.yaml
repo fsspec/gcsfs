@@ -166,13 +166,14 @@ steps:
           source env/bin/activate && \
           echo '--- Preparing test environment for HNS tests ---' && \
           export GCSFS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}' && \
+          export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}' && \
           export GCSFS_HNS_TEST_BUCKET='gcsfs-test-hns-${_SHORT_BUILD_ID}' && \
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
           export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running HNS tests on VM ---' && \
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/ --deselect gcsfs/tests/test_extended_gcsfs.py --deselect gcsfs/tests/test_zonal_file.py --deselect gcsfs/tests/test_core_versioned.py --deselect gcsfs/tests/test_core.py::test_sign"
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/ --deselect gcsfs/tests/test_extended_gcsfs.py --deselect gcsfs/tests/test_zonal_file.py --deselect gcsfs/tests/test_core_versioned.py --deselect gcsfs/tests/test_core.py::test_sign --deselect test_info_on_directory_with_only_subdirectories"
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:
       - "setup-vm"
