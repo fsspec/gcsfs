@@ -16,7 +16,3 @@ TEST_KMS_KEY = os.getenv(
 # Performance Benchmark Settings
 # =============================================================================
 BENCHMARK_FILTER = os.environ.get("GCSFS_BENCHMARK_FILTER", "")
-BENCHMARK_SKIP_TESTS = os.environ.get("GCSFS_BENCHMARK_SKIP_TESTS", "true").lower() in (
-    "true",
-    "1",
-)
