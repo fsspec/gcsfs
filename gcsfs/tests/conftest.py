@@ -8,7 +8,11 @@ from unittest import mock
 
 import fsspec
 import pytest
-import pytest_asyncio
+
+try:
+    import pytest_asyncio
+except ImportError:
+    pytest_asyncio = None
 import requests
 from google.cloud import storage
 from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
@@ -425,13 +429,15 @@ def file_path():
     yield path
 
 
-@pytest_asyncio.fixture
-async def async_gcs():
-    """Fixture to provide an asynchronous GCSFileSystem instance."""
-    token = "anon" if not os.getenv("STORAGE_EMULATOR_HOST") else None
-    GCSFileSystem.clear_instance_cache()
-    gcs = GCSFileSystem(asynchronous=True, token=token)
-    yield gcs
+if pytest_asyncio:
+
+    @pytest_asyncio.fixture
+    async def async_gcs():
+        """Fixture to provide an asynchronous GCSFileSystem instance."""
+        token = "anon" if not os.getenv("STORAGE_EMULATOR_HOST") else None
+        GCSFileSystem.clear_instance_cache()
+        gcs = GCSFileSystem(asynchronous=True, token=token)
+        yield gcs
 
 
 def pytest_addoption(parser):
