@@ -1282,6 +1282,37 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             **kwargs,
         )
 
+    async def _cp_file(self, path1, path2, acl=None, **kwargs):
+        """Duplicate remote file.
+
+        For Standard GCS buckets, falls back to the parent class's implementation
+
+        Zonal Bucket Support:
+        Server-side copy is currently NOT supported for Zonal buckets because
+        the `RewriteObject` API is unavailable for them.
+
+        The following scenarios will raise a `NotImplementedError`:
+        * Intra-zonal: Copying within the same Zonal bucket.
+        * Inter-zonal: Copying between two different Zonal buckets.
+        * Mixed: Copying between a Zonal bucket and a Standard bucket.
+
+        """
+        b1, _, _ = self.split_path(path1)
+        b2, _, _ = self.split_path(path2)
+
+        is_zonal_source = await self._is_zonal_bucket(b1)
+        is_zonal_dest = await self._is_zonal_bucket(b2)
+
+        # 1. Standard -> Standard (Delegate to core implementation)
+        if not is_zonal_source and not is_zonal_dest:
+            return await super()._cp_file(path1, path2, acl=acl, **kwargs)
+
+        # 2. Zonal Scenarios (Currently Unsupported)
+        raise NotImplementedError(
+            "Server-side copy involving Zonal buckets is not supported. "
+            "Zonal objects do not support rewrite."
+        )
+
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """

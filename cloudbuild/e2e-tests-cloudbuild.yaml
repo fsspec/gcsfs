@@ -142,6 +142,7 @@ steps:
         TEST_SCRIPT="
           source env/bin/activate && \
           echo '--- Preparing test environment for zonal tests ---' && \
+          export GCSFS_TEST_BUCKET='gcsfs-test-standard-${_SHORT_BUILD_ID}' && \
           export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}' && \
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
           export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
