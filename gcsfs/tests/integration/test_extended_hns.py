@@ -718,33 +718,6 @@ class TestExtendedGcsFileSystemRm:
             sibling_dir in gcsfs.dircache
         ), "Sibling directory cache should not be invalidated."
 
-    def test_rm_multiple_paths(self, gcs_hns):
-        """Test rm with a list of paths containing both files and directories."""
-        gcsfs = gcs_hns
-        base_dir = f"{TEST_HNS_BUCKET}/rm_multiple_paths"
-        file_to_delete = f"{base_dir}/file_to_delete.txt"
-        dir_to_delete = f"{base_dir}/dir_to_delete"
-        nested_file = f"{dir_to_delete}/nested_file.txt"
-        file_to_keep = f"{base_dir}/file_to_keep.txt"
-
-        # --- Setup ---
-        gcsfs.touch(file_to_delete)
-        gcsfs.touch(nested_file)
-        gcsfs.touch(file_to_keep)
-
-        assert gcsfs.exists(file_to_delete)
-        assert gcsfs.exists(dir_to_delete)
-        assert gcsfs.exists(file_to_keep)
-
-        # --- Perform rm on a list of paths ---
-        paths_to_delete = [file_to_delete, dir_to_delete]
-        gcsfs.rm(paths_to_delete, recursive=True)
-
-        # --- Assert Deletion ---
-        assert not gcsfs.exists(file_to_delete)
-        assert not gcsfs.exists(dir_to_delete)
-        assert gcsfs.exists(file_to_keep)
-
 
 @pytest.fixture()
 def test_structure(gcs_hns):
