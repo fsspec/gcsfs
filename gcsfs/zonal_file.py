@@ -127,12 +127,22 @@ class ZonalFile(GCSFile):
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
-    def _fetch_range(self, start, end):
+    def _fetch_range(self, start=None, end=None, chunk_lengths=None):
         """
         Overrides the default _fetch_range to implement the gRPC read path.
 
         """
         try:
+            if chunk_lengths is not None:
+                return asyn.sync(
+                    self.fs.loop,
+                    self.gcsfs._fetch_range_split,
+                    self.path,
+                    start=start,
+                    chunk_lengths=chunk_lengths,
+                    size=self.size,
+                    mrd=self.mrd,
+                )
             return self.gcsfs.cat_file(self.path, start=start, end=end, mrd=self.mrd)
         except RuntimeError as e:
             if "not satisfiable" in str(e):

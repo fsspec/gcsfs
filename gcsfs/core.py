@@ -25,6 +25,9 @@ from fsspec.implementations.http import get_client
 from fsspec.utils import setup_logging, stringify_path
 
 from . import __version__ as version
+from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
+    ReadAheadV2,
+)
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
@@ -1152,6 +1155,55 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         headers, out = await self._call("GET", u2, headers=head)
         return out
 
+    async def _fetch_range_split(
+        self, path, start=None, chunk_lengths=None, size=None, **kwargs
+    ):
+        """Reading multiple reads in one large stream to avoid multiple HTTP handshakes."""
+        path_to_object = self.url(path)
+        start = start if start is not None else 0
+        end = start + sum(chunk_lengths) if chunk_lengths is not None else None
+        if not size:
+            size = (await self._info(path))["size"]
+
+        if start >= size or (
+            chunk_lengths is not None and start + sum(chunk_lengths) > size
+        ):
+            raise RuntimeError("Request not satisfiable.")
+        if not chunk_lengths:
+            chunk_lengths = [size - start]
+
+        if start or end:
+            head = {"Range": await self._process_limits(path, start, end)}
+        else:
+            head = {}
+
+        result = []
+        logger.debug(f"GET: {path_to_object}, {head}")
+        await self._set_session()
+
+        async with self.session.request(
+            method="GET",
+            url=path_to_object,
+            headers=self._get_headers(head),
+            timeout=self.requests_timeout,
+        ) as r:
+            if r.status >= 400:
+                data = await r.read()
+                validate_response(r.status, data, path)
+                return []
+
+            while len(result) < len(chunk_lengths):
+                requested_size = chunk_lengths[len(result)]
+                if requested_size == -1:
+                    data = await r.content.read()
+                else:
+                    # Raises an error if the requested_size can't be fetched from the backend.
+                    data = await r.content.readexactly(requested_size)
+                result.append(data)
+            validate_response(r.status, None, path)
+
+        return result
+
     async def _getxattr(self, path, attr):
         """Get user-defined metadata attribute"""
         meta = (await self._info(path)).get("metadata", {})
@@ -1924,6 +1976,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if not key:
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
+
+        if cache_type == "readahead" and os.environ.get(
+            "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
+        ):
+            cache_type = "readahead_v2"  # Inject the gcsreadheadcache which is faster than fsspec readahead cache.
+
         super().__init__(
             gcsfs,
             path,
@@ -2110,17 +2168,61 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
         self.generation = j.get("generation")
 
-    def _fetch_range(self, start=None, end=None):
-        """Get data from GCS
+    def _fetch_range(self, start=None, end=None, chunk_lengths=None):
+        """
+        Fetch byte ranges from the backend file.
 
-        start, end : None or integers
-            if not both None, fetch only given range
+        This method supports two distinct fetching strategies to optimize
+        performance based on the caching mechanism in use:
+
+        1. **Standard Fetch (start, end)**:
+           Used by standard caches (e.g., ``ReadAheadCache``, ``BytesCache``).
+           Fetches a contiguous range of bytes defined by ``start`` and ``end``.
+           Returns a single ``bytes`` object.
+
+        2. **Split Fetch (start, chunk_lengths)**:
+           Used by optimized caches (e.g., ``ReadAheadV2``).
+           Fetches multiple contiguous chunks starting at ``start``, where the length
+           of each chunk is defined by the list ``chunk_lengths``. This allows the backend
+           to read data off the socket into distinct ``bytes`` objects immediately,
+           avoiding the high memory cost of slicing a large monolithic ``bytes``
+           object later (zero-copy optimization).
+
+        Parameters
+        ----------
+        start : int, optional
+            The absolute byte offset in the file to begin reading. Defaults to 0.
+        end : int, optional
+            The absolute byte offset to stop reading (exclusive). Used only for
+            standard fetches.
+        chunk_lengths : list of int, optional
+            A list of integer lengths. If provided, the method enters "Split Fetch"
+            mode. It will fetch ``sum(chunk_lengths)`` bytes starting from ``start``, but
+            return them as a list of ``bytes`` objects corresponding to the requested
+            sizes.
+
+        Returns
+        -------
+        bytes or list of bytes
+            - If ``chunk_lengths`` is None: Returns a single ``bytes`` object containing the data
+              from ``start`` to ``end``.
+            - If ``chunk_lengths`` is provided: Returns a ``list[bytes]`` where each element
+              matches the length specified in ``chunk_lengths``.
         """
         try:
+            if chunk_lengths is not None:
+                return asyn.sync(
+                    self.fs.loop,
+                    self.gcsfs._fetch_range_split,
+                    self.path,
+                    start=start,
+                    chunk_lengths=chunk_lengths,
+                    size=self.size,
+                )
             return self.gcsfs.cat_file(self.path, start=start, end=end)
         except RuntimeError as e:
             if "not satisfiable" in str(e):
-                return b""
+                return b"" if chunk_lengths is None else [b""]
             raise
 
 
