@@ -1954,7 +1954,7 @@ class TestExtendedGcsFileSystemRm:
             )
             mock_delete_files.assert_awaited_once()
             args, _ = mock_delete_files.await_args
-            assert args[0] == [file_path1, file_path2]
+            assert sorted(args[0]) == sorted([file_path1, file_path2])
 
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(

@@ -1663,7 +1663,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
             while parent:
                 dir_key = self.split_path(parent)[1]
-                if not dir_key or len(parent) < len(path):
+                if not dir_key or len(parent) < len(path.rstrip("/")):
                     break
 
                 dirs[parent] = {
