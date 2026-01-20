@@ -16,6 +16,8 @@ import os
 import uuid
 
 import pytest
+from fsspec.tests.abstract import AbstractFixtures
+from fsspec.tests.abstract.get import AbstractGetTests
 
 from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import TEST_HNS_BUCKET
@@ -665,8 +667,32 @@ class TestExtendedGcsFileSystemFindIntegration:
         ), "dircache should not be updated when using a prefix"
 
 
-class TestExtendedGcsFileSystemInfo:
-    """Integration tests for the info method on HNS buckets."""
+class TestExtendedGcsFileSystemInfo(AbstractGetTests, AbstractFixtures):
+    """
+    Integration tests for HNS Info and Get operations.
+
+    Inheritance:
+    - AbstractGetTests: Provides standard compliance tests for get() (which uses info()).
+    - AbstractFixtures: Provides standard fixtures (fs_bulk_operations_scenario_0, etc.)
+      from fsspec/tests/abstract/__init__.py.
+    """
+
+    @pytest.fixture
+    def fs(self, gcs_hns):
+        """
+        Required by AbstractFixtures.
+        Returns the HNS-enabled GCSFileSystem instance to be tested.
+        """
+        return gcs_hns
+
+    @pytest.fixture
+    def fs_path(self):
+        """
+        Required by AbstractFixtures.
+        Returns the root path on the remote filesystem where test scenarios
+        will be created.
+        """
+        return ""
 
     def test_hns_info_nested_directory_success(self, gcs_hns):
         """Test info() returns correct metadata for a nested HNS directory."""
