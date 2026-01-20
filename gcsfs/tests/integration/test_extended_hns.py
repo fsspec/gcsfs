@@ -568,14 +568,18 @@ class TestExtendedGcsFileSystemLsIntegration:
         # ls on parent containing placeholder
         out = gcs_hns.ls(parent)
         assert placeholder in out
+        gcs_hns.invalidate_cache()
 
         # ls on placeholder object itself (directory path)
         out = gcs_hns.ls(placeholder)
         assert file_path in out
+        assert placeholder in out
+        gcs_hns.invalidate_cache()
 
         # ls on placeholder object with trailing slash
         out = gcs_hns.ls(f"{placeholder}/")
         assert file_path in out
+        assert placeholder in out
 
 
 class TestExtendedGcsFileSystemRm:
@@ -989,19 +993,24 @@ class TestExtendedGcsFileSystemFindIntegration:
         out = gcs_hns.find(parent)
         assert file_path in out
         assert f"{placeholder}/" in out
+        gcs_hns.invalidate_cache()
 
         # find with dirs
         out_dirs = gcs_hns.find(parent, withdirs=True)
         assert placeholder in out_dirs
         assert file_path in out_dirs
         assert f"{placeholder}/" in out
+        gcs_hns.invalidate_cache()
 
         # find on placeholder object itself (directory path)
-        out = gcs_hns.find(placeholder)
+        out = gcs_hns.find(placeholder, withdirs=True)
         assert file_path in out
         assert f"{placeholder}/" in out
+        assert placeholder in out
+        gcs_hns.invalidate_cache()
 
         # find on placeholder object with trailing slash
-        out = gcs_hns.find(f"{placeholder}/")
+        out = gcs_hns.find(f"{placeholder}/", withdirs=True)
         assert file_path in out
         assert f"{placeholder}/" in out
+        assert placeholder in out
