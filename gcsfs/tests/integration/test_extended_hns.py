@@ -567,19 +567,20 @@ class TestExtendedGcsFileSystemLsIntegration:
 
         # ls on parent containing placeholder
         out = gcs_hns.ls(parent)
-        assert placeholder in out
+        assert len(out) == 1
+        assert out == [placeholder]
         gcs_hns.invalidate_cache()
 
         # ls on placeholder object itself (directory path)
         out = gcs_hns.ls(placeholder)
-        assert file_path in out
-        assert placeholder in out
+        assert len(out) == 2
+        assert sorted(out) == sorted([file_path, placeholder])
         gcs_hns.invalidate_cache()
 
         # ls on placeholder object with trailing slash
         out = gcs_hns.ls(f"{placeholder}/")
-        assert file_path in out
-        assert placeholder in out
+        assert len(out) == 2
+        assert sorted(out) == sorted([file_path, placeholder])
 
 
 class TestExtendedGcsFileSystemRm:
@@ -991,26 +992,25 @@ class TestExtendedGcsFileSystemFindIntegration:
 
         # find on parent containing placeholder
         out = gcs_hns.find(parent)
-        assert file_path in out
-        assert f"{placeholder}/" in out
+        assert len(out) == 2
+        assert sorted(out) == sorted([file_path, f"{placeholder}/"])
         gcs_hns.invalidate_cache()
 
         # find with dirs
         out_dirs = gcs_hns.find(parent, withdirs=True)
-        assert placeholder in out_dirs
-        assert file_path in out_dirs
-        assert f"{placeholder}/" in out
+        assert len(out_dirs) == 4
+        assert sorted(out_dirs) == sorted(
+            [parent, placeholder, file_path, f"{placeholder}/"]
+        )
         gcs_hns.invalidate_cache()
 
         # find on placeholder object itself (directory path)
         out = gcs_hns.find(placeholder, withdirs=True)
-        assert file_path in out
-        assert f"{placeholder}/" in out
-        assert placeholder in out
+        assert len(out) == 3
+        assert sorted(out) == sorted([placeholder, file_path, f"{placeholder}/"])
         gcs_hns.invalidate_cache()
 
         # find on placeholder object with trailing slash
         out = gcs_hns.find(f"{placeholder}/", withdirs=True)
-        assert file_path in out
-        assert f"{placeholder}/" in out
-        assert placeholder in out
+        assert len(out) == 3
+        assert sorted(out) == sorted([placeholder, file_path, f"{placeholder}/"])
