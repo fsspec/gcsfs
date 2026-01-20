@@ -224,6 +224,32 @@ class TestExtendedGcsFileSystemMv:
         with pytest.raises(FileExistsError, match=expected_msg):
             gcsfs.mv(path1, path2)
 
+    def test_rename_placeholder(self, gcs_hns):
+        """
+        Test rename behavior when a placeholder object exists.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rename_placeholder"
+        src_placeholder = f"{base_dir}/src_dir"
+        src_file = f"{src_placeholder}/file"
+        dest_placeholder = f"{base_dir}/dest_dir"
+        dest_file = f"{dest_placeholder}/file"
+
+        # Create a placeholder object (ends with /)
+        gcsfs.touch(f"{src_placeholder}/")
+        gcsfs.touch(src_file)
+
+        gcsfs.invalidate_cache()
+
+        # Rename directory
+        gcsfs.mv(f"{src_placeholder}/", dest_placeholder)
+
+        assert not gcsfs.exists(src_placeholder)
+        assert not gcsfs.exists(src_file)
+        assert gcsfs.exists(dest_placeholder)
+        assert gcsfs.exists(dest_file)
+        assert gcsfs.exists(f"{dest_placeholder}/")
+
 
 class TestExtendedGcsFileSystemMkdir:
     """Integration tests for the mkdir method in ExtendedGcsFileSystem."""
@@ -232,8 +258,14 @@ class TestExtendedGcsFileSystemMkdir:
         """Test successful HNS folder creation."""
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/new_dir_integration"
+        dir_path_with_trailing_slash = (
+            f"{TEST_HNS_BUCKET}/mkdir_dir_with_trailing_slash"
+        )
+
         gcsfs.mkdir(dir_path)
         assert gcsfs.isdir(dir_path)
+        gcsfs.mkdir(f"{dir_path_with_trailing_slash}/")
+        assert gcsfs.isdir(dir_path_with_trailing_slash)
 
     def test_hns_mkdir_nested_success_with_create_parents(self, gcs_hns):
         """Test successful HNS folder creation for a nested path with create_parents=True."""
@@ -520,6 +552,31 @@ class TestExtendedGcsFileSystemLsIntegration:
             path_file in items_sub_cleaned
         ), f"File '{path_file}' missing from sub-folder listing"
 
+    def test_ls_placeholder(self, gcs_hns, base_test_dir):
+        """
+        Test ls behavior when a placeholder object exists alongside a directory.
+        """
+        parent = f"{base_test_dir}/ls_placeholder"
+        placeholder = f"{parent}/dir"
+        file_path = f"{placeholder}/file"
+
+        # Create a placeholder object (ends with /)
+        gcs_hns.touch(f"{placeholder}/")
+        gcs_hns.touch(file_path)
+        gcs_hns.invalidate_cache()
+
+        # ls on parent containing placeholder
+        out = gcs_hns.ls(parent)
+        assert placeholder in out
+
+        # ls on placeholder object itself (directory path)
+        out = gcs_hns.ls(placeholder)
+        assert file_path in out
+
+        # ls on placeholder object with trailing slash
+        out = gcs_hns.ls(f"{placeholder}/")
+        assert file_path in out
+
 
 class TestExtendedGcsFileSystemRm:
     """Integration tests for the rm method in ExtendedGcsFileSystem."""
@@ -570,15 +627,53 @@ class TestExtendedGcsFileSystemRm:
         assert not gcsfs.exists(nested_file)
 
     def test_rm_folder_with_placeholder(self, gcs_hns):
-        """Test deleting a folder that contains a placeholder object."""
+        """
+        Test deleting a folder that contains a placeholder object.
+        Covers rm on directory path, directory path with trailing slash, and parent directory.
+        """
         gcsfs = gcs_hns
-        dir_path = f"{TEST_HNS_BUCKET}/rm_placeholder_dir"
-        placeholder = f"{dir_path}/"
-        gcsfs.touch(placeholder)
-        assert gcsfs.isdir(dir_path)
+        base_dir = f"{TEST_HNS_BUCKET}/rm_placeholder_test"
 
-        gcsfs.rm(dir_path, recursive=True)
-        assert not gcsfs.exists(dir_path)
+        # Case 1: rm on directory path (no trailing slash)
+        dir_path_1 = f"{base_dir}/dir1"
+        placeholder_1 = f"{dir_path_1}/"
+        file_path_1 = f"{dir_path_1}/file"
+
+        gcsfs.touch(placeholder_1)
+        gcsfs.touch(file_path_1)
+
+        assert gcsfs.exists(dir_path_1)
+        assert gcsfs.exists(file_path_1)
+        gcsfs.rm(dir_path_1, recursive=True)
+        assert not gcsfs.exists(dir_path_1)
+        assert not gcsfs.exists(file_path_1)
+
+        # Case 2: rm on directory path with trailing slash
+        dir_path_2 = f"{base_dir}/dir2"
+        placeholder_2 = f"{dir_path_2}/"
+        file_path_2 = f"{dir_path_2}/file"
+
+        gcsfs.touch(placeholder_2)
+        gcsfs.touch(file_path_2)
+
+        assert gcsfs.exists(dir_path_2)
+        assert gcsfs.exists(file_path_2)
+        gcsfs.rm(placeholder_2, recursive=True)
+        assert not gcsfs.exists(dir_path_2)
+        assert not gcsfs.exists(file_path_2)
+
+        # Case 3: rm on parent containing placeholder
+        dir_path_3 = f"{base_dir}/dir3"
+        placeholder_3 = f"{dir_path_3}/"
+        file_path_3 = f"{dir_path_3}/file"
+
+        gcsfs.touch(placeholder_3)
+        gcsfs.touch(file_path_3)
+
+        assert gcsfs.exists(dir_path_3)
+        assert gcsfs.exists(file_path_3)
+        gcsfs.rm(base_dir, recursive=True)
+        assert not gcsfs.exists(base_dir)
 
     def test_rm_non_existent_path_raises_error(self, gcs_hns):
         """Test that rm on a non-existent path raises FileNotFoundError."""
@@ -864,3 +959,49 @@ class TestExtendedGcsFileSystemFindIntegration:
         assert (
             not gcs_hns.dircache
         ), "dircache should not be updated when using a prefix"
+
+    def test_find_dircache_trailing_slash(self, gcs_hns, test_structure):
+        """Test that find populates dircache when path has trailing slash."""
+        path = test_structure["dir_with_files"]
+        gcs_hns.invalidate_cache()
+
+        gcs_hns.find(f"{path}/")
+
+        assert path in gcs_hns.dircache
+        assert len(gcs_hns.dircache[path]) > 0
+
+    def test_find_placeholder(self, gcs_hns, test_structure):
+        """
+        Test find behavior when a placeholder object exists.
+        """
+        base_dir = test_structure["base_dir"]
+        parent = f"{base_dir}/find_placeholder"
+        placeholder = f"{parent}/dir"
+        file_path = f"{placeholder}/file"
+
+        # Create a placeholder object (ends with /)
+        gcs_hns.touch(f"{placeholder}/")
+        gcs_hns.touch(file_path)
+
+        gcs_hns.invalidate_cache()
+
+        # find on parent containing placeholder
+        out = gcs_hns.find(parent)
+        assert file_path in out
+        assert f"{placeholder}/" in out
+
+        # find with dirs
+        out_dirs = gcs_hns.find(parent, withdirs=True)
+        assert placeholder in out_dirs
+        assert file_path in out_dirs
+        assert f"{placeholder}/" in out
+
+        # find on placeholder object itself (directory path)
+        out = gcs_hns.find(placeholder)
+        assert file_path in out
+        assert f"{placeholder}/" in out
+
+        # find on placeholder object with trailing slash
+        out = gcs_hns.find(f"{placeholder}/")
+        assert file_path in out
+        assert f"{placeholder}/" in out
