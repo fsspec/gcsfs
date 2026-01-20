@@ -13,6 +13,11 @@ from resource_monitor import ResourceMonitor
 MB = 1024 * 1024
 
 
+@pytest.fixture
+def populate_bucket():
+    return False
+
+
 def _write_file(gcs, path, file_size, chunk_size):
     chunks_to_write = file_size // chunk_size
     remainder = file_size % chunk_size

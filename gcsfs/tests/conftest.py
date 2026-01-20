@@ -8,11 +8,7 @@ from unittest import mock
 
 import fsspec
 import pytest
-
-try:
-    import pytest_asyncio
-except ImportError:
-    pytest_asyncio = None
+import pytest_asyncio
 import requests
 from google.cloud import storage
 from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
@@ -148,7 +144,12 @@ def buckets_to_delete():
 
 
 @pytest.fixture
-def gcs(gcs_factory, buckets_to_delete, populate=True):
+def populate_bucket():
+    return True
+
+
+@pytest.fixture
+def gcs(gcs_factory, buckets_to_delete, populate_bucket):
     gcs = gcs_factory()
     try:  # ensure we're empty.
         # Create the bucket if it doesn't exist, otherwise clean it.
@@ -163,7 +164,7 @@ def gcs(gcs_factory, buckets_to_delete, populate=True):
         else:
             _cleanup_gcs(gcs, bucket=TEST_BUCKET)
 
-        if populate:
+        if populate_bucket:
             gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
         gcs.invalidate_cache()
         yield gcs
@@ -172,11 +173,13 @@ def gcs(gcs_factory, buckets_to_delete, populate=True):
 
 
 @pytest.fixture
-def extended_gcs_factory(gcs_factory, buckets_to_delete, populate=True):
+def extended_gcs_factory(gcs_factory, buckets_to_delete, populate_bucket):
     created_instances = []
 
     def factory(**kwargs):
-        fs = _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate, **kwargs)
+        fs = _create_extended_gcsfs(
+            gcs_factory, buckets_to_delete, populate_bucket, **kwargs
+        )
         created_instances.append(fs)
         return fs
 
@@ -187,8 +190,10 @@ def extended_gcs_factory(gcs_factory, buckets_to_delete, populate=True):
 
 
 @pytest.fixture
-def extended_gcsfs(gcs_factory, buckets_to_delete, populate=True):
-    extended_gcsfs = _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate)
+def extended_gcsfs(gcs_factory, buckets_to_delete, populate_bucket):
+    extended_gcsfs = _create_extended_gcsfs(
+        gcs_factory, buckets_to_delete, populate_bucket
+    )
     try:
         yield extended_gcsfs
     finally:
@@ -308,7 +313,7 @@ def cleanup_versioned_bucket(gcs, bucket_name, prefix=None):
     logging.info("Successfully deleted %d object versions.", len(blobs_to_delete))
 
 
-def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate=True, **kwargs):
+def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate_bucket, **kwargs):
     is_real_gcs = (
         os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
     )
@@ -323,7 +328,7 @@ def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate=True, **kwar
         extended_gcsfs.mkdir(TEST_ZONAL_BUCKET)
         buckets_to_delete.add(TEST_ZONAL_BUCKET)
     try:
-        if populate:
+        if populate_bucket:
             # To avoid hitting object mutation limits, only pipe files if they
             # don't exist or if their size has changed.
             existing_files = extended_gcsfs.find(TEST_ZONAL_BUCKET, detail=True)
@@ -429,15 +434,13 @@ def file_path():
     yield path
 
 
-if pytest_asyncio:
-
-    @pytest_asyncio.fixture
-    async def async_gcs():
-        """Fixture to provide an asynchronous GCSFileSystem instance."""
-        token = "anon" if not os.getenv("STORAGE_EMULATOR_HOST") else None
-        GCSFileSystem.clear_instance_cache()
-        gcs = GCSFileSystem(asynchronous=True, token=token)
-        yield gcs
+@pytest_asyncio.fixture
+async def async_gcs():
+    """Fixture to provide an asynchronous GCSFileSystem instance."""
+    token = "anon" if not os.getenv("STORAGE_EMULATOR_HOST") else None
+    GCSFileSystem.clear_instance_cache()
+    gcs = GCSFileSystem(asynchronous=True, token=token)
+    yield gcs
 
 
 def pytest_addoption(parser):
