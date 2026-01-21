@@ -161,9 +161,9 @@ class ZonalFile(GCSFile):
         to the server.
         """
         if self.closed:
-            raise ValueError("Flush on closed file")
+            raise ValueError("Flush on closed file.")
         if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once")
+            raise ValueError("Force flush cannot be called more than once.")
         if self.finalized:
             logger.warning("File is already finalized. Ignoring flush call.")
             return
@@ -180,10 +180,12 @@ class ZonalFile(GCSFile):
         """
         Commits the write by finalizing the AsyncAppendableObjectWriter.
         """
-        if not self.writable():
-            raise ValueError("File not in write mode")
-        if self.finalized:
-            raise ValueError("This file has already been finalized")
+        if not self.writable():  # No-op
+            logger.warning("File not in write mode.")
+            return
+        if self.finalized:  # No-op
+            logger.warning("This file has already been finalized.")
+            return
         asyn.sync(self.gcsfs.loop, self.aaow.finalize)
         self.finalized = True
         # File is already finalized, avoid finalizing again on close
