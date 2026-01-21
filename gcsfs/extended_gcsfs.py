@@ -679,14 +679,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         else:
             bucket, _, _ = self.split_path(path)
 
-        is_hns = False
-        try:
-            is_hns = await self._is_bucket_hns_enabled(bucket)
-        except Exception as e:
-            logger.warning(
-                f"Could not determine if bucket '{bucket}' is HNS-enabled, "
-                f"falling back to default rm: {e}"
-            )
+        is_hns = await self._is_bucket_hns_enabled(bucket)
 
         if not is_hns:
             # Fall back to the parent's async rm implementation for non-HNS buckets.
