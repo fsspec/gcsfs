@@ -291,6 +291,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 start_offset = start if start is not None else 0
                 current_offset = start_offset
 
+                if start_offset >= file_size or (
+                    chunk_lengths is not None
+                    and start_offset + sum(chunk_lengths) > file_size
+                ):
+                    raise RuntimeError("Request not satisfiable.")
+
                 buffers = []  # To hold the results in order
                 read_ranges = []  # To pass to MRD
 

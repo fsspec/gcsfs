@@ -131,7 +131,13 @@ class ZonalFile(GCSFile):
         """
         Overrides the default _fetch_range to implement the gRPC read path.
 
+        See super() class for documentation.
         """
+        if end is not None and chunk_lengths is not None:
+            raise ValueError(
+                "The end and chunk_lengths arguments are mutually exclusive and cannot be used together."
+            )
+
         try:
             if chunk_lengths is not None:
                 return asyn.sync(
@@ -146,7 +152,7 @@ class ZonalFile(GCSFile):
             return self.gcsfs.cat_file(self.path, start=start, end=end, mrd=self.mrd)
         except RuntimeError as e:
             if "not satisfiable" in str(e):
-                return b""
+                return b"" if chunk_lengths is None else [b""]
             raise
 
     def write(self, data):

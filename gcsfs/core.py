@@ -1198,7 +1198,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     data = await r.content.read()
                 else:
                     # Raises an error if the requested_size can't be fetched from the backend.
-                    data = await r.content.readexactly(requested_size)
+                    try:
+                        data = await r.content.readexactly(requested_size)
+                    except asyncio.IncompleteReadError:
+                        raise RuntimeError("Request not satisfiable")
                 result.append(data)
             validate_response(r.status, None, path)
 
@@ -2209,6 +2212,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             - If ``chunk_lengths`` is provided: Returns a ``list[bytes]`` where each element
               matches the length specified in ``chunk_lengths``.
         """
+        if end is not None and chunk_lengths is not None:
+            raise ValueError(
+                "The end and chunk_lengths arguments are mutually exclusive and cannot be used together."
+            )
         try:
             if chunk_lengths is not None:
                 return asyn.sync(
