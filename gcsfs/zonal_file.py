@@ -77,6 +77,14 @@ class ZonalFile(GCSFile):
             raise NotImplementedError(
                 "Only read, write and append operations are currently supported for Zonal buckets."
             )
+
+        if cache_type == "readahead":
+            from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
+                ReadAheadV2,
+            )
+
+            cache_type = "readahead_v2"  # Inject the readahead_v2 which is faster than fsspec readahead cache.
+
         super().__init__(
             gcsfs,
             path,

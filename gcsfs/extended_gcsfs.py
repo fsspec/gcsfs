@@ -265,14 +265,15 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """
 
         bucket, object_name, generation = self.split_path(path)
-        if not await self._is_zonal_bucket(bucket):
-            return await super()._fetch_range_split(
-                path, start=start, chunk_lengths=chunk_lengths, size=size, **kwargs
-            )
-
         mrd_created = False
         try:
             if mrd is None:
+                # Check before creating MRD
+                if not await self._is_zonal_bucket(bucket):
+                    raise RuntimeError(
+                        "Internal error, this method is only supported for zonal buckets!"
+                    )
+
                 await self._get_grpc_client()
                 mrd = await AsyncMultiRangeDownloader.create_mrd(
                     self.grpc_client, bucket, object_name, generation
