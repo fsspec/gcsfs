@@ -1762,19 +1762,19 @@ class TestExtendedGcsFileSystemRm:
 
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(gcsfs, "_expand_path", new=mock_expand),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
-            mocks["info"].return_value = {"name": file_path, "type": "file"}
-            mock_expand.return_value = [file_path]
+            mock_expand.return_value = [{"name": file_path, "type": "file"}]
             mock_delete_files.return_value = []
 
             gcsfs.rm(file_path)
 
             mock_expand.assert_called_once_with(
-                file_path, recursive=False, maxdepth=None
+                file_path, recursive=False, maxdepth=None, detail=True
             )
-            mocks["info"].assert_called_once_with(file_path)
+            # _info should not be called as details are fetched via _expand_path
+            mocks["info"].assert_not_called()
             mock_delete_files.assert_awaited_once_with([file_path], self.BATCH_SIZE)
 
     def test_rm_recursive_hns(self, gcs_hns, gcs_hns_mocks):
@@ -1792,35 +1792,28 @@ class TestExtendedGcsFileSystemRm:
 
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(gcsfs, "_expand_path", new=mock_expand),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
             # Simulate the directory structure found by _expand_path and _info
             expanded_paths = [
-                base_dir,
-                file_path,
-                nested_dir1,
-                nested_file1,
-                nested_dir2,
-                nested_file2,
+                {"name": base_dir, "type": "directory"},
+                {"name": file_path, "type": "file"},
+                {"name": nested_dir1, "type": "directory"},
+                {"name": nested_file1, "type": "file"},
+                {"name": nested_dir2, "type": "directory"},
+                {"name": nested_file2, "type": "file"},
             ]
-            info_map = {
-                base_dir: {"name": base_dir, "type": "directory"},
-                file_path: {"name": file_path, "type": "file"},
-                nested_dir1: {"name": nested_dir1, "type": "directory"},
-                nested_file1: {"name": nested_file1, "type": "file"},
-                nested_dir2: {"name": nested_dir2, "type": "directory"},
-                nested_file2: {"name": nested_file2, "type": "file"},
-            }
-            mocks["info"].side_effect = lambda p: info_map[p]
             mock_expand.return_value = expanded_paths
             mock_delete_files.return_value = []
 
             gcsfs.rm(base_dir, recursive=True)
 
             # Verify correct calls
-            mock_expand.assert_called_once_with(base_dir, recursive=True, maxdepth=None)
-            assert mocks["info"].call_count == len(expanded_paths)
+            mock_expand.assert_called_once_with(
+                base_dir, recursive=True, maxdepth=None, detail=True
+            )
+            mocks["info"].assert_not_called()
             files_to_delete = sorted([file_path, nested_file1, nested_file2])
             mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
             assert sorted(mock_delete_files.await_args[0][0]) == files_to_delete
@@ -1854,7 +1847,7 @@ class TestExtendedGcsFileSystemRm:
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(
-                gcsfs, "_expand_path", new_callable=mock.AsyncMock
+                gcsfs, "_expand_path_with_details", new_callable=mock.AsyncMock
             ) as mock_expand,
         ):
             mock_expand.return_value = []  # Nothing found
@@ -1862,7 +1855,9 @@ class TestExtendedGcsFileSystemRm:
             with pytest.raises(FileNotFoundError):
                 gcsfs.rm(path)
 
-            mock_expand.assert_awaited_once_with(path, recursive=False, maxdepth=None)
+            mock_expand.assert_awaited_once_with(
+                path, recursive=False, maxdepth=None, detail=True
+            )
             mocks["control_client"].delete_folder.assert_not_called()
 
     def test_rm_empty_dir_hns(self, gcs_hns, gcs_hns_mocks):
@@ -1875,15 +1870,17 @@ class TestExtendedGcsFileSystemRm:
 
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(gcsfs, "_expand_path", new=mock_expand),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
-            mocks["info"].return_value = {"name": dir_path, "type": "directory"}
-            mock_expand.return_value = [dir_path]
+            mock_expand.return_value = [{"name": dir_path, "type": "directory"}]
             mock_delete_files.return_value = []
 
             gcsfs.rm(dir_path, recursive=True)
 
+            mock_expand.assert_awaited_once_with(
+                dir_path, recursive=True, maxdepth=None, detail=True
+            )
             mock_delete_files.assert_awaited_once_with([], self.BATCH_SIZE)
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
@@ -1899,11 +1896,10 @@ class TestExtendedGcsFileSystemRm:
 
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(gcsfs, "_expand_path", new=mock_expand),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
         ):
             # Mock expand_path to return the directory itself
-            mock_expand.return_value = [dir_path]
-            mocks["info"].return_value = {"name": dir_path, "type": "directory"}
+            mock_expand.return_value = [{"name": dir_path, "type": "directory"}]
 
             # Mock delete_folder to raise FailedPrecondition (directory not empty)
             mocks["control_client"].delete_folder.side_effect = (
@@ -1914,7 +1910,7 @@ class TestExtendedGcsFileSystemRm:
                 gcsfs.rm(dir_path, recursive=False)
 
             mock_expand.assert_called_once_with(
-                dir_path, recursive=False, maxdepth=None
+                dir_path, recursive=False, maxdepth=None, detail=True
             )
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
@@ -1933,24 +1929,24 @@ class TestExtendedGcsFileSystemRm:
 
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(gcsfs, "_expand_path", new=mock_expand),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
-            mock_expand.return_value = [file_path1, file_path2, dir_path]
-
-            def info_side_effect(path):
-                if path == file_path1 or path == file_path2:
-                    return {"name": path, "type": "file"}
-                return {"name": path, "type": "directory"}
-
-            mocks["info"].side_effect = info_side_effect
+            mock_expand.return_value = [
+                {"name": file_path1, "type": "file"},
+                {"name": file_path2, "type": "file"},
+                {"name": dir_path, "type": "directory"},
+            ]
 
             mock_delete_files.return_value = []
 
             gcsfs.rm([file_path1, file_path2, dir_path], recursive=True)
 
             mock_expand.assert_called_once_with(
-                [file_path1, file_path2, dir_path], recursive=True, maxdepth=None
+                [file_path1, file_path2, dir_path],
+                recursive=True,
+                maxdepth=None,
+                detail=True,
             )
             mock_delete_files.assert_awaited_once()
             args, _ = mock_delete_files.await_args

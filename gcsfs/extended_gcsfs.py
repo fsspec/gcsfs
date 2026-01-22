@@ -3,6 +3,7 @@ import logging
 import os
 from enum import Enum
 from functools import partial
+from glob import has_magic
 
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
@@ -654,6 +655,74 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     rmdir = asyn.sync_wrapper(_rmdir)
 
+    async def _expand_path_with_details(
+        self, path, recursive=False, maxdepth=None, detail=False
+    ):
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+
+        if isinstance(path, str):
+            out = await self._expand_path_with_details(
+                [path], recursive, maxdepth, detail=detail
+            )
+        else:
+            out = {} if detail else set()
+            path = [self._strip_protocol(p) for p in path]
+
+            for p in path:
+                if has_magic(p):
+                    bit = await self._glob(p, maxdepth=maxdepth, detail=detail)
+                    if detail:
+                        out.update(bit)
+                        bit_paths = list(bit.keys())
+                    else:
+                        bit_set = set(bit)
+                        out |= bit_set
+                        bit_paths = list(bit_set)
+
+                    if recursive:
+                        if maxdepth is not None and maxdepth <= 1:
+                            continue
+                        rec = await self._expand_path_with_details(
+                            bit_paths,
+                            recursive=recursive,
+                            maxdepth=maxdepth - 1 if maxdepth is not None else None,
+                            detail=detail,
+                        )
+                        if detail:
+                            for info in rec:
+                                out[info["name"]] = info
+                        else:
+                            out |= set(rec)
+                    continue
+                elif recursive:
+                    rec = await self._find(
+                        p, maxdepth=maxdepth, withdirs=True, detail=detail
+                    )
+                    if detail:
+                        out.update(rec)
+                    else:
+                        out |= set(rec)
+
+                if p not in out:
+                    if detail:
+                        try:
+                            info = await self._info(p)
+                            out[p] = info
+                        except (FileNotFoundError, OSError):
+                            pass
+                    elif recursive is False or (await self._exists(p)):
+                        out.add(p)
+
+            if detail:
+                out = list(out.values())
+            else:
+                out = sorted(out)
+
+        if not out:
+            raise FileNotFoundError(path)
+        return out
+
     async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
         """
         Deletes files and directories.
@@ -673,7 +742,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             batchsize (int): The number of files to delete in a single batch request.
         """
         if isinstance(path, list):
-            expanded_paths = path
             # For HNS check, we can check for bucket type from the first path.
             bucket, _, _ = self.split_path(path[0]) if path else (None, None, None)
         else:
@@ -687,17 +755,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
             )
 
-        expanded_paths = await self._expand_path(
-            path, recursive=recursive, maxdepth=maxdepth
+        paths = await self._expand_path_with_details(
+            path, recursive=recursive, maxdepth=maxdepth, detail=True
         )
-
-        # Get detailed information for each expanded path to determine its type.
-        # We gather info concurrently and filter out paths that don't exist.
-        info_tasks = [self._info(p) for p in expanded_paths]
-        results = await asyncio.gather(*info_tasks, return_exceptions=True)
-        paths = [
-            res for res in results if not isinstance(res, (FileNotFoundError, OSError))
-        ]
 
         # Separate files and directories based on their type.
         # Directories must be deleted from the deepest first.
