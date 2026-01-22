@@ -655,6 +655,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     rmdir = asyn.sync_wrapper(_rmdir)
 
+    # TODO: This method is only added to be used in rm method, can be deleted once
+    # rm method is integrated with recursive API
     async def _expand_path_with_details(
         self, path, recursive=False, maxdepth=None, detail=False
     ):
