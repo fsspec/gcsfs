@@ -17,14 +17,6 @@ from gcsfs.tests.perf.microbenchmarks.write.configs import (
     WriteConfigurator,
     get_write_benchmark_cases,
 )
-from gcsfs.tests.settings import BENCHMARK_SKIP_TESTS
-
-pytestmark = pytest.mark.skipif(
-    BENCHMARK_SKIP_TESTS,
-    reason="""Skipping benchmark tests.
-Set GCSFS_BENCHMARK_SKIP_TESTS=false to run them,
-or use the orchestrator script at gcsfs/tests/perf/microbenchmarks/run.py""",
-)
 
 MB = 1024 * 1024
 

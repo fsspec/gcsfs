@@ -42,6 +42,10 @@ jobs:
           --log-format="%(asctime)s %(levelname)s %(message)s" \
           --log-date-format="%H:%M:%S" \
           gcsfs/
+      - name: Run Benchmark Infrastructure Unit Tests
+        run: |
+          pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
+          pytest gcsfs/tests/perf/microbenchmarks --run-benchmarks-infra
       - name: Run Tests with experimental support
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json

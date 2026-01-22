@@ -12,13 +12,10 @@ from resource_monitor import ResourceMonitor
 
 MB = 1024 * 1024
 
-try:
-    # This import is used to check if the pytest-benchmark plugin is installed.
-    import pytest_benchmark  # noqa: F401
 
-    benchmark_plugin_installed = True
-except ImportError:
-    benchmark_plugin_installed = False
+@pytest.fixture
+def populate_bucket():
+    return False
 
 
 def _write_file(gcs, path, file_size, chunk_size):
@@ -193,28 +190,26 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
         logging.error(f"Failed to clean up benchmark files: {e}")
 
 
-if benchmark_plugin_installed:
+def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info):
+    """
+    Hook to post-process benchmark results before generating the JSON report.
+    """
+    for bench in benchmarks:
+        if "timings" in bench.get("extra_info", {}):
+            bench.stats.data = bench.extra_info["timings"]
+            bench.stats.min = bench.extra_info["min_time"]
+            bench.stats.max = bench.extra_info["max_time"]
+            bench.stats.mean = bench.extra_info["mean_time"]
+            bench.stats.median = bench.extra_info["median_time"]
+            bench.stats.stddev = bench.extra_info["stddev_time"]
+            bench.stats.rounds = bench.extra_info["rounds"]
 
-    def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info):
-        """
-        Hook to post-process benchmark results before generating the JSON report.
-        """
-        for bench in benchmarks:
-            if "timings" in bench.get("extra_info", {}):
-                bench.stats.data = bench.extra_info["timings"]
-                bench.stats.min = bench.extra_info["min_time"]
-                bench.stats.max = bench.extra_info["max_time"]
-                bench.stats.mean = bench.extra_info["mean_time"]
-                bench.stats.median = bench.extra_info["median_time"]
-                bench.stats.stddev = bench.extra_info["stddev_time"]
-                bench.stats.rounds = bench.extra_info["rounds"]
-
-                del bench.extra_info["timings"]
-                del bench.extra_info["min_time"]
-                del bench.extra_info["max_time"]
-                del bench.extra_info["mean_time"]
-                del bench.extra_info["median_time"]
-                del bench.extra_info["stddev_time"]
+            del bench.extra_info["timings"]
+            del bench.extra_info["min_time"]
+            del bench.extra_info["max_time"]
+            del bench.extra_info["mean_time"]
+            del bench.extra_info["median_time"]
+            del bench.extra_info["stddev_time"]
 
 
 def publish_benchmark_extra_info(
