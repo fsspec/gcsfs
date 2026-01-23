@@ -33,27 +33,19 @@ steps:
       - "-c"
       - |
         # Define shared variables
-        REGIONAL_BUCKET="${_BUCKET_PREFIX}-regional-${_SHORT_BUILD_ID}"
-        ZONAL_BUCKET="${_BUCKET_PREFIX}-zonal-${_SHORT_BUILD_ID}"
-        HNS_BUCKET="${_BUCKET_PREFIX}-hns-${_SHORT_BUILD_ID}"
-        RESULTS_BUCKET="${_BUCKET_PREFIX}-results-${_PROJECT_ID}"
-
-        # Save variables to workspace
-        {
-          echo "export PROJECT_ID='${_PROJECT_ID}'"
-          echo "export ZONE='${_ZONE}'"
-          echo "export REPO_URL='${_REPO_URL}'"
-          echo "export BRANCH='${_BRANCH}'"
-          echo "export BENCHMARK_FANOUT_CONFIG='${_BENCHMARK_FANOUT_CONFIG}'"
-          echo "export COMMIT_SHA='${COMMIT_SHA}'"
-          echo "export RUN_ID='${_RUN_ID}'"
-          echo "export REGIONAL_BUCKET='$REGIONAL_BUCKET'"
-          echo "export ZONAL_BUCKET='$ZONAL_BUCKET'"
-          echo "export HNS_BUCKET='$HNS_BUCKET'"
-          echo "export RESULTS_BUCKET='$RESULTS_BUCKET'"
-          echo "export TEMPLATE_NAME='$TEMPLATE_NAME'"
-          echo "export MIG_NAME='$MIG_NAME'"
-        } > /workspace/build_vars.env
+        echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
+        echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
+        echo "export REPO_URL=${_REPO_URL}" >> /workspace/build_vars.env
+        echo "export BRANCH=${_BRANCH}" >> /workspace/build_vars.env
+        echo "export BENCHMARK_FANOUT_CONFIG=${_BENCHMARK_FANOUT_CONFIG}" >> /workspace/build_vars.env
+        echo "export COMMIT_SHA=${COMMIT_SHA}" >> /workspace/build_vars.env
+        echo "export RUN_ID=${_RUN_ID}" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-${_SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_BUCKET_PREFIX}-zonal-${_SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_BUCKET_PREFIX}-hns-${_SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export RESULTS_BUCKET=${_BUCKET_PREFIX}-results-${_PROJECT_ID}" >> /workspace/build_vars.env
+        echo "export TEMPLATE_NAME='gcsfs-perf-tmpl-${_SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+        echo "export MIG_NAME='gcsfs-perf-mig-${_SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
   # 3. Create all necessary GCS buckets in parallel.
