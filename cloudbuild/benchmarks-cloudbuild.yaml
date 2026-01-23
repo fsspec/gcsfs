@@ -65,18 +65,18 @@ steps:
         echo "--- Creating Regional bucket: $$REGIONAL_BUCKET ---"
         gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} &
 
-        echo "--- Creating Zonal bucket: $ZONAL_BUCKET ---"
-        gcloud storage buckets create gs://$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+        echo "--- Creating Zonal bucket: $$ZONAL_BUCKET ---"
+        gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
 
-        echo "--- Creating HNS bucket: $HNS_BUCKET ---"
-        gcloud storage buckets create gs://$HNS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        echo "--- Creating HNS bucket: $$HNS_BUCKET ---"
+        gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
 
         # Create HNS Results Bucket (Persistent)
-        if ! gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
-          echo "--- Creating Results HNS bucket: $RESULTS_BUCKET ---"
-          gcloud storage buckets create gs://$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
+          echo "--- Creating Results HNS bucket: $$RESULTS_BUCKET ---"
+          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
         else
-          echo "--- Results bucket gs://$RESULTS_BUCKET already exists ---"
+          echo "--- Results bucket gs://$$RESULTS_BUCKET already exists ---"
         fi
 
         wait
@@ -109,8 +109,8 @@ steps:
         set -e
         source /workspace/build_vars.env
 
-        echo "Creating Instance Template: $TEMPLATE_NAME"
-        gcloud compute instance-templates create "$TEMPLATE_NAME" \
+        echo "Creating Instance Template: $$TEMPLATE_NAME"
+        gcloud compute instance-templates create "$$TEMPLATE_NAME" \
             --project="${_PROJECT_ID}" \
             --machine-type="c4-standard-192" \
             --image-family="ubuntu-2204-lts" \
@@ -126,23 +126,23 @@ steps:
             --labels="build-id=${_SHORT_BUILD_ID}" \
             --quiet
 
-        echo "Creating Managed Instance Group: $MIG_NAME with size $NUM_VMS"
-        gcloud compute instance-groups managed create "$MIG_NAME" \
+        echo "Creating Managed Instance Group: $$MIG_NAME with size $NUM_VMS"
+        gcloud compute instance-groups managed create "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
-            --template="$TEMPLATE_NAME" \
+            --template="$$TEMPLATE_NAME" \
             --size="$NUM_VMS" \
             --quiet
 
         echo "Waiting for Instance Group to be stable..."
-        gcloud compute instance-groups managed wait-until "$MIG_NAME" \
+        gcloud compute instance-groups managed wait-until "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
             --stable \
             --quiet
 
         # Save instance names for the next step
-        gcloud compute instance-groups managed list-instances "$MIG_NAME" \
+        gcloud compute instance-groups managed list-instances "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
             --format="value(instance)" > /workspace/instances.txt
@@ -194,12 +194,12 @@ steps:
         source /workspace/build_vars.env
         echo "--- Cleaning up Instance Group and Template ---"
 
-        gcloud compute instance-groups managed delete "$MIG_NAME" \
+        gcloud compute instance-groups managed delete "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
             --quiet || true
 
-        gcloud compute instance-templates delete "$TEMPLATE_NAME" \
+        gcloud compute instance-templates delete "$$TEMPLATE_NAME" \
             --project="${_PROJECT_ID}" \
             --quiet || true
     waitFor:
@@ -220,8 +220,8 @@ steps:
         source /workspace/build_vars.env
         echo "--- Deleting test buckets ---"
         gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
-        gcloud storage rm --recursive gs://$ZONAL_BUCKET &
-        gcloud storage rm --recursive gs://$HNS_BUCKET &
+        gcloud storage rm --recursive gs://$$ZONAL_BUCKET &
+        gcloud storage rm --recursive gs://$$HNS_BUCKET &
         wait
     waitFor:
       - "run-benchmarks"
