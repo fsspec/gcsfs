@@ -1,10 +1,9 @@
 substitutions:
   _PROJECT_ID: "gcs-aiml-clients-testing-101"
+  _LOCATION: "us-central1""
   _ZONE: "us-central1-a"
-  _SHORT_BUILD_ID: ${BUILD_ID:0:8}
-  _RUN_ID: ${BUILD_ID}
   _BUCKET_PREFIX: "gcsfs-perf"
-  _SERVICE_ACCOUNT: "gcsfs-perf-ci-runner@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
+  _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
   _REPO_URL: "https://github.com/fsspec/gcsfs.git"
   _BRANCH: "main"
   # Fanout Configuration: Space-separated list of "group:config_name" or "group:" (for all configs in group).
@@ -29,9 +28,12 @@ steps:
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "init-variables"
     entrypoint: "bash"
+    env:
+      - "BUILD_ID=${BUILD_ID}"
     args:
       - "-c"
       - |
+        SHORT_BUILD_ID=$${BUILD_ID:0:8}
         # Define shared variables
         echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
         echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
@@ -39,13 +41,14 @@ steps:
         echo "export BRANCH=${_BRANCH}" >> /workspace/build_vars.env
         echo "export BENCHMARK_FANOUT_CONFIG=${_BENCHMARK_FANOUT_CONFIG}" >> /workspace/build_vars.env
         echo "export COMMIT_SHA=${COMMIT_SHA}" >> /workspace/build_vars.env
-        echo "export RUN_ID=${_RUN_ID}" >> /workspace/build_vars.env
-        echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-${_SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export ZONAL_BUCKET=${_BUCKET_PREFIX}-zonal-${_SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export HNS_BUCKET=${_BUCKET_PREFIX}-hns-${_SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
+        echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_BUCKET_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_BUCKET_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export RESULTS_BUCKET=${_BUCKET_PREFIX}-results-${_PROJECT_ID}" >> /workspace/build_vars.env
-        echo "export TEMPLATE_NAME='gcsfs-perf-tmpl-${_SHORT_BUILD_ID}'" >> /workspace/build_vars.env
-        echo "export MIG_NAME='gcsfs-perf-mig-${_SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+        echo "export TEMPLATE_NAME='gcsfs-perf-tmpl-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+        echo "export MIG_NAME='gcsfs-perf-mig-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
   # 3. Create all necessary GCS buckets in parallel.
@@ -62,21 +65,21 @@ steps:
         set -e
         source /workspace/build_vars.env
 
-        echo "--- Creating Regional bucket: $$REGIONAL_BUCKET ---"
-        gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} &
+        echo "--- Creating Regional bucket: $${REGIONAL_BUCKET} ---"
+        gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} &
 
-        echo "--- Creating Zonal bucket: $$ZONAL_BUCKET ---"
-        gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+        echo "--- Creating Zonal bucket: $${ZONAL_BUCKET} ---"
+        gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
 
-        echo "--- Creating HNS bucket: $$HNS_BUCKET ---"
-        gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        echo "--- Creating HNS bucket: $${HNS_BUCKET} ---"
+        gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
 
         # Create HNS Results Bucket (Persistent)
         if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
-          echo "--- Creating Results HNS bucket: $$RESULTS_BUCKET ---"
-          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+          echo "--- Creating Results HNS bucket: $${RESULTS_BUCKET} ---"
+          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         else
-          echo "--- Results bucket gs://$$RESULTS_BUCKET already exists ---"
+          echo "--- Results bucket gs://$${RESULTS_BUCKET} already exists ---"
         fi
 
         wait
@@ -108,7 +111,7 @@ steps:
         set -e
         source /workspace/build_vars.env
 
-        echo "Creating Instance Template: $$TEMPLATE_NAME"
+        echo "Creating Instance Template: $${TEMPLATE_NAME}"
         gcloud compute instance-templates create "$$TEMPLATE_NAME" \
             --project="${_PROJECT_ID}" \
             --machine-type="c4-standard-192" \
@@ -122,10 +125,10 @@ steps:
             --metadata="enable-oslogin=TRUE" \
             --service-account="${_SERVICE_ACCOUNT}" \
             --tags="allow-ssh" \
-            --labels="build-id=${_SHORT_BUILD_ID}" \
+            --labels="build-id=$$SHORT_BUILD_ID" \
             --quiet
 
-        echo "Creating Managed Instance Group: $$MIG_NAME with size $$NUM_VMS"
+        echo "Creating Managed Instance Group: $${MIG_NAME} with size $$NUM_VMS"
         gcloud compute instance-groups managed create "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
@@ -230,4 +233,4 @@ timeout: "7200s" # 2 hours
 options:
   logging: CLOUD_LOGGING_ONLY
   pool:
-    name: "projects/${_PROJECT_ID}/locations/us-central1/workerPools/cloud-build-worker-pool"
+    name: "projects/${_PROJECT_ID}/locations/${_LOCATION}/workerPools/cloud-build-worker-pool"
