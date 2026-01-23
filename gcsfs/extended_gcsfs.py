@@ -792,15 +792,22 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         exs = await self._delete_files(files, batchsize)
         # For directories, we must delete them from deepest to shallowest
         # to avoid race conditions where a parent is deleted before its child.
-        # The `dirs` list is assumed to be pre-sorted.
-        # TODO: There is scope to optimize the deletion logic by deleting the directories in the same level
-        # concurrently. As of now we are deleting sequentially as this code would be re-written to integrate
-        # with the recursive API which would that care of deleting both files and folders in HNS bucket.
+        # We group directories by depth and delete them level by level.
+        dirs_by_depth = {}
         for d in dirs:
-            try:
-                await self._rmdir(d)
-            except Exception as e:
-                exs.append(e)
+            depth = d.count("/")
+            dirs_by_depth.setdefault(depth, []).append(d)
+
+        for depth in sorted(dirs_by_depth.keys(), reverse=True):
+            level_dirs = dirs_by_depth[depth]
+            results = await asyn._run_coros_in_chunks(
+                [self._rmdir(d) for d in level_dirs],
+                batch_size=batchsize,
+                return_exceptions=True,
+            )
+            for res in results:
+                if isinstance(res, Exception):
+                    exs.append(res)
 
         errors = [
             ex
