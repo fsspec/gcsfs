@@ -5,9 +5,7 @@ substitutions:
   _BUCKET_PREFIX: "gcsfs-perf"
   _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
   _SKIP_STEPS: ""
-  # Fanout Configuration: Space-separated list of "group:config_name" or "group:" (for all configs in group).
-  # Example: "read:read_seq,read_rand write: listing:"
-  _BENCHMARK_FANOUT_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process,read_rand_multi_process write:write_seq,write_seq_multi_process listing: delete: rename:"
+  _BENCHMARK_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process read:read_rand_multi_process"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -35,15 +33,14 @@ steps:
         # Define shared variables
         echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
         echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
-        echo "export BENCHMARK_FANOUT_CONFIG='${_BENCHMARK_FANOUT_CONFIG}'" >> /workspace/build_vars.env
+        echo "export BENCHMARK_CONFIG='${_BENCHMARK_CONFIG}'" >> /workspace/build_vars.env
         echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
         echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export ZONAL_BUCKET=${_BUCKET_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export HNS_BUCKET=${_BUCKET_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export RESULTS_BUCKET=${_BUCKET_PREFIX}-results-${_PROJECT_ID}" >> /workspace/build_vars.env
-        echo "export TEMPLATE_NAME='gcsfs-perf-tmpl-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
-        echo "export MIG_NAME='gcsfs-perf-mig-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+        echo "export VM_NAME='${_BUCKET_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
   # 3. Create all necessary GCS buckets in parallel.
@@ -75,35 +72,24 @@ steps:
         wait
     waitFor: ["init-variables"]
 
-  # 4. Calculate number of VMs needed.
+  # 4. Create a single VM for benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "count-configs"
+    id: "create-vm"
     entrypoint: "bash"
     args:
       - "-c"
       - |
-        IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_FANOUT_CONFIG}"
-        echo "export NUM_VMS=$${#CONFIG_ARRAY[@]}" >> /workspace/build_vars.env
-        echo "Calculated NUM_VMS: $${#CONFIG_ARRAY[@]}"
-    waitFor: ["init-variables"]
-
-  # 5. Create Instance Group based on count.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-mig"
-    entrypoint: "bash"
-    args:
-      - "-c"
-      - |
-        if [[ ",${_SKIP_STEPS}," == *",create-mig,"* ]]; then
-          echo "--- Skipping step: create-mig ---"
+        if [[ ",${_SKIP_STEPS}," == *",create-vm,"* ]]; then
+          echo "--- Skipping step: create-vm ---"
           exit 0
         fi
         set -e
         source /workspace/build_vars.env
 
-        echo "Creating Instance Template: $${TEMPLATE_NAME}"
-        gcloud compute instance-templates create "$$TEMPLATE_NAME" \
+        echo "Creating VM: $${VM_NAME}"
+        gcloud compute instances create "$$VM_NAME" \
             --project="${_PROJECT_ID}" \
+            --zone="${_ZONE}" \
             --machine-type="c4-standard-192" \
             --image-family="ubuntu-2204-lts" \
             --image-project="ubuntu-os-cloud" \
@@ -117,30 +103,9 @@ steps:
             --tags="allow-ssh" \
             --labels="build-id=$$SHORT_BUILD_ID" \
             --quiet
+    waitFor: ["init-variables"]
 
-        echo "Creating Managed Instance Group: $${MIG_NAME} with size $$NUM_VMS"
-        gcloud compute instance-groups managed create "$$MIG_NAME" \
-            --project="${_PROJECT_ID}" \
-            --zone="${_ZONE}" \
-            --template="$$TEMPLATE_NAME" \
-            --size="$$NUM_VMS" \
-            --quiet
-
-        echo "Waiting for Instance Group to be stable..."
-        gcloud compute instance-groups managed wait-until "$$MIG_NAME" \
-            --project="${_PROJECT_ID}" \
-            --zone="${_ZONE}" \
-            --stable \
-            --quiet
-
-        echo "Saving Instance Names..."
-        gcloud compute instance-groups managed list-instances "$$MIG_NAME" \
-            --project="${_PROJECT_ID}" \
-            --zone="${_ZONE}" \
-            --format="value(name)" > /workspace/instances.txt
-    waitFor: ["count-configs"]
-
-  # 6. Run Benchmarks.
+  # 5. Run Benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-benchmarks"
     entrypoint: "bash"
@@ -153,7 +118,7 @@ steps:
         fi
         bash cloudbuild/run_benchmarks.sh
     waitFor:
-      - "create-mig"
+      - "create-vm"
       - "create-buckets"
       - "generate-ssh-key"
 
@@ -172,26 +137,22 @@ steps:
     waitFor:
       - "run-benchmarks"
 
-  # Delete MIG and Template.
+  # Delete VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "cleanup-mig"
+    id: "cleanup-vm"
     entrypoint: "bash"
     args:
       - "-c"
       - |
-        if [[ ",${_SKIP_STEPS}," == *",cleanup-mig,"* ]]; then
-          echo "--- Skipping step: cleanup-mig ---"
+        if [[ ",${_SKIP_STEPS}," == *",cleanup-vm,"* ]]; then
+          echo "--- Skipping step: cleanup-vm ---"
           exit 0
         fi
         source /workspace/build_vars.env
 
-        gcloud compute instance-groups managed delete "$$MIG_NAME" \
+        gcloud compute instances delete "$$VM_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
-            --quiet || true
-
-        gcloud compute instance-templates delete "$$TEMPLATE_NAME" \
-            --project="${_PROJECT_ID}" \
             --quiet || true
     waitFor:
       - "cleanup-ssh-key"
@@ -218,7 +179,7 @@ steps:
     waitFor:
       - "run-benchmarks"
 
-timeout: "7200s" # 2 hours
+timeout: "14400s" # 2 hours
 
 options:
   logging: CLOUD_LOGGING_ONLY

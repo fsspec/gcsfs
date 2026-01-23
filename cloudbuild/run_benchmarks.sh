@@ -91,7 +91,7 @@ run_benchmark() {
     RESULTS_DIR='gcsfs/gcsfs/tests/perf/microbenchmarks/__run__'
     if [ -d \"\$RESULTS_DIR\" ]; then
       echo \"Uploading from \$RESULTS_DIR to gs://${RESULTS_BUCKET}/\${DATE_DIR}/${RUN_ID}/\"
-      cd \"\$RESULTS_DIR\" && gcloud storage cp --recursive . gs://${RESULTS_BUCKET}/\${DATE_DIR}/${RUN_ID}/
+      cd \"\$RESULTS_DIR\" && gcloud storage cp --recursive . gs://${RESULTS_BUCKET}/\${DATE_DIR}/${RUN_ID}/ && rm -rf *
     else
       echo \"No results directory found at \$RESULTS_DIR\"
     fi
@@ -100,75 +100,47 @@ run_benchmark() {
   gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$RUN_CMD"
 }
 
-# Orchestrates the execution of a single benchmark job: wait for SSH, setup VM, and run benchmark.
-# Arguments:
-#   group: The benchmark group.
-#   config: The benchmark config.
-#   vm_name: The name of the VM instance.
-run_job() {
-  local group=$1
-  local config=$2
-  local vm_name=$3
+# Main function to orchestrate the sequential execution of benchmarks on a single VM.
+main() {
+  local vm_name="${VM_NAME}"
 
-  echo "[$vm_name] Starting job for Group: $group, Config: $config"
+  echo "[$vm_name] Starting benchmarks..."
 
   if ! wait_for_ssh "$vm_name"; then
     echo "[$vm_name] SSH wait failed."
-    return 1
+    exit 1
   fi
 
   if ! setup_vm "$vm_name"; then
     echo "[$vm_name] Setup failed."
-    return 1
+    exit 1
   fi
-
-  if ! run_benchmark "$vm_name" "$group" "$config"; then
-    echo "[$vm_name] Benchmark failed."
-    return 1
-  fi
-
-  echo "[$vm_name] Benchmark finished successfully."
-  return 0
-}
-
-# Main function to orchestrate the parallel execution of benchmarks across VMs.
-main() {
-  # Load instances
-  local INSTANCES=($(cat /workspace/instances.txt))
 
   # Load configs
   local CONFIG_ARRAY
-  IFS=' ' read -r -a CONFIG_ARRAY <<< "${BENCHMARK_FANOUT_CONFIG}"
+  IFS=',' read -r -a CONFIG_ARRAY <<< "${BENCHMARK_CONFIG}"
 
-  local NUM_VMS=${#CONFIG_ARRAY[@]}
-  if [ "${#INSTANCES[@]}" -ne "$NUM_VMS" ]; then
-      echo "Error: Number of instances (${#INSTANCES[@]}) does not match number of configs ($NUM_VMS)."
-      exit 1
-  fi
+  local failures=0
 
-  # Main Loop
-  local pids=""
-
-  for i in "${!CONFIG_ARRAY[@]}"; do
-    local entry="${CONFIG_ARRAY[$i]}"
-    local vm_name="${INSTANCES[$i]}"
+  for entry in "${CONFIG_ARRAY[@]}"; do
+    # Trim whitespace
+    entry=$(echo "$entry" | xargs)
+    if [ -z "$entry" ]; then continue; fi
 
     IFS=':' read -r group config <<< "$entry"
 
     echo "Launching job for $group:$config on $vm_name"
 
-    # Run in background
-    run_job "$group" "$config" "$vm_name" &
-    pids="$pids $!"
+    if ! run_benchmark "$vm_name" "$group" "$config"; then
+        echo "Benchmark $group:$config failed."
+        failures=$((failures+1))
+    fi
+
+    echo "Sleeping for 30 seconds..."
+    sleep 30
   done
 
-  # Wait for all jobs
-  local failures=0
-  for pid in $pids; do
-    wait $pid || failures=$((failures+1))
-  done
-
-  if [ $failures -ne 0 ]; then
+  if [ "${failures:-0}" -ne 0 ]; then
     echo "$failures benchmark jobs failed."
     exit 1
   fi
