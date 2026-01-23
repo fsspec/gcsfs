@@ -137,7 +137,7 @@ steps:
         gcloud compute instance-groups managed list-instances "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
-            --format="value(instance)" > /workspace/instances.txt
+            --format="value(name)" > /workspace/instances.txt
     waitFor: ["count-configs"]
 
   # 6. Run Benchmarks.
