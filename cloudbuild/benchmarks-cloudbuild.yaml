@@ -5,7 +5,7 @@ substitutions:
   _INFRA_PREFIX: "gcsfs-perf"
   _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
   _BENCHMARK_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process read:read_rand_multi_process"
-  _BUCKET_TYPES: "regional zonal hns"
+  _BUCKET_TYPES: "zonal"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -69,7 +69,7 @@ steps:
         if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
           gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         else
-          echo "--- Results bucket gs://$${RESULTS_BUCKET} already exists ---"
+          echo "Results bucket gs://$${RESULTS_BUCKET} already exists"
         fi
 
         wait
@@ -126,7 +126,6 @@ steps:
     args:
       - "-c"
       - |
-        echo "--- Removing SSH key from OS Login profile ---"
         gcloud compute os-login ssh-keys remove \
           --key-file=/workspace/gcb_ssh_key.pub || true
     waitFor:
@@ -158,7 +157,6 @@ steps:
         set -e
         source /workspace/build_vars.env
 
-        # Delete Test Buckets, in parallel
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
           gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
         fi
