@@ -2,7 +2,7 @@ substitutions:
   _PROJECT_ID: "gcs-aiml-clients-testing-101"
   _LOCATION: "us-central1"
   _ZONE: "us-central1-a"
-  _BUCKET_PREFIX: "gcsfs-perf"
+  _INFRA_PREFIX: "gcsfs-perf"
   _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
   _BENCHMARK_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process read:read_rand_multi_process"
   _BUCKET_TYPES: "regional zonal hns"
@@ -37,11 +37,11 @@ steps:
         echo "export BUCKET_TYPES='${_BUCKET_TYPES}'" >> /workspace/build_vars.env
         echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
         echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export ZONAL_BUCKET=${_BUCKET_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export HNS_BUCKET=${_BUCKET_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export RESULTS_BUCKET=${_BUCKET_PREFIX}-results-${_PROJECT_ID}" >> /workspace/build_vars.env
-        echo "export VM_NAME='${_BUCKET_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-results-${_PROJECT_ID}" >> /workspace/build_vars.env
+        echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
   # 3. Create all necessary GCS buckets in parallel.
@@ -55,13 +55,13 @@ steps:
         source /workspace/build_vars.env
 
         # Create Test Buckets, in parallel
-        if [[ " ${BUCKET_TYPES} " =~ " regional " ]]; then
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
           gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} &
         fi
-        if [[ " ${BUCKET_TYPES} " =~ " zonal " ]]; then
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
           gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
         fi
-        if [[ " ${BUCKET_TYPES} " =~ " hns " ]]; then
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
           gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         fi
 
@@ -159,13 +159,13 @@ steps:
         source /workspace/build_vars.env
 
         # Delete Test Buckets, in parallel
-        if [[ " ${BUCKET_TYPES} " =~ " regional " ]]; then
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
           gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
         fi
-        if [[ " ${BUCKET_TYPES} " =~ " zonal " ]]; then
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
           gcloud storage rm --recursive gs://$$ZONAL_BUCKET &
         fi
-        if [[ " ${BUCKET_TYPES} " =~ " hns " ]]; then
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
           gcloud storage rm --recursive gs://$$HNS_BUCKET &
         fi
         wait
