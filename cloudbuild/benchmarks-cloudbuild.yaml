@@ -70,8 +70,8 @@ steps:
         set -e
         source /workspace/build_vars.env
 
-        echo "--- Creating Regional bucket: $REGIONAL_BUCKET ---"
-        gcloud storage buckets create gs://$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} &
+        echo "--- Creating Regional bucket: $$REGIONAL_BUCKET ---"
+        gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} &
 
         echo "--- Creating Zonal bucket: $ZONAL_BUCKET ---"
         gcloud storage buckets create gs://$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
@@ -227,7 +227,7 @@ steps:
         set -e
         source /workspace/build_vars.env
         echo "--- Deleting test buckets ---"
-        gcloud storage rm --recursive gs://$REGIONAL_BUCKET &
+        gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
         gcloud storage rm --recursive gs://$ZONAL_BUCKET &
         gcloud storage rm --recursive gs://$HNS_BUCKET &
         wait
