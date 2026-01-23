@@ -31,28 +31,24 @@ setup_vm() {
   local vm_name=$1
   local log_file=$2
 
-  # Setup VM (Install deps, Clone repo)
-  echo "[$vm_name] Setting up VM..." >> "$log_file"
+  # Copy source code
+  echo "[$vm_name] Copying source code..." >> "$log_file"
+  gcloud compute scp --recurse . "${vm_name}:~/gcsfs" --project="${PROJECT_ID}" --zone="${ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine >> "$log_file" 2>&1
+
   local SETUP_SCRIPT="
     set -e
+
     export DEBIAN_FRONTEND=noninteractive
     sudo apt-get update > /dev/null
     sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git > /dev/null
 
-    # Clone Repo
-    echo 'Cloning repo...'
-    git clone ${REPO_URL} gcsfs
     cd gcsfs
-    if [ -n '${COMMIT_SHA}' ]; then
-      git checkout ${COMMIT_SHA}
-    else
-      git checkout ${BRANCH}
-    fi
 
-    # Install Python deps
     python3 -m venv env
     source env/bin/activate
+
     pip install --upgrade pip > /dev/null
+    pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
     pip install -e . > /dev/null
     pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
   "

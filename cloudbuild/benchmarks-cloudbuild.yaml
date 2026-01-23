@@ -4,12 +4,10 @@ substitutions:
   _ZONE: "us-central1-a"
   _BUCKET_PREFIX: "gcsfs-perf"
   _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
-  _REPO_URL: "https://github.com/fsspec/gcsfs.git"
-  _BRANCH: "main"
+  _SKIP_STEPS: ""
   # Fanout Configuration: Space-separated list of "group:config_name" or "group:" (for all configs in group).
   # Example: "read:read_seq,read_rand write: listing:"
   _BENCHMARK_FANOUT_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process,read_rand_multi_process write:write_seq,write_seq_multi_process listing: delete: rename:"
-  _SKIP_STEPS: ""
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -37,10 +35,7 @@ steps:
         # Define shared variables
         echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
         echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
-        echo "export REPO_URL=${_REPO_URL}" >> /workspace/build_vars.env
-        echo "export BRANCH=${_BRANCH}" >> /workspace/build_vars.env
         echo "export BENCHMARK_FANOUT_CONFIG=${_BENCHMARK_FANOUT_CONFIG}" >> /workspace/build_vars.env
-        echo "export COMMIT_SHA=${COMMIT_SHA}" >> /workspace/build_vars.env
         echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
         echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
@@ -65,18 +60,13 @@ steps:
         set -e
         source /workspace/build_vars.env
 
-        echo "--- Creating Regional bucket: $${REGIONAL_BUCKET} ---"
+        # Create Test Buckets, in parallel
         gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} &
-
-        echo "--- Creating Zonal bucket: $${ZONAL_BUCKET} ---"
         gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
-
-        echo "--- Creating HNS bucket: $${HNS_BUCKET} ---"
         gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
 
         # Create HNS Results Bucket (Persistent)
         if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
-          echo "--- Creating Results HNS bucket: $${RESULTS_BUCKET} ---"
           gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         else
           echo "--- Results bucket gs://$${RESULTS_BUCKET} already exists ---"
@@ -194,7 +184,6 @@ steps:
           exit 0
         fi
         source /workspace/build_vars.env
-        echo "--- Cleaning up Instance Group and Template ---"
 
         gcloud compute instance-groups managed delete "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
@@ -220,7 +209,8 @@ steps:
         fi
         set -e
         source /workspace/build_vars.env
-        echo "--- Deleting test buckets ---"
+
+        # Delete Test Buckets, in parallel
         gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
         gcloud storage rm --recursive gs://$$ZONAL_BUCKET &
         gcloud storage rm --recursive gs://$$HNS_BUCKET &
