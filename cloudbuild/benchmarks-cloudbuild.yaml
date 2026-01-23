@@ -126,12 +126,12 @@ steps:
             --labels="build-id=${_SHORT_BUILD_ID}" \
             --quiet
 
-        echo "Creating Managed Instance Group: $$MIG_NAME with size $NUM_VMS"
+        echo "Creating Managed Instance Group: $$MIG_NAME with size $$NUM_VMS"
         gcloud compute instance-groups managed create "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
             --template="$$TEMPLATE_NAME" \
-            --size="$NUM_VMS" \
+            --size="$$NUM_VMS" \
             --quiet
 
         echo "Waiting for Instance Group to be stable..."
