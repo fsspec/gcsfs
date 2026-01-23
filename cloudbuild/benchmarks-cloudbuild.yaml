@@ -1,0 +1,231 @@
+substitutions:
+  _PROJECT_ID: "gcs-aiml-clients-testing-101"
+  _ZONE: "us-central1-a"
+  _SHORT_BUILD_ID: ${BUILD_ID:0:8}
+  _RUN_ID: ${BUILD_ID}
+  _BUCKET_PREFIX: "gcsfs-perf"
+  _SERVICE_ACCOUNT: "gcsfs-perf-ci-runner@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
+  _REPO_URL: "https://github.com/fsspec/gcsfs.git"
+  _BRANCH: "main"
+  # Fanout Configuration: Space-separated list of "group:config_name" or "group:" (for all configs in group).
+  # Example: "read:read_seq,read_rand write: listing:"
+  _BENCHMARK_FANOUT_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process,read_rand_multi_process write:write_seq,write_seq_multi_process listing: delete: rename:"
+
+steps:
+  # 1. Generate a persistent SSH key for this build run.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "generate-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        mkdir -p /workspace/.ssh
+        ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
+        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+    waitFor: ["-"]
+
+  # 2. Initialize shared variables.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "init-variables"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        # Define shared variables
+        export PROJECT_ID="${_PROJECT_ID}"
+        export ZONE="${_ZONE}"
+        export SHORT_BUILD_ID="${_SHORT_BUILD_ID}"
+        export RUN_ID="${_RUN_ID}"
+        export SERVICE_ACCOUNT="${_SERVICE_ACCOUNT}"
+        export REPO_URL="${_REPO_URL}"
+        export BRANCH="${_BRANCH}"
+        export BENCHMARK_FANOUT_CONFIG="${_BENCHMARK_FANOUT_CONFIG}"
+        export COMMIT_SHA="${COMMIT_SHA}"
+
+        export REGIONAL_BUCKET="${_BUCKET_PREFIX}-regional-${_SHORT_BUILD_ID}"
+        export ZONAL_BUCKET="${_BUCKET_PREFIX}-zonal-${_SHORT_BUILD_ID}"
+        export HNS_BUCKET="${_BUCKET_PREFIX}-hns-${_SHORT_BUILD_ID}"
+        export RESULTS_BUCKET="${_BUCKET_PREFIX}-results-${_PROJECT_ID}"
+        export TEMPLATE_NAME="gcsfs-perf-tmpl-${_SHORT_BUILD_ID}"
+        export MIG_NAME="gcsfs-perf-mig-${_SHORT_BUILD_ID}"
+
+        # Save variables to workspace for other steps
+        {
+          echo "export PROJECT_ID='$PROJECT_ID'"
+          echo "export ZONE='$ZONE'"
+          echo "export SHORT_BUILD_ID='$SHORT_BUILD_ID'"
+          echo "export RUN_ID='$RUN_ID'"
+          echo "export SERVICE_ACCOUNT='$SERVICE_ACCOUNT'"
+          echo "export REPO_URL='$REPO_URL'"
+          echo "export BRANCH='$BRANCH'"
+          echo "export BENCHMARK_FANOUT_CONFIG='$BENCHMARK_FANOUT_CONFIG'"
+          echo "export COMMIT_SHA='$COMMIT_SHA'"
+          echo "export REGIONAL_BUCKET='$REGIONAL_BUCKET'"
+          echo "export ZONAL_BUCKET='$ZONAL_BUCKET'"
+          echo "export HNS_BUCKET='$HNS_BUCKET'"
+          echo "export RESULTS_BUCKET='$RESULTS_BUCKET'"
+          echo "export TEMPLATE_NAME='$TEMPLATE_NAME'"
+          echo "export MIG_NAME='$MIG_NAME'"
+        } > /workspace/build_vars.env
+    waitFor: ["-"]
+
+  # 3. Create all necessary GCS buckets in parallel.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+
+        echo "--- Creating Regional bucket: $REGIONAL_BUCKET ---"
+        gcloud storage buckets create gs://$REGIONAL_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} &
+
+        echo "--- Creating Zonal bucket: $ZONAL_BUCKET ---"
+        gcloud storage buckets create gs://$ZONAL_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} --placement=$ZONE --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+
+        echo "--- Creating HNS bucket: $HNS_BUCKET ---"
+        gcloud storage buckets create gs://$HNS_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+
+        # Create HNS Results Bucket (Persistent)
+        if ! gcloud storage buckets describe gs://$RESULTS_BUCKET --project=$$PROJECT_ID >/dev/null 2>&1; then
+          echo "--- Creating Results HNS bucket: $RESULTS_BUCKET ---"
+          gcloud storage buckets create gs://$RESULTS_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        else
+          echo "--- Results bucket gs://$RESULTS_BUCKET already exists ---"
+        fi
+
+        wait
+    waitFor: ["init-variables"]
+
+  # 4. Calculate number of VMs needed.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "count-configs"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        source /workspace/build_vars.env
+        IFS=' ' read -r -a CONFIG_ARRAY <<< "$BENCHMARK_FANOUT_CONFIG"
+        NUM_VMS=${#CONFIG_ARRAY[@]}
+        echo "export NUM_VMS=$NUM_VMS" >> /workspace/build_vars.env
+        echo "Calculated NUM_VMS: $NUM_VMS"
+    waitFor: ["init-variables"]
+
+  # 5. Create Instance Group based on count.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-mig"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+
+        echo "Creating Instance Template: $TEMPLATE_NAME"
+        gcloud compute instance-templates create "$TEMPLATE_NAME" \
+            --project="$$PROJECT_ID" \
+            --machine-type="c4-standard-192" \
+            --image-family="ubuntu-2204-lts" \
+            --image-project="ubuntu-os-cloud" \
+            --boot-disk-type="hyperdisk-balanced" \
+            --boot-disk-size="100GB" \
+            --network-interface="network-tier=PREMIUM,nic-type=GVNIC" \
+            --network-performance-configs="total-egress-bandwidth-tier=TIER_1" \
+            --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
+            --metadata="enable-oslogin=TRUE" \
+            --service-account="$SERVICE_ACCOUNT" \
+            --tags="allow-ssh" \
+            --labels="build-id=$SHORT_BUILD_ID" \
+            --quiet
+
+        echo "Creating Managed Instance Group: $MIG_NAME with size $NUM_VMS"
+        gcloud compute instance-groups managed create "$MIG_NAME" \
+            --project="$$PROJECT_ID" \
+            --zone="$ZONE" \
+            --template="$TEMPLATE_NAME" \
+            --size="$NUM_VMS" \
+            --quiet
+
+        echo "Waiting for Instance Group to be stable..."
+        gcloud compute instance-groups managed wait-until "$MIG_NAME" \
+            --project="$$PROJECT_ID" \
+            --zone="$ZONE" \
+            --stable \
+            --quiet
+
+        # Save instance names for the next step
+        gcloud compute instance-groups managed list-instances "$MIG_NAME" \
+            --project="$$PROJECT_ID" \
+            --zone="$ZONE" \
+            --format="value(instance)" > /workspace/instances.txt
+    waitFor: ["count-configs"]
+
+  # 6. Run Benchmarks.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-benchmarks"
+    entrypoint: "bash"
+    args: ["cloudbuild/run_benchmarks.sh"]
+    waitFor:
+      - "create-mig"
+      - "create-buckets"
+      - "generate-ssh-key"
+
+  # --- Cleanup Steps ---
+
+  # Clean up the SSH key.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        echo "--- Removing SSH key from OS Login profile ---"
+        gcloud compute os-login ssh-keys remove \
+          --key-file=/workspace/gcb_ssh_key.pub || true
+    waitFor:
+      - "run-benchmarks"
+
+  # Delete MIG and Template.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-mig"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        source /workspace/build_vars.env
+        echo "--- Cleaning up Instance Group and Template ---"
+
+        gcloud compute instance-groups managed delete "$MIG_NAME" \
+            --project="$$PROJECT_ID" \
+            --zone="$ZONE" \
+            --quiet || true
+
+        gcloud compute instance-templates delete "$TEMPLATE_NAME" \
+            --project="$$PROJECT_ID" \
+            --quiet || true
+    waitFor:
+      - "cleanup-ssh-key"
+
+  # Delete all GCS buckets.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+        echo "--- Deleting test buckets ---"
+        gcloud storage rm --recursive gs://$REGIONAL_BUCKET &
+        gcloud storage rm --recursive gs://$ZONAL_BUCKET &
+        gcloud storage rm --recursive gs://$HNS_BUCKET &
+        wait
+    waitFor:
+      - "run-benchmarks"
+
+timeout: "7200s" # 2 hours
+
+options:
+  logging: CLOUD_LOGGING_ONLY
