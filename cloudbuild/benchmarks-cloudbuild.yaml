@@ -10,6 +10,7 @@ substitutions:
   # Fanout Configuration: Space-separated list of "group:config_name" or "group:" (for all configs in group).
   # Example: "read:read_seq,read_rand write: listing:"
   _BENCHMARK_FANOUT_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process,read_rand_multi_process write:write_seq,write_seq_multi_process listing: delete: rename:"
+  _SKIP_STEPS: ""
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -76,6 +77,10 @@ steps:
     args:
       - "-c"
       - |
+        if [[ ",${_SKIP_STEPS}," == *",create-buckets,"* ]]; then
+          echo "--- Skipping step: create-buckets ---"
+          exit 0
+        fi
         set -e
         source /workspace/build_vars.env
 
@@ -120,6 +125,10 @@ steps:
     args:
       - "-c"
       - |
+        if [[ ",${_SKIP_STEPS}," == *",create-mig,"* ]]; then
+          echo "--- Skipping step: create-mig ---"
+          exit 0
+        fi
         set -e
         source /workspace/build_vars.env
 
@@ -166,7 +175,14 @@ steps:
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-benchmarks"
     entrypoint: "bash"
-    args: ["cloudbuild/run_benchmarks.sh"]
+    args:
+      - "-c"
+      - |
+        if [[ ",${_SKIP_STEPS}," == *",run-benchmarks,"* ]]; then
+          echo "--- Skipping step: run-benchmarks ---"
+          exit 0
+        fi
+        bash cloudbuild/run_benchmarks.sh
     waitFor:
       - "create-mig"
       - "create-buckets"
@@ -194,6 +210,10 @@ steps:
     args:
       - "-c"
       - |
+        if [[ ",${_SKIP_STEPS}," == *",cleanup-mig,"* ]]; then
+          echo "--- Skipping step: cleanup-mig ---"
+          exit 0
+        fi
         source /workspace/build_vars.env
         echo "--- Cleaning up Instance Group and Template ---"
 
@@ -215,6 +235,10 @@ steps:
     args:
       - "-c"
       - |
+        if [[ ",${_SKIP_STEPS}," == *",delete-buckets,"* ]]; then
+          echo "--- Skipping step: delete-buckets ---"
+          exit 0
+        fi
         set -e
         source /workspace/build_vars.env
         echo "--- Deleting test buckets ---"
