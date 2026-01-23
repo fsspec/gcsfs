@@ -133,7 +133,7 @@ steps:
             --stable \
             --quiet
 
-        # Save instance names for the next step
+        echo "Saving Instance Names..."
         gcloud compute instance-groups managed list-instances "$$MIG_NAME" \
             --project="${_PROJECT_ID}" \
             --zone="${_ZONE}" \
