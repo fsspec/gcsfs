@@ -118,7 +118,7 @@ main() {
 
   # Load configs
   local CONFIG_ARRAY
-  IFS=',' read -r -a CONFIG_ARRAY <<< "${BENCHMARK_CONFIG}"
+  IFS=' ' read -r -a CONFIG_ARRAY <<< "${BENCHMARK_CONFIG}"
 
   local failures=0
 
