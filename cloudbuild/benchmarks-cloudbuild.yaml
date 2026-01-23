@@ -33,34 +33,20 @@ steps:
       - "-c"
       - |
         # Define shared variables
-        export PROJECT_ID="${_PROJECT_ID}"
-        export ZONE="${_ZONE}"
-        export SHORT_BUILD_ID="${_SHORT_BUILD_ID}"
-        export RUN_ID="${_RUN_ID}"
-        export SERVICE_ACCOUNT="${_SERVICE_ACCOUNT}"
-        export REPO_URL="${_REPO_URL}"
-        export BRANCH="${_BRANCH}"
-        export BENCHMARK_FANOUT_CONFIG="${_BENCHMARK_FANOUT_CONFIG}"
-        export COMMIT_SHA="${COMMIT_SHA}"
+        REGIONAL_BUCKET="${_BUCKET_PREFIX}-regional-${_SHORT_BUILD_ID}"
+        ZONAL_BUCKET="${_BUCKET_PREFIX}-zonal-${_SHORT_BUILD_ID}"
+        HNS_BUCKET="${_BUCKET_PREFIX}-hns-${_SHORT_BUILD_ID}"
+        RESULTS_BUCKET="${_BUCKET_PREFIX}-results-${_PROJECT_ID}"
 
-        export REGIONAL_BUCKET="${_BUCKET_PREFIX}-regional-${_SHORT_BUILD_ID}"
-        export ZONAL_BUCKET="${_BUCKET_PREFIX}-zonal-${_SHORT_BUILD_ID}"
-        export HNS_BUCKET="${_BUCKET_PREFIX}-hns-${_SHORT_BUILD_ID}"
-        export RESULTS_BUCKET="${_BUCKET_PREFIX}-results-${_PROJECT_ID}"
-        export TEMPLATE_NAME="gcsfs-perf-tmpl-${_SHORT_BUILD_ID}"
-        export MIG_NAME="gcsfs-perf-mig-${_SHORT_BUILD_ID}"
-
-        # Save variables to workspace for other steps
+        # Save variables to workspace
         {
-          echo "export PROJECT_ID='$PROJECT_ID'"
-          echo "export ZONE='$ZONE'"
-          echo "export SHORT_BUILD_ID='$SHORT_BUILD_ID'"
-          echo "export RUN_ID='$RUN_ID'"
-          echo "export SERVICE_ACCOUNT='$SERVICE_ACCOUNT'"
-          echo "export REPO_URL='$REPO_URL'"
-          echo "export BRANCH='$BRANCH'"
-          echo "export BENCHMARK_FANOUT_CONFIG='$BENCHMARK_FANOUT_CONFIG'"
-          echo "export COMMIT_SHA='$COMMIT_SHA'"
+          echo "export PROJECT_ID='${_PROJECT_ID}'"
+          echo "export ZONE='${_ZONE}'"
+          echo "export REPO_URL='${_REPO_URL}'"
+          echo "export BRANCH='${_BRANCH}'"
+          echo "export BENCHMARK_FANOUT_CONFIG='${_BENCHMARK_FANOUT_CONFIG}'"
+          echo "export COMMIT_SHA='${COMMIT_SHA}'"
+          echo "export RUN_ID='${_RUN_ID}'"
           echo "export REGIONAL_BUCKET='$REGIONAL_BUCKET'"
           echo "export ZONAL_BUCKET='$ZONAL_BUCKET'"
           echo "export HNS_BUCKET='$HNS_BUCKET'"
@@ -85,18 +71,18 @@ steps:
         source /workspace/build_vars.env
 
         echo "--- Creating Regional bucket: $REGIONAL_BUCKET ---"
-        gcloud storage buckets create gs://$REGIONAL_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} &
+        gcloud storage buckets create gs://$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} &
 
         echo "--- Creating Zonal bucket: $ZONAL_BUCKET ---"
-        gcloud storage buckets create gs://$ZONAL_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} --placement=$ZONE --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+        gcloud storage buckets create gs://$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
 
         echo "--- Creating HNS bucket: $HNS_BUCKET ---"
-        gcloud storage buckets create gs://$HNS_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        gcloud storage buckets create gs://$HNS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
 
         # Create HNS Results Bucket (Persistent)
-        if ! gcloud storage buckets describe gs://$RESULTS_BUCKET --project=$$PROJECT_ID >/dev/null 2>&1; then
+        if ! gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
           echo "--- Creating Results HNS bucket: $RESULTS_BUCKET ---"
-          gcloud storage buckets create gs://$RESULTS_BUCKET --project=$$PROJECT_ID --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
+          gcloud storage buckets create gs://$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${ZONE::-2} --enable-hierarchical-namespace --uniform-bucket-level-access &
         else
           echo "--- Results bucket gs://$RESULTS_BUCKET already exists ---"
         fi
@@ -111,8 +97,7 @@ steps:
     args:
       - "-c"
       - |
-        source /workspace/build_vars.env
-        IFS=' ' read -r -a CONFIG_ARRAY <<< "$BENCHMARK_FANOUT_CONFIG"
+        IFS=' ' read -r -a CONFIG_ARRAY <<< "$_BENCHMARK_FANOUT_CONFIG"
         NUM_VMS=${#CONFIG_ARRAY[@]}
         echo "export NUM_VMS=$NUM_VMS" >> /workspace/build_vars.env
         echo "Calculated NUM_VMS: $NUM_VMS"
@@ -134,7 +119,7 @@ steps:
 
         echo "Creating Instance Template: $TEMPLATE_NAME"
         gcloud compute instance-templates create "$TEMPLATE_NAME" \
-            --project="$$PROJECT_ID" \
+            --project="${_PROJECT_ID}" \
             --machine-type="c4-standard-192" \
             --image-family="ubuntu-2204-lts" \
             --image-project="ubuntu-os-cloud" \
@@ -144,30 +129,30 @@ steps:
             --network-performance-configs="total-egress-bandwidth-tier=TIER_1" \
             --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
             --metadata="enable-oslogin=TRUE" \
-            --service-account="$SERVICE_ACCOUNT" \
+            --service-account="${_SERVICE_ACCOUNT}" \
             --tags="allow-ssh" \
-            --labels="build-id=$SHORT_BUILD_ID" \
+            --labels="build-id=${_SHORT_BUILD_ID}" \
             --quiet
 
         echo "Creating Managed Instance Group: $MIG_NAME with size $NUM_VMS"
         gcloud compute instance-groups managed create "$MIG_NAME" \
-            --project="$$PROJECT_ID" \
-            --zone="$ZONE" \
+            --project="${_PROJECT_ID}" \
+            --zone="${_ZONE}" \
             --template="$TEMPLATE_NAME" \
             --size="$NUM_VMS" \
             --quiet
 
         echo "Waiting for Instance Group to be stable..."
         gcloud compute instance-groups managed wait-until "$MIG_NAME" \
-            --project="$$PROJECT_ID" \
-            --zone="$ZONE" \
+            --project="${_PROJECT_ID}" \
+            --zone="${_ZONE}" \
             --stable \
             --quiet
 
         # Save instance names for the next step
         gcloud compute instance-groups managed list-instances "$MIG_NAME" \
-            --project="$$PROJECT_ID" \
-            --zone="$ZONE" \
+            --project="${_PROJECT_ID}" \
+            --zone="${_ZONE}" \
             --format="value(instance)" > /workspace/instances.txt
     waitFor: ["count-configs"]
 
@@ -218,12 +203,12 @@ steps:
         echo "--- Cleaning up Instance Group and Template ---"
 
         gcloud compute instance-groups managed delete "$MIG_NAME" \
-            --project="$$PROJECT_ID" \
-            --zone="$ZONE" \
+            --project="${_PROJECT_ID}" \
+            --zone="${_ZONE}" \
             --quiet || true
 
         gcloud compute instance-templates delete "$TEMPLATE_NAME" \
-            --project="$$PROJECT_ID" \
+            --project="${_PROJECT_ID}" \
             --quiet || true
     waitFor:
       - "cleanup-ssh-key"
@@ -254,4 +239,4 @@ timeout: "7200s" # 2 hours
 options:
   logging: CLOUD_LOGGING_ONLY
   pool:
-    name: "projects/${_PROJECT_ID}/locations/us-central1/workerPools/cloud-build-worker-pool"
+    name: "projects/${_PROJECT_ID}/locations/${ZONE::-2}/workerPools/cloud-build-worker-pool"
