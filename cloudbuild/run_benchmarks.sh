@@ -12,11 +12,13 @@ wait_for_ssh() {
 
   # Wait for SSH (MIG is stable, but SSH might take a moment)
   echo "[$vm_name] Waiting for SSH..."
-  for i in {1..20}; do
-    if gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo ready"; then
+  for i in {1..10}; do
+    if gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready" ; then
+      echo "[$vm_name] SSH available."
       return 0
     fi
-    sleep 10
+    echo "Waiting for VM to become available... (attempt $$i/10)"
+    sleep 1
   done
   return 1
 }
