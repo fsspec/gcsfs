@@ -7,15 +7,13 @@ source /workspace/build_vars.env
 # Waits for SSH to become available on the VM.
 # Arguments:
 #   vm_name: The name of the VM instance.
-#   log_file: Path to the log file for this VM.
 wait_for_ssh() {
   local vm_name=$1
-  local log_file=$2
 
   # Wait for SSH (MIG is stable, but SSH might take a moment)
-  echo "[$vm_name] Waiting for SSH..." >> "$log_file"
+  echo "[$vm_name] Waiting for SSH..."
   for i in {1..20}; do
-    if gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo ready" >> "$log_file" 2>&1; then
+    if gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo ready"; then
       return 0
     fi
     sleep 10
@@ -26,14 +24,12 @@ wait_for_ssh() {
 # Sets up the VM by installing dependencies and cloning the repository.
 # Arguments:
 #   vm_name: The name of the VM instance.
-#   log_file: Path to the log file for this VM.
 setup_vm() {
   local vm_name=$1
-  local log_file=$2
 
   # Copy source code
-  echo "[$vm_name] Copying source code..." >> "$log_file"
-  gcloud compute scp --recurse . "${vm_name}:~/gcsfs" --project="${PROJECT_ID}" --zone="${ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine >> "$log_file" 2>&1
+  echo "[$vm_name] Copying source code..."
+  gcloud compute scp --recurse . "${vm_name}:~/gcsfs" --project="${PROJECT_ID}" --zone="${ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine
 
   local SETUP_SCRIPT="
     set -e
@@ -53,7 +49,7 @@ setup_vm() {
     pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
   "
 
-  gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$SETUP_SCRIPT" >> "$log_file" 2>&1
+  gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$SETUP_SCRIPT"
 }
 
 # Runs the benchmark on the VM and uploads the results.
@@ -61,15 +57,13 @@ setup_vm() {
 #   vm_name: The name of the VM instance.
 #   group: The benchmark group.
 #   config: The benchmark config.
-#   log_file: Path to the log file for this VM.
 run_benchmark() {
   local vm_name=$1
   local group=$2
   local config=$3
-  local log_file=$4
 
   # Run Benchmark
-  echo "[$vm_name] Running benchmark..." >> "$log_file"
+  echo "[$vm_name] Running benchmark..."
 
   # Construct config arg
   local CONFIG_ARG=""
@@ -100,7 +94,7 @@ run_benchmark() {
     fi
   "
 
-  gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$RUN_CMD" >> "$log_file" 2>&1
+  gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$RUN_CMD"
 }
 
 # Orchestrates the execution of a single benchmark job: wait for SSH, setup VM, and run benchmark.
@@ -112,26 +106,25 @@ run_job() {
   local group=$1
   local config=$2
   local vm_name=$3
-  local log_file="/workspace/${vm_name}.log"
 
-  echo "[$vm_name] Starting job for Group: $group, Config: $config" > "$log_file"
+  echo "[$vm_name] Starting job for Group: $group, Config: $config"
 
-  if ! wait_for_ssh "$vm_name" "$log_file"; then
-    echo "[$vm_name] SSH wait failed." >> "$log_file"
+  if ! wait_for_ssh "$vm_name"; then
+    echo "[$vm_name] SSH wait failed."
     return 1
   fi
 
-  if ! setup_vm "$vm_name" "$log_file"; then
-    echo "[$vm_name] Setup failed." >> "$log_file"
+  if ! setup_vm "$vm_name"; then
+    echo "[$vm_name] Setup failed."
     return 1
   fi
 
-  if ! run_benchmark "$vm_name" "$group" "$config" "$log_file"; then
-    echo "[$vm_name] Benchmark failed." >> "$log_file"
+  if ! run_benchmark "$vm_name" "$group" "$config"; then
+    echo "[$vm_name] Benchmark failed."
     return 1
   fi
 
-  echo "[$vm_name] Benchmark finished successfully." >> "$log_file"
+  echo "[$vm_name] Benchmark finished successfully."
   return 0
 }
 
@@ -171,10 +164,6 @@ main() {
   for pid in $pids; do
     wait $pid || failures=$((failures+1))
   done
-
-  # Print logs
-  echo "--- Benchmark Logs ---"
-  cat /workspace/*.log || true
 
   if [ $failures -ne 0 ]; then
     echo "$failures benchmark jobs failed."

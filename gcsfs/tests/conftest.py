@@ -448,13 +448,13 @@ def pytest_addoption(parser):
         "--run-benchmarks",
         action="store_true",
         default=False,
-        help="run benchmark tests",
+        help="run only perf benchmark tests",
     )
     parser.addoption(
         "--run-benchmarks-infra",
         action="store_true",
         default=False,
-        help="run benchmark infrastructure tests",
+        help="run only benchmark infrastructure tests",
     )
 
 
@@ -477,5 +477,15 @@ def pytest_ignore_collect(collection_path, config):
             path_parts = set(path_str.replace(os.sep, "/").split("/"))
             if benchmark_subdirs.intersection(path_parts):
                 return True
+
+        # If only --run-benchmarks is passed, ignore the unit tests.
+        if config.getoption("--run-benchmarks") and not config.getoption(
+            "--run-benchmarks-infra"
+        ):
+            if os.path.basename(path_str).startswith("test_"):
+                benchmark_subdirs = {"delete", "listing", "read", "rename", "write"}
+                path_parts = set(path_str.replace(os.sep, "/").split("/"))
+                if not benchmark_subdirs.intersection(path_parts):
+                    return True
 
     return None
