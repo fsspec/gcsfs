@@ -90,9 +90,8 @@ steps:
       - "-c"
       - |
         IFS=' ' read -r -a CONFIG_ARRAY <<< "$_BENCHMARK_FANOUT_CONFIG"
-        NUM_VMS=${#CONFIG_ARRAY[@]}
-        echo "export NUM_VMS=$NUM_VMS" >> /workspace/build_vars.env
-        echo "Calculated NUM_VMS: $NUM_VMS"
+        echo "export NUM_VMS=${#CONFIG_ARRAY[@]}" >> /workspace/build_vars.env
+        echo "Calculated NUM_VMS: ${#CONFIG_ARRAY[@]}"
     waitFor: ["init-variables"]
 
   # 5. Create Instance Group based on count.
