@@ -4,6 +4,7 @@ import os
 from enum import Enum
 from functools import partial
 from glob import has_magic
+from io import BytesIO
 
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
@@ -250,6 +251,82 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     async def _is_zonal_bucket(self, bucket):
         bucket_type = await self._lookup_bucket_type(bucket)
         return bucket_type == BucketType.ZONAL_HIERARCHICAL
+
+    async def _fetch_range_split(
+        self, path, start=None, chunk_lengths=None, mrd=None, size=None, **kwargs
+    ):
+        """
+        Reading multiple reads in one large stream.
+
+        Optimized for Zonal Buckets:
+        Leverages AsyncMultiRangeDownloader.download_ranges() to fetch all requested
+        'chunk_lengths' (chunks) concurrently in a single batch request, significantly
+        improving performance for ReadAheadV2.
+        """
+
+        bucket, object_name, generation = self.split_path(path)
+        mrd_created = False
+        try:
+            if mrd is None:
+                # Check before creating MRD
+                if not await self._is_zonal_bucket(bucket):
+                    raise RuntimeError(
+                        "Internal error, this method is only supported for zonal buckets!"
+                    )
+
+                await self._get_grpc_client()
+                mrd = await AsyncMultiRangeDownloader.create_mrd(
+                    self.grpc_client, bucket, object_name, generation
+                )
+                mrd_created = True
+
+            file_size = size or mrd.persisted_size
+            if file_size is None:
+                logger.warning(
+                    "AsyncMultiRangeDownloader (MRD) has no 'persisted_size'. "
+                    "Falling back to _info() to get the file size."
+                )
+                file_size = (await self._info(path))["size"]
+
+            if chunk_lengths:
+                start_offset = start if start is not None else 0
+                current_offset = start_offset
+
+                if start_offset >= file_size or (
+                    chunk_lengths is not None
+                    and start_offset + sum(chunk_lengths) > file_size
+                ):
+                    raise RuntimeError("Request not satisfiable.")
+
+                buffers = []  # To hold the results in order
+                read_ranges = []  # To pass to MRD
+
+                for length in chunk_lengths:
+                    buf = BytesIO()
+                    buffers.append(buf)
+
+                    if length > 0:
+                        read_ranges.append((current_offset, length, buf))
+
+                    current_offset += length
+
+                if read_ranges:
+                    await mrd.download_ranges(read_ranges)
+
+                return [b.getvalue() for b in buffers]
+            else:
+                end = kwargs.get("end")
+                offset, length = await self._process_limits_to_offset_and_length(
+                    path, start, end, file_size
+                )
+
+                data = await zb_hns_utils.download_range(
+                    offset=offset, length=length, mrd=mrd
+                )
+                return [data]
+        finally:
+            if mrd_created:
+                await mrd.close()
 
     async def _cat_file(self, path, start=None, end=None, mrd=None, **kwargs):
         """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
