@@ -4,8 +4,8 @@ substitutions:
   _ZONE: "us-central1-a"
   _BUCKET_PREFIX: "gcsfs-perf"
   _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
-  _SKIP_STEPS: ""
   _BENCHMARK_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process read:read_rand_multi_process"
+  _BUCKET_TYPES: "regional zonal hns"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -34,6 +34,7 @@ steps:
         echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
         echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
         echo "export BENCHMARK_CONFIG='${_BENCHMARK_CONFIG}'" >> /workspace/build_vars.env
+        echo "export BUCKET_TYPES='${_BUCKET_TYPES}'" >> /workspace/build_vars.env
         echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
         echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
@@ -50,17 +51,19 @@ steps:
     args:
       - "-c"
       - |
-        if [[ ",${_SKIP_STEPS}," == *",create-buckets,"* ]]; then
-          echo "--- Skipping step: create-buckets ---"
-          exit 0
-        fi
         set -e
         source /workspace/build_vars.env
 
         # Create Test Buckets, in parallel
-        gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} &
-        gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
-        gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        if [[ " ${BUCKET_TYPES} " =~ " regional " ]]; then
+          gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} &
+        fi
+        if [[ " ${BUCKET_TYPES} " =~ " zonal " ]]; then
+          gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
+        if [[ " ${BUCKET_TYPES} " =~ " hns " ]]; then
+          gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
 
         # Create HNS Results Bucket (Persistent)
         if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
@@ -79,10 +82,6 @@ steps:
     args:
       - "-c"
       - |
-        if [[ ",${_SKIP_STEPS}," == *",create-vm,"* ]]; then
-          echo "--- Skipping step: create-vm ---"
-          exit 0
-        fi
         set -e
         source /workspace/build_vars.env
 
@@ -112,10 +111,6 @@ steps:
     args:
       - "-c"
       - |
-        if [[ ",${_SKIP_STEPS}," == *",run-benchmarks,"* ]]; then
-          echo "--- Skipping step: run-benchmarks ---"
-          exit 0
-        fi
         bash cloudbuild/run_benchmarks.sh
     waitFor:
       - "create-vm"
@@ -144,10 +139,6 @@ steps:
     args:
       - "-c"
       - |
-        if [[ ",${_SKIP_STEPS}," == *",cleanup-vm,"* ]]; then
-          echo "--- Skipping step: cleanup-vm ---"
-          exit 0
-        fi
         source /workspace/build_vars.env
 
         gcloud compute instances delete "$$VM_NAME" \
@@ -164,17 +155,19 @@ steps:
     args:
       - "-c"
       - |
-        if [[ ",${_SKIP_STEPS}," == *",delete-buckets,"* ]]; then
-          echo "--- Skipping step: delete-buckets ---"
-          exit 0
-        fi
         set -e
         source /workspace/build_vars.env
 
         # Delete Test Buckets, in parallel
-        gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
-        gcloud storage rm --recursive gs://$$ZONAL_BUCKET &
-        gcloud storage rm --recursive gs://$$HNS_BUCKET &
+        if [[ " ${BUCKET_TYPES} " =~ " regional " ]]; then
+          gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
+        fi
+        if [[ " ${BUCKET_TYPES} " =~ " zonal " ]]; then
+          gcloud storage rm --recursive gs://$$ZONAL_BUCKET &
+        fi
+        if [[ " ${BUCKET_TYPES} " =~ " hns " ]]; then
+          gcloud storage rm --recursive gs://$$HNS_BUCKET &
+        fi
         wait
     waitFor:
       - "run-benchmarks"

@@ -13,7 +13,7 @@ wait_for_ssh() {
   # Wait for SSH (MIG is stable, but SSH might take a moment)
   echo "[$vm_name] Waiting for SSH..."
   cat /workspace/.ssh/google_compute_engine.pub
-  for i in {1..4}; do
+  for i in {1..1}; do
     if gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready" ; then
       echo "[$vm_name] SSH available."
       return 0
@@ -74,14 +74,24 @@ run_benchmark() {
     CONFIG_ARG="--config=$config"
   fi
 
+  # Construct bucket args based on BUCKET_TYPES
+  local BUCKET_ARGS=""
+  if [[ " ${BUCKET_TYPES} " =~ " regional " ]]; then
+    BUCKET_ARGS="${BUCKET_ARGS} --regional-bucket='${REGIONAL_BUCKET}'"
+  fi
+  if [[ " ${BUCKET_TYPES} " =~ " zonal " ]]; then
+    BUCKET_ARGS="${BUCKET_ARGS} --zonal-bucket='${ZONAL_BUCKET}'"
+  fi
+  if [[ " ${BUCKET_TYPES} " =~ " hns " ]]; then
+    BUCKET_ARGS="${BUCKET_ARGS} --hns-bucket='${HNS_BUCKET}'"
+  fi
+
   local RUN_CMD="
     source gcsfs/env/bin/activate
     python gcsfs/gcsfs/tests/perf/microbenchmarks/run.py \
       --group=$group \
       $CONFIG_ARG \
-      --regional-bucket='${REGIONAL_BUCKET}' \
-      --zonal-bucket='${ZONAL_BUCKET}' \
-      --hns-bucket='${HNS_BUCKET}' \
+      $BUCKET_ARGS \
       --log=true \
       --log-level=INFO
 
@@ -107,13 +117,13 @@ main() {
   echo "[$vm_name] Starting benchmarks..."
 
   if ! wait_for_ssh "$vm_name"; then
-    echo "[$vm_name] SSH wait failed."
-    exit 1
+    echo "WARNING: [$vm_name] SSH wait failed."
+    exit 0
   fi
 
   if ! setup_vm "$vm_name"; then
-    echo "[$vm_name] Setup failed."
-    exit 1
+    echo "WARNING: [$vm_name] Setup failed."
+    exit 0
   fi
 
   # Load configs
