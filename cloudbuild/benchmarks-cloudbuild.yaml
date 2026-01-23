@@ -89,9 +89,9 @@ steps:
     args:
       - "-c"
       - |
-        IFS=' ' read -r -a CONFIG_ARRAY <<< "$_BENCHMARK_FANOUT_CONFIG"
-        echo "export NUM_VMS=${#CONFIG_ARRAY[@]}" >> /workspace/build_vars.env
-        echo "Calculated NUM_VMS: ${#CONFIG_ARRAY[@]}"
+        IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_FANOUT_CONFIG}"
+        echo "export NUM_VMS=$${#CONFIG_ARRAY[@]}" >> /workspace/build_vars.env
+        echo "Calculated NUM_VMS: $${#CONFIG_ARRAY[@]}"
     waitFor: ["init-variables"]
 
   # 5. Create Instance Group based on count.
@@ -230,4 +230,4 @@ timeout: "7200s" # 2 hours
 options:
   logging: CLOUD_LOGGING_ONLY
   pool:
-    name: "projects/${_PROJECT_ID}/locations/${_ZONE::-2}/workerPools/cloud-build-worker-pool"
+    name: "projects/${_PROJECT_ID}/locations/us-central1/workerPools/cloud-build-worker-pool"
