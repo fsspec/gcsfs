@@ -35,7 +35,7 @@ steps:
         # Define shared variables
         echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
         echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
-        echo "export BENCHMARK_FANOUT_CONFIG=${_BENCHMARK_FANOUT_CONFIG}" >> /workspace/build_vars.env
+        echo "export BENCHMARK_FANOUT_CONFIG='${_BENCHMARK_FANOUT_CONFIG}'" >> /workspace/build_vars.env
         echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
         echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export REGIONAL_BUCKET=${_BUCKET_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
