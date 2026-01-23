@@ -1,6 +1,6 @@
 import pytest
 
-from gcsfs.caching import ReadAheadV2
+from gcsfs.caching import ReadAheadChunked
 
 
 class MockVectorFetcher:
@@ -32,7 +32,7 @@ def cache_setup(source_data):
     """Returns a tuple of (cache_instance, fetcher_mock)."""
     fetcher = MockVectorFetcher(source_data)
     # Blocksize 10, File size 100
-    cache = ReadAheadV2(blocksize=10, fetcher=fetcher, size=100)
+    cache = ReadAheadChunked(blocksize=10, fetcher=fetcher, size=100)
     return cache, fetcher
 
 

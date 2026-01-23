@@ -3,7 +3,7 @@ from collections import deque
 from fsspec.caching import BaseCache, register_cache
 
 
-class ReadAheadV2(BaseCache):
+class ReadAheadChunked(BaseCache):
     """
     An optimized ReadAhead cache that fetches multiple chunks in a single
     HTTP request but manages them as separate bytes objects to avoid
@@ -17,7 +17,7 @@ class ReadAheadV2(BaseCache):
     chunks until a new fetch is required.
     """
 
-    name = "readahead_v2"
+    name = "readahead_chunked"
 
     def __init__(self, blocksize: int, fetcher, size: int) -> None:
         super().__init__(blocksize, fetcher, size)
@@ -31,7 +31,7 @@ class ReadAheadV2(BaseCache):
 
         WARNING: Accessing this property forces a memory copy of the
         entire current buffer, negating the Zero-Copy optimization
-        of ReadAheadV2. Use for debugging/testing only.
+        of ReadAheadChunked. Use for debugging/testing only.
         """
         if not self.chunks:
             return b""
@@ -118,4 +118,4 @@ class ReadAheadV2(BaseCache):
         return b"".join(parts)
 
 
-register_cache(ReadAheadV2, clobber=True)
+register_cache(ReadAheadChunked, clobber=True)
