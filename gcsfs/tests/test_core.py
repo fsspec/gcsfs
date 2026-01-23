@@ -1224,6 +1224,7 @@ def test_pseudo_dir_find(gcs):
 
 
 def test_zero_cache_timeout(gcs):
+    gcs.dircache.listings_expiry_time = 0
     gcs.touch(f"gs://{TEST_BUCKET}/a/file")
     gcs.find(f"gs://{TEST_BUCKET}/a/")
     gcs.info(f"gs://{TEST_BUCKET}/a/file")
@@ -1276,6 +1277,18 @@ def test_find_dircache(gcs):
         f"{TEST_BUCKET}/nested/file2",
         f"{TEST_BUCKET}/nested/nested2",
     }
+
+
+def test_find_dircache_trailing_slash(gcs):
+    path = f"{TEST_BUCKET}/trailing_slash"
+    gcs.touch(f"{path}/file")
+    gcs.invalidate_cache()
+
+    gcs.find(f"{path}/")
+
+    assert path in gcs.dircache
+    assert len(gcs.dircache[path]) == 1
+    assert gcs.dircache[path][0]["name"] == f"{path}/file"
 
 
 def test_percent_file_name(gcs):

@@ -3,6 +3,7 @@ import logging
 import os
 from enum import Enum
 from functools import partial
+from glob import has_magic
 
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
@@ -437,6 +438,21 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     mv = asyn.sync_wrapper(_mv)
 
+    async def _list_objects(self, path, prefix="", versions=False, **kwargs):
+        try:
+            return await super()._list_objects(
+                path, prefix=prefix, versions=versions, **kwargs
+            )
+        except FileNotFoundError:
+            bucket, key, _ = self.split_path(path)
+            if key and await self._is_bucket_hns_enabled(bucket):
+                try:
+                    await self._get_directory_info(path, bucket, key, None)
+                    return []
+                except (FileNotFoundError, Exception):
+                    pass
+            raise
+
     async def _mkdir(
         self, path, create_parents=False, enable_hierarchical_namespace=False, **kwargs
     ):
@@ -638,6 +654,182 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             raise
 
     rmdir = asyn.sync_wrapper(_rmdir)
+
+    # TODO: This method is only added to be used in rm method, can be deleted once
+    # rm method is integrated with recursive API
+    async def _expand_path_with_details(
+        self, path, recursive=False, maxdepth=None, detail=False
+    ):
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+
+        if isinstance(path, str):
+            out = await self._expand_path_with_details(
+                [path], recursive, maxdepth, detail=detail
+            )
+        else:
+            out = {} if detail else set()
+            path = [self._strip_protocol(p) for p in path]
+
+            for p in path:
+                if has_magic(p):
+                    bit = await self._glob(p, maxdepth=maxdepth, detail=detail)
+                    if detail:
+                        out.update(bit)
+                        bit_paths = list(bit.keys())
+                    else:
+                        bit_set = set(bit)
+                        out |= bit_set
+                        bit_paths = list(bit_set)
+
+                    if recursive:
+                        if maxdepth is not None and maxdepth <= 1:
+                            continue
+                        rec = await self._expand_path_with_details(
+                            bit_paths,
+                            recursive=recursive,
+                            maxdepth=maxdepth - 1 if maxdepth is not None else None,
+                            detail=detail,
+                        )
+                        if detail:
+                            for info in rec:
+                                out[info["name"]] = info
+                        else:
+                            out |= set(rec)
+                    continue
+                elif recursive:
+                    rec = await self._find(
+                        p, maxdepth=maxdepth, withdirs=True, detail=detail
+                    )
+                    if detail:
+                        out.update(rec)
+                    else:
+                        out |= set(rec)
+
+                if p not in out:
+                    if detail:
+                        try:
+                            info = await self._info(p)
+                            out[p] = info
+                        except (FileNotFoundError, OSError):
+                            pass
+                    elif recursive is False or (await self._exists(p)):
+                        out.add(p)
+
+            if detail:
+                out = list(out.values())
+            else:
+                out = sorted(out)
+
+        if not out:
+            raise FileNotFoundError(path)
+        return out
+
+    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+        """
+        Deletes files and directories.
+
+        This method overrides the parent `_rm` to correctly handle directory
+        deletion in HNS-enabled buckets. For non-HNS buckets, it falls back
+        to the parent implementation.
+
+        For HNS buckets, it first expands the path to get a list of all files
+        and directories, then categorizes them. It deletes files in batches
+        and then deletes directories individually.
+
+        Args:
+            path (str or list): The path(s) to delete.
+            recursive (bool): If True, deletes directories and their contents.
+            maxdepth (int, optional): The maximum depth to traverse for deletion.
+            batchsize (int): The number of files to delete in a single batch request.
+        """
+        if isinstance(path, list):
+            # For HNS check, we can check for bucket type from the first path.
+            bucket, _, _ = self.split_path(path[0]) if path else (None, None, None)
+        else:
+            bucket, _, _ = self.split_path(path)
+
+        is_hns = await self._is_bucket_hns_enabled(bucket)
+
+        if not is_hns:
+            # Fall back to the parent's async rm implementation for non-HNS buckets.
+            return await super()._rm(
+                path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
+            )
+
+        paths = await self._expand_path_with_details(
+            path, recursive=recursive, maxdepth=maxdepth, detail=True
+        )
+
+        # Separate files and directories based on their type.
+        # Directories must be deleted from the deepest first.
+        files = list({p["name"] for p in paths if p["type"] == "file"})
+        dirs = sorted(
+            list({p["name"] for p in paths if p["type"] == "directory"}),
+            reverse=True,
+        )
+
+        return await self._perform_rm(files, dirs, path, batchsize=batchsize)
+
+    async def _perform_rm(self, files, dirs, path, batchsize):
+        """
+        Helper method to perform the deletion of files and directories.
+
+        Args:
+            files (list[str]): A list of file paths to delete.
+            dirs (list[str]): A list of directory paths to delete, sorted from
+                              deepest to shallowest.
+            path (str): The original path for the rm operation, for error reporting.
+            batchsize (int): The number of files to delete in a single batch request.
+
+        Returns:
+            list: A list of exceptions that occurred during deletion.
+        """
+        # If no files or directories were found to delete, raise FileNotFoundError.
+        if not files and not dirs:
+            raise FileNotFoundError(path)
+
+        exs = await self._delete_files(files, batchsize)
+        # For directories, we must delete them from deepest to shallowest
+        # to avoid race conditions where a parent is deleted before its child.
+        # We group directories by depth and delete them level by level.
+        dirs_by_depth = {}
+        for d in dirs:
+            depth = d.count("/")
+            dirs_by_depth.setdefault(depth, []).append(d)
+
+        for depth in sorted(dirs_by_depth.keys(), reverse=True):
+            level_dirs = dirs_by_depth[depth]
+            results = await asyn._run_coros_in_chunks(
+                [self._rmdir(d) for d in level_dirs],
+                batch_size=batchsize,
+                return_exceptions=True,
+            )
+            for res in results:
+                if isinstance(res, Exception):
+                    exs.append(res)
+
+        errors = [
+            ex
+            for ex in exs
+            if isinstance(ex, Exception)
+            and not isinstance(ex, (FileNotFoundError, api_exceptions.NotFound))
+            and "No such object" not in str(ex)
+        ]
+        if errors:
+            raise errors[0]
+
+        # Filter out non-critical "not found" errors from the final list.
+        # A successful rm should return an empty list.
+        return [
+            e
+            for e in exs
+            if e is not None
+            and not isinstance(e, (FileNotFoundError, api_exceptions.NotFound))
+            and "No such object" not in str(e)
+        ]
+
+    rm = asyn.sync_wrapper(_rm)
 
     async def _find(
         self,

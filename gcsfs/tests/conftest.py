@@ -204,7 +204,7 @@ def _cleanup_gcs(gcs, bucket=TEST_BUCKET):
     """Clean the bucket contents, logging a warning on failure."""
     try:
         if gcs.exists(bucket):
-            files_to_delete = gcs.find(bucket)
+            files_to_delete = gcs.find(bucket, withdirs=True)
             if files_to_delete:
                 gcs.rm(files_to_delete)
     except Exception as e:
@@ -393,7 +393,9 @@ def zonal_write_mocks():
     mock_aaow.offset = 0
     mock_aaow._is_stream_open = True
     mock_init_aaow = mock.AsyncMock(return_value=mock_aaow)
-    mock_gcsfs_info = mock.AsyncMock(return_value={"generation": "12345"})
+    mock_gcsfs_info = mock.AsyncMock(
+        return_value={"generation": "12345", "type": "file", "name": "mock_file"}
+    )
 
     async def append_side_effect(data):
         mock_aaow.offset += len(data)
