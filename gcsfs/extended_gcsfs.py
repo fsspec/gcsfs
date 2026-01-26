@@ -14,6 +14,7 @@ from google.api_core.client_info import ClientInfo
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
+    _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
 )
 from google.cloud.storage.asyncio.async_grpc_client import AsyncGrpcClient
@@ -23,7 +24,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
-from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile, GCSFileSystem
 from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
@@ -173,11 +174,23 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_type = self._sync_lookup_bucket_type(bucket)
+
+        # Choose correct block_size if not explicitly provided
+        if block_size is None:
+            block_size = self.default_block_size
+            # If we are using the generic default (user didn't override it),
+            # switch to the Zonal-optimized default for Zonal buckets.
+            if (
+                bucket_type == BucketType.ZONAL_HIERARCHICAL
+                and block_size == DEFAULT_BLOCK_SIZE
+            ):
+                block_size = _DEFAULT_FLUSH_INTERVAL_BYTES
+
         return gcs_file_types[bucket_type](
             self,
             path,
             mode,
-            block_size=block_size or self.default_block_size,
+            block_size=block_size,
             cache_options=cache_options,
             consistency=consistency or self.consistency,
             metadata=metadata,

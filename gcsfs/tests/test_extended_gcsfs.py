@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 from google.api_core.exceptions import NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
+    _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
 )
 from google.cloud.storage.asyncio.async_multi_range_downloader import (
@@ -228,13 +229,18 @@ def test_open_uses_correct_blocksize_and_consistency_for_all_bucket_types(
 def test_open_uses_default_blocksize_and_consistency_from_fs(
     extended_gcsfs, gcs_bucket_mocks, bucket_type_val
 ):
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot mock bucket_types on real GCS")
     csv_file = "2014-01-01.csv"
     csv_file_path = f"{TEST_ZONAL_BUCKET}/{csv_file}"
     csv_data = csv_files[csv_file]
 
     with gcs_bucket_mocks(csv_data, bucket_type_val=bucket_type_val):
         with extended_gcsfs.open(csv_file_path, "rb") as f:
-            assert f.blocksize == extended_gcsfs.default_block_size
+            if bucket_type_val == BucketType.ZONAL_HIERARCHICAL:
+                assert f.blocksize == _DEFAULT_FLUSH_INTERVAL_BYTES
+            else:
+                assert f.blocksize == extended_gcsfs.default_block_size
             assert type(f.checker) is ConsistencyChecker
 
 
