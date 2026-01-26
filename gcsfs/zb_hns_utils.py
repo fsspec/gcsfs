@@ -1,9 +1,12 @@
+import logging
 from io import BytesIO
 
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
 )
+
+logger = logging.getLogger("gcsfs")
 
 
 async def download_range(offset, length, mrd):
@@ -15,7 +18,11 @@ async def download_range(offset, length, mrd):
         return b""
     buffer = BytesIO()
     await mrd.download_ranges([(offset, length, buffer)])
-    return buffer.getvalue()
+    data = buffer.getvalue()
+    logger.info(
+        f"Requested {length} bytes from offset {offset}, downloaded {len(data)} bytes"
+    )
+    return data
 
 
 async def init_aaow(
