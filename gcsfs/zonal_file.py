@@ -185,7 +185,7 @@ class ZonalFile(GCSFile):
         if self.closed:
             raise ValueError("I/O operation on closed file.")
         if not self.writable():
-            raise ValueError("File not in write mode")
+            raise ValueError("File not in write mode.")
         if self.forced:
             raise ValueError("This file has been force-flushed, can only close")
 
@@ -217,10 +217,12 @@ class ZonalFile(GCSFile):
         Commits the write by finalizing the AsyncAppendableObjectWriter.
         """
         if not self.writable():  # No-op
-            logger.warning("File not in write mode.")
+            logger.warning("File not in write mode. Ignoring commit call.")
             return
         if self.finalized:  # No-op
-            logger.warning("This file has already been finalized.")
+            logger.warning(
+                "This file has already been finalized. Ignoring commit call."
+            )
             return
         asyn.sync(self.gcsfs.loop, self.aaow.finalize)
         self.finalized = True

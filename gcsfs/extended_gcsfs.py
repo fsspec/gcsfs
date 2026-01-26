@@ -1214,6 +1214,24 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         self.invalidate_cache(self._parent(path))
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
+        """
+        Downloads a file from GCS to a local path.
+
+        For Zonal buckets, it uses gRPC client for optimized downloads.
+        For Standard buckets, it delegates to the parent class implementation.
+
+        Parameters
+        ----------
+        rpath: str
+            Path on GCS to download the file from.
+        lpath: str
+            Path to the local file to be downloaded.
+        callback: fsspec.callbacks.Callback, optional
+            Callback to monitor the download progress.
+        **kwargs:
+            For Zonal buckets, `chunksize` bytes (int) can be provided to control
+            the download chunk size (default is 128KB).
+        """
         bucket, key, generation = self.split_path(rpath)
         if not await self._is_zonal_bucket(bucket):
             return await super()._get_file(
@@ -1282,6 +1300,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         versions=False,
         **kwargs,
     ):
+        """
+        Lists objects in a bucket.
+
+        For HNS-enabled buckets, it sets `includeFoldersAsPrefixes` to True
+        when the delimiter is '/'.
+        """
         bucket, _, _ = self.split_path(path)
         if await self._is_bucket_hns_enabled(bucket) and delimiter == "/":
             kwargs["includeFoldersAsPrefixes"] = "true"

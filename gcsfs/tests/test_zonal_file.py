@@ -214,7 +214,7 @@ def test_zonal_file_double_finalize_warning(
         with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
             f.commit()
         mock_logger.warning.assert_called_once_with(
-            "This file has already been finalized."
+            "This file has already been finalized. Ignoring commit call."
         )
 
 
