@@ -77,7 +77,7 @@ class ZonalFile(GCSFile):
                     "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )
-        elif "w" or "a" in self.mode:
+        elif "w" in self.mode or "a" in self.mode:
             self.aaow = asyn.sync(
                 self.gcsfs.loop,
                 self._init_aaow,
