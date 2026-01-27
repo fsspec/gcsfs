@@ -104,41 +104,46 @@ steps:
             --quiet
     waitFor: ["init-variables"]
 
-  # 5. Wait for SSH.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "wait-for-ssh"
-    entrypoint: "bash"
-    args:
-      - "-c"
-      - |
-        set -e
-        source /workspace/build_vars.env
-
-        echo "Waiting for SSH on VM: $${VM_NAME}"
-        for i in {1..3}; do
-          if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
-            echo "SSH is ready."
-            exit 0
-          fi
-          echo "Waiting for VM to become available... (attempt $$i/3)"
-          sleep 15
-        done
-        echo "Timeout waiting for SSH."
-        exit 1
-    waitFor: ["create-vm"]
-
-  # 6. Setup VM.
+  # 5. Setup VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "setup-vm"
     entrypoint: "bash"
     args:
       - "-c"
       - |
+        if [ -f /workspace/failure ]; then exit 1; fi
         set -e
         source /workspace/build_vars.env
+        trap 'touch /workspace/failure' ERR
+
+        echo "Waiting for SSH on VM: $${VM_NAME}"
+        SSH_READY=false
+        for i in {1..3}; do
+          if gcloud compute ssh $$VM_NAME --project=${_PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
+            echo "SSH is ready."
+            SSH_READY=true
+            break
+          fi
+          echo "Waiting for VM to become available... (attempt $$i/3)"
+          sleep 15
+        done
+
+        if [ "$SSH_READY" = false ]; then
+            echo "Timeout waiting for SSH."
+            touch /workspace/failure
+            exit 1
+        fi
 
         echo "[$${VM_NAME}] Copying source code..."
-        gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine
+        if gcloud compute scp --recurse . $${VM_NAME}:~/gcsfs --project=${_PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
+          echo "Source code copied successfully."
+        else
+          echo "Failed to copy source code."
+          touch /workspace/failure
+          exit 1
+        fi
+
+        echo "[$${VM_NAME}] Installing dependencies..."
 
         SETUP_SCRIPT="
           set -e
@@ -154,18 +159,27 @@ steps:
           pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
         "
 
-        gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"
-    waitFor: ["wait-for-ssh"]
+        if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"; then
+          echo "Dependencies installed successfully."
+        else
+          echo "Failed to install dependencies."
+          touch /workspace/failure
+          exit 1
+        fi
+    waitFor: ["create-vm"]
 
-  # 7. Run Benchmarks.
+  # 6. Run Benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-benchmarks"
+    allowFailure: true
     entrypoint: "bash"
     args:
       - "-c"
       - |
+        if [ -f /workspace/failure ]; then exit 1; fi
         set -e
         source /workspace/build_vars.env
+        trap 'touch /workspace/failure' ERR
 
         IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_CONFIG}"
         failures=0
@@ -217,7 +231,9 @@ steps:
         done
 
         if [ "$${failures:-0}" -ne 0 ]; then
-          echo "WARNING: $$failures benchmark jobs failed. Returning success to proceed with cleanup."
+          echo "ERROR: $$failures benchmark jobs failed."
+          touch /workspace/failure
+          exit 1
         else
           echo "All benchmarks completed successfully."
         fi
@@ -281,6 +297,22 @@ steps:
         wait
     waitFor:
       - "run-benchmarks"
+
+  # 11. Check for failures.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-failure"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [ -f /workspace/failure ]; then
+          echo "Build failed. See previous steps for details."
+          exit 1
+        fi
+        echo "Build successful."
+    waitFor:
+      - "cleanup-vm"
+      - "delete-buckets"
 
 timeout: "14400s" # 2 hours
 
