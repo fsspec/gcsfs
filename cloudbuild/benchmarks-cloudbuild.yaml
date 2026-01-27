@@ -106,7 +106,7 @@ steps:
 
   # 5. Setup VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "setup-vm"
+    id: "setup-and-run-benchmarks"
     allowFailure: true
     entrypoint: "bash"
     args:
@@ -173,21 +173,8 @@ steps:
           touch /workspace/failure
           exit 1
         fi
-    waitFor: ["create-vm"]
 
-  # 6. Run Benchmarks.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "run-benchmarks"
-    allowFailure: true
-    entrypoint: "bash"
-    args:
-      - "-c"
-      - |
-        if [ -f /workspace/failure ]; then exit 1; fi
-        set -e
-        source /workspace/build_vars.env
-        trap 'touch /workspace/failure' ERR
-
+        # --- Run Benchmarks ---
         IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_CONFIG}"
         failures=0
 
@@ -217,16 +204,16 @@ steps:
           echo "Running benchmarks with config: $$CONFIG_ARG for bucket(s): $$BUCKET_ARGS"
 
           RUN_SCRIPT="
-            echo "Running benchmarks script"
+            echo \"Running benchmarks script\"
 
             set -e
-            echo "Entering gcsfs directory"
+            echo \"Entering gcsfs directory\"
             cd gcsfs
             ls
-            echo "Activating virtual environment"
+            echo \"Activating virtual environment\"
             source env/bin/activate
 
-            echo "Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO"
+            echo \"Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO\"
             python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
 
             echo '--- Uploading Results ---'
@@ -241,7 +228,7 @@ steps:
           "
 
           if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
-            echo "All benchmarks completed successfully."
+            echo "Benchmark $$group:$$config completed successfully."
           else
             echo "Benchmark $$group:$$config failed."
             failures=$$((failures+1))
@@ -255,9 +242,11 @@ steps:
           echo "ERROR: $$failures benchmark jobs failed."
           touch /workspace/failure
           exit 1
+        else
+          echo "All benchmarks completed successfully."
         fi
     waitFor:
-      - "setup-vm"
+      - "create-vm"
       - "create-buckets"
       - "generate-ssh-key"
 
@@ -273,7 +262,7 @@ steps:
         gcloud compute os-login ssh-keys remove \
           --key-file=/workspace/gcb_ssh_key.pub || true
     waitFor:
-      - "run-benchmarks"
+      - "setup-and-run-benchmarks"
 
   # 9. Delete VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -312,7 +301,7 @@ steps:
         fi
         wait
     waitFor:
-      - "run-benchmarks"
+      - "setup-and-run-benchmarks"
 
   # 11. Check for failures.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
