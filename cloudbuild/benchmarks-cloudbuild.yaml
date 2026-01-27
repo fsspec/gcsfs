@@ -217,8 +217,12 @@ steps:
           echo "Running benchmarks with config: $$CONFIG_ARG for bucket(s): $$BUCKET_ARGS"
 
           RUN_SCRIPT="
+            echo "Running benchmarks script"
+
             set -e
+            echo "Entering gcsfs directory"
             cd gcsfs
+            echo "Activating virtual environment"
             source env/bin/activate
 
             echo "Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO"
