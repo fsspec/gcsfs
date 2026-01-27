@@ -135,13 +135,20 @@ steps:
             exit 1
         fi
 
-        echo "[$${VM_NAME}] Packaging and copying source code..."
-        # Tar source code to avoid copying venv symlinks/artifacts that cause scp errors
-        tar -czf /workspace/source.tar.gz --exclude-vcs --exclude='venv*' --exclude='__pycache__' --exclude='*.pyc' .
-        if gcloud compute scp /workspace/source.tar.gz $${VM_NAME}:~/source.tar.gz --project=${_PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
-          echo "Source code archive copied successfully."
+            exit 1
+        fi
+
+        echo "[$${VM_NAME}] Creating remote directory..."
+        gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="mkdir -p ~/gcsfs"
+
+        echo "[$${VM_NAME}] Copying source code..."
+        # Use GLOBIGNORE to exclude venv and other artifacts from wildcard expansion
+        shopt -s extglob dotglob
+        export GLOBIGNORE="venv*:__pycache__:.git:*.pyc:failure"
+        if gcloud compute scp --recurse * $${VM_NAME}:~/gcsfs --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
+          echo "Source code copied successfully."
         else
-          echo "Failed to copy source code archive."
+          echo "Failed to copy source code."
           touch /workspace/failure
           exit 1
         fi
