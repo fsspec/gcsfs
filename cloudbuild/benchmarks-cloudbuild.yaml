@@ -217,14 +217,6 @@ steps:
             python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
 
             echo '--- Uploading Results ---'
-            DATE_DIR=\$(date +%d%m%Y)
-            RESULTS_DIR='gcsfs/tests/perf/microbenchmarks/__run__'
-            if [ -d \\"\$$RESULTS_DIR\\" ]; then
-              echo \\"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/\\"
-              cd \\"\$$RESULTS_DIR\\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/ && rm -rf *
-            else
-              echo \\"No results directory found at \$$RESULTS_DIR\\"
-            fi
           "
 
           if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
