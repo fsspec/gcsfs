@@ -4,7 +4,7 @@ substitutions:
   _ZONE: "us-central1-a"
   _INFRA_PREFIX: "gcsfs-perf"
   _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
-  _BENCHMARK_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process read:read_rand_multi_process"
+  _BENCHMARK_CONFIG: "read:read_seq,read_rand rename:rename_flat"
   _BUCKET_TYPES: "zonal"
 
 steps:
@@ -193,7 +193,7 @@ steps:
             BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
           fi
 
-          RUN_CMD="
+          RUN_SCRIPT="
             source gcsfs/env/bin/activate
             python gcsfs/gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
             echo '--- Uploading Results ---'
@@ -207,7 +207,7 @@ steps:
             fi
           "
 
-          if ! gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_CMD"; then
+          if ! gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
             echo "Benchmark $$group:$$config failed."
             failures=$$((failures+1))
           fi
