@@ -214,7 +214,10 @@ steps:
             BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
           fi
 
+          echo "Running benchmarks with config: $$CONFIG_ARG for bucket(s): $$BUCKET_ARGS"
+
           RUN_SCRIPT="
+            set -e
             cd gcsfs
             source env/bin/activate
 
