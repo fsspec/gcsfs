@@ -107,6 +107,7 @@ steps:
   # 5. Setup VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "setup-vm"
+    allowFailure: true
     entrypoint: "bash"
     args:
       - "-c"
@@ -258,7 +259,6 @@ steps:
       - "run-benchmarks"
 
   # 9. Delete VM.
-  # Delete VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-vm"
     entrypoint: "bash"
@@ -275,7 +275,6 @@ steps:
       - "cleanup-ssh-key"
 
   # 10. Delete all GCS buckets.
-  # Delete all GCS buckets.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-buckets"
     entrypoint: "bash"
