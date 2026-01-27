@@ -222,6 +222,7 @@ steps:
             set -e
             echo "Entering gcsfs directory"
             cd gcsfs
+            ls
             echo "Activating virtual environment"
             source env/bin/activate
 
@@ -230,7 +231,7 @@ steps:
 
             echo '--- Uploading Results ---'
             DATE_DIR=\$(date +%d%m%Y)
-            RESULTS_DIR='gcsfs/gcsfs/tests/perf/microbenchmarks/__run__'
+            RESULTS_DIR='gcsfs/tests/perf/microbenchmarks/__run__'
             if [ -d \\"\$$RESULTS_DIR\\" ]; then
               echo \\"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/\\"
               cd \\"\$$RESULTS_DIR\\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/ && rm -rf *
@@ -239,7 +240,9 @@ steps:
             fi
           "
 
-          if ! gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
+          if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
+            echo "All benchmarks completed successfully."
+          else
             echo "Benchmark $$group:$$config failed."
             failures=$$((failures+1))
           fi
@@ -252,8 +255,6 @@ steps:
           echo "ERROR: $$failures benchmark jobs failed."
           touch /workspace/failure
           exit 1
-        else
-          echo "All benchmarks completed successfully."
         fi
     waitFor:
       - "setup-vm"
