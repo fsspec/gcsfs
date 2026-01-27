@@ -151,23 +151,19 @@ steps:
 
         SETUP_SCRIPT="
           set -e
-          sudo apt-get update
+          sudo apt-get update > /dev/null
           echo '--- Installing python and other dependencies on VM ---'
-          sudo apt-get install -y python3-pip python3-venv git
-          echo '--- Entering GCSFS source folder ---'
+          sudo apt-get install -y python3-pip python3-venv git > /dev/null
           cd gcsfs
-          ls
-
-          echo '--- Creating virtual environment ---'
           python3 -m venv env
           source env/bin/activate
           echo '--- Installing pip packages ---'
-          pip install --upgrade pip
-          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage
+          pip install --upgrade pip > /dev/null
+          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
           echo '--- Installing GCSFS packages ---'
-          pip install -e .
+          pip install -e . > /dev/null
           echo '--- Installing requirements for benchmarks ---'
-          pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
+          pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
         "
 
         if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"; then
@@ -219,8 +215,12 @@ steps:
           fi
 
           RUN_SCRIPT="
-            source gcsfs/env/bin/activate
-            python gcsfs/gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+            cd gcsfs
+            source env/bin/activate
+
+            echo "Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO"
+            python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+
             echo '--- Uploading Results ---'
             DATE_DIR=\$(date +%d%m%Y)
             RESULTS_DIR='gcsfs/gcsfs/tests/perf/microbenchmarks/__run__'
