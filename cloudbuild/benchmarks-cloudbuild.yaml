@@ -117,7 +117,7 @@ steps:
         source /workspace/build_vars.env
         trap 'touch /workspace/failure' ERR
 
-        echo "Waiting for SSH on VM: $${VM_NAME}"
+        echo "Waiting for SSH on VM: $${VM_NAME}... (attempt 1/3)"
         SSH_READY=false
         for i in {1..3}; do
           if gcloud compute ssh $$VM_NAME --project=${_PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
@@ -125,7 +125,7 @@ steps:
             SSH_READY=true
             break
           fi
-          echo "Waiting for VM to become available... (attempt $$i/3)"
+          echo "Waiting for VM to become available... (attempt $${i+1}/3)"
           sleep 15
         done
 
@@ -135,11 +135,13 @@ steps:
             exit 1
         fi
 
-        echo "[$${VM_NAME}] Copying source code..."
-        if gcloud compute scp --recurse . $${VM_NAME}:~/gcsfs --project=${_PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
-          echo "Source code copied successfully."
+        echo "[$${VM_NAME}] Packaging and copying source code..."
+        # Tar source code to avoid copying venv symlinks/artifacts that cause scp errors
+        tar -czf /workspace/source.tar.gz --exclude-vcs --exclude='venv*' --exclude='__pycache__' --exclude='*.pyc' .
+        if gcloud compute scp /workspace/source.tar.gz $${VM_NAME}:~/source.tar.gz --project=${_PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
+          echo "Source code archive copied successfully."
         else
-          echo "Failed to copy source code."
+          echo "Failed to copy source code archive."
           touch /workspace/failure
           exit 1
         fi
@@ -148,6 +150,8 @@ steps:
 
         SETUP_SCRIPT="
           set -e
+          mkdir -p ~/gcsfs
+          tar -xzf ~/source.tar.gz -C ~/gcsfs
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update > /dev/null
           sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git > /dev/null
