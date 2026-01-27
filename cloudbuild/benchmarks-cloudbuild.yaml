@@ -32,6 +32,7 @@ steps:
       - |
         SHORT_BUILD_ID=$${BUILD_ID:0:8}
         # Define shared variables
+        touch /workspace/gcsfs-bench-tmp/build_vars.env
         echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/gcsfs-bench-tmp/build_vars.env
         echo "export ZONE=${_ZONE}" >> /workspace/gcsfs-bench-tmp/build_vars.env
         echo "export BENCHMARK_CONFIG='${_BENCHMARK_CONFIG}'" >> /workspace/gcsfs-bench-tmp/build_vars.env
@@ -251,7 +252,6 @@ steps:
   # --- Cleanup Steps ---
 
   # 8. Clean up the SSH key.
-  # Clean up the SSH key.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-ssh-key"
     entrypoint: "bash"
