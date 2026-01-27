@@ -15,10 +15,9 @@ steps:
     args:
       - "-c"
       - |
-        mkdir -p /workspace/gcsfs-bench-tmp
         mkdir -p /workspace/.ssh
         ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
-        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcsfs-bench-tmp/gcb_ssh_key.pub
+        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
     waitFor: ["-"]
 
   # 2. Initialize shared variables.
@@ -32,18 +31,17 @@ steps:
       - |
         SHORT_BUILD_ID=$${BUILD_ID:0:8}
         # Define shared variables
-        touch /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export ZONE=${_ZONE}" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export BENCHMARK_CONFIG='${_BENCHMARK_CONFIG}'" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export BUCKET_TYPES='${_BUCKET_TYPES}'" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export RUN_ID=$${BUILD_ID}" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-results-${_PROJECT_ID}" >> /workspace/gcsfs-bench-tmp/build_vars.env
-        echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/gcsfs-bench-tmp/build_vars.env
+        echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
+        echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
+        echo "export BENCHMARK_CONFIG='${_BENCHMARK_CONFIG}'" >> /workspace/build_vars.env
+        echo "export BUCKET_TYPES='${_BUCKET_TYPES}'" >> /workspace/build_vars.env
+        echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
+        echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-results-${_PROJECT_ID}" >> /workspace/build_vars.env
+        echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
   # 3. Create all necessary GCS buckets in parallel.
@@ -54,7 +52,7 @@ steps:
       - "-c"
       - |
         set -e
-        source /workspace/gcsfs-bench-tmp/build_vars.env
+        source /workspace/build_vars.env
 
         # Create Test Buckets, in parallel
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
@@ -85,7 +83,7 @@ steps:
       - "-c"
       - |
         set -e
-        source /workspace/gcsfs-bench-tmp/build_vars.env
+        source /workspace/build_vars.env
 
         echo "Creating VM: $${VM_NAME}"
         gcloud compute instances create "$$VM_NAME" \
@@ -114,10 +112,10 @@ steps:
     args:
       - "-c"
       - |
-        if [ -f /workspace/gcsfs-bench-tmp/failure ]; then exit 1; fi
+        if [ -f /workspace/failure ]; then exit 1; fi
         set -e
-        source /workspace/gcsfs-bench-tmp/build_vars.env
-        trap 'touch /workspace/gcsfs-bench-tmp/failure' ERR
+        source /workspace/build_vars.env
+        trap 'touch /workspace/failure' ERR
 
         echo "Waiting for SSH on VM: $${VM_NAME}... (attempt 1/3)"
         SSH_READY=false
@@ -133,18 +131,19 @@ steps:
 
         if [ "$$SSH_READY" = false ]; then
             echo "Timeout waiting for SSH."
-            touch /workspace/gcsfs-bench-tmp/failure
+            touch /workspace/failure
             exit 1
         fi
 
-        echo "[$${VM_NAME}] Packaging and copying source code..."
-        # Tar source code excluding tmp dir and other artifacts
-        tar -czf /workspace/gcsfs-bench-tmp/source.tar.gz --exclude="gcsfs-bench-tmp" --exclude=".git" --exclude=".ssh" --exclude="venv*" --exclude="__pycache__" --exclude="*.pyc" .
-        if gcloud compute scp /workspace/gcsfs-bench-tmp/source.tar.gz $${VM_NAME}:~/source.tar.gz --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
-          echo "Source code archive copied successfully."
+        echo "[$${VM_NAME}] Creating remote directory..."
+        gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="mkdir -p ~/gcsfs"
+
+        echo "[$${VM_NAME}] Copying source code..."
+        if gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${_PROJECT_ID}"zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
+          echo "Source code copied successfully."
         else
-          echo "Failed to copy source code archive."
-          touch /workspace/gcsfs-bench-tmp/failure
+          echo "Failed to copy source code."
+          touch /workspace/failure
           exit 1
         fi
 
@@ -152,8 +151,6 @@ steps:
 
         SETUP_SCRIPT="
           set -e
-          mkdir -p ~/gcsfs
-          tar -xzf ~/source.tar.gz -C ~/gcsfs
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update > /dev/null
           sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git > /dev/null
@@ -170,7 +167,7 @@ steps:
           echo "Dependencies installed successfully."
         else
           echo "Failed to install dependencies."
-          touch /workspace/gcsfs-bench-tmp/failure
+          touch /workspace/failure
           exit 1
         fi
     waitFor: ["create-vm"]
@@ -183,10 +180,10 @@ steps:
     args:
       - "-c"
       - |
-        if [ -f /workspace/gcsfs-bench-tmp/failure ]; then exit 1; fi
+        if [ -f /workspace/failure ]; then exit 1; fi
         set -e
-        source /workspace/gcsfs-bench-tmp/build_vars.env
-        trap 'touch /workspace/gcsfs-bench-tmp/failure' ERR
+        source /workspace/build_vars.env
+        trap 'touch /workspace/failure' ERR
 
         IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_CONFIG}"
         failures=0
@@ -239,7 +236,7 @@ steps:
 
         if [ "$${failures:-0}" -ne 0 ]; then
           echo "ERROR: $$failures benchmark jobs failed."
-          touch /workspace/gcsfs-bench-tmp/failure
+          touch /workspace/failure
           exit 1
         else
           echo "All benchmarks completed successfully."
@@ -259,7 +256,7 @@ steps:
       - "-c"
       - |
         gcloud compute os-login ssh-keys remove \
-          --key-file=/workspace/gcsfs-bench-tmp/gcb_ssh_key.pub || true
+          --key-file=/workspace/gcb_ssh_key.pub || true
     waitFor:
       - "run-benchmarks"
 
@@ -270,7 +267,7 @@ steps:
     args:
       - "-c"
       - |
-        source /workspace/gcsfs-bench-tmp/build_vars.env
+        source /workspace/build_vars.env
 
         gcloud compute instances delete "$$VM_NAME" \
             --project="${_PROJECT_ID}" \
@@ -287,7 +284,7 @@ steps:
       - "-c"
       - |
         set -e
-        source /workspace/gcsfs-bench-tmp/build_vars.env
+        source /workspace/build_vars.env
 
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
           gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
@@ -309,7 +306,7 @@ steps:
     args:
       - "-c"
       - |
-        if [ -f /workspace/gcsfs-bench-tmp/failure ]; then
+        if [ -f /workspace/failure ]; then
           echo "Build failed. See previous steps for details."
           exit 1
         fi
