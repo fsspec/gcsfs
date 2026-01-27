@@ -4,26 +4,6 @@ set -e
 # Load build variables (buckets, etc.)
 source /workspace/build_vars.env
 
-# Waits for SSH to become available on the VM.
-# Arguments:
-#   vm_name: The name of the VM instance.
-wait_for_ssh() {
-  local vm_name=$1
-
-  # Wait for SSH (MIG is stable, but SSH might take a moment)
-  echo "[$vm_name] Waiting for SSH..."
-  cat /workspace/.ssh/google_compute_engine.pub
-  for i in {1..1}; do
-    if gcloud compute ssh "$vm_name" --project="${PROJECT_ID}" --zone="${ZONE}" --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready" ; then
-      echo "[$vm_name] SSH available."
-      return 0
-    fi
-    echo "Waiting for VM to become available... (attempt $i/4)"
-    sleep 15
-  done
-  return 1
-}
-
 # Sets up the VM by installing dependencies and cloning the repository.
 # Arguments:
 #   vm_name: The name of the VM instance.
@@ -115,11 +95,6 @@ main() {
   local vm_name="${VM_NAME}"
 
   echo "[$vm_name] Starting benchmarks..."
-
-  if ! wait_for_ssh "$vm_name"; then
-    echo "WARNING: [$vm_name] SSH wait failed."
-    exit 0
-  fi
 
   if ! setup_vm "$vm_name"; then
     echo "WARNING: [$vm_name] Setup failed."

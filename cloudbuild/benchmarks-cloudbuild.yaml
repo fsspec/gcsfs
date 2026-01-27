@@ -104,7 +104,30 @@ steps:
             --quiet
     waitFor: ["init-variables"]
 
-  # 5. Run Benchmarks.
+  # 5. Wait for SSH.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "wait-for-ssh"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+
+        echo "Waiting for SSH on VM: $${VM_NAME}"
+        for i in {1..3}; do
+          if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
+            echo "SSH is ready."
+            exit 0
+          fi
+          echo "Waiting for VM to become available... (attempt $$i/3)"
+          sleep 15
+        done
+        echo "Timeout waiting for SSH."
+        exit 1
+    waitFor: ["create-vm"]
+
+  # 6. Run Benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-benchmarks"
     entrypoint: "bash"
@@ -113,7 +136,7 @@ steps:
       - |
         bash cloudbuild/run_benchmarks.sh
     waitFor:
-      - "create-vm"
+      - "wait-for-ssh"
       - "create-buckets"
       - "generate-ssh-key"
 
