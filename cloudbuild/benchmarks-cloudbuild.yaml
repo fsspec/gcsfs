@@ -139,7 +139,7 @@ steps:
         gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="mkdir -p ~/gcsfs"
 
         echo "[$${VM_NAME}] Copying source code..."
-        if gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${_PROJECT_ID}"zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
+        if gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${_PROJECT_ID}" zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
           echo "Source code copied successfully."
         else
           echo "Failed to copy source code."
