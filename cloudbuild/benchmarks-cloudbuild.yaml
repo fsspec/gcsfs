@@ -200,8 +200,8 @@ steps:
             DATE_DIR=\$(date +%d%m%Y)
             RESULTS_DIR='gcsfs/gcsfs/tests/perf/microbenchmarks/__run__'
             if [ -d \\"\$$RESULTS_DIR\\" ]; then
-              echo \\"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\${DATE_DIR}/$${RUN_ID}/\\"
-              cd \\"\$$RESULTS_DIR\\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\${DATE_DIR}/$${RUN_ID}/ && rm -rf *
+              echo \\"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/\\"
+              cd \\"\$$RESULTS_DIR\\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/ && rm -rf *
             else
               echo \\"No results directory found at \$$RESULTS_DIR\\"
             fi
