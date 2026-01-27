@@ -127,21 +127,108 @@ steps:
         exit 1
     waitFor: ["create-vm"]
 
-  # 6. Run Benchmarks.
+  # 6. Setup VM.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "setup-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+
+        echo "[$${VM_NAME}] Copying source code..."
+        gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine
+
+        SETUP_SCRIPT="
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update > /dev/null
+          sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git > /dev/null
+          cd gcsfs
+          python3 -m venv env
+          source env/bin/activate
+          pip install --upgrade pip > /dev/null
+          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
+          pip install -e . > /dev/null
+          pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
+        "
+
+        gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"
+    waitFor: ["wait-for-ssh"]
+
+  # 7. Run Benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-benchmarks"
     entrypoint: "bash"
     args:
       - "-c"
       - |
-        bash cloudbuild/run_benchmarks.sh
+        set -e
+        source /workspace/build_vars.env
+
+        IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_CONFIG}"
+        failures=0
+
+        for entry in "$${CONFIG_ARRAY[@]}"; do
+          entry=$$(echo "$$entry" | xargs)
+          if [ -z "$$entry" ]; then continue; fi
+
+          IFS=':' read -r group config <<< "$$entry"
+          echo "Launching job for $$group:$$config on $$VM_NAME"
+
+          CONFIG_ARG=""
+          if [ -n "$$config" ]; then
+            CONFIG_ARG="--config=$$config"
+          fi
+
+          BUCKET_ARGS=""
+          if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --regional-bucket='$${REGIONAL_BUCKET}'"
+          fi
+          if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --zonal-bucket='$${ZONAL_BUCKET}'"
+          fi
+          if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
+          fi
+
+          RUN_CMD="
+            source gcsfs/env/bin/activate
+            python gcsfs/gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+            echo '--- Uploading Results ---'
+            DATE_DIR=\$(date +%d%m%Y)
+            RESULTS_DIR='gcsfs/gcsfs/tests/perf/microbenchmarks/__run__'
+            if [ -d \\"\$RESULTS_DIR\\" ]; then
+              echo \\"Uploading from \$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\${DATE_DIR}/$${RUN_ID}/\\"
+              cd \\"\$RESULTS_DIR\\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\${DATE_DIR}/$${RUN_ID}/ && rm -rf *
+            else
+              echo \\"No results directory found at \$RESULTS_DIR\\"
+            fi
+          "
+
+          if ! gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_CMD"; then
+            echo "Benchmark $$group:$$config failed."
+            failures=$$((failures+1))
+          fi
+
+          echo "Sleeping for 30 seconds..."
+          sleep 30
+        done
+
+        if [ "$${failures:-0}" -ne 0 ]; then
+          echo "WARNING: $$failures benchmark jobs failed. Returning success to proceed with cleanup."
+        else
+          echo "All benchmarks completed successfully."
+        fi
     waitFor:
-      - "wait-for-ssh"
+      - "setup-vm"
       - "create-buckets"
       - "generate-ssh-key"
 
   # --- Cleanup Steps ---
 
+  # 8. Clean up the SSH key.
   # Clean up the SSH key.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-ssh-key"
@@ -154,6 +241,7 @@ steps:
     waitFor:
       - "run-benchmarks"
 
+  # 9. Delete VM.
   # Delete VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-vm"
@@ -170,6 +258,7 @@ steps:
     waitFor:
       - "cleanup-ssh-key"
 
+  # 10. Delete all GCS buckets.
   # Delete all GCS buckets.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-buckets"
