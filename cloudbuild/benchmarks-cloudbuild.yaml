@@ -151,15 +151,23 @@ steps:
 
         SETUP_SCRIPT="
           set -e
-          sudo apt-get update > /dev/null
-          sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git > /dev/null
+          sudo apt-get update
+          echo '--- Installing python and other dependencies on VM ---'
+          sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git
+          echo '--- Entering GCSFS source folder ---'
           cd gcsfs
+          ls
+
+          echo '--- Creating virtual environment ---'
           python3 -m venv env
           source env/bin/activate
-          pip install --upgrade pip > /dev/null
-          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
-          pip install -e . > /dev/null
-          pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
+          echo '--- Installing pip packages ---'
+          pip install --upgrade pip
+          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage
+          echo '--- Installing GCSFS packages ---'
+          pip install -e .
+          echo '--- Installing requirements for benchmarks ---'
+          pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
         "
 
         if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"; then
