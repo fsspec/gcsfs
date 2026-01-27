@@ -128,7 +128,7 @@ steps:
           sleep 15
         done
 
-        if [ "$SSH_READY" = false ]; then
+        if [ "$$SSH_READY" = false ]; then
             echo "Timeout waiting for SSH."
             touch /workspace/failure
             exit 1
