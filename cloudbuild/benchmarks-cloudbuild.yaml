@@ -149,7 +149,7 @@ steps:
           set -e
           sudo apt-get update > /dev/null
           echo '--- Installing python and other dependencies on VM ---'
-          sudo apt-get install -y python3-pip python3-venv git > /dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3-venv git > /dev/null
           cd gcsfs
           python3 -m venv env
           source env/bin/activate
