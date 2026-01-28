@@ -2,7 +2,7 @@ substitutions:
   _ZONE: "us-central1-a"
   _INFRA_PREFIX: "gcsfs-perf"
   _VM_SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
-  _BENCHMARK_CONFIG: "read:read_seq read:read_seq_multi_process write:write_seq write:write_seq_multi_process"
+  _BENCHMARK_CONFIG: "read:read_seq,read_rand read:read_seq_multi_process write:write_seq write:write_seq_multi_process"
   _BUCKET_TYPES: "zonal"
 
 steps:
@@ -83,7 +83,7 @@ steps:
             --project="${PROJECT_ID}" \
             --zone="${_ZONE}" \
             --machine-type="c4-standard-192" \
-            --image-family="ubuntu-2204-lts" \
+            --image-family="ubuntu-2404-lts-amd64" \
             --image-project="ubuntu-os-cloud" \
             --boot-disk-type="hyperdisk-balanced" \
             --boot-disk-size="30GB" \
