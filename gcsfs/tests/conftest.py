@@ -162,14 +162,14 @@ def gcs(gcs_factory, buckets_to_delete, populate_bucket):
             # managed externally and should not be deleted by the tests.
             buckets_to_delete.add(TEST_BUCKET)
         else:
-            _cleanup_gcs(gcs, bucket=TEST_BUCKET)
+            _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=populate_bucket)
 
         if populate_bucket:
             gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
         gcs.invalidate_cache()
         yield gcs
     finally:
-        _cleanup_gcs(gcs)
+        _cleanup_gcs(gcs, bucket_populated=populate_bucket)
 
 
 @pytest.fixture
@@ -186,7 +186,7 @@ def extended_gcs_factory(gcs_factory, buckets_to_delete, populate_bucket):
     yield factory
 
     for fs in created_instances:
-        _cleanup_gcs(fs)
+        _cleanup_gcs(fs, bucket_populated=populate_bucket)
 
 
 @pytest.fixture
@@ -197,13 +197,13 @@ def extended_gcsfs(gcs_factory, buckets_to_delete, populate_bucket):
     try:
         yield extended_gcsfs
     finally:
-        _cleanup_gcs(extended_gcsfs)
+        _cleanup_gcs(extended_gcsfs, bucket_populated=populate_bucket)
 
 
-def _cleanup_gcs(gcs, bucket=TEST_BUCKET):
+def _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=True):
     """Clean the bucket contents, logging a warning on failure."""
     try:
-        if gcs.exists(bucket):
+        if bucket_populated and gcs.exists(bucket):
             files_to_delete = gcs.find(bucket, withdirs=True)
             if files_to_delete:
                 gcs.rm(files_to_delete)
@@ -450,13 +450,13 @@ def pytest_addoption(parser):
         "--run-benchmarks",
         action="store_true",
         default=False,
-        help="run benchmark tests",
+        help="run only perf benchmark tests",
     )
     parser.addoption(
         "--run-benchmarks-infra",
         action="store_true",
         default=False,
-        help="run benchmark infrastructure tests",
+        help="run only benchmark infrastructure tests",
     )
 
 
@@ -479,5 +479,15 @@ def pytest_ignore_collect(collection_path, config):
             path_parts = set(path_str.replace(os.sep, "/").split("/"))
             if benchmark_subdirs.intersection(path_parts):
                 return True
+
+        # If only --run-benchmarks is passed, ignore the unit tests.
+        if config.getoption("--run-benchmarks") and not config.getoption(
+            "--run-benchmarks-infra"
+        ):
+            if os.path.basename(path_str).startswith("test_"):
+                benchmark_subdirs = {"delete", "listing", "read", "rename", "write"}
+                path_parts = set(path_str.replace(os.sep, "/").split("/"))
+                if not benchmark_subdirs.intersection(path_parts):
+                    return True
 
     return None
