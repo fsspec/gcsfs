@@ -1,9 +1,7 @@
 substitutions:
-  _PROJECT_ID: "gcs-aiml-clients-testing-101"
-  _LOCATION: "us-central1"
   _ZONE: "us-central1-a"
   _INFRA_PREFIX: "gcsfs-perf"
-  _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
+  _VM_SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
   _BENCHMARK_CONFIG: "read:read_seq read:read_seq_multi_process write:write_seq write:write_seq_multi_process"
   _BUCKET_TYPES: "zonal"
 
@@ -31,16 +29,11 @@ steps:
       - |
         SHORT_BUILD_ID=$${BUILD_ID:0:8}
         # Define shared variables
-        echo "export PROJECT_ID=${_PROJECT_ID}" > /workspace/build_vars.env
-        echo "export ZONE=${_ZONE}" >> /workspace/build_vars.env
-        echo "export BENCHMARK_CONFIG='${_BENCHMARK_CONFIG}'" >> /workspace/build_vars.env
-        echo "export BUCKET_TYPES='${_BUCKET_TYPES}'" >> /workspace/build_vars.env
         echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
-        echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-results-${_PROJECT_ID}" >> /workspace/build_vars.env
+        echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-run-results" >> /workspace/build_vars.env
         echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
@@ -56,18 +49,18 @@ steps:
 
         # Create Test Buckets, in parallel
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
-          gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} &
+          gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} &
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
-          gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+          gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
-          gcloud storage buckets create gs://$$HNS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+          gcloud storage buckets create gs://$$HNS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         fi
 
         # Create HNS Results Bucket (Persistent)
-        if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} >/dev/null 2>&1; then
-          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${_PROJECT_ID} --location=${_LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
+          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         else
           echo "Results bucket gs://$${RESULTS_BUCKET} already exists"
         fi
@@ -87,7 +80,7 @@ steps:
 
         echo "Creating VM: $${VM_NAME}"
         gcloud compute instances create "$$VM_NAME" \
-            --project="${_PROJECT_ID}" \
+            --project="${PROJECT_ID}" \
             --zone="${_ZONE}" \
             --machine-type="c4-standard-192" \
             --image-family="ubuntu-2204-lts" \
@@ -98,9 +91,9 @@ steps:
             --network-performance-configs="total-egress-bandwidth-tier=TIER_1" \
             --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
             --metadata="enable-oslogin=TRUE" \
-            --service-account="${_SERVICE_ACCOUNT}" \
+            --service-account="${_VM_SERVICE_ACCOUNT}" \
             --tags="allow-ssh" \
-            --labels="build-id=$$SHORT_BUILD_ID" \
+            --labels="build-id=$$RUN_ID" \
             --quiet
     waitFor: ["init-variables"]
 
@@ -120,7 +113,7 @@ steps:
         echo "Waiting for SSH on VM: $${VM_NAME}... (attempt 1/3)"
         SSH_READY=false
         for i in {1..3}; do
-          if gcloud compute ssh $$VM_NAME --project=${_PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
+          if gcloud compute ssh $$VM_NAME --project=${PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
             echo "SSH is ready."
             SSH_READY=true
             break
@@ -136,10 +129,10 @@ steps:
         fi
 
         echo "[$${VM_NAME}] Creating remote directory..."
-        gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="mkdir -p ~/gcsfs"
+        gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="mkdir -p ~/gcsfs"
 
         echo "[$${VM_NAME}] Copying source code..."
-        if gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${_PROJECT_ID}" --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
+        if gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${PROJECT_ID}" --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
           echo "Source code copied successfully."
         else
           echo "Failed to copy source code."
@@ -166,7 +159,7 @@ steps:
           pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
         "
 
-        if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"; then
+        if gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"; then
           echo "Dependencies installed successfully."
         else
           echo "Failed to install dependencies."
@@ -217,7 +210,7 @@ steps:
             python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
           "
 
-          if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
+          if gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
             echo "Benchmark $$group:$$config completed successfully."
           else
             echo "Benchmark $$group:$$config failed."
@@ -242,7 +235,7 @@ steps:
               echo \"No results directory found at \$$RESULTS_DIR\"
             fi
         "
-        if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$UPLOAD_SCRIPT"; then
+        if gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$UPLOAD_SCRIPT"; then
           echo "Results uploaded successfully."
         else
           echo "Failed to upload results."
@@ -286,7 +279,7 @@ steps:
         source /workspace/build_vars.env
 
         gcloud compute instances delete "$$VM_NAME" \
-            --project="${_PROJECT_ID}" \
+            --project="${PROJECT_ID}" \
             --zone="${_ZONE}" \
             --quiet || true
     waitFor:
@@ -336,4 +329,4 @@ timeout: "14400s" # 2 hours
 options:
   logging: CLOUD_LOGGING_ONLY
   pool:
-    name: "projects/${_PROJECT_ID}/locations/${_LOCATION}/workerPools/cloud-build-worker-pool"
+    name: "projects/${PROJECT_ID}/locations/${LOCATION}/workerPools/cloud-build-worker-pool"

@@ -162,14 +162,14 @@ def gcs(gcs_factory, buckets_to_delete, populate_bucket):
             # managed externally and should not be deleted by the tests.
             buckets_to_delete.add(TEST_BUCKET)
         else:
-            _cleanup_gcs(gcs, bucket=TEST_BUCKET)
+            _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=populate_bucket)
 
         if populate_bucket:
             gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
         gcs.invalidate_cache()
         yield gcs
     finally:
-        _cleanup_gcs(gcs)
+        _cleanup_gcs(gcs, bucket_populated=populate_bucket)
 
 
 @pytest.fixture
@@ -186,7 +186,7 @@ def extended_gcs_factory(gcs_factory, buckets_to_delete, populate_bucket):
     yield factory
 
     for fs in created_instances:
-        _cleanup_gcs(fs)
+        _cleanup_gcs(fs, bucket_populated=populate_bucket)
 
 
 @pytest.fixture
@@ -197,13 +197,13 @@ def extended_gcsfs(gcs_factory, buckets_to_delete, populate_bucket):
     try:
         yield extended_gcsfs
     finally:
-        _cleanup_gcs(extended_gcsfs)
+        _cleanup_gcs(extended_gcsfs, bucket_populated=populate_bucket)
 
 
-def _cleanup_gcs(gcs, bucket=TEST_BUCKET):
+def _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=True):
     """Clean the bucket contents, logging a warning on failure."""
     try:
-        if gcs.exists(bucket):
+        if bucket_populated and gcs.exists(bucket):
             files_to_delete = gcs.find(bucket)
             if files_to_delete:
                 gcs.rm(files_to_delete)
