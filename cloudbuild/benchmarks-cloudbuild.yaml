@@ -4,7 +4,7 @@ substitutions:
   _ZONE: "us-central1-a"
   _INFRA_PREFIX: "gcsfs-perf"
   _SERVICE_ACCOUNT: "gcsfs-zonal-vm-sc@gcs-aiml-clients-testing-101.iam.gserviceaccount.com"
-  _BENCHMARK_CONFIG: "read:read_seq,read_rand rename:rename_flat"
+  _BENCHMARK_CONFIG: "read:read_seq read:read_seq_multi_process write:write_seq write:write_seq_multi_process"
   _BUCKET_TYPES: "zonal"
 
 steps:
@@ -215,8 +215,6 @@ steps:
 
             echo \"Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO\"
             python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
-
-            echo '--- Uploading Results ---'
           "
 
           if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
@@ -229,6 +227,28 @@ steps:
           echo "Sleeping for 30 seconds..."
           sleep 30
         done
+
+        echo "Uploading results..."
+        UPLOAD_SCRIPT="
+            set -e
+            cd gcsfs
+            echo '--- Uploading Results ---'
+            DATE_DIR=\$(date +%d%m%Y)
+            RESULTS_DIR='gcsfs/tests/perf/microbenchmarks/__run__'
+            if [ -d \"\$$RESULTS_DIR\" ]; then
+              echo \"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/\"
+              cd \"\$$RESULTS_DIR\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/ && rm -rf *
+            else
+              echo \"No results directory found at \$$RESULTS_DIR\"
+            fi
+        "
+        if gcloud compute ssh "$$VM_NAME" --project="${_PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$UPLOAD_SCRIPT"; then
+          echo "Results uploaded successfully."
+        else
+          echo "Failed to upload results."
+          touch /workspace/failure
+          exit 1
+        fi
 
         if [ "$${failures:-0}" -ne 0 ]; then
           echo "ERROR: $$failures benchmark jobs failed."
