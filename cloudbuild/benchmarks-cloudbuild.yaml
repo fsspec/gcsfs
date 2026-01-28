@@ -86,7 +86,7 @@ steps:
             --image-family="ubuntu-2204-lts" \
             --image-project="ubuntu-os-cloud" \
             --boot-disk-type="hyperdisk-balanced" \
-            --boot-disk-size="100GB" \
+            --boot-disk-size="30GB" \
             --network-interface="network-tier=PREMIUM,nic-type=GVNIC" \
             --network-performance-configs="total-egress-bandwidth-tier=TIER_1" \
             --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
@@ -97,9 +97,9 @@ steps:
             --quiet
     waitFor: ["init-variables"]
 
-  # 5. Setup VM.
+  # 5. Run benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "setup-and-run-benchmarks"
+    id: "run-benchmarks"
     allowFailure: true
     entrypoint: "bash"
     args:
@@ -110,6 +110,7 @@ steps:
         source /workspace/build_vars.env
         trap 'touch /workspace/failure' ERR
 
+        # --- Setup SSH ---
         echo "Waiting for SSH on VM: $${VM_NAME}... (attempt 1/3)"
         SSH_READY=false
         for i in {1..3}; do
@@ -128,6 +129,7 @@ steps:
             exit 1
         fi
 
+        # --- Copy source code ---
         echo "[$${VM_NAME}] Creating remote directory..."
         gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="mkdir -p ~/gcsfs"
 
@@ -140,6 +142,7 @@ steps:
           exit 1
         fi
 
+        # --- Install dependencies and packages ---
         echo "[$${VM_NAME}] Installing dependencies..."
 
         SETUP_SCRIPT="
@@ -167,7 +170,7 @@ steps:
           exit 1
         fi
 
-        # --- Run Benchmarks ---
+        # --- Run benchmarks ---
         IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_CONFIG}"
         failures=0
 
@@ -176,7 +179,7 @@ steps:
           if [ -z "$$entry" ]; then continue; fi
 
           IFS=':' read -r group config <<< "$$entry"
-          echo "Launching job for $$group:$$config on $$VM_NAME"
+          echo "[$$VM_NAME]: Launching benchmark run for $$group:$$config"
 
           CONFIG_ARG=""
           if [ -n "$$config" ]; then
@@ -194,16 +197,9 @@ steps:
             BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
           fi
 
-          echo "Running benchmarks with config: $$CONFIG_ARG for bucket(s): $$BUCKET_ARGS"
-
           RUN_SCRIPT="
-            echo \"Running benchmarks script\"
-
             set -e
-            echo \"Entering gcsfs directory\"
             cd gcsfs
-            ls
-            echo \"Activating virtual environment\"
             source env/bin/activate
 
             echo \"Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO\"
@@ -217,11 +213,11 @@ steps:
             failures=$$((failures+1))
           fi
 
-          echo "Sleeping for 30 seconds..."
+          echo "Sleeping for 30 seconds for cool down..."
           sleep 30
         done
 
-        echo "Uploading results..."
+        # --- Upload results ---
         UPLOAD_SCRIPT="
             set -e
             cd gcsfs
