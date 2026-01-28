@@ -263,7 +263,7 @@ steps:
         gcloud compute os-login ssh-keys remove \
           --key-file=/workspace/gcb_ssh_key.pub || true
     waitFor:
-      - "setup-and-run-benchmarks"
+      - "run-benchmarks"
 
   # 9. Delete VM.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
