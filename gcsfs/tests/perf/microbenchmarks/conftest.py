@@ -173,19 +173,7 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
     # --- Teardown ---
     logging.info(f"Tearing down benchmark '{params.name}': deleting files and folders.")
     try:
-        gcs.rm(file_paths)
-        if params.bucket_type != "regional":
-            # Sort by length descending to delete children first
-            for d in sorted(target_dirs, key=len, reverse=True):
-                try:
-                    gcs.rmdir(d)
-                except Exception:
-                    pass
-        else:
-            try:
-                gcs.rmdir(prefix)
-            except Exception:
-                pass
+        gcs.rm(file_paths, recursive=True)
     except Exception as e:
         logging.error(f"Failed to clean up benchmark files: {e}")
 
