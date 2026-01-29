@@ -8,6 +8,10 @@ from google.cloud.storage._experimental.asyncio.async_multi_range_downloader imp
 from gcsfs import zb_hns_utils
 from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile
 
+from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
+    ReadAheadChunked,
+)
+
 logger = logging.getLogger("gcsfs.zonal_file")
 
 
@@ -24,7 +28,7 @@ class ZonalFile(GCSFile):
         mode="rb",
         block_size=DEFAULT_BLOCK_SIZE,
         autocommit=True,
-        cache_type="readahead",
+        cache_type="readahead_chunked",
         cache_options=None,
         acl=None,
         consistency="md5",
@@ -77,6 +81,7 @@ class ZonalFile(GCSFile):
             raise NotImplementedError(
                 "Only read, write and append operations are currently supported for Zonal buckets."
             )
+
         super().__init__(
             gcsfs,
             path,
@@ -127,16 +132,32 @@ class ZonalFile(GCSFile):
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
-    def _fetch_range(self, start, end):
+    def _fetch_range(self, start=None, end=None, chunk_lengths=None):
         """
         Overrides the default _fetch_range to implement the gRPC read path.
 
+        See super() class for documentation.
         """
+        if end is not None and chunk_lengths is not None:
+            raise ValueError(
+                "The end and chunk_lengths arguments are mutually exclusive and cannot be used together."
+            )
+
         try:
+            if chunk_lengths is not None:
+                return asyn.sync(
+                    self.fs.loop,
+                    self.gcsfs._fetch_range_split,
+                    self.path,
+                    start=start,
+                    chunk_lengths=chunk_lengths,
+                    size=self.size,
+                    mrd=self.mrd,
+                )
             return self.gcsfs.cat_file(self.path, start=start, end=end, mrd=self.mrd)
         except RuntimeError as e:
             if "not satisfiable" in str(e):
-                return b""
+                return b"" if chunk_lengths is None else [b""]
             raise
 
     def write(self, data):
