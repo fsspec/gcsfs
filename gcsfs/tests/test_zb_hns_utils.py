@@ -64,7 +64,8 @@ async def test_init_aaow():
 @pytest.mark.asyncio
 async def test_init_aaow_with_flush_interval_bytes():
     """
-    Docstring for test_init_aaow_with_flush_interval_bytes
+    Tests that init_aaow correctly passes the flush_interval_bytes
+    parameter to the AsyncAppendableObjectWriter.
     """
     mock_writer_instance = mock.AsyncMock()
     with mock.patch(
