@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 import requests
 from google.cloud import storage
-from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
+from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
 

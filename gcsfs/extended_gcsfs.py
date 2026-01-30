@@ -13,17 +13,18 @@ from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
-from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
+from google.cloud.storage.asyncio.async_appendable_object_writer import (
+    _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
 )
-from google.cloud.storage._experimental.asyncio.async_grpc_client import AsyncGrpcClient
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
+from google.cloud.storage.asyncio.async_grpc_client import AsyncGrpcClient
+from google.cloud.storage.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )
 
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
-from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile, GCSFileSystem
 from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
@@ -85,7 +86,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             self._grpc_client = AsyncGrpcClient(
                 credentials=self.credential,
                 client_info=ClientInfo(user_agent=f"{USER_AGENT}/{version}"),
-            ).grpc_client
+            )
         return self._grpc_client
 
     async def _get_control_plane_client(self):
@@ -174,11 +175,23 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_type = self._sync_lookup_bucket_type(bucket)
+
+        # Choose correct block_size if not explicitly provided
+        if block_size is None:
+            block_size = self.default_block_size
+            # If we are using the generic default (user didn't override it),
+            # switch to the Zonal-optimized default for Zonal buckets.
+            if (
+                bucket_type == BucketType.ZONAL_HIERARCHICAL
+                and block_size == DEFAULT_BLOCK_SIZE
+            ):
+                block_size = _DEFAULT_FLUSH_INTERVAL_BYTES
+
         return gcs_file_types[bucket_type](
             self,
             path,
             mode,
-            block_size=block_size or self.default_block_size,
+            block_size=block_size,
             cache_type=cache_type,
             cache_options=cache_options,
             consistency=consistency or self.consistency,
@@ -1203,6 +1216,24 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         self.invalidate_cache(self._parent(path))
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
+        """
+        Downloads a file from GCS to a local path.
+
+        For Zonal buckets, it uses gRPC client for optimized downloads.
+        For Standard buckets, it delegates to the parent class implementation.
+
+        Parameters
+        ----------
+        rpath: str
+            Path on GCS to download the file from.
+        lpath: str
+            Path to the local file to be downloaded.
+        callback: fsspec.callbacks.Callback, optional
+            Callback to monitor the download progress.
+        **kwargs:
+            For Zonal buckets, `chunksize` bytes (int) can be provided to control
+            the download chunk size (default is 128KB).
+        """
         bucket, key, generation = self.split_path(rpath)
         if not await self._is_zonal_bucket(bucket):
             return await super()._get_file(
@@ -1271,6 +1302,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         versions=False,
         **kwargs,
     ):
+        """
+        Lists objects in a bucket.
+
+        For HNS-enabled buckets, it sets `includeFoldersAsPrefixes` to True
+        when the delimiter is '/'.
+        """
         bucket, _, _ = self.split_path(path)
         if await self._is_bucket_hns_enabled(bucket) and delimiter == "/":
             kwargs["includeFoldersAsPrefixes"] = "true"
@@ -1282,6 +1319,37 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             prefix=prefix,
             versions=versions,
             **kwargs,
+        )
+
+    async def _cp_file(self, path1, path2, acl=None, **kwargs):
+        """Duplicate remote file.
+
+        For Standard GCS buckets, falls back to the parent class's implementation
+
+        Zonal Bucket Support:
+        Server-side copy is currently NOT supported for Zonal buckets because
+        the `RewriteObject` API is unavailable for them.
+
+        The following scenarios will raise a `NotImplementedError`:
+        * Intra-zonal: Copying within the same Zonal bucket.
+        * Inter-zonal: Copying between two different Zonal buckets.
+        * Mixed: Copying between a Zonal bucket and a Standard bucket.
+
+        """
+        b1, _, _ = self.split_path(path1)
+        b2, _, _ = self.split_path(path2)
+
+        is_zonal_source = await self._is_zonal_bucket(b1)
+        is_zonal_dest = await self._is_zonal_bucket(b2)
+
+        # 1. Standard -> Standard (Delegate to core implementation)
+        if not is_zonal_source and not is_zonal_dest:
+            return await super()._cp_file(path1, path2, acl=acl, **kwargs)
+
+        # 2. Zonal Scenarios (Currently Unsupported)
+        raise NotImplementedError(
+            "Server-side copy involving Zonal buckets is not supported. "
+            "Zonal objects do not support rewrite."
         )
 
 

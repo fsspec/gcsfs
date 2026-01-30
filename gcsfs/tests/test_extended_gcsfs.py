@@ -5,16 +5,18 @@ import multiprocessing
 import os
 import random
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
 from unittest import mock
 
 import pytest
 from google.api_core.exceptions import NotFound
-from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
+from google.cloud.storage.asyncio.async_appendable_object_writer import (
+    _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
 )
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
+from google.cloud.storage.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )
 from google.cloud.storage.exceptions import DataCorruption
@@ -201,13 +203,18 @@ def test_open_uses_correct_blocksize_and_consistency_for_all_bucket_types(
 def test_open_uses_default_blocksize_and_consistency_from_fs(
     extended_gcsfs, gcs_bucket_mocks, bucket_type_val
 ):
+    if extended_gcsfs.on_google:
+        pytest.skip("Cannot mock bucket_types on real GCS")
     csv_file = "2014-01-01.csv"
     csv_file_path = f"{TEST_ZONAL_BUCKET}/{csv_file}"
     csv_data = csv_files[csv_file]
 
     with gcs_bucket_mocks(csv_data, bucket_type_val=bucket_type_val):
         with extended_gcsfs.open(csv_file_path, "rb") as f:
-            assert f.blocksize == extended_gcsfs.default_block_size
+            if bucket_type_val == BucketType.ZONAL_HIERARCHICAL:
+                assert f.blocksize == _DEFAULT_FLUSH_INTERVAL_BYTES
+            else:
+                assert f.blocksize == extended_gcsfs.default_block_size
             assert type(f.checker) is ConsistencyChecker
 
 
@@ -1597,3 +1604,59 @@ async def test_get_file_exception_cleanup(
 
             # The local file should not exist after the failed download
             assert not lpath.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_bucket, dest_bucket, should_fail",
+    [
+        (TEST_ZONAL_BUCKET, TEST_ZONAL_BUCKET, True),
+        (TEST_ZONAL_BUCKET, TEST_BUCKET, True),
+        (TEST_BUCKET, TEST_ZONAL_BUCKET, True),
+        (TEST_BUCKET, TEST_BUCKET, False),
+    ],
+)
+async def test_cp_file_not_implemented_error(
+    async_gcs, source_bucket, dest_bucket, should_fail
+):
+    """
+    Tests _cp_file behavior for combinations of Zonal and Standard buckets.
+    """
+    short_uuid = str(uuid.uuid4())[:8]
+    source_path = f"{source_bucket}/source_{short_uuid}"
+    dest_path = f"{dest_bucket}/dest_{short_uuid}"
+    is_real_gcs = os.getenv("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+
+    # Source file needs to exist for last case when super method is called for standard buckets
+    if is_real_gcs:
+        await async_gcs._pipe_file(source_path, b"test data", finalize_on_close=True)
+
+    async def mock_is_zonal(bucket):
+        return bucket == TEST_ZONAL_BUCKET
+
+    is_zonal_patch_cm = (
+        mock.patch.object(async_gcs, "_is_zonal_bucket", side_effect=mock_is_zonal)
+        if not is_real_gcs
+        else contextlib.nullcontext()
+    )
+
+    with is_zonal_patch_cm:
+        if should_fail:
+            with pytest.raises(
+                NotImplementedError,
+                match=(
+                    r"Server-side copy involving Zonal buckets is not supported. "
+                    r"Zonal objects do not support rewrite."
+                ),
+            ):
+                await async_gcs._cp_file(source_path, dest_path)
+        else:  # Standard -> Standard
+            if is_real_gcs:
+                await async_gcs._cp_file(source_path, dest_path)
+                assert await async_gcs._cat(dest_path) == b"test data"
+            else:
+                with mock.patch(
+                    "gcsfs.core.GCSFileSystem._cp_file", new_callable=mock.AsyncMock
+                ) as mock_super_cp:
+                    await async_gcs._cp_file(source_path, dest_path)
+                    mock_super_cp.assert_awaited_once()
