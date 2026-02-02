@@ -4,9 +4,6 @@ import os
 from unittest import mock
 
 import pytest
-from google.cloud.storage.asyncio.async_appendable_object_writer import (
-    _DEFAULT_FLUSH_INTERVAL_BYTES,
-)
 
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
