@@ -218,6 +218,20 @@ def test_zonal_file_double_finalize_warning(
         )
 
 
+def test_zonal_file_commit_not_writable_warning(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """Test that calling commit on a non-writable file logs a warning."""
+    with extended_gcsfs.open(file_path, "wb") as f:
+        # Simulate file not being writable
+        f.mode = "rb"
+        with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
+            f.commit()
+        mock_logger.warning.assert_called_once_with(
+            "File not in write mode. Ignoring commit call."
+        )
+
+
 def test_zonal_file_discard(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that discard on a ZonalFile logs a warning."""
     with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
