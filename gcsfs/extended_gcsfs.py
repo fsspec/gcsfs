@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 from enum import Enum
-from functools import partial
 from glob import has_magic
 from io import BytesIO
 
@@ -458,9 +457,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.debug(
                 f"Not an HNS bucket. Falling back to object-level mv for '{path1}' to '{path2}'."
             )
-            return await self.loop.run_in_executor(
-                None, partial(super().mv, path1, path2, **kwargs)
-            )
+            return await super()._mv(path1, path2, **kwargs)
 
         try:
             info1 = await self._info(path1)
@@ -508,10 +505,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
-        # TODO: Check feasibility to call async copy and rm methods instead of sync mv method
-        return await self.loop.run_in_executor(
-            None, partial(super().mv, path1, path2, **kwargs)
-        )
+        return await super()._mv(path1, path2, **kwargs)
 
     mv = asyn.sync_wrapper(_mv)
 
@@ -947,7 +941,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Hybrid approach for HNS enabled buckets
         # 1. Fetch all files from super find() method by passing withdirs as False.
-        files_task = self.loop.create_task(
+        files_task = asyncio.create_task(
             super()._find(
                 path,
                 withdirs=False,  # Fetch files only
@@ -962,7 +956,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # 2. Fetch all folders recursively. This is necessary to find all folders,
         # especially empty ones.
-        folders_task = self.loop.create_task(
+        folders_task = asyncio.create_task(
             self._get_all_folders(path, bucket, prefix=prefix)
         )
         # 3. Run tasks concurrently and merge results.

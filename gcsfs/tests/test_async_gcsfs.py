@@ -1,8 +1,11 @@
 import os
+import uuid
 
 import pytest
+import pytest_asyncio
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.tests.settings import TEST_HNS_BUCKET
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
 
@@ -21,6 +24,17 @@ pytestmark = [
         reason="Skipping tests on emulator, requires real GCS.",
     ),
 ]
+
+
+@pytest_asyncio.fixture
+async def hns_file_path(async_gcs):
+    """Generates a unique test file path in HNS bucket for every test and cleans up."""
+    path = f"{TEST_HNS_BUCKET}/async-hns-test-{uuid.uuid4()}"
+    yield path
+    try:
+        await async_gcs._rm(path, recursive=True)
+    except FileNotFoundError:
+        pass
 
 
 @pytest.mark.asyncio
@@ -119,3 +133,93 @@ async def test_async_rm(async_gcs, file_path):
     # Verify removal
     with pytest.raises(FileNotFoundError):
         await async_gcs._info(file_path)
+
+
+@pytest.mark.asyncio
+async def test_async_mkdir_and_rmdir(async_gcs, hns_file_path):
+    """Test async _mkdir and _rmdir."""
+    dir_path = f"{hns_file_path}/dir"
+
+    # mkdir
+    await async_gcs._mkdir(dir_path, create_parents=True)
+
+    # check exists
+    assert await async_gcs._exists(dir_path)
+    info = await async_gcs._info(dir_path)
+    assert info["type"] == "directory"
+
+    # rmdir
+    await async_gcs._rmdir(dir_path)
+
+    # verify gone
+    assert not await async_gcs._exists(dir_path)
+
+
+@pytest.mark.asyncio
+async def test_async_mv(async_gcs, hns_file_path):
+    """Test async _mv on a file and a directory."""
+    # 1. Move file
+    src = f"{hns_file_path}/src"
+    dst = f"{hns_file_path}/dst"
+
+    await async_gcs._pipe_file(src, b"data")
+    await async_gcs._mv(src, dst)
+
+    assert not await async_gcs._exists(src)
+    assert await async_gcs._exists(dst)
+    assert await async_gcs._cat_file(dst) == b"data"
+
+    # 2. Move directory (HNS specific)
+    src_dir = f"{hns_file_path}/src_dir"
+    dst_dir = f"{hns_file_path}/dst_dir"
+    src_file = f"{src_dir}/file"
+    dst_file = f"{dst_dir}/file"
+
+    await async_gcs._mkdir(src_dir)
+    await async_gcs._pipe_file(src_file, b"data")
+    await async_gcs._mv(src_dir, dst_dir, recursive=True)
+
+    assert not await async_gcs._exists(src_dir)
+    assert await async_gcs._exists(dst_dir)
+    assert await async_gcs._exists(dst_file)
+    assert await async_gcs._cat_file(dst_file) == b"data"
+
+
+@pytest.mark.asyncio
+async def test_async_find(async_gcs, hns_file_path):
+    """Test async _find."""
+    base = f"{hns_file_path}/find"
+    f1 = f"{base}/file1"
+    f2 = f"{base}/sub/file2"
+
+    await async_gcs._mkdir(base, create_parents=True)
+    await async_gcs._pipe_file(f1, b"1")
+    await async_gcs._pipe_file(f2, b"2")
+
+    out = await async_gcs._find(base)
+    assert f1 in out
+    assert f2 in out
+
+
+@pytest.mark.asyncio
+async def test_async_info(async_gcs, hns_file_path):
+    """Test async _info."""
+    file_path = f"{hns_file_path}/file"
+    await async_gcs._pipe_file(file_path, b"data")
+
+    info = await async_gcs._info(file_path)
+    assert info["name"] == file_path
+    assert info["size"] == 4
+    assert info["type"] == "file"
+
+
+@pytest.mark.asyncio
+async def test_async_rm_recursive(async_gcs, hns_file_path):
+    """Test async _rm recursive."""
+    base = f"{hns_file_path}/rm"
+    f1 = f"{base}/file1"
+    await async_gcs._pipe_file(f1, b"1")
+
+    await async_gcs._rm(base, recursive=True)
+
+    assert not await async_gcs._exists(base)
