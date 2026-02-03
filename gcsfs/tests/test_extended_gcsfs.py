@@ -11,10 +11,10 @@ from unittest import mock
 
 import pytest
 from google.api_core.exceptions import NotFound
-from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
+from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
-from google.cloud.storage._experimental.asyncio.async_multi_range_downloader import (
+from google.cloud.storage.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )
 from google.cloud.storage.exceptions import DataCorruption
