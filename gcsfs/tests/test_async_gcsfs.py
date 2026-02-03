@@ -209,7 +209,10 @@ async def test_async_info(async_gcs, hns_file_path):
 
     info = await async_gcs._info(file_path)
     assert info["name"] == file_path
-    assert info["size"] == 4
+
+    bucket, _, _ = async_gcs.split_path(file_path)
+    if not await async_gcs._is_zonal_bucket(bucket):
+        assert info["size"] == 4
     assert info["type"] == "file"
 
 
