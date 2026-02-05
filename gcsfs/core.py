@@ -2157,7 +2157,7 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     Uploads a chunk of data. This function has a conditional path to support
     experimental features for Zonal buckets to append data using gRPC.
     """
-    from google.cloud.storage._experimental.asyncio.async_appendable_object_writer import (
+    from google.cloud.storage.asyncio.async_appendable_object_writer import (
         AsyncAppendableObjectWriter,
     )
 
