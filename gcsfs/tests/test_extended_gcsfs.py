@@ -19,6 +19,7 @@ from google.cloud.storage._experimental.asyncio.async_multi_range_downloader imp
 )
 from google.cloud.storage.exceptions import DataCorruption
 
+from gcsfs import caching
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import (
     BucketType,
@@ -629,6 +630,13 @@ def test_multithreaded_read_overlapping_ranges_zb(extended_gcsfs, gcs_bucket_moc
             assert mocks["create_mrd"].call_count == len(read_tasks)
             assert mocks["downloader"].download_ranges.call_count == len(read_tasks)
             assert mocks["downloader"].close.call_count == len(read_tasks)
+
+
+def test_default_cache_is_readahead_chunked(extended_gcsfs, gcs_bucket_mocks):
+    data = text_files["zonal/test/b"]
+    with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        with extended_gcsfs.open(b, "rb") as f:
+            assert isinstance(f.cache, caching.ReadAheadChunked)
 
 
 def test_multithreaded_read_chunk_boundary_zb(extended_gcsfs, gcs_bucket_mocks):
