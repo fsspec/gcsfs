@@ -158,6 +158,7 @@ steps:
           echo '--- Installing pip packages ---'
           pip install --upgrade pip > /dev/null
           pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
+          pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main
           echo '--- Installing GCSFS packages ---'
           pip install -e . > /dev/null
           echo '--- Installing requirements for benchmarks ---'
