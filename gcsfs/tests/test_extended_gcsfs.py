@@ -19,6 +19,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 from google.cloud.storage.exceptions import DataCorruption
 
+from gcsfs import caching
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import (
     BucketType,
@@ -148,6 +149,10 @@ read_block_params = [
 
 
 def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
+    file_size = len(
+        json_data
+    )  # We need the file size to predict if readahead will trigger
+
     for param in read_block_params:
         with subtests.test(id=param.id):
             offset, length, delimiter, expected_data = param.values
@@ -159,14 +164,35 @@ def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
                 result = extended_gcsfs.read_block(path, offset, length, delimiter)
 
                 assert result == expected_data
+
                 if mocks:
                     mocks["sync_lookup_bucket_type"].assert_called_once_with(
                         TEST_ZONAL_BUCKET
                     )
+
                     if expected_data:
-                        mocks["downloader"].download_ranges.assert_called_with(
-                            [(offset, mock.ANY, mock.ANY)]
-                        )
+                        call_args = mocks["downloader"].download_ranges.call_args
+                        assert call_args is not None, "download_ranges was not called"
+
+                        # Get the actual list of ranges passed: [(start, end, buffer), ...]
+                        actual_ranges = call_args[0][0]
+
+                        if delimiter:
+                            assert len(actual_ranges) >= 1
+                            assert actual_ranges[0][0] == offset
+                        else:
+                            req_end = offset + length
+                            if req_end >= file_size:
+                                expected_chunks = 1
+                            else:
+                                expected_chunks = 2
+
+                            assert (
+                                len(actual_ranges) == expected_chunks
+                            ), f"Expected {expected_chunks} chunks (Request + Readahead), got {len(actual_ranges)}"
+                            assert actual_ranges[0][0] == offset
+                            if len(actual_ranges) == 2:
+                                assert actual_ranges[1][0] == offset + length
                     else:
                         mocks["downloader"].download_ranges.assert_not_called()
 
@@ -604,6 +630,13 @@ def test_multithreaded_read_overlapping_ranges_zb(extended_gcsfs, gcs_bucket_moc
             assert mocks["create_mrd"].call_count == len(read_tasks)
             assert mocks["downloader"].download_ranges.call_count == len(read_tasks)
             assert mocks["downloader"].close.call_count == len(read_tasks)
+
+
+def test_default_cache_is_readahead_chunked(extended_gcsfs, gcs_bucket_mocks):
+    data = text_files["zonal/test/b"]
+    with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        with extended_gcsfs.open(b, "rb") as f:
+            assert isinstance(f.cache, caching.ReadAheadChunked)
 
 
 def test_multithreaded_read_chunk_boundary_zb(extended_gcsfs, gcs_bucket_mocks):
