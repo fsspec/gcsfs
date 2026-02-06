@@ -1337,8 +1337,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         b1, _, _ = self.split_path(path1)
         b2, _, _ = self.split_path(path2)
 
-        is_zonal_source = await self._is_zonal_bucket(b1)
-        is_zonal_dest = await self._is_zonal_bucket(b2)
+        is_zonal_source, is_zonal_dest = await asyncio.gather(
+            self._is_zonal_bucket(b1), self._is_zonal_bucket(b2)
+        )
 
         # 1. Standard -> Standard (Delegate to core implementation)
         if not is_zonal_source and not is_zonal_dest:
