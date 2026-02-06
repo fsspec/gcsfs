@@ -4,6 +4,16 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.2.0
+--------
+
+* New readahead-chunks cacher (#754, 750)
+* test coverage (#752)
+* info() integration tests for hierarchical (#749)
+* more benchmark work (#748, 745)
+* zonal file downloads (#744)
+* rm for hierarchical (#742)
+
 2026.1.0
 --------
 
