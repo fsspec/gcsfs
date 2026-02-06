@@ -19,7 +19,7 @@ async def download_range(offset, length, mrd):
     buffer = BytesIO()
     await mrd.download_ranges([(offset, length, buffer)])
     data = buffer.getvalue()
-    logger.info(
+    logger.debug(
         f"Requested {length} bytes from offset {offset}, downloaded {len(data)} bytes"
     )
     return data
