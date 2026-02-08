@@ -1242,6 +1242,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     merge = asyn.sync_wrapper(_merge)
 
+    async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
+        if path1 == path2:
+            return
+        await self._copy(
+            path1, path2, recursive=recursive, maxdepth=maxdepth, onerror="raise"
+        )
+        await self._rm(path1, recursive=recursive)
+
     async def _cp_file(self, path1, path2, acl=None, **kwargs):
         """Duplicate remote file"""
         b1, k1, g1 = self.split_path(path1)
