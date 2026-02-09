@@ -9,49 +9,31 @@ common:
 
 scenarios:
   - name: "list_flat"
-    threads: [1]
-    processes: [1]
     depth: 0
     pattern: "ls"
 
   - name: "list_recursive"
-    threads: [1]
-    processes: [1]
     depth: 8
     pattern: "ls"
 
   - name: "list_recursive_deep"
-    threads: [1]
-    processes: [1]
     depth: 24
     pattern: "ls"
 
-  - name: "list_recursive_multi_thread"
-    threads: [4, 8]
-    processes: [1]
-    pattern: "ls"
-
   - name: "list_recursive_multi_process"
-    threads: [1, 2]
     processes: [4, 8]
     pattern: "ls"
 
   - name: "find_flat"
-    threads: [1]
-    processes: [1]
     depth: 0
     pattern: "find"
 
   - name: "find_recursive"
-    threads: [1]
-    processes: [1]
     depth: 8
     folders: [100]
     pattern: "find"
 
   - name: "find_recursive_deep"
-    threads: [1]
-    processes: [1]
     depth: 24
     folders: [2050]
     pattern: "find"
