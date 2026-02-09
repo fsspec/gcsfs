@@ -504,6 +504,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError("starts, ends, and paths must have the same length.")
 
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer or None.")
+
         # Group Requests by zonal vs regional buckets
         zonal_batches, regional_requests = await self._group_requests_by_bucket_type(
             paths, starts, ends
