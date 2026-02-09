@@ -1687,3 +1687,122 @@ async def test_cp_file_not_implemented_error(
                 ) as mock_super_cp:
                     await async_gcs._cp_file(source_path, dest_path)
                     mock_super_cp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_requests_by_bucket_type(async_gcs):
+    """Test grouping of requests into zonal batches and regional requests."""
+    paths = ["gs://zonal/obj1", "gs://regional/obj2", "gs://zonal/obj3"]
+    starts = [0, 10, 20]
+    ends = [5, 15, 25]
+
+    async def mock_is_zonal(bucket):
+        return bucket == "zonal"
+
+    with mock.patch.object(async_gcs, "_is_zonal_bucket", side_effect=mock_is_zonal):
+        zonal_batches, regional_requests = (
+            await async_gcs._group_requests_by_bucket_type(paths, starts, ends)
+        )
+
+    # Check zonal batches
+    # Keys are (bucket, object_name, generation)
+    # paths[0] -> zonal/obj1 -> key ("zonal", "obj1", None)
+    # paths[2] -> zonal/obj3 -> key ("zonal", "obj3", None)
+    assert len(zonal_batches) == 2
+    assert ("zonal", "obj1", None) in zonal_batches
+    assert ("zonal", "obj3", None) in zonal_batches
+
+    # Check batch content: (index, path, start, end)
+    assert zonal_batches[("zonal", "obj1", None)] == [(0, "gs://zonal/obj1", 0, 5)]
+    assert zonal_batches[("zonal", "obj3", None)] == [(2, "gs://zonal/obj3", 20, 25)]
+
+    # Check regional requests
+    assert len(regional_requests) == 1
+    assert regional_requests[0] == (1, "gs://regional/obj2", 10, 15)
+
+
+@pytest.mark.asyncio
+async def test_fetch_zonal_batch(async_gcs):
+    """Test fetching a batch of ranges for a zonal object."""
+    key = ("zonal-bucket", "obj1", "gen1")
+    batch = [
+        (0, "gs://zonal-bucket/obj1", 0, 10),
+        (2, "gs://zonal-bucket/obj1", 20, 30),
+    ]
+
+    mock_mrd = mock.AsyncMock()
+    mock_mrd.persisted_size = 100
+
+    async def mock_get_grpc_client():
+        async_gcs._grpc_client = mock.Mock()
+        return async_gcs._grpc_client
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.AsyncMultiRangeDownloader.create_mrd",
+            return_value=mock_mrd,
+        ) as mock_create_mrd,
+        mock.patch(
+            "gcsfs.zb_hns_utils.download_ranges", return_value=[b"data1", b"data2"]
+        ) as mock_download_ranges,
+        mock.patch.object(
+            async_gcs, "_get_grpc_client", side_effect=mock_get_grpc_client
+        ),
+        mock.patch.object(
+            async_gcs,
+            "_process_limits_to_offset_and_length",
+            new_callable=mock.AsyncMock,
+            side_effect=[(0, 10), (20, 10)],
+        ),
+    ):
+        results = await async_gcs._fetch_zonal_batch(key, batch)
+
+    assert results == [(0, b"data1"), (2, b"data2")]
+
+    mock_create_mrd.assert_awaited_once()
+    mock_download_ranges.assert_awaited_once()
+    # Check args to download_ranges: list of (offset, length)
+    call_args = mock_download_ranges.call_args
+    assert call_args[0][0] == [(0, 10), (20, 10)]
+    assert call_args[0][1] == mock_mrd
+    mock_mrd.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fetch_zonal_batch_fallback_info(async_gcs):
+    """Test fetching a batch of ranges for a zonal object with fallback to _info."""
+    key = ("zonal-bucket", "obj1", "gen1")
+    batch = [(0, "gs://zonal-bucket/obj1", 0, 10)]
+
+    mock_mrd = mock.AsyncMock()
+    mock_mrd.persisted_size = None  # Trigger fallback
+
+    async def mock_get_grpc_client():
+        async_gcs._grpc_client = mock.Mock()
+        return async_gcs._grpc_client
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.AsyncMultiRangeDownloader.create_mrd",
+            return_value=mock_mrd,
+        ),
+        mock.patch("gcsfs.zb_hns_utils.download_ranges", return_value=[b"data1"]),
+        mock.patch.object(
+            async_gcs, "_get_grpc_client", side_effect=mock_get_grpc_client
+        ),
+        mock.patch.object(
+            async_gcs, "_info", new_callable=mock.AsyncMock, return_value={"size": 100}
+        ) as mock_info,
+        mock.patch.object(
+            async_gcs,
+            "_process_limits_to_offset_and_length",
+            new_callable=mock.AsyncMock,
+            return_value=(0, 10),
+        ),
+        mock.patch("gcsfs.extended_gcsfs.logger") as mock_logger,
+    ):
+        await async_gcs._fetch_zonal_batch(key, batch)
+        mock_logger.warning.assert_called_once()
+        assert "no 'persisted_size'" in mock_logger.warning.call_args[0][0]
+
+    mock_info.assert_awaited_once_with("zonal-bucket/obj1")
