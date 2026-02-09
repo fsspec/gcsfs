@@ -211,7 +211,9 @@ async def test_cat_ranges_negative_batch_size(async_gcs, file_path):
     """Test that negative batch_size raises ValueError."""
     await async_gcs._pipe_file(file_path, b"data", finalize_on_close=True)
 
-    with pytest.raises(ValueError, match="batch_size must be a positive integer or None."):
+    with pytest.raises(
+        ValueError, match="batch_size must be a positive integer or None."
+    ):
         await async_gcs._cat_ranges([file_path], [0], [4], batch_size=-1)
 
 

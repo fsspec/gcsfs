@@ -1942,6 +1942,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             Timeout seconds for the asynchronous callback.
         generation: str
             Object generation.
+        supports_append: bool
+            If True, allows opening file in append mode. This is generally not supported
+            by GCS, but may be supported by subclasses (e.g. ZonalFile).
         """
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
