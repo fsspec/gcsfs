@@ -1806,3 +1806,54 @@ async def test_fetch_zonal_batch_fallback_info(async_gcs):
         assert "no 'persisted_size'" in mock_logger.warning.call_args[0][0]
 
     mock_info.assert_awaited_once_with("zonal-bucket/obj1")
+
+
+def test_cat_ranges_sync_mixed_integration(extended_gcsfs):
+    """
+    Sync Integration Test: Verifies that synchronous 'cat_ranges'
+    correctly handles a mix of Zonal and Regional files without event loop issues.
+    """
+    # Setup Inputs
+    paths = ["gs://zonal/obj1", "gs://regional/obj2"]
+    starts = [0, 10]
+    ends = [5, 15]
+
+    # Mock the low level methods to simulate Zonal and Regional behavior
+    async def mock_fetch_zonal(key, batch):
+        # Emulate Zonal return: list of (index, data) tuples
+        indices = [item[0] for item in batch]
+        return [(idx, b"ZONAL_DATA") for idx in indices]
+
+    async def mock_cat_file(path, start, end, **kwargs):
+        # Emulate Regional return: single bytes object
+        return b"REGIONAL_DATA"
+
+    async def mock_is_zonal(bucket):
+        return bucket == "zonal"
+
+    # Apply Mocks & Execute
+    with (
+        mock.patch.object(
+            extended_gcsfs, "_fetch_zonal_batch", side_effect=mock_fetch_zonal
+        ) as m_zonal,
+        mock.patch(
+            "gcsfs.core.GCSFileSystem._cat_file", side_effect=mock_cat_file
+        ) as m_regional,
+        mock.patch.object(
+            extended_gcsfs, "_is_zonal_bucket", side_effect=mock_is_zonal
+        ),
+    ):
+        results = extended_gcsfs.cat_ranges(paths, starts, ends)
+
+    # Assertions
+    assert results == [b"ZONAL_DATA", b"REGIONAL_DATA"]
+    # Zonal should be called for obj1
+    m_zonal.assert_called_once()
+    args, _ = m_zonal.call_args
+    key, batch = args
+    assert key == ("zonal", "obj1", None)
+    assert batch[0][1] == "gs://zonal/obj1"  # path check
+
+    # Regional should be called for obj2
+    m_regional.assert_called_once()
+    assert m_regional.call_args[0][0] == "gs://regional/obj2"
