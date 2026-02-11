@@ -434,12 +434,56 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             }
             self.dircache[parent2].append(new_entry)
 
+    async def _mv_file(self, path1, path2):
+        """
+        Move a file using the atomic moveTo API for HNS buckets.
+        Falls back to copy+delete for non-HNS buckets.
+        """
+        bucket1, key1, generation1 = self.split_path(path1)
+        bucket2, key2, generation2 = self.split_path(path2)
+
+        if generation2:
+            raise ValueError("Cannot move to specific object generation")
+
+        if (
+            bucket1 == bucket2
+            and await self._is_bucket_hns_enabled(bucket1)
+            and key1
+            and key2
+        ):
+            out = await self._call(
+                "POST",
+                "b/{}/o/{}/moveTo/o/{}",
+                bucket1,
+                key1,
+                key2,
+                sourceGeneration=generation1,
+                headers={"Content-Type": "application/json"},
+                json_out=True,
+            )
+            parent1 = self._parent(path1)
+            if parent1 in self.dircache:
+                path1_stripped = self._strip_protocol(path1)
+                self.dircache[parent1] = [
+                    e for e in self.dircache[parent1] if e.get("name") != path1_stripped
+                ]
+
+            parent2 = self._parent(path2)
+            if parent2 in self.dircache:
+                new_entry = self._process_object(bucket2, out)
+                self.dircache[parent2].append(new_entry)
+        else:
+            # Fallback to the parent's implementation (copy + delete)
+            await super()._mv_file(path1, path2)
+
+    mv_file = asyn.sync_wrapper(_mv_file)
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
-        optimized, atomic implementation for renaming folders in HNS-enabled
-        buckets. Falls back to the parent's object-level copy-and-delete
-        implementation for files or for non-HNS buckets.
+        optimized, atomic implementation for renaming folders and moving files
+        in HNS-enabled buckets. Falls back to the parent's object-level
+        copy-and-delete implementation for non-HNS buckets.
         """
         if path1 == path2:
             logger.debug(
@@ -484,6 +528,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 logger.info(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
                 )
+                return
+            elif not is_folder:
+                await self._mv_file(path1, path2)
                 return
         except Exception as e:
             if isinstance(e, FileNotFoundError):
