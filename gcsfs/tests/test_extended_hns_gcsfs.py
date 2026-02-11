@@ -402,14 +402,14 @@ class TestExtendedGcsFileSystemMv:
         gcs_hns,
         gcs_hns_mocks,
     ):
-        """Test scenarios that should fall back to the parent's mv method."""
+        """Test that folder rename to root directory uses HNS rename API."""
         gcsfs = gcs_hns
         dir_name = "root_dir"
         path1 = f"{TEST_HNS_BUCKET}/test/{dir_name}"
         path2 = f"{TEST_HNS_BUCKET}/"
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = [
-                {"type": "directory"},
+                {"type": "directory", "name": path1},
                 FileNotFoundError(path1),
                 {"type": "directory", "name": path2},
                 {"type": "directory", "name": f"{path2}/{dir_name}"},
@@ -424,8 +424,15 @@ class TestExtendedGcsFileSystemMv:
             assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}")
             assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
 
-            mocks["control_client"].rename_folder.assert_not_called()
-            mocks["super_mv"].assert_awaited_once_with(path1, path2, recursive=True)
+            # Verify HNS rename was used
+            expected_request = storage_control_v2.RenameFolderRequest(
+                name=f"projects/_/buckets/{TEST_HNS_BUCKET}/folders/test/{dir_name}",
+                destination_folder_id=dir_name,
+            )
+            mocks["control_client"].rename_folder.assert_called_once_with(
+                request=expected_request
+            )
+            mocks["super_mv"].assert_not_called()
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
