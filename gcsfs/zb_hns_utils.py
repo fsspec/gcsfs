@@ -30,7 +30,7 @@ async def download_ranges(ranges, mrd):
     Downloads multiple byte ranges from the file asynchronously in a single batch.
 
     Args:
-        ranges: List of (offset, length) tuples to download
+        ranges: List of (offset, length) tuples to download. Max 1000 ranges allowed.
         mrd: AsyncMultiRangeDownloader instance
 
     Returns:
@@ -40,6 +40,12 @@ async def download_ranges(ranges, mrd):
     # Structure: (original_index, offset, length, buffer)
     # Calling MRD with length=0 returns till end of file. We handle zero-length
     # ranges by returning b"" without calling MRD. So only create tasks for length > 0
+
+    if len(ranges) > 1000:
+        raise ValueError(
+            "Invalid input - length of read_ranges cannot be more than 1000"
+        )
+
     tasks = [
         (i, off, length, BytesIO())
         for i, (off, length) in enumerate(ranges)

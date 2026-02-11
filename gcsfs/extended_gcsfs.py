@@ -6,7 +6,6 @@ from collections.abc import Iterable
 from enum import Enum
 from functools import partial
 from glob import has_magic
-from io import BytesIO
 
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
@@ -293,22 +292,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 ):
                     raise RuntimeError("Request not satisfiable.")
 
-                buffers = []  # To hold the results in order
                 read_ranges = []  # To pass to MRD
-
                 for length in chunk_lengths:
-                    buf = BytesIO()
-                    buffers.append(buf)
-
-                    if length > 0:
-                        read_ranges.append((current_offset, length, buf))
-
+                    read_ranges.append((current_offset, length))
                     current_offset += length
 
-                if read_ranges:
-                    await mrd.download_ranges(read_ranges)
-
-                return [b.getvalue() for b in buffers]
+                return await zb_hns_utils.download_ranges(read_ranges, mrd)
             else:
                 end = kwargs.get("end")
                 offset, length = await self._process_limits_to_offset_and_length(
@@ -477,6 +466,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         This overrides the parent method to use gRPC-based MRD for zonal buckets,
         batching all ranges into a single MRD request instead of individual requests per range.
+        For Zonal buckets, if the number of ranges exceeds 1000, they are split into multiple
+        requests to comply with the MRD limit.
 
         Args:
             paths: list of filepaths on this filesystem
@@ -533,8 +524,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Zonal Batches
         for key, batch in zonal_batches.items():
-            indices = [idx for idx, _, _, _ in batch]
-            tasks.append(_run_task(indices, self._fetch_zonal_batch(key, batch)))
+            # MRD supports max 1000 ranges per request
+            for i in range(0, len(batch), 1000):
+                sub_batch = batch[i : i + 1000]
+                indices = [idx for idx, _, _, _ in sub_batch]
+                tasks.append(
+                    _run_task(indices, self._fetch_zonal_batch(key, sub_batch))
+                )
 
         # Regional Requests
         for idx, path, start, end in regional_requests:

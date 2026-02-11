@@ -1823,6 +1823,48 @@ async def test_fetch_zonal_batch_fallback_info(async_gcs):
     mock_info.assert_awaited_once_with("zonal-bucket/obj1")
 
 
+@pytest.mark.asyncio
+async def test_cat_ranges_1001_ranges(extended_gcsfs):
+    """
+    Test that cat_ranges correctly handles a large number of ranges (1001) without hitting mrd argument limits.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip(
+            "Mock-based test for handling large number of ranges; not suitable for live GCS."
+        )
+    # Setup Inputs
+    num_ranges = 1001
+    paths = ["gs://zonal/obj1"] * num_ranges
+
+    # Mock the low level method to simulate Zonal behavior
+    async def mock_fetch_zonal(key, batch):
+        # Emulate Zonal return: list of (index, data) tuples
+        return [(item[0], b"data") for item in batch]
+
+    with (
+        mock.patch.object(
+            extended_gcsfs, "_fetch_zonal_batch", side_effect=mock_fetch_zonal
+        ) as m_fetch,
+        mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True),
+    ):
+        results = await extended_gcsfs._cat_ranges(
+            paths, range(num_ranges), range(1, num_ranges + 1)
+        )
+
+    # Assertions
+    assert len(results) == num_ranges
+    assert m_fetch.call_count == 2
+
+    # args[1] is the batch list. We expect one batch of 1000 and one of 1.
+    batch_sizes = [len(call.args[1]) for call in m_fetch.call_args_list]
+    assert sorted(batch_sizes, reverse=True) == [1000, 1]
+
+    # Verify the key was correct for both calls
+    assert all(
+        call.args[0] == ("zonal", "obj1", None) for call in m_fetch.call_args_list
+    )
+
+
 def test_cat_ranges_sync_mixed_integration(extended_gcsfs):
     """
     Sync Integration Test: Verifies that synchronous 'cat_ranges'

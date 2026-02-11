@@ -92,6 +92,22 @@ async def test_download_ranges_exception():
 
 
 @pytest.mark.asyncio
+async def test_download_ranges_validation_limit():
+    """
+    Tests that download_ranges raises a ValueError if the number of ranges
+    exceeds 1000.
+    """
+    mock_mrd = mock.AsyncMock()
+    ranges = [(i, 10) for i in range(1001)]
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid input - length of read_ranges cannot be more than 1000",
+    ):
+        await zb_hns_utils.download_ranges(ranges, mock_mrd)
+
+
+@pytest.mark.asyncio
 async def test_init_aaow():
     """
     Tests that init_aaow calls the underlying AsyncAppendableObjectWriter.open
