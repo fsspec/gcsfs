@@ -509,12 +509,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # We only use HNS rename if the source is a folder and the move is
             # within the same bucket.
-            if is_folder and bucket1 == bucket2 and key1 and key2:
+            if is_folder and bucket1 == bucket2 and key1:
                 logger.info(
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
                 source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
-                destination_folder_id = key2
+                destination_folder_id = key2 or key1.rstrip("/").split("/")[-1]
 
                 request = storage_control_v2.RenameFolderRequest(
                     name=source_folder_name,
