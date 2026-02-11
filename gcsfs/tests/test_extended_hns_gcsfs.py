@@ -63,7 +63,7 @@ def gcs_hns_mocks():
         patch_target_sync_lookup_bucket_type = (
             "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
         )
-        patch_target_super_mv = "gcsfs.core.GCSFileSystem.mv"
+        patch_target_super_mv = "gcsfs.core.GCSFileSystem._mv"
         patch_target_super_mkdir = "gcsfs.core.GCSFileSystem._mkdir"
         patch_target_super_rmdir = "gcsfs.core.GCSFileSystem._rmdir"
         patch_target_super_find = "gcsfs.core.GCSFileSystem._find"
@@ -88,7 +88,9 @@ def gcs_hns_mocks():
             mock.patch.object(
                 gcsfs, "_storage_control_client", mock_control_client_instance
             ),
-            mock.patch(patch_target_super_mv, new_callable=mock.Mock) as mock_super_mv,
+            mock.patch(
+                patch_target_super_mv, new_callable=mock.AsyncMock
+            ) as mock_super_mv,
             mock.patch(
                 patch_target_super_mkdir, new_callable=mock.AsyncMock
             ) as mock_super_mkdir,
@@ -295,7 +297,7 @@ class TestExtendedGcsFileSystemMv:
             assert gcsfs.exists(path2)
 
             mocks["control_client"].rename_folder.assert_not_called()
-            mocks["super_mv"].assert_called_once_with(path1, path2)
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -370,7 +372,7 @@ class TestExtendedGcsFileSystemMv:
             assert gcsfs.exists(path2)
 
             mocks["control_client"].rename_folder.assert_not_called()
-            mocks["super_mv"].assert_called_once_with(path1, path2)
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -412,7 +414,7 @@ class TestExtendedGcsFileSystemMv:
             assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
 
             mocks["control_client"].rename_folder.assert_not_called()
-            mocks["super_mv"].assert_called_once_with(path1, path2, recursive=True)
+            mocks["super_mv"].assert_awaited_once_with(path1, path2, recursive=True)
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
