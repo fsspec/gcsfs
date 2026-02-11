@@ -206,9 +206,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         Returns:
             tuple: A tuple containing (offset, length).
-
-        Raises:
-            ValueError: If the calculated range is invalid.
         """
         size = file_size
 
@@ -217,6 +214,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         elif start < 0:
             size = (await self._info(path))["size"] if size is None else size
             offset = size + start
+            # If start is negative and larger than the file size, we should start from 0.
+            offset = max(0, size + start)
         else:
             offset = start
 
@@ -229,14 +228,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         else:
             effective_end = end
 
-        if offset < 0:
-            raise ValueError(f"Calculated start offset ({offset}) cannot be negative.")
-        if effective_end < offset:
-            raise ValueError(
-                f"Calculated end position ({effective_end}) cannot be before start offset ({offset})."
-            )
-        elif effective_end == offset:
-            length = 0  # Handle zero-length slice
+        # If the requested end is before/ same as the start, return empty.
+        if effective_end <= offset:
+            return offset, 0
         else:
             length = effective_end - offset  # Normal case
             size = (await self._info(path))["size"] if size is None else size
