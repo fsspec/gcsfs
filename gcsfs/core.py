@@ -856,7 +856,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _call_list_objects(self, bucket, **kwargs):
         """
         Helper method to fetch a single page of object listing.
-        Extracts valid GCS parameters from kwargs to prevent parameter injection.
+        Extracts valid GCS parameters from kwargs to prevent parameter pollution.
         """
 
         # Only pass valid parameters to the API call
