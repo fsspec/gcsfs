@@ -842,9 +842,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     async def _call_list_objects(self,bucket, **kwargs):
         """
-                Helper method to fetch a single page of object listing.
-                Extracts valid GCS parameters from kwargs to prevent parameter injection.
-                """
+        Helper method to fetch a single page of object listing.
+        Extracts valid GCS parameters from kwargs to prevent parameter injection.
+        """
         # Define allowed parameters for the GCS list API
         valid_list_params = {
             "delimiter",
@@ -854,7 +854,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             "maxResults",
             "versions",
             "pageToken",
-            "includeFoldersAsPrefixes"
+            "includeFoldersAsPrefixes",
         }
 
         # Only pass valid parameters to the API call
