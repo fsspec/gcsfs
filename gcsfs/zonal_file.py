@@ -9,7 +9,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 
 from gcsfs import zb_hns_utils
-from gcsfs.core import GCSFile
+from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
     ReadAheadChunked,
@@ -29,7 +29,7 @@ class ZonalFile(GCSFile):
         gcsfs,
         path,
         mode="rb",
-        block_size=_DEFAULT_FLUSH_INTERVAL_BYTES,
+        block_size=DEFAULT_BLOCK_SIZE,
         autocommit=True,
         cache_type="readahead_chunked",
         cache_options=None,
@@ -42,6 +42,7 @@ class ZonalFile(GCSFile):
         generation=None,
         kms_key_name=None,
         finalize_on_close=False,
+        flush_interval_bytes=_DEFAULT_FLUSH_INTERVAL_BYTES,
         **kwargs,
     ):
         """
@@ -53,10 +54,9 @@ class ZonalFile(GCSFile):
         ensure the write is finalized, `.commit()` must be called explicitly or
         `finalize_on_close` must be set to `True` when opening the file.
 
-        For Zonal buckets, `block_size` is set to `_DEFAULT_FLUSH_INTERVAL_BYTES` (16MiB) by default.
-        block_size is applicable for write mode and refers to the number of bytes to append before
-        "persisting" data in GCS. Must be a multiple of `_MAX_CHUNK_SIZE_BYTES` (2MiB).
-
+        For Zonal buckets, `flush_interval_bytes` controls the write buffer size before
+        persisting data to GCS (default: 16 MiB). This value must be a multiple
+        of `_MAX_CHUNK_SIZE_BYTES` (2 MiB).
         """
         bucket, key, generation = gcsfs._split_path(path)
         if not key:
@@ -84,7 +84,7 @@ class ZonalFile(GCSFile):
                 bucket,
                 key,
                 generation,
-                block_size,
+                flush_interval_bytes,
             )
         else:
             raise NotImplementedError(

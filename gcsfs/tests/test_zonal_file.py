@@ -84,7 +84,10 @@ def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
     bucket, key, _ = extended_gcsfs.split_path(file_path)
     custom_flush_interval_bytes = 4 * 1024 * 1024
     with extended_gcsfs.open(
-        file_path, "wb", block_size=custom_flush_interval_bytes, finalize_on_close=True
+        file_path,
+        "wb",
+        finalize_on_close=True,
+        flush_interval_bytes=custom_flush_interval_bytes,
     ):
         pass
 
