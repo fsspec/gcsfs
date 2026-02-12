@@ -840,7 +840,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         return items, prefixes
 
-    async def _call_list_objects(self,bucket, **kwargs):
+    async def _call_list_objects(self, bucket, **kwargs):
         """
         Helper method to fetch a single page of object listing.
         Extracts valid GCS parameters from kwargs to prevent parameter injection.
