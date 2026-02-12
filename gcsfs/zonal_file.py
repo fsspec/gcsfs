@@ -56,7 +56,8 @@ class ZonalFile(GCSFile):
 
         For Zonal buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
-        of `_MAX_CHUNK_SIZE_BYTES` (2 MiB).
+        of `_MAX_CHUNK_SIZE_BYTES` (2 MiB). Note that this higher default value may
+        increase memory usage.
         """
         bucket, key, generation = gcsfs._split_path(path)
         if not key:
