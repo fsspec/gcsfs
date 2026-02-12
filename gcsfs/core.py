@@ -67,6 +67,18 @@ SUPPORTED_FIXED_KEY_METADATA = {
     "custom_time": "customTime",
 }
 
+# Define allowed parameters for the GCS list API
+_VALID_LIST_PARAMS = {
+    "delimiter",
+    "prefix",
+    "startOffset",
+    "endOffset",
+    "maxResults",
+    "versions",
+    "pageToken",
+    "includeFoldersAsPrefixes",
+}
+
 
 def quote(s):
     """
@@ -829,6 +841,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 maxResults=num_items,
                 pageToken=next_page_token,
                 versions="true" if versions else None,
+                **kwargs,
             )
 
             assert page["kind"] == "storage#objects"
@@ -845,20 +858,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         Helper method to fetch a single page of object listing.
         Extracts valid GCS parameters from kwargs to prevent parameter injection.
         """
-        # Define allowed parameters for the GCS list API
-        valid_list_params = {
-            "delimiter",
-            "prefix",
-            "startOffset",
-            "endOffset",
-            "maxResults",
-            "versions",
-            "pageToken",
-            "includeFoldersAsPrefixes",
-        }
 
         # Only pass valid parameters to the API call
-        valid_kwargs = {k: v for k, v in kwargs.items() if k in valid_list_params}
+        valid_kwargs = {k: v for k, v in kwargs.items() if k in _VALID_LIST_PARAMS}
 
         return await self._call(
             "GET",
