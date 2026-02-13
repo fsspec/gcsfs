@@ -1,3 +1,17 @@
+"""
+This module contains asynchronous integration tests for the ExtendedGcsFileSystem.
+
+These tests focus on verifying the behavior of filesystem methods when invoked
+within an asynchronous context. They are designed to run against
+a real Google Cloud Storage (GCS) backend and specifically target features
+related to Hierarchical Namespace (HNS) and Zonal buckets.
+
+These tests require specific configuration:
+- GCS buckets with HNS enabled, rapid storage must be specified via corresponding environment variables.
+- `STORAGE_EMULATOR_HOST` must be set to "https://storage.googleapis.com".
+- The `GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT` environment variable must be 'true'.
+"""
+
 import os
 import uuid
 
