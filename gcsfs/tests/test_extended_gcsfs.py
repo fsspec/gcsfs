@@ -1729,8 +1729,8 @@ async def test_group_requests_by_bucket_type(async_gcs):
     assert ("zonal", "obj3", None) in zonal_batches
 
     # Check batch content: (index, path, start, end)
-    assert zonal_batches[("zonal", "obj1", None)] == [(0, "gs://zonal/obj1", 0, 5)]
-    assert zonal_batches[("zonal", "obj3", None)] == [(2, "gs://zonal/obj3", 20, 25)]
+    assert zonal_batches[("zonal", "obj1", None)] == [(0, 0, 5)]
+    assert zonal_batches[("zonal", "obj3", None)] == [(2, 20, 25)]
 
     # Check regional requests
     assert len(regional_requests) == 1
@@ -1742,8 +1742,8 @@ async def test_fetch_zonal_batch(async_gcs):
     """Test fetching a batch of ranges for a zonal object."""
     key = ("zonal-bucket", "obj1", "gen1")
     batch = [
-        (0, "gs://zonal-bucket/obj1", 0, 10),
-        (2, "gs://zonal-bucket/obj1", 20, 30),
+        (0, 0, 10),
+        (2, 20, 30),
     ]
 
     mock_mrd = mock.AsyncMock()
@@ -1788,7 +1788,7 @@ async def test_fetch_zonal_batch(async_gcs):
 async def test_fetch_zonal_batch_fallback_info(async_gcs):
     """Test fetching a batch of ranges for a zonal object with fallback to _info."""
     key = ("zonal-bucket", "obj1", "gen1")
-    batch = [(0, "gs://zonal-bucket/obj1", 0, 10)]
+    batch = [(0, 0, 10)]
 
     mock_mrd = mock.AsyncMock()
     mock_mrd.persisted_size = None  # Trigger fallback
@@ -1910,7 +1910,7 @@ def test_cat_ranges_sync_mixed_integration(extended_gcsfs):
     args, _ = m_zonal.call_args
     key, batch = args
     assert key == ("zonal", "obj1", None)
-    assert batch[0][1] == "gs://zonal/obj1"  # path check
+    assert batch[0] == (0, 0, 5)  # batch contains (idx, start, end)
 
     # Regional should be called for obj2
     m_regional.assert_called_once()

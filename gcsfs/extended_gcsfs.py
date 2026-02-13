@@ -213,7 +213,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             offset = 0
         elif start < 0:
             size = (await self._info(path))["size"] if size is None else size
-            offset = size + start
             # If start is negative and larger than the file size, we should start from 0.
             offset = max(0, size + start)
         else:
@@ -380,7 +379,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     async def _fetch_zonal_batch(self, key, batch):
         """Optimized Zonal fetch for a single object using MRD."""
         bucket, object_name, generation = key
-        indices, _, starts, ends = zip(*batch)
+        indices, starts, ends = zip(*batch)
 
         mrd = None
         try:
@@ -447,7 +446,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         for idx, path, start, end, bucket, obj, gen in path_details:
             if bucket_map[bucket]:
                 key = (bucket, obj, gen)
-                zonal_batches[key].append((idx, path, start, end))
+                zonal_batches[key].append((idx, start, end))
             else:
                 regional_requests.append((idx, path, start, end))
 
@@ -528,7 +527,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             # MRD supports max 1000 ranges per request
             for i in range(0, len(batch), MRD_MAX_RANGES):
                 sub_batch = batch[i : i + MRD_MAX_RANGES]
-                indices = [idx for idx, _, _, _ in sub_batch]
+                indices = [idx for idx, _, _ in sub_batch]
                 tasks.append(
                     _run_task(indices, self._fetch_zonal_batch(key, sub_batch))
                 )
