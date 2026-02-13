@@ -37,6 +37,7 @@ from gcsfs.tests.conftest import (
 )
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.zb_hns_utils import MRD_MAX_RANGES
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -1833,7 +1834,7 @@ async def test_cat_ranges_1001_ranges(extended_gcsfs):
             "Mock-based test for handling large number of ranges; not suitable for live GCS."
         )
     # Setup Inputs
-    num_ranges = 1001
+    num_ranges = MRD_MAX_RANGES + 1  # 1001 ranges
     paths = ["gs://zonal/obj1"] * num_ranges
 
     # Mock the low level method to simulate Zonal behavior
@@ -1857,7 +1858,7 @@ async def test_cat_ranges_1001_ranges(extended_gcsfs):
 
     # args[1] is the batch list. We expect one batch of 1000 and one of 1.
     batch_sizes = [len(call.args[1]) for call in m_fetch.call_args_list]
-    assert sorted(batch_sizes, reverse=True) == [1000, 1]
+    assert sorted(batch_sizes, reverse=True) == [MRD_MAX_RANGES, 1]
 
     # Verify the key was correct for both calls
     assert all(

@@ -25,6 +25,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.zb_hns_utils import MRD_MAX_RANGES
 from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
@@ -525,8 +526,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         # Zonal Batches
         for key, batch in zonal_batches.items():
             # MRD supports max 1000 ranges per request
-            for i in range(0, len(batch), 1000):
-                sub_batch = batch[i : i + 1000]
+            for i in range(0, len(batch), MRD_MAX_RANGES):
+                sub_batch = batch[i : i + MRD_MAX_RANGES]
                 indices = [idx for idx, _, _, _ in sub_batch]
                 tasks.append(
                     _run_task(indices, self._fetch_zonal_batch(key, sub_batch))

@@ -6,6 +6,8 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
 
+MRD_MAX_RANGES = 1000  # MRD supports up to 1000 ranges per request
+
 logger = logging.getLogger("gcsfs")
 
 
@@ -41,7 +43,7 @@ async def download_ranges(ranges, mrd):
     # Calling MRD with length=0 returns till end of file. We handle zero-length
     # ranges by returning b"" without calling MRD. So only create tasks for length > 0
 
-    if len(ranges) > 1000:
+    if len(ranges) > MRD_MAX_RANGES:
         raise ValueError(
             "Invalid input - length of read_ranges cannot be more than 1000"
         )
