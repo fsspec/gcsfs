@@ -162,6 +162,11 @@ steps:
     args:
       - "-c"
       - |
+        # Excludes tests that are not applicable to HNS buckets:
+        # - test_extended_gcsfs.py, test_zonal_file.py: Zonal bucket specific tests which won't work on HNS bucket.
+        # - test_core_versioned.py: HNS buckets do not support versioning.
+        # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
+        # - test_core.py::test_info_on_directory_with_only_subdirectories: Unit test for regional buckets.
         TEST_SCRIPT="
           source env/bin/activate && \
           echo '--- Preparing test environment for HNS tests ---' && \
