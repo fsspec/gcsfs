@@ -122,6 +122,7 @@ def test_create_table_row():
         "threads": 1,
         "processes": 1,
         "depth": 0,
+        "target_type": "file",
         "file_size": 1024 * 1024,
         "chunk_size": 1024,
         "block_size": 1024,
@@ -133,7 +134,7 @@ def test_create_table_row():
     }
     table_row = run._create_table_row(row)
     assert table_row[0] == "regional"
-    assert table_row[8] == "1.00"  # file size MB
+    assert table_row[9] == "1.00"  # file size MB
 
 
 @mock.patch("gcsfs.tests.perf.microbenchmarks.run.PrettyTable")
