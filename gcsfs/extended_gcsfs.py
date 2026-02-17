@@ -456,7 +456,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.debug(
                 f"Not an HNS bucket. Falling back to object-level mv for '{path1}' to '{path2}'."
             )
-            return await self._mv_fallback(path1, path2, **kwargs)
+            return await super()._mv(path1, path2, **kwargs)
 
         try:
             info1 = await self._info(path1)
@@ -504,19 +504,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
-        return await self._mv_fallback(path1, path2, **kwargs)
+        return await super()._mv(path1, path2, **kwargs)
 
     mv = asyn.sync_wrapper(_mv)
-
-    async def _mv_fallback(
-        self, path1, path2, recursive=False, maxdepth=None, **kwargs
-    ):
-        if path1 == path2:
-            return
-        # TODO: Pass on_error parameter after copy method handles FileNotFoundError
-        # for folders when recursive is set to true.
-        await self._copy(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        await self._rm(path1, recursive=recursive)
 
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
         try:

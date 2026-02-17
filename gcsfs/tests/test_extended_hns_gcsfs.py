@@ -63,9 +63,7 @@ def gcs_hns_mocks():
         patch_target_sync_lookup_bucket_type = (
             "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
         )
-        patch_target_mv_fallback = (
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._mv_fallback"
-        )
+        patch_target_super_mv = "gcsfs.core.GCSFileSystem._mv"
         patch_target_super_mkdir = "gcsfs.core.GCSFileSystem._mkdir"
         patch_target_super_rmdir = "gcsfs.core.GCSFileSystem._rmdir"
         patch_target_super_find = "gcsfs.core.GCSFileSystem._find"
@@ -91,8 +89,8 @@ def gcs_hns_mocks():
                 gcsfs, "_storage_control_client", mock_control_client_instance
             ),
             mock.patch(
-                patch_target_mv_fallback, new_callable=mock.AsyncMock
-            ) as mock_mv_fallback,
+                patch_target_super_mv, new_callable=mock.AsyncMock
+            ) as mock_super_mv,
             mock.patch(
                 patch_target_super_mkdir, new_callable=mock.AsyncMock
             ) as mock_super_mkdir,
@@ -113,7 +111,7 @@ def gcs_hns_mocks():
                 "sync_lookup_bucket_type": mock_sync_lookup_bucket_type,
                 "info": mock_info,
                 "control_client": mock_control_client_instance,
-                "mv_fallback": mock_mv_fallback,
+                "super_mv": mock_super_mv,
                 "super_mkdir": mock_super_mkdir,
                 "super_rmdir": mock_super_rmdir,
                 "super_find": mock_super_find,
@@ -201,7 +199,7 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
 
     def test_hns_folder_rename_with_protocol(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS folder rename when paths include the protocol."""
@@ -240,7 +238,7 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
 
     def test_hns_empty_folder_rename_success(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS rename of an empty folder."""
@@ -274,7 +272,7 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
 
     def test_file_rename_fallback_to_super_mv(
         self,
@@ -299,7 +297,7 @@ class TestExtendedGcsFileSystemMv:
             assert gcsfs.exists(path2)
 
             mocks["control_client"].rename_folder.assert_not_called()
-            mocks["mv_fallback"].assert_awaited_once_with(path1, path2)
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -374,7 +372,7 @@ class TestExtendedGcsFileSystemMv:
             assert gcsfs.exists(path2)
 
             mocks["control_client"].rename_folder.assert_not_called()
-            mocks["mv_fallback"].assert_awaited_once_with(path1, path2)
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -423,7 +421,7 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -446,7 +444,7 @@ class TestExtendedGcsFileSystemMv:
             mocks["async_lookup_bucket_type"].assert_not_called()
             mocks["info"].assert_not_called()
             mocks["control_client"].rename_folder.assert_not_called()
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
 
     def test_hns_rename_fails_if_parent_dne(self, gcs_hns, gcs_hns_mocks):
         """Test that HNS rename fails if the destination's parent does not exist."""
@@ -473,7 +471,7 @@ class TestExtendedGcsFileSystemMv:
                 request=expected_request
             )
             mocks["info"].assert_awaited_with(path1)
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
 
     def test_hns_rename_raises_file_not_found(self, gcs_hns, gcs_hns_mocks):
         """Test that NotFound from API raises FileNotFoundError."""
@@ -487,7 +485,7 @@ class TestExtendedGcsFileSystemMv:
                 gcsfs.mv(path1, path2)
 
             mocks["info"].assert_awaited_with(path1)
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
             mocks["control_client"].rename_folder.assert_not_called()
 
     def test_hns_rename_raises_file_not_found_on_race_condition(
@@ -514,7 +512,7 @@ class TestExtendedGcsFileSystemMv:
                 request=expected_request
             )
             mocks["info"].assert_awaited_with(path1)
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
 
     def test_hns_rename_raises_os_error_if_destination_exists(
         self, gcs_hns, gcs_hns_mocks
@@ -544,7 +542,7 @@ class TestExtendedGcsFileSystemMv:
                 request=expected_request
             )
             mocks["info"].assert_awaited_with(path1)
-            mocks["mv_fallback"].assert_not_called()
+            mocks["super_mv"].assert_not_called()
             mocks["control_client"].rename_folder.assert_called()
 
 
