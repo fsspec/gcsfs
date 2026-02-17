@@ -512,9 +512,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     async def async_mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
         if path1 == path2:
             return
-        await self._copy(
-            path1, path2, recursive=recursive, maxdepth=maxdepth, on_error="raise"
-        )
+        # TODO: Pass on_error parameter after copy method handles FileNotFoundError
+        # for folders when recursive is set to true.
+        await self._copy(path1, path2, recursive=recursive, maxdepth=maxdepth)
         await self._rm(path1, recursive=recursive)
 
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
