@@ -67,6 +67,18 @@ SUPPORTED_FIXED_KEY_METADATA = {
     "custom_time": "customTime",
 }
 
+# Define allowed parameters for the GCS list API
+_VALID_LIST_PARAMS = {
+    "delimiter",
+    "prefix",
+    "startOffset",
+    "endOffset",
+    "maxResults",
+    "versions",
+    "pageToken",
+    "includeFoldersAsPrefixes",
+}
+
 
 def quote(s):
     """
@@ -672,8 +684,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         default_page_size = 5000
 
         # NOTE: the inventory report logic is experimental.
-        # removing inventory_report_info parameter to pass kwargs directly to list api
-        inventory_report_info = kwargs.pop("inventory_report_info", None)
+        inventory_report_info = kwargs.get("inventory_report_info", None)
 
         # Check if the user has configured inventory report option.
         if inventory_report_info is not None:
@@ -802,16 +813,13 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         prefixes = []
         items = []
         num_items = min(items_per_call, max_results, 1000)
-        page = await self._call(
-            "GET",
-            "b/{}/o",
+        page = await self._call_list_objects(
             bucket,
             delimiter=delimiter,
             prefix=prefix,
             startOffset=start_offset,
             endOffset=end_offset,
             maxResults=num_items,
-            json_out=True,
             versions="true" if versions else None,
             **kwargs,
         )
@@ -824,9 +832,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             num_items = min(
                 items_per_call, max_results - (len(items) + len(prefixes)), 1000
             )
-            page = await self._call(
-                "GET",
-                "b/{}/o",
+            page = await self._call_list_objects(
                 bucket,
                 delimiter=delimiter,
                 prefix=prefix,
@@ -834,8 +840,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 endOffset=end_offset,
                 maxResults=num_items,
                 pageToken=next_page_token,
-                json_out=True,
                 versions="true" if versions else None,
+                **kwargs,
             )
 
             assert page["kind"] == "storage#objects"
@@ -846,6 +852,23 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         items = [self._process_object(bucket, i) for i in items]
 
         return items, prefixes
+
+    async def _call_list_objects(self, bucket, **kwargs):
+        """
+        Helper method to fetch a single page of object listing.
+        Extracts valid GCS parameters from kwargs to prevent parameter pollution.
+        """
+
+        # Only pass valid parameters to the API call
+        valid_kwargs = {k: v for k, v in kwargs.items() if k in _VALID_LIST_PARAMS}
+
+        return await self._call(
+            "GET",
+            "b/{}/o",
+            bucket,
+            json_out=True,
+            **valid_kwargs,
+        )
 
     async def _list_buckets(self):
         """Return list of all buckets under the current project."""
