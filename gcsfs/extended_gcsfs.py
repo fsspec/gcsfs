@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import os
+from collections import defaultdict
+from collections.abc import Iterable
 from enum import Enum
 from glob import has_magic
-from io import BytesIO
 
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
@@ -23,6 +24,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.zb_hns_utils import MRD_MAX_RANGES
 from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
@@ -203,9 +205,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         Returns:
             tuple: A tuple containing (offset, length).
-
-        Raises:
-            ValueError: If the calculated range is invalid.
         """
         size = file_size
 
@@ -213,7 +212,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             offset = 0
         elif start < 0:
             size = (await self._info(path))["size"] if size is None else size
-            offset = size + start
+            # If start is negative and larger than the file size, we should start from 0.
+            offset = max(0, size + start)
         else:
             offset = start
 
@@ -226,14 +226,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         else:
             effective_end = end
 
-        if offset < 0:
-            raise ValueError(f"Calculated start offset ({offset}) cannot be negative.")
-        if effective_end < offset:
-            raise ValueError(
-                f"Calculated end position ({effective_end}) cannot be before start offset ({offset})."
-            )
-        elif effective_end == offset:
-            length = 0  # Handle zero-length slice
+        # If the requested end is before/ same as the start, return empty.
+        if effective_end <= offset:
+            return offset, 0
         else:
             length = effective_end - offset  # Normal case
             size = (await self._info(path))["size"] if size is None else size
@@ -281,7 +276,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             file_size = size or mrd.persisted_size
             if file_size is None:
                 logger.warning(
-                    "AsyncMultiRangeDownloader (MRD) has no 'persisted_size'. "
+                    f"AsyncMultiRangeDownloader (MRD) for {path} has no 'persisted_size'. "
                     "Falling back to _info() to get the file size."
                 )
                 file_size = (await self._info(path))["size"]
@@ -296,22 +291,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 ):
                     raise RuntimeError("Request not satisfiable.")
 
-                buffers = []  # To hold the results in order
                 read_ranges = []  # To pass to MRD
-
                 for length in chunk_lengths:
-                    buf = BytesIO()
-                    buffers.append(buf)
-
-                    if length > 0:
-                        read_ranges.append((current_offset, length, buf))
-
+                    read_ranges.append((current_offset, length))
                     current_offset += length
 
-                if read_ranges:
-                    await mrd.download_ranges(read_ranges)
-
-                return [b.getvalue() for b in buffers]
+                return await zb_hns_utils.download_ranges(read_ranges, mrd)
             else:
                 end = kwargs.get("end")
                 offset, length = await self._process_limits_to_offset_and_length(
@@ -361,7 +346,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             file_size = mrd.persisted_size
             if file_size is None:
                 logger.warning(
-                    "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
+                    f"AsyncMultiRangeDownloader (MRD) for {path} has no 'persisted_size'. "
                     "Falling back to _info() to get the file size. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )
@@ -389,6 +374,179 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             return False
 
         return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
+
+    async def _fetch_zonal_batch(self, key, batch):
+        """Optimized Zonal fetch for a single object using MRD."""
+        bucket, object_name, generation = key
+        indices, starts, ends = zip(*batch)
+
+        mrd = None
+        try:
+            await self._get_grpc_client()
+            mrd = await AsyncMultiRangeDownloader.create_mrd(
+                self.grpc_client, bucket, object_name, generation
+            )
+
+            file_size = mrd.persisted_size
+            if file_size is None:
+                # set file_size here to avoid network call in process_limits_to_offset_and_length
+                file_size = (await self._info(f"{bucket}/{object_name}"))["size"]
+                logger.warning(
+                    f"AsyncMultiRangeDownloader (MRD) for {bucket}/{object_name} has no 'persisted_size'. "
+                    "Falling back to _info() to get the file size. "
+                    "This may result in incorrect behavior for unfinalized objects."
+                )
+
+            # Calculate offsets and lengths for all ranges in this batch
+            path_template = f"{bucket}/{object_name}"
+            ranges_to_fetch = []
+            for start, end in zip(starts, ends):
+                offset, length = await self._process_limits_to_offset_and_length(
+                    path_template, start, end, file_size
+                )
+                ranges_to_fetch.append((offset, length))
+
+            # Single gRPC call for all ranges in this object
+            data = await zb_hns_utils.download_ranges(ranges_to_fetch, mrd)
+            return list(zip(indices, data))
+
+        finally:
+            if mrd:
+                await mrd.close()
+
+    async def _group_requests_by_bucket_type(self, paths, starts, ends):
+        """
+        Groups requests into Zonal batches and Regional lists.
+        Performs parallel bucket type checks for faster performance.
+        """
+
+        # Identify unique buckets and store path details
+        unique_buckets = set()
+        path_details = []
+
+        for idx, (path, start, end) in enumerate(zip(paths, starts, ends)):
+            bucket, obj, gen = self.split_path(path)
+            unique_buckets.add(bucket)
+            path_details.append((idx, path, start, end, bucket, obj, gen))
+
+        # Check type of all unique buckets in parallel
+        unique_buckets_list = list(unique_buckets)
+        is_zonal_flags = await asyncio.gather(
+            *[self._is_zonal_bucket(b) for b in unique_buckets_list]
+        )
+
+        # Map syntax: {'bucket-a': True, 'bucket-b': False}
+        bucket_map = dict(zip(unique_buckets_list, is_zonal_flags))
+
+        # Group the requests
+        zonal_batches = defaultdict(list)
+        regional_requests = []
+
+        for idx, path, start, end, bucket, obj, gen in path_details:
+            if bucket_map[bucket]:
+                key = (bucket, obj, gen)
+                zonal_batches[key].append((idx, start, end))
+            else:
+                regional_requests.append((idx, path, start, end))
+
+        return zonal_batches, regional_requests
+
+    async def _cat_ranges(
+        self,
+        paths,
+        starts,
+        ends,
+        max_gap=None,
+        batch_size=None,
+        on_error="return",
+        **kwargs,
+    ):
+        """Fetch multiple byte ranges from one or more files with MRD optimization for zonal buckets.
+
+        This overrides the parent method to use gRPC-based MRD for zonal buckets,
+        batching all ranges into a single MRD request instead of individual requests per range.
+        For Zonal buckets, if the number of ranges exceeds 1000, they are split into multiple
+        requests to comply with the MRD limit.
+
+        Args:
+            paths: list of filepaths on this filesystem
+            starts, ends: int or list of byte limits for reads
+            max_gap, batch_size, on_error: see parent class
+
+        Returns:
+            list of byte contents for each range
+        """
+
+        if max_gap is not None:
+            raise NotImplementedError("max_gap is not supported")
+        if not isinstance(paths, list):
+            raise TypeError("paths must be a list of file paths.")
+        if not isinstance(starts, Iterable):
+            starts = [starts] * len(paths)
+        if not isinstance(ends, Iterable):
+            ends = [ends] * len(paths)
+        if len(starts) != len(paths) or len(ends) != len(paths):
+            raise ValueError("starts, ends, and paths must have the same length.")
+
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer or None.")
+
+        # Group Requests by zonal vs regional buckets
+        zonal_batches, regional_requests = await self._group_requests_by_bucket_type(
+            paths, starts, ends
+        )
+
+        # Use a semaphore to limit concurrency if batch_size is set
+        sem = asyncio.Semaphore(batch_size) if batch_size else None
+
+        async def _run_task(indices, coro):
+            try:
+                if sem:
+                    async with sem:
+                        result = await coro
+                else:
+                    result = await coro
+
+                # Zonal returns a zip/list of multiple items.
+                # Regional (super._cat_file) returns a single bytes object.
+                # We normalize everything to: [(index, data), (index, data)...]
+                if isinstance(result, bytes):
+                    return [(indices[0], result)]
+                return result
+
+            except Exception as e:
+                if on_error == "raise":
+                    raise
+                return [(i, e) for i in indices]
+
+        tasks = []
+
+        # Zonal Batches
+        for key, batch in zonal_batches.items():
+            # MRD supports max 1000 ranges per request
+            for i in range(0, len(batch), MRD_MAX_RANGES):
+                sub_batch = batch[i : i + MRD_MAX_RANGES]
+                indices = [idx for idx, _, _ in sub_batch]
+                tasks.append(
+                    _run_task(indices, self._fetch_zonal_batch(key, sub_batch))
+                )
+
+        # Regional Requests
+        for idx, path, start, end in regional_requests:
+            tasks.append(
+                _run_task(
+                    [idx], super()._cat_file(path, start=start, end=end, **kwargs)
+                )
+            )
+
+        # Execute concurrently and stitch Results
+        all_results = await asyncio.gather(*tasks)
+        results = [None] * len(paths)
+        for batch_res in all_results:
+            for idx, val in batch_res:
+                results[idx] = val
+
+        return results
 
     def _update_dircache_after_rename(self, path1, path2):
         """
@@ -1237,7 +1395,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             size = mrd.persisted_size
             if size is None:
                 logger.warning(
-                    "AsyncMultiRangeDownloader (MRD) has no 'persisted_size'. "
+                    f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
                     "Falling back to _info() to get the file size. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )

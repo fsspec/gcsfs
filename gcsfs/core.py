@@ -1167,8 +1167,20 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
+        # if start and end are both provided and valid, but start >= end, return empty bytes
+        # Otherwise, _process_limits would generate an invalid HTTP range (e.g. "bytes=5-4"
+        # for start=5, end=5), causing the server to return the whole file instead of nothing.
+        if (
+            start is not None
+            and end is not None
+            and start >= 0
+            and end >= 0
+            and start >= end
+        ):
+            return b""
         u2 = self.url(path)
-        if start or end:
+        # 'if start or end' fails when start=0 or end=0 because 0 is Falsey.
+        if start is not None or end is not None:
             head = {"Range": await self._process_limits(path, start, end)}
         else:
             head = {}
@@ -1953,6 +1965,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             Timeout seconds for the asynchronous callback.
         generation: str
             Object generation.
+        supports_append: bool
+            If True, allows opening file in append mode. This is generally not supported
+            by GCS, but may be supported by subclasses (e.g. ZonalFile).
         """
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
