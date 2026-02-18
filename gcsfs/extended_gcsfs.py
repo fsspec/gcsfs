@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import uuid
 from enum import Enum
 from glob import has_magic
 from io import BytesIO
@@ -457,7 +458,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 key1,
                 key2,
                 sourceGeneration=generation1,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Goog-GCS-Idempotency-Token": str(uuid.uuid4()),
+                },
                 json_out=True,
             )
             parent1 = self._parent(path1)

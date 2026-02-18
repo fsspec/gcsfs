@@ -583,7 +583,10 @@ class TestExtendedGcsFileSystemMvFile:
                 args, kwargs = mock_call.await_args
                 assert args[0] == "POST"
                 assert "moveTo" in args[1]
-                assert kwargs["headers"] == {"Content-Type": "application/json"}
+                headers = kwargs["headers"]
+                assert headers["Content-Type"] == "application/json"
+                assert "X-Goog-GCS-Idempotency-Token" in headers
+                assert uuid.UUID(headers["X-Goog-GCS-Idempotency-Token"])
 
     def test_mv_file_hns_cache_update(self, gcs_hns, gcs_hns_mocks):
         """Test that _mv_file updates the dircache correctly."""
@@ -629,6 +632,65 @@ class TestExtendedGcsFileSystemMvFile:
             gcsfs.mv_file(path1, path2)
 
             mocks["super_mv_file"].assert_awaited_once_with(path1, path2)
+
+    @pytest.mark.asyncio
+    async def test_mv_file_hns_idempotency_retries(self, gcs_hns, gcs_hns_mocks):
+        """Test that idempotency token persists across retries."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/file1.txt"
+        path2 = f"{TEST_HNS_BUCKET}/file2.txt"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
+            # Ensure session is initialized
+            await gcsfs._set_session()
+
+            # Mock responses
+            fail_response = mock.Mock()
+            fail_response.status = 503
+            fail_response.headers = {}
+            fail_response.read = mock.AsyncMock(
+                return_value=b'{"error": "Service Unavailable"}'
+            )
+            fail_response.request_info = mock.Mock()
+
+            success_response = mock.Mock()
+            success_response.status = 200
+            success_response.headers = {}
+            success_response.read = mock.AsyncMock(
+                return_value=b'{"kind": "storage#object"}'
+            )
+            success_response.request_info = mock.Mock()
+
+            # Mock context managers
+            cm_fail = mock.AsyncMock()
+            cm_fail.__aenter__.return_value = fail_response
+
+            cm_success = mock.AsyncMock()
+            cm_success.__aenter__.return_value = success_response
+
+            # Patch the session.request method on the actual session object
+            with mock.patch.object(
+                gcsfs.session, "request", side_effect=[cm_fail, cm_success]
+            ) as mock_request:
+                await gcsfs._mv_file(path1, path2)
+
+                assert mock_request.call_count == 2
+
+                # Verify both calls had the same idempotency token
+                call1_kwargs = mock_request.call_args_list[0].kwargs
+                call2_kwargs = mock_request.call_args_list[1].kwargs
+
+                # Check URL to ensure we intercepted the right call
+                assert "moveTo" in call1_kwargs["url"]
+
+                headers1 = call1_kwargs["headers"]
+                headers2 = call2_kwargs["headers"]
+
+                token1 = headers1.get("X-Goog-GCS-Idempotency-Token")
+                token2 = headers2.get("X-Goog-GCS-Idempotency-Token")
+
+                assert token1 is not None
+                assert token1 == token2
 
 
 class TestExtendedGcsFileSystemMkdir:
