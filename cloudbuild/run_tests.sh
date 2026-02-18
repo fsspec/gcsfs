@@ -111,9 +111,9 @@ case $TEST_SUITE in
 
     # 6. Bucket Operations & Permissions: Issues with user_project or bucket cleanup (FileNotFoundError).
     ZONAL_DESELECTS+=(
-      "--deselect gcsfs/tests/test_core.py::test_request_user_project"
-      "--deselect gcsfs/tests/test_core.py::test_bucket_location"
-      "--deselect gcsfs/tests/test_core.py::test_bucket_default_location_overwrite"
+      # "--deselect gcsfs/tests/test_core.py::test_request_user_project"
+      # "--deselect gcsfs/tests/test_core.py::test_bucket_location"
+      # "--deselect gcsfs/tests/test_core.py::test_bucket_default_location_overwrite"
       # Existing deselect
       "--deselect gcsfs/tests/test_core.py::test_sign"
     )
