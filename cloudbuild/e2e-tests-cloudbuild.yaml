@@ -145,13 +145,17 @@ steps:
           echo '--- Preparing test environment for zonal tests ---' && \
           export GCSFS_TEST_BUCKET='gcsfs-test-standard-for-zonal-${_SHORT_BUILD_ID}' && \
           export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}' && \
+          export GCSFS_HNS_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}' && \
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
           export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running Zonal tests on VM ---' && \
           ulimit -n 4096 && export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py gcsfs/tests/test_async_gcsfs.py
-        "
+          # TODO: Add back the mv tests once move object API is integrated for HNS buckets. Currently they fail as rewrite(used by cp() method) is not supported in Zonal buckets.
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py gcsfs/tests/test_async_gcsfs.py gcsfs/tests/integration/test_extended_hns.py \
+          --deselect gcsfs/tests/test_async_gcsfs.py::test_async_mv \
+          --deselect gcsfs/tests/integration/test_extended_hns.py::TestExtendedGcsFileSystemMv::test_file_rename_fallback_to_super_mv \
+          --deselect gcsfs/tests/integration/test_extended_hns.py::TestExtendedGcsFileSystemMv::test_folder_rename_to_root_directory"
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:
       - "setup-vm"
@@ -164,6 +168,11 @@ steps:
     args:
       - "-c"
       - |
+        # Excludes tests that are not applicable to HNS buckets:
+        # - test_extended_gcsfs.py, test_zonal_file.py: Zonal bucket specific tests which won't work on HNS bucket.
+        # - test_core_versioned.py: HNS buckets do not support versioning.
+        # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
+        # - test_core.py::test_info_on_directory_with_only_subdirectories: Unit test for regional buckets.
         TEST_SCRIPT="
           source env/bin/activate && \
           echo '--- Preparing test environment for HNS tests ---' && \
