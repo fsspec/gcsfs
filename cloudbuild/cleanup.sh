@@ -9,5 +9,5 @@ gcloud storage rm --recursive "gs://gcsfs-test-standard-${SHORT_BUILD_ID}" || tr
 gcloud storage rm --recursive "gs://gcsfs-test-versioned-${SHORT_BUILD_ID}" || true &
 gcloud storage rm --recursive "gs://gcsfs-test-hns-${SHORT_BUILD_ID}" || true &
 gcloud storage rm --recursive "gs://gcsfs-test-zonal-${SHORT_BUILD_ID}" || true &
-gcloud storage rm --recursive gs://gcsfs-test-standard-for-zonal-${SHORT_BUILD_ID} || true &
+gcloud storage rm --recursive "gs://gcsfs-test-standard-for-zonal-${SHORT_BUILD_ID}" || true &
 wait

@@ -165,7 +165,6 @@ def gcs(gcs_factory, buckets_to_delete, populate_bucket):
             _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=populate_bucket)
 
         if populate_bucket:
-            gcs.pipe({TEST_BUCKET + "/" + k: v for k, v in allfiles.items()})
             pipe_kwargs = {}
             # For Zonal buckets, we need to finalize the files for the metadata to be updated immediately,
             # which is important for tests that check file existence or size right after writing.

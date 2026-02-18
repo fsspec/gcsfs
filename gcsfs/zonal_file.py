@@ -118,7 +118,7 @@ class ZonalFile(GCSFile):
         """
         await self.gcsfs._get_grpc_client()
         return await zb_hns_utils.init_mrd(
-            self.grpc_client, bucket_name, object_name, generation
+            self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
     async def _init_aaow(
