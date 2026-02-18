@@ -8,7 +8,6 @@ from io import BytesIO
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
-from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
@@ -92,9 +91,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # Initialize the storage control plane client for bucket
             # metadata operations
-            client_info = gapic_v1.client_info.ClientInfo(
-                user_agent=f"{USER_AGENT}/{version}"
-            )
             # The HNS RenameFolder operation began failing with an "input/output error"
             # after an authentication library change caused it to send a
             # `quota_project_id` from application default credentials. The
@@ -109,8 +105,18 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             if hasattr(creds, "with_quota_project"):
                 creds = creds.with_quota_project(None)
 
+            transport_cls = (
+                storage_control_v2.StorageControlAsyncClient.get_transport_class(
+                    "grpc_asyncio"
+                )
+            )
+            channel = transport_cls.create_channel(
+                credentials=creds,
+                options=[("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
+            )
+            transport = transport_cls(channel=channel)
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
-                credentials=creds, client_info=client_info
+                transport=transport
             )
         return self._storage_control_client
 
