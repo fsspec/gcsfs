@@ -1,8 +1,8 @@
 #!/bin/bash
-set -x
+set -e
 
 echo "--- Deleting VM ---"
-gcloud compute instances delete "gcsfs-test-vm-${SHORT_BUILD_ID}" --zone=${ZONE} --quiet || true
+gcloud compute instances delete "gcsfs-test-vm-${SHORT_BUILD_ID}" --zone="${ZONE}" --quiet || true
 
 echo "--- Deleting buckets ---"
 gcloud storage rm --recursive "gs://gcsfs-test-standard-${SHORT_BUILD_ID}" || true &

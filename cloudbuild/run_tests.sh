@@ -18,7 +18,7 @@ ARGS=(
 
 echo "--- Running Test Suite: ${TEST_SUITE} ---"
 
-case $TEST_SUITE in
+case "$TEST_SUITE" in
   "standard")
     export GCSFS_TEST_BUCKET="gcsfs-test-standard-${SHORT_BUILD_ID}"
     export GCSFS_TEST_VERSIONED_BUCKET="gcsfs-test-versioned-${SHORT_BUILD_ID}"
@@ -68,27 +68,27 @@ case $TEST_SUITE in
     # 1. KMS & Metadata Support: Zonal buckets do not support uploading with
     # 'kmsKeyName', 'contentType', or custom metadata.
     ZONAL_DESELECTS=(
-      "--deselect gcsfs/tests/test_core.py::test_simple_upload_with_kms"
-      "--deselect gcsfs/tests/test_core.py::test_large_upload_with_kms"
-      "--deselect gcsfs/tests/test_core.py::test_multi_upload_with_kms"
-      "--deselect gcsfs/tests/test_core.py::test_fixed_key_metadata"
-      "--deselect gcsfs/tests/test_core.py::test_content_type_set"
-      "--deselect gcsfs/tests/test_core.py::test_content_type_default"
-      "--deselect gcsfs/tests/test_core.py::test_content_type_guess"
-      "--deselect gcsfs/tests/test_core.py::test_content_type_put_guess"
-      "--deselect gcsfs/tests/test_core.py::test_attrs"
+      "--deselect=gcsfs/tests/test_core.py::test_simple_upload_with_kms"
+      "--deselect=gcsfs/tests/test_core.py::test_large_upload_with_kms"
+      "--deselect=gcsfs/tests/test_core.py::test_multi_upload_with_kms"
+      "--deselect=gcsfs/tests/test_core.py::test_fixed_key_metadata"
+      "--deselect=gcsfs/tests/test_core.py::test_content_type_set"
+      "--deselect=gcsfs/tests/test_core.py::test_content_type_default"
+      "--deselect=gcsfs/tests/test_core.py::test_content_type_guess"
+      "--deselect=gcsfs/tests/test_core.py::test_content_type_put_guess"
+      "--deselect=gcsfs/tests/test_core.py::test_attrs"
     )
 
     # 2. Copy/Move/Merge: Not implemented for Zonal (requires _cp_file or Compose).
     ZONAL_DESELECTS+=(
-      "--deselect gcsfs/tests/test_core.py::test_copy"
-      "--deselect gcsfs/tests/test_core.py::test_copy_recursive"
-      "--deselect gcsfs/tests/test_core.py::test_copy_errors"
-      "--deselect gcsfs/tests/test_core.py::test_move"
-      "--deselect gcsfs/tests/test_core.py::test_cp_directory_recursive"
-      "--deselect gcsfs/tests/test_core.py::test_cp_two_files"
-      "--deselect gcsfs/tests/test_core.py::test_copy_cache_invalidated"
-      "--deselect gcsfs/tests/test_core.py::test_merge"
+      "--deselect=gcsfs/tests/test_core.py::test_copy"
+      "--deselect=gcsfs/tests/test_core.py::test_copy_recursive"
+      "--deselect=gcsfs/tests/test_core.py::test_copy_errors"
+      "--deselect=gcsfs/tests/test_core.py::test_move"
+      "--deselect=gcsfs/tests/test_core.py::test_cp_directory_recursive"
+      "--deselect=gcsfs/tests/test_core.py::test_cp_two_files"
+      "--deselect=gcsfs/tests/test_core.py::test_copy_cache_invalidated"
+      "--deselect=gcsfs/tests/test_core.py::test_merge"
     )
 
     # 3. Write/Flush Mechanics:
@@ -99,12 +99,12 @@ case $TEST_SUITE in
     # - test_array fails due to CRC32C TypeError with array objects.
     # - test_sign fails because it requires a private key
     ZONAL_DESELECTS+=(
-      "--deselect gcsfs/tests/test_core.py::test_flush"
-      "--deselect gcsfs/tests/test_core.py::test_write_blocks"
-      "--deselect gcsfs/tests/test_core.py::test_write_blocks2"
-      "--deselect gcsfs/tests/test_core.py::test_transaction"
-      "--deselect gcsfs/tests/test_core.py::test_array"
-      "--deselect gcsfs/tests/test_core.py::test_sign"
+      "--deselect=gcsfs/tests/test_core.py::test_flush"
+      "--deselect=gcsfs/tests/test_core.py::test_write_blocks"
+      "--deselect=gcsfs/tests/test_core.py::test_write_blocks2"
+      "--deselect=gcsfs/tests/test_core.py::test_transaction"
+      "--deselect=gcsfs/tests/test_core.py::test_array"
+      "--deselect=gcsfs/tests/test_core.py::test_sign"
     )
 
     pytest "${ARGS[@]}" "${ZONAL_DESELECTS[@]}" gcsfs/tests/test_core.py

@@ -168,7 +168,6 @@ def gcs(gcs_factory, buckets_to_delete, populate_bucket):
             pipe_kwargs = {}
             # For Zonal buckets, we need to finalize the files for the metadata to be updated immediately,
             # which is important for tests that check file existence or size right after writing.
-            # For other bucket types, we can skip finalization to improve test performance.
             if hasattr(gcs, "_is_zonal_bucket"):
                 pipe_kwargs["finalize_on_close"] = True
             gcs.pipe(
