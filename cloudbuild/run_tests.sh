@@ -60,8 +60,9 @@ case "$TEST_SUITE" in
     ;;
 
   "zonal-core")
-    export GCSFS_TEST_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
+    export GCSFS_TEST_BUCKET="gcsfs-test-zonal-core-${SHORT_BUILD_ID}"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
+    ulimit -n 4096
 
     # Zonal Core Deselections
     # -----------------------

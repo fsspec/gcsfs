@@ -33,6 +33,16 @@ gcloud storage buckets create "gs://gcsfs-test-standard-for-zonal-${SHORT_BUILD_
     --project="${PROJECT_ID}" \
     --location="${REGION}" &
 
+# Use a separate bucket for running core tests to avoid exceeding object rate limit 
+echo "--- Creating Zonal bucket for running core tests ---"
+gcloud storage buckets create "gs://gcsfs-test-zonal-core-${SHORT_BUILD_ID}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" \
+    --placement="${ZONE}" \
+    --default-storage-class=RAPID \
+    --enable-hierarchical-namespace \
+    --uniform-bucket-level-access &
+
 # Wait for all background bucket creation jobs to finish
 wait
 
