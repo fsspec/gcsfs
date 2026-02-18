@@ -11,7 +11,6 @@ from itertools import chain
 from unittest import mock
 
 import pytest
-from google.api_core.exceptions import NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
@@ -992,7 +991,7 @@ def test_multiprocess_error_handling_zb(extended_gcsfs):
 
     missing_file = f"{TEST_ZONAL_BUCKET}/this_does_not_exist"
 
-    with pytest.raises(NotFound):
+    with pytest.raises(FileNotFoundError):
         run_in_processes(_cat_file_worker, [(extended_gcsfs, missing_file)])
 
 

@@ -79,42 +79,18 @@ case $TEST_SUITE in
       "--deselect gcsfs/tests/test_core.py::test_merge"
     )
 
-    # 3. Directory & Size consistency (du): Fails assertions (e.g., size 0 vs 266) or directory call counts.
-    ZONAL_DESELECTS+=(
-      # "--deselect gcsfs/tests/test_core.py::test_info_on_directory_with_only_subdirectories"
-      # "--deselect gcsfs/tests/test_core.py::test_du"
-      # "--deselect gcsfs/tests/test_core.py::test_get_put"
-      # "--deselect gcsfs/tests/test_core.py::test_get_put_file_in_dir"
-      # "--deselect gcsfs/tests/test_core.py::test_get_put_list"
-      # "--deselect gcsfs/tests/test_core.py::test_get_put_recursive"
-      # "--deselect gcsfs/tests/test_core.py::test_put_directory_recursive"
-    )
-
-    # 4. Error Handling: Zonal backend raises google.api_core.exceptions.NotFound instead of IOError/FileNotFoundError.
-    ZONAL_DESELECTS+=(
-      # "--deselect gcsfs/tests/test_core.py::test_errors"
-      # "--deselect gcsfs/tests/test_core.py::test_get_error"
-    )
-
-    # 5. Write/Flush Mechanics:
+    # 3. Write/Flush Mechanics:
     # - test_flush fails because object exists immediately (immediate write).
     # - test_write_blocks/2 fail since zonal write uses SDK buffer directly, and doesn't use the GCSFile buffer
     # - test_transaction fails (discard/versioning differences).
     # - test_array fails due to CRC32C TypeError with array objects.
+    # - test_sign fails because it requires a private key
     ZONAL_DESELECTS+=(
       "--deselect gcsfs/tests/test_core.py::test_flush"
       "--deselect gcsfs/tests/test_core.py::test_write_blocks"
       "--deselect gcsfs/tests/test_core.py::test_write_blocks2"
       "--deselect gcsfs/tests/test_core.py::test_transaction"
       "--deselect gcsfs/tests/test_core.py::test_array"
-    )
-
-    # 6. Bucket Operations & Permissions: Issues with user_project or bucket cleanup (FileNotFoundError).
-    ZONAL_DESELECTS+=(
-      # "--deselect gcsfs/tests/test_core.py::test_request_user_project"
-      # "--deselect gcsfs/tests/test_core.py::test_bucket_location"
-      # "--deselect gcsfs/tests/test_core.py::test_bucket_default_location_overwrite"
-      # Existing deselect
       "--deselect gcsfs/tests/test_core.py::test_sign"
     )
 
