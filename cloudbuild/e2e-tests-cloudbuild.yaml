@@ -64,10 +64,17 @@ steps:
         bash cloudbuild/wait_for_ssh.sh "gcsfs-test-vm-${_SHORT_BUILD_ID}" "${_ZONE}"
 
         # Copy entire repo to VM
-        gcloud compute scp --recurse . gcsfs-test-vm-${_SHORT_BUILD_ID}:~ --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine
+        gcloud compute scp --recurse . gcsfs-test-vm-${_SHORT_BUILD_ID}:~ \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine
 
         # Run Setup Script remotely
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="bash cloudbuild/setup_vm.sh"
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="bash cloudbuild/setup_vm.sh"
     waitFor: ["create-vm", "generate-ssh-key"]
 
   # 5. Run Tests (Parallel Blocks)
@@ -80,8 +87,17 @@ steps:
     args:
       - "-c"
       - |
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine \
-        --command="export TEST_SUITE='standard' SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}' && bash cloudbuild/run_tests.sh"
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="export TEST_SUITE='standard' \
+            SHORT_BUILD_ID='${_SHORT_BUILD_ID}' \
+            PROJECT_ID='${PROJECT_ID}' \
+            REGION='${_REGION}' \
+            KEY_RING='${_GCSFS_KEY_RING_NAME}' \
+            KEY_NAME='${_GCSFS_KEY_NAME}' \
+            && bash cloudbuild/run_tests.sh"
     waitFor: ["setup-vm", "create-buckets"]
 
   # Zonal Tests
@@ -91,8 +107,17 @@ steps:
     args:
       - "-c"
       - |
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine \
-        --command="export TEST_SUITE='zonal' SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}' && bash cloudbuild/run_tests.sh"
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="export TEST_SUITE='zonal' \
+            SHORT_BUILD_ID='${_SHORT_BUILD_ID}' \
+            PROJECT_ID='${PROJECT_ID}' \
+            REGION='${_REGION}' \
+            KEY_RING='${_GCSFS_KEY_RING_NAME}' \
+            KEY_NAME='${_GCSFS_KEY_NAME}' \
+            && bash cloudbuild/run_tests.sh"
     waitFor: ["setup-vm", "create-buckets"]
 
   # Zonal Core Tests
@@ -102,8 +127,17 @@ steps:
     args:
       - "-c"
       - |
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine \
-        --command="export TEST_SUITE='zonal_core' SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}' && bash cloudbuild/run_tests.sh"
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="export TEST_SUITE='zonal_core' \
+            SHORT_BUILD_ID='${_SHORT_BUILD_ID}' \
+            PROJECT_ID='${PROJECT_ID}' \
+            REGION='${_REGION}' \
+            KEY_RING='${_GCSFS_KEY_RING_NAME}' \
+            KEY_NAME='${_GCSFS_KEY_NAME}' \
+            && bash cloudbuild/run_tests.sh"
     waitFor: ["setup-vm", "create-buckets"]
 
   # HNS Tests
@@ -113,8 +147,17 @@ steps:
     args:
       - "-c"
       - |
-        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine \
-        --command="export TEST_SUITE='hns' SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}' && bash cloudbuild/run_tests.sh"
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="export TEST_SUITE='hns' \
+            SHORT_BUILD_ID='${_SHORT_BUILD_ID}' \
+            PROJECT_ID='${PROJECT_ID}' \
+            REGION='${_REGION}' \
+            KEY_RING='${_GCSFS_KEY_RING_NAME}' \
+            KEY_NAME='${_GCSFS_KEY_NAME}' \
+            && bash cloudbuild/run_tests.sh"
     waitFor: ["setup-vm", "create-buckets"]
 
   # 6. Cleanup

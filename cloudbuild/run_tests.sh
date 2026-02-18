@@ -31,7 +31,11 @@ case $TEST_SUITE in
     export GCSFS_HNS_TEST_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
     ulimit -n 4096
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
-    pytest "${ARGS[@]}" gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py gcsfs/tests/test_async_gcsfs.py gcsfs/tests/integration/test_extended_hns.py
+    pytest "${ARGS[@]}" \
+      gcsfs/tests/test_extended_gcsfs.py \
+      gcsfs/tests/test_zonal_file.py \
+      gcsfs/tests/test_async_gcsfs.py \
+      gcsfs/tests/integration/test_extended_hns.py
     ;;
 
   "hns")
@@ -41,11 +45,18 @@ case $TEST_SUITE in
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
     # Excludes tests that are not applicable to HNS buckets:
     # - test_extended_gcsfs.py, test_zonal_file.py: Zonal bucket specific tests which won't work on HNS bucket.
+    # - test_extended_gcsfs_unit.py: Unit tests for zonal bucket features.
     # - test_core_versioned.py: HNS buckets do not support versioning.
     # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
     # - test_core.py::test_info_on_directory_with_only_subdirectories: Unit test for regional buckets.
     # - test_core.py::test_mv_file_cache: Integration test only applicable for regional buckets.
-    pytest "${ARGS[@]}" gcsfs/ --deselect gcsfs/tests/test_extended_gcsfs.py --deselect gcsfs/tests/test_zonal_file.py --deselect gcsfs/tests/test_core_versioned.py --deselect gcsfs/tests/test_core.py::test_sign --deselect gcsfs/tests/test_core.py::test_info_on_directory_with_only_subdirectories --deselect gcsfs/tests/test_core.py::test_mv_file_cache"
+    pytest "${ARGS[@]}" gcsfs/ \
+      --deselect gcsfs/tests/test_extended_gcsfs.py \
+      --deselect gcsfs/tests/test_extended_gcsfs_unit.py \
+      --deselect gcsfs/tests/test_zonal_file.py \
+      --deselect gcsfs/tests/test_core_versioned.py \
+      --deselect gcsfs/tests/test_core.py::test_sign \
+      --deselect gcsfs/tests/test_core.py::test_mv_file_cache"
     ;;
 
   "zonal-core")
@@ -54,7 +65,8 @@ case $TEST_SUITE in
 
     # Zonal Core Deselections
     # -----------------------
-    # 1. KMS & Metadata Support: Zonal buckets do not support uploading with 'kmsKeyName', 'contentType', or custom metadata.
+    # 1. KMS & Metadata Support: Zonal buckets do not support uploading with
+    # 'kmsKeyName', 'contentType', or custom metadata.
     ZONAL_DESELECTS=(
       "--deselect gcsfs/tests/test_core.py::test_simple_upload_with_kms"
       "--deselect gcsfs/tests/test_core.py::test_large_upload_with_kms"
@@ -81,7 +93,8 @@ case $TEST_SUITE in
 
     # 3. Write/Flush Mechanics:
     # - test_flush fails because object exists immediately (immediate write).
-    # - test_write_blocks/2 fail since zonal write uses SDK buffer directly, and doesn't use the GCSFile buffer
+    # - test_write_blocks/2 fail since zonal write uses SDK buffer directly,
+    # and doesn't use the GCSFile buffer
     # - test_transaction fails (discard/versioning differences).
     # - test_array fails due to CRC32C TypeError with array objects.
     # - test_sign fails because it requires a private key
