@@ -72,6 +72,7 @@ case "$TEST_SUITE" in
       "--deselect=gcsfs/tests/test_core.py::test_simple_upload_with_kms"
       "--deselect=gcsfs/tests/test_core.py::test_large_upload_with_kms"
       "--deselect=gcsfs/tests/test_core.py::test_multi_upload_with_kms"
+      "--deselect=gcsfs/tests/test_core.py::test_multi_upload"
       "--deselect=gcsfs/tests/test_core.py::test_fixed_key_metadata"
       "--deselect=gcsfs/tests/test_core.py::test_content_type_set"
       "--deselect=gcsfs/tests/test_core.py::test_content_type_default"

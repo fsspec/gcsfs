@@ -33,7 +33,7 @@ gcloud storage buckets create "gs://gcsfs-test-standard-for-zonal-${SHORT_BUILD_
     --project="${PROJECT_ID}" \
     --location="${REGION}" &
 
-# Use a separate bucket for running core tests to avoid exceeding object rate limit 
+# Use a separate bucket for running core tests to avoid exceeding object rate limit
 echo "--- Creating Zonal bucket for running core tests ---"
 gcloud storage buckets create "gs://gcsfs-test-zonal-core-${SHORT_BUILD_ID}" \
     --project="${PROJECT_ID}" \
