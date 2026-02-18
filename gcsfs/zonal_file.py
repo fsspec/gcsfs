@@ -223,7 +223,7 @@ class ZonalFile(GCSFile):
             return
 
         # Case 2: Closing flush (force=True) or some data has been written (AAOW exists)
-        # We must ensure aaow exists so that the file is created even for empty writes, 
+        # We must ensure aaow exists so that the file is created even for empty writes,
         # and to flush any buffered data if it exists.
         self._ensure_aaow()
 

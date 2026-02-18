@@ -94,7 +94,7 @@ case "$TEST_SUITE" in
     )
 
     # 3. Write/Flush Mechanics:
-    # - test_flush fails because ZonalFile.flush flushes directly to GCS whereas 
+    # - test_flush fails because ZonalFile.flush flushes directly to GCS whereas
     # GCSFile.flush defers write on small block (<blocksize)
     # - test_write_blocks/2 fail since it checks buffer location and zonal write
     # uses SDK buffer directly, not the GCSFile buffer
