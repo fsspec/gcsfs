@@ -63,7 +63,7 @@ def gcs_hns_mocks():
         patch_target_sync_lookup_bucket_type = (
             "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
         )
-        patch_target_super_mv = "gcsfs.core.GCSFileSystem._mv"
+        patch_target_super_mv = "gcsfs.core.GCSFileSystem.__mv"
         patch_target_super_mv_file = "fsspec.asyn.AsyncFileSystem._mv_file"
         patch_target_super_mkdir = "gcsfs.core.GCSFileSystem._mkdir"
         patch_target_super_rmdir = "gcsfs.core.GCSFileSystem._rmdir"

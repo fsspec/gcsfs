@@ -1,0 +1,331 @@
+substitutions:
+  _ZONE: ""
+  _INFRA_PREFIX: ""
+  _VM_SERVICE_ACCOUNT: ""
+  # Format: "group1:config1,config2 group2:config1"
+  _BENCHMARK_CONFIG: ""
+  # Format: "hns regional zonal"
+  _BUCKET_TYPES: ""
+
+steps:
+  # 1. Generate a persistent SSH key for this build run.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "generate-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        mkdir -p /workspace/.ssh
+        ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
+        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+    waitFor: ["-"]
+
+  # 2. Initialize shared variables.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "init-variables"
+    entrypoint: "bash"
+    env:
+      - "BUILD_ID=${BUILD_ID}"
+    args:
+      - "-c"
+      - |
+        SHORT_BUILD_ID=$${BUILD_ID:0:8}
+        # Define shared variables
+        echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-run-results" >> /workspace/build_vars.env
+        echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+    waitFor: ["-"]
+
+  # 3. Create all necessary GCS buckets in parallel.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+
+        # Create Test Buckets, in parallel
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
+          gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
+          gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
+          gcloud storage buckets create gs://$$HNS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
+
+        # Create HNS Results Bucket (Persistent)
+        if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
+          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        else
+          echo "Results bucket gs://$${RESULTS_BUCKET} already exists"
+        fi
+
+        wait
+    waitFor: ["init-variables"]
+
+  # 4. Create a single VM for benchmarks.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+
+        echo "Creating VM: $${VM_NAME}"
+        gcloud compute instances create "$$VM_NAME" \
+            --project="${PROJECT_ID}" \
+            --zone="${_ZONE}" \
+            --machine-type="c4-standard-192" \
+            --image-family="ubuntu-2404-lts-amd64" \
+            --image-project="ubuntu-os-cloud" \
+            --boot-disk-type="hyperdisk-balanced" \
+            --boot-disk-size="30GB" \
+            --network-interface="network-tier=PREMIUM,nic-type=GVNIC" \
+            --network-performance-configs="total-egress-bandwidth-tier=TIER_1" \
+            --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
+            --metadata="enable-oslogin=TRUE" \
+            --service-account="${_VM_SERVICE_ACCOUNT}" \
+            --tags="allow-ssh" \
+            --labels="build-id=$$RUN_ID" \
+            --quiet
+    waitFor: ["init-variables"]
+
+  # 5. Run benchmarks.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-benchmarks"
+    allowFailure: true
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [ -f /workspace/failure ]; then exit 1; fi
+        set -e
+        source /workspace/build_vars.env
+        trap 'touch /workspace/failure' ERR
+
+        # --- Setup SSH ---
+        echo "Waiting for SSH on VM: $${VM_NAME}... (attempt 1/3)"
+        SSH_READY=false
+        for i in {1..3}; do
+          if gcloud compute ssh $$VM_NAME --project=${PROJECT_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="echo VM is ready"; then
+            echo "SSH is ready."
+            SSH_READY=true
+            break
+          fi
+          echo "Waiting for VM to become available... (attempt $$((i+1))/3)"
+          sleep 15
+        done
+
+        if [ "$$SSH_READY" = false ]; then
+            echo "Timeout waiting for SSH."
+            touch /workspace/failure
+            exit 1
+        fi
+
+        # --- Copy source code ---
+        echo "[$${VM_NAME}] Creating remote directory..."
+        gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="mkdir -p ~/gcsfs"
+
+        echo "[$${VM_NAME}] Copying source code..."
+        if gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" --project="${PROJECT_ID}" --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine; then
+          echo "Source code copied successfully."
+        else
+          echo "Failed to copy source code."
+          touch /workspace/failure
+          exit 1
+        fi
+
+        # --- Install dependencies and packages ---
+        echo "[$${VM_NAME}] Installing dependencies..."
+
+        SETUP_SCRIPT="
+          set -e
+          sudo apt-get update > /dev/null
+          echo '--- Installing python and other dependencies on VM ---'
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3-venv git > /dev/null
+          cd gcsfs
+          python3 -m venv env
+          source env/bin/activate
+          echo '--- Installing pip packages ---'
+          pip install --upgrade pip > /dev/null
+          pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
+          pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main
+          echo '--- Installing GCSFS packages ---'
+          pip install -e . > /dev/null
+          echo '--- Installing requirements for benchmarks ---'
+          pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
+        "
+
+        if gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$SETUP_SCRIPT"; then
+          echo "Dependencies installed successfully."
+        else
+          echo "Failed to install dependencies."
+          touch /workspace/failure
+          exit 1
+        fi
+
+        # --- Run benchmarks ---
+        IFS=' ' read -r -a CONFIG_ARRAY <<< "${_BENCHMARK_CONFIG}"
+        failures=0
+
+        for entry in "$${CONFIG_ARRAY[@]}"; do
+          entry=$$(echo "$$entry" | xargs)
+          if [ -z "$$entry" ]; then continue; fi
+
+          IFS=':' read -r group config <<< "$$entry"
+          echo "[$$VM_NAME]: Launching benchmark run for $$group:$$config"
+
+          CONFIG_ARG=""
+          if [ -n "$$config" ]; then
+            CONFIG_ARG="--config=$$config"
+          fi
+
+          BUCKET_ARGS=""
+          if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --regional-bucket='$${REGIONAL_BUCKET}'"
+          fi
+          if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --zonal-bucket='$${ZONAL_BUCKET}'"
+          fi
+          if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
+          fi
+
+          RUN_SCRIPT="
+            set -e
+            cd gcsfs
+            source env/bin/activate
+
+            echo \"Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO\"
+            python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+          "
+
+          if gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$RUN_SCRIPT"; then
+            echo "Benchmark $$group:$$config completed successfully."
+          else
+            echo "Benchmark $$group:$$config failed."
+            failures=$$((failures+1))
+          fi
+
+          echo "Sleeping for 30 seconds for cool down..."
+          sleep 30
+        done
+
+        # --- Upload results ---
+        UPLOAD_SCRIPT="
+            set -e
+            cd gcsfs
+            echo '--- Uploading Results ---'
+            DATE_DIR=\$(date +%d%m%Y)
+            RESULTS_DIR='gcsfs/tests/perf/microbenchmarks/__run__'
+            if [ -d \"\$$RESULTS_DIR\" ]; then
+              echo \"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/\"
+              cd \"\$$RESULTS_DIR\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/ && rm -rf *
+            else
+              echo \"No results directory found at \$$RESULTS_DIR\"
+            fi
+        "
+        if gcloud compute ssh "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$UPLOAD_SCRIPT"; then
+          echo "Results uploaded successfully."
+        else
+          echo "Failed to upload results."
+          touch /workspace/failure
+          exit 1
+        fi
+
+        if [ "$${failures:-0}" -ne 0 ]; then
+          echo "ERROR: $$failures benchmark jobs failed."
+          touch /workspace/failure
+          exit 1
+        else
+          echo "All benchmarks completed successfully."
+        fi
+    waitFor:
+      - "create-vm"
+      - "create-buckets"
+      - "generate-ssh-key"
+
+  # --- Cleanup Steps ---
+
+  # 8. Clean up the SSH key.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        gcloud compute os-login ssh-keys remove \
+          --key-file=/workspace/gcb_ssh_key.pub || true
+    waitFor:
+      - "run-benchmarks"
+
+  # 9. Delete VM.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        source /workspace/build_vars.env
+
+        gcloud compute instances delete "$$VM_NAME" \
+            --project="${PROJECT_ID}" \
+            --zone="${_ZONE}" \
+            --quiet || true
+    waitFor:
+      - "cleanup-ssh-key"
+
+  # 10. Delete all GCS buckets.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        source /workspace/build_vars.env
+
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
+          gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
+          gcloud storage rm --recursive gs://$$ZONAL_BUCKET &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
+          gcloud storage rm --recursive gs://$$HNS_BUCKET &
+        fi
+        wait
+    waitFor:
+      - "run-benchmarks"
+
+  # 11. Check for failures.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-failure"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [ -f /workspace/failure ]; then
+          echo "Build failed. See previous steps for details."
+          exit 1
+        fi
+        echo "Build successful."
+    waitFor:
+      - "cleanup-vm"
+      - "delete-buckets"
+
+timeout: "14400s" # 2 hours
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${LOCATION}/workerPools/cloud-build-worker-pool"
