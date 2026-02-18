@@ -15,9 +15,6 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
 from google.cloud.storage.asyncio.async_grpc_client import AsyncGrpcClient
-from google.cloud.storage.asyncio.async_multi_range_downloader import (
-    AsyncMultiRangeDownloader,
-)
 
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
@@ -279,7 +276,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                     )
 
                 await self._get_grpc_client()
-                mrd = await AsyncMultiRangeDownloader.create_mrd(
+                mrd = await zb_hns_utils.init_mrd(
                     self.grpc_client, bucket, object_name, generation
                 )
                 mrd_created = True
@@ -359,7 +356,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                     return await super()._cat_file(path, start=start, end=end, **kwargs)
 
                 await self._get_grpc_client()
-                mrd = await AsyncMultiRangeDownloader.create_mrd(
+                mrd = await zb_hns_utils.init_mrd(
                     self.grpc_client, bucket, object_name, generation
                 )
                 mrd_created = True
@@ -1271,9 +1268,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         mrd = None
         try:
             await self._get_grpc_client()
-            mrd = await AsyncMultiRangeDownloader.create_mrd(
-                self.grpc_client, bucket, key, generation
-            )
+            mrd = await zb_hns_utils.init_mrd(self.grpc_client, bucket, key, generation)
 
             size = mrd.persisted_size
             if size is None:

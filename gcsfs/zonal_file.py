@@ -4,9 +4,6 @@ from fsspec import asyn
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
-from google.cloud.storage.asyncio.async_multi_range_downloader import (
-    AsyncMultiRangeDownloader,
-)
 
 from gcsfs import zb_hns_utils
 from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile
@@ -120,8 +117,8 @@ class ZonalFile(GCSFile):
         Initializes the AsyncMultiRangeDownloader.
         """
         await self.gcsfs._get_grpc_client()
-        return await AsyncMultiRangeDownloader.create_mrd(
-            self.gcsfs.grpc_client, bucket_name, object_name, generation
+        return await zb_hns_utils.init_mrd(
+            self.grpc_client, bucket_name, object_name, generation
         )
 
     async def _init_aaow(

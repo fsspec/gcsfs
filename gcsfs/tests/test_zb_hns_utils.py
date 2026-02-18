@@ -1,6 +1,7 @@
 from unittest import mock
 
 import pytest
+from google.api_core.exceptions import NotFound
 
 from gcsfs import zb_hns_utils
 
@@ -90,3 +91,40 @@ async def test_init_aaow_with_flush_interval_bytes():
         )
         mock_writer_instance.open.assert_awaited_once()
         assert result is mock_writer_instance
+
+
+@pytest.mark.asyncio
+async def test_init_mrd_success():
+    """Tests successful initialization of MRD."""
+    mock_mrd_instance = mock.Mock()
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        new_callable=mock.AsyncMock,
+        return_value=mock_mrd_instance,
+    ) as mock_create_mrd:
+        result = await zb_hns_utils.init_mrd(
+            mock_grpc_client, bucket_name, object_name, generation
+        )
+
+        mock_create_mrd.assert_awaited_once_with(
+            mock_grpc_client, bucket_name, object_name, generation
+        )
+        assert result is mock_mrd_instance
+
+
+@pytest.mark.asyncio
+async def test_init_mrd_not_found():
+    """Tests that init_mrd raises FileNotFoundError when object is not found."""
+
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        new_callable=mock.AsyncMock,
+    ) as mock_create_mrd:
+        mock_create_mrd.side_effect = NotFound("Object not found")
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            await zb_hns_utils.init_mrd(
+                mock_grpc_client, bucket_name, object_name, generation
+            )
+
+        assert f"{bucket_name}/{object_name}" in str(excinfo.value)

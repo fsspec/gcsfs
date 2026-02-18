@@ -92,8 +92,8 @@ case $TEST_SUITE in
 
     # 4. Error Handling: Zonal backend raises google.api_core.exceptions.NotFound instead of IOError/FileNotFoundError.
     ZONAL_DESELECTS+=(
-      "--deselect gcsfs/tests/test_core.py::test_errors"
-      "--deselect gcsfs/tests/test_core.py::test_get_error"
+      # "--deselect gcsfs/tests/test_core.py::test_errors"
+      # "--deselect gcsfs/tests/test_core.py::test_get_error"
     )
 
     # 5. Write/Flush Mechanics:
