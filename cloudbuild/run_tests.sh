@@ -94,10 +94,11 @@ case "$TEST_SUITE" in
     )
 
     # 3. Write/Flush Mechanics:
-    # - test_flush fails because object exists immediately (immediate write).
-    # - test_write_blocks/2 fail since zonal write uses SDK buffer directly,
-    # and doesn't use the GCSFile buffer
-    # - test_transaction fails (discard/versioning differences).
+    # - test_flush fails because ZonalFile.flush flushes directly to GCS whereas 
+    # GCSFile.flush defers write on small block (<blocksize)
+    # - test_write_blocks/2 fail since it checks buffer location and zonal write
+    # uses SDK buffer directly, not the GCSFile buffer
+    # - test_transaction fails since discard is not supported in Zonal
     # - test_array fails due to CRC32C TypeError with array objects.
     # - test_sign fails because it requires a private key
     ZONAL_DESELECTS+=(
