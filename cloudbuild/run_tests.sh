@@ -81,7 +81,7 @@ case $TEST_SUITE in
 
     # 3. Directory & Size consistency (du): Fails assertions (e.g., size 0 vs 266) or directory call counts.
     ZONAL_DESELECTS+=(
-      "--deselect gcsfs/tests/test_core.py::test_info_on_directory_with_only_subdirectories"
+      # "--deselect gcsfs/tests/test_core.py::test_info_on_directory_with_only_subdirectories"
       "--deselect gcsfs/tests/test_core.py::test_du"
       "--deselect gcsfs/tests/test_core.py::test_get_put"
       "--deselect gcsfs/tests/test_core.py::test_get_put_file_in_dir"
