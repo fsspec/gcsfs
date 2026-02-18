@@ -13,6 +13,12 @@ from resource_monitor import ResourceMonitor
 MB = 1024 * 1024
 
 
+def _format_mb(value):
+    if value == "N/A":
+        return "N/A"
+    return f"{float(value) / MB:.2f}"
+
+
 @pytest.fixture
 def populate_bucket():
     return False
@@ -183,21 +189,21 @@ def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info
     Hook to post-process benchmark results before generating the JSON report.
     """
     for bench in benchmarks:
-        if "timings" in bench.get("extra_info", {}):
-            bench.stats.data = bench.extra_info["timings"]
-            bench.stats.min = bench.extra_info["min_time"]
-            bench.stats.max = bench.extra_info["max_time"]
-            bench.stats.mean = bench.extra_info["mean_time"]
-            bench.stats.median = bench.extra_info["median_time"]
-            bench.stats.stddev = bench.extra_info["stddev_time"]
+        if "runs" in bench.get("extra_info", {}):
+            bench.stats.data = bench.extra_info["runs"]
+            bench.stats.min = bench.extra_info["min_run"]
+            bench.stats.max = bench.extra_info["max_run"]
+            bench.stats.mean = bench.extra_info["mean_run"]
+            bench.stats.median = bench.extra_info["median_run"]
+            bench.stats.stddev = bench.extra_info["stddev_run"]
             bench.stats.rounds = bench.extra_info["rounds"]
 
-            del bench.extra_info["timings"]
-            del bench.extra_info["min_time"]
-            del bench.extra_info["max_time"]
-            del bench.extra_info["mean_time"]
-            del bench.extra_info["median_time"]
-            del bench.extra_info["stddev_time"]
+            del bench.extra_info["runs"]
+            del bench.extra_info["min_run"]
+            del bench.extra_info["max_run"]
+            del bench.extra_info["mean_run"]
+            del bench.extra_info["median_run"]
+            del bench.extra_info["stddev_run"]
 
 
 def publish_benchmark_extra_info(
@@ -211,6 +217,7 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["chunk_size"] = getattr(params, "chunk_size_bytes", "N/A")
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
+    benchmark.extra_info["runtime"] = getattr(params, "runtime", "N/A")
     benchmark.extra_info["threads"] = params.threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name
@@ -236,6 +243,36 @@ def publish_resource_metrics(benchmark: Any, monitor: ResourceMonitor) -> None:
     )
 
 
+def publish_fixed_duration_benchmark_extra_info(
+    benchmark: Any, total_bytes_per_round: List[int], params: Any
+) -> None:
+    """
+    Calculate statistics for fixed duration benchmarks (total bytes)
+    and publish them to extra_info.
+    """
+    if not total_bytes_per_round:
+        return
+
+    # Calculate statistics for total bytes read
+    min_bytes = min(total_bytes_per_round)
+    max_bytes = max(total_bytes_per_round)
+    mean_bytes = statistics.mean(total_bytes_per_round)
+    median_bytes = statistics.median(total_bytes_per_round)
+    stddev_bytes = (
+        statistics.stdev(total_bytes_per_round)
+        if len(total_bytes_per_round) > 1
+        else 0.0
+    )
+
+    # For pytest-benchmark's internal reporting, we map bytes to the 'runs' fields.
+    benchmark.extra_info["runs"] = total_bytes_per_round
+    benchmark.extra_info["min_run"] = min_bytes
+    benchmark.extra_info["max_run"] = max_bytes
+    benchmark.extra_info["mean_run"] = mean_bytes
+    benchmark.extra_info["median_run"] = median_bytes
+    benchmark.extra_info["stddev_run"] = stddev_bytes
+
+
 def publish_multi_process_benchmark_extra_info(
     benchmark: Any, round_durations_s: List[float], params: Any
 ) -> None:
@@ -254,19 +291,9 @@ def publish_multi_process_benchmark_extra_info(
         statistics.stdev(round_durations_s) if len(round_durations_s) > 1 else 0.0
     )
 
-    # Build the results table as a single multi-line string to log it cleanly.
-    results_table = (
-        f"\n{'-' * 90}\n"
-        f"{'Name (time in s)':<50s} {'Min':>8s} {'Max':>8s} {'Mean':>8s} {'Rounds':>8s}\n"
-        f"{'-' * 90}\n"
-        f"{params.name:<50s} {min_time:>8.4f} {max_time:>8.4f} {mean_time:>8.4f} {params.rounds:>8d}\n"
-        f"{'-' * 90}"
-    )
-    logging.info(f"Multi-process benchmark results:{results_table}")
-
-    benchmark.extra_info["timings"] = round_durations_s
-    benchmark.extra_info["min_time"] = min_time
-    benchmark.extra_info["max_time"] = max_time
-    benchmark.extra_info["mean_time"] = mean_time
-    benchmark.extra_info["median_time"] = median_time
-    benchmark.extra_info["stddev_time"] = stddev_time
+    benchmark.extra_info["runs"] = round_durations_s
+    benchmark.extra_info["min_run"] = min_time
+    benchmark.extra_info["max_run"] = max_time
+    benchmark.extra_info["mean_run"] = mean_time
+    benchmark.extra_info["median_run"] = median_time
+    benchmark.extra_info["stddev_run"] = stddev_time
