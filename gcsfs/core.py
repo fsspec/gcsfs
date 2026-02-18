@@ -1277,6 +1277,17 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     merge = asyn.sync_wrapper(_merge)
 
+    # mv method is already available as sync method in the fsspec.py
+    # Async version of it is introduced here so that mv can be used in async methods.
+    # TODO: Add async mv method in the async.py and remove from GCSFileSystem.
+    async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
+        if path1 == path2:
+            return
+        # TODO: Pass on_error parameter after copy method handles FileNotFoundError
+        # for folders when recursive is set to true.
+        await self._copy(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        await self._rm(path1, recursive=recursive)
+
     async def _cp_file(self, path1, path2, acl=None, **kwargs):
         """Duplicate remote file"""
         b1, k1, g1 = self.split_path(path1)

@@ -4,7 +4,6 @@ import os
 from collections import defaultdict
 from collections.abc import Iterable
 from enum import Enum
-from functools import partial
 from glob import has_magic
 
 from fsspec import asyn
@@ -615,9 +614,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.debug(
                 f"Not an HNS bucket. Falling back to object-level mv for '{path1}' to '{path2}'."
             )
-            return await self.loop.run_in_executor(
-                None, partial(super().mv, path1, path2, **kwargs)
-            )
+            return await super()._mv(path1, path2, **kwargs)
 
         try:
             info1 = await self._info(path1)
@@ -625,12 +622,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # We only use HNS rename if the source is a folder and the move is
             # within the same bucket.
-            if is_folder and bucket1 == bucket2 and key1 and key2:
+            if is_folder and bucket1 == bucket2 and key1:
                 logger.info(
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
                 source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
-                destination_folder_id = key2
+                destination_folder_id = key2 or key1.rstrip("/").split("/")[-1]
 
                 request = storage_control_v2.RenameFolderRequest(
                     name=source_folder_name,
@@ -665,10 +662,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
-        # TODO: Check feasibility to call async copy and rm methods instead of sync mv method
-        return await self.loop.run_in_executor(
-            None, partial(super().mv, path1, path2, **kwargs)
-        )
+        return await super()._mv(path1, path2, **kwargs)
 
     mv = asyn.sync_wrapper(_mv)
 
@@ -1104,7 +1098,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Hybrid approach for HNS enabled buckets
         # 1. Fetch all files from super find() method by passing withdirs as False.
-        files_task = self.loop.create_task(
+        files_task = asyncio.create_task(
             super()._find(
                 path,
                 withdirs=False,  # Fetch files only
@@ -1119,7 +1113,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # 2. Fetch all folders recursively. This is necessary to find all folders,
         # especially empty ones.
-        folders_task = self.loop.create_task(
+        folders_task = asyncio.create_task(
             self._get_all_folders(path, bucket, prefix=prefix)
         )
         # 3. Run tasks concurrently and merge results.
