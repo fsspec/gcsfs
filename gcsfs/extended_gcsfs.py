@@ -439,24 +439,24 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Move a file using the atomic moveTo API for HNS buckets.
         Falls back to copy+delete for non-HNS buckets.
         """
-        bucket1, key1, generation1 = self.split_path(path1)
-        bucket2, key2, generation2 = self.split_path(path2)
+        src_bucket, src_key, generation1 = self.split_path(path1)
+        dest_bucket, dest_key, generation2 = self.split_path(path2)
 
         if generation2:
             raise ValueError("Cannot move to specific object generation")
 
         if (
-            bucket1 == bucket2
-            and await self._is_bucket_hns_enabled(bucket1)
-            and key1
-            and key2
+            src_bucket == dest_bucket
+            and await self._is_bucket_hns_enabled(src_bucket)
+            and src_key
+            and dest_key
         ):
             out = await self._call(
                 "POST",
                 "b/{}/o/{}/moveTo/o/{}",
-                bucket1,
-                key1,
-                key2,
+                src_bucket,
+                src_key,
+                dest_key,
                 sourceGeneration=generation1,
                 headers={
                     "Content-Type": "application/json",
@@ -464,17 +464,17 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 },
                 json_out=True,
             )
-            parent1 = self._parent(path1)
-            if parent1 in self.dircache:
+            src_parent = self._parent(path1)
+            if src_parent in self.dircache:
                 path1_stripped = self._strip_protocol(path1)
-                self.dircache[parent1] = [
-                    e for e in self.dircache[parent1] if e.get("name") != path1_stripped
+                self.dircache[src_parent] = [
+                    e for e in self.dircache[src_parent] if e.get("name") != path1_stripped
                 ]
 
-            parent2 = self._parent(path2)
-            if parent2 in self.dircache:
-                new_entry = self._process_object(bucket2, out)
-                self.dircache[parent2].append(new_entry)
+            dest_parent = self._parent(path2)
+            if dest_parent in self.dircache:
+                new_entry = self._process_object(dest_bucket, out)
+                self.dircache[dest_parent].append(new_entry)
         else:
             # Fallback to the parent's implementation (copy + delete)
             await super()._mv_file(path1, path2)
