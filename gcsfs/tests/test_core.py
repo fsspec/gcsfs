@@ -558,6 +558,8 @@ def test_move_recursive_with_slash(gcs):
 
 
 def test_mv_file(gcs):
+    if not gcs.on_google:
+        pytest.skip("emulator does not support moveTo")
     fn = TEST_BUCKET + "/test/accounts.1.json"
     data = gcs.cat(fn)
     gcs.mv_file(fn, fn + "2")
@@ -566,6 +568,8 @@ def test_mv_file(gcs):
 
 
 def test_mv_file_cache(gcs):
+    if not gcs.on_google:
+        pytest.skip("emulator does not support moveTo")
     fn = TEST_BUCKET + "/test/accounts.1.json"
     fn2 = fn + "2"
     parent = TEST_BUCKET + "/test"
