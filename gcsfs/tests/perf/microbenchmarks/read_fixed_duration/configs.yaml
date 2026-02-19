@@ -1,0 +1,30 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+  file_sizes_mb:
+    - 1024 # 1 GB
+  block_sizes_mb:
+    - 1
+    - 16
+  rounds: 3
+  runtime: 30 # 30 secs
+
+scenarios:
+  - name: "read_seq_fixed_duration"
+    pattern: "seq"
+    files: 30
+
+  - name: "read_seq_fixed_duration_multi_process"
+    pattern: "seq"
+    processes: [48]
+
+  - name: "read_rand_fixed_duration"
+    pattern: "rand"
+    block_sizes_mb: [0.0625, 16]
+    files: 30
+
+  - name: "read_rand_fixed_duration_multi_process"
+    pattern: "rand"
+    processes: [48]
+    block_sizes_mb: [0.0625, 16]

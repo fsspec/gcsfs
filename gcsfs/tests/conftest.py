@@ -471,11 +471,20 @@ def pytest_ignore_collect(collection_path, config):
         ):
             return True
 
+        benchmark_subdirs = {
+            "delete",
+            "listing",
+            "read",
+            "read_fixed_duration",
+            "rename",
+            "write",
+            "write_fixed_duration",
+        }
+
         # If only --run-benchmarks-infra is passed, ignore the actual benchmark subfolders.
         if config.getoption("--run-benchmarks-infra") and not config.getoption(
             "--run-benchmarks"
         ):
-            benchmark_subdirs = {"delete", "listing", "read", "rename", "write"}
             path_parts = set(path_str.replace(os.sep, "/").split("/"))
             if benchmark_subdirs.intersection(path_parts):
                 return True
@@ -485,7 +494,6 @@ def pytest_ignore_collect(collection_path, config):
             "--run-benchmarks-infra"
         ):
             if os.path.basename(path_str).startswith("test_"):
-                benchmark_subdirs = {"delete", "listing", "read", "rename", "write"}
                 path_parts = set(path_str.replace(os.sep, "/").split("/"))
                 if not benchmark_subdirs.intersection(path_parts):
                     return True

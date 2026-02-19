@@ -139,26 +139,11 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
         row[key] = bench["stats"].get(key)
 
     # Calculate percentiles
-    timings = bench["stats"].get("data")
-    if timings:
-        row["p90"] = np.percentile(timings, 90)
-        row["p95"] = np.percentile(timings, 95)
-        row["p99"] = np.percentile(timings, 99)
-
-    # Calculate max throughput
-    file_size = bench["extra_info"].get("file_size", 0)
-    files = bench["extra_info"].get("files", 1)
-
-    if file_size != "N/A":
-        total_bytes = file_size * files
-
-        min_time = bench["stats"].get("min")
-        if min_time and min_time > MIN_TIME_THRESHOLD:
-            row["max_throughput"] = total_bytes / min_time
-        else:
-            row["max_throughput"] = "0.0"
-    else:
-        row["max_throughput"] = "N/A"
+    rounds_data = bench["stats"].get("data")
+    if rounds_data:
+        row["p90"] = np.percentile(rounds_data, 90)
+        row["p95"] = np.percentile(rounds_data, 95)
+        row["p99"] = np.percentile(rounds_data, 99)
 
     return row
 
@@ -195,7 +180,7 @@ def _generate_report(json_path, results_dir):
     first_benchmark = data["benchmarks"][0]
     extra_info_headers = sorted(first_benchmark["extra_info"].keys())
     stats_headers = ["min", "max", "mean", "median", "stddev"]
-    custom_headers = ["p90", "p95", "p99", "max_throughput"]
+    custom_headers = ["p90", "p95", "p99"]
 
     headers = ["name", "group"] + extra_info_headers + stats_headers + custom_headers
 
@@ -231,6 +216,38 @@ def _create_table_row(row):
         list: A list of formatted values ready for printing in a table.
 
     """
+    runtime = row.get("runtime", "N/A")
+    is_fixed_duration = runtime != "N/A"
+
+    latency = "N/A"
+    throughput_val = "N/A"
+
+    if is_fixed_duration:
+        try:
+            r_val = float(runtime)
+            latency = f"{r_val:.2f}"
+            mean_bytes = float(row.get("mean", 0))
+            throughput_val = mean_bytes / r_val if r_val > 0 else 0
+        except (ValueError, TypeError):
+            pass
+    else:
+        try:
+            mean_latency = float(row.get("mean", 0))
+            latency = f"{mean_latency:.4f}"
+
+            file_size_str = row.get("file_size", "N/A")
+            if file_size_str != "N/A":
+                file_size = float(file_size_str)
+                files = float(row.get("files", 1))
+                total_bytes = file_size * files
+                throughput_val = (
+                    total_bytes / mean_latency
+                    if mean_latency > MIN_TIME_THRESHOLD
+                    else 0
+                )
+        except (ValueError, TypeError):
+            pass
+
     return [
         row.get("bucket_type", ""),
         row.get("group", ""),
@@ -243,9 +260,8 @@ def _create_table_row(row):
         _format_mb(row.get("file_size", 0)),
         _format_mb(row.get("chunk_size", 0)),
         _format_mb(row.get("block_size", 0)),
-        f"{float(row.get('min', 0)):.4f}",
-        f"{float(row.get('mean', 0)):.4f}",
-        _format_mb(row.get("max_throughput", 0)),
+        latency,
+        _format_mb(throughput_val),
         f"{float(row.get('cpu_max_global', 0)):.2f}",
         _format_mb(row.get("mem_max", 0)),
     ]
@@ -280,9 +296,8 @@ def _print_csv_to_shell(report_path):
             "File Size (MiB)",
             "Chunk Size (MiB)",
             "Block Size (MiB)",
-            "Min Latency (s)",
             "Mean Latency (s)",
-            "Max Throughput(MiB/s)",
+            "Mean Throughput (MiB/s)",
             "Max CPU (%)",
             "Max Memory (MiB)",
         ]
