@@ -10,6 +10,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import uuid
 import warnings
 import weakref
 from datetime import datetime, timedelta
@@ -1309,6 +1310,38 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 sourceGeneration=g1,
             )
         self.invalidate_cache(self._parent(path2))
+
+    async def _mv_file_cache_update(self, path1, path2, response=None):
+        self.invalidate_cache(self._parent(path1))
+        self.invalidate_cache(self._parent(path2))
+
+    async def _mv_file(self, path1, path2, **kwargs):
+        src_bucket, src_key, generation1 = self.split_path(path1)
+        dest_bucket, dest_key, generation2 = self.split_path(path2)
+
+        if generation2:
+            raise ValueError("Cannot move to specific object generation")
+
+        if src_bucket == dest_bucket and src_key and dest_key:
+            out = await self._call(
+                "POST",
+                "b/{}/o/{}/moveTo/o/{}",
+                src_bucket,
+                src_key,
+                dest_key,
+                sourceGeneration=generation1,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Goog-GCS-Idempotency-Token": str(uuid.uuid4()),
+                },
+                json_out=True,
+            )
+            await self._mv_file_cache_update(path1, path2, out)
+            return
+
+        await super()._mv_file(path1, path2, **kwargs)
+
+    mv_file = asyn.sync_wrapper(_mv_file)
 
     async def _rm_file(self, path, **kwargs):
         bucket, key, generation = self.split_path(path)

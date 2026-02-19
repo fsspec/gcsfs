@@ -250,21 +250,6 @@ class TestExtendedGcsFileSystemMv:
         assert gcsfs.exists(dest_file)
         assert gcsfs.exists(f"{dest_placeholder}/")
 
-    def test_hns_mv_file(self, gcs_hns):
-        """Test calling mv_file directly on an HNS bucket."""
-        gcsfs = gcs_hns
-        path1 = f"{TEST_HNS_BUCKET}/mv_file_source.txt"
-        path2 = f"{TEST_HNS_BUCKET}/mv_file_dest.txt"
-        content = b"mv_file content"
-
-        gcsfs.pipe(path1, content)
-
-        gcsfs.mv_file(path1, path2)
-
-        assert not gcsfs.exists(path1)
-        assert gcsfs.exists(path2)
-        assert gcsfs.cat(path2) == content
-
     def test_hns_mv_file_cache_update(self, gcs_hns):
         """Test that mv_file updates the cache correctly."""
         gcsfs = gcs_hns

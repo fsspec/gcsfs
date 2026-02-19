@@ -557,6 +557,25 @@ def test_move_recursive_with_slash(gcs):
     assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
 
 
+def test_mv_file(gcs):
+    fn = TEST_BUCKET + "/test/accounts.1.json"
+    data = gcs.cat(fn)
+    gcs.mv_file(fn, fn + "2")
+    assert gcs.cat(fn + "2") == data
+    assert not gcs.exists(fn)
+
+
+def test_mv_file_cache(gcs):
+    fn = TEST_BUCKET + "/test/accounts.1.json"
+    fn2 = fn + "2"
+    parent = TEST_BUCKET + "/test"
+    gcs.ls(parent)
+    assert parent in gcs.dircache
+    gcs.mv_file(fn, fn2)
+    assert parent not in gcs.dircache
+    assert fn2 in gcs.ls(parent)
+
+
 def test_cat_file(gcs):
     fn = TEST_BUCKET + "/test/accounts.1.json"
     data = gcs.cat_file(fn)

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import uuid
 from enum import Enum
 from glob import has_magic
 from io import BytesIO
@@ -434,52 +433,37 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             }
             self.dircache[parent2].append(new_entry)
 
-    async def _mv_file(self, path1, path2):
+    async def _mv_file_cache_update(self, path1, path2, response=None):
         """
-        Move a file using the atomic moveTo API for HNS buckets.
-        Falls back to copy+delete for non-HNS buckets.
+        Update the cache after a file move operation.
+
+        For HNS-enabled buckets where the move is within the same bucket, this method
+        directly updates the directory cache by removing the source entry from it's
+        parent cache and adding destination path as a new entry in it's corresponding parent cache.
+        This avoids invalidating the entire parent directory cache, which is beneficial for HNS
+        performance.
+
+        For non-HNS buckets or cross-bucket moves, it falls back to the default
+        behavior (invalidating the cache for both source and destination parents).
         """
-        src_bucket, src_key, generation1 = self.split_path(path1)
-        dest_bucket, dest_key, generation2 = self.split_path(path2)
+        src_bucket, _, _ = self.split_path(path1)
+        dest_bucket, _, _ = self.split_path(path2)
 
-        if generation2:
-            raise ValueError("Cannot move to specific object generation")
-
-        if (
-            src_bucket == dest_bucket
-            and await self._is_bucket_hns_enabled(src_bucket)
-            and src_key
-            and dest_key
-        ):
-            out = await self._call(
-                "POST",
-                "b/{}/o/{}/moveTo/o/{}",
-                src_bucket,
-                src_key,
-                dest_key,
-                sourceGeneration=generation1,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Goog-GCS-Idempotency-Token": str(uuid.uuid4()),
-                },
-                json_out=True,
-            )
+        if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
             src_parent = self._parent(path1)
             if src_parent in self.dircache:
                 path1_stripped = self._strip_protocol(path1)
                 self.dircache[src_parent] = [
-                    e for e in self.dircache[src_parent] if e.get("name") != path1_stripped
+                    e
+                    for e in self.dircache[src_parent]
+                    if e.get("name") != path1_stripped
                 ]
-
             dest_parent = self._parent(path2)
-            if dest_parent in self.dircache:
-                new_entry = self._process_object(dest_bucket, out)
+            if dest_parent in self.dircache and response:
+                new_entry = self._process_object(dest_bucket, response)
                 self.dircache[dest_parent].append(new_entry)
         else:
-            # Fallback to the parent's implementation (copy + delete)
-            await super()._mv_file(path1, path2)
-
-    mv_file = asyn.sync_wrapper(_mv_file)
+            await super()._mv_file_cache_update(path1, path2, response)
 
     async def _mv(self, path1, path2, **kwargs):
         """
