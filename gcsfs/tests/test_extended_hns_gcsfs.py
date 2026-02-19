@@ -64,7 +64,6 @@ def gcs_hns_mocks():
             "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
         )
         patch_target_super_mv = "gcsfs.core.GCSFileSystem._mv"
-        patch_target_super_mv_file = "fsspec.asyn.AsyncFileSystem._mv_file"
         patch_target_super_mkdir = "gcsfs.core.GCSFileSystem._mkdir"
         patch_target_super_rmdir = "gcsfs.core.GCSFileSystem._rmdir"
         patch_target_super_find = "gcsfs.core.GCSFileSystem._find"
@@ -93,9 +92,6 @@ def gcs_hns_mocks():
                 patch_target_super_mv, new_callable=mock.AsyncMock
             ) as mock_super_mv,
             mock.patch(
-                patch_target_super_mv_file, new_callable=mock.AsyncMock
-            ) as mock_super_mv_file,
-            mock.patch(
                 patch_target_super_mkdir, new_callable=mock.AsyncMock
             ) as mock_super_mkdir,
             mock.patch(
@@ -116,7 +112,6 @@ def gcs_hns_mocks():
                 "info": mock_info,
                 "control_client": mock_control_client_instance,
                 "super_mv": mock_super_mv,
-                "super_mv_file": mock_super_mv_file,
                 "super_mkdir": mock_super_mkdir,
                 "super_rmdir": mock_super_rmdir,
                 "super_find": mock_super_find,
@@ -560,34 +555,6 @@ class TestExtendedGcsFileSystemMv:
 class TestExtendedGcsFileSystemMvFile:
     """Unit tests for the _mv_file method in ExtendedGcsFileSystem."""
 
-    def test_mv_file_hns_calls_move_to(self, gcs_hns, gcs_hns_mocks):
-        """Test that _mv_file calls the moveTo API for HNS buckets."""
-        gcsfs = gcs_hns
-        path1 = f"{TEST_HNS_BUCKET}/file1.txt"
-        path2 = f"{TEST_HNS_BUCKET}/file2.txt"
-
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
-            # Mock _call to return a dummy object resource
-            with mock.patch.object(
-                gcsfs, "_call", new_callable=mock.AsyncMock
-            ) as mock_call:
-                mock_call.return_value = {
-                    "kind": "storage#object",
-                    "bucket": TEST_HNS_BUCKET,
-                    "name": "file2.txt",
-                }
-
-                gcsfs.mv_file(path1, path2)
-
-                mock_call.assert_awaited_once()
-                args, kwargs = mock_call.await_args
-                assert args[0] == "POST"
-                assert "moveTo" in args[1]
-                headers = kwargs["headers"]
-                assert headers["Content-Type"] == "application/json"
-                assert "X-Goog-GCS-Idempotency-Token" in headers
-                assert uuid.UUID(headers["X-Goog-GCS-Idempotency-Token"])
-
     def test_mv_file_hns_cache_update(self, gcs_hns, gcs_hns_mocks):
         """Test that _mv_file updates the dircache correctly."""
         gcsfs = gcs_hns
@@ -621,76 +588,6 @@ class TestExtendedGcsFileSystemMvFile:
                 assert path1 not in names
                 assert path2 in names
                 assert f"{parent}/other.txt" in names
-
-    def test_mv_file_non_hns_fallback(self, gcs_hns, gcs_hns_mocks):
-        """Test that _mv_file falls back to super()._mv_file for non-HNS buckets."""
-        gcsfs = gcs_hns
-        path1 = f"{TEST_HNS_BUCKET}/file1.txt"
-        path2 = f"{TEST_HNS_BUCKET}/file2.txt"
-
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
-            gcsfs.mv_file(path1, path2)
-
-            mocks["super_mv_file"].assert_awaited_once_with(path1, path2)
-
-    @pytest.mark.asyncio
-    async def test_mv_file_hns_idempotency_retries(self, gcs_hns, gcs_hns_mocks):
-        """Test that idempotency token persists across retries."""
-        gcsfs = gcs_hns
-        path1 = f"{TEST_HNS_BUCKET}/file1.txt"
-        path2 = f"{TEST_HNS_BUCKET}/file2.txt"
-
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
-            # Ensure session is initialized
-            await gcsfs._set_session()
-
-            # Mock responses
-            fail_response = mock.Mock()
-            fail_response.status = 503
-            fail_response.headers = {}
-            fail_response.read = mock.AsyncMock(
-                return_value=b'{"error": "Service Unavailable"}'
-            )
-            fail_response.request_info = mock.Mock()
-
-            success_response = mock.Mock()
-            success_response.status = 200
-            success_response.headers = {}
-            success_response.read = mock.AsyncMock(
-                return_value=b'{"kind": "storage#object"}'
-            )
-            success_response.request_info = mock.Mock()
-
-            # Mock context managers
-            cm_fail = mock.AsyncMock()
-            cm_fail.__aenter__.return_value = fail_response
-
-            cm_success = mock.AsyncMock()
-            cm_success.__aenter__.return_value = success_response
-
-            # Patch the session.request method on the actual session object
-            with mock.patch.object(
-                gcsfs.session, "request", side_effect=[cm_fail, cm_success]
-            ) as mock_request:
-                await gcsfs._mv_file(path1, path2)
-
-                assert mock_request.call_count == 2
-
-                # Verify both calls had the same idempotency token
-                call1_kwargs = mock_request.call_args_list[0].kwargs
-                call2_kwargs = mock_request.call_args_list[1].kwargs
-
-                # Check URL to ensure we intercepted the right call
-                assert "moveTo" in call1_kwargs["url"]
-
-                headers1 = call1_kwargs["headers"]
-                headers2 = call2_kwargs["headers"]
-
-                token1 = headers1.get("X-Goog-GCS-Idempotency-Token")
-                token2 = headers2.get("X-Goog-GCS-Idempotency-Token")
-
-                assert token1 is not None
-                assert token1 == token2
 
 
 class TestExtendedGcsFileSystemMkdir:
