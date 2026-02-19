@@ -2,7 +2,7 @@
 
 ## Introduction
 
-GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, listing, delete, and rename.
+GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, listing, delete, and rename. It supports both iteration-based and fixed-duration benchmarks for read and write operations.
 
 These benchmarks are built using the `pytest` and `pytest-benchmark` frameworks. Each benchmark test is a parameterized pytest case, where the parameters are dynamically configured at runtime from YAML configuration files. This allows for flexible and extensive testing scenarios without modifying the code.
 
@@ -39,6 +39,9 @@ The benchmarks use a set of parameter classes to define the configuration for ea
     *   `pattern`: Read pattern ("seq" for sequential, "rand" for random).
     *   `block_size_bytes`: Block size for GCSFS file buffering.
 
+*   **Fixed Duration Parameters**: Specific to fixed duration Read and Write operations.
+    *   `runtime`: Duration in seconds for the benchmark to run.
+
 *   **Listing Parameters**: Specific to Listing, Delete, and Rename operations.
     *   `depth`: Directory depth.
     *   `folders`: Number of folders.
@@ -48,7 +51,7 @@ The benchmarks use a set of parameter classes to define the configuration for ea
 
 Configuration values are stored in YAML files (e.g., `configs.yaml`) located within each benchmark's directory. These files define:
 
-*   **Common**: Shared settings like bucket types, file sizes, or rounds.
+*   **Common**: Shared settings like bucket types, file sizes, rounds, or runtime.
 *   **Scenarios**: Specific test scenarios defining variations in threads, processes, patterns, etc.
 
 ## Configurators
@@ -73,7 +76,7 @@ The `run.py` script is the central entry point for executing benchmarks. It hand
 
 | Option | Description | Required |
 | :--- | :--- | :--- |
-| `--group` | The benchmark group to run (e.g., `read`, `write`, `listing`). Runs all groups if not specified. | No |
+| `--group` | The benchmark group to run (e.g., `read`, `write`, `read_fixed_duration`, `write_fixed_duration`). Runs all groups if not specified. | No |
 | `--config` | Specific scenario names to run (e.g., `read_seq`, `list_flat`). Accepts multiple values. | No |
 | `--regional-bucket` | Name of the regional GCS bucket. | Yes* |
 | `--zonal-bucket` | Name of the zonal GCS bucket. | Yes* |
