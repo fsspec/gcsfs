@@ -636,6 +636,22 @@ def test_mv_file_fallback(gcs):
         mock_call.assert_not_awaited()
         mock_super_mv_file.assert_awaited_once_with(path1, path2)
 
+    # Case 3: API Error
+    path1 = "bucket1/file1.txt"
+    path2 = "bucket1/file2.txt"
+
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "fsspec.asyn.AsyncFileSystem._mv_file", new_callable=mock.AsyncMock
+        ) as mock_super_mv_file,
+    ):
+        mock_call.side_effect = Exception("moveTo failed")
+        gcs.mv_file(path1, path2)
+
+        mock_call.assert_awaited_once()
+        mock_super_mv_file.assert_awaited_once_with(path1, path2)
+
 
 @pytest.mark.asyncio
 async def test_mv_file_idempotency_retries(gcs):

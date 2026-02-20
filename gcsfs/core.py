@@ -1323,21 +1323,28 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             raise ValueError("Cannot move to specific object generation")
 
         if src_bucket == dest_bucket and src_key and dest_key:
-            out = await self._call(
-                "POST",
-                "b/{}/o/{}/moveTo/o/{}",
-                src_bucket,
-                src_key,
-                dest_key,
-                sourceGeneration=generation1,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Goog-GCS-Idempotency-Token": str(uuid.uuid4()),
-                },
-                json_out=True,
-            )
-            await self._mv_file_cache_update(path1, path2, out)
-            return
+            try:
+                out = await self._call(
+                    "POST",
+                    "b/{}/o/{}/moveTo/o/{}",
+                    src_bucket,
+                    src_key,
+                    dest_key,
+                    sourceGeneration=generation1,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Goog-GCS-Idempotency-Token": str(uuid.uuid4()),
+                    },
+                    json_out=True,
+                )
+                await self._mv_file_cache_update(path1, path2, out)
+                return
+            except Exception as e:
+                # TODO: Fallback is added to make sure there is smooth tranistion, it can be removed
+                # once we have metrics proving that moveTo API is working properly for all bucket types.
+                logger.warning(
+                    f"Failed to move file using moveTo API: {e}. Falling back to copy/delete."
+                )
 
         await super()._mv_file(path1, path2, **kwargs)
 
