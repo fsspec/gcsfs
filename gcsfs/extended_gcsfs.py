@@ -8,7 +8,6 @@ from io import BytesIO
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
-from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
@@ -92,9 +91,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # Initialize the storage control plane client for bucket
             # metadata operations
-            client_info = gapic_v1.client_info.ClientInfo(
-                user_agent=f"{USER_AGENT}/{version}"
-            )
             # The HNS RenameFolder operation began failing with an "input/output error"
             # after an authentication library change caused it to send a
             # `quota_project_id` from application default credentials. The
@@ -109,8 +105,18 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             if hasattr(creds, "with_quota_project"):
                 creds = creds.with_quota_project(None)
 
+            transport_cls = (
+                storage_control_v2.StorageControlAsyncClient.get_transport_class(
+                    "grpc_asyncio"
+                )
+            )
+            channel = transport_cls.create_channel(
+                credentials=creds,
+                options=[("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
+            )
+            transport = transport_cls(channel=channel)
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
-                credentials=creds, client_info=client_info
+                transport=transport
             )
         return self._storage_control_client
 
@@ -433,12 +439,44 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             }
             self.dircache[parent2].append(new_entry)
 
+    async def _mv_file_cache_update(self, path1, path2, response=None):
+        """
+        Update the cache after a file move operation.
+
+        For HNS-enabled buckets where the move is within the same bucket, this method
+        directly updates the directory cache by removing the source entry from it's
+        parent cache and adding destination path as a new entry in it's corresponding parent cache.
+        This avoids invalidating the entire parent directory cache, which is beneficial for HNS
+        performance.
+
+        For non-HNS buckets or cross-bucket moves, it falls back to the default
+        behavior (invalidating the cache for both source and destination parents).
+        """
+        src_bucket, _, _ = self.split_path(path1)
+        dest_bucket, _, _ = self.split_path(path2)
+
+        if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
+            src_parent = self._parent(path1)
+            if src_parent in self.dircache:
+                path1_stripped = self._strip_protocol(path1)
+                self.dircache[src_parent] = [
+                    e
+                    for e in self.dircache[src_parent]
+                    if e.get("name") != path1_stripped
+                ]
+            dest_parent = self._parent(path2)
+            if dest_parent in self.dircache and response:
+                new_entry = self._process_object(dest_bucket, response)
+                self.dircache[dest_parent].append(new_entry)
+        else:
+            await super()._mv_file_cache_update(path1, path2, response)
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
-        optimized, atomic implementation for renaming folders in HNS-enabled
-        buckets. Falls back to the parent's object-level copy-and-delete
-        implementation for files or for non-HNS buckets.
+        optimized, atomic implementation for renaming folders and moving files
+        in HNS-enabled buckets. Falls back to the parent's object-level
+        copy-and-delete implementation for non-HNS buckets.
         """
         if path1 == path2:
             logger.debug(
@@ -483,6 +521,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 logger.info(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
                 )
+                return
+            elif not is_folder:
+                await self._mv_file(path1, path2)
                 return
         except Exception as e:
             if isinstance(e, FileNotFoundError):

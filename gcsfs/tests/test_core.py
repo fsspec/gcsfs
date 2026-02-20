@@ -1,5 +1,6 @@
 import io
 import os
+import uuid
 from builtins import FileNotFoundError
 from datetime import datetime, timezone
 from itertools import chain
@@ -555,6 +556,154 @@ def test_move_recursive_with_slash(gcs):
     gcs.mv(dir_from, dir_to, recursive=True)
     assert not gcs.exists(dir_from.rstrip("/"))
     assert gcs.ls(dir_to) == [dir_to + "/file1", dir_to + "/file2", dir_to + "/nested2"]
+
+
+def test_mv_file(gcs):
+    if not gcs.on_google:
+        pytest.skip("emulator does not support moveTo")
+    fn = TEST_BUCKET + "/test/accounts.1.json"
+    data = gcs.cat(fn)
+    gcs.mv_file(fn, fn + "2")
+    assert gcs.cat(fn + "2") == data
+    assert not gcs.exists(fn)
+
+
+def test_mv_file_cache(gcs):
+    if not gcs.on_google:
+        pytest.skip("emulator does not support moveTo")
+    fn = TEST_BUCKET + "/test/accounts.1.json"
+    fn2 = fn + "2"
+    parent = TEST_BUCKET + "/test"
+    gcs.ls(parent)
+    assert parent in gcs.dircache
+    gcs.mv_file(fn, fn2)
+    assert parent not in gcs.dircache
+    assert fn2 in gcs.ls(parent)
+
+
+def test_mv_file_calls_move_to(gcs):
+    path1 = TEST_BUCKET + "/file1.txt"
+    path2 = TEST_BUCKET + "/file2.txt"
+
+    # Mock _call to return a dummy object resource
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        mock_call.return_value = {
+            "kind": "storage#object",
+            "bucket": TEST_BUCKET,
+            "name": "file2.txt",
+        }
+
+        gcs.mv_file(path1, path2)
+
+        mock_call.assert_awaited_once()
+        args, kwargs = mock_call.await_args
+        assert args[0] == "POST"
+        assert "moveTo" in args[1]
+        headers = kwargs["headers"]
+        assert headers["Content-Type"] == "application/json"
+        assert "X-Goog-GCS-Idempotency-Token" in headers
+        assert uuid.UUID(headers["X-Goog-GCS-Idempotency-Token"])
+
+
+def test_mv_file_fallback(gcs):
+    # Case 1: Cross bucket
+    path1 = "bucket1/file1.txt"
+    path2 = "bucket2/file2.txt"
+
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "fsspec.asyn.AsyncFileSystem._mv_file", new_callable=mock.AsyncMock
+        ) as mock_super_mv_file,
+    ):
+        gcs.mv_file(path1, path2)
+
+        mock_call.assert_not_awaited()
+        mock_super_mv_file.assert_awaited_once_with(path1, path2)
+
+    # Case 2: Missing key
+    path1 = "bucket1/file1.txt"
+    path2 = "bucket1/"
+
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "fsspec.asyn.AsyncFileSystem._mv_file", new_callable=mock.AsyncMock
+        ) as mock_super_mv_file,
+    ):
+        gcs.mv_file(path1, path2)
+
+        mock_call.assert_not_awaited()
+        mock_super_mv_file.assert_awaited_once_with(path1, path2)
+
+    # Case 3: API Error
+    path1 = "bucket1/file1.txt"
+    path2 = "bucket1/file2.txt"
+
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "fsspec.asyn.AsyncFileSystem._mv_file", new_callable=mock.AsyncMock
+        ) as mock_super_mv_file,
+    ):
+        mock_call.side_effect = Exception("moveTo failed")
+        gcs.mv_file(path1, path2)
+
+        mock_call.assert_awaited_once()
+        mock_super_mv_file.assert_awaited_once_with(path1, path2)
+
+
+@pytest.mark.asyncio
+async def test_mv_file_idempotency_retries(gcs):
+    path1 = TEST_BUCKET + "/file1.txt"
+    path2 = TEST_BUCKET + "/file2.txt"
+
+    # Ensure session is initialized
+    await gcs._set_session()
+
+    # Mock responses
+    fail_response = mock.Mock()
+    fail_response.status = 503
+    fail_response.headers = {}
+    fail_response.read = mock.AsyncMock(
+        return_value=b'{"error": "Service Unavailable"}'
+    )
+    fail_response.request_info = mock.Mock()
+
+    success_response = mock.Mock()
+    success_response.status = 200
+    success_response.headers = {}
+    success_response.read = mock.AsyncMock(return_value=b'{"kind": "storage#object"}')
+    success_response.request_info = mock.Mock()
+
+    # Patch the session.request method
+    with mock.patch.object(
+        gcs.session,
+        "request",
+        side_effect=[
+            mock.AsyncMock(__aenter__=mock.AsyncMock(return_value=fail_response)),
+            mock.AsyncMock(__aenter__=mock.AsyncMock(return_value=success_response)),
+        ],
+    ) as mock_request:
+        await gcs._mv_file(path1, path2)
+
+        assert mock_request.call_count == 2
+
+        # Verify both calls had the same idempotency token
+        call1_kwargs = mock_request.call_args_list[0].kwargs
+        call2_kwargs = mock_request.call_args_list[1].kwargs
+
+        # Check URL to ensure we intercepted the right call
+        assert "moveTo" in call1_kwargs["url"]
+
+        headers1 = call1_kwargs["headers"]
+        headers2 = call2_kwargs["headers"]
+
+        token1 = headers1.get("X-Goog-GCS-Idempotency-Token")
+        token2 = headers2.get("X-Goog-GCS-Idempotency-Token")
+
+        assert token1 is not None
+        assert token1 == token2
 
 
 def test_cat_file(gcs):

@@ -274,30 +274,36 @@ class TestExtendedGcsFileSystemMv:
             )
             mocks["super_mv"].assert_not_called()
 
-    def test_file_rename_fallback_to_super_mv(
+    def test_file_rename_delegates_to_mv_file(
         self,
         gcs_hns,
         gcs_hns_mocks,
     ):
-        """Test scenarios that should fall back to the parent's mv method."""
+        """Test that file rename in HNS bucket delegates to _mv_file."""
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/file.txt"
         path2 = f"{TEST_HNS_BUCKET}/new_file.txt"
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        gcsfs.touch(path1)
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
             mocks["info"].side_effect = [
                 {"type": "file"},
                 FileNotFoundError(path1),
                 {"type": "file", "name": path2},
             ]
 
-            gcsfs.touch(path1)
             gcsfs.mv(path1, path2)
 
             assert not gcsfs.exists(path1)
             assert gcsfs.exists(path2)
 
             mocks["control_client"].rename_folder.assert_not_called()
-            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+            mock_mv_file.assert_awaited_once_with(path1, path2)
+            mocks["super_mv"].assert_not_called()
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -544,6 +550,44 @@ class TestExtendedGcsFileSystemMv:
             mocks["info"].assert_awaited_with(path1)
             mocks["super_mv"].assert_not_called()
             mocks["control_client"].rename_folder.assert_called()
+
+
+class TestExtendedGcsFileSystemMvFile:
+    """Unit tests for the _mv_file method in ExtendedGcsFileSystem."""
+
+    def test_mv_file_hns_cache_update(self, gcs_hns, gcs_hns_mocks):
+        """Test that _mv_file updates the dircache correctly."""
+        gcsfs = gcs_hns
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        path1 = f"{parent}/file1.txt"
+        path2 = f"{parent}/file2.txt"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
+            # Pre-populate cache
+            gcsfs.dircache[parent] = [
+                {"name": path1, "type": "file"},
+                {"name": f"{parent}/other.txt", "type": "file"},
+            ]
+
+            with mock.patch.object(
+                gcsfs, "_call", new_callable=mock.AsyncMock
+            ) as mock_call:
+                mock_call.return_value = {
+                    "kind": "storage#object",
+                    "bucket": TEST_HNS_BUCKET,
+                    "name": "parent/file2.txt",
+                    "size": 100,
+                }
+
+                gcsfs.mv_file(path1, path2)
+
+                # Check cache
+                assert parent in gcsfs.dircache
+                entries = gcsfs.dircache[parent]
+                names = [e["name"] for e in entries]
+                assert path1 not in names
+                assert path2 in names
+                assert f"{parent}/other.txt" in names
 
 
 class TestExtendedGcsFileSystemMkdir:
