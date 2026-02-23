@@ -1,4 +1,5 @@
 import fsspec.tests.abstract as abstract
+import pytest
 
 from gcsfs.tests.derived.gcsfs_fixtures import GcsfsFixtures
 
@@ -12,4 +13,8 @@ class TestGcsfsGet(abstract.AbstractGetTests, GcsfsFixtures):
 
 
 class TestGcsfsPut(abstract.AbstractPutTests, GcsfsFixtures):
+    pass
+
+
+class TestGcsfsPipe(abstract.AbstractPipeTests, GcsfsFixtures):
     pass
