@@ -589,6 +589,35 @@ class TestExtendedGcsFileSystemMvFile:
                 assert path2 in names
                 assert f"{parent}/other.txt" in names
 
+    @pytest.mark.asyncio
+    async def test_mv_file_cache_update_fallback(self, gcs_hns, gcs_hns_mocks):
+        """Test that _mv_file_cache_update falls back to super for non-HNS/cross-bucket."""
+        gcsfs = gcs_hns
+
+        # Case 1: Cross bucket move (HNS enabled on source)
+        path1 = f"{TEST_HNS_BUCKET}/file1.txt"
+        path2 = "other-bucket/file2.txt"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
+            with mock.patch(
+                "gcsfs.core.GCSFileSystem._mv_file_cache_update",
+                new_callable=mock.AsyncMock,
+            ) as mock_super_update:
+                await gcsfs._mv_file_cache_update(path1, path2)
+                mock_super_update.assert_awaited_once_with(path1, path2, None)
+
+        # Case 2: Same bucket, but non-HNS
+        path3 = f"{TEST_HNS_BUCKET}/file3.txt"
+        path4 = f"{TEST_HNS_BUCKET}/file4.txt"
+
+        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs):
+            with mock.patch(
+                "gcsfs.core.GCSFileSystem._mv_file_cache_update",
+                new_callable=mock.AsyncMock,
+            ) as mock_super_update:
+                await gcsfs._mv_file_cache_update(path3, path4)
+                mock_super_update.assert_awaited_once_with(path3, path4, None)
+
 
 class TestExtendedGcsFileSystemMkdir:
     """Tests for the mkdir method in ExtendedGcsFileSystem."""

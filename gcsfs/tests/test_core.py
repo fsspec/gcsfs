@@ -572,13 +572,17 @@ def test_mv_file_cache(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support moveTo")
     fn = TEST_BUCKET + "/test/accounts.1.json"
-    fn2 = fn + "2"
+    fn2 = TEST_BUCKET + "/nested/accounts.1.json"
     parent = TEST_BUCKET + "/test"
+    parent2 = TEST_BUCKET + "/nested"
     gcs.ls(parent)
+    gcs.ls(parent2)
     assert parent in gcs.dircache
+    assert parent2 in gcs.dircache
     gcs.mv_file(fn, fn2)
     assert parent not in gcs.dircache
-    assert fn2 in gcs.ls(parent)
+    assert parent2 not in gcs.dircache
+    assert fn2 in gcs.ls(parent2)
 
 
 def test_mv_file_calls_move_to(gcs):
@@ -1902,3 +1906,17 @@ def test_default_gcp_universe(monkeypatch):
         == "https://storage.googleapis.com/download/storage/v1/b/test/o/path?alt=media"
     )
     assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
+
+
+def test_mv_file_raises_error_for_specific_generation(gcs):
+    original_version_aware = gcs.version_aware
+    gcs.version_aware = True
+    try:
+        src = f"{TEST_BUCKET}/source.txt"
+        dest = f"{TEST_BUCKET}/dest.txt#123456"
+        with pytest.raises(
+            ValueError, match="Cannot move to specific object generation"
+        ):
+            gcs.mv_file(src, dest)
+    finally:
+        gcs.version_aware = original_version_aware
