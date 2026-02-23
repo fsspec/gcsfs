@@ -289,6 +289,9 @@ async def test_cat_ranges_runtime_errors(async_gcs, file_path, on_error):
             results[1], Exception
         )  # The missing file should be an Exception object
         assert results[2] == b"valid"
+
+
+@pytest.mark.asyncio
 async def test_async_mkdir_and_rmdir(async_gcs, hns_file_path):
     """Test async _mkdir and _rmdir."""
     dir_path = f"{hns_file_path}/dir"

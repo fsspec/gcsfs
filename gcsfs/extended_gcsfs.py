@@ -451,6 +451,47 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         return zonal_batches, regional_requests
 
+    async def _fetch_regional_request(self, idx, path, start, end, **kwargs):
+        """Wrapper to fetch a regional file and return it in a standardized list of tuples."""
+        data = await super()._cat_file(path, start=start, end=end, **kwargs)
+        return [(idx, data)]
+
+    async def _create_fetch_coroutines(
+        self, zonal_batches, regional_requests, sem, on_error, **kwargs
+    ):
+        """Creates bounded asyncio coroutines for both Zonal and Regional fetch operations."""
+        tasks = []
+
+        async def _run_task(indices, coro):
+            try:
+                if sem:
+                    async with sem:
+                        return await coro
+                return await coro
+            except Exception as e:
+                if on_error == "raise":
+                    raise
+                return [(i, e) for i in indices]
+
+        # 1. Zonal Batches (MRD supports max 1000 ranges per request)
+        for key, batch in zonal_batches.items():
+            for i in range(0, len(batch), MRD_MAX_RANGES):
+                sub_batch = batch[i : i + MRD_MAX_RANGES]
+                indices = [idx for idx, _, _ in sub_batch]
+                tasks.append(
+                    _run_task(indices, self._fetch_zonal_batch(key, sub_batch))
+                )
+
+        # 2. Regional Requests
+        for idx, path, start, end in regional_requests:
+            tasks.append(
+                _run_task(
+                    [idx], self._fetch_regional_request(idx, path, start, end, **kwargs)
+                )
+            )
+
+        return tasks
+
     async def _cat_ranges(
         self,
         paths,
@@ -487,7 +528,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             ends = [ends] * len(paths)
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError("starts, ends, and paths must have the same length.")
-
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be a positive integer or None.")
 
@@ -499,45 +539,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         # Use a semaphore to limit concurrency if batch_size is set
         sem = asyncio.Semaphore(batch_size) if batch_size else None
 
-        async def _run_task(indices, coro):
-            try:
-                if sem:
-                    async with sem:
-                        result = await coro
-                else:
-                    result = await coro
-
-                # Zonal returns a zip/list of multiple items.
-                # Regional (super._cat_file) returns a single bytes object.
-                # We normalize everything to: [(index, data), (index, data)...]
-                if isinstance(result, bytes):
-                    return [(indices[0], result)]
-                return result
-
-            except Exception as e:
-                if on_error == "raise":
-                    raise
-                return [(i, e) for i in indices]
-
-        tasks = []
-
-        # Zonal Batches
-        for key, batch in zonal_batches.items():
-            # MRD supports max 1000 ranges per request
-            for i in range(0, len(batch), MRD_MAX_RANGES):
-                sub_batch = batch[i : i + MRD_MAX_RANGES]
-                indices = [idx for idx, _, _ in sub_batch]
-                tasks.append(
-                    _run_task(indices, self._fetch_zonal_batch(key, sub_batch))
-                )
-
-        # Regional Requests
-        for idx, path, start, end in regional_requests:
-            tasks.append(
-                _run_task(
-                    [idx], super()._cat_file(path, start=start, end=end, **kwargs)
-                )
-            )
+        # Build and execute tasks
+        tasks = await self._create_fetch_coroutines(
+            zonal_batches, regional_requests, sem, on_error, **kwargs
+        )
 
         # Execute concurrently and stitch Results
         all_results = await asyncio.gather(*tasks)
