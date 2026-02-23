@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import uuid
 from enum import Enum
 from glob import has_magic
 from io import BytesIO
@@ -512,6 +513,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 request = storage_control_v2.RenameFolderRequest(
                     name=source_folder_name,
                     destination_folder_id=destination_folder_id,
+                    request_id=str(uuid.uuid4()),
                 )
 
                 logger.debug(f"rename_folder request: {request}")
@@ -622,6 +624,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             parent=parent,
             folder_id=folder_id,
             recursive=create_parents,
+            request_id=str(uuid.uuid4()),
         )
         try:
             logger.debug(f"create_folder request: {request}")
@@ -666,7 +669,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                     f"projects/_/buckets/{bucket}/folders/{folder_id}"
                 )
 
-                request = storage_control_v2.GetFolderRequest(name=folder_resource_name)
+                request = storage_control_v2.GetFolderRequest(
+                    name=folder_resource_name, request_id=str(uuid.uuid4())
+                )
 
                 # Verify existence using get_folder API
                 response = await self._storage_control_client.get_folder(
@@ -737,7 +742,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         try:
             logger.info(f"Using HNS-aware rmdir for '{path}'.")
             folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
-            request = storage_control_v2.DeleteFolderRequest(name=folder_name)
+            request = storage_control_v2.DeleteFolderRequest(
+                name=folder_name,
+                request_id=str(uuid.uuid4()),
+            )
 
             logger.debug(f"delete_folder request: {request}")
             await self._storage_control_client.delete_folder(request=request)
@@ -1052,7 +1060,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if folder_id and not folder_id.endswith("/"):
             folder_id += "/"
         parent = f"projects/_/buckets/{bucket}"
-        request = storage_control_v2.ListFoldersRequest(parent=parent, prefix=folder_id)
+        request = storage_control_v2.ListFoldersRequest(
+            parent=parent, prefix=folder_id, request_id=str(uuid.uuid4())
+        )
         logger.debug(f"list_folders request: {request}")
 
         async for folder in await self._storage_control_client.list_folders(
