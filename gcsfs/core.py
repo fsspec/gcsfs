@@ -1967,7 +1967,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             Object generation.
         supports_append: bool
             If True, allows opening file in append mode. This is generally not supported
-            by GCS, but may be supported by subclasses (e.g. ZonalFile).
+            by GCS, but may be supported by subclasses (e.g. ZonalFile). This flag
+            should be set by subclasses that support append operations. Otherwise,
+            the mode will be overwritten to "wb" mode with a warning.
         """
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
