@@ -293,11 +293,13 @@ class ZonalFile(GCSFile):
         # super is closed before aaow since flush may need aaow
         super().close()
         if hasattr(self, "mrd") and self.mrd:
-            asyn.sync(self.gcsfs.loop, self.mrd.close)
+            asyn.sync(self.gcsfs.loop, zb_hns_utils.close_mrd, self.mrd)
+
         # Only close aaow if the stream is open
         if hasattr(self, "aaow") and self.aaow and self.aaow._is_stream_open:
             asyn.sync(
                 self.gcsfs.loop,
-                self.aaow.close,
+                zb_hns_utils.close_aaow,
+                self.aaow,
                 finalize_on_close=self.finalize_on_close,
             )

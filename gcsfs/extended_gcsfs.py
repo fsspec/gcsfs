@@ -330,7 +330,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 return [data]
         finally:
             if mrd_created:
-                await mrd.close()
+                await zb_hns_utils.close_mrd(mrd)
 
     async def _cat_file(self, path, start=None, end=None, mrd=None, **kwargs):
         """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
@@ -381,7 +381,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         finally:
             # Explicit cleanup if we created the MRD
             if mrd_created:
-                await mrd.close()
+                await zb_hns_utils.close_mrd(mrd)
 
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
@@ -1160,7 +1160,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 await writer.append_from_file(f, block_size=chunksize)
         finally:
             finalize_on_close = kwargs.get("finalize_on_close", False)
-            await writer.close(finalize_on_close=finalize_on_close)
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
         self.invalidate_cache(self._parent(rpath))
 
@@ -1232,7 +1232,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 await writer.append(data[i : i + chunksize])
         finally:
             finalize_on_close = kwargs.get("finalize_on_close", False)
-            await writer.close(finalize_on_close=finalize_on_close)
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
         self.invalidate_cache(self._parent(path))
 
@@ -1311,8 +1311,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 os.remove(lpath)
             raise e
         finally:
-            if mrd:
-                await mrd.close()
+            await zb_hns_utils.close_mrd(mrd)
 
     async def _do_list_objects(
         self,
@@ -1408,12 +1407,12 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
             f"Error uploading chunk at offset {location.offset}: {e}. Closing stream."
         )
         # Don't finalize the upload on error
-        await location.close(finalize_on_close=False)
+        await zb_hns_utils.close_aaow(location, finalize_on_close=False)
         raise
 
     if (location.offset or 0) >= size:
         logger.debug("Uploaded data is equal or greater than size. Finalizing upload.")
-        await location.close(finalize_on_close=True)
+        await zb_hns_utils.close_aaow(location, finalize_on_close=True)
 
 
 async def initiate_upload(
@@ -1557,4 +1556,4 @@ async def simple_upload(
         await writer.append(datain)
     finally:
         finalize_on_close = kwargs.get("finalize_on_close", False)
-        await writer.close(finalize_on_close=finalize_on_close)
+        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)

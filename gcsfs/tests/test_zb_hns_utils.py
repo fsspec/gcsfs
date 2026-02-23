@@ -1,3 +1,4 @@
+import logging
 from unittest import mock
 
 import pytest
@@ -90,3 +91,57 @@ async def test_init_aaow_with_flush_interval_bytes():
         )
         mock_writer_instance.open.assert_awaited_once()
         assert result is mock_writer_instance
+
+
+@pytest.mark.asyncio
+async def test_close_aaow(caplog):
+    """Tests all graceful closing scenarios for AsyncAppendableObjectWriter."""
+    # 1. Handles None gracefully
+    await zb_hns_utils.close_aaow(None)
+
+    # 2. Closes successfully
+    mock_aaow = mock.AsyncMock()
+    await zb_hns_utils.close_aaow(mock_aaow, finalize_on_close=True)
+    mock_aaow.close.assert_awaited_once_with(finalize_on_close=True)
+
+    # 3. Catches exceptions and logs a warning
+    mock_aaow.reset_mock()
+    mock_aaow.bucket_name = "test-bucket"
+    mock_aaow.object_name = "test-object"
+    mock_aaow.close.side_effect = Exception("Close failed")
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        await zb_hns_utils.close_aaow(mock_aaow, finalize_on_close=False)
+
+    mock_aaow.close.assert_awaited_once_with(finalize_on_close=False)
+    assert (
+        "Error closing AsyncAppendableObjectWriter for test-bucket/test-object: Close failed"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_mrd(caplog):
+    """Tests all graceful closing scenarios for AsyncMultiRangeDownloader."""
+    # 1. Handles None gracefully
+    await zb_hns_utils.close_mrd(None)
+
+    # 2. Closes successfully
+    mock_mrd = mock.AsyncMock()
+    await zb_hns_utils.close_mrd(mock_mrd)
+    mock_mrd.close.assert_awaited_once()
+
+    # 3. Catches exceptions and logs a warning
+    mock_mrd.reset_mock()
+    mock_mrd.bucket_name = "test-bucket"
+    mock_mrd.object_name = "test-object"
+    mock_mrd.close.side_effect = Exception("Close failed")
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        await zb_hns_utils.close_mrd(mock_mrd)
+
+    mock_mrd.close.assert_awaited_once()
+    assert (
+        "Error closing AsyncMultiRangeDownloader for test-bucket/test-object: Close failed"
+        in caplog.text
+    )
