@@ -1,5 +1,4 @@
 import fsspec.tests.abstract as abstract
-import pytest
 
 from gcsfs.tests.derived.gcsfs_fixtures import GcsfsFixtures
 
