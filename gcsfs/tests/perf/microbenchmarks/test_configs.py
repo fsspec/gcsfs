@@ -114,13 +114,14 @@ def test_write_configurator(mock_config_dependencies):
 
 def test_listing_configurator(mock_config_dependencies):
     """Test that ListingConfigurator correctly builds benchmark parameters."""
-    common = {"bucket_types": ["regional"], "files": [100], "rounds": 1}
+    common = {"bucket_types": ["regional"], "rounds": 1}
     scenario = {
         "name": "list_test",
         "processes": [1],
         "threads": [1],
         "depth": 2,
         "folders": [5],
+        "files": [100],
         "pattern": "prefix",
     }
 
