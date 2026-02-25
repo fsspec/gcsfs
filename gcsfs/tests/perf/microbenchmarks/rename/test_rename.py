@@ -24,13 +24,13 @@ single_threaded_cases, _, _ = filter_test_cases(all_benchmark_cases)
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_listing",
+    "gcsfs_benchmark_rename",
     single_threaded_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_rename_recursive(benchmark, gcsfs_benchmark_listing, monitor):
-    gcs, _, prefix, params = gcsfs_benchmark_listing
+def test_rename_recursive(benchmark, gcsfs_benchmark_rename, monitor):
+    gcs, _, prefix, params = gcsfs_benchmark_rename
     prefix_renamed = f"{prefix}_renamed"
 
     try:

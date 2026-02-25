@@ -204,6 +204,7 @@ steps:
             set -e
             cd gcsfs
             source env/bin/activate
+            export GCSFS_BENCHMARK_CPU_AFFINITY=true
 
             echo \"Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO\"
             python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO

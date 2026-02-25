@@ -467,7 +467,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             # We only use HNS rename if the source is a folder and the move is
             # within the same bucket.
             if is_folder and bucket1 == bucket2 and key1 and key2:
-                logger.info(
+                logger.debug(
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
                 source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
@@ -482,7 +482,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 await self._storage_control_client.rename_folder(request=request)
                 self._update_dircache_after_rename(path1, path2)
 
-                logger.info(
+                logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
                 )
                 return
@@ -579,7 +579,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if not is_hns:
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
 
-        logger.info(f"Using HNS-aware mkdir for '{path}'.")
+        logger.debug(f"Using HNS-aware mkdir for '{path}'.")
         parent = f"projects/_/buckets/{bucket}"
         folder_id = key.rstrip("/")
         request = storage_control_v2.CreateFolderRequest(
@@ -699,7 +699,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             pass
 
         try:
-            logger.info(f"Using HNS-aware rmdir for '{path}'.")
+            logger.debug(f"Using HNS-aware rmdir for '{path}'.")
             folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
             request = storage_control_v2.DeleteFolderRequest(name=folder_name)
 

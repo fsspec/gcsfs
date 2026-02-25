@@ -1,7 +1,6 @@
 import logging
 import multiprocessing
 import os
-import random
 import statistics
 import time
 import uuid
@@ -47,7 +46,7 @@ def _prepare_files(gcs, file_paths, file_size=0):
         pool_size = 16
     else:
         chunk_size = 1
-        pool_size = min(100, len(file_paths))
+        pool_size = min(200, len(file_paths))
 
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("spawn")
@@ -135,6 +134,86 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
     )
 
 
+def _benchmark_listing_fixture_helper(
+    extended_gcs_factory, params, prefix_tag, teardown=True
+):
+    gcs = extended_gcs_factory()
+
+    prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
+
+    # Deterministic folder structure generation
+    target_dirs = []
+
+    folders = getattr(params, "folders", 0)
+    depth = getattr(params, "depth", 0)
+    total_files = getattr(params, "files", 0)
+    files_per_folder = int(total_files / folders)
+
+    # Level 0 is the prefix itself
+    levels = {0: [prefix]}
+
+    if depth == 0:
+        # Flat structure: all folders are direct children of prefix
+        current_level_folders = []
+        for i in range(folders):
+            new_path = f"{prefix}/folder_{i}"
+            target_dirs.append(new_path)
+            current_level_folders.append(new_path)
+        levels[1] = current_level_folders
+    else:
+        folders_per_level = folders // depth
+        remainder = folders % depth
+
+        for d in range(1, depth + 1):
+            count = folders_per_level + (1 if d <= remainder else 0)
+
+            parents = levels[d - 1]
+            num_parents = len(parents)
+            current_level_folders = []
+
+            if num_parents > 0:
+                for i in range(count):
+                    parent = parents[i % num_parents]
+                    new_path = f"{parent}/folder_{d}_{i}"
+                    target_dirs.append(new_path)
+                    current_level_folders.append(new_path)
+
+            levels[d] = current_level_folders
+
+    file_paths = []
+    for folder in target_dirs:
+        for i in range(files_per_folder):
+            file_paths.append(f"{folder}/file_{i}")
+
+    params.files = len(file_paths)
+
+    logging.info(
+        f"Setting up benchmark '{params.name}': creating {len(file_paths)} "
+        f"files at depth {depth} with prefix '{prefix}' distributed across {len(target_dirs)} "
+        f"folders and with {files_per_folder} files per folder."
+    )
+
+    start_time = time.perf_counter()
+    _prepare_files(gcs, file_paths, getattr(params, "file_size_bytes", 0))
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    logging.info(
+        f"Benchmark '{params.name}' setup created {len(file_paths)} files in {duration_ms:.2f} ms."
+    )
+
+    yield gcs, target_dirs, prefix, params
+
+    if teardown:
+        # --- Teardown ---
+        logging.info(
+            f"Tearing down benchmark '{params.name}': deleting files and folders."
+        )
+        try:
+            gcs.rm(prefix, recursive=True)
+        except Exception as e:
+            logging.error(f"Failed to clean up benchmark files: {e}")
+
+
 @pytest.fixture
 def gcsfs_benchmark_listing(extended_gcs_factory, request):
     """
@@ -142,46 +221,33 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
     It creates a directory structure with 0-byte files.
     """
     params = request.param
-    gcs = extended_gcs_factory()
-
-    prefix = f"{params.bucket_name}/benchmark-listing-{uuid.uuid4()}"
-
-    target_dirs = [prefix]
-    candidates = [(prefix, 0)]
-
-    for i in range(params.folders):
-        valid_parents = [p for p in candidates if p[1] <= params.depth]
-        parent_path, parent_depth = random.choice(valid_parents)
-        new_path = f"{parent_path}/folder_{i}"
-        target_dirs.append(new_path)
-        candidates.append((new_path, parent_depth + 1))
-
-    file_paths = []
-    for i in range(params.files):
-        folder = random.choice(target_dirs)
-        file_paths.append(f"{folder}/file_{i}")
-
-    logging.info(
-        f"Setting up benchmark '{params.name}': creating {params.files} "
-        f"files distributed across {len(target_dirs) - 1} folders at depth {params.depth}."
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory, params, "benchmark-listing", teardown=True
     )
 
-    start_time = time.perf_counter()
-    _prepare_files(gcs, file_paths)
 
-    duration_ms = (time.perf_counter() - start_time) * 1000
-    logging.info(
-        f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
+@pytest.fixture
+def gcsfs_benchmark_rename(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a rename benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory, params, "benchmark-rename", teardown=True
     )
 
-    yield gcs, target_dirs, prefix, params
 
-    # --- Teardown ---
-    logging.info(f"Tearing down benchmark '{params.name}': deleting files and folders.")
-    try:
-        gcs.rm(file_paths, recursive=True)
-    except Exception as e:
-        logging.error(f"Failed to clean up benchmark files: {e}")
+@pytest.fixture
+def gcsfs_benchmark_delete(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a delete benchmark run.
+    It creates a directory structure with 0-byte files but skips teardown.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory, params, "benchmark-delete", teardown=False
+    )
 
 
 def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info):

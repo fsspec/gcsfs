@@ -9,6 +9,7 @@ from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_multi_process_benchmark_extra_info,
     publish_resource_metrics,
 )
+from gcsfs.tests.settings import BENCHMARK_CPU_AFFINITY
 
 
 def filter_test_cases(all_cases):
@@ -120,14 +121,15 @@ def run_multi_process(
             )
             processes = []
 
-            total_cores = os.cpu_count() or 0
-            old_affinity = os.sched_getaffinity(0)
             affinity_set = False
-            if total_cores > 16:
-                affinity_cores = set(range(16, total_cores - 10))
-                if len(affinity_cores) >= params.processes:
-                    os.sched_setaffinity(0, affinity_cores)
-                    affinity_set = True
+            old_affinity = os.sched_getaffinity(0)
+            if BENCHMARK_CPU_AFFINITY:
+                total_cores = os.cpu_count() or 0
+                if total_cores > 16:
+                    affinity_cores = set(range(16, total_cores - 10))
+                    if len(affinity_cores) >= params.processes:
+                        os.sched_setaffinity(0, affinity_cores)
+                        affinity_set = True
 
             try:
                 for i in range(params.processes):

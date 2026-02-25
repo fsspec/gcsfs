@@ -14,7 +14,7 @@ class ListingConfigurator(BaseBenchmarkConfigurator):
         threads_list = scenario.get("threads", [1])
         rounds = common_config.get("rounds", 1)
         bucket_types = common_config.get("bucket_types", ["regional"])
-        files_list = common_config.get("files", [10000])
+        files_list = scenario.get("files", [10000])
         scenario_depth = scenario.get("depth", 0)
         folders_list = scenario.get("folders", [1])
         pattern = scenario.get("pattern", "N/A")

@@ -128,7 +128,8 @@ def _process_worker(
             ]
 
         # Wait for all threads in the process to complete
-        list(futures)
+        for f in futures:
+            f.result()
     duration_s = time.perf_counter() - start_time
     process_durations_shared[index] = duration_s
 
