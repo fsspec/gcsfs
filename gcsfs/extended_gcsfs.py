@@ -2,14 +2,12 @@ import asyncio
 import logging
 import os
 from enum import Enum
-from functools import partial
 from glob import has_magic
 from io import BytesIO
 
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
-from google.api_core import gapic_v1
 from google.api_core.client_info import ClientInfo
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
@@ -93,9 +91,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # Initialize the storage control plane client for bucket
             # metadata operations
-            client_info = gapic_v1.client_info.ClientInfo(
-                user_agent=f"{USER_AGENT}/{version}"
-            )
             # The HNS RenameFolder operation began failing with an "input/output error"
             # after an authentication library change caused it to send a
             # `quota_project_id` from application default credentials. The
@@ -110,8 +105,18 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             if hasattr(creds, "with_quota_project"):
                 creds = creds.with_quota_project(None)
 
+            transport_cls = (
+                storage_control_v2.StorageControlAsyncClient.get_transport_class(
+                    "grpc_asyncio"
+                )
+            )
+            channel = transport_cls.create_channel(
+                credentials=creds,
+                options=[("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
+            )
+            transport = transport_cls(channel=channel)
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
-                credentials=creds, client_info=client_info
+                transport=transport
             )
         return self._storage_control_client
 
@@ -173,6 +178,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_type = self._sync_lookup_bucket_type(bucket)
+
         return gcs_file_types[bucket_type](
             self,
             path,
@@ -433,12 +439,44 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             }
             self.dircache[parent2].append(new_entry)
 
+    async def _mv_file_cache_update(self, path1, path2, response=None):
+        """
+        Update the cache after a file move operation.
+
+        For HNS-enabled buckets where the move is within the same bucket, this method
+        directly updates the directory cache by removing the source entry from it's
+        parent cache and adding destination path as a new entry in it's corresponding parent cache.
+        This avoids invalidating the entire parent directory cache, which is beneficial for HNS
+        performance.
+
+        For non-HNS buckets or cross-bucket moves, it falls back to the default
+        behavior (invalidating the cache for both source and destination parents).
+        """
+        src_bucket, _, _ = self.split_path(path1)
+        dest_bucket, _, _ = self.split_path(path2)
+
+        if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
+            src_parent = self._parent(path1)
+            if src_parent in self.dircache:
+                path1_stripped = self._strip_protocol(path1)
+                self.dircache[src_parent] = [
+                    e
+                    for e in self.dircache[src_parent]
+                    if e.get("name") != path1_stripped
+                ]
+            dest_parent = self._parent(path2)
+            if dest_parent in self.dircache and response:
+                new_entry = self._process_object(dest_bucket, response)
+                self.dircache[dest_parent].append(new_entry)
+        else:
+            await super()._mv_file_cache_update(path1, path2, response)
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
-        optimized, atomic implementation for renaming folders in HNS-enabled
-        buckets. Falls back to the parent's object-level copy-and-delete
-        implementation for files or for non-HNS buckets.
+        optimized, atomic implementation for renaming folders and moving files
+        in HNS-enabled buckets. Falls back to the parent's object-level
+        copy-and-delete implementation for non-HNS buckets.
         """
         if path1 == path2:
             logger.debug(
@@ -456,9 +494,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.debug(
                 f"Not an HNS bucket. Falling back to object-level mv for '{path1}' to '{path2}'."
             )
-            return await self.loop.run_in_executor(
-                None, partial(super().mv, path1, path2, **kwargs)
-            )
+            return await super()._mv(path1, path2, **kwargs)
 
         try:
             info1 = await self._info(path1)
@@ -466,12 +502,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # We only use HNS rename if the source is a folder and the move is
             # within the same bucket.
-            if is_folder and bucket1 == bucket2 and key1 and key2:
+            if is_folder and bucket1 == bucket2 and key1:
                 logger.debug(
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
                 source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
-                destination_folder_id = key2
+                destination_folder_id = key2 or key1.rstrip("/").split("/")[-1]
 
                 request = storage_control_v2.RenameFolderRequest(
                     name=source_folder_name,
@@ -485,6 +521,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
                 )
+                return
+            elif not is_folder:
+                await self._mv_file(path1, path2)
                 return
         except Exception as e:
             if isinstance(e, FileNotFoundError):
@@ -506,10 +545,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
-        # TODO: Check feasibility to call async copy and rm methods instead of sync mv method
-        return await self.loop.run_in_executor(
-            None, partial(super().mv, path1, path2, **kwargs)
-        )
+        return await super()._mv(path1, path2, **kwargs)
 
     mv = asyn.sync_wrapper(_mv)
 
@@ -945,7 +981,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Hybrid approach for HNS enabled buckets
         # 1. Fetch all files from super find() method by passing withdirs as False.
-        files_task = self.loop.create_task(
+        files_task = asyncio.create_task(
             super()._find(
                 path,
                 withdirs=False,  # Fetch files only
@@ -960,7 +996,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # 2. Fetch all folders recursively. This is necessary to find all folders,
         # especially empty ones.
-        folders_task = self.loop.create_task(
+        folders_task = asyncio.create_task(
             self._get_all_folders(path, bucket, prefix=prefix)
         )
         # 3. Run tasks concurrently and merge results.
@@ -1201,6 +1237,24 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         self.invalidate_cache(self._parent(path))
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
+        """
+        Downloads a file from GCS to a local path.
+
+        For Zonal buckets, it uses gRPC client for optimized downloads.
+        For Standard buckets, it delegates to the parent class implementation.
+
+        Parameters
+        ----------
+        rpath: str
+            Path on GCS to download the file from.
+        lpath: str
+            Path to the local file to be downloaded.
+        callback: fsspec.callbacks.Callback, optional
+            Callback to monitor the download progress.
+        **kwargs:
+            For Zonal buckets, `chunksize` bytes (int) can be provided to control
+            the download chunk size (default is 128KB).
+        """
         bucket, key, generation = self.split_path(rpath)
         if not await self._is_zonal_bucket(bucket):
             return await super()._get_file(
@@ -1269,6 +1323,12 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         versions=False,
         **kwargs,
     ):
+        """
+        Lists objects in a bucket.
+
+        For HNS-enabled buckets, it sets `includeFoldersAsPrefixes` to True
+        when the delimiter is '/'.
+        """
         bucket, _, _ = self.split_path(path)
         if await self._is_bucket_hns_enabled(bucket) and delimiter == "/":
             kwargs["includeFoldersAsPrefixes"] = "true"
@@ -1280,6 +1340,38 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             prefix=prefix,
             versions=versions,
             **kwargs,
+        )
+
+    async def _cp_file(self, path1, path2, acl=None, **kwargs):
+        """Duplicate remote file.
+
+        For Standard GCS buckets, falls back to the parent class's implementation
+
+        Zonal Bucket Support:
+        Server-side copy is currently NOT supported for Zonal buckets because
+        the `RewriteObject` API is unavailable for them.
+
+        The following scenarios will raise a `NotImplementedError`:
+        * Intra-zonal: Copying within the same Zonal bucket.
+        * Inter-zonal: Copying between two different Zonal buckets.
+        * Mixed: Copying between a Zonal bucket and a Standard bucket.
+
+        """
+        b1, _, _ = self.split_path(path1)
+        b2, _, _ = self.split_path(path2)
+
+        is_zonal_source, is_zonal_dest = await asyncio.gather(
+            self._is_zonal_bucket(b1), self._is_zonal_bucket(b2)
+        )
+
+        # 1. Standard -> Standard (Delegate to core implementation)
+        if not is_zonal_source and not is_zonal_dest:
+            return await super()._cp_file(path1, path2, acl=acl, **kwargs)
+
+        # 2. Zonal Scenarios (Currently Unsupported)
+        raise NotImplementedError(
+            "Server-side copy involving Zonal buckets is not supported. "
+            "Zonal objects do not support rewrite."
         )
 
 

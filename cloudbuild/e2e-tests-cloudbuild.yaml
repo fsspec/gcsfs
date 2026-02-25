@@ -29,6 +29,8 @@ steps:
         set -e
         echo "--- Creating standard bucket ---"
         gcloud storage buckets create gs://gcsfs-test-standard-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} &
+        echo "--- Creating standard bucket for zonal tests ---"
+        gcloud storage buckets create gs://gcsfs-test-standard-for-zonal-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} &
         echo "--- Creating versioned bucket ---"
         gcloud storage buckets create gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} --project=${PROJECT_ID} --location=${_REGION} &
         echo "--- Creating HNS bucket ---"
@@ -99,7 +101,6 @@ steps:
           pip install --upgrade pip > /dev/null
           # Install testing libraries explicitly, as they are not in setup.py
           pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
-          pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main
           pip install -e . > /dev/null
         "
 
@@ -142,14 +143,15 @@ steps:
         TEST_SCRIPT="
           source env/bin/activate && \
           echo '--- Preparing test environment for zonal tests ---' && \
+          export GCSFS_TEST_BUCKET='gcsfs-test-standard-for-zonal-${_SHORT_BUILD_ID}' && \
           export GCSFS_ZONAL_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}' && \
+          export GCSFS_HNS_TEST_BUCKET='gcsfs-test-zonal-${_SHORT_BUILD_ID}' && \
           export STORAGE_EMULATOR_HOST=https://storage.googleapis.com && \
           export GCSFS_TEST_PROJECT=${PROJECT_ID} && \
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running Zonal tests on VM ---' && \
           ulimit -n 4096 && export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-          pip install --upgrade --force-reinstall git+https://github.com/googleapis/python-storage.git@main && \
-          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py gcsfs/tests/test_async_gcsfs.py
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/tests/test_extended_gcsfs.py gcsfs/tests/test_zonal_file.py gcsfs/tests/test_async_gcsfs.py gcsfs/tests/integration/test_extended_hns.py
         "
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:
@@ -163,6 +165,12 @@ steps:
     args:
       - "-c"
       - |
+        # Excludes tests that are not applicable to HNS buckets:
+        # - test_extended_gcsfs.py, test_zonal_file.py: Zonal bucket specific tests which won't work on HNS bucket.
+        # - test_core_versioned.py: HNS buckets do not support versioning.
+        # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
+        # - test_core.py::test_info_on_directory_with_only_subdirectories: Unit test for regional buckets.
+        # - test_core.py::test_mv_file_cache: Integration test only applicable for regional buckets.
         TEST_SCRIPT="
           source env/bin/activate && \
           echo '--- Preparing test environment for HNS tests ---' && \
@@ -174,7 +182,7 @@ steps:
           export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${_REGION}/keyRings/${_GCSFS_KEY_RING_NAME}/cryptoKeys/${_GCSFS_KEY_NAME} && \
           echo '--- Running HNS tests on VM ---' && \
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true' && \
-          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/ --deselect gcsfs/tests/test_extended_gcsfs.py --deselect gcsfs/tests/test_zonal_file.py --deselect gcsfs/tests/test_core_versioned.py --deselect gcsfs/tests/test_core.py::test_sign --deselect gcsfs/tests/test_core.py::test_info_on_directory_with_only_subdirectories"
+          pytest -vv -s --log-format='%(asctime)s %(levelname)s %(message)s' --log-date-format='%H:%M:%S' --color=no gcsfs/ --deselect gcsfs/tests/test_extended_gcsfs.py --deselect gcsfs/tests/test_zonal_file.py --deselect gcsfs/tests/test_core_versioned.py --deselect gcsfs/tests/test_core.py::test_sign --deselect gcsfs/tests/test_core.py::test_info_on_directory_with_only_subdirectories --deselect gcsfs/tests/test_core.py::test_mv_file_cache"
         gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine --command="$$TEST_SCRIPT"
     waitFor:
       - "setup-vm"
@@ -222,6 +230,7 @@ steps:
         set -e
         echo "--- Deleting test buckets in parallel ---"
         gcloud storage rm --recursive gs://gcsfs-test-standard-${_SHORT_BUILD_ID} &
+        gcloud storage rm --recursive gs://gcsfs-test-standard-for-zonal-${_SHORT_BUILD_ID} &
         gcloud storage rm --recursive gs://gcsfs-test-versioned-${_SHORT_BUILD_ID} &
         gcloud storage rm --recursive gs://gcsfs-test-hns-${_SHORT_BUILD_ID} &
         gcloud storage rm --recursive gs://gcsfs-test-zonal-${_SHORT_BUILD_ID} &
