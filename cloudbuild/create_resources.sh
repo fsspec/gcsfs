@@ -43,7 +43,20 @@ gcloud storage buckets create "gs://gcsfs-test-zonal-core-${SHORT_BUILD_ID}" \
     --enable-hierarchical-namespace \
     --uniform-bucket-level-access &
 
-# Wait for all background bucket creation jobs to finish
+# The VM is created in the same zone as the zonal bucket to test rapid storage features.
+# It's given the 'cloud-platform' scope to allow it to access GCS and other services.
+echo "--- Creating GCE VM ---"
+gcloud compute instances create "gcsfs-test-vm-${SHORT_BUILD_ID}" \
+    --project="${PROJECT_ID}" \
+    --zone="${ZONE}" \
+    --machine-type=n2-standard-4 \
+    --image-family=debian-13 \
+    --image-project=debian-cloud \
+    --service-account="${ZONAL_VM_SERVICE_ACCOUNT}" \
+    --scopes=https://www.googleapis.com/auth/cloud-platform \
+    --metadata=enable-oslogin=TRUE &
+
+# Wait for all background bucket and VM creation jobs to finish
 wait
 
 echo "--- Enabling versioning on versioned bucket ---"

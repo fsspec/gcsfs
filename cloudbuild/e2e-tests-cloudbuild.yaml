@@ -32,9 +32,9 @@ steps:
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
     waitFor: ["-"]
 
-  # Create all necessary GCS buckets in parallel.
+  # Create all necessary GCS buckets AND the GCE VM in parallel.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-buckets"
+    id: "create-resources"
     entrypoint: "bash"
     args:
       - "-c"
@@ -46,27 +46,7 @@ steps:
       - "REGION=${_REGION}"
       - "ZONE=${_ZONE}"
       - "SHORT_BUILD_ID=${_SHORT_BUILD_ID}"
-    waitFor: ["-"]
-
-  # Create a GCE VM to run the tests.
-  # The VM is created in the same zone as the zonal bucket to test rapid storage features.
-  # It's given the 'cloud-platform' scope to allow it to access GCS and other services.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-vm"
-    entrypoint: "bash"
-    args:
-      - "-c"
-      - |
-        ${_SKIP_IF_FAILED}
-        gcloud compute instances create gcsfs-test-vm-${_SHORT_BUILD_ID} \
-          --project=${PROJECT_ID} \
-          --zone=${_ZONE} \
-          --machine-type=n2-standard-4 \
-          --image-family=debian-13 \
-          --image-project=debian-cloud \
-          --service-account=${_ZONAL_VM_SERVICE_ACCOUNT} \
-          --scopes=https://www.googleapis.com/auth/cloud-platform \
-          --metadata=enable-oslogin=TRUE || touch /workspace/FAILED
+      - "ZONAL_VM_SERVICE_ACCOUNT=${_ZONAL_VM_SERVICE_ACCOUNT}"
     waitFor: ["-"]
 
   # Set up the VM for integration tests.
@@ -94,7 +74,7 @@ steps:
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="bash cloudbuild/setup_vm.sh" || touch /workspace/FAILED
-    waitFor: ["create-vm", "generate-ssh-key"]
+    waitFor: ["create-resources", "generate-ssh-key"]
 
   # 5. Run Tests (Parallel Blocks)
   # We reuse a single remote runner script, passing env vars to control which suite runs.
@@ -112,7 +92,7 @@ steps:
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='standard' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || touch /workspace/FAILED
-    waitFor: ["setup-vm", "create-buckets"]
+    waitFor: ["setup-vm", "create-resources"]
 
   # Zonal Tests
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -127,7 +107,7 @@ steps:
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='zonal' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || touch /workspace/FAILED
-    waitFor: ["setup-vm", "create-buckets"]
+    waitFor: ["setup-vm", "create-resources"]
 
   # Zonal Core Tests
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -142,7 +122,7 @@ steps:
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='zonal-core' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || touch /workspace/FAILED
-    waitFor: ["setup-vm", "create-buckets"]
+    waitFor: ["setup-vm", "create-resources"]
 
   # HNS Tests
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -157,7 +137,7 @@ steps:
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='hns' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || touch /workspace/FAILED
-    waitFor: ["setup-vm", "create-buckets"]
+    waitFor: ["setup-vm", "create-resources"]
 
   # 6. Cleanup
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
