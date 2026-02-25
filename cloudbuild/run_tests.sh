@@ -48,12 +48,11 @@ case "$TEST_SUITE" in
     # - test_extended_gcsfs_unit.py: Unit tests for zonal bucket features.
     # - test_core_versioned.py: HNS buckets do not support versioning.
     # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
-    # - test_core.py::test_info_on_directory_with_only_subdirectories: Unit test for regional buckets.
     # - test_core.py::test_mv_file_cache: Integration test only applicable for regional buckets.
     pytest "${ARGS[@]}" gcsfs/ \
       --deselect gcsfs/tests/test_extended_gcsfs.py \
-      --deselect gcsfs/tests/test_extended_gcsfs_unit.py \
       --deselect gcsfs/tests/test_zonal_file.py \
+      --deselect gcsfs/tests/test_extended_gcsfs_unit.py \
       --deselect gcsfs/tests/test_core_versioned.py \
       --deselect gcsfs/tests/test_core.py::test_sign \
       --deselect gcsfs/tests/test_core.py::test_mv_file_cache
@@ -86,7 +85,6 @@ case "$TEST_SUITE" in
       "--deselect=gcsfs/tests/test_core.py::test_copy"
       "--deselect=gcsfs/tests/test_core.py::test_copy_recursive"
       "--deselect=gcsfs/tests/test_core.py::test_copy_errors"
-      "--deselect=gcsfs/tests/test_core.py::test_move"
       "--deselect=gcsfs/tests/test_core.py::test_cp_directory_recursive"
       "--deselect=gcsfs/tests/test_core.py::test_cp_two_files"
       "--deselect=gcsfs/tests/test_core.py::test_copy_cache_invalidated"
@@ -101,6 +99,7 @@ case "$TEST_SUITE" in
     # - test_transaction fails since discard is not supported in Zonal
     # - test_array fails due to CRC32C TypeError with array objects.
     # - test_sign fails because it requires a private key
+    # - test_mv_file_cache: Integration test only applicable for regional buckets.
     ZONAL_DESELECTS+=(
       "--deselect=gcsfs/tests/test_core.py::test_flush"
       "--deselect=gcsfs/tests/test_core.py::test_write_blocks"
@@ -108,6 +107,7 @@ case "$TEST_SUITE" in
       "--deselect=gcsfs/tests/test_core.py::test_transaction"
       "--deselect=gcsfs/tests/test_core.py::test_array"
       "--deselect=gcsfs/tests/test_core.py::test_sign"
+      "--deselect=gcsfs/tests/test_core.py::test_mv_file_cache"
     )
 
     pytest "${ARGS[@]}" "${ZONAL_DESELECTS[@]}" gcsfs/tests/test_core.py
