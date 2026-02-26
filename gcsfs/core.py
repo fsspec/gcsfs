@@ -2022,8 +2022,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
         supports_append = kwargs.pop("supports_append", False)
-        self._append_tmp = None
-        self._append_tmp_key = None
+        self._append_original_key = None
         self._append_generation = None
         if "a" in self.mode and not supports_append:
             try:
@@ -2038,9 +2037,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 self.buffer.write(existing_data)
                 self.loc = len(existing_data)
             elif existing_size > 0:
-                self._append_tmp = self.path + ".tmp." + str(uuid.uuid4())
-                _, self._append_tmp_key, _ = self.gcsfs.split_path(self._append_tmp)
+                self._append_original_key = self.key
                 self._append_generation = info.get("generation")
+                self.key = self._append_original_key + ".tmp." + str(uuid.uuid4())
 
         if "r" in self.mode:
             det = self.details
@@ -2150,21 +2149,23 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         return True
 
     def _finalize_append(self):
-        if self._append_tmp is not None:
-            original = self.path
-            if self._append_generation:
-                original = f"{self.path}#{self._append_generation}"
-            result = self.gcsfs.merge(self.path, [original, self._append_tmp])
-            try:
-                self.gcsfs.rm(self._append_tmp)
-            except FileNotFoundError:
-                pass
-            if int(result.get("componentCount", 1)) >= 1000:
-                self.gcsfs.cp_file(self.path, self.path)
-            self.gcsfs.invalidate_cache(self.path)
-            self._append_tmp = None
-            self._append_tmp_key = None
-            self._append_generation = None
+        if self._append_original_key is None:
+            return
+        tmp_path = f"{self.bucket}/{self.key}"
+        original = self.path
+        if self._append_generation:
+            original = f"{self.path}#{self._append_generation}"
+        self.key = self._append_original_key
+        result = self.gcsfs.merge(self.path, [original, tmp_path])
+        try:
+            self.gcsfs.rm(tmp_path)
+        except FileNotFoundError:
+            pass
+        if int(result.get("componentCount", 1)) >= 1000:
+            self.gcsfs.cp_file(self.path, self.path)
+        self.gcsfs.invalidate_cache(self.path)
+        self._append_original_key = None
+        self._append_generation = None
 
     def commit(self):
         """If not auto-committing, finalize file"""
@@ -2179,13 +2180,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def _initiate_upload(self):
         """Create multi-upload"""
-        upload_key = self._append_tmp_key or self.key
         self.location = asyn.sync(
             self.gcsfs.loop,
             initiate_upload,
             self.gcsfs,
             self.bucket,
-            upload_key,
+            self.key,
             self.content_type,
             self.metadata,
             self.fixed_key_metadata,
@@ -2205,13 +2205,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             "DELETE",
             self.location.replace("&ifGenerationMatch=0", ""),
         )
-        if self._append_tmp is not None:
+        if self._append_original_key is not None:
             try:
-                self.gcsfs.rm(self._append_tmp)
+                self.gcsfs.rm(f"{self.bucket}/{self.key}")
             except FileNotFoundError:
                 pass
-            self._append_tmp = None
-            self._append_tmp_key = None
+            self.key = self._append_original_key
+            self._append_original_key = None
             self._append_generation = None
         self.location = None
         self.closed = True
@@ -2220,13 +2220,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
         data = self.buffer.read()
-        upload_key = self._append_tmp_key or self.key
         j = asyn.sync(
             self.gcsfs.loop,
             simple_upload,
             self.gcsfs,
             self.bucket,
-            upload_key,
+            self.key,
             data,
             self.metadata,
             self.consistency,
