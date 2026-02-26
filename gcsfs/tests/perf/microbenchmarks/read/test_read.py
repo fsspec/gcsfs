@@ -16,6 +16,7 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
 BENCHMARK_GROUP = "read"
 
 
+# TODO: These tests will be removed in the future now that we have runtime based tests
 def _read_op_seq(gcs, path, chunk_size):
     start_time = time.perf_counter()
     with gcs.open(path, "rb") as f:

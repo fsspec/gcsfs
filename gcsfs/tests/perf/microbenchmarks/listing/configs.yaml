@@ -9,24 +9,30 @@ scenarios:
     pattern: "ls"
     files: [65536, 131072]
 
-  - name: "list_recursive"
+  - name: "list_flat_folders"
+    pattern: "ls"
+    folders: [256]
+    files: [65536, 131072]
+
+  - name: "list_recursive_folders"
     depth: 8
+    folders: [256]
     pattern: "ls"
     files: [65536, 131072]
 
-  - name: "list_recursive_deep"
+  - name: "list_recursive_folders_deep"
     depth: 24
-    pattern: "ls"
-    files: [65536, 131072]
-
-  - name: "list_recursive_multi_process"
-    processes: [4, 8]
+    folders: [256]
     pattern: "ls"
     files: [65536, 131072]
 
   - name: "find_flat"
-    depth: 0
     pattern: "find"
+    files: [65536, 131072]
+
+  - name: "find_flat_folders"
+    pattern: "find"
+    folders: [256]
     files: [65536, 131072]
 
   - name: "find_recursive"
@@ -35,7 +41,7 @@ scenarios:
     pattern: "find"
     files: [65536, 131072]
 
-  - name: "find_recursive_deep"
+  - name: "find_recursive_folders_deep"
     depth: 24
     folders: [256]
     pattern: "find"
