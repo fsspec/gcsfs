@@ -565,56 +565,105 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             raise
 
     async def _mkdir(
-        self, path, create_parents=False, enable_hierarchical_namespace=False, **kwargs
+        self,
+        path,
+        create_parents=False,
+        enable_hierarchical_namespace=False,
+        placement=None,
+        location=None,
+        **kwargs,
     ):
         """
-        If the path does not contain an object key, a new bucket is created.
-        If `enable_hierarchical_namespace` is True, the bucket will have Hierarchical Namespace enabled.
+        Create a directory or bucket.
 
-        For HNS-enabled buckets, this method creates a folder object. If
-        `create_parents` is True, any missing parent folders are also created.
+        If the path refers to a bucket (no object key), a new bucket is created.
+        If the path refers to a directory (includes object key), a directory is created.
 
-        If bucket doesn't exist, enable_hierarchical_namespace and create_parents are set to True
-        and the path includes a key then HNS-enabled bucket will be created
-        and also the folders within that bucket.
+        Parameters
+        ----------
+        path : str
+            Path to create.
+        create_parents : bool
+            If True, create parent directories if they do not exist.
+            If the path includes a bucket that does not exist, the bucket will also be created.
+        enable_hierarchical_namespace : bool
+            If True, and a bucket is being created, the bucket will have Hierarchical
+            Namespace (HNS) enabled.
+        placement : str, optional
+            If set to a zone (e.g. "us-central1-a"), a Zonal bucket is created.
+            Zonal buckets are HNS-enabled by default.
+            When creating a Zonal bucket, `location` must be passed as a
+            region (e.g. "us-central1"). If `location` is not specified, it defaults
+            to `self.default_location`. The zone specified in `placement` must belong
+            to the region specified in `location`.
+        location : str, optional
+            Location where buckets are created, like 'US' or 'EUROPE-WEST3'.
+            If not provided, defaults to `self.default_location`.
+        **kwargs : dict
+            Additional arguments passed to the bucket creation API.
 
-        If `create_parents` is False and a parent does not exist, a
-        FileNotFoundError is raised.
-
-        For non-HNS buckets, it falls back to the parent implementation which
-        may involve creating a bucket or doing nothing (as GCS has no true empty directories).
+        Notes
+        -----
+        - For HNS-enabled buckets (including Zonal buckets), this method creates a
+          native folder object.
+        - If `create_parents` is False and a parent directory does not exist in an
+          HNS/Zonal bucket, a FileNotFoundError is raised.
+        - For non-HNS buckets, this falls back to the parent implementation. Since
+          standard GCS has no true directories, `mkdir` on a path with a key is
+          typically a no-op unless `create_parents=True` triggers bucket creation.
         """
         path = self._strip_protocol(path)
-        if enable_hierarchical_namespace:
-            kwargs["hierarchicalNamespace"] = {"enabled": True}
+        bucket, key, _ = self.split_path(path)
+
+        # Determine if we are requesting creation of a Zonal or HNS bucket
+        should_create_zonal_bucket = placement is not None
+        should_create_hns_bucket = (
+            enable_hierarchical_namespace or should_create_zonal_bucket
+        )
+
+        # Prepare arguments for bucket creation
+        bucket_kwargs = kwargs.copy()
+        bucket_kwargs["location"] = location
+        if should_create_zonal_bucket:
+            bucket_kwargs["customPlacementConfig"] = {"dataLocations": [placement]}
+            bucket_kwargs["storageClass"] = "RAPID"
+
+        if should_create_hns_bucket:
+            bucket_kwargs["hierarchicalNamespace"] = {"enabled": True}
             # HNS buckets require uniform bucket-level access.
-            kwargs["iamConfiguration"] = {"uniformBucketLevelAccess": {"enabled": True}}
+            bucket_kwargs["iamConfiguration"] = {
+                "uniformBucketLevelAccess": {"enabled": True}
+            }
             # When uniformBucketLevelAccess is enabled, ACLs cannot be used.
             # We must explicitly set them to None to prevent the parent
             # method from using default ACLs.
-            kwargs["acl"] = None
-            kwargs["default_acl"] = None
+            bucket_kwargs["acl"] = None
+            bucket_kwargs["default_acl"] = None
 
-        bucket, key, _ = self.split_path(path)
-        # If the key is empty, the path refers to a bucket, not an object.
-        # Defer to the parent method to handle bucket creation.
+        # Case 1: Path is just a bucket
         if not key:
-            return await super()._mkdir(path, create_parents=create_parents, **kwargs)
+            return await super()._mkdir(
+                path, create_parents=create_parents, **bucket_kwargs
+            )
 
-        is_hns = False
-        # If creating an HNS bucket, check for its existence first.
-        if create_parents and enable_hierarchical_namespace:
+        # Case 2: Path is a folder
+        is_hns_bucket = False
+
+        # If creating parents and HNS/Zonal requested, ensure bucket exists with correct config
+        if create_parents and should_create_hns_bucket:
             if not await self._exists(bucket):
-                await super()._mkdir(bucket, create_parents=True, **kwargs)
-                is_hns = True  # Skip HNS check since we just created it.
+                await super()._mkdir(bucket, create_parents=True, **bucket_kwargs)
+                is_hns_bucket = True
 
-        if not is_hns:
-            # If the bucket was not created above, we need to check its type.
-            is_hns = await self._is_bucket_hns_enabled(bucket)
+        if not is_hns_bucket:
+            is_hns_bucket = await self._is_bucket_hns_enabled(bucket)
 
-        if not is_hns:
-            return await super()._mkdir(path, create_parents=create_parents, **kwargs)
+        if is_hns_bucket:
+            return await self._create_hns_folder(path, bucket, key, create_parents)
 
+        return await super()._mkdir(path, create_parents=create_parents, **kwargs)
+
+    async def _create_hns_folder(self, path, bucket, key, create_parents):
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
         parent = f"projects/_/buckets/{bucket}"
         folder_id = key.rstrip("/")
