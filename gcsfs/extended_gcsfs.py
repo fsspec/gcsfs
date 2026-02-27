@@ -623,7 +623,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Prepare arguments for bucket creation
         bucket_kwargs = kwargs.copy()
-        bucket_kwargs["location"] = location
+        if location:
+            bucket_kwargs["location"] = location
         if should_create_zonal_bucket:
             bucket_kwargs["customPlacementConfig"] = {"dataLocations": [placement]}
             bucket_kwargs["storageClass"] = "RAPID"
