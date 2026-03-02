@@ -2,7 +2,7 @@
 
 ## Introduction
 
-GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, listing, delete, and rename. It supports both iteration-based and fixed-duration benchmarks for read and write operations.
+GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, listing, delete, and rename.
 
 These benchmarks are built using the `pytest` and `pytest-benchmark` frameworks. Each benchmark test is a parameterized pytest case, where the parameters are dynamically configured at runtime from YAML configuration files. This allows for flexible and extensive testing scenarios without modifying the code.
 
@@ -38,8 +38,6 @@ The benchmarks use a set of parameter classes to define the configuration for ea
 *   **Read Parameters**: Specific to Read operations (extends IO Parameters).
     *   `pattern`: Read pattern ("seq" for sequential, "rand" for random).
     *   `block_size_bytes`: Block size for GCSFS file buffering.
-
-*   **Fixed Duration Parameters**: Specific to fixed duration Read and Write operations.
     *   `runtime`: Duration in seconds for the benchmark to run.
 
 *   **Listing Parameters**: Specific to Listing, Delete, and Rename operations.
@@ -56,7 +54,7 @@ Configuration values are stored in YAML files (e.g., `configs.yaml`) located wit
 
 ## Configurators
 
-Configurators are Python classes (e.g., `ReadConfigurator`, `ListingConfigurator`) responsible for parsing the YAML configuration files and converting them into a list of parameter objects (`BenchmarkParameters`). These objects are then consumed by the test files to generate parameterized test cases.
+Configurators are Python classes (e.g., `ReadFixedDurationConfigurator`, `ListingConfigurator`) responsible for parsing the YAML configuration files and converting them into a list of parameter objects (`BenchmarkParameters`). These objects are then consumed by the test files to generate parameterized test cases.
 
 ## Benchmark File
 

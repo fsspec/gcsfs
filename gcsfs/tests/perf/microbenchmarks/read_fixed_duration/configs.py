@@ -1,12 +1,12 @@
 import itertools
 
+from gcsfs.tests.perf.microbenchmarks.configs import BaseBenchmarkConfigurator
 from gcsfs.tests.perf.microbenchmarks.conftest import MB
-from gcsfs.tests.perf.microbenchmarks.read.configs import ReadConfigurator
 
 from .parameters import ReadFixedDurationBenchmarkParameters
 
 
-class ReadFixedDurationConfigurator(ReadConfigurator):
+class ReadFixedDurationConfigurator(BaseBenchmarkConfigurator):
     def build_cases(self, scenario, common_config):
         procs_list = scenario.get("processes", [1])
         threads_list = scenario.get("threads", [1])

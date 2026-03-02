@@ -45,5 +45,5 @@ def test_rename_recursive(benchmark, gcsfs_benchmark_rename, monitor):
     finally:
         try:
             gcs.rm(prefix_renamed, recursive=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"cleanup failed for {prefix_renamed} - {e}")
