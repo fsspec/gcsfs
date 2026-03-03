@@ -775,7 +775,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             raise ValueError("maxdepth must be at least 1")
 
         if isinstance(path, str):
-            logging.info(f"calling recursive _expand_path_with_details for {path}")
             out = await self._expand_path_with_details(
                 [path], recursive, maxdepth, detail=detail
             )
@@ -810,11 +809,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                             out |= set(rec)
                     continue
                 elif recursive:
-                    logging.info(f"calling recursive find for {p}")
                     rec = await self._find(
                         p, maxdepth=maxdepth, withdirs=True, detail=detail
                     )
-                    logging.info(f"find result count for {p}: {len(rec)}")
                     if detail:
                         out.update(rec)
                     else:
@@ -834,10 +831,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 out = list(out.values())
             else:
                 out = sorted(out)
-
-            logging.info(
-                f"expand_path_with_details result count for {path}: {len(out)}"
-            )
 
         if not out:
             raise FileNotFoundError(path)
@@ -861,7 +854,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
         """
-        logging.info(f"Entered rm method with path: {path}")
         if isinstance(path, list):
             # For HNS check, we can check for bucket type from the first path.
             bucket, _, _ = self.split_path(path[0]) if path else (None, None, None)
@@ -869,7 +861,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             bucket, _, _ = self.split_path(path)
 
         is_hns = await self._is_bucket_hns_enabled(bucket)
-        logging.info(f"Is HNS bucket: {is_hns}")
 
         if not is_hns:
             # Fall back to the parent's async rm implementation for non-HNS buckets.
@@ -877,12 +868,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
             )
 
-        logging.info(f"Expanding path with details: {path}")
         paths = await self._expand_path_with_details(
             path, recursive=recursive, maxdepth=maxdepth, detail=True
         )
-
-        logging.info(f"Expanded path with details: {paths}")
 
         # Separate files and directories based on their type.
         # Directories must be deleted from the deepest first.
@@ -993,7 +981,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # Hybrid approach for HNS enabled buckets
         # 1. Fetch all files from super find() method by passing withdirs as False.
-        logging.info(f"Fetching files for path: {path}")
         files_task = asyncio.create_task(
             super()._find(
                 path,
@@ -1009,18 +996,14 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # 2. Fetch all folders recursively. This is necessary to find all folders,
         # especially empty ones.
-        logging.info(f"Fetching folders for path: {path}")
         folders_task = asyncio.create_task(
             self._get_all_folders(path, bucket, prefix=prefix)
         )
         # 3. Run tasks concurrently and merge results.
         files_result, folders_result = await asyncio.gather(files_task, folders_task)
 
-        logging.info(f"Merging results for path: {path}")
-
         # Always update the cache with both files and folders for consistency.
         cacheable_objects = list(files_result.values()) + folders_result
-        logging.info(f"Cacheable objects count: {len(cacheable_objects)}")
         self._get_dirs_and_update_cache(path, cacheable_objects, prefix=prefix)
 
         if not withdirs:
@@ -1054,9 +1037,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 f"{o['name']}#{o['generation']}" if "generation" in o else o["name"]
                 for o in all_objects
             ]
-        logging.info(
-            f"Returning names for path: {path}, object count: {len(all_objects)}"
-        )
         return [o["name"] for o in all_objects]
 
     async def _get_all_folders(self, path, bucket, prefix=""):
