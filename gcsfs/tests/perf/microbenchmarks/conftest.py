@@ -57,6 +57,11 @@ def _prepare_files(gcs, file_paths, file_size=0):
             pytest.fail(str(e))
 
 
+def _prepare_folders(gcs, folder_paths):
+    for path in folder_paths:
+        gcs.mkdir(path, create_parents=True)
+
+
 def _benchmark_io_fixture_helper(
     extended_gcs_factory, params, prefix_tag, create_files=False, gcs_kwargs=None
 ):
@@ -135,7 +140,12 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
 
 
 def _benchmark_listing_fixture_helper(
-    extended_gcs_factory, params, prefix_tag, teardown=True
+    extended_gcs_factory,
+    params,
+    prefix_tag,
+    teardown=True,
+    create_folders=False,
+    require_file_paths=False,
 ):
     gcs = extended_gcs_factory()
 
@@ -180,6 +190,19 @@ def _benchmark_listing_fixture_helper(
 
             levels[d] = current_level_folders
 
+    # Create empyt folders first if specified
+    if create_folders:
+        logging.info(
+            f"Setting up benchmark '{params.name}': creating {len(target_dirs)} "
+            f"folders at depth {depth} with prefix '{prefix}'."
+        )
+        start_time = time.perf_counter()
+        _prepare_folders(gcs, target_dirs)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logging.info(
+            f"Benchmark '{params.name}' setup created {len(target_dirs)} folders in {duration_ms:.2f} ms."
+        )
+
     file_paths = []
     for folder in target_dirs:
         for i in range(files_per_folder):
@@ -201,7 +224,10 @@ def _benchmark_listing_fixture_helper(
         f"Benchmark '{params.name}' setup created {len(file_paths)} files in {duration_ms:.2f} ms."
     )
 
-    yield gcs, target_dirs, prefix, params
+    if require_file_paths:
+        yield gcs, target_dirs, file_paths, prefix, params
+    else:
+        yield gcs, target_dirs, prefix, params
 
     if teardown:
         # --- Teardown ---
@@ -250,6 +276,23 @@ def gcsfs_benchmark_delete(extended_gcs_factory, request):
     )
 
 
+@pytest.fixture
+def gcsfs_benchmark_info(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a info benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-info",
+        teardown=True,
+        create_folders=True,
+        require_file_paths=True,
+    )
+
+
 def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info):
     """
     Hook to post-process benchmark results before generating the JSON report.
@@ -291,6 +334,7 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["processes"] = params.processes
     benchmark.extra_info["depth"] = getattr(params, "depth", "N/A")
     benchmark.extra_info["folders"] = getattr(params, "folders", "N/A")
+    benchmark.extra_info["target_type"] = getattr(params, "target_type", "N/A")
 
     benchmark.group = benchmark_group
 

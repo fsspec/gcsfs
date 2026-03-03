@@ -1,0 +1,29 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+    - "hns"
+  files:
+    - 100
+  folders:
+    - 100
+
+scenarios:
+  - name: "info"
+    pattern: "info"
+    depth: 1
+    target_types: ["bucket", "folder", "file"]
+  - name: "info_deep"
+    pattern: "info"
+    depth: 10
+    target_types: ["bucket", "folder", "file"]
+  - name: "info_multi_process"
+    pattern: "info"
+    depth: 1
+    processes: [4, 8]
+    target_types: ["bucket", "folder", "file"]
+  - name: "info_multi_process_deep"
+    pattern: "info"
+    depth: 10
+    processes: [4, 8]
+    target_types: ["bucket", "folder", "file"]
