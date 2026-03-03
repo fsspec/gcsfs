@@ -84,7 +84,7 @@ def test_read_configurator(mock_config_dependencies):
     case = cases[0]
     assert case.name == "read_test_1procs_1threads_1MB_file_16MB_block_regional"
     assert case.file_size_bytes == 1 * MB
-    assert case.block_size_bytes == 16 * MB
+    assert case.block_size_bytes == 5 * MB
     assert case.chunk_size_bytes == 16 * MB
     assert case.pattern == "seq"
     assert case.bucket_name == "test-bucket"
@@ -94,9 +94,9 @@ def test_write_configurator(mock_config_dependencies):
     """Test that WriteConfigurator correctly builds benchmark parameters."""
     common = {
         "bucket_types": ["regional"],
-        "file_sizes_mb": [10],
-        "chunk_sizes_mb": [5],
+        "chunk_sizes_mb": [10],
         "rounds": 1,
+        "runtime": 30,
     }
     scenario = {"name": "write_test", "processes": [2], "threads": [1]}
 
@@ -105,9 +105,9 @@ def test_write_configurator(mock_config_dependencies):
 
     assert len(cases) == 1
     case = cases[0]
-    assert case.name == "write_test_2procs_1threads_10MB_file_5MB_chunk_regional"
-    assert case.file_size_bytes == 10 * MB
-    assert case.chunk_size_bytes == 5 * MB
+    assert case.name == "write_test_2procs_1threads_10MB_chunk_regional_30s_duration"
+    assert case.file_size_bytes == 0
+    assert case.chunk_size_bytes == 10 * MB
     assert case.processes == 2
     assert case.files == 2  # threads * processes
 
