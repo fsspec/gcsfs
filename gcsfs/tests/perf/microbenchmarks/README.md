@@ -40,10 +40,13 @@ The benchmarks use a set of parameter classes to define the configuration for ea
     *   `block_size_bytes`: Block size for GCSFS file buffering.
     *   `runtime`: Duration in seconds for the benchmark to run.
 
-*   **Listing Parameters**: Specific to Listing, Delete, and Rename operations.
+*   **Listing Parameters**: Specific to Listing, Delete, Rename, and Info operations.
     *   `depth`: Directory depth.
     *   `folders`: Number of folders.
     *   `pattern`: Listing pattern (e.g., "ls", "find").
+
+*   **Info Parameters**: Specific to Info operations (extends Listing Parameters).
+    *    `target_type`: The type of target to query: "bucket", "folder", or "file".
 
 ## Configuration
 
@@ -74,7 +77,7 @@ The `run.py` script is the central entry point for executing benchmarks. It hand
 
 | Option | Description | Required |
 | :--- | :--- | :--- |
-| `--group` | The benchmark group to run (e.g., `read`, `write`, `read_fixed_duration`, `write_fixed_duration`). Runs all groups if not specified. | No |
+| `--group` | The benchmark group to run (e.g., `read`, `write`, `read_fixed_duration`, `write_fixed_duration`, `listing`, `info`). Runs all groups if not specified. | No |
 | `--config` | Specific scenario names to run (e.g., `read_seq`, `list_flat`). Accepts multiple values. | No |
 | `--regional-bucket` | Name of the regional GCS bucket. | Yes* |
 | `--zonal-bucket` | Name of the zonal GCS bucket. | Yes* |
