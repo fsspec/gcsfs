@@ -37,6 +37,7 @@ from gcsfs.tests.conftest import (
 )
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.zb_hns_utils import MRD_MAX_RANGES
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -322,38 +323,53 @@ def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
 
 
 @pytest.mark.parametrize(
-    "start,end,exp_offset,exp_length,exp_exc",
+    "start, end, exp_offset, exp_length",
     [
-        (None, None, 0, file_size, None),  # full file
-        (-10, None, file_size - 10, 10, None),  # start negative
-        (10, -10, 10, file_size - 20, None),  # end negative
-        (20, 20, 20, 0, None),  # zero-length slice
-        (50, 40, None, None, ValueError),  # end before start -> raises
-        (-200, None, None, None, ValueError),  # offset negative -> raises
-        (file_size - 10, 200, file_size - 10, 10, None),  # end > size clamps
+        # --- Standard Slicing ---
+        (None, None, 0, file_size),  # Full file: data[:]
+        (10, 20, 10, 10),  # Middle slice: data[10:20]
+        (None, 10, 0, 10),  # Prefix: data[:10]
+        (10, None, 10, file_size - 10),  # Suffix: data[10:]
+        # --- Negative Indices ---
+        (-10, None, file_size - 10, 10),  # Last N bytes: data[-10:]
+        (None, -10, 0, file_size - 10),  # All except last N: data[:-10]
+        (10, -10, 10, file_size - 20),  # Positive start, Negative end: data[10:-10]
+        # --- Zero Length & Empty Reads ---
+        (20, 20, 20, 0),  # Zero-length (Start == End): data[20:20]
+        (50, 40, 50, 0),  # Crossover (Start > End): data[50:40] -> Empty
         (
             file_size + 10,
-            file_size + 20,
+            None,
             file_size + 10,
             0,
+        ),  # Start past EOF: data[110:] -> Empty
+        # --- Overshoot & Clamping ---
+        (
+            -file_size * 2,
             None,
-        ),  # offset > size -> empty
+            0,
+            file_size,
+        ),  # Start Overshoot: data[-200:] -> Whole file
+        (
+            file_size - 10,
+            file_size + 100,
+            file_size - 10,
+            10,
+        ),  # End Overshoot: data[90:200] -> Last 10 bytes
     ],
 )
 def test_process_limits_parametrized(
-    extended_gcsfs, start, end, exp_offset, exp_length, exp_exc
+    extended_gcsfs, start, end, exp_offset, exp_length
 ):
-    if exp_exc is not None:
-        with pytest.raises(exp_exc):
-            extended_gcsfs.sync_process_limits_to_offset_and_length(
-                file_path, start, end
-            )
-    else:
-        offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
-            file_path, start, end
-        )
-        assert offset == exp_offset
-        assert length == exp_length
+    """
+    Verifies that start/end limits are correctly converted to offset/length
+    """
+    offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
+        file_path, start, end
+    )
+
+    assert offset == exp_offset
+    assert length == exp_length
 
 
 @pytest.mark.parametrize(
@@ -1687,3 +1703,215 @@ async def test_cp_file_not_implemented_error(
                 ) as mock_super_cp:
                     await async_gcs._cp_file(source_path, dest_path)
                     mock_super_cp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_requests_by_bucket_type(async_gcs):
+    """Test grouping of requests into zonal batches and regional requests."""
+    paths = ["gs://zonal/obj1", "gs://regional/obj2", "gs://zonal/obj3"]
+    starts = [0, 10, 20]
+    ends = [5, 15, 25]
+
+    async def mock_is_zonal(bucket):
+        return bucket == "zonal"
+
+    with mock.patch.object(async_gcs, "_is_zonal_bucket", side_effect=mock_is_zonal):
+        zonal_batches, regional_requests = (
+            await async_gcs._group_requests_by_bucket_type(paths, starts, ends)
+        )
+
+    # Check zonal batches
+    # Keys are (bucket, object_name, generation)
+    # paths[0] -> zonal/obj1 -> key ("zonal", "obj1", None)
+    # paths[2] -> zonal/obj3 -> key ("zonal", "obj3", None)
+    assert len(zonal_batches) == 2
+    assert ("zonal", "obj1", None) in zonal_batches
+    assert ("zonal", "obj3", None) in zonal_batches
+
+    # Check batch content: (index, path, start, end)
+    assert zonal_batches[("zonal", "obj1", None)] == [(0, 0, 5)]
+    assert zonal_batches[("zonal", "obj3", None)] == [(2, 20, 25)]
+
+    # Check regional requests
+    assert len(regional_requests) == 1
+    assert regional_requests[0] == (1, "gs://regional/obj2", 10, 15)
+
+
+@pytest.mark.asyncio
+async def test_fetch_zonal_batch(async_gcs):
+    """Test fetching a batch of ranges for a zonal object."""
+    key = ("zonal-bucket", "obj1", "gen1")
+    batch = [
+        (0, 0, 10),
+        (2, 20, 30),
+    ]
+
+    mock_mrd = mock.AsyncMock()
+    mock_mrd.persisted_size = 100
+
+    async def mock_get_grpc_client():
+        async_gcs._grpc_client = mock.Mock()
+        return async_gcs._grpc_client
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.AsyncMultiRangeDownloader.create_mrd",
+            return_value=mock_mrd,
+        ) as mock_create_mrd,
+        mock.patch(
+            "gcsfs.zb_hns_utils.download_ranges", return_value=[b"data1", b"data2"]
+        ) as mock_download_ranges,
+        mock.patch.object(
+            async_gcs, "_get_grpc_client", side_effect=mock_get_grpc_client
+        ),
+        mock.patch.object(
+            async_gcs,
+            "_process_limits_to_offset_and_length",
+            new_callable=mock.AsyncMock,
+            side_effect=[(0, 10), (20, 10)],
+        ),
+    ):
+        results = await async_gcs._fetch_zonal_batch(key, batch)
+
+    assert results == [(0, b"data1"), (2, b"data2")]
+
+    mock_create_mrd.assert_awaited_once()
+    mock_download_ranges.assert_awaited_once()
+    # Check args to download_ranges: list of (offset, length)
+    call_args = mock_download_ranges.call_args
+    assert call_args[0][0] == [(0, 10), (20, 10)]
+    assert call_args[0][1] == mock_mrd
+    mock_mrd.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fetch_zonal_batch_fallback_info(async_gcs):
+    """Test fetching a batch of ranges for a zonal object with fallback to _info."""
+    key = ("zonal-bucket", "obj1", "gen1")
+    batch = [(0, 0, 10)]
+
+    mock_mrd = mock.AsyncMock()
+    mock_mrd.persisted_size = None  # Trigger fallback
+
+    async def mock_get_grpc_client():
+        async_gcs._grpc_client = mock.Mock()
+        return async_gcs._grpc_client
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.AsyncMultiRangeDownloader.create_mrd",
+            return_value=mock_mrd,
+        ),
+        mock.patch("gcsfs.zb_hns_utils.download_ranges", return_value=[b"data1"]),
+        mock.patch.object(
+            async_gcs, "_get_grpc_client", side_effect=mock_get_grpc_client
+        ),
+        mock.patch.object(
+            async_gcs, "_info", new_callable=mock.AsyncMock, return_value={"size": 100}
+        ) as mock_info,
+        mock.patch.object(
+            async_gcs,
+            "_process_limits_to_offset_and_length",
+            new_callable=mock.AsyncMock,
+            return_value=(0, 10),
+        ),
+        mock.patch("gcsfs.extended_gcsfs.logger") as mock_logger,
+    ):
+        await async_gcs._fetch_zonal_batch(key, batch)
+        mock_logger.warning.assert_called_once()
+        assert "no 'persisted_size'" in mock_logger.warning.call_args[0][0]
+
+    mock_info.assert_awaited_once_with("zonal-bucket/obj1")
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_1001_ranges(extended_gcsfs):
+    """
+    Test that cat_ranges correctly handles a large number of ranges (1001) without hitting mrd argument limits.
+    """
+    if extended_gcsfs.on_google:
+        pytest.skip(
+            "Mock-based test for handling large number of ranges; not suitable for live GCS."
+        )
+    # Setup Inputs
+    num_ranges = MRD_MAX_RANGES + 1  # 1001 ranges
+    paths = ["gs://zonal/obj1"] * num_ranges
+
+    # Mock the low level method to simulate Zonal behavior
+    async def mock_fetch_zonal(key, batch):
+        # Emulate Zonal return: list of (index, data) tuples
+        return [(item[0], b"data") for item in batch]
+
+    with (
+        mock.patch.object(
+            extended_gcsfs, "_fetch_zonal_batch", side_effect=mock_fetch_zonal
+        ) as m_fetch,
+        mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True),
+    ):
+        results = await extended_gcsfs._cat_ranges(
+            paths, range(num_ranges), range(1, num_ranges + 1)
+        )
+
+    # Assertions
+    assert len(results) == num_ranges
+    assert m_fetch.call_count == 2
+
+    # args[1] is the batch list. We expect one batch of 1000 and one of 1.
+    batch_sizes = [len(call.args[1]) for call in m_fetch.call_args_list]
+    assert sorted(batch_sizes, reverse=True) == [MRD_MAX_RANGES, 1]
+
+    # Verify the key was correct for both calls
+    assert all(
+        call.args[0] == ("zonal", "obj1", None) for call in m_fetch.call_args_list
+    )
+
+
+def test_cat_ranges_sync_mixed_integration(extended_gcsfs):
+    """
+    Sync Integration Test: Verifies that synchronous 'cat_ranges'
+    correctly handles a mix of Zonal and Regional files without event loop issues.
+    """
+    # Setup Inputs
+    paths = ["gs://zonal/obj1", "gs://regional/obj2"]
+    starts = [0, 10]
+    ends = [5, 15]
+
+    # Mock the low level methods to simulate Zonal and Regional behavior
+    async def mock_fetch_zonal(key, batch):
+        # Emulate Zonal return: list of (index, data) tuples
+        indices = [item[0] for item in batch]
+        return [(idx, b"ZONAL_DATA") for idx in indices]
+
+    async def mock_cat_file(path, start, end, **kwargs):
+        # Emulate Regional return: single bytes object
+        return b"REGIONAL_DATA"
+
+    async def mock_is_zonal(bucket):
+        return bucket == "zonal"
+
+    # Apply Mocks & Execute
+    with (
+        mock.patch.object(
+            extended_gcsfs, "_fetch_zonal_batch", side_effect=mock_fetch_zonal
+        ) as m_zonal,
+        mock.patch(
+            "gcsfs.core.GCSFileSystem._cat_file", side_effect=mock_cat_file
+        ) as m_regional,
+        mock.patch.object(
+            extended_gcsfs, "_is_zonal_bucket", side_effect=mock_is_zonal
+        ),
+    ):
+        results = extended_gcsfs.cat_ranges(paths, starts, ends)
+
+    # Assertions
+    assert results == [b"ZONAL_DATA", b"REGIONAL_DATA"]
+    # Zonal should be called for obj1
+    m_zonal.assert_called_once()
+    args, _ = m_zonal.call_args
+    key, batch = args
+    assert key == ("zonal", "obj1", None)
+    assert batch[0] == (0, 0, 5)  # batch contains (idx, start, end)
+
+    # Regional should be called for obj2
+    m_regional.assert_called_once()
+    assert m_regional.call_args[0][0] == "gs://regional/obj2"
