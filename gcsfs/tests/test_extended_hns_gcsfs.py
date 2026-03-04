@@ -926,12 +926,15 @@ class TestExtendedGcsFileSystemMkdir:
         bucket_name = f"new-zonal-bucket-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some/dir"
         placement = "us-central1-a"
+        location = "us-central1"
 
         with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
             # Simulate bucket not existing initially.
             mocks["info"].side_effect = FileNotFoundError
 
-            gcsfs.mkdir(dir_path, create_parents=True, placement=placement)
+            gcsfs.mkdir(
+                dir_path, create_parents=True, placement=placement, location=location
+            )
 
             # Verify bucket creation via super()._mkdir
             mocks["super_mkdir"].assert_called_once()
@@ -942,6 +945,7 @@ class TestExtendedGcsFileSystemMkdir:
                 "dataLocations": [placement]
             }
             assert call_args[1]["hierarchicalNamespace"] == {"enabled": True}
+            assert call_args[1]["location"] == location
             assert call_args[1]["storageClass"] == "RAPID"
 
             # Verify folder creation via control_client.create_folder
