@@ -662,7 +662,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if is_hns_bucket:
             return await self._create_hns_folder(path, bucket, key, create_parents)
 
-        return await super()._mkdir(path, create_parents=create_parents, **kwargs)
+        return await super()._mkdir(
+            path, create_parents=create_parents, **bucket_kwargs
+        )
 
     async def _create_hns_folder(self, path, bucket, key, create_parents):
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
