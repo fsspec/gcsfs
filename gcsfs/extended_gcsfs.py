@@ -91,27 +91,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # Initialize the storage control plane client for bucket
             # metadata operations
-            # The HNS RenameFolder operation began failing with an "input/output error"
-            # after an authentication library change caused it to send a
-            # `quota_project_id` from application default credentials. The
-            # RenameFolder API rejects requests with this parameter.
-            #
-            # This workaround explicitly removes the `quota_project_id` to prevent
-            # the API from rejecting the request. A long-term fix is in progress
-            # in the GCS backend to relax this restriction.
-            #
-            # TODO: Remove this workaround once the GCS backend fix is deployed.
-            creds = self.credential
-            if hasattr(creds, "with_quota_project"):
-                creds = creds.with_quota_project(None)
-
             transport_cls = (
                 storage_control_v2.StorageControlAsyncClient.get_transport_class(
                     "grpc_asyncio"
                 )
             )
             channel = transport_cls.create_channel(
-                credentials=creds,
+                credentials=self.credential,
                 options=[("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
             )
             transport = transport_cls(channel=channel)
