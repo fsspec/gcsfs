@@ -15,3 +15,6 @@ TEST_KMS_KEY = os.getenv(
 # Performance Benchmark Settings
 # =============================================================================
 BENCHMARK_FILTER = os.environ.get("GCSFS_BENCHMARK_FILTER", "")
+BENCHMARK_CPU_AFFINITY = (
+    os.environ.get("GCSFS_BENCHMARK_CPU_AFFINITY", "false").lower() == "true"
+)

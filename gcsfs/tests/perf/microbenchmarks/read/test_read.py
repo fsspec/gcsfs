@@ -16,6 +16,7 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
 BENCHMARK_GROUP = "read"
 
 
+# TODO: These tests will be removed in the future now that we have runtime based tests
 def _read_op_seq(gcs, path, chunk_size):
     start_time = time.perf_counter()
     with gcs.open(path, "rb") as f:
@@ -113,6 +114,7 @@ def _process_worker(
     """A worker function for each process to read a list of files."""
     start_time = time.perf_counter()
     with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = []
         if pattern == "seq":
             futures = [
                 executor.submit(_read_op_seq, gcs, path, chunk_size)
@@ -126,8 +128,9 @@ def _process_worker(
                 for path in file_paths
             ]
 
-            # Wait for all threads in the process to complete
-            list(futures)
+        # Wait for all threads in the process to complete
+        for f in futures:
+            f.result()
     duration_s = time.perf_counter() - start_time
     process_durations_shared[index] = duration_s
 

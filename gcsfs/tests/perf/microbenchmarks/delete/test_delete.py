@@ -24,13 +24,13 @@ single_threaded_cases, _, _ = filter_test_cases(all_benchmark_cases)
 
 
 @pytest.mark.parametrize(
-    "gcsfs_benchmark_listing",
+    "gcsfs_benchmark_delete",
     single_threaded_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
-def test_delete_recursive(benchmark, gcsfs_benchmark_listing, monitor):
-    gcs, _, prefix, params = gcsfs_benchmark_listing
+def test_delete_recursive(benchmark, gcsfs_benchmark_delete, monitor):
+    gcs, _, prefix, params = gcsfs_benchmark_delete
 
     run_single_threaded(
         benchmark, monitor, params, _delete_op, (gcs, prefix), BENCHMARK_GROUP

@@ -1,7 +1,6 @@
 import logging
 import multiprocessing
 import os
-import random
 import statistics
 import time
 import uuid
@@ -11,6 +10,12 @@ import pytest
 from resource_monitor import ResourceMonitor
 
 MB = 1024 * 1024
+
+
+def _format_mb(value):
+    if value == "N/A":
+        return "N/A"
+    return f"{float(value) / MB:.2f}"
 
 
 @pytest.fixture
@@ -41,7 +46,7 @@ def _prepare_files(gcs, file_paths, file_size=0):
         pool_size = 16
     else:
         chunk_size = 1
-        pool_size = min(100, len(file_paths))
+        pool_size = min(200, len(file_paths))
 
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("spawn")
@@ -50,6 +55,11 @@ def _prepare_files(gcs, file_paths, file_size=0):
             pool.starmap(_write_file, args)
         except RuntimeError as e:
             pytest.fail(str(e))
+
+
+def _prepare_folders(gcs, folder_paths):
+    for path in folder_paths:
+        gcs.mkdir(path, create_parents=True)
 
 
 def _benchmark_io_fixture_helper(
@@ -129,6 +139,107 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
     )
 
 
+def _benchmark_listing_fixture_helper(
+    extended_gcs_factory,
+    params,
+    prefix_tag,
+    teardown=True,
+    create_folders=False,
+    require_file_paths=False,
+):
+    gcs = extended_gcs_factory()
+
+    prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
+
+    # Deterministic folder structure generation
+    target_dirs = []
+
+    folders = getattr(params, "folders", 0)
+    depth = getattr(params, "depth", 0)
+    total_files = getattr(params, "files", 0)
+    files_per_folder = int(total_files / folders)
+
+    # Level 0 is the prefix itself
+    levels = {0: [prefix]}
+
+    if depth == 0:
+        # Flat structure: all folders are direct children of prefix
+        current_level_folders = []
+        for i in range(folders):
+            new_path = f"{prefix}/folder_{i}"
+            target_dirs.append(new_path)
+            current_level_folders.append(new_path)
+        levels[1] = current_level_folders
+    else:
+        folders_per_level = folders // depth
+        remainder = folders % depth
+
+        for d in range(1, depth + 1):
+            count = folders_per_level + (1 if d <= remainder else 0)
+
+            parents = levels[d - 1]
+            num_parents = len(parents)
+            current_level_folders = []
+
+            if num_parents > 0:
+                for i in range(count):
+                    parent = parents[i % num_parents]
+                    new_path = f"{parent}/folder_{d}_{i}"
+                    target_dirs.append(new_path)
+                    current_level_folders.append(new_path)
+
+            levels[d] = current_level_folders
+
+    # Create empyt folders first if specified
+    if create_folders:
+        logging.info(
+            f"Setting up benchmark '{params.name}': creating {len(target_dirs)} "
+            f"folders at depth {depth} with prefix '{prefix}'."
+        )
+        start_time = time.perf_counter()
+        _prepare_folders(gcs, target_dirs)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logging.info(
+            f"Benchmark '{params.name}' setup created {len(target_dirs)} folders in {duration_ms:.2f} ms."
+        )
+
+    file_paths = []
+    for folder in target_dirs:
+        for i in range(files_per_folder):
+            file_paths.append(f"{folder}/file_{i}")
+
+    params.files = len(file_paths)
+
+    logging.info(
+        f"Setting up benchmark '{params.name}': creating {len(file_paths)} "
+        f"files at depth {depth} with prefix '{prefix}' distributed across {len(target_dirs)} "
+        f"folders and with {files_per_folder} files per folder."
+    )
+
+    start_time = time.perf_counter()
+    _prepare_files(gcs, file_paths, getattr(params, "file_size_bytes", 0))
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    logging.info(
+        f"Benchmark '{params.name}' setup created {len(file_paths)} files in {duration_ms:.2f} ms."
+    )
+
+    if require_file_paths:
+        yield gcs, target_dirs, file_paths, prefix, params
+    else:
+        yield gcs, target_dirs, prefix, params
+
+    if teardown:
+        # --- Teardown ---
+        logging.info(
+            f"Tearing down benchmark '{params.name}': deleting files and folders."
+        )
+        try:
+            gcs.rm(prefix, recursive=True)
+        except Exception as e:
+            logging.error(f"Failed to clean up benchmark files: {e}")
+
+
 @pytest.fixture
 def gcsfs_benchmark_listing(extended_gcs_factory, request):
     """
@@ -136,46 +247,50 @@ def gcsfs_benchmark_listing(extended_gcs_factory, request):
     It creates a directory structure with 0-byte files.
     """
     params = request.param
-    gcs = extended_gcs_factory()
-
-    prefix = f"{params.bucket_name}/benchmark-listing-{uuid.uuid4()}"
-
-    target_dirs = [prefix]
-    candidates = [(prefix, 0)]
-
-    for i in range(params.folders):
-        valid_parents = [p for p in candidates if p[1] <= params.depth]
-        parent_path, parent_depth = random.choice(valid_parents)
-        new_path = f"{parent_path}/folder_{i}"
-        target_dirs.append(new_path)
-        candidates.append((new_path, parent_depth + 1))
-
-    file_paths = []
-    for i in range(params.files):
-        folder = random.choice(target_dirs)
-        file_paths.append(f"{folder}/file_{i}")
-
-    logging.info(
-        f"Setting up benchmark '{params.name}': creating {params.files} "
-        f"files distributed across {len(target_dirs) - 1} folders at depth {params.depth}."
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory, params, "benchmark-listing", teardown=True
     )
 
-    start_time = time.perf_counter()
-    _prepare_files(gcs, file_paths)
 
-    duration_ms = (time.perf_counter() - start_time) * 1000
-    logging.info(
-        f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
+@pytest.fixture
+def gcsfs_benchmark_rename(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a rename benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory, params, "benchmark-rename", teardown=True
     )
 
-    yield gcs, target_dirs, prefix, params
 
-    # --- Teardown ---
-    logging.info(f"Tearing down benchmark '{params.name}': deleting files and folders.")
-    try:
-        gcs.rm(file_paths, recursive=True)
-    except Exception as e:
-        logging.error(f"Failed to clean up benchmark files: {e}")
+@pytest.fixture
+def gcsfs_benchmark_delete(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a delete benchmark run.
+    It creates a directory structure with 0-byte files but skips teardown.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory, params, "benchmark-delete", teardown=False
+    )
+
+
+@pytest.fixture
+def gcsfs_benchmark_info(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a info benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-info",
+        teardown=True,
+        create_folders=True,
+        require_file_paths=True,
+    )
 
 
 def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info):
@@ -183,21 +298,21 @@ def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info
     Hook to post-process benchmark results before generating the JSON report.
     """
     for bench in benchmarks:
-        if "timings" in bench.get("extra_info", {}):
-            bench.stats.data = bench.extra_info["timings"]
-            bench.stats.min = bench.extra_info["min_time"]
-            bench.stats.max = bench.extra_info["max_time"]
-            bench.stats.mean = bench.extra_info["mean_time"]
-            bench.stats.median = bench.extra_info["median_time"]
-            bench.stats.stddev = bench.extra_info["stddev_time"]
+        if "runs" in bench.get("extra_info", {}):
+            bench.stats.data = bench.extra_info["runs"]
+            bench.stats.min = bench.extra_info["min_run"]
+            bench.stats.max = bench.extra_info["max_run"]
+            bench.stats.mean = bench.extra_info["mean_run"]
+            bench.stats.median = bench.extra_info["median_run"]
+            bench.stats.stddev = bench.extra_info["stddev_run"]
             bench.stats.rounds = bench.extra_info["rounds"]
 
-            del bench.extra_info["timings"]
-            del bench.extra_info["min_time"]
-            del bench.extra_info["max_time"]
-            del bench.extra_info["mean_time"]
-            del bench.extra_info["median_time"]
-            del bench.extra_info["stddev_time"]
+            del bench.extra_info["runs"]
+            del bench.extra_info["min_run"]
+            del bench.extra_info["max_run"]
+            del bench.extra_info["mean_run"]
+            del bench.extra_info["median_run"]
+            del bench.extra_info["stddev_run"]
 
 
 def publish_benchmark_extra_info(
@@ -211,6 +326,7 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["chunk_size"] = getattr(params, "chunk_size_bytes", "N/A")
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
+    benchmark.extra_info["runtime"] = getattr(params, "runtime", "N/A")
     benchmark.extra_info["threads"] = params.threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name
@@ -218,6 +334,7 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["processes"] = params.processes
     benchmark.extra_info["depth"] = getattr(params, "depth", "N/A")
     benchmark.extra_info["folders"] = getattr(params, "folders", "N/A")
+    benchmark.extra_info["target_type"] = getattr(params, "target_type", "N/A")
 
     benchmark.group = benchmark_group
 
@@ -234,6 +351,36 @@ def publish_resource_metrics(benchmark: Any, monitor: ResourceMonitor) -> None:
             "vcpus": monitor.vcpus,
         }
     )
+
+
+def publish_fixed_duration_benchmark_extra_info(
+    benchmark: Any, total_bytes_per_round: List[int], params: Any
+) -> None:
+    """
+    Calculate statistics for fixed duration benchmarks (total bytes)
+    and publish them to extra_info.
+    """
+    if not total_bytes_per_round:
+        return
+
+    # Calculate statistics for total bytes read
+    min_bytes = min(total_bytes_per_round)
+    max_bytes = max(total_bytes_per_round)
+    mean_bytes = statistics.mean(total_bytes_per_round)
+    median_bytes = statistics.median(total_bytes_per_round)
+    stddev_bytes = (
+        statistics.stdev(total_bytes_per_round)
+        if len(total_bytes_per_round) > 1
+        else 0.0
+    )
+
+    # For pytest-benchmark's internal reporting, we map bytes to the 'runs' fields.
+    benchmark.extra_info["runs"] = total_bytes_per_round
+    benchmark.extra_info["min_run"] = min_bytes
+    benchmark.extra_info["max_run"] = max_bytes
+    benchmark.extra_info["mean_run"] = mean_bytes
+    benchmark.extra_info["median_run"] = median_bytes
+    benchmark.extra_info["stddev_run"] = stddev_bytes
 
 
 def publish_multi_process_benchmark_extra_info(
@@ -254,19 +401,9 @@ def publish_multi_process_benchmark_extra_info(
         statistics.stdev(round_durations_s) if len(round_durations_s) > 1 else 0.0
     )
 
-    # Build the results table as a single multi-line string to log it cleanly.
-    results_table = (
-        f"\n{'-' * 90}\n"
-        f"{'Name (time in s)':<50s} {'Min':>8s} {'Max':>8s} {'Mean':>8s} {'Rounds':>8s}\n"
-        f"{'-' * 90}\n"
-        f"{params.name:<50s} {min_time:>8.4f} {max_time:>8.4f} {mean_time:>8.4f} {params.rounds:>8d}\n"
-        f"{'-' * 90}"
-    )
-    logging.info(f"Multi-process benchmark results:{results_table}")
-
-    benchmark.extra_info["timings"] = round_durations_s
-    benchmark.extra_info["min_time"] = min_time
-    benchmark.extra_info["max_time"] = max_time
-    benchmark.extra_info["mean_time"] = mean_time
-    benchmark.extra_info["median_time"] = median_time
-    benchmark.extra_info["stddev_time"] = stddev_time
+    benchmark.extra_info["runs"] = round_durations_s
+    benchmark.extra_info["min_run"] = min_time
+    benchmark.extra_info["max_run"] = max_time
+    benchmark.extra_info["mean_run"] = mean_time
+    benchmark.extra_info["median_run"] = median_time
+    benchmark.extra_info["stddev_run"] = stddev_time

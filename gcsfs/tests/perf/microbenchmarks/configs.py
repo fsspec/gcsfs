@@ -19,9 +19,6 @@ class BaseBenchmarkConfigurator:
         scenarios = config["scenarios"]
 
         if BENCHMARK_FILTER:
-            logging.info(
-                f"Filtering the scenarios based on BENCHMARK_FILTER: {BENCHMARK_FILTER}"
-            )
             filter_names = [
                 name.strip().lower() for name in BENCHMARK_FILTER.split(",")
             ]

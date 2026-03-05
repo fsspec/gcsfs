@@ -4,6 +4,10 @@ import pytest
 
 from gcsfs.tests.perf.microbenchmarks import configs
 from gcsfs.tests.perf.microbenchmarks.delete.configs import get_delete_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.info.configs import (
+    InfoConfigurator,
+    get_info_benchmark_cases,
+)
 from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     ListingConfigurator,
     get_listing_benchmark_cases,
@@ -114,13 +118,14 @@ def test_write_configurator(mock_config_dependencies):
 
 def test_listing_configurator(mock_config_dependencies):
     """Test that ListingConfigurator correctly builds benchmark parameters."""
-    common = {"bucket_types": ["regional"], "files": [100], "rounds": 1}
+    common = {"bucket_types": ["regional"], "rounds": 1}
     scenario = {
         "name": "list_test",
         "processes": [1],
         "threads": [1],
         "depth": 2,
         "folders": [5],
+        "files": [100],
         "pattern": "prefix",
     }
 
@@ -137,6 +142,34 @@ def test_listing_configurator(mock_config_dependencies):
     assert case.depth == 2
     assert case.folders == 5
     assert case.pattern == "prefix"
+
+
+def test_info_configurator(mock_config_dependencies):
+    """Test that InfoConfigurator correctly builds benchmark parameters."""
+    common = {"bucket_types": ["regional"], "files": [100], "folders": [1]}
+    scenario = {
+        "name": "info_test",
+        "processes": [1],
+        "threads": [1],
+        "depth": 0,
+        "pattern": "info",
+        "target_types": ["file"],
+    }
+
+    configurator = InfoConfigurator("dummy")
+    cases = configurator.build_cases(scenario, common)
+
+    assert len(cases) == 1
+    case = cases[0]
+    assert (
+        case.name
+        == "info_test_1procs_1threads_100files_0depth_1folders_file_info_regional"
+    )
+    assert case.files == 100
+    assert case.depth == 0
+    assert case.folders == 1
+    assert case.pattern == "info"
+    assert case.target_type == "file"
 
 
 def test_generate_cases_calls_load(mock_config_dependencies):
@@ -188,3 +221,7 @@ def test_validate_actual_yaml_configs():
         # Rename
         cases = get_rename_benchmark_cases()
         assert len(cases) > 0, "Rename config produced no cases"
+
+        # Info
+        cases = get_info_benchmark_cases()
+        assert len(cases) > 0, "Info config produced no cases"

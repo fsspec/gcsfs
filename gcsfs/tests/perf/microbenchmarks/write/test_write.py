@@ -16,6 +16,7 @@ from gcsfs.tests.perf.microbenchmarks.write.configs import get_write_benchmark_c
 BENCHMARK_GROUP = "write"
 
 
+# TODO: These tests will be removed in the future now that we have runtime based tests
 def _write_op_seq(gcs, path, chunk_size, file_size):
     chunks = file_size // chunk_size
     remainder = file_size % chunk_size
@@ -85,7 +86,8 @@ def _process_worker(
             executor.submit(_write_op_seq, gcs, path, chunk_size, file_size_bytes)
             for path in file_paths
         ]
-        list(futures)
+        for f in futures:
+            f.result()
     duration_s = time.perf_counter() - start_time
     process_durations_shared[index] = duration_s
 

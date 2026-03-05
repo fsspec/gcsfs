@@ -58,7 +58,7 @@ def test_process_benchmark_result():
         "extra_info": {"file_size": 100, "files": 2},
         "stats": {"min": 0.1, "data": [0.1, 0.2]},
     }
-    headers = ["name", "group", "file_size", "files", "min", "p90", "max_throughput"]
+    headers = ["name", "group", "file_size", "files", "min", "p90"]
     extra = ["file_size", "files"]
     stats = ["min"]
 
@@ -67,8 +67,6 @@ def test_process_benchmark_result():
     assert row["name"] == "test_bench"
     assert row["group"] == "read"
     assert row["file_size"] == 100
-    # Throughput = (100 * 2) / 0.1 = 2000.0
-    assert row["max_throughput"] == 2000.0
     assert "p90" in row
 
 
@@ -124,6 +122,7 @@ def test_create_table_row():
         "threads": 1,
         "processes": 1,
         "depth": 0,
+        "target_type": "file",
         "file_size": 1024 * 1024,
         "chunk_size": 1024,
         "block_size": 1024,
@@ -135,7 +134,7 @@ def test_create_table_row():
     }
     table_row = run._create_table_row(row)
     assert table_row[0] == "regional"
-    assert table_row[8] == "1.00"  # file size MB
+    assert table_row[9] == "1.00"  # file size MB
 
 
 @mock.patch("gcsfs.tests.perf.microbenchmarks.run.PrettyTable")

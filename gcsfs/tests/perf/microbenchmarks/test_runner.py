@@ -133,6 +133,6 @@ def test_run_multi_process(mock_mp, mock_benchmark, mock_monitor):
     assert mock_process.start.call_count == 4
     assert mock_process.join.call_count == 4
 
-    # Check timings in extra_info
-    assert mock_benchmark.extra_info["timings"] == [2.0, 2.0]
-    assert mock_benchmark.extra_info["min_time"] == 2.0
+    # Check runs in extra_info
+    assert mock_benchmark.extra_info["runs"] == [2.0, 2.0]
+    assert mock_benchmark.extra_info["min_run"] == 2.0

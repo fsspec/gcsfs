@@ -330,7 +330,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 return [data]
         finally:
             if mrd_created:
-                await mrd.close()
+                await zb_hns_utils.close_mrd(mrd)
 
     async def _cat_file(self, path, start=None, end=None, mrd=None, **kwargs):
         """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
@@ -381,7 +381,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         finally:
             # Explicit cleanup if we created the MRD
             if mrd_created:
-                await mrd.close()
+                await zb_hns_utils.close_mrd(mrd)
 
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
@@ -503,7 +503,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             # We only use HNS rename if the source is a folder and the move is
             # within the same bucket.
             if is_folder and bucket1 == bucket2 and key1:
-                logger.info(
+                logger.debug(
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
                 source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
@@ -518,7 +518,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 await self._storage_control_client.rename_folder(request=request)
                 self._update_dircache_after_rename(path1, path2)
 
-                logger.info(
+                logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
                 )
                 return
@@ -615,7 +615,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if not is_hns:
             return await super()._mkdir(path, create_parents=create_parents, **kwargs)
 
-        logger.info(f"Using HNS-aware mkdir for '{path}'.")
+        logger.debug(f"Using HNS-aware mkdir for '{path}'.")
         parent = f"projects/_/buckets/{bucket}"
         folder_id = key.rstrip("/")
         request = storage_control_v2.CreateFolderRequest(
@@ -735,7 +735,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             pass
 
         try:
-            logger.info(f"Using HNS-aware rmdir for '{path}'.")
+            logger.debug(f"Using HNS-aware rmdir for '{path}'.")
             folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
             request = storage_control_v2.DeleteFolderRequest(name=folder_name)
 
@@ -1160,7 +1160,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 await writer.append_from_file(f, block_size=chunksize)
         finally:
             finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
-            await writer.close(finalize_on_close=finalize_on_close)
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
         self.invalidate_cache(self._parent(rpath))
 
@@ -1232,7 +1232,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 await writer.append(data[i : i + chunksize])
         finally:
             finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
-            await writer.close(finalize_on_close=finalize_on_close)
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
         self.invalidate_cache(self._parent(path))
 
@@ -1309,8 +1309,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 os.remove(lpath)
             raise e
         finally:
-            if mrd:
-                await mrd.close()
+            await zb_hns_utils.close_mrd(mrd)
 
     async def _do_list_objects(
         self,
@@ -1406,12 +1405,12 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
             f"Error uploading chunk at offset {location.offset}: {e}. Closing stream."
         )
         # Don't finalize the upload on error
-        await location.close(finalize_on_close=False)
+        await zb_hns_utils.close_aaow(location, finalize_on_close=False)
         raise
 
     if (location.offset or 0) >= size:
         logger.debug("Uploaded data is equal or greater than size. Finalizing upload.")
-        await location.close(finalize_on_close=True)
+        await zb_hns_utils.close_aaow(location, finalize_on_close=True)
 
 
 async def initiate_upload(
@@ -1556,4 +1555,4 @@ async def simple_upload(
     finally:
         default_finalize = getattr(fs, "finalize_on_close", False)
         finalize_on_close = kwargs.get("finalize_on_close", default_finalize)
-        await writer.close(finalize_on_close=finalize_on_close)
+        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
