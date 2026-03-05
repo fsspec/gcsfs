@@ -30,6 +30,9 @@ pytestmark = pytest.mark.skipif(
     not should_run, reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set"
 )
 
+FIXED_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
+FIXED_REQUEST_ID = str(FIXED_UUID)
+
 
 def get_mock_folder(folder_path):
     """Helper to create a mock folder object from the Storage Control API."""
@@ -103,6 +106,7 @@ def gcs_hns_mocks():
             mock.patch(
                 patch_target_super_rm, new_callable=mock.AsyncMock
             ) as mock_super_rm,
+            mock.patch("gcsfs.extended_gcsfs.uuid.uuid4", return_value=FIXED_UUID),
         ):
             mock_async_lookup_bucket_type.return_value = bucket_type_val
             mock_sync_lookup_bucket_type.return_value = bucket_type_val
@@ -132,6 +136,7 @@ class TestExtendedGcsFileSystemMv:
         return storage_control_v2.RenameFolderRequest(
             name=f"projects/_/buckets/{TEST_HNS_BUCKET}/folders/{path1_key}",
             destination_folder_id=path2_key,
+            request_id=FIXED_REQUEST_ID,
         )
 
     rename_success_params = [
@@ -423,6 +428,7 @@ class TestExtendedGcsFileSystemMv:
             expected_request = storage_control_v2.RenameFolderRequest(
                 name=f"projects/_/buckets/{TEST_HNS_BUCKET}/folders/test/{dir_name}",
                 destination_folder_id=dir_name,
+                request_id=FIXED_REQUEST_ID,
             )
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
@@ -629,6 +635,7 @@ class TestExtendedGcsFileSystemMkdir:
             parent=f"projects/_/buckets/{bucket}",
             folder_id=folder_path.rstrip("/"),
             recursive=recursive,
+            request_id=FIXED_REQUEST_ID,
         )
 
     def test_hns_mkdir_success(self, gcs_hns, gcs_hns_mocks):
@@ -947,7 +954,9 @@ class TestExtendedGcsFileSystemFind:
             expected_folder_id = "find_test/"
             expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
             expected_request = storage_control_v2.ListFoldersRequest(
-                parent=expected_parent, prefix=expected_folder_id
+                parent=expected_parent,
+                prefix=expected_folder_id,
+                request_id=FIXED_REQUEST_ID,
             )
             mocks["control_client"].list_folders.assert_called_once_with(
                 request=expected_request
@@ -993,7 +1002,9 @@ class TestExtendedGcsFileSystemFind:
             expected_folder_id = "find_test/"
             expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
             expected_request = storage_control_v2.ListFoldersRequest(
-                parent=expected_parent, prefix=expected_folder_id
+                parent=expected_parent,
+                prefix=expected_folder_id,
+                request_id=FIXED_REQUEST_ID,
             )
             mocks["control_client"].list_folders.assert_called_once_with(
                 request=expected_request
@@ -1039,7 +1050,9 @@ class TestExtendedGcsFileSystemFind:
             expected_folder_id = "find_test/"
             expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
             expected_request = storage_control_v2.ListFoldersRequest(
-                parent=expected_parent, prefix=expected_folder_id
+                parent=expected_parent,
+                prefix=expected_folder_id,
+                request_id=FIXED_REQUEST_ID,
             )
             mocks["control_client"].list_folders.assert_called_once_with(
                 request=expected_request
@@ -1093,7 +1106,9 @@ class TestExtendedGcsFileSystemFind:
             expected_folder_id = "find_test/"
             expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
             expected_request = storage_control_v2.ListFoldersRequest(
-                parent=expected_parent, prefix=expected_folder_id
+                parent=expected_parent,
+                prefix=expected_folder_id,
+                request_id=FIXED_REQUEST_ID,
             )
             mocks["control_client"].list_folders.assert_called_once_with(
                 request=expected_request
@@ -1261,6 +1276,7 @@ class TestExtendedGcsFileSystemInternal:
                 "projects/_/buckets/bucket/folders/folder"
                 == call_kwargs["request"].name
             )
+            assert call_kwargs["request"].request_id
             mock_super_method.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1474,7 +1490,9 @@ class TestExtendedGcsFileSystemRmdir:
         """Constructs a DeleteFolderRequest for testing."""
         bucket, folder_path = dir_path.split("/", 1)
         expected_folder_name = f"projects/_/buckets/{bucket}/folders/{folder_path}"
-        return storage_control_v2.DeleteFolderRequest(name=expected_folder_name)
+        return storage_control_v2.DeleteFolderRequest(
+            name=expected_folder_name, request_id=FIXED_REQUEST_ID
+        )
 
     def test_hns_rmdir_success(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS empty directory deletion."""
@@ -1832,7 +1850,9 @@ class TestExtendedGcsFileSystemRm:
         """Constructs a DeleteFolderRequest for testing."""
         bucket, key, _ = gcsfs.split_path(dir_path)
         expected_folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
-        return storage_control_v2.DeleteFolderRequest(name=expected_folder_name)
+        return storage_control_v2.DeleteFolderRequest(
+            name=expected_folder_name, request_id=FIXED_REQUEST_ID
+        )
 
     def test_rm_file_hns(self, gcs_hns, gcs_hns_mocks):
         """Test sync rm on a single file in an HNS bucket."""

@@ -13,3 +13,7 @@ class TestGcsfsGet(abstract.AbstractGetTests, GcsfsFixtures):
 
 class TestGcsfsPut(abstract.AbstractPutTests, GcsfsFixtures):
     pass
+
+
+class TestGcsfsPipe(abstract.AbstractPipeTests, GcsfsFixtures):
+    pass
