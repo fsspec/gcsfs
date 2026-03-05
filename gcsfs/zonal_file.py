@@ -4,9 +4,6 @@ from fsspec import asyn
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
-from google.cloud.storage.asyncio.async_multi_range_downloader import (
-    AsyncMultiRangeDownloader,
-)
 
 from gcsfs import zb_hns_utils
 from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile
@@ -63,9 +60,11 @@ class ZonalFile(GCSFile):
         if not key:
             raise OSError("Attempt to open a bucket")
         self.mrd = None
+        self.aaow = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
         self.mode = mode
+        self.flush_interval_bytes = flush_interval_bytes
         self.gcsfs = gcsfs
         object_size = None
         if "r" in self.mode:
@@ -79,14 +78,7 @@ class ZonalFile(GCSFile):
                     "This may result in incorrect behavior for unfinalized objects."
                 )
         elif "w" in self.mode or "a" in self.mode:
-            self.aaow = asyn.sync(
-                self.gcsfs.loop,
-                self._init_aaow,
-                bucket,
-                key,
-                generation,
-                flush_interval_bytes,
-            )
+            pass
         else:
             raise NotImplementedError(
                 "Only read, write and append operations are currently supported for Zonal buckets."
@@ -120,7 +112,7 @@ class ZonalFile(GCSFile):
         Initializes the AsyncMultiRangeDownloader.
         """
         await self.gcsfs._get_grpc_client()
-        return await AsyncMultiRangeDownloader.create_mrd(
+        return await zb_hns_utils.init_mrd(
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
@@ -147,6 +139,17 @@ class ZonalFile(GCSFile):
             generation,
             flush_interval_bytes,
         )
+
+    def _ensure_aaow(self):
+        if self.aaow is None:
+            self.aaow = asyn.sync(
+                self.gcsfs.loop,
+                self._init_aaow,
+                self.bucket,
+                self.key,
+                self.generation,
+                self.flush_interval_bytes,
+            )
 
     def _fetch_range(self, start=None, end=None, chunk_lengths=None):
         """
@@ -190,6 +193,9 @@ class ZonalFile(GCSFile):
         if self.forced:
             raise ValueError("This file has been force-flushed, can only close")
 
+        # Lazily initialize the AsyncAppendableObjectWriter on the first write to avoid
+        # unnecessary object creation for files that are opened but never written to.
+        self._ensure_aaow()
         asyn.sync(self.gcsfs.loop, self.aaow.append, data)
 
     def flush(self, force=False):
@@ -211,6 +217,16 @@ class ZonalFile(GCSFile):
             # no-op to flush on read-mode
             return
 
+        # Case 1: Intermediate flush (force=False)
+        # If no data has been written (aaow is None), there is nothing to flush.
+        if self.aaow is None and not force:
+            return
+
+        # Case 2: Closing flush (force=True) or some data has been written (AAOW exists)
+        # We must ensure aaow exists so that the file is created even for empty writes,
+        # and to flush any buffered data if it exists.
+        self._ensure_aaow()
+
         asyn.sync(self.gcsfs.loop, self.aaow.flush)
 
     def commit(self):
@@ -225,6 +241,8 @@ class ZonalFile(GCSFile):
                 "This file has already been finalized. Ignoring commit call."
             )
             return
+
+        self._ensure_aaow()
         asyn.sync(self.gcsfs.loop, self.aaow.finalize)
         self.finalized = True
         # File is already finalized, avoid finalizing again on close
@@ -292,11 +310,11 @@ class ZonalFile(GCSFile):
             return
         # super is closed before aaow since flush may need aaow
         super().close()
-        if hasattr(self, "mrd") and self.mrd:
-            asyn.sync(self.gcsfs.loop, zb_hns_utils.close_mrd, self.mrd)
+        # Helper method safely handles mrd=None.
+        asyn.sync(self.gcsfs.loop, zb_hns_utils.close_mrd, self.mrd)
 
         # Only close aaow if the stream is open
-        if hasattr(self, "aaow") and self.aaow and self.aaow._is_stream_open:
+        if self.aaow and self.aaow._is_stream_open:
             asyn.sync(
                 self.gcsfs.loop,
                 zb_hns_utils.close_aaow,

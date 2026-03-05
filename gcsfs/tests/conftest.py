@@ -151,6 +151,11 @@ def populate_bucket():
 @pytest.fixture
 def gcs(gcs_factory, buckets_to_delete, populate_bucket):
     gcs = gcs_factory()
+    # Dynamically set `finalize_on_close` to True. This configures all upload
+    # methods (pipe, write etc.) to finalize objects for this fixture's duration without
+    # altering the fsspec cache key or the params which is also used by other fixtures.
+    gcs.finalize_on_close = True
+
     try:  # ensure we're empty.
         # Create the bucket if it doesn't exist, otherwise clean it.
         if not gcs.exists(TEST_BUCKET):
@@ -170,6 +175,10 @@ def gcs(gcs_factory, buckets_to_delete, populate_bucket):
         yield gcs
     finally:
         _cleanup_gcs(gcs, bucket_populated=populate_bucket)
+        # Remove the dynamically added attribute. This prevents state leakage
+        # into subsequent tests that can share this cached fsspec instance.
+        if hasattr(gcs, "finalize_on_close"):
+            delattr(gcs, "finalize_on_close")
 
 
 @pytest.fixture

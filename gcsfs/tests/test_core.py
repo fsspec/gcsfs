@@ -252,10 +252,11 @@ def test_info_on_directory_with_only_subdirectories(gcs):
         # Assertions
         assert info["type"] == "directory"
         assert info["name"] == dir_path
-        # one call is for exact file check and one call for directory
+        # Standard bucket: one call is for exact file check and one call for directory
+        # Zonal buckets use Storage Control API for directory lookup, which bypasses _call.
         assert (
-            mock_call.call_count == 2
-        ), "info() should only make two calls to GCS for a directory."
+            mock_call.call_count <= 2
+        ), "info() should not make more than two calls to GCS for a directory."
 
 
 def test_ls2(gcs):
