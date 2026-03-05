@@ -134,12 +134,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     async def _get_bucket_type(self, bucket):
         try:
-            await self._get_control_plane_client()
+            client = await self._get_control_plane_client()
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
             logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
-            response = await self._storage_control_client.get_storage_layout(
-                name=bucket_name_value
-            )
+            response = await client.get_storage_layout(name=bucket_name_value)
 
             if response.location_type == "zone":
                 return BucketType.ZONAL_HIERARCHICAL
@@ -517,9 +515,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 )
 
                 logger.debug(f"rename_folder request: {request}")
-                operation = await self._storage_control_client.rename_folder(
-                    request=request
-                )
+                client = await self._get_control_plane_client()
+                operation = await client.rename_folder(request=request)
                 await operation.result()
                 self._update_dircache_after_rename(path1, path2)
 
@@ -631,8 +628,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
         try:
             logger.debug(f"create_folder request: {request}")
-            await self._get_control_plane_client()
-            await self._storage_control_client.create_folder(request=request)
+            client = await self._get_control_plane_client()
+            await client.create_folder(request=request)
             # Instead of invalidating the parent cache, update it to add the new entry.
             parent_path = self._parent(path)
             if parent_path in self.dircache:
@@ -677,9 +674,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 )
 
                 # Verify existence using get_folder API
-                response = await self._storage_control_client.get_folder(
-                    request=request
-                )
+                client = await self._get_control_plane_client()
+                response = await client.get_folder(request=request)
 
                 # If successful, return directory metadata
                 return {
@@ -751,7 +747,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             )
 
             logger.debug(f"delete_folder request: {request}")
-            await self._storage_control_client.delete_folder(request=request)
+            client = await self._get_control_plane_client()
+            await client.delete_folder(request=request)
 
             # Remove the directory from the cache and from its parent's listing.
             self.dircache.pop(path, None)
@@ -1068,9 +1065,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
         logger.debug(f"list_folders request: {request}")
 
-        async for folder in await self._storage_control_client.list_folders(
-            request=request
-        ):
+        client = await self._get_control_plane_client()
+        async for folder in await client.list_folders(request=request):
             folders.append(self._create_folder_entry(bucket, folder))
 
         return folders
