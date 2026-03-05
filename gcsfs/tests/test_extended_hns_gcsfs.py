@@ -204,6 +204,10 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
+            # Verify that the operation result was awaited
+            mocks[
+                "control_client"
+            ].rename_folder.return_value.result.assert_awaited_once()
             mocks["super_mv"].assert_not_called()
 
     def test_hns_folder_rename_with_protocol(self, gcs_hns, gcs_hns_mocks):
@@ -243,6 +247,10 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
+            # Verify that the operation result was awaited
+            mocks[
+                "control_client"
+            ].rename_folder.return_value.result.assert_awaited_once()
             mocks["super_mv"].assert_not_called()
 
     def test_hns_empty_folder_rename_success(self, gcs_hns, gcs_hns_mocks):
@@ -277,6 +285,10 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
+            # Verify that the operation result was awaited
+            mocks[
+                "control_client"
+            ].rename_folder.return_value.result.assert_awaited_once()
             mocks["super_mv"].assert_not_called()
 
     def test_file_rename_delegates_to_mv_file(
@@ -433,6 +445,10 @@ class TestExtendedGcsFileSystemMv:
             mocks["control_client"].rename_folder.assert_called_once_with(
                 request=expected_request
             )
+            # Verify that the operation result was awaited
+            mocks[
+                "control_client"
+            ].rename_folder.return_value.result.assert_awaited_once()
             mocks["super_mv"].assert_not_called()
             expected_info_calls = [
                 mock.call(path1),  # from _mv

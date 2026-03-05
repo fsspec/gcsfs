@@ -517,7 +517,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 )
 
                 logger.debug(f"rename_folder request: {request}")
-                await self._storage_control_client.rename_folder(request=request)
+                operation = await self._storage_control_client.rename_folder(
+                    request=request
+                )
+                await operation.result()
                 self._update_dircache_after_rename(path1, path2)
 
                 logger.debug(

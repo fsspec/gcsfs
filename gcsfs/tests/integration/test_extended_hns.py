@@ -131,6 +131,24 @@ class TestExtendedGcsFileSystemMv:
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}")
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
 
+    def test_hns_rm_immediately_after_rename(self, gcs_hns):
+        """Test that a folder can be deleted immediately after rename."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/rename_before_rm"
+        path2 = f"{TEST_HNS_BUCKET}/renamed_for_rm"
+
+        # Create folder with content
+        gcsfs.touch(f"{path1}/file.txt")
+        assert gcsfs.exists(path1)
+
+        # Rename and then immediately remove
+        gcsfs.mv(path1, path2)
+        gcsfs.rm(path2, recursive=True)
+
+        # Verify both are gone
+        assert not gcsfs.exists(path1)
+        assert not gcsfs.exists(path2)
+
     def test_hns_rename_fails_if_parent_does_not_exist(self, gcs_hns):
         """Test that HNS rename fails if the destination's parent does not exist."""
         gcsfs = gcs_hns
