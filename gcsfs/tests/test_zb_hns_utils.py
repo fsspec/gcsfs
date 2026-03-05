@@ -131,6 +131,7 @@ async def test_init_mrd_not_found():
         assert f"{bucket_name}/{object_name}" in str(excinfo.value)
 
 
+@pytest.mark.asyncio
 async def test_close_aaow(caplog):
     """Tests all graceful closing scenarios for AsyncAppendableObjectWriter."""
     # 1. Handles None gracefully
