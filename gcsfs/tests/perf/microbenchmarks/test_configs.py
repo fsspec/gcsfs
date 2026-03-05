@@ -12,14 +12,14 @@ from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     ListingConfigurator,
     get_listing_benchmark_cases,
 )
-from gcsfs.tests.perf.microbenchmarks.read.configs import (
-    ReadConfigurator,
-    get_read_benchmark_cases,
+from gcsfs.tests.perf.microbenchmarks.read_fixed_duration.configs import (
+    ReadFixedDurationConfigurator,
+    get_read_fixed_duration_benchmark_cases,
 )
 from gcsfs.tests.perf.microbenchmarks.rename.configs import get_rename_benchmark_cases
-from gcsfs.tests.perf.microbenchmarks.write.configs import (
-    WriteConfigurator,
-    get_write_benchmark_cases,
+from gcsfs.tests.perf.microbenchmarks.write_fixed_duration.configs import (
+    WriteFixedDurationConfigurator,
+    get_write_fixed_duration_benchmark_cases,
 )
 
 MB = 1024 * 1024
@@ -81,14 +81,14 @@ def test_read_configurator(mock_config_dependencies):
     }
     scenario = {"name": "read_test", "processes": [1], "threads": [1], "pattern": "seq"}
 
-    configurator = ReadConfigurator("dummy")
+    configurator = ReadFixedDurationConfigurator("dummy")
     cases = configurator.build_cases(scenario, common)
 
     assert len(cases) == 1
     case = cases[0]
     assert case.name == "read_test_1procs_1threads_1MB_file_16MB_block_regional"
     assert case.file_size_bytes == 1 * MB
-    assert case.block_size_bytes == 16 * MB
+    assert case.block_size_bytes == 5 * MB
     assert case.chunk_size_bytes == 16 * MB
     assert case.pattern == "seq"
     assert case.bucket_name == "test-bucket"
@@ -98,20 +98,20 @@ def test_write_configurator(mock_config_dependencies):
     """Test that WriteConfigurator correctly builds benchmark parameters."""
     common = {
         "bucket_types": ["regional"],
-        "file_sizes_mb": [10],
-        "chunk_sizes_mb": [5],
+        "chunk_sizes_mb": [10],
         "rounds": 1,
+        "runtime": 30,
     }
     scenario = {"name": "write_test", "processes": [2], "threads": [1]}
 
-    configurator = WriteConfigurator("dummy")
+    configurator = WriteFixedDurationConfigurator("dummy")
     cases = configurator.build_cases(scenario, common)
 
     assert len(cases) == 1
     case = cases[0]
-    assert case.name == "write_test_2procs_1threads_10MB_file_5MB_chunk_regional"
-    assert case.file_size_bytes == 10 * MB
-    assert case.chunk_size_bytes == 5 * MB
+    assert case.name == "write_test_2procs_1threads_10MB_chunk_regional_30s_duration"
+    assert case.file_size_bytes == 0
+    assert case.chunk_size_bytes == 10 * MB
     assert case.processes == 2
     assert case.files == 2  # threads * processes
 
@@ -188,7 +188,7 @@ def test_generate_cases_calls_load(mock_config_dependencies):
         mock.patch("yaml.safe_load", return_value=config_content),
     ):
 
-        configurator = WriteConfigurator("dummy")
+        configurator = WriteFixedDurationConfigurator("dummy")
         cases = configurator.generate_cases()
         assert len(cases) == 1
         assert cases[0].name.startswith("test")
@@ -203,11 +203,11 @@ def test_validate_actual_yaml_configs():
     # Ensure BENCHMARK_FILTER is empty so we load all cases
     with mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""):
         # Read
-        cases = get_read_benchmark_cases()
+        cases = get_read_fixed_duration_benchmark_cases()
         assert len(cases) > 0, "Read config produced no cases"
 
         # Write
-        cases = get_write_benchmark_cases()
+        cases = get_write_fixed_duration_benchmark_cases()
         assert len(cases) > 0, "Write config produced no cases"
 
         # Listing

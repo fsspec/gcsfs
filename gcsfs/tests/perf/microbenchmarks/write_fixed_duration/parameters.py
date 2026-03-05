@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 
-from gcsfs.tests.perf.microbenchmarks.write.parameters import WriteBenchmarkParameters
+from gcsfs.tests.perf.microbenchmarks.parameters import IOBenchmarkParameters
 
 
 @dataclass
-class WriteFixedDurationBenchmarkParameters(WriteBenchmarkParameters):
+class WriteFixedDurationBenchmarkParameters(IOBenchmarkParameters):
     """
     Defines the parameters for a write benchmark test cases with runtime.
     """

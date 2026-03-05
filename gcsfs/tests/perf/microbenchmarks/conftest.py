@@ -235,7 +235,7 @@ def _benchmark_listing_fixture_helper(
             f"Tearing down benchmark '{params.name}': deleting files and folders."
         )
         try:
-            gcs.rm(prefix, recursive=True)
+            gcs.rm(f"{prefix}*", recursive=True)
         except Exception as e:
             logging.error(f"Failed to clean up benchmark files: {e}")
 
@@ -260,7 +260,7 @@ def gcsfs_benchmark_rename(extended_gcs_factory, request):
     """
     params = request.param
     yield from _benchmark_listing_fixture_helper(
-        extended_gcs_factory, params, "benchmark-rename", teardown=True
+        extended_gcs_factory, params, "benchmark-rename", teardown=False
     )
 
 
