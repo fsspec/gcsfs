@@ -22,7 +22,7 @@ case "$TEST_SUITE" in
   "standard")
     export GCSFS_TEST_BUCKET="gcsfs-test-standard-${SHORT_BUILD_ID}"
     export GCSFS_TEST_VERSIONED_BUCKET="gcsfs-test-versioned-${SHORT_BUILD_ID}"
-    pytest "${ARGS[@]}" gcsfs/tests/test_core.py --deselect gcsfs/tests/test_core.py::test_sign
+    pytest "${ARGS[@]}" gcsfs/ --deselect gcsfs/tests/test_core.py::test_sign
     ;;
 
   "zonal")
@@ -32,7 +32,10 @@ case "$TEST_SUITE" in
     ulimit -n 4096
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
     pytest "${ARGS[@]}" \
-      gcsfs/tests/test_zonal_file.py 
+      gcsfs/tests/test_extended_gcsfs.py \
+      gcsfs/tests/test_zonal_file.py \
+      gcsfs/tests/integration/test_async_gcsfs.py \
+      gcsfs/tests/integration/test_extended_hns.py
     ;;
 
   "hns")
@@ -46,7 +49,7 @@ case "$TEST_SUITE" in
     # - test_core_versioned.py: HNS buckets do not support versioning.
     # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
     # - test_core.py::test_mv_file_cache: Integration test only applicable for regional buckets.
-    pytest "${ARGS[@]}" gcsfs/tests/test_core.py \
+    pytest "${ARGS[@]}" gcsfs/ \
       --deselect gcsfs/tests/test_extended_gcsfs.py \
       --deselect gcsfs/tests/test_zonal_file.py \
       --deselect gcsfs/tests/test_extended_gcsfs_unit.py \
