@@ -1,13 +1,16 @@
-# ============================================================================
-# To guarantee that our cleanup script runs (preventing orphaned cloud resources),
-# we prevent steps from hard-crashing by appending: `|| touch /workspace/FAILED`
+# =======================================================================================
+# To guarantee that our cleanup script always runs (preventing orphaned cloud resources),
+# this pipeline uses the `allowFailure` property and a final check step.
 #
 # How it works:
-# 1. If a command fails, it drops a FAILED flag in the shared workspace and exits 0.
-# 2. Subsequent steps use ${_SKIP_IF_FAILED} to see the flag and instantly skip themselves.
-# 3. The pipeline "fast-forwards" directly to the final Cleanup step.
-# 4. Cleanup safely deletes resources, reads the flag, and finally fails the build.
-# ============================================================================
+# 1. Critical steps have `allowFailure: true`.
+# 2. If a command fails, it writes its name to `/workspace/FAILED` and exits with 1.
+# 3. Cloud Build marks the step as Failed (gray icon) but continues the pipeline.
+# 4. Subsequent steps use `${_SKIP_IF_FAILED}` to see the flag and skip execution.
+# 5. The pipeline continues to the `cleanup` step, which runs unconditionally.
+# 6. A final `check-failure` step reads the `/workspace/FAILED` file, prints a
+#    summary of which steps failed, and then exits with 1 to fail the overall build.
+# =======================================================================================
 
 substitutions:
   _REGION: "us-central1"
@@ -79,7 +82,7 @@ steps:
     waitFor: ["create-resources", "generate-ssh-key"]
     allowFailure: true
 
-  # 5. Run Tests (Parallel Blocks)
+  # Run Tests (Parallel Blocks)
   # We reuse a single remote runner script, passing env vars to control which suite runs.
 
   # Standard Tests
@@ -146,7 +149,7 @@ steps:
     waitFor: ["setup-vm", "create-resources"]
     allowFailure: true
 
-  # 6. Cleanup
+  # Cleanup
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup"
     entrypoint: "bash"
@@ -165,7 +168,7 @@ steps:
         "run-zonal-core-tests",
       ]
 
-  # 7. Fail the build if any previous step failed
+  # Fail the build if any previous step failed
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "check-failure"
     entrypoint: "bash"
