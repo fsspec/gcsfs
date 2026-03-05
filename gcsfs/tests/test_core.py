@@ -37,7 +37,7 @@ def test_simple(gcs, monkeypatch):
 def test_dircache_filled(gcs):
     assert not dict(gcs.dircache)
     gcs.ls(TEST_BUCKET)
-    assert len(gcs.dircache) == 1
+    assert len(gcs.dircache) == 2
     gcs.dircache[TEST_BUCKET][0]["CHECK"] = True
     out = gcs.ls(TEST_BUCKET, detail=True)
     assert [o for o in out if o.get("CHECK", None)]
