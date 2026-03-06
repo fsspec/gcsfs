@@ -1,0 +1,37 @@
+substitutions:
+  _DATASET_NAME: ""
+  _LOCATION: ""
+
+steps:
+  # Step 0: Create the BigQuery dataset if it doesn't exist
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'ensure-dataset'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        bq show ${PROJECT_ID}:${_DATASET_NAME} || \
+        bq mk --dataset --location=${_LOCATION} ${PROJECT_ID}:${_DATASET_NAME}
+
+  # Step 1: Update the Staging External Table definition
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'update-staging-table'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        bq mk --project_id=${PROJECT_ID} \
+          --external_table_definition=benchmarks_schema.json \
+          --force \
+          ${_DATASET_NAME}.staging
+
+  # Step 2: Run the migration and ingestion SQL script
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'run-ingestion'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        sed -i "s/gcs-aiml-clients-testing-101/${PROJECT_ID}/g" ingest.sql
+        sed -i "s/gcsfs_microbenchmarks/${_DATASET_NAME}/g" ingest.sql
+        bq query --use_legacy_sql=false --project_id=${PROJECT_ID} "$(cat ingest.sql)"

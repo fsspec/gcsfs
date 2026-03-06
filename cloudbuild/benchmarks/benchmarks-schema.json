@@ -1,0 +1,41 @@
+{
+  "sourceFormat": "CSV",
+  "sourceUris": ["gs://gcsfs-perf-micro-bench-run-results/*.csv"],
+  "csvOptions": {
+    "skipLeadingRows": 1,
+    "sourceColumnMatch": "NAME",
+    "nullMarker": "N/A"
+  },
+  "schema": {
+    "fields": [
+      {"name": "name", "type": "STRING"},
+      {"name": "group", "type": "STRING"},
+      {"name": "block_size", "type": "STRING"},
+      {"name": "bucket_name", "type": "STRING"},
+      {"name": "bucket_type", "type": "STRING"},
+      {"name": "chunk_size", "type": "STRING"},
+      {"name": "cpu_max_global", "type": "FLOAT"},
+      {"name": "depth", "type": "STRING"},
+      {"name": "file_size", "type": "STRING"},
+      {"name": "files", "type": "INTEGER"},
+      {"name": "folders", "type": "STRING"},
+      {"name": "mem_max", "type": "FLOAT"},
+      {"name": "net_throughput_s", "type": "FLOAT"},
+      {"name": "pattern", "type": "STRING"},
+      {"name": "processes", "type": "INTEGER"},
+      {"name": "rounds", "type": "INTEGER"},
+      {"name": "runtime", "type": "FLOAT"},
+      {"name": "target_type", "type": "STRING"},
+      {"name": "threads", "type": "INTEGER"},
+      {"name": "vcpus", "type": "INTEGER"},
+      {"name": "min", "type": "FLOAT"},
+      {"name": "max", "type": "FLOAT"},
+      {"name": "mean", "type": "FLOAT"},
+      {"name": "median", "type": "FLOAT"},
+      {"name": "stddev", "type": "FLOAT"},
+      {"name": "p90", "type": "FLOAT"},
+      {"name": "p95", "type": "FLOAT"},
+      {"name": "p99", "type": "FLOAT"}
+    ]
+  }
+}
