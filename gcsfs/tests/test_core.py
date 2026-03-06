@@ -1135,6 +1135,44 @@ def test_merge(gcs):
     assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
 
 
+def test_append_small_file(gcs):
+    path = TEST_BUCKET + "/tmp/test/append_small"
+    with gcs.open(path, "wb") as f:
+        f.write(b"hello")
+    with gcs.open(path, "ab") as f:
+        f.write(b" world")
+    assert gcs.cat_file(path) == b"hello world"
+
+
+def test_append_large_file(gcs):
+    path = TEST_BUCKET + "/tmp/test/append_large"
+    data = b"x" * (2**18)
+    append_data = b"y" * (2**18 + 100)
+    with gcs.open(path, "wb") as f:
+        f.write(data)
+    with gcs.open(path, "ab", block_size=2**18) as f:
+        f.write(append_data)
+    assert gcs.cat_file(path) == data + append_data
+
+
+def test_append_nonexistent(gcs):
+    path = TEST_BUCKET + "/tmp/test/append_new"
+    if gcs.exists(path):
+        gcs.rm(path)
+    with gcs.open(path, "ab") as f:
+        f.write(b"fresh")
+    assert gcs.cat_file(path) == b"fresh"
+
+
+def test_append_text_mode(gcs):
+    path = TEST_BUCKET + "/tmp/test/append_text"
+    with gcs.open(path, "w") as f:
+        f.write("hello")
+    with gcs.open(path, "a") as f:
+        f.write(" world")
+    assert gcs.cat_file(path) == b"hello world"
+
+
 def test_bigger_than_block_read(gcs):
     with gcs.open(TEST_BUCKET + "/2014-01-01.csv", "rb", block_size=3) as f:
         out = []

@@ -1249,8 +1249,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
         bucket, key, generation = self.split_path(path)
-        source = [{"name": self.split_path(p)[1]} for p in paths]
-        await self._call(
+        source = []
+        for p in paths:
+            _, name, gen = self.split_path(p)
+            obj = {"name": name}
+            if gen:
+                obj["generation"] = gen
+            source.append(obj)
+        return await self._call(
             "POST",
             "b/{}/o/{}/compose",
             bucket,
@@ -1262,6 +1268,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 "kind": "storage#composeRequest",
                 "destination": {"name": key, "bucket": bucket},
             },
+            json_out=True,
         )
 
     merge = asyn.sync_wrapper(_merge)
@@ -2015,11 +2022,24 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
         supports_append = kwargs.pop("supports_append", False)
+        self._append_original_key = None
+        self._append_generation = None
         if "a" in self.mode and not supports_append:
-            warnings.warn(
-                "Append mode 'a' is not supported in GCS. Using overwrite mode instead."
-            )
-            self.mode = self.mode.replace("a", "w")
+            try:
+                info = self.fs.info(self.path)
+                existing_size = info["size"]
+            except FileNotFoundError:
+                existing_size = 0
+
+            if existing_size > 0 and existing_size < (block_size or self.blocksize):
+                existing_data = self.fs.cat_file(self.path)
+                self.buffer = UnclosableBytesIO()
+                self.buffer.write(existing_data)
+                self.loc = len(existing_data)
+            elif existing_size > 0:
+                self._append_original_key = self.key
+                self._append_generation = info.get("generation")
+                self.key = self._append_original_key + ".tmp." + str(uuid.uuid4())
 
         if "r" in self.mode:
             det = self.details
@@ -2034,7 +2054,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.fixed_key_metadata.update(fixed_key_metadata or {})
         self.kms_key_name = kms_key_name
         self.timeout = timeout
-        if mode in {"wb", "xb"}:
+        if mode in {"wb", "xb", "ab"}:
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
@@ -2128,10 +2148,35 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             break
         return True
 
+    def _finalize_append(self):
+        if self._append_original_key is None:
+            return
+        tmp_path = f"{self.bucket}/{self.key}"
+        original = self.path
+        if self._append_generation:
+            original = f"{self.path}#{self._append_generation}"
+        self.key = self._append_original_key
+        result = self.gcsfs.merge(self.path, [original, tmp_path])
+        try:
+            self.gcsfs.rm(tmp_path)
+        except FileNotFoundError:
+            pass
+        if int(result.get("componentCount", 1)) >= 1000:
+            self.gcsfs.cp_file(self.path, self.path)
+        self.gcsfs.invalidate_cache(self.path)
+        self._append_original_key = None
+        self._append_generation = None
+
     def commit(self):
         """If not auto-committing, finalize file"""
         self.autocommit = True
         self._upload_chunk(final=True)
+        self._finalize_append()
+
+    def close(self):
+        super().close()
+        if self.autocommit:
+            self._finalize_append()
 
     def _initiate_upload(self):
         """Create multi-upload"""
@@ -2160,6 +2205,14 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             "DELETE",
             self.location.replace("&ifGenerationMatch=0", ""),
         )
+        if self._append_original_key is not None:
+            try:
+                self.gcsfs.rm(f"{self.bucket}/{self.key}")
+            except FileNotFoundError:
+                pass
+            self.key = self._append_original_key
+            self._append_original_key = None
+            self._append_generation = None
         self.location = None
         self.closed = True
 
