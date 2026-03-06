@@ -52,7 +52,7 @@ class TestConditionalImport:
 
     def test_experimental_env_set_to_false(self):
         """
-        Tests gcsfs.GCSFileSystem is extended_gcsfs.ExtendedGcsFileSystem when
+        Tests gcsfs.GCSFileSystem is core.GCSFileSystem when
         GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT IS set to false.
         """
         os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
