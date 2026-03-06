@@ -36,13 +36,26 @@ class TestConditionalImport:
         # affecting other tests
         sys.modules.update(self.original_modules)
 
-    def test_experimental_env_unset(self):
+    def test_experimental_env_is_set_by_default(self):
         """
         Tests gcsfs.GCSFileSystem is core.GCSFileSystem when
-        GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT is NOT set.
+        GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT is NOT set and uses default value.
         """
         if "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT" in os.environ:
             del os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]
+
+        import gcsfs
+
+        assert (
+            gcsfs.GCSFileSystem is gcsfs.extended_gcsfs.ExtendedGcsFileSystem
+        ), "Should be ExtendedGcsFileSystem"
+
+    def test_experimental_env_set_to_false(self):
+        """
+        Tests gcsfs.GCSFileSystem is extended_gcsfs.ExtendedGcsFileSystem when
+        GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT IS set to false.
+        """
+        os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
 
         import gcsfs
 
@@ -52,16 +65,3 @@ class TestConditionalImport:
         assert not hasattr(
             gcsfs, "ExtendedGcsFileSystem"
         ), "ExtendedGcsFileSystem should not be imported directly on gcsfs"
-
-    def test_experimental_env_set(self):
-        """
-        Tests gcsfs.GCSFileSystem is extended_gcsfs.ExtendedGcsFileSystem when
-        GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT IS set.
-        """
-        os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
-
-        import gcsfs
-
-        assert (
-            gcsfs.GCSFileSystem is gcsfs.extended_gcsfs.ExtendedGcsFileSystem
-        ), "Should be ExtendedGcsFileSystem"

@@ -228,6 +228,7 @@ Contents
 .. toctree::
    api
    developer
+   hns_buckets
    fuse
    changelog
    code-of-conduct
