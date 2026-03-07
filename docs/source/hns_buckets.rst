@@ -58,20 +58,11 @@ For more details on managing these buckets, refer to the official documentation 
 Disabling HNS Support
 ------------------------------
 
-You can disable these features by explicitly passing the ``GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=False`` flag when instantiating the filesystem, or by setting an environment variable of the same name.
+You can disable these features by explicitly setting an environment variable of the same name.
 
-**Option 1: Via Keyword Argument**
-
-.. code-block:: python
-
-    import gcsfs
-
-    fs = gcsfs.GCSFileSystem(GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=False)
-
-**Option 2: Via Environment Variable**
-
-If you are running jobs on a cluster or don't want to modify your Python code, you can enable it globally via your environment:
+**Code Example**
 
 .. code-block:: bash
 
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false
+**Note:** *The choice of which filesystem class to use is made at import time based on the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT environment variable, and cannot be controlled via constructor arguments passed to GCSFileSystem.*
