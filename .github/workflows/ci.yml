@@ -59,7 +59,7 @@ jobs:
       - name: Run Full Test Suite [with Extended tests (Zonal & HNS) Enabled]
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
-          # TODO: Use dedicated test variables to decouple zonal test execution from the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT feature flag.
+          # TODO: Use dedicated test variables to decouple specialised test execution from the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT feature flag.
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
           pytest -vv -s \
             --cov=gcsfs --cov-append --cov-report=xml \
