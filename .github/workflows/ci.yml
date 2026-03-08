@@ -56,7 +56,7 @@ jobs:
             --log-format="%(asctime)s %(levelname)s %(message)s" \
             --log-date-format="%H:%M:%S" \
             gcsfs/
-      - name: Run Tests with Extended tests (Zonal & HNS) Enabled
+      - name: Run Extended tests (Zonal & HNS Enabled)
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
           # TODO: Use dedicated test variables to decouple specialised test execution from the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT feature flag.
