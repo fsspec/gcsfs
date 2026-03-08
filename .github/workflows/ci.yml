@@ -35,7 +35,7 @@ jobs:
       - name: install
         run: |
           pip install -e .
-      - name: Run Tests for standard buckets with fallback to GCSFileSystem
+      - name: Run Standard Bucket Tests with extended feature support turned OFF
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
           export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="false"
@@ -48,7 +48,7 @@ jobs:
         run: |
           pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
           pytest gcsfs/tests/perf/microbenchmarks --run-benchmarks-infra
-      - name: Run Tests for Standard buckets
+      - name: Run Standard Bucket Tests with default ON extended feature support
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
           pytest -vv -s \
@@ -56,7 +56,7 @@ jobs:
             --log-format="%(asctime)s %(levelname)s %(message)s" \
             --log-date-format="%H:%M:%S" \
             gcsfs/
-      - name: Run Full Test Suite (with Extended tests (Zonal & HNS) Enabled)
+      - name: Run Full Test Suite [with Extended tests (Zonal & HNS) Enabled]
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
           # TODO: Use dedicated test variables to decouple zonal test execution from the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT feature flag.
