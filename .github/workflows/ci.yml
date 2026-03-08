@@ -35,10 +35,12 @@ jobs:
       - name: install
         run: |
           pip install -e .
-      - name: Run Standard Tests
+      - name: Run Standard Bucket Tests with extended feature support turned OFF
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
+          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="false"
           pytest -vv -s \
+          --cov=gcsfs --cov-report=xml \
           --log-format="%(asctime)s %(levelname)s %(message)s" \
           --log-date-format="%H:%M:%S" \
           gcsfs/
@@ -46,15 +48,28 @@ jobs:
         run: |
           pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
           pytest gcsfs/tests/perf/microbenchmarks --run-benchmarks-infra
-      - name: Run Tests with experimental support
+      - name: Run Standard Bucket Tests with default ON extended feature support
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
-          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
           pytest -vv -s \
-            --cov=gcsfs --cov-report=xml \
+            --cov=gcsfs --cov-append --cov-report=xml \
             --log-format="%(asctime)s %(levelname)s %(message)s" \
             --log-date-format="%H:%M:%S" \
             gcsfs/
+      - name: Run Extended tests (Zonal & HNS Enabled)
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-secret.json
+          # TODO: Use dedicated test variables to decouple specialised test execution from the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT feature flag.
+          export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT="true"
+          pytest -vv -s \
+            --cov=gcsfs --cov-append --cov-report=xml \
+            --log-format="%(asctime)s %(levelname)s %(message)s" \
+            --log-date-format="%H:%M:%S" \
+            gcsfs/tests/test_extended_gcsfs.py \
+            gcsfs/tests/test_extended_hns_gcsfs.py \
+            gcsfs/tests/test_extended_gcsfs_unit.py \
+            gcsfs/tests/test_zb_hns_utils.py \
+            gcsfs/tests/test_zonal_file.py
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
