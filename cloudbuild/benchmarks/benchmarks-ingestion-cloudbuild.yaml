@@ -38,7 +38,9 @@ steps:
         sed -i "s/@PROJECT_ID@/${PROJECT_ID}/g" cloudbuild/benchmarks/ingest.sql
         sed -i "s/@DATASET_NAME@/${_DATASET_NAME}/g" cloudbuild/benchmarks/ingest.sql
 
-        bq query --use_legacy_sql=false --project_id=${PROJECT_ID} "$(cat cloudbuild/benchmarks/ingest.sql)"
+        bq query --use_legacy_sql=false \
+                 --project_id=${PROJECT_ID} \
+                 < cloudbuild/benchmarks/ingest.sql
 
 timeout: "14400s" # 2 hours
 

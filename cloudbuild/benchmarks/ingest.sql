@@ -1,5 +1,3 @@
--- 1. Ensure the history table exists with metadata columns
--- Tokens: @PROJECT_ID@ and @DATASET_NAME@
 CREATE TABLE IF NOT EXISTS `@PROJECT_ID@.@DATASET_NAME@.history`
 (
   run_date DATE,
@@ -9,7 +7,6 @@ CREATE TABLE IF NOT EXISTS `@PROJECT_ID@.@DATASET_NAME@.history`
 )
 PARTITION BY run_date;
 
--- 2. Dynamically add missing columns to history
 DECLARE alter_stmt STRING;
 SET alter_stmt = (
   SELECT
@@ -28,7 +25,6 @@ IF alter_stmt IS NOT NULL THEN
   EXECUTE IMMEDIATE alter_stmt;
 END IF;
 
--- 3. Perform idempotent ingestion
 INSERT INTO `@PROJECT_ID@.@DATASET_NAME@.history`
 SELECT
   PARSE_DATE('%d%m%Y', REGEXP_EXTRACT(_FILE_NAME, r'/(\d{8})/')) as run_date,
