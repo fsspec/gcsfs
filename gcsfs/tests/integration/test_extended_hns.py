@@ -55,18 +55,23 @@ class TestExtendedGcsFileSystemMv:
         file_in_root = f"{path1}/file1.txt"
         nested_file = f"{path1}/sub_dir/file2.txt"
 
-        gcsfs.touch(file_in_root)
-        gcsfs.touch(nested_file)
+        data1 = b"content of file1"
+        data2 = b"content of file2"
+
+        gcsfs.pipe(file_in_root, data1)
+        gcsfs.pipe(nested_file, data2)
 
         gcsfs.mv(path1, path2)
 
         # Verify that the old path no longer exist
         assert not gcsfs.exists(path1)
 
-        # Verify that the new paths exist
+        # Verify that the new paths exist and have correct content
         assert gcsfs.exists(path2)
         assert gcsfs.exists(f"{path2}/file1.txt")
+        assert gcsfs.cat(f"{path2}/file1.txt") == data1
         assert gcsfs.exists(f"{path2}/sub_dir/file2.txt")
+        assert gcsfs.cat(f"{path2}/sub_dir/file2.txt") == data2
 
     def test_hns_folder_rename_with_protocol(self, gcs_hns):
         """Test successful HNS folder rename when paths include the protocol."""
@@ -77,12 +82,15 @@ class TestExtendedGcsFileSystemMv:
         path2 = f"gs://{path2_no_proto}"
 
         file_in_root = f"{path1}/file1.txt"
-        gcsfs.touch(file_in_root)
+        data = b"content of file with protocol"
+        gcsfs.pipe(file_in_root, data)
 
         gcsfs.mv(path1, path2)
 
         assert not gcsfs.exists(path1)
         assert gcsfs.exists(path2)
+        assert gcsfs.exists(f"{path2}/file1.txt")
+        assert gcsfs.cat(f"{path2}/file1.txt") == data
 
     def test_hns_empty_folder_rename_success(self, gcs_hns):
         """Test successful HNS rename of an empty folder."""
@@ -106,11 +114,13 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/file.txt"
         path2 = f"{TEST_HNS_BUCKET}/new_file.txt"
 
-        gcsfs.touch(path1)
+        data = b"content of single file"
+        gcsfs.pipe(path1, data)
         gcsfs.mv(path1, path2)
 
         assert not gcsfs.exists(path1)
         assert gcsfs.exists(path2)
+        assert gcsfs.cat(path2) == data
 
     def test_folder_rename_to_root_directory(
         self,
@@ -123,13 +133,33 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/test/{dir_name}"
         path2 = f"{TEST_HNS_BUCKET}/"
 
-        gcsfs.touch(f"{path1}/file.txt")
+        data = b"content of file in root dir rename"
+        gcsfs.pipe(f"{path1}/file.txt", data)
         gcsfs.mv(path1, path2, recursive=True)
 
         assert not gcsfs.exists(path1)
         assert gcsfs.exists(path2)
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}")
         assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
+        assert gcsfs.cat(f"{path2.rstrip('/')}/{dir_name}/file.txt") == data
+
+    def test_hns_rm_immediately_after_rename(self, gcs_hns):
+        """Test that a folder can be deleted immediately after rename."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/rename_before_rm"
+        path2 = f"{TEST_HNS_BUCKET}/renamed_for_rm"
+
+        # Create folder with content
+        gcsfs.touch(f"{path1}/file.txt")
+        assert gcsfs.exists(path1)
+
+        # Rename and then immediately remove
+        gcsfs.mv(path1, path2)
+        gcsfs.rm(path2, recursive=True)
+
+        # Verify both are gone
+        assert not gcsfs.exists(path1)
+        assert not gcsfs.exists(path2)
 
     def test_hns_rename_fails_if_parent_does_not_exist(self, gcs_hns):
         """Test that HNS rename fails if the destination's parent does not exist."""
@@ -237,7 +267,8 @@ class TestExtendedGcsFileSystemMv:
 
         # Create a placeholder object (ends with /)
         gcsfs.touch(f"{src_placeholder}/")
-        gcsfs.touch(src_file)
+        data = b"content of file with placeholder"
+        gcsfs.pipe(src_file, data)
 
         gcsfs.invalidate_cache()
 
@@ -248,6 +279,7 @@ class TestExtendedGcsFileSystemMv:
         assert not gcsfs.exists(src_file)
         assert gcsfs.exists(dest_placeholder)
         assert gcsfs.exists(dest_file)
+        assert gcsfs.cat(dest_file) == data
         assert gcsfs.exists(f"{dest_placeholder}/")
 
     def test_hns_mv_file_cache_update(self, gcs_hns):
