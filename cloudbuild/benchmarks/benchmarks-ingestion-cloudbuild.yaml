@@ -1,6 +1,5 @@
 substitutions:
   _DATASET_NAME: ""
-  _LOCATION: ""
 
 steps:
   # Step 0: Create the BigQuery dataset if it doesn't exist
@@ -11,7 +10,7 @@ steps:
       - '-c'
       - |
         bq show ${PROJECT_ID}:${_DATASET_NAME} || \
-        bq mk --dataset --location=${_LOCATION} ${PROJECT_ID}:${_DATASET_NAME}
+        bq mk --dataset --location=${LOCATION} ${PROJECT_ID}:${_DATASET_NAME}
 
   # Step 1: Update the Staging External Table definition
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
