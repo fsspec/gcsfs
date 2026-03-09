@@ -20,7 +20,7 @@ steps:
       - '-c'
       - |
         bq mk --project_id=${PROJECT_ID} \
-          --external_table_definition=benchmarks_schema.json \
+          --external_table_definition=cloudbuild/benchmarks/benchmarks_schema.json \
           --force \
           ${_DATASET_NAME}.staging
 
@@ -34,7 +34,7 @@ steps:
         sed -i "s/@PROJECT_ID@/${PROJECT_ID}/g" ingest.sql
         sed -i "s/@DATASET_NAME@/${_DATASET_NAME}/g" ingest.sql
 
-        bq query --use_legacy_sql=false --project_id=${PROJECT_ID} "$(cat ingest.sql)"
+        bq query --use_legacy_sql=false --project_id=${PROJECT_ID} "$(cat cloudbuild/benchmarks/ingest.sql)"
 
 timeout: "14400s" # 2 hours
 
