@@ -1,5 +1,6 @@
 -- 1. Ensure the history table exists with metadata columns
-CREATE TABLE IF NOT EXISTS `gcs-aiml-clients-testing-101.gcsfs_microbenchmarks.history`
+-- Tokens: @PROJECT_ID@ and @DATASET_NAME@
+CREATE TABLE IF NOT EXISTS `@PROJECT_ID@.@DATASET_NAME@.history`
 (
   run_date DATE,
   build_id STRING,
@@ -12,12 +13,13 @@ PARTITION BY run_date;
 DECLARE alter_stmt STRING;
 SET alter_stmt = (
   SELECT
-    CONCAT("ALTER TABLE `gcs-aiml-clients-testing-101.gcsfs_microbenchmarks.history` ",
+    CONCAT("ALTER TABLE `@PROJECT_ID@.@DATASET_NAME@.history` ",
            STRING_AGG(CONCAT("ADD COLUMN `", column_name, "` ", data_type), ", "))
-  FROM `gcs-aiml-clients-testing-101.gcsfs_microbenchmarks.INFORMATION_SCHEMA.COLUMNS`
+  FROM `@PROJECT_ID@.@DATASET_NAME@.INFORMATION_SCHEMA.COLUMNS`
   WHERE table_name = 'staging'
     AND column_name NOT IN (
-      SELECT column_name FROM `gcs-aiml-clients-testing-101.gcsfs_microbenchmarks.INFORMATION_SCHEMA.COLUMNS`
+      SELECT column_name
+      FROM `@PROJECT_ID@.@DATASET_NAME@.INFORMATION_SCHEMA.COLUMNS`
       WHERE table_name = 'history'
     )
 );
@@ -27,12 +29,15 @@ IF alter_stmt IS NOT NULL THEN
 END IF;
 
 -- 3. Perform idempotent ingestion
-INSERT INTO `gcs-aiml-clients-testing-101.gcsfs_microbenchmarks.history`
+INSERT INTO `@PROJECT_ID@.@DATASET_NAME@.history`
 SELECT
   PARSE_DATE('%d%m%Y', REGEXP_EXTRACT(_FILE_NAME, r'/(\d{8})/')) as run_date,
   REGEXP_EXTRACT(_FILE_NAME, r'/([0-9a-fA-F-]{36})/') as build_id,
   PARSE_TIMESTAMP('%d%m%Y-%H%M%S', REGEXP_EXTRACT(_FILE_NAME, r'/(\d{8}-\d{6})/')) as run_timestamp,
   _FILE_NAME as source_uri,
   *
-FROM `gcs-aiml-clients-testing-101.gcsfs_microbenchmarks.staging`
-WHERE _FILE_NAME NOT IN (SELECT DISTINCT source_uri FROM `gcs-aiml-clients-testing-101.gcsfs_microbenchmarks.history`);
+FROM `@PROJECT_ID@.@DATASET_NAME@.staging`
+WHERE _FILE_NAME NOT IN (
+  SELECT DISTINCT source_uri
+  FROM `@PROJECT_ID@.@DATASET_NAME@.history`
+);

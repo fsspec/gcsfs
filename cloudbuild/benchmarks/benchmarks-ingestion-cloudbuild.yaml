@@ -25,13 +25,14 @@ steps:
           --force \
           ${_DATASET_NAME}.staging
 
-  # Step 2: Run the migration and ingestion SQL script
+  # Step 2: Perform Token Replacement and run ingestion script
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'run-ingestion'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        sed -i "s/gcs-aiml-clients-testing-101/${PROJECT_ID}/g" ingest.sql
-        sed -i "s/gcsfs_microbenchmarks/${_DATASET_NAME}/g" ingest.sql
+        sed -i "s/@PROJECT_ID@/${PROJECT_ID}/g" ingest.sql
+        sed -i "s/@DATASET_NAME@/${_DATASET_NAME}/g" ingest.sql
+
         bq query --use_legacy_sql=false --project_id=${PROJECT_ID} "$(cat ingest.sql)"
