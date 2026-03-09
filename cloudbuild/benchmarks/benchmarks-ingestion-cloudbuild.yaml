@@ -6,6 +6,7 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'ensure-dataset'
     entrypoint: 'bash'
+    waitFor: ['-'] # Starts immediately
     args:
       - '-c'
       - |
@@ -16,6 +17,7 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'update-staging-table'
     entrypoint: 'bash'
+    waitFor: ['ensure-dataset']
     args:
       - '-c'
       - |
@@ -28,11 +30,13 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'run-ingestion'
     entrypoint: 'bash'
+    waitFor: ['update-staging-table']
     args:
       - '-c'
       - |
-        sed -i "s/@PROJECT_ID@/${PROJECT_ID}/g" ingest.sql
-        sed -i "s/@DATASET_NAME@/${_DATASET_NAME}/g" ingest.sql
+        # Ensure path is consistent for both sed and bq query
+        sed -i "s/@PROJECT_ID@/${PROJECT_ID}/g" cloudbuild/benchmarks/ingest.sql
+        sed -i "s/@DATASET_NAME@/${_DATASET_NAME}/g" cloudbuild/benchmarks/ingest.sql
 
         bq query --use_legacy_sql=false --project_id=${PROJECT_ID} "$(cat cloudbuild/benchmarks/ingest.sql)"
 
