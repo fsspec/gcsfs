@@ -16,6 +16,7 @@ import os
 import uuid
 
 import pytest
+import re
 
 from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import TEST_HNS_BUCKET
@@ -1207,16 +1208,11 @@ class TestExtendedGcsFileSystemTree:
             "folder_E_empty",
         }
 
-        found_names = set()
         lines = tree_str.strip().split("\n")
-        import re
+        # Extract basenames from tree lines (e.g., "├── folder_A/" -> "folder_A")
+        found_names = {line.split("──")[-1].strip().rstrip("/") for line in lines[1:]}
 
-        for line in lines[1:]:
-            match = re.search(r"[├└]──\s*([^\s(]+)", line)
-            if match:
-                found_names.add(match.group(1).rstrip("/"))
-
-        assert expected_basenames == found_names
+        assert found_names == expected_basenames
 
 
 class TestExtendedGcsFileSystemGlob:
@@ -1226,19 +1222,19 @@ class TestExtendedGcsFileSystemGlob:
         base_dir = f"{TEST_HNS_BUCKET}/verify_glob_{uuid.uuid4().hex}"
 
         files = [
-            f"{base_dir}/dir_A/file1.txt",
-            f"{base_dir}/dir_A/file2.txt",
-            f"{base_dir}/dir_A/subdir_B/file3.txt",
-            f"{base_dir}/dir_C/file4.dat",
+            f"{base_dir}/folder_with_files/file1.txt",
+            f"{base_dir}/folder_with_files/file2.txt",
+            f"{base_dir}/folder_with_files/subdir/file3.txt",
+            f"{base_dir}/folder_with_one_file/file4.dat",
             f"{base_dir}/root_file.txt",
         ]
-        placeholder = f"{base_dir}/placeholder_dir/"
+        placeholder = f"{base_dir}/folder_with_placeholder/"
         dirs = [
-            f"{base_dir}/dir_A",
-            f"{base_dir}/dir_A/subdir_B",
-            f"{base_dir}/dir_C",
-            f"{base_dir}/empty_dir_1",
-            f"{base_dir}/empty_dir_2",
+            f"{base_dir}/folder_with_files",
+            f"{base_dir}/folder_with_files/subdir",
+            f"{base_dir}/folder_with_one_file",
+            f"{base_dir}/empty_folder_1",
+            f"{base_dir}/empty_folder_2",
         ]
 
         for d in dirs:
@@ -1251,52 +1247,52 @@ class TestExtendedGcsFileSystemGlob:
             {
                 "pattern": f"{base_dir}/*",
                 "expected": {
-                    f"{base_dir}/dir_A",
-                    f"{base_dir}/dir_C",
-                    f"{base_dir}/empty_dir_1",
-                    f"{base_dir}/empty_dir_2",
+                    f"{base_dir}/folder_with_files",
+                    f"{base_dir}/folder_with_one_file",
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
                     f"{base_dir}/root_file.txt",
-                    f"{base_dir}/placeholder_dir",
+                    f"{base_dir}/folder_with_placeholder",
                 },
                 "description": "Non-recursive top-level glob",
             },
             {
-                "pattern": f"{base_dir}/dir_A/*",
+                "pattern": f"{base_dir}/folder_with_files/*",
                 "expected": {
-                    f"{base_dir}/dir_A/file1.txt",
-                    f"{base_dir}/dir_A/file2.txt",
-                    f"{base_dir}/dir_A/subdir_B",
+                    f"{base_dir}/folder_with_files/file1.txt",
+                    f"{base_dir}/folder_with_files/file2.txt",
+                    f"{base_dir}/folder_with_files/subdir",
                 },
                 "description": "Non-recursive sub-level glob",
             },
             {
-                "pattern": f"{base_dir}/dir_A/file?.txt",
+                "pattern": f"{base_dir}/folder_with_files/file?.txt",
                 "expected": {
-                    f"{base_dir}/dir_A/file1.txt",
-                    f"{base_dir}/dir_A/file2.txt",
+                    f"{base_dir}/folder_with_files/file1.txt",
+                    f"{base_dir}/folder_with_files/file2.txt",
                 },
                 "description": "Question mark wildcard",
             },
             {
-                "pattern": f"{base_dir}/empty_dir_[12]",
-                "expected": {f"{base_dir}/empty_dir_1", f"{base_dir}/empty_dir_2"},
+                "pattern": f"{base_dir}/empty_folder_[12]",
+                "expected": {f"{base_dir}/empty_folder_1", f"{base_dir}/empty_folder_2"},
                 "description": "Character range wildcard",
             },
             {
                 "pattern": f"{base_dir}/**",
                 "expected": {
                     base_dir,
-                    f"{base_dir}/dir_A",
-                    f"{base_dir}/dir_A/subdir_B",
-                    f"{base_dir}/dir_C",
-                    f"{base_dir}/empty_dir_1",
-                    f"{base_dir}/empty_dir_2",
-                    f"{base_dir}/dir_A/file1.txt",
-                    f"{base_dir}/dir_A/file2.txt",
-                    f"{base_dir}/dir_A/subdir_B/file3.txt",
-                    f"{base_dir}/dir_C/file4.dat",
+                    f"{base_dir}/folder_with_files",
+                    f"{base_dir}/folder_with_files/subdir",
+                    f"{base_dir}/folder_with_one_file",
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
+                    f"{base_dir}/folder_with_files/file1.txt",
+                    f"{base_dir}/folder_with_files/file2.txt",
+                    f"{base_dir}/folder_with_files/subdir/file3.txt",
+                    f"{base_dir}/folder_with_one_file/file4.dat",
                     f"{base_dir}/root_file.txt",
-                    f"{base_dir}/placeholder_dir",
+                    f"{base_dir}/folder_with_placeholder",
                 },
                 "description": "Recursive glob all",
             },
@@ -1317,52 +1313,48 @@ class TestExtendedGcsFileSystemWalk:
     def test_hns_walk_complex(self, gcs_hns):
         base_dir = f"{TEST_HNS_BUCKET}/verify_walk_{uuid.uuid4().hex}"
 
-        files = [
-            f"{base_dir}/parent_dir/child_dir/file1.txt",
-            f"{base_dir}/other_dir/file3.txt",
-            f"{base_dir}/root_file.txt",
-        ]
-        dirs = [
-            f"{base_dir}/parent_dir",
-            f"{base_dir}/parent_dir/child_dir",
-            f"{base_dir}/empty_dir",
-            f"{base_dir}/other_dir",
-        ]
-        placeholder = f"{base_dir}/placeholder_object/"
+        folder_with_files = f"{base_dir}/folder_with_files"
+        subdir = f"{folder_with_files}/subdir"
+        empty_folder = f"{base_dir}/empty_folder"
+        folder_with_one_file = f"{base_dir}/folder_with_one_file"
+        folder_with_placeholder = f"{base_dir}/folder_with_placeholder"
 
         gcs_hns.mkdir(base_dir)
-        for d in dirs:
-            gcs_hns.mkdir(d)
-        for f in files:
-            gcs_hns.touch(f)
-        gcs_hns.touch(placeholder)
+        gcs_hns.mkdir(folder_with_files)
+        gcs_hns.mkdir(subdir)
+        gcs_hns.mkdir(empty_folder)
+        gcs_hns.mkdir(folder_with_one_file)
+
+        gcs_hns.touch(f"{subdir}/file1.txt")
+        gcs_hns.touch(f"{folder_with_one_file}/file3.txt")
+        gcs_hns.touch(f"{base_dir}/root_file.txt")
+        gcs_hns.touch(f"{folder_with_placeholder}/")
 
         walk_results = list(gcs_hns.walk(base_dir))
 
-        expected_dirs = {
-            base_dir,
-            f"{base_dir}/parent_dir",
-            f"{base_dir}/parent_dir/child_dir",
-            f"{base_dir}/empty_dir",
-            f"{base_dir}/other_dir",
-            f"{base_dir}/placeholder_object",
-        }
-        expected_files = {
-            f"{base_dir}/parent_dir/child_dir/file1.txt",
-            f"{base_dir}/other_dir/file3.txt",
-            f"{base_dir}/root_file.txt",
-            f"{base_dir}/placeholder_object/",
+        # Expected structure: root -> (set of dirs, set of files)
+        expected_structure = {
+            base_dir: (
+                {
+                    "folder_with_files",
+                    "empty_folder",
+                    "folder_with_one_file",
+                    "folder_with_placeholder",
+                },
+                {"root_file.txt"},
+            ),
+            folder_with_files: ({"subdir"}, set()),
+            subdir: (set(), {"file1.txt"}),
+            empty_folder: (set(), set()),
+            folder_with_one_file: (set(), {"file3.txt"}),
+            folder_with_placeholder: (set(), {""}),
         }
 
-        found_dirs = set()
-        found_files = set()
+        assert len(walk_results) == len(expected_structure)
         for root, d_list, f_list in walk_results:
             root = root.rstrip("/")
-            found_dirs.add(root)
-            for d in d_list:
-                found_dirs.add(f"{root}/{d}".rstrip("/"))
-            for f in f_list:
-                found_files.add(f"{root}/{f}")
+            assert root in expected_structure, f"Unexpected root yielded by walk: {root}"
+            exp_dirs, exp_files = expected_structure[root]
+            assert set(d_list) == exp_dirs, f"Directories mismatch for {root}"
+            assert set(f_list) == exp_files, f"Files mismatch for {root}"
 
-        assert found_dirs == expected_dirs
-        assert found_files == expected_files

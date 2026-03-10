@@ -1956,27 +1956,24 @@ def test_tree(gcs):
         "placeholder_Q",
     }
 
-    found_names = set()
     lines = tree_str.strip().split("\n")
-    for line in lines[1:]:
-        match = re.search(r"[├└]──\s*([^\s(]+)", line)
-        if match:
-            found_names.add(match.group(1).rstrip("/"))
+    # Extract basenames from tree lines (e.g., "├── folder_A/" -> "folder_A")
+    found_names = {line.split("──")[-1].strip().rstrip("/") for line in lines[1:]}
 
-    assert expected_basenames == found_names
+    assert found_names == expected_basenames
 
 
 def test_glob(gcs):
     base_dir = f"{TEST_BUCKET}/test_glob_regional_{uuid.uuid4().hex}"
 
     files = [
-        f"{base_dir}/dir_A/file1.txt",
-        f"{base_dir}/dir_A/file2.txt",
-        f"{base_dir}/dir_A/subdir_B/file3.txt",
-        f"{base_dir}/dir_C/file4.dat",
+        f"{base_dir}/folder_with_files/file1.txt",
+        f"{base_dir}/folder_with_files/file2.txt",
+        f"{base_dir}/folder_with_files/subdir/file3.txt",
+        f"{base_dir}/folder_with_one_file/file4.dat",
         f"{base_dir}/root_file.txt",
     ]
-    placeholder = f"{base_dir}/placeholder_dir/"
+    placeholder = f"{base_dir}/folder_with_placeholder/"
 
     for f in files:
         gcs.touch(f)
@@ -1986,33 +1983,33 @@ def test_glob(gcs):
         {
             "pattern": f"{base_dir}/*",
             "expected": {
-                f"{base_dir}/dir_A",
-                f"{base_dir}/dir_C",
+                f"{base_dir}/folder_with_files",
+                f"{base_dir}/folder_with_one_file",
                 f"{base_dir}/root_file.txt",
-                f"{base_dir}/placeholder_dir",
+                f"{base_dir}/folder_with_placeholder",
             },
         },
         {
-            "pattern": f"{base_dir}/dir_A/*",
+            "pattern": f"{base_dir}/folder_with_files/*",
             "expected": {
-                f"{base_dir}/dir_A/file1.txt",
-                f"{base_dir}/dir_A/file2.txt",
-                f"{base_dir}/dir_A/subdir_B",
+                f"{base_dir}/folder_with_files/file1.txt",
+                f"{base_dir}/folder_with_files/file2.txt",
+                f"{base_dir}/folder_with_files/subdir",
             },
         },
         {
             "pattern": f"{base_dir}/**",
             "expected": {
                 base_dir,
-                f"{base_dir}/dir_A",
-                f"{base_dir}/dir_A/subdir_B",
-                f"{base_dir}/dir_C",
-                f"{base_dir}/dir_A/file1.txt",
-                f"{base_dir}/dir_A/file2.txt",
-                f"{base_dir}/dir_A/subdir_B/file3.txt",
-                f"{base_dir}/dir_C/file4.dat",
+                f"{base_dir}/folder_with_files",
+                f"{base_dir}/folder_with_files/subdir",
+                f"{base_dir}/folder_with_one_file",
+                f"{base_dir}/folder_with_files/file1.txt",
+                f"{base_dir}/folder_with_files/file2.txt",
+                f"{base_dir}/folder_with_files/subdir/file3.txt",
+                f"{base_dir}/folder_with_one_file/file4.dat",
                 f"{base_dir}/root_file.txt",
-                f"{base_dir}/placeholder_dir",
+                f"{base_dir}/folder_with_placeholder",
             },
         },
     ]
@@ -2027,46 +2024,34 @@ def test_glob(gcs):
 def test_walk(gcs):
     base_dir = f"{TEST_BUCKET}/test_walk_regional_{uuid.uuid4().hex}"
 
-    files = [
-        f"{base_dir}/parent_dir/child_dir/file1.txt",
-        f"{base_dir}/other_dir/file3.txt",
-        f"{base_dir}/root_file.txt",
-    ]
-    placeholder = f"{base_dir}/placeholder_object/"
+    folder_with_files = f"{base_dir}/folder_with_files"
+    subdir = f"{folder_with_files}/subdir"
+    folder_with_one_file = f"{base_dir}/folder_with_one_file"
+    folder_with_placeholder = f"{base_dir}/folder_with_placeholder"
 
-    for f in files:
-        gcs.touch(f)
-    gcs.touch(placeholder)
+    gcs.touch(f"{subdir}/file1.txt")
+    gcs.touch(f"{folder_with_one_file}/file3.txt")
+    gcs.touch(f"{base_dir}/root_file.txt")
+    gcs.touch(f"{folder_with_placeholder}/")
 
     walk_results = list(gcs.walk(base_dir))
 
-    # Expected result for FLAT
-    expected_dirs = {
-        base_dir,
-        f"{base_dir}/parent_dir",
-        f"{base_dir}/parent_dir/child_dir",
-        f"{base_dir}/other_dir",
-        f"{base_dir}/placeholder_object",
-    }
-    expected_files = {
-        f"{base_dir}/parent_dir/child_dir/file1.txt",
-        f"{base_dir}/other_dir/file3.txt",
-        f"{base_dir}/root_file.txt",
+    # Expected structure for FLAT bucket
+    expected_structure = {
+        base_dir: (
+            {"folder_with_files", "folder_with_one_file", "folder_with_placeholder"},
+            {"root_file.txt"},
+        ),
+        folder_with_files: ({"subdir"}, set()),
+        subdir: (set(), {"file1.txt"}),
+        folder_with_one_file: (set(), {"file3.txt"}),
+        folder_with_placeholder: (set(), {""}),
     }
 
-    # In flat buckets, placeholder objects might appear as files as well
-    # depending on the implementation's handling of trailing slashes.
-    expected_files.add(f"{base_dir}/placeholder_object/")
-
-    found_dirs = set()
-    found_files = set()
+    assert len(walk_results) == len(expected_structure)
     for root, d_list, f_list in walk_results:
         root = root.rstrip("/")
-        found_dirs.add(root)
-        for d in d_list:
-            found_dirs.add(f"{root}/{d}".rstrip("/"))
-        for f in f_list:
-            found_files.add(f"{root}/{f}")
-
-    assert found_dirs == expected_dirs
-    assert found_files == expected_files
+        assert root in expected_structure
+        exp_dirs, exp_files = expected_structure[root]
+        assert set(d_list) == exp_dirs
+        assert set(f_list) == exp_files
