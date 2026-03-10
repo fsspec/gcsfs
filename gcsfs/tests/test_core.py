@@ -1954,15 +1954,15 @@ def test_tree(gcs):
             "deep_file.txt",
             "placeholder_P",
             "file_P.txt",
-            "placeholder_Q"
+            "placeholder_Q",
         }
 
         found_names = set()
         lines = tree_str.strip().split("\n")
         for line in lines[1:]:
-            match = re.search(r'[├└]──\s*([^\s(]+)', line)
+            match = re.search(r"[├└]──\s*([^\s(]+)", line)
             if match:
-                found_names.add(match.group(1).rstrip('/'))
+                found_names.add(match.group(1).rstrip("/"))
 
         assert expected_basenames == found_names
 
@@ -1991,24 +1991,42 @@ def test_glob(gcs):
         test_cases = [
             {
                 "pattern": f"{base_dir}/*",
-                "expected": {f"{base_dir}/dir_A", f"{base_dir}/dir_C", f"{base_dir}/root_file.txt", f"{base_dir}/placeholder_dir"},
+                "expected": {
+                    f"{base_dir}/dir_A",
+                    f"{base_dir}/dir_C",
+                    f"{base_dir}/root_file.txt",
+                    f"{base_dir}/placeholder_dir",
+                },
             },
             {
                 "pattern": f"{base_dir}/dir_A/*",
-                "expected": {f"{base_dir}/dir_A/file1.txt", f"{base_dir}/dir_A/file2.txt", f"{base_dir}/dir_A/subdir_B"},
+                "expected": {
+                    f"{base_dir}/dir_A/file1.txt",
+                    f"{base_dir}/dir_A/file2.txt",
+                    f"{base_dir}/dir_A/subdir_B",
+                },
             },
             {
                 "pattern": f"{base_dir}/**",
-                "expected": {base_dir, f"{base_dir}/dir_A", f"{base_dir}/dir_A/subdir_B", f"{base_dir}/dir_C",
-                             f"{base_dir}/dir_A/file1.txt", f"{base_dir}/dir_A/file2.txt", f"{base_dir}/dir_A/subdir_B/file3.txt",
-                             f"{base_dir}/dir_C/file4.dat", f"{base_dir}/root_file.txt", f"{base_dir}/placeholder_dir"},
+                "expected": {
+                    base_dir,
+                    f"{base_dir}/dir_A",
+                    f"{base_dir}/dir_A/subdir_B",
+                    f"{base_dir}/dir_C",
+                    f"{base_dir}/dir_A/file1.txt",
+                    f"{base_dir}/dir_A/file2.txt",
+                    f"{base_dir}/dir_A/subdir_B/file3.txt",
+                    f"{base_dir}/dir_C/file4.dat",
+                    f"{base_dir}/root_file.txt",
+                    f"{base_dir}/placeholder_dir",
+                },
             },
         ]
 
         for case in test_cases:
             results = gcs.glob(case["pattern"])
-            results_normalized = {r.rstrip('/') for r in results}
-            expected_normalized = {e.rstrip('/') for e in case["expected"]}
+            results_normalized = {r.rstrip("/") for r in results}
+            expected_normalized = {e.rstrip("/") for e in case["expected"]}
             assert results_normalized == expected_normalized
 
     finally:
@@ -2034,8 +2052,18 @@ def test_walk(gcs):
         walk_results = list(gcs.walk(base_dir))
 
         # Expected result for FLAT
-        expected_dirs = {base_dir, f"{base_dir}/parent_dir", f"{base_dir}/parent_dir/child_dir", f"{base_dir}/other_dir", f"{base_dir}/placeholder_object"}
-        expected_files = {f"{base_dir}/parent_dir/child_dir/file1.txt", f"{base_dir}/other_dir/file3.txt", f"{base_dir}/root_file.txt"}
+        expected_dirs = {
+            base_dir,
+            f"{base_dir}/parent_dir",
+            f"{base_dir}/parent_dir/child_dir",
+            f"{base_dir}/other_dir",
+            f"{base_dir}/placeholder_object",
+        }
+        expected_files = {
+            f"{base_dir}/parent_dir/child_dir/file1.txt",
+            f"{base_dir}/other_dir/file3.txt",
+            f"{base_dir}/root_file.txt",
+        }
 
         # In flat buckets, placeholder objects might appear as files as well
         # depending on the implementation's handling of trailing slashes.
@@ -2044,10 +2072,10 @@ def test_walk(gcs):
         found_dirs = set()
         found_files = set()
         for root, d_list, f_list in walk_results:
-            root = root.rstrip('/')
+            root = root.rstrip("/")
             found_dirs.add(root)
             for d in d_list:
-                found_dirs.add(f"{root}/{d}".rstrip('/'))
+                found_dirs.add(f"{root}/{d}".rstrip("/"))
             for f in f_list:
                 found_files.add(f"{root}/{f}")
 

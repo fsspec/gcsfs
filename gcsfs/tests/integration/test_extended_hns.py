@@ -1205,16 +1205,17 @@ class TestExtendedGcsFileSystemTree:
                 "placeholder_P",
                 "file_P.txt",
                 "placeholder_Q",
-                "folder_E_empty"
+                "folder_E_empty",
             }
 
             found_names = set()
             lines = tree_str.strip().split("\n")
             import re
+
             for line in lines[1:]:
-                match = re.search(r'[├└]──\s*([^\s(]+)', line)
+                match = re.search(r"[├└]──\s*([^\s(]+)", line)
                 if match:
-                    found_names.add(match.group(1).rstrip('/'))
+                    found_names.add(match.group(1).rstrip("/"))
 
             assert expected_basenames == found_names
 
@@ -1255,38 +1256,65 @@ class TestExtendedGcsFileSystemGlob:
             test_cases = [
                 {
                     "pattern": f"{base_dir}/*",
-                    "expected": {f"{base_dir}/dir_A", f"{base_dir}/dir_C", f"{base_dir}/empty_dir_1", f"{base_dir}/empty_dir_2", f"{base_dir}/root_file.txt", f"{base_dir}/placeholder_dir"},
-                    "description": "Non-recursive top-level glob"
+                    "expected": {
+                        f"{base_dir}/dir_A",
+                        f"{base_dir}/dir_C",
+                        f"{base_dir}/empty_dir_1",
+                        f"{base_dir}/empty_dir_2",
+                        f"{base_dir}/root_file.txt",
+                        f"{base_dir}/placeholder_dir",
+                    },
+                    "description": "Non-recursive top-level glob",
                 },
                 {
                     "pattern": f"{base_dir}/dir_A/*",
-                    "expected": {f"{base_dir}/dir_A/file1.txt", f"{base_dir}/dir_A/file2.txt", f"{base_dir}/dir_A/subdir_B"},
-                    "description": "Non-recursive sub-level glob"
+                    "expected": {
+                        f"{base_dir}/dir_A/file1.txt",
+                        f"{base_dir}/dir_A/file2.txt",
+                        f"{base_dir}/dir_A/subdir_B",
+                    },
+                    "description": "Non-recursive sub-level glob",
                 },
                 {
                     "pattern": f"{base_dir}/dir_A/file?.txt",
-                    "expected": {f"{base_dir}/dir_A/file1.txt", f"{base_dir}/dir_A/file2.txt"},
-                    "description": "Question mark wildcard"
+                    "expected": {
+                        f"{base_dir}/dir_A/file1.txt",
+                        f"{base_dir}/dir_A/file2.txt",
+                    },
+                    "description": "Question mark wildcard",
                 },
                 {
                     "pattern": f"{base_dir}/empty_dir_[12]",
                     "expected": {f"{base_dir}/empty_dir_1", f"{base_dir}/empty_dir_2"},
-                    "description": "Character range wildcard"
+                    "description": "Character range wildcard",
                 },
                 {
                     "pattern": f"{base_dir}/**",
-                    "expected": {base_dir, f"{base_dir}/dir_A", f"{base_dir}/dir_A/subdir_B", f"{base_dir}/dir_C", f"{base_dir}/empty_dir_1", f"{base_dir}/empty_dir_2",
-                                 f"{base_dir}/dir_A/file1.txt", f"{base_dir}/dir_A/file2.txt", f"{base_dir}/dir_A/subdir_B/file3.txt",
-                                 f"{base_dir}/dir_C/file4.dat", f"{base_dir}/root_file.txt", f"{base_dir}/placeholder_dir"},
-                    "description": "Recursive glob all"
+                    "expected": {
+                        base_dir,
+                        f"{base_dir}/dir_A",
+                        f"{base_dir}/dir_A/subdir_B",
+                        f"{base_dir}/dir_C",
+                        f"{base_dir}/empty_dir_1",
+                        f"{base_dir}/empty_dir_2",
+                        f"{base_dir}/dir_A/file1.txt",
+                        f"{base_dir}/dir_A/file2.txt",
+                        f"{base_dir}/dir_A/subdir_B/file3.txt",
+                        f"{base_dir}/dir_C/file4.dat",
+                        f"{base_dir}/root_file.txt",
+                        f"{base_dir}/placeholder_dir",
+                    },
+                    "description": "Recursive glob all",
                 },
             ]
 
             for case in test_cases:
                 results = gcs_hns.glob(case["pattern"])
-                results_normalized = {r.rstrip('/') for r in results}
-                expected_normalized = {e.rstrip('/') for e in case["expected"]}
-                assert results_normalized == expected_normalized, f"Failed: {case['description']}"
+                results_normalized = {r.rstrip("/") for r in results}
+                expected_normalized = {e.rstrip("/") for e in case["expected"]}
+                assert (
+                    results_normalized == expected_normalized
+                ), f"Failed: {case['description']}"
 
         finally:
             if gcs_hns.exists(base_dir):
@@ -1322,16 +1350,28 @@ class TestExtendedGcsFileSystemWalk:
 
             walk_results = list(gcs_hns.walk(base_dir))
 
-            expected_dirs = {base_dir, f"{base_dir}/parent_dir", f"{base_dir}/parent_dir/child_dir", f"{base_dir}/empty_dir", f"{base_dir}/other_dir", f"{base_dir}/placeholder_object"}
-            expected_files = {f"{base_dir}/parent_dir/child_dir/file1.txt", f"{base_dir}/other_dir/file3.txt", f"{base_dir}/root_file.txt", f"{base_dir}/placeholder_object/"}
+            expected_dirs = {
+                base_dir,
+                f"{base_dir}/parent_dir",
+                f"{base_dir}/parent_dir/child_dir",
+                f"{base_dir}/empty_dir",
+                f"{base_dir}/other_dir",
+                f"{base_dir}/placeholder_object",
+            }
+            expected_files = {
+                f"{base_dir}/parent_dir/child_dir/file1.txt",
+                f"{base_dir}/other_dir/file3.txt",
+                f"{base_dir}/root_file.txt",
+                f"{base_dir}/placeholder_object/",
+            }
 
             found_dirs = set()
             found_files = set()
             for root, d_list, f_list in walk_results:
-                root = root.rstrip('/')
+                root = root.rstrip("/")
                 found_dirs.add(root)
                 for d in d_list:
-                    found_dirs.add(f"{root}/{d}".rstrip('/'))
+                    found_dirs.add(f"{root}/{d}".rstrip("/"))
                 for f in f_list:
                     found_files.add(f"{root}/{f}")
 
