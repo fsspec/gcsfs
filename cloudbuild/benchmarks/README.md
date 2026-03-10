@@ -1,9 +1,9 @@
 # GCSFS Benchmarks Automation
 
-## 1. Introduction
+## Introduction
 This directory contains Cloud Build configurations to automate the execution of GCSFS microbenchmarks and the ingestion of their results into BigQuery. This automation allows for nightly performance tracking, regression detection, and historical analysis of GCSFS performance across different bucket types (Regional, Zonal, HNS).
 
-## 2. Benchmarks Run Pipeline
+## Benchmarks Run Pipeline
 **File:** `benchmarks-cloudbuild.yaml`
 
 This pipeline handles the end-to-end execution of the performance benchmarks. It is designed to be ephemeral, creating the necessary infrastructure on-the-fly and tearing it down after execution to minimize costs.
@@ -23,7 +23,7 @@ This pipeline handles the end-to-end execution of the performance benchmarks. It
     *   Deletes the temporary VM and the temporary test buckets (Regional, Zonal, HNS).
     *   Removes the temporary SSH keys.
 
-## 3. Benchmarks Ingestion Pipeline
+## Benchmarks Ingestion Pipeline
 **File:** `benchmarks-ingestion-cloudbuild.yaml`
 
 This pipeline loads the benchmark results from the GCS Results Bucket into BigQuery for analysis. It uses an External Table for staging and a native partitioned table for historical storage.
@@ -38,7 +38,7 @@ This pipeline loads the benchmark results from the GCS Results Bucket into BigQu
     *   **Idempotency**: Uses the `source_uri` (file path) to prevent duplicate data insertion if the pipeline is re-run.
     *   **Metadata Extraction**: Extracts metadata like `run_date`, `build_id`, and `run_timestamp` directly from the source file path.
 
-## 4. Cloud Build Triggers
+## Cloud Build Triggers
 To run this automation in your own GCP project, you need to set up atleast two Cloud Build triggers.
 
 ### Benchmarks Run Trigger
