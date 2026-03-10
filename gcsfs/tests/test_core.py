@@ -1,6 +1,5 @@
 import io
 import os
-import re
 import uuid
 from builtins import FileNotFoundError
 from datetime import datetime, timezone

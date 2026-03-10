@@ -16,7 +16,6 @@ import os
 import uuid
 
 import pytest
-import re
 
 from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import TEST_HNS_BUCKET
@@ -1275,7 +1274,10 @@ class TestExtendedGcsFileSystemGlob:
             },
             {
                 "pattern": f"{base_dir}/empty_folder_[12]",
-                "expected": {f"{base_dir}/empty_folder_1", f"{base_dir}/empty_folder_2"},
+                "expected": {
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
+                },
                 "description": "Character range wildcard",
             },
             {
@@ -1353,8 +1355,9 @@ class TestExtendedGcsFileSystemWalk:
         assert len(walk_results) == len(expected_structure)
         for root, d_list, f_list in walk_results:
             root = root.rstrip("/")
-            assert root in expected_structure, f"Unexpected root yielded by walk: {root}"
+            assert (
+                root in expected_structure
+            ), f"Unexpected root yielded by walk: {root}"
             exp_dirs, exp_files = expected_structure[root]
             assert set(d_list) == exp_dirs, f"Directories mismatch for {root}"
             assert set(f_list) == exp_files, f"Files mismatch for {root}"
-
