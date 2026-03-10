@@ -34,9 +34,12 @@ The fundamental architectural shift is that ``ExtendedFileSystem`` actively rout
    * - **``mkdir``**
      - Only used for creating buckets, since GCS Flat namespace doesn't have real directories.
      - Calls the native GCS Folders API, creating physical GCS Folder resource instead of simulating with 0 byte object or object prefix.
-   * - **``rmdir`` / ``rm``**
+   * - **``rmdir``**
+     - Primarily used to delete buckets, as directories do not exist as distinct physical entities.
+     - Used to delete empty folders natively via the GCS Folders API, in addition to deleting buckets.
+   * - **``rm``**
      - Paginates through and individually issues delete requests for every object matching the prefix.
-     - Deletes the folder resource directly via the Folders API. **Atomic (for individual folder)** and more performant; GCS natively cascades the deletion to all contents server-side.
+     - Deletes the folder resource and its contents via different delete requests corresponding to folder or file.
    * - **``rename`` / ``mv``**
      - Issues a ``Copy`` request for each object under the prefix, followed by ``Delete``. Non-atomic, ``O(N)``.
      - Triggers a single native metadata-only rename on the folder. **Atomic** and more performant, ``O(1)``, helpful in Checkpointing.
