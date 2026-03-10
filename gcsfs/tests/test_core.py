@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import uuid
 from builtins import FileNotFoundError
 from datetime import datetime, timezone
@@ -1921,3 +1922,138 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
             gcs.mv_file(src, dest)
     finally:
         gcs.version_aware = original_version_aware
+
+
+def test_tree(gcs):
+    unique_id = uuid.uuid4().hex
+    base_dir = f"{TEST_BUCKET}/test_tree_regional_{unique_id}"
+
+    try:
+        gcs.mkdir(base_dir)
+        gcs.mkdir(f"{base_dir}/folder_A")
+        gcs.touch(f"{base_dir}/root_file.txt")
+        gcs.touch(f"{base_dir}/folder_A/file_A.txt")
+
+        # Deep nesting
+        gcs.touch(f"{base_dir}/folder_A/sub_B/sub_C/sub_D/deep_file.txt")
+
+        # Placeholder objects (Trailing slashes)
+        gcs.touch(f"{base_dir}/placeholder_P/")
+        gcs.touch(f"{base_dir}/placeholder_P/file_P.txt")
+        gcs.touch(f"{base_dir}/placeholder_Q/")
+
+        tree_str = gcs.tree(base_dir, recursion_limit=10)
+
+        expected_basenames = {
+            "root_file.txt",
+            "folder_A",
+            "file_A.txt",
+            "sub_B",
+            "sub_C",
+            "sub_D",
+            "deep_file.txt",
+            "placeholder_P",
+            "file_P.txt",
+            "placeholder_Q"
+        }
+
+        found_names = set()
+        lines = tree_str.strip().split("\n")
+        for line in lines[1:]:
+            match = re.search(r'[├└]──\s*([^\s(]+)', line)
+            if match:
+                found_names.add(match.group(1).rstrip('/'))
+
+        assert expected_basenames == found_names
+
+    finally:
+        if gcs.exists(base_dir):
+            gcs.rm(base_dir, recursive=True)
+
+
+def test_glob(gcs):
+    base_dir = f"{TEST_BUCKET}/test_glob_regional_{uuid.uuid4().hex}"
+
+    files = [
+        f"{base_dir}/dir_A/file1.txt",
+        f"{base_dir}/dir_A/file2.txt",
+        f"{base_dir}/dir_A/subdir_B/file3.txt",
+        f"{base_dir}/dir_C/file4.dat",
+        f"{base_dir}/root_file.txt",
+    ]
+    placeholder = f"{base_dir}/placeholder_dir/"
+
+    try:
+        for f in files:
+            gcs.touch(f)
+        gcs.touch(placeholder)
+
+        test_cases = [
+            {
+                "pattern": f"{base_dir}/*",
+                "expected": {f"{base_dir}/dir_A", f"{base_dir}/dir_C", f"{base_dir}/root_file.txt", f"{base_dir}/placeholder_dir"},
+            },
+            {
+                "pattern": f"{base_dir}/dir_A/*",
+                "expected": {f"{base_dir}/dir_A/file1.txt", f"{base_dir}/dir_A/file2.txt", f"{base_dir}/dir_A/subdir_B"},
+            },
+            {
+                "pattern": f"{base_dir}/**",
+                "expected": {base_dir, f"{base_dir}/dir_A", f"{base_dir}/dir_A/subdir_B", f"{base_dir}/dir_C",
+                             f"{base_dir}/dir_A/file1.txt", f"{base_dir}/dir_A/file2.txt", f"{base_dir}/dir_A/subdir_B/file3.txt",
+                             f"{base_dir}/dir_C/file4.dat", f"{base_dir}/root_file.txt", f"{base_dir}/placeholder_dir"},
+            },
+        ]
+
+        for case in test_cases:
+            results = gcs.glob(case["pattern"])
+            results_normalized = {r.rstrip('/') for r in results}
+            expected_normalized = {e.rstrip('/') for e in case["expected"]}
+            assert results_normalized == expected_normalized
+
+    finally:
+        if gcs.exists(base_dir):
+            gcs.rm(base_dir, recursive=True)
+
+
+def test_walk(gcs):
+    base_dir = f"{TEST_BUCKET}/test_walk_regional_{uuid.uuid4().hex}"
+
+    files = [
+        f"{base_dir}/parent_dir/child_dir/file1.txt",
+        f"{base_dir}/other_dir/file3.txt",
+        f"{base_dir}/root_file.txt",
+    ]
+    placeholder = f"{base_dir}/placeholder_object/"
+
+    try:
+        for f in files:
+            gcs.touch(f)
+        gcs.touch(placeholder)
+
+        walk_results = list(gcs.walk(base_dir))
+
+        # Expected result for FLAT
+        expected_dirs = {base_dir, f"{base_dir}/parent_dir", f"{base_dir}/parent_dir/child_dir", f"{base_dir}/other_dir", f"{base_dir}/placeholder_object"}
+        expected_files = {f"{base_dir}/parent_dir/child_dir/file1.txt", f"{base_dir}/other_dir/file3.txt", f"{base_dir}/root_file.txt"}
+
+        # In flat buckets, placeholder objects might appear as files as well
+        # depending on the implementation's handling of trailing slashes.
+        expected_files.add(f"{base_dir}/placeholder_object/")
+
+        found_dirs = set()
+        found_files = set()
+        for root, d_list, f_list in walk_results:
+            root = root.rstrip('/')
+            found_dirs.add(root)
+            for d in d_list:
+                found_dirs.add(f"{root}/{d}".rstrip('/'))
+            for f in f_list:
+                found_files.add(f"{root}/{f}")
+
+        assert found_dirs == expected_dirs
+        assert found_files == expected_files
+
+    finally:
+        if gcs.exists(base_dir):
+            gcs.rm(base_dir, recursive=True)
