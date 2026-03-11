@@ -1,0 +1,50 @@
+substitutions:
+  _DATASET_NAME: ""
+
+steps:
+  # Step 0: Create the BigQuery dataset if it doesn't exist
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'ensure-dataset'
+    entrypoint: 'bash'
+    waitFor: ['-'] # Starts immediately
+    args:
+      - '-c'
+      - |
+        bq show ${PROJECT_ID}:${_DATASET_NAME} || \
+        bq mk --dataset --location=${LOCATION} ${PROJECT_ID}:${_DATASET_NAME}
+
+  # Step 1: Update the Staging External Table definition
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'update-staging-table'
+    entrypoint: 'bash'
+    waitFor: ['ensure-dataset']
+    args:
+      - '-c'
+      - |
+        bq mk --project_id=${PROJECT_ID} \
+          --external_table_definition=cloudbuild/benchmarks/benchmarks_schema.json \
+          --force \
+          ${_DATASET_NAME}.staging
+
+  # Step 2: Perform Token Replacement and run ingestion script
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'run-ingestion'
+    entrypoint: 'bash'
+    waitFor: ['update-staging-table']
+    args:
+      - '-c'
+      - |
+        # Ensure path is consistent for both sed and bq query
+        sed -i "s/@PROJECT_ID@/${PROJECT_ID}/g" cloudbuild/benchmarks/ingest.sql
+        sed -i "s/@DATASET_NAME@/${_DATASET_NAME}/g" cloudbuild/benchmarks/ingest.sql
+
+        bq query --use_legacy_sql=false \
+                 --project_id=${PROJECT_ID} \
+                 < cloudbuild/benchmarks/ingest.sql
+
+timeout: "14400s" # 2 hours
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${LOCATION}/workerPools/cloud-build-worker-pool"

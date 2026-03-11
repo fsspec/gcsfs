@@ -33,17 +33,13 @@ def test_rename_recursive(benchmark, gcsfs_benchmark_rename, monitor):
     gcs, _, prefix, params = gcsfs_benchmark_rename
     prefix_renamed = f"{prefix}_renamed"
 
-    try:
-        run_single_threaded(
-            benchmark,
-            monitor,
-            params,
-            _rename_op,
-            (gcs, prefix, prefix_renamed),
-            BENCHMARK_GROUP,
-        )
-    finally:
-        try:
-            gcs.rm(prefix_renamed, recursive=True)
-        except Exception as e:
-            logging.warning(f"cleanup failed for {prefix_renamed} - {e}")
+    run_single_threaded(
+        benchmark,
+        monitor,
+        params,
+        _rename_op,
+        (gcs, prefix, prefix_renamed),
+        BENCHMARK_GROUP,
+    )
+    # Adding a sleep of 60 secs here to ensure that deletion works
+    time.sleep(60)
