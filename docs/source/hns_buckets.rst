@@ -24,7 +24,7 @@ Importantly, ``ExtendedFileSystem`` is designed to be fully backward-compatible.
 
 The fundamental architectural shift is that ``ExtendedFileSystem`` actively routes directory-level operations to the **GCS Folders grpc API** instead of relying solely on the Objects API.
 
-.. list-table:: Operation Semantics: Flat Namespace vs. HNS
+.. list-table:: **Operation Semantics: Flat Namespace vs. HNS**
    :widths: 15 40 45
    :header-rows: 1
 
@@ -55,7 +55,23 @@ While ``gcsfs`` aims to abstract the differences via the ``fsspec`` API, you sho
 1. **Implicit directories:** In standard GCS, you can create an object ``a/b/c.txt`` without the directories ``a/`` or ``a/b/`` physically existing. In HNS, the parent folder resources must exist (or be created) before the object can be written. ``gcsfs`` handles parent folder creation natively under the hood.
 2. **``mkdir`` behavior:** Previously, in a flat namespace, calling ``mkdir`` on a path could only ensure the underlying bucket exists. With HNS enabled, calling ``mkdir`` will create an actual folder resource in GCS. Furthermore, if you want to create nested folders (eg: bucket/a/b/c/d) pass ``create_parents=True``, it will physically create all intermediate folder resources along the specified path.
 3. **No mixing or toggling:** You cannot toggle HNS on an existing flat-namespace bucket. You must create a new HNS bucket and migrate your data.
-4. **Object naming:** Object names in HNS cannot end with a slash (``/``) unless they are true folder resources.
+4. **Object naming:** Object names in HNS cannot end with a slash (``/``) unless without the creation of physical folder resources.
+5. **Rename Operation Benchmarks**
+
+The following benchmarks show the time taken (in seconds) to rename a directory containing a large number of files (spread across 256 folders and 8 levels) in a standard Regional bucket versus an HNS bucket (can be replicated using `gcsfs/tests/perf/microbenchmarks/rename`):
+
+.. list-table::
+   :header-rows: 1
+
+   * - File Count
+     - Standard Regional (seconds)
+     - HNS (seconds)
+   * - 65K Files
+     - 75.69
+     - 15.4
+   * - 100K Files
+     - 170.6
+     - 23.2
 
 For more details on managing these buckets, refer to the official documentation for `Hierarchical Namespace <https://cloud.google.com/storage/docs/hns-overview>`_.
 
@@ -70,4 +86,4 @@ You can disable these features by explicitly setting an environment variable of 
 
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false
 
-**Note:** *The choice of which filesystem class to use is made at import time based on the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT environment variable, and cannot be controlled via constructor arguments passed to GCSFileSystem (but you can still import each class explicitly, if you desire).*
+**Note:** *The choice of which filesystem class to use is made at import time based on the GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT environment variable, and cannot be controlled via constructor arguments passed to GCSFileSystem (but you can still import each class explicitly, if needed).*
