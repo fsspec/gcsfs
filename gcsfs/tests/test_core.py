@@ -1956,8 +1956,8 @@ def test_tree(gcs):
     }
 
     lines = tree_str.strip().split("\n")
-    # Extract basenames from tree lines (e.g., "├── folder_A/" -> "folder_A")
-    found_names = {line.split("──")[-1].strip().rstrip("/") for line in lines[1:]}
+    # Extract basenames from tree lines (e.g., "├── folder_A" -> "folder_A")
+    found_names = {line.split("──")[-1].strip() for line in lines[1:]}
 
     assert found_names == expected_basenames
 
@@ -2009,15 +2009,14 @@ def test_glob(gcs):
                 f"{base_dir}/folder_with_one_file/file4.dat",
                 f"{base_dir}/root_file.txt",
                 f"{base_dir}/folder_with_placeholder",
+                f"{base_dir}/folder_with_placeholder/",
             },
         },
     ]
 
     for case in test_cases:
-        results = gcs.glob(case["pattern"])
-        results_normalized = {r.rstrip("/") for r in results}
-        expected_normalized = {e.rstrip("/") for e in case["expected"]}
-        assert results_normalized == expected_normalized
+        results = set(gcs.glob(case["pattern"]))
+        assert results == case["expected"]
 
 
 def test_walk(gcs):

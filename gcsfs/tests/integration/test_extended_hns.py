@@ -1208,10 +1208,39 @@ class TestExtendedGcsFileSystemTree:
         }
 
         lines = tree_str.strip().split("\n")
-        # Extract basenames from tree lines (e.g., "├── folder_A/" -> "folder_A")
-        found_names = {line.split("──")[-1].strip().rstrip("/") for line in lines[1:]}
+        # Extract basenames from tree lines (e.g., "├── folder_A/" -> "folder_A/")
+        found_names = {line.split("──")[-1].strip() for line in lines[1:]}
 
         assert found_names == expected_basenames
+
+    def test_tree_on_empty_folder(self, gcs_hns):
+        """Test tree on a folder that is completely empty."""
+        unique_id = uuid.uuid4().hex
+        base_dir = f"{TEST_HNS_BUCKET}/empty_tree_{unique_id}"
+        gcs_hns.mkdir(base_dir)
+
+        tree_str = gcs_hns.tree(base_dir)
+        # Should just return the base directory name
+        assert tree_str.strip() == base_dir
+
+    def test_tree_on_nested_empty_folders(self, gcs_hns):
+        """Test tree on nested folders that are all empty."""
+        unique_id = uuid.uuid4().hex
+        base_dir = f"{TEST_HNS_BUCKET}/nested_empty_tree_{unique_id}"
+        path = f"{base_dir}/level1/level2/level3"
+        gcs_hns.mkdir(path, create_parents=True)
+
+        tree_str = gcs_hns.tree(base_dir, recursion_limit=10)
+        lines = tree_str.strip().split("\n")
+
+        # Expect something like:
+        # base_dir
+        # └── level1/
+        #     └── level2/
+        #         └── level3/
+
+        found_names = {line.split("──")[-1].strip().rstrip("/") for line in lines[1:]}
+        assert found_names == {"level1", "level2", "level3"}
 
 
 class TestExtendedGcsFileSystemGlob:
@@ -1281,6 +1310,14 @@ class TestExtendedGcsFileSystemGlob:
                 "description": "Character range wildcard",
             },
             {
+                "pattern": f"{base_dir}/empty_folder*",
+                "expected": {
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
+                },
+                "description": "Glob matching empty folders only",
+            },
+            {
                 "pattern": f"{base_dir}/**",
                 "expected": {
                     base_dir,
@@ -1295,18 +1332,15 @@ class TestExtendedGcsFileSystemGlob:
                     f"{base_dir}/folder_with_one_file/file4.dat",
                     f"{base_dir}/root_file.txt",
                     f"{base_dir}/folder_with_placeholder",
+                    f"{base_dir}/folder_with_placeholder/",
                 },
                 "description": "Recursive glob all",
             },
         ]
 
         for case in test_cases:
-            results = gcs_hns.glob(case["pattern"])
-            results_normalized = {r.rstrip("/") for r in results}
-            expected_normalized = {e.rstrip("/") for e in case["expected"]}
-            assert (
-                results_normalized == expected_normalized
-            ), f"Failed: {case['description']}"
+            results = set(gcs_hns.glob(case["pattern"]))
+            assert results == case["expected"], f"Failed: {case['description']}"
 
 
 class TestExtendedGcsFileSystemWalk:
@@ -1320,12 +1354,16 @@ class TestExtendedGcsFileSystemWalk:
         empty_folder = f"{base_dir}/empty_folder"
         folder_with_one_file = f"{base_dir}/folder_with_one_file"
         folder_with_placeholder = f"{base_dir}/folder_with_placeholder"
+        nested_empty = f"{base_dir}/nested_empty"
+        nested_empty_a = f"{nested_empty}/A"
+        nested_empty_b = f"{nested_empty_a}/B"
 
         gcs_hns.mkdir(base_dir)
         gcs_hns.mkdir(folder_with_files)
         gcs_hns.mkdir(subdir)
         gcs_hns.mkdir(empty_folder)
         gcs_hns.mkdir(folder_with_one_file)
+        gcs_hns.mkdir(nested_empty_b, create_parents=True)
 
         gcs_hns.touch(f"{subdir}/file1.txt")
         gcs_hns.touch(f"{folder_with_one_file}/file3.txt")
@@ -1342,6 +1380,7 @@ class TestExtendedGcsFileSystemWalk:
                     "empty_folder",
                     "folder_with_one_file",
                     "folder_with_placeholder",
+                    "nested_empty",
                 },
                 {"root_file.txt"},
             ),
@@ -1350,6 +1389,9 @@ class TestExtendedGcsFileSystemWalk:
             empty_folder: (set(), set()),
             folder_with_one_file: (set(), {"file3.txt"}),
             folder_with_placeholder: (set(), {""}),
+            nested_empty: ({"A"}, set()),
+            nested_empty_a: ({"B"}, set()),
+            nested_empty_b: (set(), set()),
         }
 
         assert len(walk_results) == len(expected_structure)
