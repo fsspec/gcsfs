@@ -2019,6 +2019,66 @@ def test_glob(gcs):
         assert results == case["expected"]
 
 
+def test_expand_path_regional(gcs):
+    base_dir = f"{TEST_BUCKET}/test_expand_path_regional_{uuid.uuid4().hex}"
+
+    files = [
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir/file3.txt",
+        f"{base_dir}/root_file.txt",
+    ]
+    for f in files:
+        gcs.touch(f)
+
+    # Empty folder (with placeholder)
+    empty_folder = f"{base_dir}/empty_folder/"
+    gcs.touch(empty_folder)
+
+    # Test case 1: No magic, recursive=True (invokes _find)
+    expanded = gcs.expand_path(base_dir, recursive=True)
+    expected = {
+        base_dir,
+        f"{base_dir}/folder",
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir",
+        f"{base_dir}/folder/subdir/file3.txt",
+        f"{base_dir}/root_file.txt",
+        f"{base_dir}/empty_folder",
+        f"{base_dir}/empty_folder/",
+    }
+    assert set(expanded) == expected
+
+    # Test case 2: With magic * (invokes _glob)
+    expanded_magic = gcs.expand_path(f"{base_dir}/folder/*", recursive=True)
+    expected_magic = {
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir",
+        f"{base_dir}/folder/subdir/file3.txt",
+    }
+    assert set(expanded_magic) == expected_magic
+
+    # Test case 3: Recursive glob **
+    expanded_glob_starstar = gcs.expand_path(f"{base_dir}/**/*.txt", recursive=True)
+    expected_glob_starstar = {
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir/file3.txt",
+        f"{base_dir}/root_file.txt",
+    }
+    assert set(expanded_glob_starstar) == expected_glob_starstar
+
+    # Test case 4: Question mark magic
+    expanded_question = gcs.expand_path(f"{base_dir}/folder/file?.txt", recursive=True)
+    expected_question = {
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+    }
+    assert set(expanded_question) == expected_question
+
+
 def test_walk(gcs):
     base_dir = f"{TEST_BUCKET}/test_walk_regional_{uuid.uuid4().hex}"
 

@@ -1403,3 +1403,76 @@ class TestExtendedGcsFileSystemWalk:
             exp_dirs, exp_files = expected_structure[root]
             assert set(d_list) == exp_dirs, f"Directories mismatch for {root}"
             assert set(f_list) == exp_files, f"Files mismatch for {root}"
+
+
+class TestExtendedGcsFileSystemExpandPath:
+    """Integration tests for the expand_path method in ExtendedGcsFileSystem."""
+
+    def test_hns_expand_path(self, gcs_hns):
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/test_expand_path_hns_{uuid.uuid4().hex}"
+
+        files = [
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir/file3.txt",
+            f"{base_dir}/root_file.txt",
+        ]
+        for f in files:
+            gcsfs.touch(f)
+
+        # Native empty folder
+        empty_folder = f"{base_dir}/empty_folder"
+        gcsfs.mkdir(empty_folder)
+
+        # Placeholder folder object (trailing slash)
+        placeholder_folder = f"{base_dir}/placeholder_folder/"
+        gcsfs.touch(placeholder_folder)
+
+        # Test case 1: No magic, recursive=True
+        expanded = gcsfs.expand_path(base_dir, recursive=True)
+        expected = {
+            base_dir,
+            f"{base_dir}/folder",
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir",
+            f"{base_dir}/folder/subdir/file3.txt",
+            f"{base_dir}/root_file.txt",
+            empty_folder,
+            f"{base_dir}/placeholder_folder",
+            placeholder_folder,
+        }
+        assert set(expanded) == expected
+
+        # Test case 2: With magic *
+        expanded_magic = gcsfs.expand_path(f"{base_dir}/folder/*", recursive=True)
+        expected_magic = {
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir",
+            f"{base_dir}/folder/subdir/file3.txt",
+        }
+        assert set(expanded_magic) == expected_magic
+
+        # Test case 3: Recursive glob **
+        expanded_glob_starstar = gcsfs.expand_path(
+            f"{base_dir}/**/*.txt", recursive=True
+        )
+        expected_glob_starstar = {
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir/file3.txt",
+            f"{base_dir}/root_file.txt",
+        }
+        assert set(expanded_glob_starstar) == expected_glob_starstar
+
+        # Test case 4: Character range magic
+        expanded_range = gcsfs.expand_path(
+            f"{base_dir}/folder/file[12].txt", recursive=True
+        )
+        expected_range = {
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+        }
+        assert set(expanded_range) == expected_range
