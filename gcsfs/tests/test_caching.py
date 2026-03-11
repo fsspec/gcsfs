@@ -1,6 +1,10 @@
+import asyncio
+from unittest import mock
+
+import fsspec.asyn
 import pytest
 
-from gcsfs.caching import ReadAheadChunked
+from gcsfs.caching import Prefetcher, ReadAheadChunked
 
 
 class MockVectorFetcher:
@@ -198,3 +202,396 @@ def test_out_of_bounds(cache_setup):
     """Test start >= size returns empty."""
     cache, _ = cache_setup
     assert cache._fetch(150, 200) == b""
+
+
+class TrackedAsyncMockFetcher:
+    """Simulates an async backend and tracks calls for assertions."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.should_fail = False
+        self.calls = []
+
+    async def __call__(self, start, size, split_factor=1):
+        self.calls.append({"start": start, "size": size, "split_factor": split_factor})
+        if self.should_fail:
+            raise RuntimeError("Mocked network error")
+
+        await asyncio.sleep(0.001)
+        end = min(start + size, len(self.data))
+        return self.data[start:end]
+
+
+@pytest.fixture
+def prefetcher_setup(source_data):
+    """Provides a fresh Prefetcher and its mocked fetcher for each test."""
+    fetcher = TrackedAsyncMockFetcher(source_data)
+
+    cache = Prefetcher(
+        blocksize=10,
+        fetcher=fetcher,
+        size=len(source_data),
+        max_prefetch_size=30,
+        concurrency=4,
+    )
+    yield cache, fetcher
+    cache.close()
+
+
+def test_prefetcher_initial_state(prefetcher_setup):
+    cache, _ = prefetcher_setup
+    assert cache.user_offset == 0
+    assert cache.sequential_streak == 0
+    assert not cache.is_stopped
+
+
+def test_prefetcher_sequential_reads(prefetcher_setup, source_data):
+    cache, _ = prefetcher_setup
+
+    res1 = cache._fetch(0, 15)
+    assert res1 == source_data[0:15]
+    assert cache.sequential_streak > 0
+    res2 = cache._fetch(15, 25)
+    assert res2 == source_data[15:25]
+
+
+def test_prefetcher_out_of_bounds(prefetcher_setup):
+    cache, _ = prefetcher_setup
+    res = cache._fetch(250, 260)
+    assert res == b""
+
+
+def test_prefetcher_with_no_offsets(prefetcher_setup, source_data):
+    cache, _ = prefetcher_setup
+    res = cache._fetch(None, None)
+    assert res == source_data
+
+
+def test_prefetcher_seek_resets_streak(prefetcher_setup, source_data):
+    cache, _ = prefetcher_setup
+
+    cache._fetch(0, 10)
+    assert cache.sequential_streak > 0
+
+    res = cache._fetch(50, 60)
+    assert res == source_data[50:60]
+    assert cache.user_offset == 60
+
+
+def test_prefetcher_exact_block_reads(prefetcher_setup, source_data):
+    """Test reading exactly the blocksize increments streak and fetches correctly."""
+    cache, fetcher = prefetcher_setup
+
+    res1 = cache._fetch(0, 10)
+    assert res1 == source_data[0:10]
+    assert cache.sequential_streak == 1
+
+    res2 = cache._fetch(10, 20)
+    assert res2 == source_data[10:20]
+    assert cache.sequential_streak == 2
+
+    assert len(fetcher.calls) >= 2
+
+
+def test_prefetcher_adaptive_small_reads(prefetcher_setup, source_data):
+    """Test that reading a small amount scales the fetcher down to match."""
+    cache, fetcher = prefetcher_setup
+
+    # Fetch 4 bytes. Blocksize is 10 originally, but the read history makes adaptive size=4.
+    res1 = cache._fetch(0, 4)
+    assert res1 == source_data[0:4]
+
+    # Because adaptive blocksize=4, the producer specifically fetched 4 bytes.
+    # Therefore, 0 bytes remain in the zero-copy block.
+    assert len(cache._current_block) - cache._current_block_idx == 0
+    assert cache.user_offset == 4
+
+    # Verify the fetcher only requested 4 bytes from the backend
+    assert fetcher.calls[0]["size"] == 4
+
+
+def test_prefetcher_partial_read_from_queued_block(prefetcher_setup, source_data):
+    """Test zero-copy pointer logic when the queued block is larger than the read request."""
+    cache, fetcher = prefetcher_setup
+
+    # Manually queue an explicit 10-byte block simulating background prefetching
+    task = asyncio.Future()
+    task.set_result(source_data[0:10])
+    cache.queue.put_nowait(task)
+
+    # User only asks for 4 bytes out of the 10-byte queued block
+    res1 = cache._fetch(0, 4)
+    assert res1 == source_data[0:4]
+
+    # 10 bytes were queued, 4 consumed, leaving exactly 6 in the zero-copy buffer
+    assert len(cache._current_block) - cache._current_block_idx == 6
+    assert cache.user_offset == 4
+
+    # The next read should drain the remaining zero-copy buffer without fetching
+    res2 = cache._fetch(4, 8)
+    assert res2 == source_data[4:8]
+    assert cache.user_offset == 8
+    assert len(cache._current_block) - cache._current_block_idx == 2
+
+
+def test_prefetcher_cross_block_read(prefetcher_setup, source_data):
+    """Test requesting a large chunk that spans multiple underlying prefetch blocks."""
+    cache, _ = prefetcher_setup
+    res = cache._fetch(0, 25)
+
+    assert res == source_data[0:25]
+    assert cache.user_offset == 25
+
+    # Read history becomes 25, adaptive size becomes 25.
+    # The producer fetches 25, we consume 25. Exactly 0 remain.
+    assert len(cache._current_block) - cache._current_block_idx == 0
+
+
+def test_prefetcher_seek_same_offset(prefetcher_setup):
+    """Test that seeking to the current user_offset is a no-op and does not clear buffers."""
+    cache, _ = prefetcher_setup
+    cache._fetch(0, 5)
+    streak_before = cache.sequential_streak
+    block_before = cache._current_block
+    idx_before = cache._current_block_idx
+
+    fsspec.asyn.sync(cache.loop, cache.seek, cache.user_offset)
+    assert cache.sequential_streak == streak_before
+    assert cache._current_block == block_before
+    assert cache._current_block_idx == idx_before
+
+
+def test_prefetcher_eof_handling(prefetcher_setup, source_data):
+    """Test behavior when fetching up to and past the file size limit."""
+    cache, _ = prefetcher_setup
+    res = cache._fetch(95, 110)
+    assert res == source_data[95:100]
+    assert cache._fetch(105, 115) == b""
+
+
+def test_prefetcher_producer_error_propagation(prefetcher_setup):
+    """Test that exceptions in the background fetcher task surface to the caller."""
+    cache, fetcher = prefetcher_setup
+    fetcher.should_fail = True
+    with pytest.raises(RuntimeError, match="Mocked network error"):
+        cache._fetch(0, 10)
+    assert cache.is_stopped is True
+
+
+def test_prefetcher_dynamic_split_factor(prefetcher_setup, source_data):
+    """Test that split_factor increases for large chunks on sequential reads."""
+    cache, fetcher = prefetcher_setup
+
+    with mock.patch.object(Prefetcher, "MIN_CHUNK_SIZE", 5):
+        cache._fetch(0, 10)
+        cache._fetch(10, 20)
+
+        fsspec.asyn.sync(cache.loop, asyncio.sleep, 0.05)
+
+    recent_calls = [c for c in fetcher.calls if c["start"] >= 20]
+    assert len(recent_calls) > 0
+    assert recent_calls[0]["split_factor"] > 1
+
+
+def test_prefetcher_max_prefetch_limit(prefetcher_setup):
+    """Test that the producer pauses when the queue hits the max_prefetch_size."""
+    cache, _ = prefetcher_setup
+    cache._fetch(0, 1)
+    fsspec.asyn.sync(cache.loop, asyncio.sleep, 0.05)
+    max_expected_offset = cache.user_offset + cache.max_prefetch_size + cache.blocksize
+    assert cache.current_offset <= max_expected_offset
+
+
+def test_prefetcher_close_while_active(prefetcher_setup):
+    """Test that closing the prefetcher safely cancels pending background tasks."""
+    cache, _ = prefetcher_setup
+    cache._fetch(0, 10)
+    cache._fetch(10, 20)
+
+    assert len(cache._active_tasks) > 0 or not cache.queue.empty()
+    assert cache.is_stopped is False
+
+    cache.close()
+
+    assert cache.is_stopped is True
+    assert len(cache._active_tasks) == 0
+    assert cache.queue.empty() is True
+
+
+def test_prefetcher_adaptive_averaging(prefetcher_setup):
+    """Verify that the blocksize adapts upwards and downwards based on read history."""
+    cache, _ = prefetcher_setup
+    assert cache._get_adaptive_blocksize() == 10
+
+    # Test upward adaptation (5 reads of 12 = 60 bytes used)
+    for _ in range(5):
+        cache._fetch(cache.user_offset, cache.user_offset + 12)
+
+    # Average of five 12s is 12
+    assert cache._get_adaptive_blocksize() == 12
+
+    # Test downward adaptation (5 reads of 4 = 20 bytes used, 80 total)
+    for _ in range(5):
+        cache._fetch(cache.user_offset, cache.user_offset + 4)
+
+    # Average of five 12s and five 4s is (60 + 20) / 10 = 80 / 10 = 8
+    assert cache._get_adaptive_blocksize() == 8
+
+    # Push out all the 12s, leaving only 4s (5 reads of 4 = 20 bytes used, exactly 100 total)
+    for _ in range(5):
+        cache._fetch(cache.user_offset, cache.user_offset + 4)
+
+    # Average of ten 4s is 4
+    assert cache._get_adaptive_blocksize() == 4
+
+
+def test_prefetcher_history_eviction(prefetcher_setup):
+    """Verify that only the last 10 reads impact the adaptive blocksize."""
+    cache, _ = prefetcher_setup
+    for _ in range(10):
+        cache._fetch(cache.user_offset, cache.user_offset + 1)
+
+    assert cache.history_sum == 10
+    assert len(cache.read_history) == 10
+
+    # Adding a large read should evict the oldest 1
+    cache._fetch(cache.user_offset, cache.user_offset + 10)
+    assert cache.history_sum == 19
+    assert cache.read_history[-1] == 10
+
+
+def test_prefetcher_seek_resets_history(prefetcher_setup):
+    """Verify that a seek clears adaptive history to prevent stale logic."""
+    cache, _ = prefetcher_setup
+    cache._fetch(0, 100)
+    cache._fetch(100, 200)
+    cache._fetch(200, 300)
+    assert cache.history_sum > 0
+
+    fsspec.asyn.sync(cache.loop, cache.seek, 500)
+    assert cache.history_sum == 0
+    assert len(cache.read_history) == 0
+    assert cache._get_adaptive_blocksize() == cache.blocksize
+
+
+def test_prefetcher_queue_empty_race_condition(prefetcher_setup):
+    """
+    Verify that the defensive asyncio.QueueEmpty catch works if the queue
+    reports not empty but actually contains no items.
+    """
+    cache, _ = prefetcher_setup
+
+    while not cache.queue.empty():
+        cache.queue.get_nowait()
+
+    with mock.patch.object(cache.queue, "empty", side_effect=[False, True]):
+        fsspec.asyn.sync(cache.loop, cache._cancel_all_tasks, False)
+
+
+def test_producer_loop_uses_adaptive_size(prefetcher_setup, source_data):
+    """Verify the producer actually fetches using the adaptive blocksize."""
+    cache, fetcher = prefetcher_setup
+
+    with mock.patch.object(cache, "_get_adaptive_blocksize", return_value=15):
+        cache._wakeup_producer.set()
+        fsspec.asyn.sync(cache.loop, asyncio.sleep, 0.1)
+
+        prefetch_calls = [c for c in fetcher.calls]
+        assert len(prefetch_calls) > 0
+        assert prefetch_calls[-1]["size"] == 15
+
+
+def test_prefetcher_producer_exception_handling(prefetcher_setup):
+    """
+    Verify that an unexpected exception inside the producer loop is caught,
+    placed into the queue, and stops the cache.
+    """
+    cache, _ = prefetcher_setup
+
+    with mock.patch.object(
+        cache, "_get_adaptive_blocksize", side_effect=Exception("Mocked Error!")
+    ):
+        cache._wakeup_producer.set()
+
+        fsspec.asyn.sync(cache.loop, asyncio.sleep, 0.05)
+        with pytest.raises(Exception, match="Mocked Error!"):
+            cache._fetch(0, 10)
+
+
+def test_prefetcher_producer_early_stop(prefetcher_setup):
+    """
+    Verify that if the cache is stopped while the producer is waiting,
+    waking it up causes it to immediately break the loop.
+    """
+    cache, _ = prefetcher_setup
+    cache.is_stopped = True
+    cache._wakeup_producer.set()
+    fsspec.asyn.sync(cache.loop, asyncio.sleep, 0.05)
+    assert cache._producer_task.done() is True
+
+
+def test_prefetcher_read_after_producer_stops(prefetcher_setup):
+    """
+    Test that reading from a Prefetcher after the producer has fatally
+    stopped (and the queue is drained of the original error) raises our
+    new RuntimeError safeguard.
+    """
+    cache, fetcher = prefetcher_setup
+    fetcher.should_fail = True
+    with pytest.raises(RuntimeError, match="Mocked network error"):
+        cache._fetch(0, 10)
+
+    assert cache.is_stopped is True
+    assert cache.queue.empty() is True
+    assert cache.user_offset < cache.size
+    with pytest.raises(
+        RuntimeError, match="Could not fetch data, the producer is stopped"
+    ):
+        cache._fetch(cache.user_offset, cache.user_offset + 10)
+
+
+def test_prefetcher_zero_copy_full_current_block(prefetcher_setup, source_data):
+    """
+    Test the zero-copy optimization path where the requested size matches
+    the entire available _current_block, and the index is 0.
+    """
+    cache, _ = prefetcher_setup
+    cache._current_block = source_data[0:10]
+    cache._current_block_idx = 0
+    res = cache._fetch(0, 10)
+
+    assert res == source_data[0:10]
+    assert res is cache._current_block
+    assert cache.user_offset == 10
+
+
+def test_prefetcher_break_on_empty_block(prefetcher_setup):
+    """
+    Test that _async_fetch safely breaks its collection loop if read()
+    unexpectedly returns an empty bytes object.
+    """
+    cache, _ = prefetcher_setup
+    task = asyncio.Future()
+    task.set_result(b"")
+    cache.queue.put_nowait(task)
+    res = cache._fetch(0, 10)
+    assert res == b""
+
+
+def test_prefetcher_cancelled_error_propagation(prefetcher_setup):
+    """
+    Verify that an asyncio.CancelledError is re-raised without altering
+    the is_stopped flag, differentiating a deliberate cancellation from a crash.
+    """
+    cache, _ = prefetcher_setup
+
+    async def simulate_cancellation():
+        task = cache.loop.create_future()
+        task.cancel()
+        cache.queue.put_nowait(task)
+        assert cache.is_stopped is False
+        with pytest.raises(asyncio.CancelledError):
+            await cache.read()
+
+    fsspec.asyn.sync(cache.loop, simulate_cancellation)
+    assert cache.is_stopped is False

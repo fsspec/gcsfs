@@ -279,27 +279,6 @@ def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
             assert result == expected
 
 
-def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
-    """
-    Tests that mrd stream is properly closed with file closure.
-    """
-    with gcs_bucket_mocks(
-        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
-    ) as mocks:
-        if not extended_gcsfs.on_google:
-
-            def close_side_effect():
-                mocks["downloader"].is_stream_open = False
-
-            mocks["downloader"].close.side_effect = close_side_effect
-
-        with extended_gcsfs.open(file_path, "rb") as f:
-            assert f.mrd is not None
-
-        assert True is f.closed
-        assert False is f.mrd.is_stream_open
-
-
 def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
     "Tests that mrd can read from an unfinalized file successfully"
     if not extended_gcsfs.on_google:

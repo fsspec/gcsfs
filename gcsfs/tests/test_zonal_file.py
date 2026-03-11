@@ -1,5 +1,7 @@
 """Tests for ZonalFile write operations."""
 
+import asyncio
+import contextlib
 import os
 from unittest import mock
 
@@ -8,8 +10,10 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
 
+from gcsfs.caching import Prefetcher
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.zonal_file import ZonalFile
 
 test_data = b"hello world"
 
@@ -474,3 +478,279 @@ class TestZonalFileRealGCS:
 
         extended_gcsfs.pipe(remote_path, overwrite_data, finalize_on_close=True)
         assert extended_gcsfs.cat(remote_path) == overwrite_data
+
+
+@pytest.fixture
+def mock_gcsfs():
+    fs = mock.Mock()
+    fs._split_path.return_value = ("test-bucket", "test-key", "123")
+    fs.split_path.return_value = ("test-bucket", "test-key", "123")
+    fs.info.return_value = {"size": 1000, "generation": "123", "name": "test-key"}
+    fs.loop = mock.Mock()
+    return fs
+
+
+def test_zonal_file_prefetcher_initialization(mock_gcsfs):
+    """Test that setting cache_type to 'prefetcher' injects the logical chunk fetcher."""
+
+    with (
+        mock.patch("gcsfs.zonal_file.MRDPool") as mrd_pool_mock,
+        mock.patch("gcsfs.zonal_file.asyn.sync"),
+    ):
+
+        mrd_pool_instance = mock.Mock()
+        mrd_pool_instance.persisted_size = 1000
+        mrd_pool_mock.return_value = mrd_pool_instance
+
+        cache_options = {"concurrency": 2}
+
+        zf = ZonalFile(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="prefetcher",
+            pool_size=1,
+            cache_options=cache_options,
+        )
+
+        assert zf.pool_size == 1
+        assert zf.cache.name == Prefetcher.name
+        assert zf.cache.size == 1000
+
+        zf.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_logical_chunk_split_logic(mock_gcsfs):
+    """Test that chunks larger than 16MB are split correctly."""
+
+    with (
+        mock.patch("gcsfs.zonal_file.MRDPool"),
+        mock.patch("gcsfs.zonal_file.asyn.sync"),
+        mock.patch("gcsfs.zonal_file.DirectMemmoveBuffer"),
+    ):
+
+        zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+        zf.pool_size = 4
+
+        zf.mrd_pool = mock.Mock()
+        zf.gcsfs.memmove_executor = mock.Mock()
+
+        mrd_mock = mock.AsyncMock()
+
+        @contextlib.asynccontextmanager
+        async def fake_get_mrd():
+            yield mrd_mock
+
+        zf.mrd_pool.get_mrd = fake_get_mrd
+
+        total_size = 32 * 1024 * 1024
+        await zf._fetch_logical_chunk(
+            start_offset=0, total_size=total_size, split_factor=2
+        )
+
+        # Assert the split logic directly on the downloader mock
+        assert mrd_mock.download_ranges.call_count == 2
+
+        # Sort calls by offset to ensure consistent assertions (tasks can run in any order)
+        calls = mrd_mock.download_ranges.call_args_list
+        args = [c[0][0][0] for c in calls]  # extracts the (offset, size, buffer) tuple
+        args.sort(key=lambda x: x[0])
+
+        assert args[0][0] == 0  # Offset 1
+        assert args[0][1] == 16 * 1024 * 1024  # Size 1
+
+        assert args[1][0] == 16 * 1024 * 1024  # Offset 2
+        assert args[1][1] == 16 * 1024 * 1024  # Size 2
+
+        # Explicitly close while asyn.sync is still mocked
+        zf.close()
+
+
+@pytest.mark.asyncio
+async def test_zonal_fetch_logical_chunk_cancellation(mock_gcsfs):
+    """Test the BaseException block (cancellation) cleans up and cancels inner tasks."""
+    with (
+        mock.patch("gcsfs.zonal_file.MRDPool"),
+        mock.patch("gcsfs.zonal_file.asyn.sync"),
+        mock.patch("gcsfs.zonal_file.DirectMemmoveBuffer"),
+    ):
+        zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+        zf.mrd_pool = mock.Mock()
+        zf.gcsfs.memmove_executor = mock.Mock()
+
+        mrd_mock = mock.AsyncMock()
+
+        # Create a side effect that hangs to simulate pending downloads
+        async def slow_download(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        mrd_mock.download_ranges = mock.AsyncMock(side_effect=slow_download)
+
+        @contextlib.asynccontextmanager
+        async def fake_get_mrd():
+            yield mrd_mock
+
+        zf.mrd_pool.get_mrd = fake_get_mrd
+
+        # Spawn the fetcher as a task
+        task = asyncio.create_task(
+            zf._fetch_logical_chunk(start_offset=0, total_size=100, split_factor=2)
+        )
+
+        # Yield control to let the inner tasks get created and block on sleep
+        await asyncio.sleep(0.1)
+
+        # Cancel the outer task
+        task.cancel()
+
+        # Ensure the CancelledError bubbles out exactly as expected
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        zf.close()
+
+
+@pytest.mark.asyncio
+async def test_zonal_fetch_logical_chunk_single(mock_gcsfs):
+    """Test successful single chunk download (split_factor=1)."""
+    with (
+        mock.patch("gcsfs.zonal_file.MRDPool"),
+        mock.patch("gcsfs.zonal_file.asyn.sync"),
+        mock.patch("gcsfs.zonal_file.DirectMemmoveBuffer") as mem_buf_mock,
+        mock.patch(
+            "gcsfs.zonal_file.PyBytes_FromStringAndSize", return_value=b"0" * 100
+        ),
+        mock.patch("gcsfs.zonal_file.PyBytes_AsString", return_value=12345),
+    ):
+        zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+        zf.mrd_pool = mock.Mock()
+
+        mrd_mock = mock.AsyncMock()
+
+        @contextlib.asynccontextmanager
+        async def fake_get_mrd():
+            yield mrd_mock
+
+        zf.mrd_pool.get_mrd = fake_get_mrd
+
+        res = await zf._fetch_logical_chunk(
+            start_offset=0, total_size=100, split_factor=1
+        )
+
+        assert res == b"0" * 100
+        mrd_mock.download_ranges.assert_awaited_once()
+        # Verify the finally block ran and closed the buffer
+        mem_buf_mock.return_value.close.assert_called_once()
+        zf.close()
+
+
+@pytest.mark.asyncio
+async def test_zonal_fetch_logical_chunk_single_exception(mock_gcsfs):
+    """Test exception handling and buffer cleanup in single chunk download."""
+    with (
+        mock.patch("gcsfs.zonal_file.MRDPool"),
+        mock.patch("gcsfs.zonal_file.asyn.sync"),
+        mock.patch("gcsfs.zonal_file.DirectMemmoveBuffer") as mem_buf_mock,
+        mock.patch(
+            "gcsfs.zonal_file.PyBytes_FromStringAndSize", return_value=b"0" * 100
+        ),
+        mock.patch("gcsfs.zonal_file.PyBytes_AsString", return_value=12345),
+    ):
+        zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+        zf.mrd_pool = mock.Mock()
+
+        mrd_mock = mock.AsyncMock()
+        mrd_mock.download_ranges.side_effect = RuntimeError("Single chunk failure")
+
+        @contextlib.asynccontextmanager
+        async def fake_get_mrd():
+            yield mrd_mock
+
+        zf.mrd_pool.get_mrd = fake_get_mrd
+
+        with pytest.raises(RuntimeError, match="Single chunk failure"):
+            await zf._fetch_logical_chunk(
+                start_offset=0, total_size=100, split_factor=1
+            )
+
+        # Verify the finally block ran despite the error
+        mem_buf_mock.return_value.close.assert_called_once()
+        zf.close()
+
+
+@pytest.mark.asyncio
+async def test_zonal_fetch_logical_chunk_multi_exception(mock_gcsfs):
+    """Test that standard Exceptions in concurrent downloads are caught and propagated."""
+    with (
+        mock.patch("gcsfs.zonal_file.MRDPool"),
+        mock.patch("gcsfs.zonal_file.asyn.sync"),
+        mock.patch("gcsfs.zonal_file.DirectMemmoveBuffer") as mem_buf_mock,
+        mock.patch(
+            "gcsfs.zonal_file.PyBytes_FromStringAndSize", return_value=b"0" * 100
+        ),
+        mock.patch("gcsfs.zonal_file.PyBytes_AsString", return_value=12345),
+    ):
+        zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+        zf.mrd_pool = mock.Mock()
+
+        mrd_mock = mock.AsyncMock()
+
+        call_count = 0
+
+        async def fake_download_ranges(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise RuntimeError("Simulated chunk download failure")
+            return None
+
+        mrd_mock.download_ranges = mock.AsyncMock(side_effect=fake_download_ranges)
+
+        @contextlib.asynccontextmanager
+        async def fake_get_mrd():
+            yield mrd_mock
+
+        zf.mrd_pool.get_mrd = fake_get_mrd
+
+        with pytest.raises(RuntimeError, match="Simulated chunk download failure"):
+            await zf._fetch_logical_chunk(
+                start_offset=0, total_size=100, split_factor=2
+            )
+
+        assert mem_buf_mock.return_value.close.call_count == 2
+        zf.close()
+
+
+@pytest.mark.asyncio
+async def test_zonal_fetch_logical_chunk_multi_cancellation(mock_gcsfs):
+    """Test the BaseException block (cancellation) cleans up and cancels inner tasks."""
+    with (
+        mock.patch("gcsfs.zonal_file.MRDPool"),
+        mock.patch("gcsfs.zonal_file.asyn.sync"),
+        mock.patch("gcsfs.zonal_file.DirectMemmoveBuffer") as mem_buf_mock,
+        mock.patch(
+            "gcsfs.zonal_file.PyBytes_FromStringAndSize", return_value=b"0" * 100
+        ),
+        mock.patch("gcsfs.zonal_file.PyBytes_AsString", return_value=12345),
+        mock.patch("asyncio.gather", new_callable=mock.AsyncMock) as gather_mock,
+    ):
+        zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+        zf.mrd_pool = mock.Mock()
+
+        @contextlib.asynccontextmanager
+        async def fake_get_mrd():
+            yield mock.AsyncMock()
+
+        zf.mrd_pool.get_mrd = fake_get_mrd
+
+        gather_mock.side_effect = [asyncio.CancelledError("Cancelled by test"), []]
+
+        with pytest.raises(asyncio.CancelledError):
+            await zf._fetch_logical_chunk(
+                start_offset=0, total_size=100, split_factor=2
+            )
+        assert gather_mock.call_count == 2
+        assert mem_buf_mock.return_value.close.call_count == 2
+
+        zf.close()

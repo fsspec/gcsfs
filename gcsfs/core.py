@@ -26,6 +26,7 @@ from fsspec.implementations.http import get_client
 from fsspec.utils import setup_logging, stringify_path
 
 from . import __version__ as version
+from .caching import Prefetcher
 from .checkers import get_consistency_checker
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
@@ -1998,6 +1999,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if not key:
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
+
+        if cache_options is None:
+            cache_options = {}
+
+        if "r" in mode:
+            _FETCHER_OVERRIDE = {Prefetcher.name: self._fetch_logical_chunk}
+            if cache_type in _FETCHER_OVERRIDE:
+                cache_options["fetcher_override"] = _FETCHER_OVERRIDE[cache_type]
+
         super().__init__(
             gcsfs,
             path,
@@ -2196,6 +2206,51 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if "not satisfiable" in str(e):
                 return b""
             raise
+
+    async def _fetch_logical_chunk(self, start_offset, total_size, split_factor=1):
+        """
+        Async fetcher mapped to the Prefetcher cache for regional buckets.
+        Uses concurrent HTTP range requests for split downloads.
+        """
+        if split_factor == 1:
+            return await self.gcsfs._cat_file(
+                self.path, start=start_offset, end=start_offset + total_size
+            )
+
+        part_size = total_size // split_factor
+        tasks = []
+
+        for i in range(split_factor):
+            offset = start_offset + (i * part_size)
+            actual_size = (
+                part_size if i < split_factor - 1 else total_size - (i * part_size)
+            )
+
+            tasks.append(
+                asyncio.create_task(
+                    self.gcsfs._cat_file(
+                        self.path, start=offset, end=offset + actual_size
+                    )
+                )
+            )
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Exception):
+                    raise res
+            return b"".join(results)
+        except asyncio.CancelledError as e:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise e
+
+    def close(self):
+        if hasattr(self, "cache") and self.cache and hasattr(self.cache, "close"):
+            self.cache.close()
+        super().close()
 
 
 def _convert_fixed_key_metadata(metadata, *, from_google=False):

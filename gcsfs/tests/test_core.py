@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import uuid
@@ -8,6 +9,7 @@ from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
+import fsspec.asyn
 import fsspec.core
 import pytest
 import requests
@@ -18,6 +20,7 @@ import gcsfs.checkers
 import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
+from gcsfs.caching import Prefetcher
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
 from gcsfs.tests.utils import tempdir, tmpfile
@@ -1921,3 +1924,193 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
             gcs.mv_file(src, dest)
     finally:
         gcs.version_aware = original_version_aware
+
+
+def test_gcsfile_prefetcher_sequential_read(gcs):
+    """
+    Test that the Prefetcher cache correctly handles sequential reads
+    and returns the expected data chunks.
+    """
+    fn = f"{TEST_BUCKET}/prefetcher_seq.txt"
+
+    # Create a 2MB file
+    file_size = 2 * 1024 * 1024
+    data = os.urandom(file_size)
+    gcs.pipe(fn, data)
+
+    # Open with Prefetcher using a small block size (512KB) to trigger multiple fetches
+    block_size = 512 * 1024
+    with gcs.open(fn, "rb", cache_type="prefetcher", block_size=block_size) as f:
+        assert isinstance(f.cache, Prefetcher)
+
+        # Read the first block
+        chunk1 = f.read(block_size)
+        assert chunk1 == data[:block_size]
+        assert f.cache.user_offset == block_size
+
+        # Read a smaller chunk to test remainder logic
+        chunk2 = f.read(1024)
+        assert chunk2 == data[block_size : block_size + 1024]
+
+        # Read the rest of the file
+        chunk3 = f.read()
+        assert chunk3 == data[block_size + 1024 :]
+
+        # Ensure we reached the end
+        assert f.read(10) == b""
+
+
+def test_gcsfile_prefetcher_seek(gcs):
+    """
+    Test that the Prefetcher gracefully handles forward and backward seeks,
+    which requires clearing remainders and restarting the producer loop.
+    """
+    fn = f"{TEST_BUCKET}/prefetcher_seek.txt"
+    data = b"A" * 1000 + b"B" * 1000 + b"C" * 1000
+    gcs.pipe(fn, data)
+
+    with gcs.open(fn, "rb", cache_type="prefetcher", block_size=1000) as f:
+        # Initial read
+        assert f.read(500) == b"A" * 500
+
+        # Seek forward (misaligned with block size)
+        f.seek(1500)
+        assert f.read(500) == b"B" * 500
+
+        # Seek backward (forces task cancellation and restart)
+        f.seek(0)
+        assert f.read(1000) == b"A" * 1000
+
+        # Seek to exact end
+        f.seek(3000)
+        assert f.read(10) == b""
+
+
+def test_gcsfile_prefetcher_cleanup(gcs):
+    """
+    Test that calling close() on a GCSFile explicitly stops the Prefetcher's
+    background asyncio tasks to prevent 'Task was destroyed' warnings.
+    """
+    fn = f"{TEST_BUCKET}/prefetcher_cleanup.txt"
+    data = b"X" * (1024 * 1024)
+    gcs.pipe(fn, data)
+
+    f = gcs.open(fn, "rb", cache_type="prefetcher", block_size=1024 * 100)
+
+    # Read a tiny bit to ensure the producer task is spawned and running
+    f.read(10)
+
+    cache = f.cache
+    assert isinstance(cache, Prefetcher)
+    assert not cache.is_stopped
+
+    # Close the file wrapper
+    f.close()
+
+    # Verify that the internal tasks were flagged to stop and cleaned up
+    assert cache.is_stopped is True
+    assert len(cache._active_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_prefetcher_logical_chunk_override(gcs):
+    """
+    Test that the custom `_fetch_logical_chunk` override in GCSFile
+    is correctly passed to and used by the Prefetcher cache.
+    """
+    fn = f"{TEST_BUCKET}/prefetcher_override.txt"
+    data = b"Y" * 1024
+    gcs.pipe(fn, data)
+    original_fetch = gcsfs.core.GCSFile._fetch_logical_chunk
+
+    async def mock_fetch(self_obj, start_offset, total_size, split_factor=1):
+        return await original_fetch(
+            self_obj, start_offset, total_size, split_factor=split_factor
+        )
+
+    with mock.patch.object(
+        gcsfs.core.GCSFile,
+        "_fetch_logical_chunk",
+        autospec=True,
+        side_effect=mock_fetch,
+    ) as mock_fetch_obj:
+
+        with gcs.open(fn, "rb", cache_type="prefetcher", block_size=256) as f:
+            assert f.cache.fetcher.__name__ == "_fetch_logical_chunk"
+            f.read(512)
+
+        assert mock_fetch_obj.call_count >= 1
+
+
+def test_fetch_logical_chunk_single(gcs):
+    """Test standard single-chunk fetch when split_factor is 1."""
+    fn = f"{TEST_BUCKET}/fetch_single.txt"
+    data = b"0123456789" * 10
+    gcs.pipe(fn, data)
+
+    with gcs.open(fn, "rb") as f:
+        # Run the async method in the gcs fsspec loop
+        res = fsspec.asyn.sync(gcs.loop, f._fetch_logical_chunk, 0, 100, split_factor=1)
+        assert res == data
+
+
+def test_fetch_logical_chunk_multi(gcs):
+    """Test concurrent multi-chunk fetch when split_factor > 1."""
+    fn = f"{TEST_BUCKET}/fetch_multi.txt"
+    data = b"A" * 500 + b"B" * 500
+    gcs.pipe(fn, data)
+
+    with gcs.open(fn, "rb") as f:
+        # 1000 bytes split across 3 workers (333, 333, 334)
+        res = fsspec.asyn.sync(
+            gcs.loop, f._fetch_logical_chunk, 0, 1000, split_factor=3
+        )
+        assert res == data
+        assert len(res) == 1000
+
+
+def test_fetch_logical_chunk_exception(gcs):
+    """Test that exceptions inside the concurrent gather are raised."""
+    fn = f"{TEST_BUCKET}/fetch_exception.txt"
+    data = b"0123456789" * 10
+    gcs.pipe(fn, data)
+
+    with gcs.open(fn, "rb") as f:
+        original_cat = f.gcsfs._cat_file
+
+        async def mock_cat_file(path, start, end, **kwargs):
+            if start > 0:  # Simulate a failure on the second chunk
+                raise RuntimeError("Simulated download failure")
+            return await original_cat(path, start=start, end=end, **kwargs)
+
+        with mock.patch.object(f.gcsfs, "_cat_file", side_effect=mock_cat_file):
+            with pytest.raises(RuntimeError, match="Simulated download failure"):
+                fsspec.asyn.sync(
+                    gcs.loop, f._fetch_logical_chunk, 0, 100, split_factor=2
+                )
+
+
+def test_fetch_logical_chunk_cancellation(gcs):
+    """Test that cancelling _fetch_logical_chunk properly cancels its inner tasks."""
+    fn = f"{TEST_BUCKET}/fetch_cancel.txt"
+    data = b"0123456789" * 10
+    gcs.pipe(fn, data)
+
+    with gcs.open(fn, "rb", cache_type="prefetcher") as f:
+
+        async def hanging_cat_file(path, start, end, **kwargs):
+            await asyncio.sleep(10)
+            return b""
+
+        with mock.patch.object(f.gcsfs, "_cat_file", side_effect=hanging_cat_file):
+
+            async def run_and_cancel():
+                task = asyncio.create_task(
+                    f._fetch_logical_chunk(0, 100, split_factor=3)
+                )
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            fsspec.asyn.sync(gcs.loop, run_and_cancel)
