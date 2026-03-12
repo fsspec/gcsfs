@@ -52,8 +52,13 @@ def test_zonal_file_write_success(extended_gcsfs, zonal_write_mocks, file_path):
     data1 = b"first part "
     data2 = b"second part"
     with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
-        f.write(data1)
-        f.write(data2)
+        bytes_written1 = f.write(data1)
+        assert bytes_written1 == len(data1)
+        assert f.loc == len(data1)
+
+        bytes_written2 = f.write(data2)
+        assert bytes_written2 == len(data2)
+        assert f.loc == len(data1) + len(data2)
 
     if zonal_write_mocks:
         zonal_write_mocks["aaow"].append.assert_has_awaits(
