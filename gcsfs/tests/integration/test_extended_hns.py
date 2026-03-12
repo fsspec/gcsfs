@@ -894,6 +894,46 @@ class TestExtendedGcsFileSystemRm:
             sibling_dir in gcsfs.dircache
         ), "Sibling directory cache should not be invalidated."
 
+    def test_rm_wildcard_with_empty_folders(self, gcs_hns):
+        """Test deleting files and empty folders using wildcards on HNS bucket."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_wildcard_empty_{uuid.uuid4().hex}"
+
+        # Setup: Some files, some empty folders, some non-empty folders
+        empty_dir1 = f"{base_dir}/empty_1"
+        empty_dir2 = f"{base_dir}/empty_2"
+        empty_dir3 = f"{base_dir}/one_more_empty_dir"
+        other_dir = f"{base_dir}/other_dir"
+        file1 = f"{base_dir}/file1.txt"
+
+        gcsfs.mkdir(empty_dir1, create_parents=True)
+        gcsfs.mkdir(empty_dir2)
+        gcsfs.touch(file1)
+        gcsfs.mkdir(empty_dir3)
+        gcsfs.touch(f"{other_dir}/file2.txt")
+
+        # 1. Remove only matching empty folders using wildcard
+        gcsfs.rm(f"{base_dir}/empty_*", recursive=True)
+
+        assert not gcsfs.exists(empty_dir1)
+        assert not gcsfs.exists(empty_dir2)
+        assert gcsfs.exists(file1)
+        assert gcsfs.exists(other_dir)
+
+        # 2. Remove remaining using a broad wildcard
+        gcsfs.rm(f"{base_dir}/*", recursive=True)
+
+        assert not gcsfs.exists(file1)
+        assert not gcsfs.exists(other_dir)
+        assert not gcsfs.exists(empty_dir3)
+
+        # Verify base_dir is now empty (HNS might still have the base_dir itself)
+        assert gcsfs.ls(base_dir) == []
+
+        gcsfs.rm(base_dir, recursive=True)
+
+        assert not gcsfs.exists(base_dir)
+
 
 @pytest.fixture()
 def test_structure(gcs_hns):
