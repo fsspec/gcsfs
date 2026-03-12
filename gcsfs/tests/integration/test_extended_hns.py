@@ -1525,3 +1525,24 @@ class TestExtendedGcsFileSystemExpandPath:
             f"{base_dir}/folder/file2.txt",
         }
         assert set(expanded_range) == expected_range
+
+
+class TestHNSFolderStatus:
+    """Integration tests for exists and isdir methods on HNS folders."""
+
+    def test_hns_empty_folder_status(self, gcs_hns):
+        """Test exists and isdir on an empty folder in an HNS bucket."""
+        gcsfs = gcs_hns
+        folder_path = f"{TEST_HNS_BUCKET}/empty_folder_{uuid.uuid4().hex}"
+
+        # Create an empty folder
+        gcsfs.mkdir(folder_path)
+
+        # Verify exists and isdir
+        assert gcsfs.exists(folder_path)
+        assert gcsfs.isdir(folder_path)
+        assert not gcsfs.isfile(folder_path)
+
+        # Clean up
+        gcsfs.rmdir(folder_path)
+        assert not gcsfs.exists(folder_path)

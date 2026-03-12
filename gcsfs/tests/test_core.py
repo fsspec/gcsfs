@@ -34,6 +34,105 @@ def test_simple(gcs, monkeypatch):
     gcs.ls("/" + TEST_BUCKET)  # OK to lead with '/'
 
 
+def test_exists(gcs):
+    # Existing file
+    fn = TEST_BUCKET + "/nested/file1"
+    assert gcs.exists(fn)
+
+    # Existing directory
+    dn = TEST_BUCKET + "/nested"
+    assert gcs.exists(dn)
+
+    # Bucket
+    assert gcs.exists(TEST_BUCKET)
+
+    # Non-existing path
+    assert not gcs.exists(TEST_BUCKET + "/non-existing")
+
+    # Path within non-existing directory
+    assert not gcs.exists(TEST_BUCKET + "/non-existing/file")
+
+    # Prefix cases
+    # file 'nested/file1' exists. Check if 'nested/file' exists.
+    assert not gcs.exists(TEST_BUCKET + "/nested/file")
+
+    # nested/nested2/file1 exists, so nested/nested2 should be a directory
+    assert gcs.exists(TEST_BUCKET + "/nested/nested2")
+
+    # Trailing slash
+    assert gcs.exists(dn + "/")
+
+    # Non-existent bucket
+    nb = "non-existent-bucket-name-" + str(uuid4())
+    assert not gcs.exists(nb)
+
+
+def test_isdir(gcs):
+    # Existing file
+    fn = TEST_BUCKET + "/nested/file1"
+    assert not gcs.isdir(fn)
+
+    # Existing directory
+    dn = TEST_BUCKET + "/nested"
+    assert gcs.isdir(dn)
+
+    # Bucket
+    assert gcs.isdir(TEST_BUCKET)
+
+    # Non-existing path
+    assert not gcs.isdir(TEST_BUCKET + "/non-existing")
+
+    # nested/nested2/file1 exists, so nested/nested2 should be a directory
+    assert gcs.isdir(TEST_BUCKET + "/nested/nested2")
+
+    # Trailing slash
+    assert gcs.isdir(dn + "/")
+
+    # Non-existent bucket
+    nb = "non-existent-bucket-name-" + str(uuid4())
+    assert not gcs.isdir(nb)
+
+
+def test_isfile(gcs):
+    # Existing file
+    fn = TEST_BUCKET + "/nested/file1"
+    assert gcs.isfile(fn)
+
+    # Existing directory
+    dn = TEST_BUCKET + "/nested"
+    assert not gcs.isfile(dn)
+
+    # Bucket
+    assert not gcs.isfile(TEST_BUCKET)
+
+    # Non-existing path
+    assert not gcs.isfile(TEST_BUCKET + "/non-existing")
+
+    # Path within non-existing directory
+    assert not gcs.isfile(TEST_BUCKET + "/non-existing/file")
+
+    # nested/nested2/file1 exists, so nested/nested2 is not a file
+    assert not gcs.isfile(TEST_BUCKET + "/nested/nested2")
+
+    # Trailing slash
+    assert not gcs.isfile(dn + "/")
+
+    # Non-existent bucket
+    nb = "non-existent-bucket-name-" + str(uuid4())
+    assert not gcs.isfile(nb)
+
+    # Generation
+    info = gcs.info(fn)
+    gen = info.get("generation")
+    if gen:
+        original_version_aware = gcs.version_aware
+        gcs.version_aware = True
+        try:
+            assert gcs.isfile(f"{fn}#{gen}")
+        finally:
+            gcs.version_aware = original_version_aware
+
+
 def test_dircache_filled(gcs):
     assert not dict(gcs.dircache)
     gcs.ls(TEST_BUCKET)
