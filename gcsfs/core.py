@@ -1246,12 +1246,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     setxattrs = asyn.sync_wrapper(_setxattrs)
 
-    async def _merge(self, path, paths, acl=None):
+    async def _merge(self, path, paths, acl=None, source_generations=None):
         """Concatenate objects within a single bucket"""
         bucket, key, generation = self.split_path(path)
         source = []
-        for p in paths:
+        for i, p in enumerate(paths):
             _, name, gen = self.split_path(p)
+            if source_generations and i < len(source_generations):
+                gen = gen or source_generations[i]
             obj = {"name": name}
             if gen:
                 obj["generation"] = gen
@@ -2005,6 +2007,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if not key:
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
+        self._append_original_key = None
+        self._append_generation = None
         super().__init__(
             gcsfs,
             path,
@@ -2022,8 +2026,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
         supports_append = kwargs.pop("supports_append", False)
-        self._append_original_key = None
-        self._append_generation = None
         if "a" in self.mode and not supports_append:
             try:
                 info = self.fs.info(self.path)
@@ -2152,11 +2154,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if self._append_original_key is None:
             return
         tmp_path = f"{self.bucket}/{self.key}"
-        original = self.path
-        if self._append_generation:
-            original = f"{self.path}#{self._append_generation}"
         self.key = self._append_original_key
-        result = self.gcsfs.merge(self.path, [original, tmp_path])
+        result = self.gcsfs.merge(
+            self.path,
+            [self.path, tmp_path],
+            source_generations=[self._append_generation, None],
+        )
         try:
             self.gcsfs.rm(tmp_path)
         except FileNotFoundError:
