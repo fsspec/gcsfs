@@ -1197,6 +1197,15 @@ class TestExtendedGcsFileSystemInfo:
         assert info["name"] == file_path
         assert info["size"] == 0
 
+    def test_hns_size_directory_success(self, gcs_hns):
+        """Test size() returns 0 for HNS directories."""
+        gcsfs = gcs_hns
+        dir_name = f"size_dir_{uuid.uuid4().hex}"
+        dir_path = f"{TEST_HNS_BUCKET}/{dir_name}"
+
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.size(dir_path) == 0
+
     def test_hns_info_non_existent_path_raises(self, gcs_hns):
         """Test info() raises FileNotFoundError for non-existent paths."""
         gcsfs = gcs_hns

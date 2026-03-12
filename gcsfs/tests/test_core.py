@@ -229,6 +229,26 @@ def test_info(gcs):
     assert gcs.info(a)["mtime"] == gcs.modified(a)
 
 
+def test_size(gcs):
+    gcs.touch(a)
+    assert gcs.size(a) == 0
+    with gcs.open(a, "wb") as f:
+        f.write(b"123")
+    assert gcs.size(a) == 3
+
+
+def test_size_nonexistent(gcs):
+    with pytest.raises(FileNotFoundError):
+        gcs.size(TEST_BUCKET + "/nonexistent_" + str(uuid.uuid4()))
+
+
+def test_size_directory(gcs):
+    path = f"{TEST_BUCKET}/test_size_dir/file.txt"
+    gcs.touch(path)
+    dir_path = f"{TEST_BUCKET}/test_size_dir"
+    assert gcs.size(dir_path) == 0
+
+
 def test_info_on_directory_with_only_subdirectories(gcs):
     """Test info() on a path that contains no direct files but has subdirectories."""
     # Setup: create a file inside a nested directory
