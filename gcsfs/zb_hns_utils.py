@@ -249,11 +249,7 @@ class MRDPool:
 
     async def _create_mrd(self):
         await self.gcsfs._get_grpc_client()
-        from google.cloud.storage.asyncio.async_multi_range_downloader import (
-            AsyncMultiRangeDownloader,
-        )
-
-        mrd = await AsyncMultiRangeDownloader.create_mrd(
+        mrd = await init_mrd(
             self.gcsfs.grpc_client, self.bucket_name, self.object_name, self.generation
         )
         self._all_mrds.append(mrd)
