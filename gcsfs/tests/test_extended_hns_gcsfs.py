@@ -921,6 +921,62 @@ class TestExtendedGcsFileSystemMkdir:
             mocks["super_mkdir"].assert_not_called()
             mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
 
+    def test_mkdir_with_placement_string(self, gcs_hns, gcs_hns_mocks):
+        """Test mkdir with placement as a string (Zonal bucket)."""
+        gcsfs = gcs_hns
+        bucket_path = "new-zonal-bucket"
+        placement = "us-central1-a"
+
+        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+            mocks["info"].side_effect = FileNotFoundError
+
+            gcsfs.mkdir(bucket_path, placement=placement)
+
+            mocks["super_mkdir"].assert_called_once()
+            call_args = mocks["super_mkdir"].call_args
+            assert call_args[0][0] == bucket_path
+            assert call_args[1]["customPlacementConfig"] == {
+                "dataLocations": [placement]
+            }
+            assert call_args[1]["hierarchicalNamespace"] == {"enabled": True}
+            assert call_args[1]["storageClass"] == "RAPID"
+
+    def test_mkdir_with_placement_creates_bucket_and_folders(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """Test mkdir with placement creates bucket and folders."""
+        gcsfs = gcs_hns
+        bucket_name = f"new-zonal-bucket-{uuid.uuid4()}"
+        dir_path = f"{bucket_name}/some/dir"
+        placement = "us-central1-a"
+        location = "us-central1"
+
+        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+            # Simulate bucket not existing initially.
+            mocks["info"].side_effect = FileNotFoundError
+
+            gcsfs.mkdir(
+                dir_path, create_parents=True, placement=placement, location=location
+            )
+
+            # Verify bucket creation via super()._mkdir
+            mocks["super_mkdir"].assert_called_once()
+            call_args = mocks["super_mkdir"].call_args
+            assert call_args[0][0] == bucket_name
+            assert call_args[1]["create_parents"] is True
+            assert call_args[1]["customPlacementConfig"] == {
+                "dataLocations": [placement]
+            }
+            assert call_args[1]["hierarchicalNamespace"] == {"enabled": True}
+            assert call_args[1]["location"] == location
+            assert call_args[1]["storageClass"] == "RAPID"
+
+            # Verify folder creation via control_client.create_folder
+            expected_request = self._get_create_folder_request(dir_path, recursive=True)
+            mocks["control_client"].create_folder.assert_called_once_with(
+                request=expected_request
+            )
+
 
 class TestExtendedGcsFileSystemFind:
     """Tests for the find method in ExtendedGcsFileSystem."""

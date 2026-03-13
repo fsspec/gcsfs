@@ -397,6 +397,30 @@ class TestExtendedGcsFileSystemMkdir:
 
         assert gcsfs._sync_lookup_bucket_type(bucket_name) is BucketType.HIERARCHICAL
 
+    def test_mkdir_for_zonal_bucket(self, gcs_hns, buckets_to_delete):
+        """Test creating a Zonal bucket using the placement parameter (string)."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-zonal-bucket-{uuid.uuid4()}"
+        dir_path = f"{bucket_name}/some_dir"
+        buckets_to_delete.add(bucket_name)
+
+        # Use a valid zone for placement
+        placement = "us-central1-a"
+        location = "us-central1"
+
+        assert not gcsfs.exists(bucket_name)
+        gcsfs.mkdir(
+            dir_path, create_parents=True, placement=placement, location=location
+        )
+        assert gcsfs.exists(bucket_name)
+        assert gcsfs.exists(dir_path)
+        assert (
+            gcsfs._sync_lookup_bucket_type(bucket_name) == BucketType.ZONAL_HIERARCHICAL
+        )
+
+        info = gcsfs.info(bucket_name)
+        assert info["location"] == location.upper()
+
     def test_mkdir_create_non_hns_bucket(self, gcs_hns, buckets_to_delete):
         """Test creating a new non-HNS bucket by default."""
         gcsfs = gcs_hns
