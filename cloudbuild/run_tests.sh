@@ -110,6 +110,13 @@ case "$TEST_SUITE" in
       "--deselect=gcsfs/tests/test_core.py::test_mv_file_cache"
     )
 
+    # Zonal tests with prefetcher cache does not call _cat_file method.
+    # The following tests depends upon mocking the _cat_file method for regional.
+    ZONAL_DESELECTS+=(
+      "--deselect=gcsfs/tests/test_core.py::test_prefetcher_logical_chunk_override"
+      "--deselect=gcsfs/tests/test_core.py::test_fetch_logical_chunk_exception"
+    )
+
     pytest "${ARGS[@]}" "${ZONAL_DESELECTS[@]}" gcsfs/tests/test_core.py
     ;;
 esac
