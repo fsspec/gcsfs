@@ -894,6 +894,46 @@ class TestExtendedGcsFileSystemRm:
             sibling_dir in gcsfs.dircache
         ), "Sibling directory cache should not be invalidated."
 
+    def test_rm_wildcard_with_empty_folders(self, gcs_hns):
+        """Test deleting files and empty folders using wildcards on HNS bucket."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_wildcard_empty_{uuid.uuid4().hex}"
+
+        # Setup: Some files, some empty folders, some non-empty folders
+        empty_dir1 = f"{base_dir}/empty_1"
+        empty_dir2 = f"{base_dir}/empty_2"
+        empty_dir3 = f"{base_dir}/one_more_empty_dir"
+        other_dir = f"{base_dir}/other_dir"
+        file1 = f"{base_dir}/file1.txt"
+
+        gcsfs.mkdir(empty_dir1, create_parents=True)
+        gcsfs.mkdir(empty_dir2)
+        gcsfs.touch(file1)
+        gcsfs.mkdir(empty_dir3)
+        gcsfs.touch(f"{other_dir}/file2.txt")
+
+        # 1. Remove only matching empty folders using wildcard
+        gcsfs.rm(f"{base_dir}/empty_*", recursive=True)
+
+        assert not gcsfs.exists(empty_dir1)
+        assert not gcsfs.exists(empty_dir2)
+        assert gcsfs.exists(file1)
+        assert gcsfs.exists(other_dir)
+
+        # 2. Remove remaining using a broad wildcard
+        gcsfs.rm(f"{base_dir}/*", recursive=True)
+
+        assert not gcsfs.exists(file1)
+        assert not gcsfs.exists(other_dir)
+        assert not gcsfs.exists(empty_dir3)
+
+        # Verify base_dir is now empty (HNS might still have the base_dir itself)
+        assert gcsfs.ls(base_dir) == []
+
+        gcsfs.rm(base_dir, recursive=True)
+
+        assert not gcsfs.exists(base_dir)
+
 
 @pytest.fixture()
 def test_structure(gcs_hns):
@@ -1157,6 +1197,15 @@ class TestExtendedGcsFileSystemInfo:
         assert info["name"] == file_path
         assert info["size"] == 0
 
+    def test_hns_size_directory_success(self, gcs_hns):
+        """Test size() returns 0 for HNS directories."""
+        gcsfs = gcs_hns
+        dir_name = f"size_dir_{uuid.uuid4().hex}"
+        dir_path = f"{TEST_HNS_BUCKET}/{dir_name}"
+
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.size(dir_path) == 0
+
     def test_hns_info_non_existent_path_raises(self, gcs_hns):
         """Test info() raises FileNotFoundError for non-existent paths."""
         gcsfs = gcs_hns
@@ -1165,3 +1214,335 @@ class TestExtendedGcsFileSystemInfo:
         # Should raise FileNotFoundError, mapping from api_exceptions.NotFound
         with pytest.raises(FileNotFoundError):
             gcsfs.info(non_existent_path)
+
+
+class TestExtendedGcsFileSystemTree:
+    """Integration tests for the tree method on HNS buckets."""
+
+    def test_hns_tree_complex_structure(self, gcs_hns):
+        unique_id = uuid.uuid4().hex
+        base_dir = f"{TEST_HNS_BUCKET}/verify_tree_complex_{unique_id}"
+
+        gcs_hns.mkdir(base_dir)
+        gcs_hns.mkdir(f"{base_dir}/folder_A")
+        gcs_hns.touch(f"{base_dir}/root_file.txt")
+        gcs_hns.touch(f"{base_dir}/folder_A/file_A.txt")
+
+        # Deep nesting
+        gcs_hns.mkdir(f"{base_dir}/folder_A/sub_B/sub_C/sub_D", create_parents=True)
+        gcs_hns.touch(f"{base_dir}/folder_A/sub_B/sub_C/sub_D/deep_file.txt")
+
+        # Empty folder (Native HNS)
+        gcs_hns.mkdir(f"{base_dir}/folder_E_empty")
+
+        # Placeholder objects (Trailing slashes)
+        gcs_hns.touch(f"{base_dir}/placeholder_P/")
+        gcs_hns.touch(f"{base_dir}/placeholder_P/file_P.txt")
+        gcs_hns.touch(f"{base_dir}/placeholder_Q/")
+
+        tree_str = gcs_hns.tree(base_dir, recursion_limit=10)
+
+        expected_basenames = {
+            "root_file.txt",
+            "folder_A",
+            "file_A.txt",
+            "sub_B",
+            "sub_C",
+            "sub_D",
+            "deep_file.txt",
+            "placeholder_P",
+            "file_P.txt",
+            "placeholder_Q",
+            "folder_E_empty",
+        }
+
+        lines = tree_str.strip().split("\n")
+        # Extract basenames from tree lines (e.g., "├── folder_A/" -> "folder_A/")
+        found_names = {line.split("──")[-1].strip() for line in lines[1:]}
+
+        assert found_names == expected_basenames
+
+    def test_tree_on_empty_folder(self, gcs_hns):
+        """Test tree on a folder that is completely empty."""
+        unique_id = uuid.uuid4().hex
+        base_dir = f"{TEST_HNS_BUCKET}/empty_tree_{unique_id}"
+        gcs_hns.mkdir(base_dir)
+
+        tree_str = gcs_hns.tree(base_dir)
+        # Should just return the base directory name
+        assert tree_str.strip() == base_dir
+
+    def test_tree_on_nested_empty_folders(self, gcs_hns):
+        """Test tree on nested folders that are all empty."""
+        unique_id = uuid.uuid4().hex
+        base_dir = f"{TEST_HNS_BUCKET}/nested_empty_tree_{unique_id}"
+        path = f"{base_dir}/level1/level2/level3"
+        gcs_hns.mkdir(path, create_parents=True)
+
+        tree_str = gcs_hns.tree(base_dir, recursion_limit=10)
+        lines = tree_str.strip().split("\n")
+
+        # Expect something like:
+        # base_dir
+        # └── level1/
+        #     └── level2/
+        #         └── level3/
+
+        found_names = {line.split("──")[-1].strip().rstrip("/") for line in lines[1:]}
+        assert found_names == {"level1", "level2", "level3"}
+
+
+class TestExtendedGcsFileSystemGlob:
+    """Integration tests for the glob method on HNS buckets."""
+
+    def test_hns_glob_complex(self, gcs_hns):
+        base_dir = f"{TEST_HNS_BUCKET}/verify_glob_{uuid.uuid4().hex}"
+
+        files = [
+            f"{base_dir}/folder_with_files/file1.txt",
+            f"{base_dir}/folder_with_files/file2.txt",
+            f"{base_dir}/folder_with_files/subdir/file3.txt",
+            f"{base_dir}/folder_with_one_file/file4.dat",
+            f"{base_dir}/root_file.txt",
+        ]
+        placeholder = f"{base_dir}/folder_with_placeholder/"
+        dirs = [
+            f"{base_dir}/folder_with_files",
+            f"{base_dir}/folder_with_files/subdir",
+            f"{base_dir}/folder_with_one_file",
+            f"{base_dir}/empty_folder_1",
+            f"{base_dir}/empty_folder_2",
+        ]
+
+        for d in dirs:
+            gcs_hns.mkdir(d, create_parents=True)
+        for f in files:
+            gcs_hns.touch(f)
+        gcs_hns.touch(placeholder)
+
+        test_cases = [
+            {
+                "pattern": f"{base_dir}/*",
+                "expected": {
+                    f"{base_dir}/folder_with_files",
+                    f"{base_dir}/folder_with_one_file",
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
+                    f"{base_dir}/root_file.txt",
+                    f"{base_dir}/folder_with_placeholder",
+                },
+                "description": "Non-recursive top-level glob",
+            },
+            {
+                "pattern": f"{base_dir}/folder_with_files/*",
+                "expected": {
+                    f"{base_dir}/folder_with_files/file1.txt",
+                    f"{base_dir}/folder_with_files/file2.txt",
+                    f"{base_dir}/folder_with_files/subdir",
+                },
+                "description": "Non-recursive sub-level glob",
+            },
+            {
+                "pattern": f"{base_dir}/folder_with_files/file?.txt",
+                "expected": {
+                    f"{base_dir}/folder_with_files/file1.txt",
+                    f"{base_dir}/folder_with_files/file2.txt",
+                },
+                "description": "Question mark wildcard",
+            },
+            {
+                "pattern": f"{base_dir}/empty_folder_[12]",
+                "expected": {
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
+                },
+                "description": "Character range wildcard",
+            },
+            {
+                "pattern": f"{base_dir}/empty_folder*",
+                "expected": {
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
+                },
+                "description": "Glob matching empty folders only",
+            },
+            {
+                "pattern": f"{base_dir}/**",
+                "expected": {
+                    base_dir,
+                    f"{base_dir}/folder_with_files",
+                    f"{base_dir}/folder_with_files/subdir",
+                    f"{base_dir}/folder_with_one_file",
+                    f"{base_dir}/empty_folder_1",
+                    f"{base_dir}/empty_folder_2",
+                    f"{base_dir}/folder_with_files/file1.txt",
+                    f"{base_dir}/folder_with_files/file2.txt",
+                    f"{base_dir}/folder_with_files/subdir/file3.txt",
+                    f"{base_dir}/folder_with_one_file/file4.dat",
+                    f"{base_dir}/root_file.txt",
+                    f"{base_dir}/folder_with_placeholder",
+                    f"{base_dir}/folder_with_placeholder/",
+                },
+                "description": "Recursive glob all",
+            },
+        ]
+
+        for case in test_cases:
+            results = set(gcs_hns.glob(case["pattern"]))
+            assert results == case["expected"], f"Failed: {case['description']}"
+
+
+class TestExtendedGcsFileSystemWalk:
+    """Integration tests for the walk method on HNS buckets."""
+
+    def test_hns_walk_complex(self, gcs_hns):
+        base_dir = f"{TEST_HNS_BUCKET}/verify_walk_{uuid.uuid4().hex}"
+
+        folder_with_files = f"{base_dir}/folder_with_files"
+        subdir = f"{folder_with_files}/subdir"
+        empty_folder = f"{base_dir}/empty_folder"
+        folder_with_one_file = f"{base_dir}/folder_with_one_file"
+        folder_with_placeholder = f"{base_dir}/folder_with_placeholder"
+        nested_empty = f"{base_dir}/nested_empty"
+        nested_empty_a = f"{nested_empty}/A"
+        nested_empty_b = f"{nested_empty_a}/B"
+
+        gcs_hns.mkdir(base_dir)
+        gcs_hns.mkdir(folder_with_files)
+        gcs_hns.mkdir(subdir)
+        gcs_hns.mkdir(empty_folder)
+        gcs_hns.mkdir(folder_with_one_file)
+        gcs_hns.mkdir(nested_empty_b, create_parents=True)
+
+        gcs_hns.touch(f"{subdir}/file1.txt")
+        gcs_hns.touch(f"{folder_with_one_file}/file3.txt")
+        gcs_hns.touch(f"{base_dir}/root_file.txt")
+        gcs_hns.touch(f"{folder_with_placeholder}/")
+
+        walk_results = list(gcs_hns.walk(base_dir))
+
+        # Expected structure: root -> (set of dirs, set of files)
+        expected_structure = {
+            base_dir: (
+                {
+                    "folder_with_files",
+                    "empty_folder",
+                    "folder_with_one_file",
+                    "folder_with_placeholder",
+                    "nested_empty",
+                },
+                {"root_file.txt"},
+            ),
+            folder_with_files: ({"subdir"}, set()),
+            subdir: (set(), {"file1.txt"}),
+            empty_folder: (set(), set()),
+            folder_with_one_file: (set(), {"file3.txt"}),
+            folder_with_placeholder: (set(), {""}),
+            nested_empty: ({"A"}, set()),
+            nested_empty_a: ({"B"}, set()),
+            nested_empty_b: (set(), set()),
+        }
+
+        assert len(walk_results) == len(expected_structure)
+        for root, d_list, f_list in walk_results:
+            root = root.rstrip("/")
+            assert (
+                root in expected_structure
+            ), f"Unexpected root yielded by walk: {root}"
+            exp_dirs, exp_files = expected_structure[root]
+            assert set(d_list) == exp_dirs, f"Directories mismatch for {root}"
+            assert set(f_list) == exp_files, f"Files mismatch for {root}"
+
+
+class TestExtendedGcsFileSystemExpandPath:
+    """Integration tests for the expand_path method in ExtendedGcsFileSystem."""
+
+    def test_hns_expand_path(self, gcs_hns):
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/test_expand_path_hns_{uuid.uuid4().hex}"
+
+        files = [
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir/file3.txt",
+            f"{base_dir}/root_file.txt",
+        ]
+        for f in files:
+            gcsfs.touch(f)
+
+        # Native empty folder
+        empty_folder = f"{base_dir}/empty_folder"
+        gcsfs.mkdir(empty_folder)
+
+        # Placeholder folder object (trailing slash)
+        placeholder_folder = f"{base_dir}/placeholder_folder/"
+        gcsfs.touch(placeholder_folder)
+
+        # Test case 1: No magic, recursive=True
+        expanded = gcsfs.expand_path(base_dir, recursive=True)
+        expected = {
+            base_dir,
+            f"{base_dir}/folder",
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir",
+            f"{base_dir}/folder/subdir/file3.txt",
+            f"{base_dir}/root_file.txt",
+            empty_folder,
+            f"{base_dir}/placeholder_folder",
+            placeholder_folder,
+        }
+        assert set(expanded) == expected
+
+        # Test case 2: With magic *
+        expanded_magic = gcsfs.expand_path(f"{base_dir}/folder/*", recursive=True)
+        expected_magic = {
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir",
+            f"{base_dir}/folder/subdir/file3.txt",
+        }
+        assert set(expanded_magic) == expected_magic
+
+        # Test case 3: Recursive glob **
+        expanded_glob_starstar = gcsfs.expand_path(
+            f"{base_dir}/**/*.txt", recursive=True
+        )
+        expected_glob_starstar = {
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+            f"{base_dir}/folder/subdir/file3.txt",
+            f"{base_dir}/root_file.txt",
+        }
+        assert set(expanded_glob_starstar) == expected_glob_starstar
+
+        # Test case 4: Character range magic
+        expanded_range = gcsfs.expand_path(
+            f"{base_dir}/folder/file[12].txt", recursive=True
+        )
+        expected_range = {
+            f"{base_dir}/folder/file1.txt",
+            f"{base_dir}/folder/file2.txt",
+        }
+        assert set(expanded_range) == expected_range
+
+
+class TestHNSFolderStatus:
+    """Integration tests for exists and isdir methods on HNS folders."""
+
+    def test_hns_empty_folder_status(self, gcs_hns):
+        """Test exists and isdir on an empty folder in an HNS bucket."""
+        gcsfs = gcs_hns
+        folder_path = f"{TEST_HNS_BUCKET}/empty_folder_{uuid.uuid4().hex}"
+
+        # Create an empty folder
+        gcsfs.mkdir(folder_path)
+
+        # Verify exists and isdir
+        assert gcsfs.exists(folder_path)
+        assert gcsfs.isdir(folder_path)
+        assert not gcsfs.isfile(folder_path)
+
+        # Clean up
+        gcsfs.rmdir(folder_path)
+        assert not gcsfs.exists(folder_path)

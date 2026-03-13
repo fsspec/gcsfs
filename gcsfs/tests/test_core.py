@@ -34,6 +34,105 @@ def test_simple(gcs, monkeypatch):
     gcs.ls("/" + TEST_BUCKET)  # OK to lead with '/'
 
 
+def test_exists(gcs):
+    # Existing file
+    fn = TEST_BUCKET + "/nested/file1"
+    assert gcs.exists(fn)
+
+    # Existing directory
+    dn = TEST_BUCKET + "/nested"
+    assert gcs.exists(dn)
+
+    # Bucket
+    assert gcs.exists(TEST_BUCKET)
+
+    # Non-existing path
+    assert not gcs.exists(TEST_BUCKET + "/non-existing")
+
+    # Path within non-existing directory
+    assert not gcs.exists(TEST_BUCKET + "/non-existing/file")
+
+    # Prefix cases
+    # file 'nested/file1' exists. Check if 'nested/file' exists.
+    assert not gcs.exists(TEST_BUCKET + "/nested/file")
+
+    # nested/nested2/file1 exists, so nested/nested2 should be a directory
+    assert gcs.exists(TEST_BUCKET + "/nested/nested2")
+
+    # Trailing slash
+    assert gcs.exists(dn + "/")
+
+    # Non-existent bucket
+    nb = "non-existent-bucket-name-" + str(uuid4())
+    assert not gcs.exists(nb)
+
+
+def test_isdir(gcs):
+    # Existing file
+    fn = TEST_BUCKET + "/nested/file1"
+    assert not gcs.isdir(fn)
+
+    # Existing directory
+    dn = TEST_BUCKET + "/nested"
+    assert gcs.isdir(dn)
+
+    # Bucket
+    assert gcs.isdir(TEST_BUCKET)
+
+    # Non-existing path
+    assert not gcs.isdir(TEST_BUCKET + "/non-existing")
+
+    # nested/nested2/file1 exists, so nested/nested2 should be a directory
+    assert gcs.isdir(TEST_BUCKET + "/nested/nested2")
+
+    # Trailing slash
+    assert gcs.isdir(dn + "/")
+
+    # Non-existent bucket
+    nb = "non-existent-bucket-name-" + str(uuid4())
+    assert not gcs.isdir(nb)
+
+
+def test_isfile(gcs):
+    # Existing file
+    fn = TEST_BUCKET + "/nested/file1"
+    assert gcs.isfile(fn)
+
+    # Existing directory
+    dn = TEST_BUCKET + "/nested"
+    assert not gcs.isfile(dn)
+
+    # Bucket
+    assert not gcs.isfile(TEST_BUCKET)
+
+    # Non-existing path
+    assert not gcs.isfile(TEST_BUCKET + "/non-existing")
+
+    # Path within non-existing directory
+    assert not gcs.isfile(TEST_BUCKET + "/non-existing/file")
+
+    # nested/nested2/file1 exists, so nested/nested2 is not a file
+    assert not gcs.isfile(TEST_BUCKET + "/nested/nested2")
+
+    # Trailing slash
+    assert not gcs.isfile(dn + "/")
+
+    # Non-existent bucket
+    nb = "non-existent-bucket-name-" + str(uuid4())
+    assert not gcs.isfile(nb)
+
+    # Generation
+    info = gcs.info(fn)
+    gen = info.get("generation")
+    if gen:
+        original_version_aware = gcs.version_aware
+        gcs.version_aware = True
+        try:
+            assert gcs.isfile(f"{fn}#{gen}")
+        finally:
+            gcs.version_aware = original_version_aware
+
+
 def test_dircache_filled(gcs):
     assert not dict(gcs.dircache)
     gcs.ls(TEST_BUCKET)
@@ -229,6 +328,26 @@ def test_info(gcs):
     assert gcs.info(a)["mtime"] == gcs.modified(a)
 
 
+def test_size(gcs):
+    gcs.touch(a)
+    assert gcs.size(a) == 0
+    with gcs.open(a, "wb") as f:
+        f.write(b"123")
+    assert gcs.size(a) == 3
+
+
+def test_size_nonexistent(gcs):
+    with pytest.raises(FileNotFoundError):
+        gcs.size(TEST_BUCKET + "/nonexistent_" + str(uuid.uuid4()))
+
+
+def test_size_directory(gcs):
+    path = f"{TEST_BUCKET}/test_size_dir/file.txt"
+    gcs.touch(path)
+    dir_path = f"{TEST_BUCKET}/test_size_dir"
+    assert gcs.size(dir_path) == 0
+
+
 def test_info_on_directory_with_only_subdirectories(gcs):
     """Test info() on a path that contains no direct files but has subdirectories."""
     # Setup: create a file inside a nested directory
@@ -352,6 +471,71 @@ def test_rm_chunked_batch(gcs):
     files_removed = gcs.find(TEST_BUCKET)
     for fn in files:
         assert fn not in files_removed
+
+
+def test_rm_wildcards_and_lists(gcs):
+    base_dir = f"{TEST_BUCKET}/test_rm_complex_{uuid.uuid4().hex}"
+    files = [
+        f"{base_dir}/file1.txt",
+        f"{base_dir}/file2.txt",
+        f"{base_dir}/other.txt",
+        f"{base_dir}/a1.dat",
+        f"{base_dir}/b1.dat",
+        f"{base_dir}/subdir/nested.txt",
+    ]
+    for f in files:
+        gcs.touch(f)
+
+    # 1. Test '?' wildcard (non-recursive)
+    gcs.rm(f"{base_dir}/file?.txt")
+    assert not gcs.exists(files[0])
+    assert not gcs.exists(files[1])
+    assert gcs.exists(files[2])
+
+    # 2. Test list of patterns with '*' wildcards (non-recursive)
+    gcs.rm([f"{base_dir}/a*", f"{base_dir}/b*"])
+    assert not gcs.exists(files[3])
+    assert not gcs.exists(files[4])
+    assert gcs.exists(files[2])
+    assert gcs.exists(files[5])  # subdir file still exists
+
+    # 3. Test 'base_dir/*' (non-recursive)
+    gcs.rm(f"{base_dir}/*")
+    assert not gcs.exists(files[2])
+    assert gcs.exists(files[5])  # subdir file still exists
+
+    # 4. Test non-matching pattern
+    with pytest.raises(FileNotFoundError):
+        gcs.rm(f"{base_dir}/non_existent*")
+
+    # 5. Test recursive wildcard cleanup
+    gcs.rm(f"{base_dir}/**", recursive=True)
+    assert not gcs.exists(base_dir)
+
+    # 6. Test 'bucket/*' (non-recursive)
+    new_bucket = f"gcsfs-test-rm-{uuid.uuid4().hex}"
+    gcs.mkdir(new_bucket)
+    try:
+        gcs.touch(f"{new_bucket}/file1")
+        gcs.touch(f"{new_bucket}/subdir/file2")
+        gcs.rm(f"{new_bucket}/*")
+        assert not gcs.exists(f"{new_bucket}/file1")
+        assert gcs.exists(f"{new_bucket}/subdir/file2")
+    finally:
+        gcs.rm(new_bucket, recursive=True)
+
+    # 7. Test 'bucket/*' (recursive)
+    new_bucket = f"gcsfs-test-rm-recursive-{uuid.uuid4().hex}"
+    gcs.mkdir(new_bucket)
+    try:
+        gcs.touch(f"{new_bucket}/file1")
+        gcs.touch(f"{new_bucket}/subdir/file2")
+        gcs.rm(f"{new_bucket}/*", recursive=True)
+        assert not gcs.exists(f"{new_bucket}/file1")
+        assert not gcs.exists(f"{new_bucket}/subdir/file2")
+    finally:
+        if gcs.exists(new_bucket):
+            gcs.rm(new_bucket, recursive=True)
 
 
 def test_file_access(gcs):
@@ -1921,3 +2105,195 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
             gcs.mv_file(src, dest)
     finally:
         gcs.version_aware = original_version_aware
+
+
+def test_tree(gcs):
+    unique_id = uuid.uuid4().hex
+    base_dir = f"{TEST_BUCKET}/test_tree_regional_{unique_id}"
+
+    gcs.mkdir(base_dir)
+    gcs.mkdir(f"{base_dir}/folder_A")
+    gcs.touch(f"{base_dir}/root_file.txt")
+    gcs.touch(f"{base_dir}/folder_A/file_A.txt")
+
+    # Deep nesting
+    gcs.touch(f"{base_dir}/folder_A/sub_B/sub_C/sub_D/deep_file.txt")
+
+    # Placeholder objects (Trailing slashes)
+    gcs.touch(f"{base_dir}/placeholder_P/")
+    gcs.touch(f"{base_dir}/placeholder_P/file_P.txt")
+    gcs.touch(f"{base_dir}/placeholder_Q/")
+
+    tree_str = gcs.tree(base_dir, recursion_limit=10)
+
+    expected_basenames = {
+        "root_file.txt",
+        "folder_A",
+        "file_A.txt",
+        "sub_B",
+        "sub_C",
+        "sub_D",
+        "deep_file.txt",
+        "placeholder_P",
+        "file_P.txt",
+        "placeholder_Q",
+    }
+
+    lines = tree_str.strip().split("\n")
+    # Extract basenames from tree lines (e.g., "├── folder_A" -> "folder_A")
+    found_names = {line.split("──")[-1].strip() for line in lines[1:]}
+
+    assert found_names == expected_basenames
+
+
+def test_glob(gcs):
+    base_dir = f"{TEST_BUCKET}/test_glob_regional_{uuid.uuid4().hex}"
+
+    files = [
+        f"{base_dir}/folder_with_files/file1.txt",
+        f"{base_dir}/folder_with_files/file2.txt",
+        f"{base_dir}/folder_with_files/subdir/file3.txt",
+        f"{base_dir}/folder_with_one_file/file4.dat",
+        f"{base_dir}/root_file.txt",
+    ]
+    placeholder = f"{base_dir}/folder_with_placeholder/"
+
+    for f in files:
+        gcs.touch(f)
+    gcs.touch(placeholder)
+
+    test_cases = [
+        {
+            "pattern": f"{base_dir}/*",
+            "expected": {
+                f"{base_dir}/folder_with_files",
+                f"{base_dir}/folder_with_one_file",
+                f"{base_dir}/root_file.txt",
+                f"{base_dir}/folder_with_placeholder",
+            },
+        },
+        {
+            "pattern": f"{base_dir}/folder_with_files/*",
+            "expected": {
+                f"{base_dir}/folder_with_files/file1.txt",
+                f"{base_dir}/folder_with_files/file2.txt",
+                f"{base_dir}/folder_with_files/subdir",
+            },
+        },
+        {
+            "pattern": f"{base_dir}/**",
+            "expected": {
+                base_dir,
+                f"{base_dir}/folder_with_files",
+                f"{base_dir}/folder_with_files/subdir",
+                f"{base_dir}/folder_with_one_file",
+                f"{base_dir}/folder_with_files/file1.txt",
+                f"{base_dir}/folder_with_files/file2.txt",
+                f"{base_dir}/folder_with_files/subdir/file3.txt",
+                f"{base_dir}/folder_with_one_file/file4.dat",
+                f"{base_dir}/root_file.txt",
+                f"{base_dir}/folder_with_placeholder",
+                f"{base_dir}/folder_with_placeholder/",
+            },
+        },
+    ]
+
+    for case in test_cases:
+        results = set(gcs.glob(case["pattern"]))
+        assert results == case["expected"]
+
+
+def test_expand_path_regional(gcs):
+    base_dir = f"{TEST_BUCKET}/test_expand_path_regional_{uuid.uuid4().hex}"
+
+    files = [
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir/file3.txt",
+        f"{base_dir}/root_file.txt",
+    ]
+    for f in files:
+        gcs.touch(f)
+
+    # Empty folder (with placeholder)
+    empty_folder = f"{base_dir}/empty_folder/"
+    gcs.touch(empty_folder)
+
+    # Test case 1: No magic, recursive=True (invokes _find)
+    expanded = gcs.expand_path(base_dir, recursive=True)
+    expected = {
+        base_dir,
+        f"{base_dir}/folder",
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir",
+        f"{base_dir}/folder/subdir/file3.txt",
+        f"{base_dir}/root_file.txt",
+        f"{base_dir}/empty_folder",
+        f"{base_dir}/empty_folder/",
+    }
+    assert set(expanded) == expected
+
+    # Test case 2: With magic * (invokes _glob)
+    expanded_magic = gcs.expand_path(f"{base_dir}/folder/*", recursive=True)
+    expected_magic = {
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir",
+        f"{base_dir}/folder/subdir/file3.txt",
+    }
+    assert set(expanded_magic) == expected_magic
+
+    # Test case 3: Recursive glob **
+    expanded_glob_starstar = gcs.expand_path(f"{base_dir}/**/*.txt", recursive=True)
+    expected_glob_starstar = {
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+        f"{base_dir}/folder/subdir/file3.txt",
+        f"{base_dir}/root_file.txt",
+    }
+    assert set(expanded_glob_starstar) == expected_glob_starstar
+
+    # Test case 4: Question mark magic
+    expanded_question = gcs.expand_path(f"{base_dir}/folder/file?.txt", recursive=True)
+    expected_question = {
+        f"{base_dir}/folder/file1.txt",
+        f"{base_dir}/folder/file2.txt",
+    }
+    assert set(expanded_question) == expected_question
+
+
+def test_walk(gcs):
+    base_dir = f"{TEST_BUCKET}/test_walk_regional_{uuid.uuid4().hex}"
+
+    folder_with_files = f"{base_dir}/folder_with_files"
+    subdir = f"{folder_with_files}/subdir"
+    folder_with_one_file = f"{base_dir}/folder_with_one_file"
+    folder_with_placeholder = f"{base_dir}/folder_with_placeholder"
+
+    gcs.touch(f"{subdir}/file1.txt")
+    gcs.touch(f"{folder_with_one_file}/file3.txt")
+    gcs.touch(f"{base_dir}/root_file.txt")
+    gcs.touch(f"{folder_with_placeholder}/")
+
+    walk_results = list(gcs.walk(base_dir))
+
+    # Expected structure for FLAT bucket
+    expected_structure = {
+        base_dir: (
+            {"folder_with_files", "folder_with_one_file", "folder_with_placeholder"},
+            {"root_file.txt"},
+        ),
+        folder_with_files: ({"subdir"}, set()),
+        subdir: (set(), {"file1.txt"}),
+        folder_with_one_file: (set(), {"file3.txt"}),
+        folder_with_placeholder: (set(), {""}),
+    }
+
+    assert len(walk_results) == len(expected_structure)
+    for root, d_list, f_list in walk_results:
+        root = root.rstrip("/")
+        assert root in expected_structure
+        exp_dirs, exp_files = expected_structure[root]
+        assert set(d_list) == exp_dirs
+        assert set(f_list) == exp_files
