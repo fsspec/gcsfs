@@ -374,7 +374,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     # Clean up the aiohttp session
     #
-    # This can run from the main thread if invoked via the weakref callbcak.
+    # This can run from the main thread if invoked via the weakref callback.
     # This can happen even if the `loop` parameter belongs to another thread
     # (e.g. the fsspec IO worker). The control flow here is intended to attempt
     # in-thread asynchronous cleanup first, then fallback to synchronous
@@ -1340,7 +1340,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 await self._mv_file_cache_update(path1, path2, out)
                 return
             except Exception as e:
-                # TODO: Fallback is added to make sure there is smooth tranistion, it can be removed
+                # TODO: Fallback is added to make sure there is smooth transition, it can be removed
                 # once we have metrics proving that moveTo API is working properly for all bucket types.
                 logger.warning(
                     f"Failed to move file using moveTo API: {e}. Falling back to copy/delete."
@@ -1439,6 +1439,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     @property
     def on_google(self):
+        # match "torage" to handle both "storage" and "Storage"
         return f"torage.{_gcp_universe_domain()}" in self._location
 
     async def _delete_files(self, files, batchsize):
@@ -1853,7 +1854,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         GCS allows object generation (object version) to be specified in either
         the URL fragment or the `generation` query parameter. When provided,
-        the fragment will take priority over the `generation` query paramenter.
+        the fragment will take priority over the `generation` query parameter.
 
         Returns
         -------
