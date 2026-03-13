@@ -14,6 +14,15 @@ objects of the type used by zarr.
 
 .. _fsspec: https://filesystem-spec.readthedocs.io/en/latest/
 
+.. warning::
+   **Default Filesystem Implementation Change:**
+   ``gcsfs`` now uses ``ExtendedFileSystem`` as the default
+   entry point for all bucket types to support specialised storage buckets like HNS out-of-box.
+   While all operations on standard buckets will route to the ``core.GCSFileSystem`` (pre-existing implementation) under the hood,
+   this represents a change in the default flow. If you experience any unexpected behavior due to this change,
+   you can revert to the previous implementation by setting the environment variable
+   ``GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false`` before importing ``gcsfs``.
+
 Installation
 ------------
 
@@ -228,6 +237,7 @@ Contents
 .. toctree::
    api
    developer
+   hns_buckets
    fuse
    changelog
    code-of-conduct

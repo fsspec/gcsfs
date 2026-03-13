@@ -9,7 +9,7 @@ del get_versions
 from .core import GCSFileSystem
 from .mapping import GCSMap
 
-if os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false").lower() in ("true", "1"):
+if os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true").lower() in ("true", "1"):
     try:
         from .extended_gcsfs import ExtendedGcsFileSystem as GCSFileSystem
 
