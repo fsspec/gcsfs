@@ -4,6 +4,24 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.3.0
+--------
+
+**The default inplementation is now ExtendedGcsFileSystem**. This still
+defers to GCSFileSystem for operations on "normal" buckets (i.e., not
+zonal, rapid, hierarchical). Set GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT to
+disable.
+
+* docs for zonal/rapid storage support (#792, 788, 781)
+* test/ci/cov fixes (#785, 772, 766, 765, 764)
+* fix zonalfile writes to track byte count (#777)
+* benchmarks (#775, 770, 767, 762)
+* fix folder rename race (HNS) (#771)
+* create zonal buckets (#769)
+* graceful close (#763)
+* list: pass only valid kwargs (#759)
+* make mv_file atomic (#758)
+
 2026.2.0
 --------
 
