@@ -7,7 +7,8 @@ releasing in step with fsspec.
 2026.3.0
 --------
 
-**The default inplementation is now ExtendedGcsFileSystem**. This still
+**Support for Rapid and hierarchical buckets is moved from opt-in to default.**
+**The default implementation is now ExtendedGcsFileSystem**. This still
 defers to GCSFileSystem for operations on "normal" buckets (i.e., not
 zonal, rapid, hierarchical). Set GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT to
 disable.
