@@ -4,7 +4,7 @@ from gcsfs.tests.perf.microbenchmarks.parameters import IOBenchmarkParameters
 
 
 @dataclass
-class ReadFixedDurationBenchmarkParameters(IOBenchmarkParameters):
+class ReadBenchmarkParameters(IOBenchmarkParameters):
     """
     Defines the parameters for a read benchmark test cases with runtime.
     """

@@ -57,7 +57,7 @@ Configuration values are stored in YAML files (e.g., `configs.yaml`) located wit
 
 ## Configurators
 
-Configurators are Python classes (e.g., `ReadFixedDurationConfigurator`, `ListingConfigurator`) responsible for parsing the YAML configuration files and converting them into a list of parameter objects (`BenchmarkParameters`). These objects are then consumed by the test files to generate parameterized test cases.
+Configurators are Python classes (e.g., `ReadConfigurator`, `ListingConfigurator`) responsible for parsing the YAML configuration files and converting them into a list of parameter objects (`BenchmarkParameters`). These objects are then consumed by the test files to generate parameterized test cases.
 
 ## Benchmark File
 
@@ -77,7 +77,7 @@ The `run.py` script is the central entry point for executing benchmarks. It hand
 
 | Option | Description | Required |
 | :--- | :--- | :--- |
-| `--group` | The benchmark group to run (e.g., `read`, `write`, `read_fixed_duration`, `write_fixed_duration`, `listing`, `info`). Runs all groups if not specified. | No |
+| `--group` | The benchmark group to run (e.g., `read`, `write`, `listing`, `info`). Runs all groups if not specified. | No |
 | `--config` | Specific scenario names to run (e.g., `read_seq`, `list_flat`). Accepts multiple values. | No |
 | `--regional-bucket` | Name of the regional GCS bucket. | Yes* |
 | `--zonal-bucket` | Name of the zonal GCS bucket. | Yes* |

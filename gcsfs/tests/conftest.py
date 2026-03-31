@@ -485,10 +485,8 @@ def pytest_ignore_collect(collection_path, config):
             "delete",
             "listing",
             "read",
-            "read_fixed_duration",
             "rename",
             "write",
-            "write_fixed_duration",
             "info",
         }
 

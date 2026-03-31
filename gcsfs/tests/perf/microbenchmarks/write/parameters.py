@@ -4,7 +4,7 @@ from gcsfs.tests.perf.microbenchmarks.parameters import IOBenchmarkParameters
 
 
 @dataclass
-class WriteFixedDurationBenchmarkParameters(IOBenchmarkParameters):
+class WriteBenchmarkParameters(IOBenchmarkParameters):
     """
     Defines the parameters for a write benchmark test cases with runtime.
     """

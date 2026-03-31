@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gcsfs.tests.perf.microbenchmarks.read_fixed_duration.configs import (
-    get_read_fixed_duration_benchmark_cases,
+from gcsfs.tests.perf.microbenchmarks.read.configs import (
+    get_read_benchmark_cases,
 )
 from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
@@ -14,7 +14,7 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
     run_single_threaded_fixed_duration,
 )
 
-BENCHMARK_GROUP = "read_fixed_duration"
+BENCHMARK_GROUP = "read"
 
 
 def _read_op_seq(gcs, file_paths, chunk_size, runtime):
@@ -57,7 +57,7 @@ def _random_read_worker(gcs, file_paths, chunk_size, offsets, runtime):
     return _read_op_rand(gcs, file_paths, chunk_size, local_offsets, runtime)
 
 
-all_benchmark_cases = get_read_fixed_duration_benchmark_cases()
+all_benchmark_cases = get_read_benchmark_cases()
 single_threaded_cases, _, multi_process_cases = filter_test_cases(all_benchmark_cases)
 
 

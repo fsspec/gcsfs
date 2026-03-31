@@ -12,14 +12,14 @@ from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     ListingConfigurator,
     get_listing_benchmark_cases,
 )
-from gcsfs.tests.perf.microbenchmarks.read_fixed_duration.configs import (
-    ReadFixedDurationConfigurator,
-    get_read_fixed_duration_benchmark_cases,
+from gcsfs.tests.perf.microbenchmarks.read.configs import (
+    ReadConfigurator,
+    get_read_benchmark_cases,
 )
 from gcsfs.tests.perf.microbenchmarks.rename.configs import get_rename_benchmark_cases
-from gcsfs.tests.perf.microbenchmarks.write_fixed_duration.configs import (
-    WriteFixedDurationConfigurator,
-    get_write_fixed_duration_benchmark_cases,
+from gcsfs.tests.perf.microbenchmarks.write.configs import (
+    WriteConfigurator,
+    get_write_benchmark_cases,
 )
 
 MB = 1024 * 1024
@@ -87,7 +87,7 @@ def test_read_configurator(mock_config_dependencies):
         "block_sizes_mb": [16],
     }
 
-    configurator = ReadFixedDurationConfigurator("dummy")
+    configurator = ReadConfigurator("dummy")
     cases = configurator.build_cases(scenario, common)
 
     assert len(cases) == 1
@@ -113,7 +113,7 @@ def test_write_configurator(mock_config_dependencies):
     }
     scenario = {"name": "write_test", "processes": [2], "threads": [1]}
 
-    configurator = WriteFixedDurationConfigurator("dummy")
+    configurator = WriteConfigurator("dummy")
     cases = configurator.build_cases(scenario, common)
 
     assert len(cases) == 1
@@ -201,7 +201,7 @@ def test_generate_cases_calls_load(mock_config_dependencies):
         mock.patch("yaml.safe_load", return_value=config_content),
     ):
 
-        configurator = WriteFixedDurationConfigurator("dummy")
+        configurator = WriteConfigurator("dummy")
         cases = configurator.generate_cases()
         assert len(cases) == 1
         assert cases[0].name.startswith("test")
@@ -216,11 +216,11 @@ def test_validate_actual_yaml_configs():
     # Ensure BENCHMARK_FILTER is empty so we load all cases
     with mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""):
         # Read
-        cases = get_read_fixed_duration_benchmark_cases()
+        cases = get_read_benchmark_cases()
         assert len(cases) > 0, "Read config produced no cases"
 
         # Write
-        cases = get_write_fixed_duration_benchmark_cases()
+        cases = get_write_benchmark_cases()
         assert len(cases) > 0, "Write config produced no cases"
 
         # Listing

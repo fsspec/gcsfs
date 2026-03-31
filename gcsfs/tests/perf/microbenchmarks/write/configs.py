@@ -3,37 +3,30 @@ import itertools
 from gcsfs.tests.perf.microbenchmarks.configs import BaseBenchmarkConfigurator
 from gcsfs.tests.perf.microbenchmarks.conftest import MB
 
-from .parameters import ReadFixedDurationBenchmarkParameters
+from .parameters import WriteBenchmarkParameters
 
 
-class ReadFixedDurationConfigurator(BaseBenchmarkConfigurator):
+class WriteConfigurator(BaseBenchmarkConfigurator):
     def build_cases(self, scenario, common_config):
         procs_list = scenario.get("processes", [1])
         threads_list = scenario.get("threads", [1])
-        rounds = common_config.get("rounds", 1)
         bucket_types = common_config.get("bucket_types", ["regional"])
-        file_sizes_mb = common_config.get("file_sizes_mb", [128])
-        chunk_sizes_mb = common_config.get("chunk_sizes_mb", [16])
-        block_sizes_mb = scenario.get("block_sizes_mb", [5])
-
-        pattern = scenario.get("pattern", "seq")
+        chunk_sizes_mb = common_config.get("chunk_sizes_mb", [64, 100])
+        block_sizes_mb = common_config.get("block_sizes_mb", [16])
+        scenario_block_sizes_mb = scenario.get("block_sizes_mb")
+        if scenario_block_sizes_mb:
+            block_sizes_mb = scenario_block_sizes_mb
         runtime = common_config.get("runtime", 30)
-        scenario_files = scenario.get("files")
+        rounds = common_config.get("rounds", 1)
 
         cases = []
         param_combinations = itertools.product(
-            procs_list,
-            threads_list,
-            file_sizes_mb,
-            chunk_sizes_mb,
-            block_sizes_mb,
-            bucket_types,
+            procs_list, threads_list, chunk_sizes_mb, block_sizes_mb, bucket_types
         )
 
         for (
             procs,
             threads,
-            size_mb,
             chunk_size_mb,
             block_size_mb,
             bucket_type,
@@ -44,31 +37,25 @@ class ReadFixedDurationConfigurator(BaseBenchmarkConfigurator):
 
             name = (
                 f"{scenario['name']}_{procs}procs_{threads}threads_"
-                f"{size_mb}MB_file_{chunk_size_mb}MB_chunk_{block_size_mb}MB_block_{bucket_type}"
+                f"{chunk_size_mb}MB_chunk_{block_size_mb}MB_block_{bucket_type}_{runtime}s_duration"
             )
 
-            if scenario_files is not None:
-                files_count = scenario_files
-            else:
-                files_count = threads * procs
-
-            params = ReadFixedDurationBenchmarkParameters(
+            params = WriteBenchmarkParameters(
                 name=name,
-                pattern=pattern,
                 bucket_name=bucket_name,
                 bucket_type=bucket_type,
                 threads=threads,
                 processes=procs,
-                files=files_count,
+                files=threads * procs,
                 rounds=rounds,
                 chunk_size_bytes=int(chunk_size_mb * MB),
                 block_size_bytes=int(block_size_mb * MB),
-                file_size_bytes=int(size_mb * MB),
+                file_size_bytes=0,
                 runtime=runtime,
             )
             cases.append(params)
         return cases
 
 
-def get_read_fixed_duration_benchmark_cases():
-    return ReadFixedDurationConfigurator(__file__).generate_cases()
+def get_write_benchmark_cases():
+    return WriteConfigurator(__file__).generate_cases()

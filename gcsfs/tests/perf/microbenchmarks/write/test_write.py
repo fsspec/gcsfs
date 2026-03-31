@@ -10,11 +10,11 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
     run_multi_process,
     run_single_threaded_fixed_duration,
 )
-from gcsfs.tests.perf.microbenchmarks.write_fixed_duration.configs import (
-    get_write_fixed_duration_benchmark_cases,
+from gcsfs.tests.perf.microbenchmarks.write.configs import (
+    get_write_benchmark_cases,
 )
 
-BENCHMARK_GROUP = "write_fixed_duration"
+BENCHMARK_GROUP = "write"
 
 
 def _write_op_seq_fixed_duration(gcs, file_path, chunk_size, runtime):
@@ -37,7 +37,7 @@ def _write_op_seq_fixed_duration(gcs, file_path, chunk_size, runtime):
     return total_bytes_written
 
 
-all_benchmark_cases = get_write_fixed_duration_benchmark_cases()
+all_benchmark_cases = get_write_benchmark_cases()
 single_threaded_cases, _, multi_process_cases = filter_test_cases(all_benchmark_cases)
 
 
