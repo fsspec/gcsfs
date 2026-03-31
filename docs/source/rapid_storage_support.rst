@@ -109,13 +109,13 @@ Here are the microbenchmarks.
 Rapid drastically outperforms standard buckets across different read patterns, including both sequential and random reads, as well as for writes.
 To reproduce using more combinations, please see the `gcsfs/perf/microbenchmarks <https://github.com/fsspec/gcsfs/tree/main/gcsfs/tests/perf/microbenchmarks>`_ directory.
 
-.. list-table:: **Sequential Reads**
+.. list-table:: **Sequential Reads Throughput (MB/s)**
    :header-rows: 1
 
    * - IO Size
      - Processes
-     - Rapid (MB/s)
-     - Standard (MB/s)
+     - Rapid Bucket
+     - Standard Bucket
    * - 1 MB
      - Single Process
      - 469.09
@@ -133,13 +133,13 @@ To reproduce using more combinations, please see the `gcsfs/perf/microbenchmarks
      - 19213.27
      - 4010.50
 
-.. list-table:: **Random Reads**
+.. list-table:: **Random Reads Throughput (MB/s)**
    :header-rows: 1
 
    * - IO Size
      - Processes
-     - Rapid Throughput (MB/s)
-     - Standard (MB/s)
+     - Rapid Bucket
+     - Standard Bucket
    * - 64 KB
      - Single Process
      - 39
@@ -157,14 +157,14 @@ To reproduce using more combinations, please see the `gcsfs/perf/microbenchmarks
      - 21448
      - 4504
 
-.. list-table:: **Writes**
+.. list-table:: **Writes Throughput (MB/s)**
    :widths: 20 20 30 30
    :header-rows: 1
 
    * - IO Size
      - Processes
-     - Zonal Bucket
-     - Regional Bucket
+     - Rapid Bucket
+     - Standard Bucket
    * - 16 MB
      - Single Process
      - 326
