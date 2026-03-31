@@ -19,6 +19,7 @@ For standard buckets, ``gcsfs`` uses a custom retry decorator (``retry_request``
     - ``mv`` / ``_mv_file``: Moving/renaming objects.
     - ``cp`` / ``_cp_file``: Copying objects.
 - **Number of Retries:** The default number of retries is **6**. This is defined as a class attribute ``retries = 6`` in ``GCSFileSystem``.
+- **Timeouts:** Individual requests use ``requests_timeout`` (if configured in ``GCSFileSystem.__init__``) as their timeout. There is no total deadline for the retry loop in ``retry_request``; it will attempt up to the specified number of retries (default 6) irrespective of the total time taken.
 - **Backoff Strategy:** Exponential backoff with jitter. The wait time between retries is calculated as ``min(random.random() + 2 ** (retry - 1), 32)``.
 - **Retriable Errors:**
     - ``requests.exceptions.ChunkedEncodingError``
