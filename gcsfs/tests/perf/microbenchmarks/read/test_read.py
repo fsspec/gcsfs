@@ -5,9 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gcsfs.tests.perf.microbenchmarks.read.configs import (
-    get_read_benchmark_cases,
-)
+from gcsfs.tests.perf.microbenchmarks.read.configs import get_read_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
     run_multi_process,

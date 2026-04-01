@@ -10,9 +10,7 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
     run_multi_process,
     run_single_threaded_fixed_duration,
 )
-from gcsfs.tests.perf.microbenchmarks.write.configs import (
-    get_write_benchmark_cases,
-)
+from gcsfs.tests.perf.microbenchmarks.write.configs import get_write_benchmark_cases
 
 BENCHMARK_GROUP = "write"
 
