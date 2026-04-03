@@ -18,6 +18,20 @@ def test_googlecredentials_none():
     credentials.apply(headers)
 
 
+def test_no_gce_check_skips_cloud():
+    """When NO_GCE_CHECK=true, the 'cloud' method should not be attempted."""
+    with patch.dict(os.environ, {"NO_GCE_CHECK": "true"}):
+        with patch.object(GoogleCredentials, "_connect_cloud") as mock_cloud:
+            # google_default and cloud will fail; anon will succeed
+            with patch.object(
+                GoogleCredentials,
+                "_connect_google_default",
+                side_effect=ValueError("no default"),
+            ):
+                GoogleCredentials(project="myproject", token=None, access="read_only")
+            mock_cloud.assert_not_called()
+
+
 def test_connect_google_default_uses_request():
     with patch("gcsfs.credentials.gauth.default") as mock_default:
         mock_default.return_value = (Mock(), "my-project")
