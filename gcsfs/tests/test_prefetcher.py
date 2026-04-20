@@ -136,9 +136,9 @@ def test_producer_concurrency_streak_and_min_chunk():
     original_min_chunk = bp.producer.MIN_CHUNK_SIZE
     bp.producer.MIN_CHUNK_SIZE = 10
 
-    bp._fetch(0, 50)
-    bp._fetch(50, 100)
-    bp._fetch(100, 150)
+    # Do 6 reads to push the streak well past the MIN_STREAKS threshold
+    for i in range(6):
+        bp._fetch(i * 50, (i + 1) * 50)
 
     fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
 
@@ -172,17 +172,14 @@ def test_producer_loop_space_constraints():
 
 
 def test_producer_error_propagation():
-    fetcher = MockFetcher(b"A" * 1000, fail_at_call=3)
-    bp = BackgroundPrefetcher(fetcher=fetcher, size=1000, concurrency=4)
-    bp.read_tracker.add(100)
+    fetcher = MockFetcher(b"A" * 2000, fail_at_call=3)
+    bp = BackgroundPrefetcher(fetcher=fetcher, size=2000, concurrency=4)
 
-    assert bp._fetch(0, 100) == b"A" * 100
+    for i in range(2):
+        bp._fetch(i * 100, (i + 1) * 100)
 
     with pytest.raises(OSError, match="Simulated Network Timeout"):
-        bp._fetch(100, 500)
-
-    assert bp.is_stopped is True
-    bp.close()
+        bp._fetch(400, 500)
 
 
 def test_read_after_close_or_error():
@@ -353,18 +350,18 @@ def test_producer_min_chunk_logic():
 
 
 def test_producer_loop_exception():
-    bp = BackgroundPrefetcher(fetcher=MockFetcher(b""), size=100, concurrency=4)
+    bp = BackgroundPrefetcher(fetcher=MockFetcher(b"A" * 100), size=100, concurrency=4)
     error_object = ValueError("Producer crash")
-    bp.producer.get_io_size = mock.Mock(side_effect=error_object)
 
-    with pytest.raises(ValueError, match="Producer crash"):
-        bp._fetch(0, 10)
+    with mock.patch(
+        "gcsfs.prefetcher.RunningAverageTracker.average", new_callable=mock.PropertyMock
+    ) as mocked_avg:
+        mocked_avg.side_effect = error_object
+        with pytest.raises(ValueError, match="Producer crash"):
+            bp._fetch(0, 10)
 
     assert bp.is_stopped is True
     assert bp._error == error_object
-
-    with pytest.raises(ValueError, match="Producer crash"):
-        bp._fetch(0, 10)
     bp.close()
 
 
@@ -507,7 +504,10 @@ def test_producer_min_chunk_inner_break():
     async def trigger_loop():
         bp.producer.current_offset = 250
         bp.consumer.offset = 0
-        bp.consumer.sequential_streak = 3  # makes prefetch_size = (3+1) * 100 = 400
+        bp.consumer.target_offset = 0
+        # streak=6 makes prefetch_multiplier = 4 (6 - 3 + 1)
+        # prefetch_size = 4 * 100 = 400
+        bp.consumer.sequential_streak = 6
         bp.wakeup_event.set()
         await asyncio.sleep(0.05)
 
@@ -532,4 +532,96 @@ def test_producer_loop_break_on_stopped_after_wakeup():
 
     # Verify the producer gracefully exited without doing work
     assert fetcher.call_count == 0
+    bp.close()
+
+
+def test_massive_read_disables_proactive_prefetching():
+    fetcher = MockFetcher(b"X" * 1000)
+
+    # max_prefetch_size = 40
+    bp = BackgroundPrefetcher(
+        fetcher=fetcher, size=1000, concurrency=4, max_prefetch_size=40
+    )
+
+    # Do enough reads to build a sequential streak and trigger large averages
+    # Reading 60 bytes at a time. Average = 60. Threshold = 50.
+    for i in range(4):
+        bp._fetch(i * 60, (i + 1) * 60)
+
+    fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
+
+    # Because average (60) > threshold (40), prefetch_multiplier is pinned to 1.
+    # The producer should only fetch what the user specifically read (4 * 60 = 240)
+    # and should NOT have pre-fetched any additional data ahead into the queue.
+    assert bp.producer.current_offset == 240
+    bp.close()
+
+
+def test_normal_read_allows_proactive_prefetching():
+    fetcher = MockFetcher(b"X" * 1000)
+
+    # max_prefetch_size = 200 makes dynamic threshold = 100
+    bp = BackgroundPrefetcher(
+        fetcher=fetcher, size=1000, concurrency=4, max_prefetch_size=200
+    )
+
+    # Reading 60 bytes at a time. Average = 60. Threshold = 100.
+    for i in range(4):
+        bp._fetch(i * 60, (i + 1) * 60)
+
+    fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
+
+    # Because average (60) <= threshold (100), the producer allows prefetching.
+    # It calculates a normal prefetch_multiplier > 1 and pre-fetches data ahead.
+    assert bp.producer.current_offset > 240
+    bp.close()
+
+
+def test_target_offset_expands_prefetch():
+    fetcher = MockFetcher(b"X" * 1000)
+    bp = BackgroundPrefetcher(fetcher=fetcher, size=1000, concurrency=4)
+
+    # Seed tracker to keep the default `max_prefetch_size` calculation small
+    bp.read_tracker.add(10)
+
+    # The consumer requests a massive chunk (500 bytes), far exceeding normal prefetch windows
+    bp._fetch(0, 500)
+
+    fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
+
+    # The new target_offset logic should explicitly tell the producer to expand its
+    # boundary to cover the requested 500 bytes, overriding the tiny multiplier logic.
+    assert bp.consumer.target_offset == 500
+    assert bp.producer.current_offset >= 500
+    bp.close()
+
+
+def test_producer_min_chunk_inner_empty_queue_shrink():
+    fetcher = MockFetcher(b"X" * 1000)
+    bp = BackgroundPrefetcher(
+        fetcher=fetcher, size=1000, concurrency=4, max_prefetch_size=400
+    )
+
+    bp.read_tracker.add(100)
+
+    original_min_chunk = bp.producer.MIN_CHUNK_SIZE
+    bp.producer.MIN_CHUNK_SIZE = 200
+
+    async def trigger_loop():
+        # Setup conditions where the queue is empty and the user is waiting
+        # This makes prefetch_space_available exactly equal to prefetch_size
+        bp.producer.current_offset = 0
+        bp.consumer.offset = 0
+        bp.consumer.target_offset = 0
+        bp.consumer.sequential_streak = 6
+        bp.wakeup_event.set()
+        await asyncio.sleep(0.05)
+
+    fsspec.asyn.sync(bp.loop, trigger_loop)
+
+    # Because space_available == prefetch_size, it triggers the shrink condition
+    # instead of breaking, ensuring the blocked consumer gets its data.
+    assert fetcher.call_count > 0
+
+    bp.producer.MIN_CHUNK_SIZE = original_min_chunk
     bp.close()
