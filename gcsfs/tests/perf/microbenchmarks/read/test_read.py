@@ -59,6 +59,38 @@ def _read_op_rand(
     return total_bytes_read
 
 
+def _read_op_mixed(
+    gcs,
+    file_paths,
+    min_chunk_size,
+    max_chunk_size,
+    seq_probability,
+    file_size_bytes,
+    runtime,
+):
+    """Read files with a mix of sequential reads and random seeks for a fixed duration."""
+    total_bytes_read = 0
+    start_time = time.perf_counter()
+    files_it = itertools.cycle(file_paths)
+
+    while time.perf_counter() - start_time < runtime:
+        path = next(files_it)
+        with gcs.open(path, "rb", cache_type="none") as f:
+            while time.perf_counter() - start_time < runtime:
+                chunk_size = random.randint(min_chunk_size, max_chunk_size)
+                if random.random() >= seq_probability:
+                    max_offset = max(0, file_size_bytes - chunk_size)
+                    f.seek(random.randint(0, max_offset))
+
+                data = f.read(chunk_size)
+
+                if not data:
+                    break
+                total_bytes_read += len(data)
+
+    return total_bytes_read
+
+
 def _read_op_reopen(
     gcs, file_paths, chunk_size, runtime, block_size, mrd_pool_size=None
 ):
@@ -163,6 +195,17 @@ def _build_read_worker(params, gcs, file_paths):
             block_size,
             mrd_pool_size,
         )
+    elif params.pattern == "mixed":
+        op = _read_op_mixed
+        op_args = (
+            gcs,
+            file_paths,
+            params.min_chunk_size_bytes,
+            params.max_chunk_size_bytes,
+            params.seq_probability,
+            params.file_size_bytes,
+            params.runtime,
+        )
     else:
         raise ValueError(f"Unsupported read pattern: {params.pattern}")
 
@@ -181,6 +224,9 @@ def _process_worker_fixed_duration(
     runtime,
     block_size,
     mrd_pool_size=None,
+    min_chunk_size=None,
+    max_chunk_size=None,
+    seq_probability=None,
 ):
     """A worker function for each process to read files for a fixed duration."""
     with ThreadPoolExecutor(max_workers=threads) as executor:
@@ -226,6 +272,20 @@ def _process_worker_fixed_duration(
                 )
                 for _ in range(threads)
             ]
+        elif pattern == "mixed":
+            futures = [
+                executor.submit(
+                    _read_op_mixed,
+                    gcs,
+                    file_paths,
+                    min_chunk_size,
+                    max_chunk_size,
+                    seq_probability,
+                    file_size_bytes,
+                    runtime,
+                )
+                for _ in range(threads)
+            ]
 
         results = [f.result() for f in futures]
         total_bytes = sum(results)
@@ -259,6 +319,9 @@ def test_read_multi_process(
             params.runtime,
             params.block_size_bytes,
             getattr(params, "mrd_pool_size", None),
+            params.min_chunk_size_bytes,
+            params.max_chunk_size_bytes,
+            params.seq_probability,
         )
 
     run_multi_process(
