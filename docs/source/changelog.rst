@@ -4,6 +4,26 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.4.0
+--------
+
+* add fallback when missing __version__ (#826)
+* use project ID in gRPC, if set (#825)
+* fix location lookup in put_file (#821)
+* error message formatting in rm_files (#820)
+* requestor pays in ExtendedGcs (#817)
+* logging error->warning in storage layout API (#816)
+* fix prefetcher docs (#815)
+* cleanup on failure in cloud build benchmarks (#812)
+* benchmark updates (#812, 811, 810, 802)
+* migrate setuptools to hatch (#809)
+* retreive coroutine exceptions (#807)
+* honour NO_GCE_CHECK (#803)
+* update README (#801)
+* use moveTo in standard buckets (#800)
+* typos (#798, 796, 794)
+* prefetcher for standard buckets (#795)
+
 2026.3.0
 --------
 
