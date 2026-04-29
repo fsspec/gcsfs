@@ -13,6 +13,7 @@ from google.cloud.storage.exceptions import DataCorruption
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import (
     BucketType,
+    ExtendedGcsFileSystem,
     initiate_upload,
     simple_upload,
     upload_chunk,
@@ -622,3 +623,33 @@ async def test_merge_delegates_to_core_for_non_zonal(async_gcs):
     ):
         await async_gcs._merge(path, paths, acl="public-read")
         mock_core_merge.assert_awaited_once_with(path, paths, acl="public-read")
+
+
+@pytest.mark.parametrize(
+    "requester_pays, expected_quota_project",
+    [
+        ("requester-project", "requester-project"),  # Case 1: string
+        (True, "dummy-billing-project"),  # Case 2: True (fallback)
+    ],
+)
+@pytest.mark.asyncio
+async def test_async_grpc_client_init_quota_project(
+    requester_pays, expected_quota_project
+):
+    """
+    Verifies that ExtendedGcsFileSystem initializes AsyncGrpcClient
+    with the correct quota_project_id in ClientOptions derived from requester_pays.
+    """
+    project = "dummy-billing-project"
+
+    fs = ExtendedGcsFileSystem(project=project, requester_pays=requester_pays)
+
+    with mock.patch("gcsfs.extended_gcsfs.AsyncGrpcClient") as mock_grpc_client:
+        # Trigger client initialization
+        await fs._get_grpc_client()
+
+        mock_grpc_client.assert_called_once()
+        _, kwargs = mock_grpc_client.call_args
+        client_options = kwargs.get("client_options")
+        assert client_options is not None
+        assert client_options.quota_project_id == expected_quota_project

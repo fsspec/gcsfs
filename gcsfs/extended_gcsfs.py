@@ -91,11 +91,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     async def _get_grpc_client(self):
         if self._grpc_client is None:
-            client_options = None
+            client_options = ClientOptions(quota_project_id=self._user_project)
             if self._location:
                 # client_options expects only the host:port, without the protocol.
                 endpoint = self._location.split("://")[-1]
-                client_options = ClientOptions(api_endpoint=endpoint)
+                client_options.api_endpoint = endpoint
             self._grpc_client = AsyncGrpcClient(
                 credentials=self.credential,
                 client_info=ClientInfo(user_agent=f"{USER_AGENT}/{version}"),
