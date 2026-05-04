@@ -31,11 +31,22 @@ steps:
     entrypoint: "bash"
     env:
       - "BUILD_ID=${BUILD_ID}"
+      - "BRANCH_NAME=${BRANCH_NAME}"
     args:
       - "-c"
       - |
         SHORT_BUILD_ID=$${BUILD_ID:0:8}
         # Define shared variables
+        SAFE_BRANCH=$(echo "$${BRANCH_NAME:-unknown}" | tr -c 'a-zA-Z0-9_.-' '-')
+
+        # Error out if the branch is unknown
+        if [ "$${SAFE_BRANCH}" = "unknown" ]; then
+          echo "ERROR: BRANCH_NAME is not set or evaluates to unknown. Failing the build."
+          exit 1
+        fi
+
+        echo "export BRANCH_NAME=$${SAFE_BRANCH}" >> /workspace/build_vars.env
+
         echo "export RUN_ID=$${BUILD_ID}" >> /workspace/build_vars.env
         echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
@@ -318,8 +329,8 @@ steps:
             DATE_DIR=\$(date +%d%m%Y)
             RESULTS_DIR='gcsfs/tests/perf/microbenchmarks/__run__'
             if [ -d \"\$$RESULTS_DIR\" ]; then
-              echo \"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/\"
-              cd \"\$$RESULTS_DIR\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/\$${DATE_DIR}/$${RUN_ID}/ && rm -rf *
+              echo \"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/branch=$${BRANCH_NAME}/\$${DATE_DIR}/$${RUN_ID}/\"
+              cd \"\$$RESULTS_DIR\" && gcloud storage cp --recursive . gs://$${RESULTS_BUCKET}/branch=$${BRANCH_NAME}/\$${DATE_DIR}/$${RUN_ID}/ && rm -rf *
             else
               echo \"No results directory found at \$$RESULTS_DIR\"
             fi

@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS `@PROJECT_ID@.@DATASET_NAME@.history`
   run_date DATE,
   build_id STRING,
   run_timestamp TIMESTAMP,
-  source_uri STRING
+  source_uri STRING,
+  branch_name STRING
 )
 PARTITION BY run_date;
 
@@ -37,6 +38,7 @@ SELECT
   REGEXP_EXTRACT(_FILE_NAME, r'/([0-9a-fA-F-]{36})/') as build_id,
   PARSE_TIMESTAMP('%d%m%Y-%H%M%S', REGEXP_EXTRACT(_FILE_NAME, r'/(\d{8}-\d{6})/')) as run_timestamp,
   _FILE_NAME as source_uri,
+  REGEXP_EXTRACT(_FILE_NAME, r'/branch=([^/]+)/') as branch_name,
   *
 FROM `@PROJECT_ID@.@DATASET_NAME@.staging`
 WHERE _FILE_NAME NOT IN (
