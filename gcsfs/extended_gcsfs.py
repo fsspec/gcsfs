@@ -872,21 +872,47 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     # TODO: This method is only added to be used in rm method, can be deleted once
     # rm method is integrated with recursive API
     async def _expand_path_with_details(
-        self, path, recursive=False, maxdepth=None, detail=False
+        self, path, recursive=False, maxdepth=None, detail=False, assume_literal=False
     ):
+        """
+        Expand path with details, similar to `_expand_path` but returning full details.
+
+        This method is used in `_rm` to get a list of files and directories to delete.
+        It handles special characters in filenames by avoiding re-globbing concrete paths
+        found during recursive expansion.
+
+        Parameters
+        ----------
+        path : str or list
+            The path or list of paths to expand.
+        recursive : bool, default False
+            Whether to recursively expand directories.
+        maxdepth : int, optional
+            Maximum depth to traverse for expansion.
+        detail : bool, default False
+            If True, returns a list of dictionaries with file details;
+            otherwise, returns a list of path strings.
+        assume_literal : bool, default False
+            If True, treats the paths as literal even if they contain magic characters.
+            This is used in recursive calls to prevent re-globbing concrete paths.
+        """
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
 
         if isinstance(path, str):
             return await self._expand_path_with_details(
-                [path], recursive, maxdepth, detail=detail
+                [path],
+                recursive,
+                maxdepth,
+                detail=detail,
+                assume_literal=assume_literal,
             )
         else:
             out = {} if detail else set()
             path = [self._strip_protocol(p) for p in path]
 
             for p in path:
-                if has_magic(p):
+                if not assume_literal and has_magic(p):
                     bit = await self._glob(p, maxdepth=maxdepth, detail=detail)
                     if detail:
                         out.update(bit)
@@ -904,6 +930,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                             recursive=recursive,
                             maxdepth=maxdepth - 1 if maxdepth is not None else None,
                             detail=detail,
+                            assume_literal=True,
                         )
                         if detail:
                             for info in rec:
