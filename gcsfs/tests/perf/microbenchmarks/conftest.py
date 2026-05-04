@@ -328,7 +328,18 @@ def publish_benchmark_extra_info(
     """
     benchmark.extra_info["files"] = params.files
     benchmark.extra_info["file_size"] = getattr(params, "file_size_bytes", "N/A")
-    benchmark.extra_info["chunk_size"] = getattr(params, "chunk_size_bytes", "N/A")
+
+    c_size = getattr(params, "chunk_size_bytes", 0)
+    benchmark.extra_info["chunk_size"] = c_size if c_size > 0 else "N/A"
+
+    min_c = getattr(params, "min_chunk_size_bytes", 0)
+    max_c = getattr(params, "max_chunk_size_bytes", 0)
+    benchmark.extra_info["min_chunk_size"] = min_c if min_c > 0 else "N/A"
+    benchmark.extra_info["max_chunk_size"] = max_c if max_c > 0 else "N/A"
+
+    prob = getattr(params, "seq_probability", None)
+    benchmark.extra_info["seq_probability"] = prob if prob is not None else "N/A"
+
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
     benchmark.extra_info["runtime"] = getattr(params, "runtime", "N/A")

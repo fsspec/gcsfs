@@ -117,6 +117,7 @@ def test_create_table_row():
     row = {
         "bucket_type": "regional",
         "group": "read",
+        "seq_probability": 0.6,
         "pattern": "seq",
         "files": 1,
         "folders": 0,
@@ -135,7 +136,8 @@ def test_create_table_row():
     }
     table_row = run._create_table_row(row)
     assert table_row[0] == "regional"
-    assert table_row[9] == "1.00"  # file size MB
+    assert table_row[3] == 0.6
+    assert table_row[10] == "1.00"  # file size MB
 
 
 @mock.patch("gcsfs.tests.perf.microbenchmarks.run.PrettyTable")

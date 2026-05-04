@@ -28,3 +28,9 @@ scenarios:
     pattern: "rand"
     processes: [16, 48]
     block_sizes_mb: [0.0625, 16]
+
+  - name: "read_mixed_fixed_duration"
+    pattern: "mixed"
+    min_chunk_sizes_mb: [0.0625]
+    max_chunk_sizes_mb: [1024]
+    seq_probabilities: [0.3, 0.5, 0.7] # 30% sequential, 50% sequential, 70% sequential

@@ -17,3 +17,12 @@ class ReadBenchmarkParameters(IOBenchmarkParameters):
 
     # Time in seconds the test should run.
     runtime: int
+
+    # Min I/O chunk size
+    min_chunk_size_bytes: int
+
+    # Max I/O chunk size
+    max_chunk_size_bytes: int
+
+    # The sequential probability, the seek probability would be 1 - seq_probability
+    seq_probability: float
