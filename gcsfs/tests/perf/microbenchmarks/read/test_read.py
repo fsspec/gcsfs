@@ -9,6 +9,7 @@ from gcsfs.tests.perf.microbenchmarks.read.configs import get_read_benchmark_cas
 from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
     run_multi_process,
+    run_multi_threaded_fixed_duration,
     run_single_threaded_fixed_duration,
 )
 
@@ -56,7 +57,9 @@ def _random_read_worker(gcs, file_paths, chunk_size, offsets, runtime):
 
 
 all_benchmark_cases = get_read_benchmark_cases()
-single_threaded_cases, _, multi_process_cases = filter_test_cases(all_benchmark_cases)
+single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_cases(
+    all_benchmark_cases
+)
 
 
 @pytest.mark.parametrize(
@@ -68,6 +71,37 @@ single_threaded_cases, _, multi_process_cases = filter_test_cases(all_benchmark_
 def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read
 
+    op, op_args = _build_read_worker(params, gcs, file_paths)
+
+    run_single_threaded_fixed_duration(
+        benchmark, monitor, params, op, op_args, BENCHMARK_GROUP
+    )
+
+
+@pytest.mark.parametrize(
+    "gcsfs_benchmark_read",
+    multi_threaded_cases,
+    indirect=True,
+    ids=lambda p: p.name,
+)
+def test_read_multi_threaded(benchmark, gcsfs_benchmark_read, monitor):
+    gcs, file_paths, params = gcsfs_benchmark_read
+
+    args_list = []
+    for _ in range(params.threads):
+        thread_file_paths = list(file_paths)
+        random.shuffle(thread_file_paths)
+        _, op_args = _build_read_worker(params, gcs, thread_file_paths)
+        args_list.append(op_args)
+
+    op, _ = _build_read_worker(params, gcs, file_paths)
+
+    run_multi_threaded_fixed_duration(
+        benchmark, monitor, params, op, args_list, BENCHMARK_GROUP
+    )
+
+
+def _build_read_worker(params, gcs, file_paths):
     op = None
     op_args = (gcs, file_paths, params.chunk_size_bytes, params.runtime)
     if params.pattern == "seq":
@@ -76,10 +110,10 @@ def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
         op = _random_read_worker
         offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
         op_args = (gcs, file_paths, params.chunk_size_bytes, offsets, params.runtime)
+    else:
+        raise ValueError(f"Unsupported read pattern: {params.pattern}")
 
-    run_single_threaded_fixed_duration(
-        benchmark, monitor, params, op, op_args, BENCHMARK_GROUP
-    )
+    return op, op_args
 
 
 def _process_worker_fixed_duration(

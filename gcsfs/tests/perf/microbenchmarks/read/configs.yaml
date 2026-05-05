@@ -15,6 +15,10 @@ scenarios:
     pattern: "seq"
     files: 30
 
+  - name: "read_seq_fixed_duration_multi_thread"
+    pattern: "seq"
+    threads: [16]
+
   - name: "read_seq_fixed_duration_multi_process"
     pattern: "seq"
     processes: [16, 48]
@@ -23,6 +27,10 @@ scenarios:
     pattern: "rand"
     block_sizes_mb: [0.0625, 16]
     files: 30
+
+  - name: "read_rand_fixed_duration_multi_thread"
+    pattern: "rand"
+    threads: [16]
 
   - name: "read_rand_fixed_duration_multi_process"
     pattern: "rand"
