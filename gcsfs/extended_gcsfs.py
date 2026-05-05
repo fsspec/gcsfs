@@ -1185,7 +1185,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         # To find folders matching a partial prefix, we need to list their parent.
         if full_prefix and not full_prefix.endswith("/"):
-            start_dir = full_prefix.rpartition("/")[0] + "/"
+            partition = full_prefix.rpartition("/")
+            start_dir = partition[0] + partition[1]
         else:
             start_dir = full_prefix
 
