@@ -114,17 +114,19 @@ def validate_response(status, content, path, args=None):
             raise FileNotFoundError(path)
 
         error = None
-        if hasattr(content, "decode"):
-            content = content.decode()
-        try:
-            error = json.loads(content)["error"]
-            # Sometimes the error message is a string.
-            if isinstance(error, str):
-                msg = error
-            else:
-                msg = error["message"]
-        except json.decoder.JSONDecodeError:
-            msg = content
+        msg = ""
+        if content:
+            if hasattr(content, "decode"):
+                content = content.decode()
+            try:
+                error = json.loads(content)["error"]
+                # Sometimes the error message is a string.
+                if isinstance(error, str):
+                    msg = error
+                else:
+                    msg = error["message"]
+            except json.decoder.JSONDecodeError:
+                msg = content
 
         if status == 403:
             raise OSError(f"Forbidden: {path}\n{msg}")

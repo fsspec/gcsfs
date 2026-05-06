@@ -199,6 +199,21 @@ def test_validate_response_error_is_string():
     assert e.value.message == "Too Many Requests, 429"
 
 
+def test_validate_response_content_none():
+    with pytest.raises(HttpError) as e:
+        validate_response(429, None, "/path")
+    assert e.value.code == 429
+    assert e.value.message == ", 429"
+
+
+def test_validate_response_invalid_json():
+    content = "This is a raw plain-text error"
+    with pytest.raises(HttpError) as e:
+        validate_response(400, content, "/path")
+    assert e.value.code == 400
+    assert e.value.message == "This is a raw plain-text error, 400"
+
+
 @pytest.mark.parametrize(
     ["file_path", "validate_get_error", "validate_list_error", "expected_error"],
     [
