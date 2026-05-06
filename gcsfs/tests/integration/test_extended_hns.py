@@ -1060,6 +1060,13 @@ class TestExtendedGcsFileSystemFindIntegration:
             expected_result
         ), "find with prefix and withdirs=True should return matching files and directories."
 
+    def test_find_partial_prefix(self, gcs_hns, test_structure):
+        """Test find with a partial folder prefix (Issue #830)."""
+        base_dir = test_structure["base_dir"]
+        # Partial match for "empty_dir"
+        result = gcs_hns.find(base_dir, withdirs=True, prefix="empty_")
+        assert result == [test_structure["empty_dir"]]
+
     def test_find_on_file(self, gcs_hns, test_structure):
         """Test that calling find on a single file returns only that file."""
         file_path = test_structure["root_file"]

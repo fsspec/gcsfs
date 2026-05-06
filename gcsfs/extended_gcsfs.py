@@ -872,21 +872,47 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     # TODO: This method is only added to be used in rm method, can be deleted once
     # rm method is integrated with recursive API
     async def _expand_path_with_details(
-        self, path, recursive=False, maxdepth=None, detail=False
+        self, path, recursive=False, maxdepth=None, detail=False, assume_literal=False
     ):
+        """
+        Expand path with details, similar to `_expand_path` but returning full details.
+
+        This method is used in `_rm` to get a list of files and directories to delete.
+        It handles special characters in filenames by avoiding re-globbing concrete paths
+        found during recursive expansion.
+
+        Parameters
+        ----------
+        path : str or list
+            The path or list of paths to expand.
+        recursive : bool, default False
+            Whether to recursively expand directories.
+        maxdepth : int, optional
+            Maximum depth to traverse for expansion.
+        detail : bool, default False
+            If True, returns a list of dictionaries with file details;
+            otherwise, returns a list of path strings.
+        assume_literal : bool, default False
+            If True, treats the paths as literal even if they contain magic characters.
+            This is used in recursive calls to prevent re-globbing concrete paths.
+        """
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
 
         if isinstance(path, str):
             return await self._expand_path_with_details(
-                [path], recursive, maxdepth, detail=detail
+                [path],
+                recursive,
+                maxdepth,
+                detail=detail,
+                assume_literal=assume_literal,
             )
         else:
             out = {} if detail else set()
             path = [self._strip_protocol(p) for p in path]
 
             for p in path:
-                if has_magic(p):
+                if not assume_literal and has_magic(p):
                     bit = await self._glob(p, maxdepth=maxdepth, detail=detail)
                     if detail:
                         out.update(bit)
@@ -904,6 +930,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                             recursive=recursive,
                             maxdepth=maxdepth - 1 if maxdepth is not None else None,
                             detail=detail,
+                            assume_literal=True,
                         )
                         if detail:
                             for info in rec:
@@ -1152,26 +1179,44 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Recursively fetches all folder objects under a given path using the
         Storage Control API.
         """
-        folders = []
-        base_path = self.split_path(path)[1].rstrip("/")
-        full_prefix = f"{base_path}/{prefix}".strip("/") if base_path else prefix
+        _, base_path, _ = self.split_path(path)
+        base_path = "" if not base_path else base_path.rstrip("/") + "/"
+        full_prefix = f"{base_path}{prefix}"
 
-        folder_id = full_prefix
-        if folder_id and not folder_id.endswith("/"):
-            folder_id += "/"
+        # To find folders matching a partial prefix, we need to list their parent.
+        if full_prefix and not full_prefix.endswith("/"):
+            partition = full_prefix.rpartition("/")
+            start_dir = partition[0] + partition[1]
+        else:
+            start_dir = full_prefix
+
+        folders = []
+        client = await self._get_control_plane_client()
         parent = f"projects/_/buckets/{bucket}"
+
         request = storage_control_v2.ListFoldersRequest(
-            parent=parent, prefix=folder_id, request_id=str(uuid.uuid4())
+            parent=parent, prefix=start_dir, request_id=str(uuid.uuid4())
         )
         logger.debug(f"list_folders request: {request}")
 
-        client = await self._get_control_plane_client()
-        async for folder in await client.list_folders(
-            request=request,
-            retry=self._get_retry_config(),
-            timeout=STORAGE_CONTROL_RPC_TIMEOUT,
-        ):
-            folders.append(self._create_folder_entry(bucket, folder))
+        try:
+            async for folder in await client.list_folders(
+                request=request,
+                retry=self._get_retry_config(),
+                timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+            ):
+                entry = self._create_folder_entry(bucket, folder)
+                _, key, _ = self.split_path(entry["name"])
+                # Key from _create_folder_entry does not have a trailing slash
+                key_with_slash = key + "/"
+
+                if key.startswith(full_prefix) or key_with_slash.startswith(
+                    full_prefix
+                ):
+                    folders.append(entry)
+        except api_exceptions.NotFound:
+            # If the start_dir itself doesn't exist, we just return empty
+            pass
 
         return folders
 

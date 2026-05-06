@@ -1993,6 +1993,23 @@ def test_find_with_prefix_partial_cache(gcs, with_cache):
     assert gcs.find(base_dir + "/non_existent", prefix="more_non_existent") == []
 
 
+def test_find_withdirs_prefix(gcs):
+    base_dir = f"{TEST_BUCKET}/test_find_withdirs_prefix"
+    gcs.touch(base_dir + "/folder_1/file1.txt")
+    gcs.touch(base_dir + "/folder_2/file2.txt")
+    gcs.touch(base_dir + "/other/file3.txt")
+
+    # Find with prefix matching folders
+    results = gcs.find(base_dir, withdirs=True, prefix="folder_")
+    expected = [
+        base_dir + "/folder_1",
+        base_dir + "/folder_1/file1.txt",
+        base_dir + "/folder_2",
+        base_dir + "/folder_2/file2.txt",
+    ]
+    assert sorted(results) == sorted(expected)
+
+
 def test_find_dircache(gcs):
     """Running `ls` after find should not corrupt the dir cache"""
     assert set(gcs.find(TEST_BUCKET)) == {f"{TEST_BUCKET}/{path}" for path in allfiles}

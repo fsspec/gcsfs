@@ -653,3 +653,46 @@ async def test_async_grpc_client_init_quota_project(
         client_options = kwargs.get("client_options")
         assert client_options is not None
         assert client_options.quota_project_id == expected_quota_project
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, prefix, expected_start_dir",
+    [
+        ("bucket", "folder", ""),  # Case: bucket root with prefix
+        ("bucket/parent", "folder", "parent/"),  # Case: subfolder with prefix
+        ("bucket/a/b", "c", "a/b/"),  # Case: deep subfolder
+        ("bucket", "a/b", "a/"),  # Case: root path with slash-contained prefix
+        (
+            "bucket/folder/",
+            "",
+            "folder/",
+        ),  # Case: subfolder with trailing slash, no prefix
+        ("bucket", "", ""),  # Case: empty everything
+    ],
+)
+async def test_get_all_folders_start_dir_calculation(
+    extended_gcsfs, path, prefix, expected_start_dir
+):
+    """
+    Verifies that _get_all_folders correctly calculates start_dir for various
+    combinations of path and prefix.
+    """
+    fs = extended_gcsfs
+
+    with mock.patch.object(
+        fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+    ) as mock_client_getter:
+        mock_client = mock_client_getter.return_value
+        mock_client.list_folders = mock.AsyncMock()
+
+        # Mock async for loop in _get_all_folders to return empty results
+        mock_client.list_folders.return_value = mock.MagicMock()
+        mock_client.list_folders.return_value.__aiter__.return_value = []
+
+        await fs._get_all_folders(path, "bucket", prefix=prefix)
+
+        # Check the prefix passed to ListFoldersRequest
+        _, kwargs = mock_client.list_folders.call_args
+        request = kwargs["request"]
+        assert request.prefix == expected_start_dir
