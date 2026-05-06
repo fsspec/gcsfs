@@ -1214,6 +1214,43 @@ class TestExtendedGcsFileSystemFind:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
 
+    def test_hns_find_partial_prefix(self, gcs_hns, gcs_hns_mocks):
+        """Test find with a partial folder prefix (Issue #830)."""
+        base_path = f"{TEST_HNS_BUCKET}/find_test"
+        prefix = "empty_folder_"
+        # Mock results from storage_control.list_folders
+        # We return folders that match the partial prefix and some that don't
+        mock_folders = [
+            get_mock_folder("find_test/empty_folder_1"),
+            get_mock_folder("find_test/empty_folder_2"),
+            get_mock_folder("find_test/other_folder"),
+        ]
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+            mocks["super_find"].return_value = {}  # No files
+            mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
+
+            result = gcs_hns.find(base_path, withdirs=True, prefix=prefix)
+
+            # Should only contain folders matching the prefix
+            assert len(result) == 2
+            assert f"{base_path}/empty_folder_1" in result
+            assert f"{base_path}/empty_folder_2" in result
+            assert f"{base_path}/other_folder" not in result
+
+            # Assert that list_folders was called with the correct request
+            # It should go up to the nearest slash (find_test/)
+            expected_folder_id = "find_test/"
+            expected_parent = f"projects/_/buckets/{TEST_HNS_BUCKET}"
+            expected_request = storage_control_v2.ListFoldersRequest(
+                parent=expected_parent,
+                prefix=expected_folder_id,
+                request_id=FIXED_REQUEST_ID,
+            )
+            mocks["control_client"].list_folders.assert_called_once_with(
+                request=expected_request, retry=mock.ANY, timeout=mock.ANY
+            )
+
     def test_find_non_hns_falls_back(self, gcs_hns, gcs_hns_mocks):
         """Test that find falls back to parent implementation for non-HNS"""
         base_path = f"{TEST_HNS_BUCKET}/find_test"

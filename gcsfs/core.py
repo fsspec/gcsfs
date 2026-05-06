@@ -1857,10 +1857,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         dirs = {}
         cache_entries = {}
 
+        full_prefix = ""
+        if prefix:
+            full_prefix = path.rstrip("/") + "/" + prefix
+
         for obj in objects:
             # For native HNS empty folders, which are returned as directory types
             # but are not placeholders, we need to ensure they have an entry in the cache.
-            if obj.get("type") == "directory":
+            if not prefix and update_cache and obj.get("type") == "directory":
                 cache_entries.setdefault(obj["name"], {})
 
             parent = self._parent(obj["name"])
@@ -1869,6 +1873,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             while parent:
                 dir_key = self.split_path(parent)[1]
                 if not dir_key or len(parent) < len(path.rstrip("/")):
+                    break
+
+                if prefix and not parent.startswith(full_prefix):
+                    # If this parent doesn't match the prefix, neither will its parents.
                     break
 
                 dirs[parent] = {
@@ -1880,10 +1888,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     "size": 0,
                 }
 
-                listing = cache_entries.setdefault(parent, {})
-                name = previous["name"]
-                if name not in listing:
-                    listing[name] = previous
+                if not prefix and update_cache:
+                    listing = cache_entries.setdefault(parent, {})
+                    name = previous["name"]
+                    if name not in listing:
+                        listing[name] = previous
 
                 previous = dirs[parent]
                 parent = self._parent(parent)
