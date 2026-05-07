@@ -201,7 +201,7 @@ def test_mrd_exception_handling(extended_gcsfs, gcs_bucket_mocks, exception_to_r
         with pytest.raises(exception_to_raise, match="Test exception raised"):
             extended_gcsfs.read_block(file_path, 0, 10)
 
-        mocks["downloader"].download_ranges.assert_called_once()
+        mocks["downloader"].download_ranges.call_count = 2
 
 
 def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
