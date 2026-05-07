@@ -6,6 +6,7 @@ substitutions:
   _BENCHMARK_CONFIG: ""
   # Format: "hns regional zonal"
   _BUCKET_TYPES: ""
+  _ENABLE_EXPERIMENTAL_READS: "false"
   # Target benchmark workload (e.g., "IO" or "METADATA")
   _BENCHMARK_TYPE: ""
   _IO_VM_TYPE: "c4-standard-192"
@@ -177,6 +178,10 @@ steps:
     id: "run-benchmarks"
     allowFailure: true
     entrypoint: "bash"
+    env:
+      - "BUCKET_TYPES=${_BUCKET_TYPES}"
+      - "BENCHMARK_CONFIG=${_BENCHMARK_CONFIG}"
+      - "ENABLE_EXPERIMENTAL_READS=${_ENABLE_EXPERIMENTAL_READS}"
     args:
       - "-c"
       - |
@@ -279,6 +284,11 @@ steps:
           IFS=':' read -r group config <<< "$$entry"
           echo "[$$VM_NAME]: Launching benchmark run for $$group:$$config"
 
+          CUSTOM_ENV=""
+          if [[ "$$group" == *"read"* ]] && [[ " $${BUCKET_TYPES} " =~ " regional " ]] && [[ "$${ENABLE_EXPERIMENTAL_READS}" == "true" ]]; then
+            CUSTOM_ENV="export USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='true'; export DEFAULT_GCSFS_CONCURRENCY=4"
+          fi
+
           CONFIG_ARG=""
           if [ -n "$$config" ]; then
             CONFIG_ARG="--config=$$config"
@@ -300,6 +310,7 @@ steps:
             cd gcsfs
             source env/bin/activate
             export GCSFS_BENCHMARK_CPU_AFFINITY=true
+            $$CUSTOM_ENV
 
             echo \"Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO\"
             python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
