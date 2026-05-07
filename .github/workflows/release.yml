@@ -41,6 +41,7 @@ jobs:
   release:
     name: Create Release
     needs: build
+    if: "!contains(github.ref_name, 'dev') && github.event_name == 'push'"
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -62,6 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+    environment: pypi
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
