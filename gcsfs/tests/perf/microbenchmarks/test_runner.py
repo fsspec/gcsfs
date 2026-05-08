@@ -93,6 +93,35 @@ def test_run_multi_threaded(mock_benchmark, mock_monitor):
     assert worker_func.call_count == 2
 
 
+def test_run_multi_threaded_fixed_duration(mock_benchmark, mock_monitor):
+    params = MockParams(threads=2, rounds=3)
+    params.runtime = 30
+    # 2 threads and 3 rounds means worker_func is called 6 times in total (2 calls per round).
+    # Since worker_func returns sequential values:
+    # - Round 1: calls return 10 and 20 (Sum = 30)
+    # - Round 2: calls return 30 and 40 (Sum = 70)
+    # - Round 3: calls return 50 and 60 (Sum = 110)
+    worker_func = mock.Mock(side_effect=[10, 20, 30, 40, 50, 60])
+    args_list = [(1,), (2,)]
+
+    runner.run_multi_threaded_fixed_duration(
+        mock_benchmark, mock_monitor, params, worker_func, args_list, "read"
+    )
+
+    assert mock_benchmark.extra_info["threads"] == 2
+    assert mock_benchmark.group == "read"
+    # Verify that the sum of returns matches the expected values for each of the 3 rounds
+    assert mock_benchmark.extra_info["runs"] == [30, 70, 110]
+    assert mock_benchmark.extra_info["min_run"] == 30
+    assert mock_benchmark.extra_info["max_run"] == 110
+
+    mock_monitor.assert_called_once()
+    assert worker_func.call_count == 6
+    mock_benchmark.pedantic.assert_called_once_with(
+        mock.ANY, rounds=1, iterations=1, warmup_rounds=0
+    )
+
+
 @mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
 def test_run_multi_process(mock_mp, mock_benchmark, mock_monitor):
     params = MockParams(processes=2, rounds=2)
