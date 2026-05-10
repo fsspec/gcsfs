@@ -1,9 +1,11 @@
 import asyncio
+import collections
 import contextlib
 import ctypes
 import logging
 import os
 import threading
+import weakref
 from io import BytesIO
 
 from google.api_core.exceptions import NotFound
@@ -309,8 +311,26 @@ class DirectMemmoveBuffer:
             raise BufferError(error_msg)
 
 
+async def _close_mrds(mrds, raise_exception=False):
+    """Close a list of MRDs asynchronously."""
+    if not mrds:
+        return
+    results = await asyncio.gather(
+        *(mrd.close() for mrd in mrds), return_exceptions=True
+    )
+    for r in results:
+        if isinstance(r, Exception):
+            if raise_exception:
+                raise r
+            logger.warning("Error closing MRD: %s", r)
+
+
 class MRDPool:
-    """Manages a pool of AsyncMultiRangeDownloader objects with on-demand scaling."""
+    """Manages a pool of AsyncMultiRangeDownloader objects with on-demand scaling.
+
+    When constructed by `MRDPoolCache`, the instance acts as a pool over a shared
+    MRD queue and donates its MRDs back to that queue on close.
+    """
 
     def __init__(
         self,
@@ -319,21 +339,14 @@ class MRDPool:
         object_name,
         generation,
         pool_size,
+        cache=None,
     ):
-        """
-        Initializes the MRDPool.
-
-        Args:
-            gcsfs (gcsfs.GCSFileSystem): The GCS filesystem client used for the downloads.
-            bucket_name (str): The name of the GCS bucket.
-            object_name (str): The target object/blob name in the bucket.
-            generation (int or str): The specific generation of the GCS object to download.
-            pool_size (int): The maximum number of concurrent downloaders allowed in the pool.
-        """
         self.gcsfs = gcsfs
         self.bucket_name = bucket_name
         self.object_name = object_name
         self.generation = generation
+        self._cache = cache
+        self._key = (bucket_name, object_name, generation)
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
@@ -345,7 +358,7 @@ class MRDPool:
         self._all_mrds = []
         self._rr_index = 0
         self.mrd_supports_multi_request = (
-            False  # Change this to true once mrd supports concurrent reuqests.
+            False  # Change this to true once mrd supports concurrent requests.
         )
 
     async def _create_mrd(self):
@@ -353,18 +366,26 @@ class MRDPool:
         mrd = await init_mrd(
             self.gcsfs.grpc_client, self.bucket_name, self.object_name, self.generation
         )
+        return mrd
+
+    async def _get_or_create_mrd(self):
+        """Gets an MRD from the cache or creates a new one."""
+        mrd = None
+        if self._cache is not None:
+            mrd = self._cache.get_idle_mrd(self._key)
+        if mrd is None:
+            mrd = await self._create_mrd()
         self._all_mrds.append(mrd)
         return mrd
 
     async def initialize(self):
         """Initializes the MRDPool by creating the first downloader instance."""
         async with self._lock:
-
             if self._closed:
                 raise RuntimeError("Cannot initialize a closed MRDPool.")
 
             if not self._initialized and self._active_count == 0:
-                mrd = await self._create_mrd()
+                mrd = await self._get_or_create_mrd()
                 self.persisted_size = mrd.persisted_size
                 self._free_mrds.put_nowait(mrd)
                 self._active_count += 1
@@ -378,7 +399,8 @@ class MRDPool:
 
         If a downloader is available in the pool, it is yielded immediately. If the
         pool is empty but hasn't reached `pool_size`, a new downloader is spawned
-        on demand. Automatically returns thec downloader to the free queue upon exit.
+        on demand or fetched from the cache. Automatically returns the downloader
+        to the free queue upon exit.
 
         Yields:
             AsyncMultiRangeDownloader: An active downloader ready for requests.
@@ -406,7 +428,7 @@ class MRDPool:
 
             if create_new:
                 try:
-                    mrd = await self._create_mrd()
+                    mrd = await self._get_or_create_mrd()
                 except BaseException as e:
                     self._active_count -= 1
                     raise e
@@ -429,20 +451,185 @@ class MRDPool:
         """
         Cleanly shut down all MRDs.
 
-        Iterates through all instantiated downloaders and calls their close methods
+        Iterates through all instantiated downloaders and releases them back to
+        the cache if available, otherwise closes them.
         """
         async with self._lock:
             if self._closed:
                 return
 
-            tasks = []
-            for mrd in self._all_mrds:
-                tasks.append(mrd.close())
+            if self._initialized and self._free_mrds.qsize() != len(self._all_mrds):
+                raise RuntimeError("Cannot close pool with active MRDs.")
+
             try:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        raise result
+                if self._cache is not None:
+                    await self._cache.release(self._key, self._all_mrds)
+                else:
+                    await _close_mrds(self._all_mrds, raise_exception=True)
             finally:
                 self._all_mrds.clear()
                 self._closed = True
+
+
+def _drain_queue(q):
+    if q is None:
+        return []
+    items = list(q)
+    q.clear()
+    return items
+
+
+class MRDPoolCache:
+    """Filesystem-level cache of MRD pools.
+
+    Keyed by (bucket, object, generation). Idle pools are kept in an LRU cache
+    and evicted when exceeding `max_idle_pools`.
+
+    Lifecycle:
+    1. `get()` returns an `MRDPool`.
+    2. When the pool is closed, it returns its MRDs to this cache via `release()`.
+    3. When a key's refcount hits zero, it becomes eligible for LRU eviction.
+
+    Note: `max_idle_pools` bounds the number of cached keys, not the number of
+    idle MRDs. Each cached key holds up to `pool_size` MRDs from its last user,
+    so peak idle inventory is approximately `max_idle_pools * pool_size` MRDs
+    (each owning a gRPC stream).
+    """
+
+    def __init__(self, gcsfs, max_idle_pools: int = 16):
+        """
+        Initializes the MRDPoolCache.
+
+        Args:
+            gcsfs (ExtendedGcsFileSystem): The filesystem instance.
+            max_idle_pools (int, optional): Maximum number of idle pools to retain. Defaults to 16.
+        """
+        self._gcsfs = weakref.ref(gcsfs)
+        self._max_idle_pools = max_idle_pools
+        self._mrd_queues = {}
+        self._refcounts = {}
+        self._evictable_keys = collections.OrderedDict()
+        self._closed = False
+
+    def get_idle_mrd(self, key):
+        """Gets an MRD from the queue for the given key."""
+        if self._closed:
+            return None
+        queue = self._mrd_queues.get(key)
+        if queue:
+            return queue.popleft()
+        return None
+
+    def _incref(self, key):
+        """Mark `key` as in use: ensure its queue exists, bump refcount,
+        and remove the key from the evictable set so it can't be LRU'd out
+        while a caller still holds the pool.
+        """
+        if key not in self._mrd_queues:
+            self._mrd_queues[key] = collections.deque()
+        self._refcounts[key] = self._refcounts.get(key, 0) + 1
+        self._evictable_keys.pop(key, None)
+
+    def _decref(self, key):
+        """Release one reference on `key`. When the last reference goes,
+        mark the key evictable and run LRU eviction. Returns MRDs whose
+        keys were evicted and must be closed by the caller.
+        """
+        refcount = self._refcounts.get(key, 0) - 1
+        if refcount > 0:
+            self._refcounts[key] = refcount
+            return []
+
+        self._refcounts.pop(key, None)
+        if self._closed:
+            return []
+
+        self._evictable_keys[key] = None
+        mrds_to_close = []
+        while len(self._evictable_keys) > self._max_idle_pools:
+            evict_key, _ = self._evictable_keys.popitem(last=False)
+            mrds_to_close.extend(_drain_queue(self._mrd_queues.pop(evict_key, None)))
+        return mrds_to_close
+
+    async def get(self, bucket_name, object_name, generation, pool_size):
+        """
+        Gets an MRDPool for the specified object.
+
+        Args:
+            bucket_name (str): Name of the bucket.
+            object_name (str): Name of the object.
+            generation (int): Object generation.
+            pool_size (int): Requested pool size.
+
+        Returns:
+            MRDPool: An initialized MRDPool instance.
+        """
+        if self._closed:
+            raise RuntimeError("MRDPoolCache is closed.")
+        fs = self._gcsfs()
+        if fs is None:
+            raise RuntimeError("ExtendedGcsFileSystem has been garbage collected.")
+
+        if generation is None:
+            info = await fs._info(f"{bucket_name}/{object_name}")
+            generation = info.get("generation")
+        key = (bucket_name, object_name, generation)
+
+        self._incref(key)
+        mrd_pool = MRDPool(
+            fs,
+            bucket_name,
+            object_name,
+            generation,
+            pool_size,
+            cache=self,
+        )
+        try:
+            await mrd_pool.initialize()
+        except BaseException:
+            # Init failed. `mrd_pool.close()` donates any partial MRDs back
+            # via release() and drops the refcount we just took. If that was
+            # the last reference, purge the key entirely.
+            await mrd_pool.close()
+            mrds_to_close = []
+            if key not in self._refcounts:
+                self._evictable_keys.pop(key, None)
+                mrds_to_close = _drain_queue(self._mrd_queues.pop(key, None))
+            await _close_mrds(mrds_to_close, raise_exception=False)
+            raise
+
+        return mrd_pool
+
+    async def release(self, key, mrds):
+        """
+        Releases MRDs back to the cache or closes them if necessary.
+
+        Args:
+            key (tuple): Cache key (bucket, object, generation).
+            mrds (list): List of MRDs to release.
+        """
+        mrds_to_close = []
+        mrd_queue = self._mrd_queues.get(key)
+        if mrd_queue is not None:
+            for mrd in mrds:
+                mrd_queue.append(mrd)
+        else:
+            mrds_to_close.extend(mrds)
+
+        mrds_to_close.extend(self._decref(key))
+        await _close_mrds(mrds_to_close, raise_exception=False)
+
+    async def close(self):
+        """
+        Closes the cache and all pooled MRDs.
+        """
+        if self._closed:
+            return
+        mrds_to_close = []
+        for q in self._mrd_queues.values():
+            mrds_to_close.extend(_drain_queue(q))
+        self._mrd_queues.clear()
+        self._refcounts.clear()
+        self._evictable_keys.clear()
+        self._closed = True
+        await _close_mrds(mrds_to_close, raise_exception=True)

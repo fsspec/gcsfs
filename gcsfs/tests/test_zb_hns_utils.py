@@ -1,3 +1,5 @@
+import asyncio
+import collections
 import concurrent.futures
 import ctypes
 import logging
@@ -7,7 +9,7 @@ import pytest
 from google.api_core.exceptions import NotFound
 
 from gcsfs import zb_hns_utils
-from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
+from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool, MRDPoolCache, _close_mrds
 
 mock_grpc_client = mock.Mock()
 bucket_name = "test-bucket"
@@ -485,7 +487,6 @@ async def test_mrd_pool_queue_filled_during_lock_wait(mock_gcsfs):
 
     # Simulate _create_mrd so we correctly populate _all_mrds
     async def fake_create_mrd():
-        pool._all_mrds.append(mrd_mock)
         return mrd_mock
 
     with mock.patch.object(pool, "_create_mrd", side_effect=fake_create_mrd):
@@ -512,7 +513,6 @@ async def test_mrd_pool_round_robin_multi_request(mock_gcsfs):
     # logic sees that there are available active MRDs to share.
     async def fake_create_mrd():
         mrd = mrd_mocks.pop(0)
-        pool._all_mrds.append(mrd)
         return mrd
 
     # Enable the multi-request feature manually for this test
@@ -579,3 +579,436 @@ def test_direct_memmove_buffer_submit_failure(mock_memmove):
         buf.close()
 
     executor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_close_mrds():
+    mrd1 = mock.AsyncMock()
+    mrd2 = mock.AsyncMock()
+    mrds = [mrd1, mrd2]
+
+    await _close_mrds(mrds)
+
+    mrd1.close.assert_awaited_once()
+    mrd2.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_mrds_empty():
+    await _close_mrds([])  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_close_mrds_propagates_exception():
+    bad_mrd = mock.AsyncMock()
+    bad_mrd.close.side_effect = RuntimeError("boom")
+    good_mrd = mock.AsyncMock()
+    mrds = [bad_mrd, good_mrd]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _close_mrds(mrds, raise_exception=True)
+
+    good_mrd.close.assert_awaited_once()
+
+
+@pytest.fixture
+def mock_cache():
+    """A mock cache with an internal idle MRD queue."""
+    queue = collections.deque()
+    cache = mock.AsyncMock()
+    cache.get_idle_mrd = mock.Mock(
+        side_effect=lambda key: (queue.popleft() if queue else None)
+    )
+    cache.queue = queue
+    return cache
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_get_mrd_from_local_free_queue(mock_cache):
+    mock_mrd = mock.AsyncMock()
+    mock_cache.queue.append(mock_mrd)
+
+    mrd_pool = MRDPool(
+        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
+    )
+    async with mrd_pool.get_mrd() as mrd:
+        assert mrd is mock_mrd
+        assert mrd_pool._active_count == 1
+        assert mrd_pool._all_mrds == [mock_mrd]
+        # The MRD has left the queue's free queue while in use
+        assert len(mock_cache.queue) == 0
+    # After release it stays in the mrd_pool's local free queue, not the shared queue
+    assert mrd_pool._free_mrds.qsize() == 1
+    assert len(mock_cache.queue) == 0
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_get_mrd_creates_when_empty(
+    init_mrd_mock, mock_cache, mock_gcsfs
+):
+    new_mrd = mock.AsyncMock()
+    init_mrd_mock.return_value = new_mrd
+
+    mrd_pool = MRDPool(
+        mock_gcsfs, "bucket", "obj", "123", pool_size=2, cache=mock_cache
+    )
+    async with mrd_pool.get_mrd() as mrd:
+        assert mrd is new_mrd
+
+    init_mrd_mock.assert_awaited_once()
+    assert mrd_pool._all_mrds == [new_mrd]
+    assert mrd_pool._active_count == 1
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_pool_size_cap(init_mrd_mock, mock_cache, mock_gcsfs):
+    init_mrd_mock.side_effect = lambda *a, **kw: mock.AsyncMock()
+
+    mrd_pool = MRDPool(
+        mock_gcsfs, "bucket", "obj", "123", pool_size=2, cache=mock_cache
+    )
+    # Hold two slots open concurrently
+    async with mrd_pool.get_mrd(), mrd_pool.get_mrd():
+        assert mrd_pool._active_count == 2
+
+        # A third concurrent get_mrd must wait, not create a third MRD
+        async def third():
+            async with mrd_pool.get_mrd():
+                pass
+
+        third_task = asyncio.create_task(third())
+        await asyncio.sleep(0)  # let third start and block on _free_mrds.get()
+        assert init_mrd_mock.await_count == 2  # never grew past 2
+        assert not third_task.done()
+
+    await asyncio.wait_for(third_task, timeout=1.0)
+    assert init_mrd_mock.await_count == 2  # third reused; no new creation
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_create_failure_decrements_active(
+    init_mrd_mock, mock_cache, mock_gcsfs
+):
+    init_mrd_mock.side_effect = RuntimeError("init failed")
+    mrd_pool = MRDPool(
+        mock_gcsfs, "bucket", "obj", "123", pool_size=2, cache=mock_cache
+    )
+
+    with pytest.raises(RuntimeError, match="init failed"):
+        async with mrd_pool.get_mrd():
+            pass
+
+    assert mrd_pool._active_count == 0
+    assert mrd_pool._all_mrds == []
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_close_donates_and_repools(mock_cache):
+    captured = []
+
+    async def mock_release(key, mrds):
+        captured.append((key, list(mrds)))
+        for mrd in mrds:
+            mock_cache.queue.append(mrd)
+
+    mock_cache.release = mock.AsyncMock(side_effect=mock_release)
+
+    mock_mrd_a = mock.AsyncMock()
+    mock_mrd_b = mock.AsyncMock()
+    mrd_pool = MRDPool(
+        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
+    )
+    mrd_pool._free_mrds.put_nowait(mock_mrd_a)
+    mrd_pool._free_mrds.put_nowait(mock_mrd_b)
+    mrd_pool._all_mrds.extend([mock_mrd_a, mock_mrd_b])
+    mrd_pool._initialized = True
+
+    await mrd_pool.close()
+
+    assert mrd_pool._closed is True
+    assert mrd_pool._free_mrds.qsize() == 2
+    assert len(mock_cache.queue) == 2
+    assert captured == [(mrd_pool._key, [mock_mrd_a, mock_mrd_b])]
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_close_idempotent(mock_cache):
+    captured = []
+
+    async def mock_release(key, mrds):
+        captured.append((key, mrds))
+
+    mock_cache.release = mock.AsyncMock(side_effect=mock_release)
+
+    mrd_pool = MRDPool(
+        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
+    )
+    await mrd_pool.close()
+    await mrd_pool.close()  # second call is a no-op
+
+    assert captured == [(mrd_pool._key, [])]
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_get_mrd_after_close_raises(mock_cache):
+    mock_cache.release = mock.AsyncMock()
+
+    mrd_pool = MRDPool(
+        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
+    )
+    await mrd_pool.close()
+
+    with pytest.raises(RuntimeError, match="MRDPool is closed"):
+        async with mrd_pool.get_mrd():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_close_concurrently(mock_cache):
+    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache)
+
+    # Mock release to take some time to yield control
+    async def slow_release(key, mrds):
+        await asyncio.sleep(0.1)
+
+    mock_cache.release.side_effect = slow_release
+
+    # Call close concurrently
+    tasks = [asyncio.create_task(pool.close()) for _ in range(5)]
+    await asyncio.gather(*tasks)
+
+    assert mock_cache.release.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_close_exception_handling(mock_cache):
+    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache)
+    mrd = mock.AsyncMock()
+    pool._all_mrds.append(mrd)
+    pool._free_mrds.put_nowait(mrd)
+    pool._initialized = True
+
+    mock_cache.release.side_effect = RuntimeError("release failed")
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        await pool.close()
+
+    assert pool._closed is True
+    assert len(pool._all_mrds) == 0
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_close_with_active_mrds_raises_assertion():
+    mock_cache = mock.AsyncMock()
+    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache)
+    mrd = mock.AsyncMock()
+    pool._all_mrds.append(mrd)
+    # Do not put in _free_mrds, so it is active
+    pool._initialized = True
+
+    with pytest.raises(RuntimeError, match="Cannot close pool with active MRDs"):
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_creates_mrd_queue(init_mrd_mock, mock_gcsfs):
+    mock_mrd = mock.AsyncMock()
+    mock_mrd.persisted_size = 8
+    init_mrd_mock.return_value = mock_mrd
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+    mrd_pool = await cache.get("bucket", "obj", "123", pool_size=2)
+
+    assert mrd_pool.persisted_size == 8
+    assert mrd_pool.pool_size == 2
+    assert mrd_pool._cache is cache
+    assert cache._refcounts[("bucket", "obj", "123")] == 1
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_shares_mrd_queue(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+    a = await cache.get("bucket", "obj", "123", pool_size=2)
+    a_queue = a._cache._mrd_queues[a._key]
+    b = await cache.get("bucket", "obj", "123", pool_size=4)
+
+    assert a_queue is b._cache._mrd_queues[b._key]
+    assert cache._refcounts[("bucket", "obj", "123")] == 2
+    assert init_mrd_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_distinct_keys(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+
+    await cache.get("bucket", "obj-a", "1", pool_size=1)
+    await cache.get("bucket", "obj-b", "1", pool_size=1)
+
+    assert len(cache._mrd_queues) == 2
+    assert init_mrd_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_init_failure_drops_entry(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.side_effect = RuntimeError("init boom")
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+
+    with pytest.raises(RuntimeError, match="init boom"):
+        await cache.get("bucket", "obj", "1", pool_size=1)
+
+    assert ("bucket", "obj", "1") not in cache._mrd_queues
+
+    # A retry succeeds
+    init_mrd_mock.side_effect = None
+    init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
+    await cache.get("bucket", "obj", "1", pool_size=1)
+    assert cache._refcounts[("bucket", "obj", "1")] == 1
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_release_refcount(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+
+    a = await cache.get("bucket", "obj", "1", pool_size=1)
+    b = await cache.get("bucket", "obj", "1", pool_size=1)
+
+    await a.close()
+    assert cache._refcounts[("bucket", "obj", "1")] == 1
+    assert ("bucket", "obj", "1") not in cache._evictable_keys
+
+    await b.close()
+    assert ("bucket", "obj", "1") not in cache._refcounts
+    assert ("bucket", "obj", "1") in cache._evictable_keys
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_lru_eviction(init_mrd_mock, mock_gcsfs):
+    mock_mrds = []
+
+    async def mock_create_mrd(*_a, **_kw):
+        m = mock.AsyncMock(persisted_size=0)
+        mock_mrds.append(m)
+        return m
+
+    init_mrd_mock.side_effect = mock_create_mrd
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=2)
+
+    # Open + close 3 distinct objects sequentially
+    mrd_pools = []
+    for i in range(3):
+        mrd_pools.append(await cache.get("bucket", f"obj-{i}", "1", pool_size=1))
+    for mrd_pool in mrd_pools:
+        await mrd_pool.close()
+
+    # Only the most recent 2 should remain
+    assert ("bucket", "obj-0", "1") not in cache._mrd_queues
+    assert ("bucket", "obj-1", "1") in cache._mrd_queues
+    assert ("bucket", "obj-2", "1") in cache._mrd_queues
+    assert list(cache._evictable_keys.keys()) == [
+        ("bucket", "obj-1", "1"),
+        ("bucket", "obj-2", "1"),
+    ]
+    # The evicted MRD queue's MRDs were torn down
+    mock_mrds[0].close.assert_awaited_once()
+    mock_mrds[1].close.assert_not_awaited()
+    mock_mrds[2].close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_pinned_never_evicted(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.side_effect = lambda *a, **kw: mock.AsyncMock(persisted_size=0)
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=0)
+    mrd_pools = [
+        await cache.get("bucket", f"obj-{i}", "1", pool_size=1) for i in range(3)
+    ]
+
+    # All 3 still resident even with max_idle=0 since they're in use
+    assert len(cache._mrd_queues) == 3
+    assert len(cache._evictable_keys) == 0
+
+    for mrd_pool in mrd_pools:
+        await mrd_pool.close()
+
+    # Now they should all be evicted (each release pushes idle past cap=0)
+    assert cache._mrd_queues == {}
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_release_reuses_mrd_on_get(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=4)
+    a = await cache.get("bucket", "obj", "1", pool_size=1)
+    a_queue = a._cache._mrd_queues[a._key]
+    await a.close()
+    assert ("bucket", "obj", "1") in cache._evictable_keys
+
+    b = await cache.get("bucket", "obj", "1", pool_size=1)
+    assert b._cache._mrd_queues[b._key] is a_queue
+    assert ("bucket", "obj", "1") not in cache._evictable_keys
+    init_mrd_mock.assert_awaited_once()  # not re-initialized
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_close_tears_down_all(init_mrd_mock, mock_gcsfs):
+    mock_mrds = []
+
+    async def mock_create_mrd(*_a, **_kw):
+        m = mock.AsyncMock(persisted_size=0)
+        mock_mrds.append(m)
+        return m
+
+    init_mrd_mock.side_effect = mock_create_mrd
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+    a = await cache.get("bucket", "obj-a", "1", pool_size=1)
+    assert a is not None
+    mrd_pool_b = await cache.get("bucket", "obj-b", "1", pool_size=1)
+    await mrd_pool_b.close()  # one idle, one pinned
+
+    await cache.close()
+
+    assert cache._mrd_queues == {}
+    assert cache._evictable_keys == collections.OrderedDict()
+    assert cache._closed is True
+
+    await a.close()
+
+    for m in mock_mrds:
+        m.close.assert_awaited_once()
+
+    # Subsequent get raises
+    with pytest.raises(RuntimeError, match="MRDPoolCache is closed"):
+        await cache.get("bucket", "obj-c", "1", pool_size=1)
+
+    # Subsequent close is a no-op
+    await cache.close()
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_close_no_op_when_already_closed(
+    init_mrd_mock, mock_gcsfs
+):
+    cache = MRDPoolCache(mock_gcsfs)
+    await cache.close()
+    await cache.close()  # idempotent
+    assert cache._closed is True

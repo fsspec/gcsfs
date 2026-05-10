@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from glob import has_magic
 
+import fsspec
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
@@ -89,7 +90,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     to the parent class GCSFileSystem for default processing.
     """
 
-    def __init__(self, *args, finalize_on_close=False, **kwargs):
+    def __init__(
+        self, *args, finalize_on_close=False, mrd_pool_cache_size=16, **kwargs
+    ):
         """
         Parameters
         ----------
@@ -130,6 +133,36 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             max_workers=kwargs.get("memmove_max_workers", 8)
         )
         weakref.finalize(self, self._memmove_executor.shutdown)
+        self._mrd_pool_cache = zb_hns_utils.MRDPoolCache(
+            self, max_idle_pools=mrd_pool_cache_size
+        )
+        weakref.finalize(
+            self,
+            self._finalize_mrd_pool_cache,
+            self.loop,
+            self._mrd_pool_cache,
+        )
+
+    @staticmethod
+    def _finalize_mrd_pool_cache(loop, cache):
+        """Tear down the MRDPoolCache when ExtendedGcsFileSystem is garbage collected."""
+        if cache is None or getattr(cache, "_closed", False):
+            return
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(cache.close(), loop)
+        elif current_loop is not None and current_loop.is_running():
+            asyncio.run_coroutine_threadsafe(cache.close(), current_loop)
+        elif asyn.loop[0] is not None and asyn.loop[0].is_running():
+            try:
+                asyn.sync(asyn.loop[0], cache.close, timeout=0.1)
+            except fsspec.FSTimeoutError:
+                pass
 
     @property
     def _user_project(self):
@@ -189,6 +222,26 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 transport=transport
             )
         return self._storage_control_client
+
+    async def close_resources(self):
+        """Close gRPC clients, channels, and other resources."""
+        if self._grpc_client is not None:
+            try:
+                await self._grpc_client.grpc_client.transport.close()
+            except Exception as e:
+                logger.warning(f"Failed to close grpc_client: {e}")
+            self._grpc_client = None
+        if self._storage_control_client is not None:
+            try:
+                await self._storage_control_client.transport.close()
+            except Exception as e:
+                logger.warning(f"Failed to close storage_control_client: {e}")
+            self._storage_control_client = None
+        if self._mrd_pool_cache is not None:
+            try:
+                await self._mrd_pool_cache.close()
+            except Exception as e:
+                logger.warning(f"Failed to close MRDPoolCache: {e}")
 
     async def _lookup_bucket_type(self, bucket):
         if bucket in self._storage_layout_cache:
@@ -358,10 +411,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if mrd is None:
             # If no mrd is provided, we create one with pool size equal to passed concurrency.
             pool_size = min(len(chunk_lengths), concurrency)
-            mrd = zb_hns_utils.MRDPool(
-                self, bucket, object_name, generation, pool_size=pool_size
+            mrd = await self._mrd_pool_cache.get(
+                bucket, object_name, generation, pool_size=pool_size
             )
-            await mrd.initialize()
             pool_created_here = True
 
         tasks = []
@@ -511,10 +563,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 )
 
             # Instantiate an MRDPool locally for this call
-            mrd = zb_hns_utils.MRDPool(
-                self, bucket, object_name, generation, pool_size=concurrency
+            mrd = await self._mrd_pool_cache.get(
+                bucket, object_name, generation, pool_size=concurrency
             )
-            await mrd.initialize()
             pool_created_here = True
 
         try:
@@ -1570,48 +1621,46 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             return
         callback = callback or NoOpCallback()
 
-        mrd = None
+        mrd_pool = await self._mrd_pool_cache.get(bucket, key, generation, pool_size=1)
         try:
-            await self._get_grpc_client()
-            mrd = await zb_hns_utils.init_mrd(self.grpc_client, bucket, key, generation)
-
-            size = mrd.persisted_size
-            if size is None:
-                logger.warning(
-                    f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
-                    "Falling back to _info() to get the file size. "
-                    "This may result in incorrect behavior for unfinalized objects."
-                )
-                size = (await self._info(rpath))["size"]
-            callback.set_size(size)
-
-            lparent = os.path.dirname(lpath) or os.curdir
-            os.makedirs(lparent, exist_ok=True)
-
-            chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
-            offset = 0
-
-            with open(lpath, "wb") as f2:
-                while True:
-                    if offset >= size:
-                        break
-
-                    data = await zb_hns_utils.download_range(
-                        offset=offset, length=chunksize, mrd=mrd
+            async with mrd_pool.get_mrd() as mrd:
+                size = mrd.persisted_size
+                if size is None:
+                    logger.warning(
+                        f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
+                        "Falling back to _info() to get the file size. "
+                        "This may result in incorrect behavior for unfinalized objects."
                     )
-                    if not data:
-                        break
+                    size = (await self._info(rpath))["size"]
+                callback.set_size(size)
 
-                    f2.write(data)
-                    offset += len(data)
-                    callback.relative_update(len(data))
+                lparent = os.path.dirname(lpath) or os.curdir
+                os.makedirs(lparent, exist_ok=True)
+
+                chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
+                offset = 0
+
+                with open(lpath, "wb") as f2:
+                    while True:
+                        if offset >= size:
+                            break
+
+                        data = await zb_hns_utils.download_range(
+                            offset=offset, length=chunksize, mrd=mrd
+                        )
+                        if not data:
+                            break
+
+                        f2.write(data)
+                        offset += len(data)
+                        callback.relative_update(len(data))
         except Exception as e:
             # Clean up the corrupted file before raising error
             if os.path.exists(lpath):
                 os.remove(lpath)
             raise e
         finally:
-            await zb_hns_utils.close_mrd(mrd)
+            await mrd_pool.close()
 
     async def _do_list_objects(
         self,

@@ -1,4 +1,5 @@
 # Unit tests for ExtendedGCSFileSystem.
+import asyncio
 import io
 import logging
 import os
@@ -22,6 +23,7 @@ from gcsfs.tests.conftest import csv_files, files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
+from gcsfs.zb_hns_utils import MRDPoolCache
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -213,16 +215,16 @@ def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
         json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
     ) as mocks:
         with extended_gcsfs.open(file_path, "rb") as f:
-            # The MRD should be created upon opening the file.
-            mocks["create_mrd"].assert_called_once()
+            # The MRDPoolCache.get should be called upon opening the file.
+            mocks["pool_cache_get"].assert_called_once()
 
             f.read(10)
             f.read(20)
             f.seek(5)
             f.read(5)
 
-        # Verify that create_mrd was not called again.
-        mocks["create_mrd"].assert_called_once()
+        # Verify that pool_cache_get was not called again.
+        mocks["pool_cache_get"].assert_called_once()
 
 
 def test_zonal_file_warning_on_missing_persisted_size(
@@ -231,8 +233,11 @@ def test_zonal_file_warning_on_missing_persisted_size(
     """
     Tests that a warning is logged when MRD has no 'persisted_size' attribute when opening ZonalFile.
     """
-    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
-        # 'persisted_size' is set to None in the mock downloader
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        # Force persisted_size to None to trigger the warning
+        mocks["pool"].persisted_size = None
         with caplog.at_level(logging.WARNING, logger="gcsfs"):
             with extended_gcsfs.open(file_path, "rb"):
                 pass
@@ -696,3 +701,47 @@ async def test_get_all_folders_start_dir_calculation(
         _, kwargs = mock_client.list_folders.call_args
         request = kwargs["request"]
         assert request.prefix == expected_start_dir
+
+
+def test_extended_gcsfs_constructs_mrd_pool_cache(monkeypatch):
+    # Avoid creating real gRPC clients
+    monkeypatch.setattr(
+        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_grpc_client",
+        mock.AsyncMock(),
+    )
+
+    fs = ExtendedGcsFileSystem(token="anon", mrd_pool_cache_size=64)
+    assert isinstance(fs._mrd_pool_cache, MRDPoolCache)
+    assert fs._mrd_pool_cache._max_idle_pools == 64
+
+    # Default applies when kwarg omitted
+    fs2 = ExtendedGcsFileSystem(token="anon")
+    assert fs2._mrd_pool_cache._max_idle_pools == 16
+
+
+def test_finalize_mrd_pool_cache_closed_loop(monkeypatch, caplog):
+    """
+    Tests that _finalize_mrd_pool_cache does nothing when no event loop is running.
+    """
+
+    mock_pool = mock.MagicMock(spec=MRDPoolCache)
+    mock_pool._closed = False
+
+    # Mock asyncio.get_running_loop to raise RuntimeError
+    monkeypatch.setattr(
+        asyncio, "get_running_loop", mock.Mock(side_effect=RuntimeError)
+    )
+
+    # Mock asyn.loop to be [None]
+    monkeypatch.setattr("fsspec.asyn.loop", [None])
+
+    mock_loop = mock.MagicMock()
+    mock_loop.is_running.return_value = False
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+
+    # Verify that close was not called (since no loop was running)
+    mock_pool.close.assert_not_called()
+    # Verify no warnings were logged
+    assert len(caplog.records) == 0
