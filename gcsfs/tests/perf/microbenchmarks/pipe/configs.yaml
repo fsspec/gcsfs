@@ -3,7 +3,7 @@ common:
     - "regional"
     - "zonal"
   file_sizes_mb:
-    - 512 # 512 MB
+    - 200 # 200 MB
   chunk_sizes_mb:
     - 50 # 50 MB Default chunk size
   rounds: 3
@@ -12,4 +12,4 @@ scenarios:
   - name: "pipe_file"
 
   - name: "pipe_file_multi_process"
-    processes: [4, 8] # Scaled down concurrent processes to prevent OOM crashes on large contiguous byte buffers
+    processes: [4, 8]

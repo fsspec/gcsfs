@@ -11,7 +11,7 @@ class PipeConfigurator(BaseBenchmarkConfigurator):
         procs_list = scenario.get("processes", [1])
         threads_list = scenario.get("threads", [1])
         bucket_types = common_config.get("bucket_types", ["regional"])
-        file_sizes_mb = common_config.get("file_sizes_mb", [1024, 51200])
+        file_sizes_mb = common_config.get("file_sizes_mb", [200])
         chunk_sizes_mb = common_config.get("chunk_sizes_mb", [50])
         rounds = common_config.get("rounds", 1)
 
