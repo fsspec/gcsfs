@@ -677,7 +677,7 @@ class TestExtendedGcsFileSystemMkdir:
         bucket, folder_path = dir_path.split("/", 1)
         return storage_control_v2.CreateFolderRequest(
             parent=f"projects/_/buckets/{bucket}",
-            folder_id=folder_path.rstrip("/"),
+            folder_id=folder_path.rstrip("/") + "/",
             recursive=recursive,
             request_id=FIXED_REQUEST_ID,
         )
