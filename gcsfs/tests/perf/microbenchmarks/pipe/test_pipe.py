@@ -64,10 +64,11 @@ def _process_worker(
     process_durations_shared,
     index,
 ):
+    """A worker function for each process to pipe files concurrently."""
+
     # Generate data buffer efficiently per process
     data_buffer = b"0" * file_size
 
-    """A worker function for each process to pipe files concurrently."""
     start_time = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=threads) as executor:
