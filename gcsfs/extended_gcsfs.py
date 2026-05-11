@@ -846,7 +846,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     async def _create_hns_folder(self, path, bucket, key, create_parents):
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
         parent = f"projects/_/buckets/{bucket}"
-        folder_id = key.rstrip("/")
+        folder_id = key.rstrip("/") + "/"
         request = storage_control_v2.CreateFolderRequest(
             parent=parent,
             folder_id=folder_id,
