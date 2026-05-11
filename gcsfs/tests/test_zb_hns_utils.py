@@ -1,5 +1,4 @@
 import concurrent.futures
-import ctypes
 import logging
 from unittest import mock
 
@@ -380,104 +379,6 @@ async def test_mrd_pool_close_with_exceptions(create_mrd_mock, mock_gcsfs):
     assert len(pool._all_mrds) == 0
 
 
-@mock.patch("gcsfs.zb_hns_utils.ctypes.memmove")
-def test_direct_memmove_buffer_error_handling(mock_memmove):
-    size = 20
-    buffer_array = (ctypes.c_char * size)()
-    start_address = ctypes.addressof(buffer_array)
-    end_address = start_address + size
-
-    # Simulate an access violation or similar error during memory copy
-    mock_memmove.side_effect = MemoryError("Segfault simulated")
-
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    buf = DirectMemmoveBuffer(start_address, end_address, executor, max_pending=2)
-
-    # First write triggers the background error
-    future = buf.write(b"bad data")
-
-    # Wait for the background thread to actually fail
-    with pytest.raises(MemoryError):
-        future.result()
-
-    # Subsequent writes should raise the stored error immediately
-    with pytest.raises(MemoryError, match="Segfault simulated"):
-        buf.write(b"more data")
-
-    # Close should also raise the stored error.
-    with pytest.raises(MemoryError, match="Segfault simulated"):
-        buf.close()
-
-    executor.shutdown()
-
-
-def test_direct_memmove_buffer():
-    data1 = b"hello"
-    data2 = b"world"
-
-    # Calculate exact size to prevent the new underflow check from failing
-    size = len(data1) + len(data2)
-    buffer_array = (ctypes.c_char * size)()
-    start_address = ctypes.addressof(buffer_array)
-    end_address = start_address + size
-
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    buf = DirectMemmoveBuffer(start_address, end_address, executor, max_pending=2)
-
-    future1 = buf.write(data1)
-    future2 = buf.write(data2)
-
-    future1.result()
-    future2.result()
-    buf.close()
-
-    result_bytes = ctypes.string_at(start_address, len(data1) + len(data2))
-    assert result_bytes == b"helloworld"
-
-    executor.shutdown()
-
-
-def test_direct_memmove_buffer_overflow():
-    """Tests that writing past the allocated end_address raises a BufferError."""
-    size = 10
-    buffer_array = (ctypes.c_char * size)()
-    start_address = ctypes.addressof(buffer_array)
-    end_address = start_address + size
-
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    buf = DirectMemmoveBuffer(start_address, end_address, executor, max_pending=2)
-
-    # Fill the buffer exactly to capacity
-    buf.write(b"1234567890")
-
-    # Attempting to write even 1 more byte should trigger the overflow protection
-    with pytest.raises(BufferError, match="Attempted to write"):
-        buf.write(b"1")
-
-    buf.close()
-    executor.shutdown()
-
-
-def test_direct_memmove_buffer_underflow():
-    """Tests that closing an incompletely filled buffer raises a BufferError."""
-    size = 10
-    buffer_array = (ctypes.c_char * size)()
-    start_address = ctypes.addressof(buffer_array)
-    end_address = start_address + size
-
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    buf = DirectMemmoveBuffer(start_address, end_address, executor, max_pending=2)
-
-    # Write fewer bytes than the expected capacity
-    buf.write(b"12345")
-
-    # Closing should detect that current_offset (5) < expected size (10)
-    with pytest.raises(BufferError, match="Buffer contains uninitialized data"):
-        buf.close()
-
-    executor.shutdown()
-
-
 @pytest.mark.asyncio
 async def test_mrd_pool_queue_filled_during_lock_wait(mock_gcsfs):
     pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
@@ -548,19 +449,120 @@ async def test_mrd_pool_round_robin_multi_request(mock_gcsfs):
 
 
 @mock.patch("gcsfs.zb_hns_utils.ctypes.memmove")
+def test_direct_memmove_buffer_error_handling(mock_memmove):
+    # Use a size > 128KB to trigger the executor background path
+    size = 130 * 1024 + 10
+    data1 = b"a" * (130 * 1024)
+    data2 = b"b" * 10
+
+    # Simulate an access violation or similar error during memory copy
+    mock_memmove.side_effect = MemoryError("Segfault simulated")
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    # First write triggers the background error (slow path)
+    future = view.write(data1)
+
+    # Wait for the background thread to actually fail
+    with pytest.raises(MemoryError):
+        future.result()
+
+    # Subsequent writes should raise the stored error immediately
+    with pytest.raises(MemoryError, match="Segfault simulated"):
+        view.write(data2)
+
+    # Close should also raise the stored error.
+    with pytest.raises(MemoryError, match="Segfault simulated"):
+        buf.close()
+
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer():
+    data1 = b"hello"
+    data2 = b"world"
+    size = len(data1) + len(data2)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    future1 = view.write(data1)
+    future2 = view.write(data2)
+
+    future1.result()
+    future2.result()
+
+    view.close()
+    buf.close()
+
+    result_bytes = buf.get_value()
+    assert result_bytes == b"helloworld"
+
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_overflow():
+    """Tests that writing past the view boundaries raises a BufferError."""
+    size = 10
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    # Fill the buffer exactly to capacity
+    view.write(b"1234567890")
+
+    # Attempting to write even 1 more byte should trigger the overflow protection
+    with pytest.raises(BufferError, match="Attempted to write"):
+        view.write(b"1")
+
+    view.close()
+    buf.close()
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_underflow():
+    """Tests that closing an incompletely filled view/buffer raises a BufferError."""
+    size = 10
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    # Write fewer bytes than the expected capacity
+    view.write(b"12345")
+
+    # Closing the view should detect that current_offset (5) < expected size (10)
+    with pytest.raises(BufferError, match="Buffer contains uninitialized data"):
+        view.close()
+
+    # Calling get_value after an incompletely filled buffer should also error
+    buf.close()
+    with pytest.raises(BufferError, match="Buffer incomplete"):
+        buf.get_value()
+
+    executor.shutdown()
+
+
+@mock.patch("gcsfs.zb_hns_utils.ctypes.memmove")
 def test_direct_memmove_buffer_submit_failure(mock_memmove):
     """
     Tests that if executor.submit fails synchronously (e.g., executor is closed),
     the internal locks, semaphores, and events are properly reset, and close()
     does not hang.
     """
-    size = 10
-    buffer_array = (ctypes.c_char * size)()
-    start_address = ctypes.addressof(buffer_array)
-    end_address = start_address + size
+    # 1. Chunk > 128KB to force executor scheduling (skip the synchronous fast path)
+    chunk_size = 130 * 1024
+
+    # 2. Expected size > chunk_size to skip the Zero-Copy optimization
+    expected_size = 140 * 1024
+
+    data = b"a" * chunk_size
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    buf = DirectMemmoveBuffer(start_address, end_address, executor, max_pending=2)
+    buf = DirectMemmoveBuffer(expected_size, executor, max_pending=2)
+    view = buf.get_view(0, expected_size)
 
     # Mock the submit method to simulate a closed executor throwing a RuntimeError
     with mock.patch.object(
@@ -568,7 +570,7 @@ def test_direct_memmove_buffer_submit_failure(mock_memmove):
     ):
         # The write operation should raise the simulated RuntimeError
         with pytest.raises(RuntimeError, match="Executor closed"):
-            buf.write(b"12345")
+            view.write(data)
 
     # Verify that the internal tracking state was correctly rolled back
     assert buf._pending_count == 0
@@ -578,4 +580,47 @@ def test_direct_memmove_buffer_submit_failure(mock_memmove):
     with pytest.raises(RuntimeError, match="Executor closed"):
         buf.close()
 
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_zero_copy():
+    """Tests that a perfect aligned single payload avoids memory allocation completely."""
+    data = b"exact_size_payload"
+    size = len(data)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    # Writing a single payload identical to the expected size
+    future = view.write(data)
+    future.result()
+
+    view.close()
+    buf.close()
+
+    # Should be the EXACT same string object returned without copying
+    result = buf.get_value()
+    assert result is data
+
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_overlapping_views():
+    """Tests that getting overlapping views raises a ValueError."""
+    size = 100
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+
+    # Get a view for the first half
+    _ = buf.get_view(0, 50)
+
+    # Attempting to get an overlapping view should fail
+    with pytest.raises(ValueError, match="Overlapping view requested"):
+        _ = buf.get_view(25, 50)
+
+    # Getting a view for the second half should succeed
+    _ = buf.get_view(50, 50)
+
+    buf.close()
     executor.shutdown()

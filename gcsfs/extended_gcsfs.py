@@ -27,12 +27,7 @@ from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs.core import GCSFile, GCSFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
-from gcsfs.zb_hns_utils import (
-    DirectMemmoveBuffer,
-    MRDPool,
-    PyBytes_AsString,
-    PyBytes_FromStringAndSize,
-)
+from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
@@ -411,39 +406,34 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 await mrd.close()
 
     async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool):
-        """Helper to handle concurrent chunk downloads into a DirectMemmoveBuffer."""
+        """Helper to handle concurrent chunk downloads cleanly."""
         concurrency = (
             concurrency if length >= self.MIN_CHUNK_SIZE_FOR_CONCURRENCY else 1
         )
-        result_bytes = PyBytes_FromStringAndSize(None, length)
-        buffer_ptr = PyBytes_AsString(result_bytes)
-
         part_size = length // concurrency
-        tasks = []
-        buffers = []
-        loop = asyncio.get_running_loop()
 
-        # Track if the core download process failed
+        tasks = []
+        views = []
         has_error = False
 
-        async def _download(o, s, b, mrd_or_pool):
+        # The master buffer manages its own allocation under the hood
+        master_buffer = DirectMemmoveBuffer(length, self._memmove_executor)
+
+        async def _download(o, s, view, mrd_or_pool):
             async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m_client:
-                await m_client.download_ranges([(o, s, b)])
+                await m_client.download_ranges([(o, s, view)])
 
         for i in range(concurrency):
             part_offset = offset + (i * part_size)
             actual_size = part_size if i < concurrency - 1 else length - (i * part_size)
 
-            part_address = buffer_ptr + (part_offset - offset)
-            buf = DirectMemmoveBuffer(
-                part_address,
-                part_address + actual_size,
-                self._memmove_executor,
-            )
-            buffers.append(buf)
+            # Give each task a restricted view of the master buffer
+            view = master_buffer.get_view(part_offset - offset, actual_size)
+            views.append(view)
+
             tasks.append(
                 asyncio.create_task(
-                    _download(part_offset, actual_size, buf, mrd_or_pool)
+                    _download(part_offset, actual_size, view, mrd_or_pool)
                 )
             )
 
@@ -453,6 +443,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 if isinstance(res, Exception):
                     has_error = True
                     raise res
+            for view in views:
+                view.close()
         except BaseException:
             has_error = True
             for t in tasks:
@@ -461,18 +453,17 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         finally:
-            for buf in buffers:
-                try:
-                    await loop.run_in_executor(None, buf.close)
-                except BufferError:
-                    # If we are already handling a network/download exception,
-                    # ignore the BufferError (which is just a symptom of the drop).
-                    # If there's no download error, this means the buffer logic
-                    # itself failed, so we must surface the error.
-                    if not has_error:
-                        raise
+            try:
+                master_buffer.close()
+            except Exception:
+                # If we are already handling a network/download exception,
+                # ignore the exception from buffer (which is just a symptom of the drop).
+                # If there's no download error, this means the buffer logic
+                # itself failed, so we must surface the error.
+                if not has_error:
+                    raise
 
-        return result_bytes
+        return master_buffer.get_value()
 
     async def _cat_file(
         self,
