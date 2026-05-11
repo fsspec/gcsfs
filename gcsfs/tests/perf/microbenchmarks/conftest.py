@@ -140,6 +140,21 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
     )
 
 
+@pytest.fixture
+def gcsfs_benchmark_pipe(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a pipe benchmark run.
+    It provides a GCSFS instance and a list of file paths to pipe to.
+    """
+    params = request.param
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-pipe",
+        create_files=False,
+    )
+
+
 def _benchmark_listing_fixture_helper(
     extended_gcs_factory,
     params,
