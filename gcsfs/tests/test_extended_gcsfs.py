@@ -30,12 +30,7 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import (
-    _MULTI_THREADED_TEST_DATA_SIZE,
-    csv_files,
-    files,
-    text_files,
-)
+from gcsfs.tests.conftest import csv_files, files, text_files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
@@ -342,9 +337,20 @@ async def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
 
 
 # ========================== Zonal Multithreaded Read Tests ===========================
+_MULTI_THREADED_TEST_DATA_SIZE = 5 * 1024 * 1024  # 5MB
 _MULTI_THREADED_TEST_FILE = "multi_threaded_test_file"
-_MULTI_THREADED_TEST_DATA = text_files[_MULTI_THREADED_TEST_FILE]
+pattern = b"0123456789abcdef"
+_MULTI_THREADED_TEST_DATA = (
+    pattern * (_MULTI_THREADED_TEST_DATA_SIZE // len(pattern))
+    + pattern[: _MULTI_THREADED_TEST_DATA_SIZE % len(pattern)]
+)
 _MULTI_THREADED_TEST_FILE_PATH = f"{TEST_ZONAL_BUCKET}/{_MULTI_THREADED_TEST_FILE}"
+
+
+@pytest.fixture
+def multi_threaded_test_file(extended_gcsfs):
+    extended_gcsfs.pipe(_MULTI_THREADED_TEST_FILE_PATH, _MULTI_THREADED_TEST_DATA)
+
 
 _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY = 1 * 1024 * 1024  # 1MB
 _NUM_CONCURRENCY_THREADS = 10
@@ -371,7 +377,9 @@ def _read_range_from_fs(fs, path, offset, length, block_size=None):
         return f.read(length)
 
 
-def test_multithreaded_read_disjoint_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_disjoint_ranges_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads of disjoint ranges from the same file.
     Verifies that different parts of the file can be fetched simultaneously without data mix-up.
@@ -399,7 +407,9 @@ def test_multithreaded_read_disjoint_ranges_zb(extended_gcsfs, gcs_bucket_mocks)
             assert mocks["downloader"].close.call_count == len(read_tasks)
 
 
-def test_multithreaded_read_overlapping_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_overlapping_ranges_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads of overlapping ranges from the same file.
     """
@@ -443,7 +453,9 @@ def test_default_cache_is_readahead_chunked(extended_gcsfs, gcs_bucket_mocks):
             assert isinstance(f.cache, caching.ReadAheadChunked)
 
 
-def test_multithreaded_read_chunk_boundary_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_chunk_boundary_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads that straddle internal buffering chunk boundaries.
     Verifies correct stitching of data from multiple internal requests.
@@ -522,7 +534,9 @@ def _read_random_range(fs, path, file_size, read_length):
         return f.read(read_length)
 
 
-def test_multithreaded_read_high_concurrency_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_high_concurrency_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests high-concurrency reads to stress the connection pooling and handling.
     Verifies that many concurrent requests do not lead to crashes or deadlocks.
@@ -559,7 +573,7 @@ def test_multithreaded_read_high_concurrency_zb(extended_gcsfs, gcs_bucket_mocks
 
 
 def test_multithreaded_read_one_fails_others_survive_zb(
-    extended_gcsfs, gcs_bucket_mocks
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
 ):
     """
     Tests fault tolerance: one thread's read operation fails, but others complete successfully.
@@ -665,7 +679,7 @@ def _read_range_and_get_pid(path, offset, length, block_size=None):
     return data, os.getpid()
 
 
-def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
+def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs, multi_threaded_test_file):
     """
     Tests concurrent reads of disjoint ranges from the same file in different processes.
     """
@@ -694,7 +708,9 @@ def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
     assert os.getpid() not in pids
 
 
-def test_multiprocess_read_overlapping_ranges_zb(extended_gcsfs):
+def test_multiprocess_read_overlapping_ranges_zb(
+    extended_gcsfs, multi_threaded_test_file
+):
     """
     Tests concurrent reads of overlapping ranges from the same file in different processes.
     """
@@ -733,7 +749,7 @@ def _read_with_passed_fs(fs, path, offset, length):
         return f.read(length)
 
 
-def test_multiprocess_shared_fs_zb(extended_gcsfs):
+def test_multiprocess_shared_fs_zb(extended_gcsfs, multi_threaded_test_file):
     """
     Tests passing the filesystem object itself to child processes.
     """
