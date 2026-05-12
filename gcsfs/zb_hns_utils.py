@@ -350,26 +350,31 @@ class DirectMemmoveBuffer:
             self.semaphore.release()
             raise
 
-        try:
-            if size <= self.THRESHOLD_BYTES_FOR_SCHEDULING:
-                # Fast path, no need to send it to executor
+        if size <= self.THRESHOLD_BYTES_FOR_SCHEDULING:
+            # Fast path, no need to send it to executor
+            try:
                 self._do_memmove(dest, data_bytes, size)
-                fut = concurrent.futures.Future()
-                with self._lock:
-                    local_err = self._error
-                if local_err:
-                    fut.set_exception(local_err)
-                else:
-                    fut.set_result(None)
-                return fut
+            except BaseException:
+                # The exception is already captured in self._error by _do_memmove
+                pass
+
+            fut = concurrent.futures.Future()
+            with self._lock:
+                local_err = self._error
+            if local_err:
+                fut.set_exception(local_err)
             else:
+                fut.set_result(None)
+            return fut
+        else:
+            try:
                 # Slow path, schedule it on executor.
                 return self.executor.submit(self._do_memmove, dest, data_bytes, size)
-        except BaseException as e:
-            with self._lock:
-                self._error = e
-            self._decrement_pending()
-            raise e
+            except BaseException as e:
+                with self._lock:
+                    self._error = e
+                self._decrement_pending()
+                raise e
 
     def _do_memmove(self, dest, data_bytes, size):
         try:
