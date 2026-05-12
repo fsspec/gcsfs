@@ -16,7 +16,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import GCSFileSystem
-from gcsfs.extended_gcsfs import BucketType
+from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
@@ -139,7 +139,12 @@ def gcs_factory(docker_gcs):
 
     def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
-        return fsspec.filesystem("gcs", **params, **kwargs)
+        fs = fsspec.filesystem("gcs", **params, **kwargs)
+        # Enable caching of UNKNOWN bucket types if we are on emulator
+        is_emulator = params.get("endpoint_url") != "https://storage.googleapis.com"
+        if is_emulator and isinstance(fs, ExtendedGcsFileSystem):
+            fs._cache_unknown_buckets = True
+        return fs
 
     return factory
 
@@ -451,7 +456,10 @@ def zonal_write_mocks():
         return
 
     patch_target_get_bucket_type = (
-        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type"
+        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_type"
+    )
+    patch_target_sync_get_bucket_type = (
+        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
     )
     patch_target_init_aaow = "gcsfs.zb_hns_utils.init_aaow"
     patch_target_gcsfs_info = "gcsfs.core.GCSFileSystem._info"
@@ -483,6 +491,11 @@ def zonal_write_mocks():
     with (
         mock.patch(
             patch_target_get_bucket_type,
+            new_callable=mock.AsyncMock,
+            return_value=BucketType.ZONAL_HIERARCHICAL,
+        ),
+        mock.patch(
+            patch_target_sync_get_bucket_type,
             return_value=BucketType.ZONAL_HIERARCHICAL,
         ),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),
@@ -504,9 +517,11 @@ def file_path():
 
 
 @pytest_asyncio.fixture
-async def async_gcs(gcs_factory):
+async def async_gcs():
     """Fixture to provide an asynchronous GCSFileSystem instance."""
-    gcs = gcs_factory(asynchronous=True)
+    token = "anon" if not os.getenv("STORAGE_EMULATOR_HOST") else None
+    GCSFileSystem.clear_instance_cache()
+    gcs = GCSFileSystem(asynchronous=True, token=token)
     yield gcs
 
 

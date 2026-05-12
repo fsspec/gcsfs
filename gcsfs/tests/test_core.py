@@ -487,8 +487,7 @@ def test_rm_recursive(gcs):
 
 def test_rm_chunked_batch(gcs):
     files = [f"{TEST_BUCKET}/t{i}" for i in range(303)]
-    for fn in files:
-        gcs.touch(fn)
+    gcs.pipe({fn: b"" for fn in files})
 
     files_created = gcs.find(TEST_BUCKET)
     for fn in files:
@@ -511,8 +510,7 @@ def test_rm_wildcards_in_directory(gcs):
         f"{base_dir}/b1.dat",
         f"{base_dir}/subdir/nested.txt",
     ]
-    for f in files:
-        gcs.touch(f)
+    gcs.pipe({f: b"" for f in files})
 
     # 1. Test '?' wildcard (non-recursive)
     gcs.rm(f"{base_dir}/file?.txt")
