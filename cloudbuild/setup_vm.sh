@@ -11,4 +11,15 @@ source env/bin/activate
 
 pip install --upgrade pip > /dev/null
 pip install pytest pytest-timeout pytest-subtests pytest-asyncio build hatchling hatch-vcs fusepy google-cloud-storage > /dev/null
-pip install -e . > /dev/null
+if [ "$INSTALL_GCSFS_FROM_PYPI" = "true" ]; then
+    echo '--- Installing gcsfs from PyPI ---'
+    pip install gcsfs > /dev/null
+else
+    echo '--- Installing gcsfs from local source ---'
+    pip install -e . > /dev/null
+fi
+
+if [ "$INSTALL_FSSPEC_HEAD" = "true" ]; then
+    echo '--- Installing fsspec HEAD ---'
+    pip install --force-reinstall git+https://github.com/fsspec/filesystem_spec.git > /dev/null
+fi
