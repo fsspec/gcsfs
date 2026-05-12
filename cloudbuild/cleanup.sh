@@ -16,4 +16,6 @@ gcloud storage rm --recursive "gs://gcsfs-test-hns-${SHORT_BUILD_ID}" || true &
 gcloud storage rm --recursive "gs://gcsfs-test-zonal-${SHORT_BUILD_ID}" || true &
 gcloud storage rm --recursive "gs://gcsfs-test-standard-for-zonal-${SHORT_BUILD_ID}" || true &
 gcloud storage rm --recursive "gs://gcsfs-test-zonal-core-${SHORT_BUILD_ID}" || true &
+gcloud storage rm --recursive "gs://gcsfs-test-hns-req-pay-${SHORT_BUILD_ID}" --billing-project="${PROJECT_ID}" || true &
+gcloud storage rm --recursive "gs://gcsfs-test-standard-req-pay-${SHORT_BUILD_ID}" --billing-project="${PROJECT_ID}" || true &
 wait

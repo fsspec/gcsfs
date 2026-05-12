@@ -38,6 +38,7 @@ class ZonalFile(GCSFile):
         fixed_key_metadata=None,
         generation=None,
         kms_key_name=None,
+        pool_size=zb_hns_utils.DEFAULT_CONCURRENCY,
         finalize_on_close=False,
         flush_interval_bytes=_DEFAULT_FLUSH_INTERVAL_BYTES,
         **kwargs,
@@ -59,19 +60,21 @@ class ZonalFile(GCSFile):
         bucket, key, generation = gcsfs._split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
-        self.mrd = None
         self.aaow = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
         self.mode = mode
         self.flush_interval_bytes = flush_interval_bytes
         self.gcsfs = gcsfs
+        self.pool_size = pool_size
         object_size = None
         if "r" in self.mode:
-            self.mrd = asyn.sync(
-                self.gcsfs.loop, self._init_mrd, bucket, key, generation
+            self.mrd_pool = zb_hns_utils.MRDPool(
+                self.gcsfs, bucket, key, generation, self.pool_size
             )
-            object_size = self.mrd.persisted_size
+            asyn.sync(self.gcsfs.loop, self.mrd_pool.initialize)
+            object_size = self.mrd_pool.persisted_size
+
             if object_size is None:
                 logger.warning(
                     "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
@@ -151,33 +154,93 @@ class ZonalFile(GCSFile):
                 self.flush_interval_bytes,
             )
 
-    def _fetch_range(self, start=None, end=None, chunk_lengths=None):
+    def _fetch_range(
+        self,
+        start: int | None = None,
+        end: int | None = None,
+        chunk_lengths: list[int] | None = None,
+    ):
         """
         Overrides the default _fetch_range to implement the gRPC read path.
 
-        See super() class for documentation.
+        Args:
+            start: The start offset for requested bytes (included).
+            end: The end offset for requested bytes (excluded).
+            chunk_lengths: A list of integers specifying the sizes of sequential chunks to read
+                starting from the start offset. This cannot be used at the same time as the end parameter.
+
+        Returns:
+            A single bytes object if chunk_lengths is None, or a list of bytes objects corresponding
+            to the requested chunk sizes. If the range cannot be satisfied, it returns empty bytes
+            or a list with empty bytes.
+
+        Raises:
+            ValueError: If both end and chunk_lengths are provided.
+            RuntimeError: If an underlying fetch operation fails for an unexpected reason.
         """
         if end is not None and chunk_lengths is not None:
             raise ValueError(
                 "The end and chunk_lengths arguments are mutually exclusive and cannot be used together."
             )
 
-        try:
+        if self._prefetch_engine:
+            # This block is basically where caches and prefetch engines may overlap.
+            # We plan to remove this behaviour in future.
+
+            try:
+                if chunk_lengths is None:
+                    return self._prefetch_engine._fetch(start, end)
+
+                # Fetch chunks sequentially through the prefetch engine
+                # Spawning concurrent task is worst here, because that would act as seek for prefetcher.
+                results = []
+                current_offset = start if start is not None else 0
+                for length in chunk_lengths:
+                    data = self._prefetch_engine._fetch(
+                        current_offset, current_offset + length
+                    )
+                    results.append(data)
+                    current_offset += length
+                    if length != len(data):
+                        raise RuntimeError("not satisfiable")
+                return results
+            except RuntimeError as e:
+                if "not satisfiable" in str(e):
+                    return b"" if chunk_lengths is None else [b""]
+                raise
+
+        # non-prefetch route
+        async def _do_fetch():
             if chunk_lengths is not None:
-                return asyn.sync(
-                    self.fs.loop,
-                    self.gcsfs._fetch_range_split,
+                return await self.gcsfs._fetch_range_split(
                     self.path,
+                    concurrency=self.concurrency,
                     start=start,
                     chunk_lengths=chunk_lengths,
                     size=self.size,
-                    mrd=self.mrd,
+                    mrd=self.mrd_pool,
                 )
-            return self.gcsfs.cat_file(self.path, start=start, end=end, mrd=self.mrd)
+
+            return await self.gcsfs._cat_file(
+                self.path,
+                start=start,
+                end=end,
+                concurrency=self.concurrency,
+                mrd=self.mrd_pool,
+            )
+
+        try:
+            return asyn.sync(self.fs.loop, _do_fetch)
         except RuntimeError as e:
             if "not satisfiable" in str(e):
                 return b"" if chunk_lengths is None else [b""]
             raise
+
+    async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
+        """The native coroutine called by the BackgroundPrefetcher."""
+        return await self.gcsfs._concurrent_mrd_fetch(
+            start_offset, total_size, split_factor, self.mrd_pool
+        )
 
     def write(self, data):
         """
@@ -311,10 +374,12 @@ class ZonalFile(GCSFile):
         """
         if self.closed:
             return
+
         # super is closed before aaow since flush may need aaow
         super().close()
-        # Helper method safely handles mrd=None.
-        asyn.sync(self.gcsfs.loop, zb_hns_utils.close_mrd, self.mrd)
+
+        if hasattr(self, "mrd_pool") and self.mrd_pool:
+            asyn.sync(self.gcsfs.loop, self.mrd_pool.close)
 
         # Only close aaow if the stream is open
         if self.aaow and self.aaow._is_stream_open:

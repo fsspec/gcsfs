@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.27.0", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gcsfs"
+dynamic = ["version"]
+description = "Convenient Filesystem interface over GCS"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE.txt"]
+requires-python = ">=3.10"
+maintainers = [{ name = "Martin Durant", email = "mdurant@anaconda.com" }]
+keywords = ["google-cloud-storage", "gcloud", "file-system"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "aiohttp!=4.0.0a0,!=4.0.0a1,>=3.9.0",
+    "decorator>4.1.2",
+    "fsspec>=2026.3.0",
+    "google-auth>=1.2",
+    "google-auth-oauthlib",
+    "google-cloud-storage>=3.9.0",
+    "google-cloud-storage-control",
+    "requests",
+]
+
+[project.optional-dependencies]
+gcsfuse = ["fusepy"]
+crc = ["crcmod"]
+dev = [
+    "flake8",
+    "isort",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-timeout",
+    "pytest-cov",
+    "pytest-subtests",
+]
+
+[project.urls]
+Homepage = "https://github.com/fsspec/gcsfs"
+Documentation = "https://gcsfs.readthedocs.io"
+Repository = "https://github.com/fsspec/gcsfs"
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { 'version_scheme' = 'post-release' }
+
+[tool.hatch.build]
+exclude = [
+    "/gcsfs/tests",
+    "/gcsfs/tests/**",
+]
+
+[tool.hatch.build.hooks.vcs]
+version-file = "gcsfs/_version.py"
+
+[tool.pytest.ini_options]
+addopts = "--color=yes --timeout=1800"
+log_cli = false
+log_cli_level = "DEBUG"
+
+[tool.isort]
+profile = "black"
+known_third_party = ["aiohttp", "click", "decorator", "fsspec", "fuse", "google", "google_auth_oauthlib", "numpy", "prettytable", "psutil", "pytest", "pytest_asyncio", "requests", "resource_monitor", "yaml"]

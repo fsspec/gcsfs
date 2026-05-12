@@ -14,6 +14,7 @@ import uuid
 import warnings
 import weakref
 from datetime import datetime, timedelta
+from glob import has_magic
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
 from urllib.parse import urlsplit
@@ -23,7 +24,7 @@ import fsspec
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from fsspec.implementations.http import get_client
-from fsspec.utils import setup_logging, stringify_path
+from fsspec.utils import other_paths, setup_logging, stringify_path
 
 from . import __version__ as version
 from .checkers import get_consistency_checker
@@ -1338,16 +1339,70 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     merge = asyn.sync_wrapper(_merge)
 
-    # mv method is already available as sync method in the fsspec.py
-    # Async version of it is introduced here so that mv can be used in async methods.
     # TODO: Add async mv method in the async.py and remove from GCSFileSystem.
-    async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
+    async def _mv(
+        self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs
+    ):
         if path1 == path2:
             return
-        # TODO: Pass on_error parameter after copy method handles FileNotFoundError
-        # for folders when recursive is set to true.
-        await self._copy(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        await self._rm(path1, recursive=recursive)
+
+        if isinstance(path1, list) and isinstance(path2, list):
+            # No need to expand paths when both source and destination
+            # are provided as lists
+            paths1 = path1
+            paths2 = path2
+        else:
+            source_is_str = isinstance(path1, str)
+            paths1 = await self._expand_path(
+                path1, maxdepth=maxdepth, recursive=recursive
+            )
+            if source_is_str and (not recursive or maxdepth is not None):
+                # Non-recursive glob does not move directories
+                paths1 = [
+                    p
+                    for p in paths1
+                    if not (asyn.trailing_sep(p) or await self._isdir(p))
+                ]
+                if not paths1:
+                    return
+
+            source_is_file = len(paths1) == 1
+            dest_is_dir = isinstance(path2, str) and (
+                asyn.trailing_sep(path2) or await self._isdir(path2)
+            )
+
+            exists = source_is_str and (
+                (has_magic(path1) and source_is_file)
+                or (
+                    not has_magic(path1)
+                    and dest_is_dir
+                    and not asyn.trailing_sep(path1)
+                )
+            )
+            paths2 = other_paths(
+                paths1,
+                path2,
+                exists=exists,
+                flatten=not source_is_str,
+            )
+
+        batch_size = batch_size or self.batch_size
+        result = await asyn._run_coros_in_chunks(
+            [self._mv_file(p1, p2, **kwargs) for p1, p2 in zip(paths1, paths2)],
+            batch_size=batch_size,
+            return_exceptions=True,
+            nofiles=True,
+        )
+
+        for res, p1 in zip(result, paths1):
+            if isinstance(res, Exception):
+                if isinstance(res, FileNotFoundError) and recursive:
+                    # Ignore FileNotFoundError for implicit directories returned by _expand_path.
+                    if any(p.startswith(p1.rstrip("/") + "/") for p in paths1):
+                        continue
+                raise res
+
+    mv = asyn.sync_wrapper(_mv)
 
     async def _cp_file(self, path1, path2, acl=None, **kwargs):
         """Duplicate remote file"""
@@ -1411,6 +1466,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 )
                 await self._mv_file_cache_update(path1, path2, out)
                 return
+            except FileNotFoundError:
+                # Raise immediately because fallback will also fail when file is not found.
+                raise
             except Exception as e:
                 # TODO: Fallback is added to make sure there is smooth transition, it can be removed
                 # once we have metrics proving that moveTo API is working properly for all bucket types.
@@ -1501,7 +1559,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     if msg and msg2:
                         out.append(OSError(msg2.groups()[0]))
                     else:
-                        out.append(OSError(str(path, code)))
+                        out.append(OSError(f"{path}: {code}"))
             if remaining:
                 paths = remaining
                 await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
@@ -1694,7 +1752,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 except Exception:
                     await self._call(
                         "DELETE",
-                        self.location.replace("&ifGenerationMatch=0", ""),
+                        location.replace("&ifGenerationMatch=0", ""),
                     )
                     raise
 
@@ -1799,10 +1857,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         dirs = {}
         cache_entries = {}
 
+        full_prefix = ""
+        if prefix:
+            full_prefix = path.rstrip("/") + "/" + prefix
+
         for obj in objects:
             # For native HNS empty folders, which are returned as directory types
             # but are not placeholders, we need to ensure they have an entry in the cache.
-            if obj.get("type") == "directory":
+            if not prefix and update_cache and obj.get("type") == "directory":
                 cache_entries.setdefault(obj["name"], {})
 
             parent = self._parent(obj["name"])
@@ -1811,6 +1873,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             while parent:
                 dir_key = self.split_path(parent)[1]
                 if not dir_key or len(parent) < len(path.rstrip("/")):
+                    break
+
+                if prefix and not parent.startswith(full_prefix):
+                    # If this parent doesn't match the prefix, neither will its parents.
                     break
 
                 dirs[parent] = {
@@ -1822,10 +1888,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     "size": 0,
                 }
 
-                listing = cache_entries.setdefault(parent, {})
-                name = previous["name"]
-                if name not in listing:
-                    listing[name] = previous
+                if not prefix and update_cache:
+                    listing = cache_entries.setdefault(parent, {})
+                    name = previous["name"]
+                    if name not in listing:
+                        listing[name] = previous
 
                 previous = dirs[parent]
                 parent = self._parent(parent)

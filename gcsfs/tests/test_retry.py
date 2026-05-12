@@ -7,9 +7,96 @@ import pytest
 import requests
 from requests.exceptions import ProxyError
 
-from gcsfs.retry import HttpError, is_retriable, validate_response
+from gcsfs.retry import (
+    DEFAULT_RETRY_CONFIG,
+    HttpError,
+    get_storage_control_retry_config,
+    is_retriable,
+    validate_response,
+)
 from gcsfs.tests.settings import TEST_BUCKET
 from gcsfs.tests.utils import tmpfile
+
+
+def test_storage_control_retry_config_from_kwargs():
+    kwargs = {"retry_timeout": 15.0, "retry_initial": 3.0, "other_arg": "value"}
+    cfg = {k: v for k, v in kwargs.items() if k.startswith("retry_") and v is not None}
+    assert cfg["retry_timeout"] == 15.0
+    assert cfg["retry_initial"] == 3.0
+    assert "retry_maximum" not in cfg
+
+
+@pytest.mark.parametrize(
+    "kwargs, base_config, expected",
+    [
+        # 1. Defaults only
+        ({}, None, {"timeout": DEFAULT_RETRY_CONFIG.get("timeout")}),
+        # 2. FS Config override
+        ({}, {"timeout": 10.0}, {"timeout": 10.0}),
+        # 3. Call-site override (highest priority)
+        (
+            {"timeout": 5.0},
+            {"timeout": 10.0},
+            {"timeout": 5.0},
+        ),
+        # 4. Partial override (Call-site has timeout, FS has initial)
+        (
+            {"timeout": 7.0},
+            {"initial": 2.0},
+            {"timeout": 7.0, "initial": 2.0},
+        ),
+    ],
+)
+def test_get_storage_control_retry_config_resolution(kwargs, base_config, expected):
+    retry = get_storage_control_retry_config(base_config, **kwargs)
+    for attr, val in expected.items():
+        assert getattr(retry, f"_{attr}") == val
+
+
+from unittest import mock
+
+from google.api_core import exceptions as api_exceptions
+
+
+@pytest.mark.asyncio
+async def test_get_storage_control_retry_config_execution():
+    # Create a config with very short delays for testing
+    base_cfg = {"initial": 0.001, "maximum": 0.01}
+    retry = get_storage_control_retry_config(base_config=base_cfg)
+
+    mock_func = mock.AsyncMock()
+    mock_func.side_effect = [
+        api_exceptions.ServiceUnavailable("Transient error 1"),
+        api_exceptions.ServiceUnavailable("Transient error 2"),
+        "success",
+    ]
+
+    # In the real client, the method is wrapped with the retry object
+    # AsyncRetry objects are callable and take the function to wrap
+    wrapped_func = retry(mock_func)
+
+    result = await wrapped_func()
+
+    assert result == "success"
+    assert mock_func.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_get_storage_control_retry_config_non_retriable():
+    base_cfg = {"initial": 0.001, "maximum": 0.01}
+    retry = get_storage_control_retry_config(base_config=base_cfg)
+
+    mock_func = mock.AsyncMock()
+    # 404 is NOT in our transient exceptions list
+    mock_func.side_effect = api_exceptions.NotFound("Not Found")
+
+    wrapped_func = retry(mock_func)
+
+    with pytest.raises(api_exceptions.NotFound):
+        await wrapped_func()
+
+    # Should only be called once because NotFound is not retriable
+    assert mock_func.call_count == 1
 
 
 def test_tempfile():
@@ -110,6 +197,21 @@ def test_validate_response_error_is_string():
         validate_response(429, j, "/path")
     assert e.value.code == 429
     assert e.value.message == "Too Many Requests, 429"
+
+
+def test_validate_response_content_none():
+    with pytest.raises(HttpError) as e:
+        validate_response(429, None, "/path")
+    assert e.value.code == 429
+    assert e.value.message == ", 429"
+
+
+def test_validate_response_invalid_json():
+    content = "This is a raw plain-text error"
+    with pytest.raises(HttpError) as e:
+        validate_response(400, content, "/path")
+    assert e.value.code == 400
+    assert e.value.message == "This is a raw plain-text error, 400"
 
 
 @pytest.mark.parametrize(

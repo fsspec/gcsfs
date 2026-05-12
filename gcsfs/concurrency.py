@@ -10,6 +10,7 @@ async def parallel_tasks_first_completed(coros):
     when exiting the context.
     """
     tasks = [asyncio.create_task(c) for c in coros]
+
     try:
         # Suspend until the first task finishes for maximum responsiveness
         done, pending = await asyncio.wait(
@@ -21,3 +22,5 @@ async def parallel_tasks_first_completed(coros):
         for t in tasks:
             if not t.done():
                 t.cancel()
+        # Await all tasks to ensure exceptions are retrieved and cancellation is processed
+        await asyncio.gather(*tasks, return_exceptions=True)

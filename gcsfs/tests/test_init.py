@@ -1,5 +1,6 @@
 import os
 import sys
+from unittest import mock
 
 
 class TestConditionalImport:
@@ -78,3 +79,45 @@ class TestConditionalImport:
         assert not hasattr(
             gcsfs, "ExtendedGcsFileSystem"
         ), "ExtendedGcsFileSystem should not be imported directly on gcsfs"
+
+    def test_version_exists(self):
+        """
+        Tests that __version__ is imported correctly
+        when the _version module exists.
+        """
+        # Create a fake module that has a __version__ attribute
+        mock_version_module = mock.MagicMock()
+        mock_version_module.__version__ = "1.2.3"
+
+        # Inject the fake module into sys.modules so 'from ._version import __version__' succeeds
+        with mock.patch.dict("sys.modules", {"gcsfs._version": mock_version_module}):
+            import gcsfs
+
+            assert gcsfs.__version__ == "1.2.3"
+
+    def test_version_fallback_metadata(self):
+        """
+        Tests that when _version.py is missing, the version is retrieved
+        via importlib.metadata.version.
+        """
+        # Setting a module to None in sys.modules forces Python to raise a
+        # ModuleNotFoundError (which subclasses ImportError) when it is imported.
+        with mock.patch.dict("sys.modules", {"gcsfs._version": None}):
+            with mock.patch("importlib.metadata.version", return_value="9.9.9"):
+                import gcsfs
+
+                assert gcsfs.__version__ == "9.9.9"
+
+    def test_version_fallback_unknown(self):
+        """
+        Tests that when both _version.py is missing and metadata is unavailable,
+        the version falls back to "unknown".
+        """
+        with mock.patch.dict("sys.modules", {"gcsfs._version": None}):
+            # Simulate the package metadata not existing
+            with mock.patch(
+                "importlib.metadata.version", side_effect=ImportError("Not found")
+            ):
+                import gcsfs
+
+                assert gcsfs.__version__ == "unknown"

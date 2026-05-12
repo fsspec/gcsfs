@@ -17,8 +17,8 @@ import uuid
 
 import pytest
 
-from gcsfs.extended_gcsfs import BucketType
-from gcsfs.tests.settings import TEST_HNS_BUCKET
+from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
+from gcsfs.tests.settings import TEST_HNS_BUCKET, TEST_PROJECT
 
 should_run_hns = os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false").lower() in (
     "true",
@@ -1060,6 +1060,13 @@ class TestExtendedGcsFileSystemFindIntegration:
             expected_result
         ), "find with prefix and withdirs=True should return matching files and directories."
 
+    def test_find_partial_prefix(self, gcs_hns, test_structure):
+        """Test find with a partial folder prefix (Issue #830)."""
+        base_dir = test_structure["base_dir"]
+        # Partial match for "empty_dir"
+        result = gcs_hns.find(base_dir, withdirs=True, prefix="empty_")
+        assert result == [test_structure["empty_dir"]]
+
     def test_find_on_file(self, gcs_hns, test_structure):
         """Test that calling find on a single file returns only that file."""
         file_path = test_structure["root_file"]
@@ -1612,3 +1619,46 @@ class TestHNSFolderStatus:
         # Clean up
         gcsfs.rmdir(folder_path)
         assert not gcsfs.exists(folder_path)
+
+
+class TestExtendedGcsFileSystemHnsRequesterPays:
+    """Integration tests for HNS operations on requester pays buckets."""
+
+    def test_hns_mkdir_fails_without_quota_project(self, hns_requester_pays_bucket):
+        """Test that HNS mkdir fails if quota project is not provided on a req pays bucket."""
+
+        bucket = hns_requester_pays_bucket
+        dir_path = f"{bucket}/new_dir_{uuid.uuid4().hex}"
+
+        fs = ExtendedGcsFileSystem(requester_pays=False)
+
+        # It raises ValueError with custom message if it detects requester pays
+        with pytest.raises(ValueError) as excinfo:
+            fs.mkdir(dir_path)
+
+        assert "Bucket is requester pays" in str(excinfo.value)
+
+    def test_hns_mkdir_succeeds_with_quota_project(self, hns_requester_pays_bucket):
+        """Test that HNS mkdir succeeds if quota project is provided on a req pays bucket."""
+
+        bucket = hns_requester_pays_bucket
+        dir_path = f"{bucket}/new_dir_{uuid.uuid4().hex}"
+
+        # Pass project explicitly to ensure it's used as quota_project_id
+        fs = ExtendedGcsFileSystem(project=TEST_PROJECT, requester_pays=True)
+
+        fs.mkdir(dir_path)
+        # Invalidate cache to force reading from backend
+        fs.invalidate_cache()
+        assert fs.isdir(dir_path)
+
+    def test_hns_bucket_type_detection_with_req_pays(self, hns_requester_pays_bucket):
+        """Test that hns apis are invoked and return HNS when req pays is enabled."""
+
+        fs = ExtendedGcsFileSystem(project=TEST_PROJECT, requester_pays=True)
+
+        # Clear cache to force lookup
+        fs._storage_layout_cache.clear()
+
+        bucket_type = fs._sync_lookup_bucket_type(hns_requester_pays_bucket)
+        assert bucket_type == BucketType.HIERARCHICAL

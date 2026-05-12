@@ -1,5 +1,6 @@
 substitutions:
   _DATASET_NAME: ""
+  _INFRA_PREFIX: ""
 
 steps:
   # Step 0: Create the BigQuery dataset if it doesn't exist
@@ -21,6 +22,9 @@ steps:
     args:
       - '-c'
       - |
+        # Inject the dynamically provided bucket name into the JSON schema
+        sed -i "s/@INFRA_PREFIX@/${_INFRA_PREFIX}/g" cloudbuild/benchmarks/benchmarks_schema.json
+
         bq mk --project_id=${PROJECT_ID} \
           --external_table_definition=cloudbuild/benchmarks/benchmarks_schema.json \
           --force \

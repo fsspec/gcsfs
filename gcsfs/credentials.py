@@ -322,7 +322,10 @@ class GoogleCredentials:
         ]:
             self._connect_token(method)
         elif method is None:
-            for meth in ["google_default", "cache", "cloud", "anon"]:
+            methods = ["google_default", "cache", "cloud", "anon"]
+            if os.environ.get("NO_GCE_CHECK") == "true":
+                methods.remove("cloud")
+            for meth in methods:
                 try:
                     self.connect(method=meth)
                     logger.debug("Connected with method %s", meth)

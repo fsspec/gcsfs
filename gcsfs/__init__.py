@@ -1,11 +1,17 @@
 import logging
 import os
 
-from ._version import get_versions
+try:
+    from ._version import __version__  # noqa: F401
+except ImportError:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        __version__ = version("gcsfs")
+    except (ImportError, PackageNotFoundError):
+        __version__ = "unknown"
 
 logger = logging.getLogger(__name__)
-__version__ = get_versions()["version"]
-del get_versions
 from .core import GCSFileSystem
 from .mapping import GCSMap
 
@@ -25,7 +31,3 @@ if os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true").lower() in ("true", "1
 # TODO: GCSMap still refers to the original GCSFileSystem. This will be
 # addressed in a future update.
 __all__ = ["GCSFileSystem", "GCSMap"]
-
-from . import _version
-
-__version__ = _version.get_versions()["version"]

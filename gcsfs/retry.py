@@ -7,8 +7,16 @@ import aiohttp.client_exceptions
 import google.auth.exceptions
 import requests.exceptions
 from decorator import decorator
+from google.api_core import exceptions as api_exceptions
+from google.api_core.retry import AsyncRetry
 
 logger = logging.getLogger("gcsfs")
+DEFAULT_RETRY_CONFIG = {
+    "timeout": 60.0,
+    "initial": 1.0,
+    "maximum": 60.0,
+    "multiplier": 2.0,
+}
 
 
 class HttpError(Exception):
@@ -106,17 +114,19 @@ def validate_response(status, content, path, args=None):
             raise FileNotFoundError(path)
 
         error = None
-        if hasattr(content, "decode"):
-            content = content.decode()
-        try:
-            error = json.loads(content)["error"]
-            # Sometimes the error message is a string.
-            if isinstance(error, str):
-                msg = error
-            else:
-                msg = error["message"]
-        except json.decoder.JSONDecodeError:
-            msg = content
+        msg = ""
+        if content:
+            if hasattr(content, "decode"):
+                content = content.decode()
+            try:
+                error = json.loads(content)["error"]
+                # Sometimes the error message is a string.
+                if isinstance(error, str):
+                    msg = error
+                else:
+                    msg = error["message"]
+            except json.decoder.JSONDecodeError:
+                msg = content
 
         if status == 403:
             raise OSError(f"Forbidden: {path}\n{msg}")
@@ -176,3 +186,47 @@ async def retry_request(func, retries=6, *args, **kwargs):
                 continue
             logger.exception(f"{func.__name__} non-retriable exception: {e}")
             raise e
+
+
+def _is_transient_exception(exception):
+    is_transient = isinstance(
+        exception,
+        (
+            api_exceptions.DeadlineExceeded,
+            api_exceptions.ServiceUnavailable,
+            api_exceptions.InternalServerError,
+            api_exceptions.TooManyRequests,
+            api_exceptions.ResourceExhausted,
+            api_exceptions.Unknown,
+        ),
+    )
+    if (
+        not is_transient
+        and isinstance(exception, api_exceptions.Unauthenticated)
+        and "Invalid Credentials" in str(exception)
+    ):
+        is_transient = True
+    return is_transient
+
+
+def get_storage_control_retry_config(base_config=None, **kwargs) -> AsyncRetry:
+    """
+    Returns an AsyncRetry object configured for Storage Control API calls.
+
+    Priority: kwargs (timeout, etc.) > base_config > package defaults.
+
+    Args:
+        base_config: A dict containing base settings.
+        **kwargs: Direct call-site overrides (e.g., timeout=10).
+    """
+    retry_kwargs = DEFAULT_RETRY_CONFIG.copy()
+    valid_keys = DEFAULT_RETRY_CONFIG.keys()
+    if base_config:
+        retry_kwargs.update(
+            {k: v for k, v in base_config.items() if k in valid_keys and v is not None}
+        )
+
+    overrides = {k: v for k, v in kwargs.items() if k in valid_keys and v is not None}
+    retry_kwargs.update(overrides)
+
+    return AsyncRetry(predicate=_is_transient_exception, **retry_kwargs)

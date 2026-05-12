@@ -7,6 +7,11 @@ gcloud storage buckets create "gs://gcsfs-test-standard-${SHORT_BUILD_ID}" \
     --project="${PROJECT_ID}" \
     --location="${REGION}" &
 
+echo "--- Creating standard requester pays bucket ---"
+gcloud storage buckets create "gs://gcsfs-test-standard-req-pay-${SHORT_BUILD_ID}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" &
+
 echo "--- Creating versioned bucket ---"
 gcloud storage buckets create "gs://gcsfs-test-versioned-${SHORT_BUILD_ID}" \
     --project="${PROJECT_ID}" \
@@ -14,6 +19,13 @@ gcloud storage buckets create "gs://gcsfs-test-versioned-${SHORT_BUILD_ID}" \
 
 echo "--- Creating HNS bucket ---"
 gcloud storage buckets create "gs://gcsfs-test-hns-${SHORT_BUILD_ID}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" \
+    --enable-hierarchical-namespace \
+    --uniform-bucket-level-access &
+
+echo "--- Creating HNS requester pays bucket ---"
+gcloud storage buckets create "gs://gcsfs-test-hns-req-pay-${SHORT_BUILD_ID}" \
     --project="${PROJECT_ID}" \
     --location="${REGION}" \
     --enable-hierarchical-namespace \
@@ -62,3 +74,11 @@ wait
 echo "--- Enabling versioning on versioned bucket ---"
 gcloud storage buckets update "gs://gcsfs-test-versioned-${SHORT_BUILD_ID}" \
     --versioning
+
+echo "--- Enabling requester pays on HNS bucket ---"
+gcloud storage buckets update "gs://gcsfs-test-hns-req-pay-${SHORT_BUILD_ID}" \
+    --requester-pays
+
+echo "--- Enabling requester pays on standard bucket ---"
+gcloud storage buckets update "gs://gcsfs-test-standard-req-pay-${SHORT_BUILD_ID}" \
+    --requester-pays

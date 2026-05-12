@@ -1,7 +1,10 @@
 import asyncio
+import contextlib
 import logging
 import os
 import uuid
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from glob import has_magic
 
@@ -16,15 +19,26 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
 from google.cloud.storage.asyncio.async_grpc_client import AsyncGrpcClient
+from google.cloud.storage.asyncio.async_multi_range_downloader import (
+    AsyncMultiRangeDownloader,
+)
 
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.zb_hns_utils import (
+    DirectMemmoveBuffer,
+    MRDPool,
+    PyBytes_AsString,
+    PyBytes_FromStringAndSize,
+)
 from gcsfs.zonal_file import ZonalFile
 
 logger = logging.getLogger("gcsfs")
 
 USER_AGENT = "python-gcsfs"
+STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 
 
 class BucketType(Enum):
@@ -42,6 +56,31 @@ gcs_file_types = {
 }
 
 
+@contextlib.asynccontextmanager
+async def _get_mrd_from_pool_or_mrd(mrd_or_pool):
+    """
+    Helper function to yield an AsyncMultiRangeDownloader
+    whether a single instance or an MRDPool is provided.
+    """
+    if isinstance(mrd_or_pool, MRDPool):
+        async with mrd_or_pool.get_mrd() as m:
+            yield m
+    elif isinstance(mrd_or_pool, AsyncMultiRangeDownloader):
+        yield mrd_or_pool
+    else:
+        raise TypeError(
+            f"Expected MRDPool or AsyncMultiRangeDownloader, got {type(mrd_or_pool)}"
+        )
+
+
+async def _get_mrd_size(mrd_or_pool):
+    """Helper to extract the persisted_size from either a pool or a single MRD."""
+    if mrd_or_pool is None:
+        return None
+    async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m:
+        return m.persisted_size
+
+
 class ExtendedGcsFileSystem(GCSFileSystem):
     """
     This class will be used when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT env variable is set to true.
@@ -51,6 +90,26 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     """
 
     def __init__(self, *args, finalize_on_close=False, **kwargs):
+        """
+        Parameters
+        ----------
+        finalize_on_close : bool, default False
+            By default, files in zonal buckets are left unfinalized to allow appends.
+        **kwargs : dict
+            Additional arguments passed to GCSFileSystem.
+            Supports retry configuration overrides for Storage Control API:
+            - retry_timeout: Total time to spend retrying (seconds).
+            - retry_initial: Initial delay between retries (seconds).
+            - retry_maximum: Maximum delay between retries (seconds).
+            - retry_multiplier: Multiplier for delay between retries.
+            These map to `google.api_core.retry.AsyncRetry` arguments (without 'retry_' prefix).
+        """
+        valid_keys = DEFAULT_RETRY_CONFIG.keys()
+        self.retry_config = {
+            k[6:]: v
+            for k, v in kwargs.items()
+            if k.startswith("retry_") and k[6:] in valid_keys and v is not None
+        }
         super().__init__(*args, **kwargs)
         # By default, files in zonal buckets are left unfinalized to allow appends.
         self.finalize_on_close = finalize_on_close
@@ -67,6 +126,24 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if self.credentials.token == "anon":
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
+        self._memmove_executor = ThreadPoolExecutor(
+            max_workers=kwargs.get("memmove_max_workers", 8)
+        )
+        weakref.finalize(self, self._memmove_executor.shutdown)
+
+    @property
+    def _user_project(self):
+        """Value used for billing - enabling "requestor pays" access"""
+        if self.requester_pays:
+            return (
+                self.requester_pays
+                if isinstance(self.requester_pays, str)
+                else self.project
+            )
+        return None
+
+    def _get_retry_config(self, **kwargs):
+        return get_storage_control_retry_config(self.retry_config, **kwargs)
 
     @property
     def grpc_client(self):
@@ -80,11 +157,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
     async def _get_grpc_client(self):
         if self._grpc_client is None:
-            client_options = None
+            client_options = ClientOptions(quota_project_id=self._user_project)
             if self._location:
                 # client_options expects only the host:port, without the protocol.
                 endpoint = self._location.split("://")[-1]
-                client_options = ClientOptions(api_endpoint=endpoint)
+                client_options.api_endpoint = endpoint
             self._grpc_client = AsyncGrpcClient(
                 credentials=self.credential,
                 client_info=ClientInfo(user_agent=f"{USER_AGENT}/{version}"),
@@ -105,6 +182,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             channel = transport_cls.create_channel(
                 credentials=self.credential,
                 options=[("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
+                quota_project_id=self._user_project,
             )
             transport = transport_cls(channel=channel)
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
@@ -129,7 +207,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             client = await self._get_control_plane_client()
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
             logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
-            response = await client.get_storage_layout(name=bucket_name_value)
+            response = await client.get_storage_layout(
+                name=bucket_name_value,
+                retry=self._get_retry_config(),
+                timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+            )
 
             if response.location_type == "zone":
                 return BucketType.ZONAL_HIERARCHICAL
@@ -140,11 +222,14 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 return BucketType.HIERARCHICAL
             return BucketType.NON_HIERARCHICAL
         except api_exceptions.NotFound:
-            logger.warning(f"Error: Bucket {bucket} not found or you lack permissions.")
+            logger.warning(
+                f"Error: Bucket {bucket} not found or you lack permissions for "
+                f"storage layout api used to detect bucket type. Falling back to GCSFileSystem."
+            )
             return BucketType.UNKNOWN
         except Exception as e:
-            logger.error(
-                f"Could not determine bucket type for bucket name {bucket}: {e}"
+            logger.warning(
+                f"Could not determine bucket type for bucket name {bucket}: {e}, falling back to GCSFileSystem"
             )
             # Default to UNKNOWN in case bucket type is not obtained
             return BucketType.UNKNOWN
@@ -241,73 +326,163 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         return bucket_type == BucketType.ZONAL_HIERARCHICAL
 
     async def _fetch_range_split(
-        self, path, start=None, chunk_lengths=None, mrd=None, size=None, **kwargs
+        self,
+        path,
+        start,
+        chunk_lengths,
+        concurrency,
+        mrd=None,
+        size=None,
+        **kwargs,
     ):
         """
-        Reading multiple reads in one large stream.
+        Reading multiple adjacent ranges concurrently.
 
-        Optimized for Zonal Buckets:
-        Leverages AsyncMultiRangeDownloader.download_ranges() to fetch all requested
-        'chunk_lengths' (chunks) concurrently in a single batch request, significantly
-        improving performance for ReadAheadV2.
+        Delegates concurrent fetching of individual chunks directly to `_cat_file`.
         """
+        file_size = size or await _get_mrd_size(mrd)
+        if file_size is None:
+            logger.warning(
+                f"AsyncMultiRangeDownloader (MRD) for {path} has no 'persisted_size'. "
+                "Falling back to _info() to get the file size."
+            )
+            file_size = (await self._info(path))["size"]
 
+        start_offset = start if start is not None else 0
+        if start_offset >= file_size or start_offset + sum(chunk_lengths) > file_size:
+            raise RuntimeError("Request not satisfiable.")
+
+        pool_created_here = False
         bucket, object_name, generation = self.split_path(path)
-        mrd_created = False
+
+        if mrd is None:
+            # If no mrd is provided, we create one with pool size equal to passed concurrency.
+            pool_size = min(len(chunk_lengths), concurrency)
+            mrd = zb_hns_utils.MRDPool(
+                self, bucket, object_name, generation, pool_size=pool_size
+            )
+            await mrd.initialize()
+            pool_created_here = True
+
+        tasks = []
         try:
-            if mrd is None:
-                # Check before creating MRD
-                if not await self._is_zonal_bucket(bucket):
-                    raise RuntimeError(
-                        "Internal error, this method is only supported for zonal buckets!"
+            current_offset = start_offset
+
+            cat_kwargs = kwargs.copy()
+
+            for length in chunk_lengths:
+                end_offset = current_offset + length
+                tasks.append(
+                    asyncio.create_task(
+                        self._cat_file(
+                            path,
+                            start=current_offset,
+                            end=end_offset,
+                            mrd=mrd,
+                            # Distribute the concurrency budget proportionally.
+                            # Since these outer tasks are already concurrent, this is typically 1.
+                            # However, if a large chunk dominates the total size, it receives
+                            # higher concurrency to prevent it from becoming a bottleneck.
+                            concurrency=max(
+                                1, length * concurrency // sum(chunk_lengths)
+                            ),
+                            **cat_kwargs,
+                        )
                     )
-
-                await self._get_grpc_client()
-                mrd = await zb_hns_utils.init_mrd(
-                    self.grpc_client, bucket, object_name, generation
                 )
-                mrd_created = True
+                current_offset = end_offset
 
-            file_size = size or mrd.persisted_size
-            if file_size is None:
-                logger.warning(
-                    f"AsyncMultiRangeDownloader (MRD) for {path} has no 'persisted_size'. "
-                    "Falling back to _info() to get the file size."
-                )
-                file_size = (await self._info(path))["size"]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            if chunk_lengths:
-                start_offset = start if start is not None else 0
-                current_offset = start_offset
+            # Bubble up any exceptions encountered during concurrent fetching
+            for res in results:
+                if isinstance(res, Exception):
+                    raise res
 
-                if start_offset >= file_size or (
-                    chunk_lengths is not None
-                    and start_offset + sum(chunk_lengths) > file_size
-                ):
-                    raise RuntimeError("Request not satisfiable.")
-
-                read_ranges = []  # To pass to MRD
-
-                for length in chunk_lengths:
-                    read_ranges.append((current_offset, length))
-                    current_offset += length
-
-                return await zb_hns_utils.download_ranges(read_ranges, mrd)
-            else:
-                end = kwargs.get("end")
-                offset, length = await self._process_limits_to_offset_and_length(
-                    path, start, end, file_size
-                )
-
-                data = await zb_hns_utils.download_range(
-                    offset=offset, length=length, mrd=mrd
-                )
-                return [data]
+            return results
+        except BaseException:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         finally:
-            if mrd_created:
-                await zb_hns_utils.close_mrd(mrd)
+            if pool_created_here:
+                await mrd.close()
 
-    async def _cat_file(self, path, start=None, end=None, mrd=None, **kwargs):
+    async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool):
+        """Helper to handle concurrent chunk downloads into a DirectMemmoveBuffer."""
+        concurrency = (
+            concurrency if length >= self.MIN_CHUNK_SIZE_FOR_CONCURRENCY else 1
+        )
+        result_bytes = PyBytes_FromStringAndSize(None, length)
+        buffer_ptr = PyBytes_AsString(result_bytes)
+
+        part_size = length // concurrency
+        tasks = []
+        buffers = []
+        loop = asyncio.get_running_loop()
+
+        # Track if the core download process failed
+        has_error = False
+
+        async def _download(o, s, b, mrd_or_pool):
+            async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m_client:
+                await m_client.download_ranges([(o, s, b)])
+
+        for i in range(concurrency):
+            part_offset = offset + (i * part_size)
+            actual_size = part_size if i < concurrency - 1 else length - (i * part_size)
+
+            part_address = buffer_ptr + (part_offset - offset)
+            buf = DirectMemmoveBuffer(
+                part_address,
+                part_address + actual_size,
+                self._memmove_executor,
+            )
+            buffers.append(buf)
+            tasks.append(
+                asyncio.create_task(
+                    _download(part_offset, actual_size, buf, mrd_or_pool)
+                )
+            )
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Exception):
+                    has_error = True
+                    raise res
+        except BaseException:
+            has_error = True
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            for buf in buffers:
+                try:
+                    await loop.run_in_executor(None, buf.close)
+                except BufferError:
+                    # If we are already handling a network/download exception,
+                    # ignore the BufferError (which is just a symptom of the drop).
+                    # If there's no download error, this means the buffer logic
+                    # itself failed, so we must surface the error.
+                    if not has_error:
+                        raise
+
+        return result_bytes
+
+    async def _cat_file(
+        self,
+        path,
+        start=None,
+        end=None,
+        mrd=None,
+        concurrency=zb_hns_utils.DEFAULT_CONCURRENCY,
+        **kwargs,
+    ):
         """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
 
         This method overrides the parent `_cat_file` to read objects in Zonal buckets using gRPC.
@@ -316,47 +491,60 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             path (str): The full GCS path to the file (e.g., "bucket/object").
             start (int, optional): The starting byte position to read from.
             end (int, optional): The ending byte position to read to.
-            mrd (AsyncMultiRangeDownloader, optional): An existing multi-range
-                downloader instance. If not provided, a new one will be created for Zonal buckets.
+            mrd (AsyncMultiRangeDownloader, MRDPool, optional): An existing multi-range
+                downloader instance or a pool of MRD. If not provided, a new one will be created for Zonal buckets.
+            concurrency (int, optional): The max number of concurrent request to fetch the data.
 
         Returns:
             bytes: The content of the file or file range.
         """
-        try:
-            mrd_created = False
+        pool_created_here = False
 
-            # A new MRD is required when read is done directly by the
-            # GCSFilesystem class without creating a GCSFile object first.
-            if mrd is None:
-                bucket, object_name, generation = self.split_path(path)
+        # A new MRDPool is required when read is done directly by the
+        # GCSFilesystem class without creating a GCSFile object first.
+        if mrd is None:
+            bucket, object_name, generation = self.split_path(path)
+            if not await self._is_zonal_bucket(bucket):
                 # Fall back to default implementation if not a zonal bucket
-                if not await self._is_zonal_bucket(bucket):
-                    return await super()._cat_file(path, start=start, end=end, **kwargs)
-
-                await self._get_grpc_client()
-                mrd = await zb_hns_utils.init_mrd(
-                    self.grpc_client, bucket, object_name, generation
+                return await super()._cat_file(
+                    path, start=start, end=end, concurrency=concurrency, **kwargs
                 )
-                mrd_created = True
 
-            file_size = mrd.persisted_size
+            # Instantiate an MRDPool locally for this call
+            mrd = zb_hns_utils.MRDPool(
+                self, bucket, object_name, generation, pool_size=concurrency
+            )
+            await mrd.initialize()
+            pool_created_here = True
+
+        try:
+            file_size = await _get_mrd_size(mrd)
             if file_size is None:
                 logger.warning(
                     f"AsyncMultiRangeDownloader (MRD) for {path} has no 'persisted_size'. "
                     "Falling back to _info() to get the file size. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )
+                file_size = (await self._info(path))["size"]
+
             offset, length = await self._process_limits_to_offset_and_length(
                 path, start, end, file_size
             )
 
-            return await zb_hns_utils.download_range(
-                offset=offset, length=length, mrd=mrd
+            if length == 0:
+                return b""
+
+            return await self._concurrent_mrd_fetch(
+                offset,
+                length,
+                concurrency if length >= self.MIN_CHUNK_SIZE_FOR_CONCURRENCY else 1,
+                mrd,
             )
+
         finally:
-            # Explicit cleanup if we created the MRD
-            if mrd_created:
-                await zb_hns_utils.close_mrd(mrd)
+            # If we created a temporary pool specifically for this _cat_file call, clean it up
+            if pool_created_here:
+                await mrd.close()
 
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
@@ -460,6 +648,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             )
             return
 
+        if (
+            isinstance(path1, list)
+            or isinstance(path2, list)
+            or (isinstance(path1, str) and has_magic(path1))
+        ):
+            return await super()._mv(path1, path2, **kwargs)
+
         bucket1, key1, _ = self.split_path(path1)
         bucket2, key2, _ = self.split_path(path2)
 
@@ -492,7 +687,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
                 logger.debug(f"rename_folder request: {request}")
                 client = await self._get_control_plane_client()
-                operation = await client.rename_folder(request=request)
+                operation = await client.rename_folder(
+                    request=request,
+                    retry=self._get_retry_config(),
+                    timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+                )
                 await operation.result()
                 self._update_dircache_after_rename(path1, path2)
 
@@ -657,7 +856,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         try:
             logger.debug(f"create_folder request: {request}")
             client = await self._get_control_plane_client()
-            await client.create_folder(request=request)
+            await client.create_folder(
+                request=request,
+                retry=self._get_retry_config(),
+                timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+            )
             # Instead of invalidating the parent cache, update it to add the new entry.
             parent_path = self._parent(path)
             if parent_path in self.dircache:
@@ -703,7 +906,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
                 # Verify existence using get_folder API
                 client = await self._get_control_plane_client()
-                response = await client.get_folder(request=request)
+                response = await client.get_folder(
+                    request=request,
+                    retry=self._get_retry_config(),
+                    timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+                )
 
                 # If successful, return directory metadata
                 return {
@@ -776,7 +983,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             logger.debug(f"delete_folder request: {request}")
             client = await self._get_control_plane_client()
-            await client.delete_folder(request=request)
+            await client.delete_folder(
+                request=request,
+                retry=self._get_retry_config(),
+                timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+            )
 
             # Remove the directory from the cache and from its parent's listing.
             self.dircache.pop(path, None)
@@ -805,21 +1016,47 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     # TODO: This method is only added to be used in rm method, can be deleted once
     # rm method is integrated with recursive API
     async def _expand_path_with_details(
-        self, path, recursive=False, maxdepth=None, detail=False
+        self, path, recursive=False, maxdepth=None, detail=False, assume_literal=False
     ):
+        """
+        Expand path with details, similar to `_expand_path` but returning full details.
+
+        This method is used in `_rm` to get a list of files and directories to delete.
+        It handles special characters in filenames by avoiding re-globbing concrete paths
+        found during recursive expansion.
+
+        Parameters
+        ----------
+        path : str or list
+            The path or list of paths to expand.
+        recursive : bool, default False
+            Whether to recursively expand directories.
+        maxdepth : int, optional
+            Maximum depth to traverse for expansion.
+        detail : bool, default False
+            If True, returns a list of dictionaries with file details;
+            otherwise, returns a list of path strings.
+        assume_literal : bool, default False
+            If True, treats the paths as literal even if they contain magic characters.
+            This is used in recursive calls to prevent re-globbing concrete paths.
+        """
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
 
         if isinstance(path, str):
             return await self._expand_path_with_details(
-                [path], recursive, maxdepth, detail=detail
+                [path],
+                recursive,
+                maxdepth,
+                detail=detail,
+                assume_literal=assume_literal,
             )
         else:
             out = {} if detail else set()
             path = [self._strip_protocol(p) for p in path]
 
             for p in path:
-                if has_magic(p):
+                if not assume_literal and has_magic(p):
                     bit = await self._glob(p, maxdepth=maxdepth, detail=detail)
                     if detail:
                         out.update(bit)
@@ -837,6 +1074,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                             recursive=recursive,
                             maxdepth=maxdepth - 1 if maxdepth is not None else None,
                             detail=detail,
+                            assume_literal=True,
                         )
                         if detail:
                             for info in rec:
@@ -1085,22 +1323,44 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Recursively fetches all folder objects under a given path using the
         Storage Control API.
         """
-        folders = []
-        base_path = self.split_path(path)[1].rstrip("/")
-        full_prefix = f"{base_path}/{prefix}".strip("/") if base_path else prefix
+        _, base_path, _ = self.split_path(path)
+        base_path = "" if not base_path else base_path.rstrip("/") + "/"
+        full_prefix = f"{base_path}{prefix}"
 
-        folder_id = full_prefix
-        if folder_id and not folder_id.endswith("/"):
-            folder_id += "/"
+        # To find folders matching a partial prefix, we need to list their parent.
+        if full_prefix and not full_prefix.endswith("/"):
+            partition = full_prefix.rpartition("/")
+            start_dir = partition[0] + partition[1]
+        else:
+            start_dir = full_prefix
+
+        folders = []
+        client = await self._get_control_plane_client()
         parent = f"projects/_/buckets/{bucket}"
+
         request = storage_control_v2.ListFoldersRequest(
-            parent=parent, prefix=folder_id, request_id=str(uuid.uuid4())
+            parent=parent, prefix=start_dir, request_id=str(uuid.uuid4())
         )
         logger.debug(f"list_folders request: {request}")
 
-        client = await self._get_control_plane_client()
-        async for folder in await client.list_folders(request=request):
-            folders.append(self._create_folder_entry(bucket, folder))
+        try:
+            async for folder in await client.list_folders(
+                request=request,
+                retry=self._get_retry_config(),
+                timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+            ):
+                entry = self._create_folder_entry(bucket, folder)
+                _, key, _ = self.split_path(entry["name"])
+                # Key from _create_folder_entry does not have a trailing slash
+                key_with_slash = key + "/"
+
+                if key.startswith(full_prefix) or key_with_slash.startswith(
+                    full_prefix
+                ):
+                    folders.append(entry)
+        except api_exceptions.NotFound:
+            # If the start_dir itself doesn't exist, we just return empty
+            pass
 
         return folders
 

@@ -10,5 +10,5 @@ python3 -m venv env
 source env/bin/activate
 
 pip install --upgrade pip > /dev/null
-pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
+pip install pytest pytest-timeout pytest-subtests pytest-asyncio build hatchling hatch-vcs fusepy google-cloud-storage > /dev/null
 pip install -e . > /dev/null

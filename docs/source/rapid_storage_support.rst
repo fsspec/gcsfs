@@ -96,7 +96,7 @@ The table below highlights how core filesystem and file-level operations change 
      - **Not applicable.** Logs a warning since streaming data cannot be canceled.
    * - **close**
      - Finalizes the file upload to GCS.
-     - Closes streams but leaves the object unfinalized (appendable) by default. Use ``finalize_on_close=True`` when opening file or calling ``close()`` or use ``.commit()`` to finalize. Note that ``autocommit`` does not work for Rapid buckets.
+     - Closes streams but leaves the object unfinalized (appendable) by default. Use ``finalize_on_close=True`` when opening file or use ``.commit()`` to finalize. Note that ``autocommit`` does not work for Rapid buckets.
    * - **mv**
      - Object-level copy-and-delete logic.
      - Uses native, atomic ``rename_folder`` API for folders. All directory semantics described in the :doc:`HNS documentation <hns_buckets>` also apply for Rapid.

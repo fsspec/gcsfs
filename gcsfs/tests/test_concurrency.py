@@ -76,3 +76,26 @@ async def test_parallel_tasks_first_completed_exception():
         completed_task = done.pop()
         with pytest.raises(ValueError, match="error"):
             completed_task.result()
+
+
+@pytest.mark.asyncio
+async def test_parallel_tasks_unretrieved_exception_fix():
+    async def get_call():
+        await asyncio.sleep(0.5)
+        return "ok"
+
+    async def error_task():
+        await asyncio.sleep(0.1)
+        raise ValueError("error in list")
+
+    async with parallel_tasks_first_completed([get_call(), error_task()]) as (
+        tasks,
+        done,
+        pending,
+    ):
+        get_object_task, get_directory_info_task = tasks
+        try:
+            res = await get_object_task
+            assert res == "ok"
+        except ValueError:
+            pytest.fail("Unexpected ValueError")
