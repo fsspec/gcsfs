@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -36,8 +37,8 @@ single_threaded_cases, _, multi_process_cases = filter_test_cases(all_benchmark_
 def test_pipe_single_threaded(benchmark, gcsfs_benchmark_pipe, monitor):
     gcs, file_paths, params = gcsfs_benchmark_pipe
 
-    # Generate data buffer once efficiently outside the timed benchmark execution
-    data_buffer = b"0" * params.file_size_bytes
+    # Generate data buffer once outside the timed benchmark execution
+    data_buffer = os.urandom(params.file_size_bytes)
 
     op_args = (
         gcs,
@@ -67,7 +68,7 @@ def _process_worker(
     """A worker function for each process to pipe files concurrently."""
 
     # Generate data buffer efficiently per process
-    data_buffer = b"0" * file_size
+    data_buffer = os.urandom(file_size)
 
     start_time = time.perf_counter()
 
