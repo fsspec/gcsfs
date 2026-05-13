@@ -126,16 +126,16 @@ class PrefetchProducer:
     #
     # If the average read size exceeds this value and patterns are variable,
     # prefetching shifts from an I/O bottleneck to a CPU bottleneck. When a user
-    # requests random massive sizes (e.g., jumping between 100MB and INF), the
+    # requests random massive sizes (e.g., jumping between 64MB and INF), the
     # producer still fetches chunks based on the rolling average. The consumer
     # then has to pick up multiple chunks and stitch them together to match the
     # exact requested size.
     #
     # For small average read sizes, this byte assembly is fast and the bottleneck
-    # remains the network I/O. However, for massive reads (>= 100MB), the extra
+    # remains the network I/O. However, for massive reads (>= 64MB), the extra
     # step of copying and assembling huge byte strings in memory severely slows
     # down the operation.
-    VARIABLE_IO_THRESHOLD = 100 * 1024 * 1024
+    VARIABLE_IO_THRESHOLD = 64 * 1024 * 1024
 
     def __init__(
         self,
@@ -289,12 +289,12 @@ class PrefetchProducer:
                     and avg_io_size > self._user_max_prefetch_size
                 )
 
-                # Disable prefetching ahead if highly variable AND average > 100MB, or if it exceeds user max
+                # Disable prefetching ahead if highly variable AND average > 64MB, or if it exceeds user max
                 if (
                     is_variable and avg_io_size > PrefetchProducer.VARIABLE_IO_THRESHOLD
                 ) or exceeds_user_max:
                     logger.debug(
-                        "Large IO detected (variable > 100MB or > user max). Disabling background prefetching."
+                        "Large IO detected (variable > 64MB or > user max). Disabling background prefetching."
                     )
                     prefetch_multiplier = 1
                 elif streak < self.MIN_STREAKS_FOR_PREFETCHING:
