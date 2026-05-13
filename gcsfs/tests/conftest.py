@@ -16,7 +16,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import GCSFileSystem
-from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
+from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
@@ -94,6 +94,19 @@ def _avoid_adc_timeout(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_get_bucket_type_on_emulator():
+    """Mock _get_bucket_type to return UNKNOWN instantly on emulator."""
+    if not is_real_gcs():
+        with mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
+            return_value=BucketType.UNKNOWN,
+        ):
+            yield
+    else:
+        yield
+
+
 def stop_docker(container):
     cmd = shlex.split('docker ps -a -q --filter "name=%s"' % container)
     cid = subprocess.check_output(cmd).strip().decode()
@@ -140,11 +153,7 @@ def gcs_factory(docker_gcs):
 
     def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
-        fs = fsspec.filesystem("gcs", **params, **kwargs)
-        # Enable caching of UNKNOWN bucket types if not using real GCS
-        if not is_real_gcs() and isinstance(fs, ExtendedGcsFileSystem):
-            fs._cache_unknown_buckets = True
-        return fs
+        return fsspec.filesystem("gcs", **params, **kwargs)
 
     return factory
 
@@ -448,11 +457,8 @@ def zonal_write_mocks():
         yield None
         return
 
-    patch_target_lookup_bucket_type = (
-        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_type"
-    )
-    patch_target_sync_lookup_bucket_type = (
-        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
+    patch_target_get_bucket_type = (
+        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type"
     )
     patch_target_init_aaow = "gcsfs.zb_hns_utils.init_aaow"
     patch_target_gcsfs_info = "gcsfs.core.GCSFileSystem._info"
@@ -483,12 +489,7 @@ def zonal_write_mocks():
 
     with (
         mock.patch(
-            patch_target_lookup_bucket_type,
-            new_callable=mock.AsyncMock,
-            return_value=BucketType.ZONAL_HIERARCHICAL,
-        ),
-        mock.patch(
-            patch_target_sync_lookup_bucket_type,
+            patch_target_get_bucket_type,
             return_value=BucketType.ZONAL_HIERARCHICAL,
         ),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),

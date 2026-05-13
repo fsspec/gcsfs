@@ -104,7 +104,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             - retry_multiplier: Multiplier for delay between retries.
             These map to `google.api_core.retry.AsyncRetry` arguments (without 'retry_' prefix).
         """
-        self._cache_unknown_buckets = kwargs.pop("cache_unknown_buckets", False)
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -195,10 +194,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
         bucket_type = await self._get_bucket_type(bucket)
-        # Dont cache UNKNOWN type by default.
-        # Caching can be enabled (via cache_unknown_buckets=True) to avoid repeated slow
-        # lookups on emulators or when users lack permissions for the Storage Control API.
-        if bucket_type == BucketType.UNKNOWN and not self._cache_unknown_buckets:
+        # Dont cache UNKNOWN type
+        if bucket_type == BucketType.UNKNOWN:
             return bucket_type
         self._storage_layout_cache[bucket] = bucket_type
         return self._storage_layout_cache[bucket]
