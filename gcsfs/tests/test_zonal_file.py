@@ -9,7 +9,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zonal_file import ZonalFile
 
 test_data = b"hello world"
@@ -354,7 +354,7 @@ def test_zonal_file_append_to_empty(extended_gcsfs, zonal_write_mocks, file_path
 
 
 @pytest.mark.skipif(
-    os.environ.get("STORAGE_EMULATOR_HOST") != "https://storage.googleapis.com",
+    not is_real_gcs(),
     reason="This test class is for real GCS only.",
 )
 class TestZonalFileRealGCS:

@@ -30,14 +30,9 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import (
-    _MULTI_THREADED_TEST_DATA_SIZE,
-    csv_files,
-    files,
-    text_files,
-)
+from gcsfs.tests.conftest import csv_files, files, text_files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
 
 file = "test/accounts.1.json"
@@ -73,10 +68,7 @@ def gcs_bucket_mocks():
     @contextlib.contextmanager
     def _gcs_bucket_mocks_factory(file_data, bucket_type_val):
         """Creates mocks for a given file content and bucket type."""
-        is_real_gcs = (
-            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-        )
-        if is_real_gcs:
+        if is_real_gcs():
             yield None
             return
         patch_target_lookup_bucket_type = (
@@ -342,9 +334,20 @@ async def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
 
 
 # ========================== Zonal Multithreaded Read Tests ===========================
+_MULTI_THREADED_TEST_DATA_SIZE = 5 * 1024 * 1024  # 5MB
 _MULTI_THREADED_TEST_FILE = "multi_threaded_test_file"
-_MULTI_THREADED_TEST_DATA = text_files[_MULTI_THREADED_TEST_FILE]
+pattern = b"0123456789abcdef"
+_MULTI_THREADED_TEST_DATA = (
+    pattern * (_MULTI_THREADED_TEST_DATA_SIZE // len(pattern))
+    + pattern[: _MULTI_THREADED_TEST_DATA_SIZE % len(pattern)]
+)
 _MULTI_THREADED_TEST_FILE_PATH = f"{TEST_ZONAL_BUCKET}/{_MULTI_THREADED_TEST_FILE}"
+
+
+@pytest.fixture
+def multi_threaded_test_file(extended_gcsfs):
+    extended_gcsfs.pipe(_MULTI_THREADED_TEST_FILE_PATH, _MULTI_THREADED_TEST_DATA)
+
 
 _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY = 1 * 1024 * 1024  # 1MB
 _NUM_CONCURRENCY_THREADS = 10
@@ -371,7 +374,9 @@ def _read_range_from_fs(fs, path, offset, length, block_size=None):
         return f.read(length)
 
 
-def test_multithreaded_read_disjoint_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_disjoint_ranges_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads of disjoint ranges from the same file.
     Verifies that different parts of the file can be fetched simultaneously without data mix-up.
@@ -399,7 +404,9 @@ def test_multithreaded_read_disjoint_ranges_zb(extended_gcsfs, gcs_bucket_mocks)
             assert mocks["downloader"].close.call_count == len(read_tasks)
 
 
-def test_multithreaded_read_overlapping_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_overlapping_ranges_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads of overlapping ranges from the same file.
     """
@@ -443,7 +450,9 @@ def test_default_cache_is_readahead_chunked(extended_gcsfs, gcs_bucket_mocks):
             assert isinstance(f.cache, caching.ReadAheadChunked)
 
 
-def test_multithreaded_read_chunk_boundary_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_chunk_boundary_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads that straddle internal buffering chunk boundaries.
     Verifies correct stitching of data from multiple internal requests.
@@ -522,7 +531,9 @@ def _read_random_range(fs, path, file_size, read_length):
         return f.read(read_length)
 
 
-def test_multithreaded_read_high_concurrency_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_high_concurrency_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests high-concurrency reads to stress the connection pooling and handling.
     Verifies that many concurrent requests do not lead to crashes or deadlocks.
@@ -559,7 +570,7 @@ def test_multithreaded_read_high_concurrency_zb(extended_gcsfs, gcs_bucket_mocks
 
 
 def test_multithreaded_read_one_fails_others_survive_zb(
-    extended_gcsfs, gcs_bucket_mocks
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
 ):
     """
     Tests fault tolerance: one thread's read operation fails, but others complete successfully.
@@ -665,7 +676,7 @@ def _read_range_and_get_pid(path, offset, length, block_size=None):
     return data, os.getpid()
 
 
-def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
+def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs, multi_threaded_test_file):
     """
     Tests concurrent reads of disjoint ranges from the same file in different processes.
     """
@@ -694,7 +705,9 @@ def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
     assert os.getpid() not in pids
 
 
-def test_multiprocess_read_overlapping_ranges_zb(extended_gcsfs):
+def test_multiprocess_read_overlapping_ranges_zb(
+    extended_gcsfs, multi_threaded_test_file
+):
     """
     Tests concurrent reads of overlapping ranges from the same file in different processes.
     """
@@ -733,7 +746,7 @@ def _read_with_passed_fs(fs, path, offset, length):
         return f.read(length)
 
 
-def test_multiprocess_shared_fs_zb(extended_gcsfs):
+def test_multiprocess_shared_fs_zb(extended_gcsfs, multi_threaded_test_file):
     """
     Tests passing the filesystem object itself to child processes.
     """
@@ -1109,10 +1122,9 @@ async def test_cp_file_not_implemented_error(
     short_uuid = str(uuid.uuid4())[:8]
     source_path = f"{source_bucket}/source_{short_uuid}"
     dest_path = f"{dest_bucket}/dest_{short_uuid}"
-    is_real_gcs = os.getenv("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
 
     # Source file needs to exist for last case when super method is called for standard buckets
-    if is_real_gcs:
+    if is_real_gcs():
         await async_gcs._pipe_file(source_path, b"test data", finalize_on_close=True)
 
     async def mock_is_zonal(bucket):
@@ -1120,7 +1132,7 @@ async def test_cp_file_not_implemented_error(
 
     is_zonal_patch_cm = (
         mock.patch.object(async_gcs, "_is_zonal_bucket", side_effect=mock_is_zonal)
-        if not is_real_gcs
+        if not is_real_gcs()
         else contextlib.nullcontext()
     )
 
@@ -1135,7 +1147,7 @@ async def test_cp_file_not_implemented_error(
             ):
                 await async_gcs._cp_file(source_path, dest_path)
         else:  # Standard -> Standard
-            if is_real_gcs:
+            if is_real_gcs():
                 await async_gcs._cp_file(source_path, dest_path)
                 assert await async_gcs._cat(dest_path) == b"test data"
             else:

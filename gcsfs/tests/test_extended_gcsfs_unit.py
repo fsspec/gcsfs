@@ -21,7 +21,7 @@ from gcsfs.extended_gcsfs import (
 from gcsfs.tests.conftest import csv_files, files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
-from gcsfs.tests.utils import tmpfile
+from gcsfs.tests.utils import is_real_gcs, tmpfile
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -46,7 +46,7 @@ pytestmark = [
         reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set",
     ),
     pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
+        is_real_gcs(),
         reason="Contains Unit tests using mocks, does not require testing on real GCS.",
     ),
 ]
