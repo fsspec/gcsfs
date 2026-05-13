@@ -20,6 +20,7 @@ import pytest_asyncio
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests.settings import TEST_HNS_BUCKET
+from gcsfs.tests.utils import is_real_gcs
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
 
@@ -34,7 +35,7 @@ pytestmark = [
         reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set",
     ),
     pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") != "https://storage.googleapis.com",
+        not is_real_gcs(),
         reason="Skipping tests on emulator, requires real GCS.",
     ),
 ]

@@ -19,6 +19,7 @@ import pytest
 
 from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.tests.settings import TEST_HNS_BUCKET, TEST_PROJECT
+from gcsfs.tests.utils import is_real_gcs
 
 should_run_hns = os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false").lower() in (
     "true",
@@ -27,8 +28,7 @@ should_run_hns = os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false").lower()
 
 # Skip these tests if not running against a real GCS backend or if experimentation flag is not set.
 pytestmark = pytest.mark.skipif(
-    os.environ.get("STORAGE_EMULATOR_HOST") != "https://storage.googleapis.com"
-    or not should_run_hns,
+    not is_real_gcs() or not should_run_hns,
     reason="This test class is for real GCS HNS buckets only and requires experimental flag.",
 )
 

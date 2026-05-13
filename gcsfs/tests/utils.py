@@ -40,3 +40,8 @@ def tmpfile(extension="", dir=None):
             else:
                 with ignoring(OSError):
                     os.remove(filename)
+
+
+def is_real_gcs():
+    """Checks if tests are explicitly running against real GCS."""
+    return os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"

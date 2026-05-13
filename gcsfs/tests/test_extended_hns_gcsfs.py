@@ -18,6 +18,7 @@ from google.cloud import storage_control_v2
 from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
 from gcsfs.tests.settings import TEST_HNS_BUCKET
+from gcsfs.tests.utils import is_real_gcs
 
 REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
 
@@ -754,7 +755,7 @@ class TestExtendedGcsFileSystemMkdir:
             mocks["super_mkdir"].assert_not_called()
 
     @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
+        is_real_gcs(),
         reason="This test is only to check that create_folder is not called for non-HNS buckets.",
     )
     def test_mkdir_non_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks):
@@ -1591,7 +1592,7 @@ class TestExtendedGcsFileSystemRmdir:
             mocks["super_rmdir"].assert_not_called()
 
     @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
+        is_real_gcs(),
         reason="This test is only to check that delete_folder is not called in case of non-HNS buckets."
         "In real GCS on non-HNS bucket there would be no empty directories to delete.",
     )

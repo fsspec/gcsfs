@@ -196,7 +196,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             return self._storage_layout_cache[bucket]
         bucket_type = await self._get_bucket_type(bucket)
         # Dont cache UNKNOWN type by default.
-        # Allow caching it in tests (via config) to avoid slow repeated failing lookups on emulator.
+        # Caching can be enabled (via cache_unknown_buckets=True) to avoid repeated slow
+        # lookups on emulators or when users lack permissions for the Storage Control API.
         if bucket_type == BucketType.UNKNOWN and not self._cache_unknown_buckets:
             return bucket_type
         self._storage_layout_cache[bucket] = bucket_type

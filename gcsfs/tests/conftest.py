@@ -25,6 +25,7 @@ from gcsfs.tests.settings import (
     TEST_VERSIONED_BUCKET,
     TEST_ZONAL_BUCKET,
 )
+from gcsfs.tests.utils import is_real_gcs
 
 files = {
     "test/accounts.1.json": (
@@ -79,7 +80,7 @@ BUCKET_NAME_MAP = {
 def _avoid_adc_timeout(monkeypatch):
     """Avoid slow ADC lookups and Metadata Server requests in tests."""
     # Do not apply if tests are explicitly running against real GCS
-    if os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com":
+    if is_real_gcs():
         yield
         return
 
@@ -103,7 +104,7 @@ def stop_docker(container):
 @pytest.fixture(scope="session")
 def docker_gcs():
     if "STORAGE_EMULATOR_HOST" in os.environ:
-        if os.environ["STORAGE_EMULATOR_HOST"] != "https://storage.googleapis.com":
+        if not is_real_gcs():
             params["token"] = "anon"
         # assume using real API or otherwise have a server already set up
         yield os.getenv("STORAGE_EMULATOR_HOST")
@@ -140,9 +141,8 @@ def gcs_factory(docker_gcs):
     def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
         fs = fsspec.filesystem("gcs", **params, **kwargs)
-        # Enable caching of UNKNOWN bucket types if we are on emulator
-        is_emulator = params.get("endpoint_url") != "https://storage.googleapis.com"
-        if is_emulator and isinstance(fs, ExtendedGcsFileSystem):
+        # Enable caching of UNKNOWN bucket types if not using real GCS
+        if not is_real_gcs() and isinstance(fs, ExtendedGcsFileSystem):
             fs._cache_unknown_buckets = True
         return fs
 
@@ -308,9 +308,6 @@ def final_cleanup(gcs_factory, buckets_to_delete):
 def gcs_versioned(gcs_factory, buckets_to_delete):
     gcs = gcs_factory()
     gcs.version_aware = True
-    is_real_gcs = (
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-    )
     try:  # ensure we're empty.
         # The versioned bucket might be created by `is_versioning_enabled`
         # in test_core_versioned.py. We must register it for cleanup only if
@@ -324,7 +321,7 @@ def gcs_versioned(gcs_factory, buckets_to_delete):
                 buckets_to_delete.add(TEST_VERSIONED_BUCKET)
         except ImportError:
             pass  # test_core_versioned is not being run
-        if is_real_gcs:
+        if is_real_gcs():
             cleanup_versioned_bucket(gcs, TEST_VERSIONED_BUCKET)
         else:
             # For emulators, we delete and recreate the bucket for a clean state
@@ -339,7 +336,7 @@ def gcs_versioned(gcs_factory, buckets_to_delete):
     finally:
         # Ensure the bucket is empty after the test.
         try:
-            if is_real_gcs:
+            if is_real_gcs():
                 cleanup_versioned_bucket(gcs, TEST_VERSIONED_BUCKET)
         except Exception as e:
             logging.warning(
@@ -385,13 +382,9 @@ def cleanup_versioned_bucket(gcs, bucket_name, prefix=None):
 
 
 def _create_extended_gcsfs(gcs_factory, buckets_to_delete, populate_bucket, **kwargs):
-    is_real_gcs = (
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-    )
-
     extended_gcsfs = gcs_factory(**kwargs)
     # Only create/delete/populate the bucket if we are NOT using the real GCS endpoint.
-    if not is_real_gcs:
+    if not is_real_gcs():
         if not extended_gcsfs.exists(TEST_ZONAL_BUCKET):
             extended_gcsfs.mkdir(TEST_ZONAL_BUCKET)
             buckets_to_delete.add(TEST_ZONAL_BUCKET)
@@ -451,14 +444,14 @@ def gcs_hns(gcs_factory, buckets_to_delete):
 def zonal_write_mocks():
     """A fixture for mocking Zonal bucket write functionality."""
 
-    if os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com":
+    if is_real_gcs():
         yield None
         return
 
-    patch_target_get_bucket_type = (
+    patch_target_lookup_bucket_type = (
         "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_type"
     )
-    patch_target_sync_get_bucket_type = (
+    patch_target_sync_lookup_bucket_type = (
         "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
     )
     patch_target_init_aaow = "gcsfs.zb_hns_utils.init_aaow"
@@ -490,12 +483,12 @@ def zonal_write_mocks():
 
     with (
         mock.patch(
-            patch_target_get_bucket_type,
+            patch_target_lookup_bucket_type,
             new_callable=mock.AsyncMock,
             return_value=BucketType.ZONAL_HIERARCHICAL,
         ),
         mock.patch(
-            patch_target_sync_get_bucket_type,
+            patch_target_sync_lookup_bucket_type,
             return_value=BucketType.ZONAL_HIERARCHICAL,
         ),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),

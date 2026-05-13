@@ -32,7 +32,7 @@ from gcsfs.extended_gcsfs import (
 )
 from gcsfs.tests.conftest import csv_files, files, text_files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
 
 file = "test/accounts.1.json"
@@ -68,10 +68,7 @@ def gcs_bucket_mocks():
     @contextlib.contextmanager
     def _gcs_bucket_mocks_factory(file_data, bucket_type_val):
         """Creates mocks for a given file content and bucket type."""
-        is_real_gcs = (
-            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-        )
-        if is_real_gcs:
+        if is_real_gcs():
             yield None
             return
         patch_target_lookup_bucket_type = (
@@ -1125,10 +1122,9 @@ async def test_cp_file_not_implemented_error(
     short_uuid = str(uuid.uuid4())[:8]
     source_path = f"{source_bucket}/source_{short_uuid}"
     dest_path = f"{dest_bucket}/dest_{short_uuid}"
-    is_real_gcs = os.getenv("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
 
     # Source file needs to exist for last case when super method is called for standard buckets
-    if is_real_gcs:
+    if is_real_gcs():
         await async_gcs._pipe_file(source_path, b"test data", finalize_on_close=True)
 
     async def mock_is_zonal(bucket):
@@ -1136,7 +1132,7 @@ async def test_cp_file_not_implemented_error(
 
     is_zonal_patch_cm = (
         mock.patch.object(async_gcs, "_is_zonal_bucket", side_effect=mock_is_zonal)
-        if not is_real_gcs
+        if not is_real_gcs()
         else contextlib.nullcontext()
     )
 
@@ -1151,7 +1147,7 @@ async def test_cp_file_not_implemented_error(
             ):
                 await async_gcs._cp_file(source_path, dest_path)
         else:  # Standard -> Standard
-            if is_real_gcs:
+            if is_real_gcs():
                 await async_gcs._cp_file(source_path, dest_path)
                 assert await async_gcs._cat(dest_path) == b"test data"
             else:
