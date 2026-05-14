@@ -2180,12 +2180,23 @@ async def test_get_control_plane_client_quota_project_id(
         ("https://my-endpoint.com", {}, "my-endpoint.com"),
         (
             None,
-            {"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog"},
+            {
+                "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
+                "STORAGE_EMULATOR_HOST": "",
+            },
             "storage.apis-tpczero.goog",
+        ),
+        (
+            None,
+            {
+                "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
+                "STORAGE_EMULATOR_HOST": "my-emulator.com",
+            },
+            "my-emulator.com",
         ),
         (None, {"STORAGE_EMULATOR_HOST": "my-emulator.com"}, "my-emulator.com"),
         (None, {"STORAGE_EMULATOR_HOST": "http://my-emulator.com"}, "my-emulator.com"),
-        (None, {}, "storage.googleapis.com"),
+        (None, {"STORAGE_EMULATOR_HOST": ""}, "storage.googleapis.com"),
     ],
 )
 async def test_get_control_plane_client_endpoint(
