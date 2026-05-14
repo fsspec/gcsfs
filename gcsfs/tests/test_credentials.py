@@ -85,8 +85,10 @@ def test_connect_cloud_not_on_google():
 @pytest.mark.parametrize("token", ["", "incorrect.token", "x" * 100])
 def test_credentials_from_raw_token(token):
     with patch.dict(os.environ, {"FETCH_RAW_TOKEN_EXPIRY": "false"}):
+        fs = GCSFileSystem(project="myproject", token=token)
+        if not fs.on_google:
+            pytest.skip("Emulator does not validate tokens")
         with pytest.raises(HttpError, match="Invalid Credentials"):
-            fs = GCSFileSystem(project="myproject", token=token)
             fs.ls("/")
 
 

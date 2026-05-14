@@ -2399,23 +2399,17 @@ def test_find_maxdepth(gcs):
 
 
 def test_sign(gcs, monkeypatch):
+    if not gcs.on_google:
+        pytest.skip("Emulator does not support signing")
+
     file = TEST_BUCKET + "/test.jpg"
     with gcs.open(file, "wb") as f:
         f.write(b"This is a test string")
     assert gcs.cat(file) == b"This is a test string"
 
-    # `sign` is creating a google Client on its own, it needs a realistically
-    # looking credentials file.
-    if not gcs.on_google:
-        monkeypatch.setenv(
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            os.path.dirname(__file__) + "/fake-service-account-credentials.json",
-        )
-
     current_ts_utc = int(datetime.now(tz=timezone.utc).timestamp())
     result = gcs.sign(file)
 
-    # Check it here since emulator doesn't really validate those values
     params = parse_qs(urlparse(result).query)
     assert int(params["Expires"][0]) >= current_ts_utc + 100
 

@@ -1105,17 +1105,27 @@ def test_get_directory_from_zonal_bucket(extended_gcsfs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "source_bucket, dest_bucket, should_fail",
+    "source_bucket_type, dest_bucket_type, should_fail",
     [
-        (TEST_ZONAL_BUCKET, TEST_ZONAL_BUCKET, True),
-        (TEST_ZONAL_BUCKET, TEST_BUCKET, True),
-        (TEST_BUCKET, TEST_ZONAL_BUCKET, True),
-        (TEST_BUCKET, TEST_BUCKET, False),
+        (BucketType.ZONAL_HIERARCHICAL, BucketType.ZONAL_HIERARCHICAL, True),
+        (BucketType.ZONAL_HIERARCHICAL, BucketType.NON_HIERARCHICAL, True),
+        (BucketType.NON_HIERARCHICAL, BucketType.ZONAL_HIERARCHICAL, True),
+        (BucketType.NON_HIERARCHICAL, BucketType.NON_HIERARCHICAL, False),
     ],
 )
 async def test_cp_file_not_implemented_error(
-    async_gcs, source_bucket, dest_bucket, should_fail
+    async_gcs, source_bucket_type, dest_bucket_type, should_fail
 ):
+    source_bucket = (
+        TEST_ZONAL_BUCKET
+        if source_bucket_type == BucketType.ZONAL_HIERARCHICAL
+        else TEST_BUCKET
+    )
+    dest_bucket = (
+        TEST_ZONAL_BUCKET
+        if dest_bucket_type == BucketType.ZONAL_HIERARCHICAL
+        else TEST_BUCKET
+    )
     """
     Tests _cp_file behavior for combinations of Zonal and Standard buckets.
     """

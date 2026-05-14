@@ -1,14 +1,23 @@
 import os
 
-TEST_BUCKET = os.getenv("GCSFS_TEST_BUCKET", "gcsfs_test")
-TEST_VERSIONED_BUCKET = os.getenv("GCSFS_TEST_VERSIONED_BUCKET", "gcsfs_test_versioned")
-TEST_HNS_BUCKET = os.getenv("GCSFS_HNS_TEST_BUCKET", "gcsfs_hns_test")
-TEST_ZONAL_BUCKET = os.getenv("GCSFS_ZONAL_TEST_BUCKET", "gcsfs_zonal_test")
+
+def _get_bucket_name(env_var: str, default_name: str) -> str:
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+    suffix = f"_{worker_id}" if worker_id else ""
+    return os.getenv(env_var, default_name) + suffix
+
+
+TEST_BUCKET = _get_bucket_name("GCSFS_TEST_BUCKET", "gcsfs_test")
+TEST_VERSIONED_BUCKET = _get_bucket_name(
+    "GCSFS_TEST_VERSIONED_BUCKET", "gcsfs_test_versioned"
+)
+TEST_HNS_BUCKET = _get_bucket_name("GCSFS_HNS_TEST_BUCKET", "gcsfs_hns_test")
+TEST_ZONAL_BUCKET = _get_bucket_name("GCSFS_ZONAL_TEST_BUCKET", "gcsfs_zonal_test")
 TEST_PROJECT = os.getenv("GCSFS_TEST_PROJECT", "project")
-TEST_REQUESTER_PAYS_BUCKET = os.getenv(
+TEST_REQUESTER_PAYS_BUCKET = _get_bucket_name(
     "GCSFS_TEST_REQ_PAYS_BUCKET", "gcsfs_test_req_pays"
 )
-TEST_HNS_REQUESTER_PAYS_BUCKET = os.getenv(
+TEST_HNS_REQUESTER_PAYS_BUCKET = _get_bucket_name(
     "GCSFS_HNS_TEST_REQ_PAYS_BUCKET", "gcsfs_hns_test_req_pays"
 )
 TEST_KMS_KEY = os.getenv(
