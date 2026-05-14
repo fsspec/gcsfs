@@ -2175,9 +2175,9 @@ async def test_get_control_plane_client_quota_project_id(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "endpoint_url, env_updates, expected_host",
+    "endpoint_url, env_updates, expected_host, expected_insecure",
     [
-        ("https://my-endpoint.com", {}, "my-endpoint.com"),
+        ("https://my-endpoint.com", {}, "my-endpoint.com", False),
         (
             None,
             {
@@ -2185,28 +2185,38 @@ async def test_get_control_plane_client_quota_project_id(
                 "STORAGE_EMULATOR_HOST": "",
             },
             "storage.apis-tpczero.goog",
+            False,
         ),
         (
             None,
             {
                 "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
-                "STORAGE_EMULATOR_HOST": "my-emulator.com",
+                "STORAGE_EMULATOR_HOST": "http://my-emulator.com",
             },
             "my-emulator.com",
+            True,
         ),
-        (None, {"STORAGE_EMULATOR_HOST": "my-emulator.com"}, "my-emulator.com"),
-        (None, {"STORAGE_EMULATOR_HOST": "http://my-emulator.com"}, "my-emulator.com"),
-        (None, {"STORAGE_EMULATOR_HOST": ""}, "storage.googleapis.com"),
+        (
+            None,
+            {"STORAGE_EMULATOR_HOST": "http://my-emulator.com"},
+            "my-emulator.com",
+            True,
+        ),
+        (
+            None,
+            {"STORAGE_EMULATOR_HOST": "https://my-emulator.com"},
+            "my-emulator.com",
+            False,
+        ),
+        (None, {"STORAGE_EMULATOR_HOST": ""}, "storage.googleapis.com", False),
     ],
 )
 async def test_get_control_plane_client_endpoint(
-    endpoint_url, env_updates, expected_host
+    endpoint_url, env_updates, expected_host, expected_insecure
 ):
     fs_kwargs = {"token": "anon"}
     if endpoint_url:
         fs_kwargs["endpoint_url"] = endpoint_url
-
-    fs = ExtendedGcsFileSystem(**fs_kwargs)
 
     mock_transport_cls = mock.Mock()
     mock_channel = mock.Mock()
@@ -2220,16 +2230,22 @@ async def test_get_control_plane_client_endpoint(
             "get_transport_class",
             return_value=mock_transport_cls,
         ),
+        mock.patch("grpc.aio.insecure_channel") as mock_insecure_channel,
         mock.patch.dict(os.environ, env_updates),
     ):
-        # Clear cached client to force re-initialization
-        fs._storage_control_client = None
+        ExtendedGcsFileSystem.clear_instance_cache()
+        fs = ExtendedGcsFileSystem(**fs_kwargs)
 
         await fs._get_control_plane_client()
 
-        mock_transport_cls.create_channel.assert_called_once()
-        kwargs = mock_transport_cls.create_channel.call_args.kwargs
-        assert kwargs.get("host") == expected_host
+        if expected_insecure:
+            mock_insecure_channel.assert_called_once_with(
+                expected_host, options=mock.ANY
+            )
+        else:
+            mock_transport_cls.create_channel.assert_called_once()
+            kwargs = mock_transport_cls.create_channel.call_args.kwargs
+            assert kwargs.get("host") == expected_host
 
 
 def test_extended_gcsfs_retry_init():

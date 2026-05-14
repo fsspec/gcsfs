@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from glob import has_magic
 
+import grpc
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
@@ -188,7 +189,14 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 endpoint = self._location.split("://")[-1]
                 channel_kwargs["host"] = endpoint
 
-            channel = transport_cls.create_channel(**channel_kwargs)
+            if self._location and self._location.startswith("http://"):
+                host = channel_kwargs["host"]
+                channel = grpc.aio.insecure_channel(
+                    host, options=channel_kwargs.get("options")
+                )
+            else:
+                channel = transport_cls.create_channel(**channel_kwargs)
+
             transport = transport_cls(channel=channel)
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
                 transport=transport
