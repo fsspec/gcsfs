@@ -179,11 +179,16 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                     "grpc_asyncio"
                 )
             )
-            channel = transport_cls.create_channel(
-                credentials=self.credential,
-                options=[("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
-                quota_project_id=self._user_project,
-            )
+            channel_kwargs = {
+                "credentials": self.credential,
+                "options": [("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
+                "quota_project_id": self._user_project,
+            }
+            if self._location:
+                endpoint = self._location.split("://")[-1]
+                channel_kwargs["host"] = endpoint
+
+            channel = transport_cls.create_channel(**channel_kwargs)
             transport = transport_cls(channel=channel)
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
                 transport=transport

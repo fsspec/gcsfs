@@ -2173,6 +2173,54 @@ async def test_get_control_plane_client_quota_project_id(
         assert kwargs["quota_project_id"] == expected_quota_project
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint_url, env_updates, expected_host",
+    [
+        ("https://my-endpoint.com", {}, "my-endpoint.com"),
+        (
+            None,
+            {"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog"},
+            "storage.apis-tpczero.goog",
+        ),
+        (None, {"STORAGE_EMULATOR_HOST": "my-emulator.com"}, "my-emulator.com"),
+        (None, {"STORAGE_EMULATOR_HOST": "http://my-emulator.com"}, "my-emulator.com"),
+        (None, {}, "storage.googleapis.com"),
+    ],
+)
+async def test_get_control_plane_client_endpoint(
+    endpoint_url, env_updates, expected_host
+):
+    fs_kwargs = {"token": "anon"}
+    if endpoint_url:
+        fs_kwargs["endpoint_url"] = endpoint_url
+
+    fs = ExtendedGcsFileSystem(**fs_kwargs)
+
+    mock_transport_cls = mock.Mock()
+    mock_channel = mock.Mock()
+    mock_transport_cls.create_channel.return_value = mock_channel
+
+    import os
+
+    with (
+        mock.patch.object(
+            storage_control_v2.StorageControlAsyncClient,
+            "get_transport_class",
+            return_value=mock_transport_cls,
+        ),
+        mock.patch.dict(os.environ, env_updates),
+    ):
+        # Clear cached client to force re-initialization
+        fs._storage_control_client = None
+
+        await fs._get_control_plane_client()
+
+        mock_transport_cls.create_channel.assert_called_once()
+        kwargs = mock_transport_cls.create_channel.call_args.kwargs
+        assert kwargs.get("host") == expected_host
+
+
 def test_extended_gcsfs_retry_init():
     fs = ExtendedGcsFileSystem(token="anon", retry_timeout=20.0, retry_initial=4.0)
     assert fs.retry_config["timeout"] == 20.0
