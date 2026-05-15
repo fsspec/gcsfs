@@ -334,6 +334,15 @@ async def test_mrd_pool_double_initialize(create_mrd_mock, mock_gcsfs):
 
 
 @pytest.mark.asyncio
+async def test_mrd_pool_initialize_after_close(mock_gcsfs):
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
+    await pool.close()
+
+    with pytest.raises(RuntimeError, match="Cannot initialize a closed MRDPool"):
+        await pool.initialize()
+
+
+@pytest.mark.asyncio
 @mock.patch(
     "google.cloud.storage.asyncio.async_multi_range_downloader.AsyncMultiRangeDownloader.create_mrd",
     new_callable=mock.AsyncMock,
@@ -611,6 +620,18 @@ async def test_close_mrds_propagates_exception():
     good_mrd.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_close_mrds_logs_warning(caplog):
+    bad_mrd = mock.AsyncMock()
+    bad_mrd.close.side_effect = RuntimeError("boom")
+    mrds = [bad_mrd]
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        await _close_mrds(mrds)
+
+    assert "Error closing MRD: boom" in caplog.text
+
+
 @pytest.fixture
 def mock_cache():
     """A mock cache with an internal idle MRD queue."""
@@ -864,6 +885,20 @@ async def test_mrd_pool_cache_get_init_failure_drops_entry(init_mrd_mock, mock_g
 
 @pytest.mark.asyncio
 @mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_init_failure_with_max_idle_zero(
+    init_mrd_mock, mock_gcsfs
+):
+    init_mrd_mock.side_effect = RuntimeError("init boom")
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=0)
+
+    with pytest.raises(RuntimeError, match="init boom"):
+        await cache.get("bucket", "obj", "1", pool_size=1)
+
+    assert ("bucket", "obj", "1") not in cache._mrd_queues
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
 async def test_mrd_pool_cache_release_refcount(init_mrd_mock, mock_gcsfs):
     init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
     cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
@@ -1010,3 +1045,25 @@ async def test_mrd_pool_cache_close_no_op_when_already_closed(
     await cache.close()
     await cache.close()  # idempotent
     assert cache._closed is True
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_cache_get_idle_mrd_closed(mock_gcsfs):
+    cache = MRDPoolCache(mock_gcsfs)
+    await cache.close()
+    assert cache.get_idle_mrd(("bucket", "obj", "1")) is None
+
+
+def test_mrd_pool_cache_get_idle_mrd_not_found(mock_gcsfs):
+    cache = MRDPoolCache(mock_gcsfs)
+    assert cache.get_idle_mrd(("bucket", "obj", "1")) is None
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_cache_get_fs_gc(mock_gcsfs):
+    cache = MRDPoolCache(mock_gcsfs)
+    cache._gcsfs = lambda: None  # Simulate GC
+    with pytest.raises(
+        RuntimeError, match="ExtendedGcsFileSystem has been garbage collected"
+    ):
+        await cache.get("bucket", "obj", "1", pool_size=1)

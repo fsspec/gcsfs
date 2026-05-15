@@ -745,3 +745,133 @@ def test_finalize_mrd_pool_cache_closed_loop(monkeypatch, caplog):
     mock_pool.close.assert_not_called()
     # Verify no warnings were logged
     assert len(caplog.records) == 0
+
+
+def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
+    """
+    Tests that _finalize_mrd_pool_cache uses asyncio.run_coroutine_threadsafe
+    when current_loop is running.
+    """
+    mock_pool = mock.MagicMock(spec=MRDPoolCache)
+    mock_pool._closed = False
+
+    # Mock asyncio.get_running_loop to return a running loop
+    mock_current_loop = mock.MagicMock()
+    mock_current_loop.is_running.return_value = True
+    monkeypatch.setattr(
+        asyncio, "get_running_loop", mock.Mock(return_value=mock_current_loop)
+    )
+
+    # Mock asyncio.run_coroutine_threadsafe
+    mock_run_coroutine_threadsafe = mock.Mock()
+    monkeypatch.setattr(
+        asyncio, "run_coroutine_threadsafe", mock_run_coroutine_threadsafe
+    )
+
+    mock_loop = mock.MagicMock()
+    mock_loop.is_running.return_value = False
+
+    ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+
+    # Verify that run_coroutine_threadsafe was called
+    mock_run_coroutine_threadsafe.assert_called_once()
+    args, _ = mock_run_coroutine_threadsafe.call_args
+    assert args[1] == mock_current_loop
+
+
+def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):
+    """
+    Tests that _finalize_mrd_pool_cache uses asyn.sync when asyn.loop[0] is running.
+    """
+    mock_pool = mock.MagicMock(spec=MRDPoolCache)
+    mock_pool._closed = False
+
+    # Mock asyncio.get_running_loop to raise RuntimeError
+    monkeypatch.setattr(
+        asyncio, "get_running_loop", mock.Mock(side_effect=RuntimeError)
+    )
+
+    # Mock asyn.loop to be [mock_loop]
+    mock_asyn_loop = mock.MagicMock()
+    mock_asyn_loop.is_running.return_value = True
+    monkeypatch.setattr("fsspec.asyn.loop", [mock_asyn_loop])
+
+    # Mock asyn.sync
+    mock_sync = mock.Mock()
+    monkeypatch.setattr("fsspec.asyn.sync", mock_sync)
+
+    mock_loop = mock.MagicMock()
+    mock_loop.is_running.return_value = False
+
+    ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+
+    # Verify that asyn.sync was called
+    mock_sync.assert_called_once_with(mock_asyn_loop, mock_pool.close, timeout=0.1)
+
+
+def test_finalize_mrd_pool_cache_asyn_loop_running_timeout(monkeypatch):
+    """
+    Tests that _finalize_mrd_pool_cache ignores FSTimeoutError from asyn.sync.
+    """
+    import fsspec
+
+    mock_pool = mock.MagicMock(spec=MRDPoolCache)
+    mock_pool._closed = False
+
+    # Mock asyncio.get_running_loop to raise RuntimeError
+    monkeypatch.setattr(
+        asyncio, "get_running_loop", mock.Mock(side_effect=RuntimeError)
+    )
+
+    # Mock asyn.loop to be [mock_loop]
+    mock_asyn_loop = mock.MagicMock()
+    mock_asyn_loop.is_running.return_value = True
+    monkeypatch.setattr("fsspec.asyn.loop", [mock_asyn_loop])
+
+    # Mock asyn.sync to raise FSTimeoutError
+    mock_sync = mock.Mock(side_effect=fsspec.FSTimeoutError)
+    monkeypatch.setattr("fsspec.asyn.sync", mock_sync)
+
+    mock_loop = mock.MagicMock()
+    mock_loop.is_running.return_value = False
+
+    # Should not raise exception
+    ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+
+    mock_sync.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_close_resources_with_exceptions(caplog):
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    fs = ExtendedGcsFileSystem(token="anon")
+
+    # Mock grpc_client
+    mock_grpc = mock.Mock()
+    mock_grpc.grpc_client.transport.close = mock.AsyncMock(
+        side_effect=Exception("grpc fail")
+    )
+    fs._grpc_client = mock_grpc
+
+    # Mock storage_control_client
+    mock_storage_control = mock.Mock()
+    mock_storage_control.transport.close = mock.AsyncMock(
+        side_effect=Exception("storage control fail")
+    )
+    fs._storage_control_client = mock_storage_control
+
+    # Mock mrd_pool_cache
+    mock_cache = mock.Mock()
+    mock_cache.close = mock.AsyncMock(side_effect=Exception("cache fail"))
+    fs._mrd_pool_cache = mock_cache
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        await fs.close_resources()
+
+    assert "Failed to close grpc_client: grpc fail" in caplog.text
+    assert "Failed to close storage_control_client: storage control fail" in caplog.text
+    assert "Failed to close MRDPoolCache: cache fail" in caplog.text
+
+    assert fs._grpc_client is None
+    assert fs._storage_control_client is None
