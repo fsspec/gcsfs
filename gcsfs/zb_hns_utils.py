@@ -460,9 +460,6 @@ class MRDPool:
             if self._closed:
                 return
 
-            if self._initialized and self._free_mrds.qsize() != len(self._all_mrds):
-                raise RuntimeError("Cannot close pool with active MRDs.")
-
             try:
                 if self._cache is not None:
                     await self._cache.release(self._key, self._all_mrds)

@@ -801,19 +801,6 @@ async def test_mrd_pool_close_exception_handling(mock_cache):
 
 
 @pytest.mark.asyncio
-async def test_mrd_pool_close_with_active_mrds_raises_assertion():
-    mock_cache = mock.AsyncMock()
-    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache)
-    mrd = mock.AsyncMock()
-    pool._all_mrds.append(mrd)
-    # Do not put in _free_mrds, so it is active
-    pool._initialized = True
-
-    with pytest.raises(RuntimeError, match="Cannot close pool with active MRDs"):
-        await pool.close()
-
-
-@pytest.mark.asyncio
 @mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
 async def test_mrd_pool_cache_get_creates_mrd_queue(init_mrd_mock, mock_gcsfs):
     mock_mrd = mock.AsyncMock()
