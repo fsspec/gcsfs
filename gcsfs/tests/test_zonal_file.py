@@ -665,12 +665,16 @@ def test_zonal_file_fetch_range_unhandled_runtime_error(mock_sync, mock_gcsfs):
 @pytest.mark.asyncio
 @mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
 async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
-    """Two ZonalFiles opened on the same path share one idle MRD queue and
-    only pay init_mrd once."""
+    """Two ZonalFiles opened on the same path share idle MRDs."""
 
-    seed = mock.AsyncMock()
-    seed.persisted_size = 0
-    init_mrd_mock.return_value = seed
+    mock_mrds = []
+
+    async def mock_create_mrd(*_a, **_kw):
+        m = mock.AsyncMock(persisted_size=0)
+        mock_mrds.append(m)
+        return m
+
+    init_mrd_mock.side_effect = mock_create_mrd
 
     fs = mock.Mock()
     fs.loop = asyncio.new_event_loop()
@@ -688,19 +692,25 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     assert fs._mrd_pool_cache._refcounts[("bucket", "key", "1")] == 2
     assert init_mrd_mock.await_count == 2
 
+    a_mrd = pool_a._all_mrds[0]
+    b_mrd = pool_b._all_mrds[0]
+
     await pool_a.close()
     await pool_b.close()
 
     # Verify reuse after close
-    pool_c = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
-    mrd_c = pool_c._all_mrds[0]
+    pool_c = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=2)
+
+    assert init_mrd_mock.await_count == 3  # 2 from before + 1 from pool_c init
+
+    async with pool_c.get_mrd() as m1:
+        assert m1 is mock_mrds[2]  # The one created in pool_c.initialize()
+
+        async with pool_c.get_mrd() as m2:
+            assert m2 is b_mrd or m2 is a_mrd  # Reused from cache
+
+    assert init_mrd_mock.await_count == 3  # No new calls in get_mrd
+
     await pool_c.close()
-
-    pool_d = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
-    assert pool_d._all_mrds[0] is mrd_c
-
-    assert init_mrd_mock.await_count == 2  # still only called twice
-
-    await pool_d.close()
     await fs._mrd_pool_cache.close()
     fs.loop.close()
