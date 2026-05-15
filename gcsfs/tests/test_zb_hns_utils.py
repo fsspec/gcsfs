@@ -952,18 +952,29 @@ async def test_mrd_pool_cache_pinned_never_evicted(init_mrd_mock, mock_gcsfs):
 @pytest.mark.asyncio
 @mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
 async def test_mrd_pool_cache_release_reuses_mrd_on_get(init_mrd_mock, mock_gcsfs):
-    init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
+    mock_mrds = []
+
+    async def mock_create_mrd(*_a, **_kw):
+        m = mock.AsyncMock(persisted_size=0)
+        mock_mrds.append(m)
+        return m
+
+    init_mrd_mock.side_effect = mock_create_mrd
 
     cache = MRDPoolCache(mock_gcsfs, max_idle_pools=4)
     a = await cache.get("bucket", "obj", "1", pool_size=1)
-    a_queue = a._cache._mrd_queues[a._key]
+    a_mrd = a._all_mrds[0]
     await a.close()
-    assert ("bucket", "obj", "1") in cache._evictable_keys
 
-    b = await cache.get("bucket", "obj", "1", pool_size=1)
-    assert b._cache._mrd_queues[b._key] is a_queue
-    assert ("bucket", "obj", "1") not in cache._evictable_keys
-    init_mrd_mock.assert_awaited_once()  # not re-initialized
+    b = await cache.get("bucket", "obj", "1", pool_size=2)
+
+    async with b.get_mrd() as m1:
+        assert m1 is mock_mrds[1]  # The one created in b.initialize()
+
+        async with b.get_mrd() as m2:
+            assert m2 is a_mrd  # Reused from cache (originally from a)
+
+    assert init_mrd_mock.await_count == 2
 
 
 @pytest.mark.asyncio
