@@ -2153,6 +2153,7 @@ async def test_get_control_plane_client_quota_project_id(
     requester_pays, expected_quota_project
 ):
 
+    ExtendedGcsFileSystem.clear_instance_cache()
     fs = ExtendedGcsFileSystem(project="my-project", requester_pays=requester_pays)
 
     mock_transport_cls = mock.Mock()
