@@ -44,4 +44,13 @@ def tmpfile(extension="", dir=None):
 
 def is_real_gcs():
     """Checks if tests are explicitly running against real GCS."""
-    return os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+    if (
+        "STORAGE_EMULATOR_HOST" not in os.environ
+        and "GOOGLE_CLOUD_UNIVERSE_DOMAIN" not in os.environ
+    ):
+        return False
+
+    from gcsfs.core import _location
+
+    host = _location()
+    return host.startswith("https://")

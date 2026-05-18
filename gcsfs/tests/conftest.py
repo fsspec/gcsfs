@@ -116,13 +116,13 @@ def stop_docker(container):
 
 @pytest.fixture(scope="session")
 def docker_gcs():
-    if "STORAGE_EMULATOR_HOST" in os.environ:
-        if not is_real_gcs():
-            params["token"] = "anon"
-        # assume using real API or otherwise have a server already set up
-        yield os.getenv("STORAGE_EMULATOR_HOST")
+    if not is_real_gcs():
+        params["token"] = "anon"
+
+    if "STORAGE_EMULATOR_HOST" in os.environ or is_real_gcs():
+        from gcsfs.core import _location
+        yield _location()
         return
-    params["token"] = "anon"
     container = "gcsfs_test"
     cmd = (
         "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "
