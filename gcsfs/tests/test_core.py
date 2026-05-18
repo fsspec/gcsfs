@@ -2486,6 +2486,7 @@ def test_default_gcp_universe(monkeypatch):
     # Make sure we simulate a mock less connection
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", raising=False)
 
     fs = fsspec.filesystem("gcs", token="anon")
     assert fs.base == "https://storage.googleapis.com/storage/v1/"
