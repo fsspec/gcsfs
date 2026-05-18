@@ -31,6 +31,8 @@ pytestmark = pytest.mark.skipif(
     not should_run, reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set"
 )
 
+ORIGINAL_GET_BUCKET_TYPE = ExtendedGcsFileSystem._get_bucket_type
+
 FIXED_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 FIXED_REQUEST_ID = str(FIXED_UUID)
 
@@ -2336,7 +2338,7 @@ class TestExtendedGcsFileSystemBucketType:
         """Override the global session mock to allow testing the real _get_bucket_type."""
         with mock.patch(
             "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
-            new=ExtendedGcsFileSystem._get_bucket_type,
+            new=ORIGINAL_GET_BUCKET_TYPE,
         ):
             yield
 
