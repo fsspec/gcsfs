@@ -159,7 +159,9 @@ def gcs_factory(docker_gcs):
 
     def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
-        return fsspec.filesystem("gcs", **params, **kwargs)
+        combined_params = params.copy()
+        combined_params.update(kwargs)
+        return fsspec.filesystem("gcs", **combined_params)
 
     return factory
 
