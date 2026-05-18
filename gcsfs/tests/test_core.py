@@ -1841,8 +1841,8 @@ def test_user_project_fallback_google_default(monkeypatch):
 
 
 @pytest.mark.parametrize("requester_pays", [True, TEST_PROJECT])
-def test_requester_pays_cat(requester_pays_bucket, requester_pays):
-    gcs = GCSFileSystem(requester_pays=requester_pays)
+def test_requester_pays_cat(gcs_factory, requester_pays_bucket, requester_pays):
+    gcs = gcs_factory(requester_pays=requester_pays)
     file_path = f"{requester_pays_bucket}/test_file.txt"
     data = b"test data requester pays"
 
@@ -1850,14 +1850,14 @@ def test_requester_pays_cat(requester_pays_bucket, requester_pays):
     assert gcs.cat(file_path) == data
 
 
-def test_requester_pays_fails_without_user_project(requester_pays_bucket):
+def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_factory):
     """Test that operations on a requester-pays bucket fail if the flag is not set."""
-    fs = GCSFileSystem(requester_pays=False)
+    fs = gcs_factory(requester_pays=False)
     with pytest.raises(ValueError, match="Bucket is requester pays"):
         fs.ls(requester_pays_bucket)
 
 
-def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
+def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""
     fs = gcs_factory(requester_pays=True)

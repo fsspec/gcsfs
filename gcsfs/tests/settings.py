@@ -23,7 +23,7 @@ TEST_HNS_REQUESTER_PAYS_BUCKET = _get_bucket_name(
 )
 TEST_KMS_KEY = os.getenv(
     "GCSFS_TEST_KMS_KEY",
-    f"projects/{TEST_PROJECT}/locations/us/keyRings/gcsfs_test/cryptKeys/gcsfs_test_key",
+    f"projects/{TEST_PROJECT}/locations/{TEST_REGION}/keyRings/gcsfs_test/cryptoKeys/gcsfs_test_key",
 )
 
 # =============================================================================
