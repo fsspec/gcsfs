@@ -2326,3 +2326,93 @@ class TestStorageControlRetryExecution:
             mock_create.assert_called_once()
             kwargs = mock_create.call_args.kwargs
             assert kwargs["timeout"] == 30.0  # STORAGE_CONTROL_RPC_TIMEOUT
+
+
+class TestExtendedGcsFileSystemBucketType:
+    """Unit tests for ExtendedGcsFileSystem _get_bucket_type and grpc_client."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_get_bucket_type_on_emulator(self):
+        """Override the global session mock to allow testing the real _get_bucket_type."""
+        with mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
+            new=ExtendedGcsFileSystem._get_bucket_type,
+        ):
+            yield
+
+    @pytest.fixture
+    def extended_gcsfs(self):
+        ExtendedGcsFileSystem.clear_instance_cache()
+        return ExtendedGcsFileSystem(token="anon")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "location_type, hns_enabled, expected_bucket_type",
+        [
+            ("zone", None, BucketType.ZONAL_HIERARCHICAL),
+            ("region", True, BucketType.HIERARCHICAL),
+            ("region", False, BucketType.NON_HIERARCHICAL),
+        ],
+    )
+    async def test_get_bucket_type_detection(
+        self, extended_gcsfs, location_type, hns_enabled, expected_bucket_type
+    ):
+        fs = extended_gcsfs
+        mock_response = mock.Mock()
+        mock_response.location_type = location_type
+        if hns_enabled is not None:
+            mock_response.hierarchical_namespace = mock.Mock(enabled=hns_enabled)
+
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as mock_client_getter:
+            mock_client = mock_client_getter.return_value
+            mock_client.get_storage_layout = mock.AsyncMock(return_value=mock_response)
+
+            bucket_type = await fs._get_bucket_type("test-bucket")
+            assert bucket_type == expected_bucket_type
+
+            if location_type == "zone":
+                mock_client.get_storage_layout.assert_awaited_once_with(
+                    name="projects/_/buckets/test-bucket/storageLayout",
+                    retry=mock.ANY,
+                    timeout=mock.ANY,
+                )
+
+    @pytest.mark.asyncio
+    async def test_get_bucket_type_not_found(self, extended_gcsfs, caplog):
+        import logging
+
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as mock_client_getter:
+            mock_client = mock_client_getter.return_value
+            mock_client.get_storage_layout = mock.AsyncMock(
+                side_effect=api_exceptions.NotFound("Not Found")
+            )
+
+            with caplog.at_level(logging.WARNING, logger="gcsfs"):
+                bucket_type = await fs._get_bucket_type("missing-bucket")
+                assert bucket_type == BucketType.UNKNOWN
+                assert "not found or you lack permissions" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_get_bucket_type_general_exception(self, extended_gcsfs, caplog):
+        import logging
+
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as mock_client_getter:
+            mock_client = mock_client_getter.return_value
+            mock_client.get_storage_layout = mock.AsyncMock(
+                side_effect=Exception("Error")
+            )
+
+            with caplog.at_level(logging.WARNING, logger="gcsfs"):
+                bucket_type = await fs._get_bucket_type("error-bucket")
+                assert bucket_type == BucketType.UNKNOWN
+                assert "Could not determine bucket type" in caplog.text
