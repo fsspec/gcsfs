@@ -14,6 +14,7 @@ TEST_VERSIONED_BUCKET = _get_bucket_name(
 TEST_HNS_BUCKET = _get_bucket_name("GCSFS_HNS_TEST_BUCKET", "gcsfs_hns_test")
 TEST_ZONAL_BUCKET = _get_bucket_name("GCSFS_ZONAL_TEST_BUCKET", "gcsfs_zonal_test")
 TEST_PROJECT = os.getenv("GCSFS_TEST_PROJECT", "project")
+TEST_REGION = os.getenv("GCSFS_TEST_REGION", "us-central1")
 TEST_REQUESTER_PAYS_BUCKET = _get_bucket_name(
     "GCSFS_TEST_REQ_PAYS_BUCKET", "gcsfs_test_req_pays"
 )

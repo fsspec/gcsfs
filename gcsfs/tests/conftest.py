@@ -21,6 +21,8 @@ from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
     TEST_HNS_REQUESTER_PAYS_BUCKET,
+    TEST_PROJECT,
+    TEST_REGION,
     TEST_REQUESTER_PAYS_BUCKET,
     TEST_VERSIONED_BUCKET,
     TEST_ZONAL_BUCKET,
@@ -121,6 +123,7 @@ def docker_gcs():
 
     if "STORAGE_EMULATOR_HOST" in os.environ or is_real_gcs():
         from gcsfs.core import _location
+
         yield _location()
         return
     container = "gcsfs_test"
@@ -150,6 +153,10 @@ def docker_gcs():
 @pytest.fixture(scope="session")
 def gcs_factory(docker_gcs):
     params["endpoint_url"] = docker_gcs
+    if is_real_gcs():
+        params["default_location"] = TEST_REGION
+        params["project"] = TEST_PROJECT
+
 
     def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
