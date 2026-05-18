@@ -157,7 +157,6 @@ def gcs_factory(docker_gcs):
         params["default_location"] = TEST_REGION
         params["project"] = TEST_PROJECT
 
-
     def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
         return fsspec.filesystem("gcs", **params, **kwargs)
