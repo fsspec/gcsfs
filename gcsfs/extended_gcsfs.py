@@ -160,8 +160,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if self._grpc_client is None:
             client_options = ClientOptions(quota_project_id=self._user_project)
             if self._location:
-                # client_options expects only the host:port, without the protocol.
-                endpoint = self._location.split("://")[-1]
+                # client_options expects only the host:port, without any protocol or path components.
+                endpoint = self._location.split("://")[-1].split("/")[0]
                 client_options.api_endpoint = endpoint
             self._grpc_client = AsyncGrpcClient(
                 credentials=self.credential,
@@ -186,7 +186,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 "quota_project_id": self._user_project,
             }
             if self._location:
-                endpoint = self._location.split("://")[-1]
+                # Extract host:port safely (strips protocol and trailing URL paths if any).
+                endpoint = self._location.split("://")[-1].split("/")[0]
                 channel_kwargs["host"] = endpoint
 
             if self._location and self._location.startswith("http://"):

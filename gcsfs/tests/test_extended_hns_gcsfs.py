@@ -2182,6 +2182,7 @@ async def test_get_control_plane_client_quota_project_id(
     "endpoint_url, env_updates, expected_host, expected_insecure",
     [
         ("https://my-endpoint.com", {}, "my-endpoint.com", False),
+        ("https://my-endpoint.com/storage/v1/", {}, "my-endpoint.com", False),
         (
             None,
             {
@@ -2196,6 +2197,15 @@ async def test_get_control_plane_client_quota_project_id(
             {
                 "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
                 "STORAGE_EMULATOR_HOST": "http://my-emulator.com",
+            },
+            "my-emulator.com",
+            True,
+        ),
+        (
+            None,
+            {
+                "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
+                "STORAGE_EMULATOR_HOST": "http://my-emulator.com/storage/v1/",
             },
             "my-emulator.com",
             True,
