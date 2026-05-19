@@ -91,13 +91,22 @@ class ExtendedGcsFileSystem(GCSFileSystem):
     """
 
     def __init__(
-        self, *args, finalize_on_close=False, mrd_pool_cache_size=16, **kwargs
+        self,
+        *args,
+        finalize_on_close=False,
+        mrd_pool_cache_size=16,
+        max_mrd_pool_cache_queue_size=8,
+        **kwargs,
     ):
         """
         Parameters
         ----------
         finalize_on_close : bool, default False
             By default, files in zonal buckets are left unfinalized to allow appends.
+        mrd_pool_cache_size : int, default 16
+            Maximum number of idle pools to retain in the cache.
+        max_mrd_pool_cache_queue_size : int, default 8
+            Maximum number of idle MRDs per key in the cache.
         **kwargs : dict
             Additional arguments passed to GCSFileSystem.
             Supports retry configuration overrides for Storage Control API:
@@ -134,7 +143,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         )
         weakref.finalize(self, self._memmove_executor.shutdown)
         self._mrd_pool_cache = zb_hns_utils.MRDPoolCache(
-            self, max_idle_pools=mrd_pool_cache_size
+            self,
+            max_idle_pools=mrd_pool_cache_size,
+            max_queue_size=max_mrd_pool_cache_queue_size,
         )
         weakref.finalize(
             self,

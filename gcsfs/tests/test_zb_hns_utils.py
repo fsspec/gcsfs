@@ -1067,3 +1067,49 @@ async def test_mrd_pool_cache_get_fs_gc(mock_gcsfs):
         RuntimeError, match="ExtendedGcsFileSystem has been garbage collected"
     ):
         await cache.get("bucket", "obj", "1", pool_size=1)
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_max_queue_size_limit(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.side_effect = lambda *a, **kw: mock.AsyncMock(persisted_size=0)
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=2, max_queue_size=2)
+
+    # Create pools for same key
+    pool_a = await cache.get("bucket", "obj", "1", pool_size=2)
+    pool_b = await cache.get("bucket", "obj", "1", pool_size=2)
+
+    # Let's get the MRDs from the pools so they scale up
+    async with pool_a.get_mrd() as m1, pool_a.get_mrd() as m2:
+        async with pool_b.get_mrd() as m3, pool_b.get_mrd() as m4:
+            # We have 4 MRDs checked out across the pools for the same key
+            mrd_instances = [m1, m2, m3, m4]
+
+    # Now let's close both pools, which releases their MRDs back to the cache
+    await pool_a.close()
+    await pool_b.close()
+
+    # The queue size should be exactly max_queue_size (2)
+    queue = cache._mrd_queues[("bucket", "obj", "1")]
+    assert len(queue) == 2
+
+    # Two of the MRDs should have been closed
+    closed_count = sum(1 for mrd in mrd_instances if mrd.close.call_count > 0)
+    assert closed_count == 2
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_max_queue_size_zero(init_mrd_mock, mock_gcsfs):
+    init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=2, max_queue_size=0)
+
+    pool = await cache.get("bucket", "obj", "1", pool_size=2)
+    async with pool.get_mrd() as m1:
+        mrd_instance = m1
+
+    await pool.close()
+
+    queue = cache._mrd_queues[("bucket", "obj", "1")]
+    assert len(queue) == 0
+    mrd_instance.close.assert_awaited_once()

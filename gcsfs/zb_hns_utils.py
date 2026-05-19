@@ -488,23 +488,20 @@ class MRDPoolCache:
     1. `get()` returns an `MRDPool`.
     2. When the pool is closed, it returns its MRDs to this cache via `release()`.
     3. When a key's refcount hits zero, it becomes eligible for LRU eviction.
-
-    Note: `max_idle_pools` bounds the number of cached keys, not the number of
-    idle MRDs. Each cached key holds up to `pool_size` MRDs from its last user,
-    so peak idle inventory is approximately `max_idle_pools * pool_size` MRDs
-    (each owning a gRPC stream).
     """
 
-    def __init__(self, gcsfs, max_idle_pools: int = 16):
+    def __init__(self, gcsfs, max_idle_pools: int = 16, max_queue_size: int = 8):
         """
         Initializes the MRDPoolCache.
 
         Args:
             gcsfs (ExtendedGcsFileSystem): The filesystem instance.
             max_idle_pools (int, optional): Maximum number of idle pools to retain. Defaults to 16.
+            max_queue_size (int, optional): Maximum number of idle MRDs per key. Defaults to 8.
         """
         self._gcsfs = weakref.ref(gcsfs)
         self._max_idle_pools = max_idle_pools
+        self._max_queue_size = max_queue_size
         self._mrd_queues = {}
         self._refcounts = {}
         self._evictable_keys = collections.OrderedDict()
@@ -611,7 +608,10 @@ class MRDPoolCache:
         mrd_queue = self._mrd_queues.get(key)
         if mrd_queue is not None:
             for mrd in mrds:
-                mrd_queue.append(mrd)
+                if len(mrd_queue) < self._max_queue_size:
+                    mrd_queue.append(mrd)
+                else:
+                    mrds_to_close.append(mrd)
         else:
             mrds_to_close.extend(mrds)
 
