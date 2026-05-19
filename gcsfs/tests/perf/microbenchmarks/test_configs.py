@@ -94,7 +94,8 @@ def test_read_configurator(mock_config_dependencies):
     assert len(cases) == 1
     case = cases[0]
     assert (
-        case.name == "read_test_1procs_1threads_1MB_file_16MB_chunk_16MB_block_regional"
+        case.name
+        == "read_test_mrd_pool_cache_16_mrd_pool_1_1procs_1threads_1MB_file_16MB_chunk_16MB_block_regional"
     )
     assert case.file_size_bytes == 1 * MB
     assert case.block_size_bytes == 16 * MB

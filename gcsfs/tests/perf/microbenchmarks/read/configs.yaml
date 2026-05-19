@@ -30,3 +30,19 @@ scenarios:
   - name: "read_rand_fixed_duration_multi_thread"
     pattern: "rand"
     threads: [32]
+
+  - name: "read_repeatedly_open_same_file_fixed_duration"
+    pattern: "repeatedly_open_same_file"
+    bucket_types:
+      - "zonal"
+    file_sizes_mb:
+      - 256
+    chunk_sizes_mb:
+      - 1
+    mrd_pool_cache_sizes:
+      - 16
+      - 0
+    mrd_pool_sizes:
+      - 1
+      - 4
+    threads: [1]

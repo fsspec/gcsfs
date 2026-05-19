@@ -16,14 +16,18 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
 BENCHMARK_GROUP = "read"
 
 
-def _read_op_seq(gcs, file_paths, chunk_size, runtime, block_size):
+def _read_op_seq(gcs, file_paths, chunk_size, runtime, block_size, mrd_pool_size=None):
     """Read files sequentially for a fixed duration."""
     total_bytes_read = 0
     start_time = time.perf_counter()
     files_it = itertools.cycle(file_paths)
+    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    if mrd_pool_size is not None:
+        open_kwargs["pool_size"] = mrd_pool_size
+
     while time.perf_counter() - start_time < runtime:
         path = next(files_it)
-        with gcs.open(path, "rb", block_size=block_size, cache_type="none") as f:
+        with gcs.open(path, "rb", **open_kwargs) as f:
             while time.perf_counter() - start_time < runtime:
                 data = f.read(chunk_size)
                 if not data:
@@ -32,14 +36,20 @@ def _read_op_seq(gcs, file_paths, chunk_size, runtime, block_size):
     return total_bytes_read
 
 
-def _read_op_rand(gcs, file_paths, chunk_size, offsets, runtime, block_size):
+def _read_op_rand(
+    gcs, file_paths, chunk_size, offsets, runtime, block_size, mrd_pool_size=None
+):
     """Read files from random offsets for a fixed duration."""
     total_bytes_read = 0
     start_time = time.perf_counter()
     files_it = itertools.cycle(file_paths)
+    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    if mrd_pool_size is not None:
+        open_kwargs["pool_size"] = mrd_pool_size
+
     while time.perf_counter() - start_time < runtime:
         path = next(files_it)
-        with gcs.open(path, "rb", cache_type="none", block_size=block_size) as f:
+        with gcs.open(path, "rb", **open_kwargs) as f:
             for offset in offsets:
                 if time.perf_counter() - start_time >= runtime:
                     break
@@ -49,12 +59,33 @@ def _read_op_rand(gcs, file_paths, chunk_size, offsets, runtime, block_size):
     return total_bytes_read
 
 
-def _random_read_worker(gcs, file_paths, chunk_size, offsets, runtime, block_size):
+def _read_op_repeatedly_open_same_file(
+    gcs, file_paths, chunk_size, runtime, block_size, mrd_pool_size=None
+):
+    """Repeatedly open file, read a chunk, and close it to measure connection overhead."""
+    total_bytes_read = 0
+    start_time = time.perf_counter()
+    files_it = itertools.cycle(file_paths)
+    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    if mrd_pool_size is not None:
+        open_kwargs["pool_size"] = mrd_pool_size
+
+    while time.perf_counter() - start_time < runtime:
+        path = next(files_it)
+        with gcs.open(path, "rb", **open_kwargs) as f:
+            data = f.read(chunk_size)
+            total_bytes_read += len(data)
+    return total_bytes_read
+
+
+def _random_read_worker(
+    gcs, file_paths, chunk_size, offsets, runtime, block_size, mrd_pool_size=None
+):
     """A worker that reads files from random offsets."""
     local_offsets = list(offsets)
     random.shuffle(local_offsets)
     return _read_op_rand(
-        gcs, file_paths, chunk_size, local_offsets, runtime, block_size
+        gcs, file_paths, chunk_size, local_offsets, runtime, block_size, mrd_pool_size
     )
 
 
@@ -106,10 +137,20 @@ def test_read_multi_threaded(benchmark, gcsfs_benchmark_read, monitor):
 def _build_read_worker(params, gcs, file_paths):
     op = None
     block_size = params.block_size_bytes
-    op_args = (gcs, file_paths, params.chunk_size_bytes, params.runtime, block_size)
+    mrd_pool_size = getattr(params, "mrd_pool_size", None)
+    op_args = (
+        gcs,
+        file_paths,
+        params.chunk_size_bytes,
+        params.runtime,
+        block_size,
+        mrd_pool_size,
+    )
 
     if params.pattern == "seq":
         op = _read_op_seq
+    elif params.pattern == "repeatedly_open_same_file":
+        op = _read_op_repeatedly_open_same_file
     elif params.pattern == "rand":
         op = _random_read_worker
         offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
@@ -120,6 +161,7 @@ def _build_read_worker(params, gcs, file_paths):
             offsets,
             params.runtime,
             block_size,
+            mrd_pool_size,
         )
     else:
         raise ValueError(f"Unsupported read pattern: {params.pattern}")
@@ -138,6 +180,7 @@ def _process_worker_fixed_duration(
     index,
     runtime,
     block_size,
+    mrd_pool_size=None,
 ):
     """A worker function for each process to read files for a fixed duration."""
     with ThreadPoolExecutor(max_workers=threads) as executor:
@@ -145,7 +188,26 @@ def _process_worker_fixed_duration(
         if pattern == "seq":
             futures = [
                 executor.submit(
-                    _read_op_seq, gcs, file_paths, chunk_size, runtime, block_size
+                    _read_op_seq,
+                    gcs,
+                    file_paths,
+                    chunk_size,
+                    runtime,
+                    block_size,
+                    mrd_pool_size,
+                )
+                for _ in range(threads)
+            ]
+        elif pattern == "repeatedly_open_same_file":
+            futures = [
+                executor.submit(
+                    _read_op_repeatedly_open_same_file,
+                    gcs,
+                    file_paths,
+                    chunk_size,
+                    runtime,
+                    block_size,
+                    mrd_pool_size,
                 )
                 for _ in range(threads)
             ]
@@ -160,6 +222,7 @@ def _process_worker_fixed_duration(
                     offsets,
                     runtime,
                     block_size,
+                    mrd_pool_size,
                 )
                 for _ in range(threads)
             ]
@@ -195,6 +258,7 @@ def test_read_multi_process(
             i,
             params.runtime,
             params.block_size_bytes,
+            getattr(params, "mrd_pool_size", None),
         )
 
     run_multi_process(
@@ -205,6 +269,9 @@ def test_read_multi_process(
         worker_target=_process_worker_fixed_duration,
         args_builder=args_builder,
         benchmark_group=BENCHMARK_GROUP,
-        gcs_kwargs={"block_size": params.block_size_bytes},
+        gcs_kwargs={
+            "block_size": params.block_size_bytes,
+            "mrd_pool_cache_size": getattr(params, "mrd_pool_cache_size", 16),
+        },
         request=request,
     )
