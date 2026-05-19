@@ -806,7 +806,7 @@ def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):
     ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
 
     # Verify that asyn.sync was called
-    mock_sync.assert_called_once_with(mock_asyn_loop, mock_pool.close, timeout=0.1)
+    mock_sync.assert_called_once_with(mock_asyn_loop, mock_pool.close, timeout=5.0)
 
 
 def test_finalize_mrd_pool_cache_asyn_loop_running_timeout(monkeypatch):

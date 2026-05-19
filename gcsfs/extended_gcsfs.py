@@ -160,7 +160,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             asyncio.run_coroutine_threadsafe(cache.close(), current_loop)
         elif asyn.loop[0] is not None and asyn.loop[0].is_running():
             try:
-                asyn.sync(asyn.loop[0], cache.close, timeout=0.1)
+                asyn.sync(asyn.loop[0], cache.close, timeout=5.0)
             except fsspec.FSTimeoutError:
                 pass
 
