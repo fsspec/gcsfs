@@ -22,4 +22,5 @@ fi
 if [ "$INSTALL_FSSPEC_HEAD" = "true" ]; then
     echo '--- Installing fsspec HEAD ---'
     pip install --force-reinstall git+https://github.com/fsspec/filesystem_spec.git > /dev/null
+    echo "fsspec version: $(python3 -c 'import fsspec; print(fsspec.__version__)')"
 fi

@@ -21,6 +21,8 @@ from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
     TEST_HNS_REQUESTER_PAYS_BUCKET,
+    TEST_PROJECT,
+    TEST_REGION,
     TEST_REQUESTER_PAYS_BUCKET,
     TEST_VERSIONED_BUCKET,
     TEST_ZONAL_BUCKET,
@@ -94,7 +96,7 @@ def _avoid_adc_timeout(monkeypatch):
     yield
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="session", autouse=True)
 def _mock_get_bucket_type_on_emulator():
     """Mock _get_bucket_type to return UNKNOWN instantly on emulator."""
     if not is_real_gcs():
@@ -116,13 +118,14 @@ def stop_docker(container):
 
 @pytest.fixture(scope="session")
 def docker_gcs():
-    if "STORAGE_EMULATOR_HOST" in os.environ:
-        if not is_real_gcs():
-            params["token"] = "anon"
-        # assume using real API or otherwise have a server already set up
-        yield os.getenv("STORAGE_EMULATOR_HOST")
+    if not is_real_gcs():
+        params["token"] = "anon"
+
+    if "STORAGE_EMULATOR_HOST" in os.environ or is_real_gcs():
+        from gcsfs.core import _location
+
+        yield _location()
         return
-    params["token"] = "anon"
     container = "gcsfs_test"
     cmd = (
         "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "
@@ -150,10 +153,15 @@ def docker_gcs():
 @pytest.fixture(scope="session")
 def gcs_factory(docker_gcs):
     params["endpoint_url"] = docker_gcs
+    if is_real_gcs():
+        params["default_location"] = TEST_REGION
+        params["project"] = TEST_PROJECT
 
     def factory(**kwargs):
         GCSFileSystem.clear_instance_cache()
-        return fsspec.filesystem("gcs", **params, **kwargs)
+        combined_params = params.copy()
+        combined_params.update(kwargs)
+        return fsspec.filesystem("gcs", **combined_params)
 
     return factory
 

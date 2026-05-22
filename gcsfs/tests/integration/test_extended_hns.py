@@ -17,8 +17,8 @@ import uuid
 
 import pytest
 
-from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
-from gcsfs.tests.settings import TEST_HNS_BUCKET, TEST_PROJECT
+from gcsfs.extended_gcsfs import BucketType
+from gcsfs.tests.settings import TEST_HNS_BUCKET
 from gcsfs.tests.utils import is_real_gcs
 
 should_run_hns = os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false").lower() in (
@@ -1624,13 +1624,15 @@ class TestHNSFolderStatus:
 class TestExtendedGcsFileSystemHnsRequesterPays:
     """Integration tests for HNS operations on requester pays buckets."""
 
-    def test_hns_mkdir_fails_without_quota_project(self, hns_requester_pays_bucket):
+    def test_hns_mkdir_fails_without_quota_project(
+        self, hns_requester_pays_bucket, gcs_factory
+    ):
         """Test that HNS mkdir fails if quota project is not provided on a req pays bucket."""
 
         bucket = hns_requester_pays_bucket
         dir_path = f"{bucket}/new_dir_{uuid.uuid4().hex}"
 
-        fs = ExtendedGcsFileSystem(requester_pays=False)
+        fs = gcs_factory(requester_pays=False)
 
         # It raises ValueError with custom message if it detects requester pays
         with pytest.raises(ValueError) as excinfo:
@@ -1638,24 +1640,28 @@ class TestExtendedGcsFileSystemHnsRequesterPays:
 
         assert "Bucket is requester pays" in str(excinfo.value)
 
-    def test_hns_mkdir_succeeds_with_quota_project(self, hns_requester_pays_bucket):
+    def test_hns_mkdir_succeeds_with_quota_project(
+        self, hns_requester_pays_bucket, gcs_factory
+    ):
         """Test that HNS mkdir succeeds if quota project is provided on a req pays bucket."""
 
         bucket = hns_requester_pays_bucket
         dir_path = f"{bucket}/new_dir_{uuid.uuid4().hex}"
 
         # Pass project explicitly to ensure it's used as quota_project_id
-        fs = ExtendedGcsFileSystem(project=TEST_PROJECT, requester_pays=True)
+        fs = gcs_factory(requester_pays=True)
 
         fs.mkdir(dir_path)
         # Invalidate cache to force reading from backend
         fs.invalidate_cache()
         assert fs.isdir(dir_path)
 
-    def test_hns_bucket_type_detection_with_req_pays(self, hns_requester_pays_bucket):
+    def test_hns_bucket_type_detection_with_req_pays(
+        self, hns_requester_pays_bucket, gcs_factory
+    ):
         """Test that hns apis are invoked and return HNS when req pays is enabled."""
 
-        fs = ExtendedGcsFileSystem(project=TEST_PROJECT, requester_pays=True)
+        fs = gcs_factory(requester_pays=True)
 
         # Clear cache to force lookup
         fs._storage_layout_cache.clear()

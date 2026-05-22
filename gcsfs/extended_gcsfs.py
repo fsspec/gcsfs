@@ -159,8 +159,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if self._grpc_client is None:
             client_options = ClientOptions(quota_project_id=self._user_project)
             if self._location:
-                # client_options expects only the host:port, without the protocol.
-                endpoint = self._location.split("://")[-1]
+                # client_options expects only the host:port, without any protocol or path components.
+                endpoint = self._location.split("://")[-1].split("/")[0]
                 client_options.api_endpoint = endpoint
             self._grpc_client = AsyncGrpcClient(
                 credentials=self.credential,
@@ -179,11 +179,18 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                     "grpc_asyncio"
                 )
             )
-            channel = transport_cls.create_channel(
-                credentials=self.credential,
-                options=[("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
-                quota_project_id=self._user_project,
-            )
+            channel_kwargs = {
+                "credentials": self.credential,
+                "options": [("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
+                "quota_project_id": self._user_project,
+            }
+            if self._location:
+                # Extract host:port safely (strips protocol and trailing URL paths if any).
+                endpoint = self._location.split("://")[-1].split("/")[0]
+                channel_kwargs["host"] = endpoint
+
+            channel = transport_cls.create_channel(**channel_kwargs)
+
             transport = transport_cls(channel=channel)
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
                 transport=transport
