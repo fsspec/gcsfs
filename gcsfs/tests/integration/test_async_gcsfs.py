@@ -18,9 +18,7 @@ import pytest
 import pytest_asyncio
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-from gcsfs.tests.conftest import requires_hns
-from gcsfs.tests.conftest import requires_rapid
-from gcsfs.tests.conftest import requires_real_gcs
+from gcsfs.tests.conftest import requires_hns, requires_rapid, requires_real_gcs
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
 pytestmark = [requires_real_gcs, requires_hns, requires_rapid]
