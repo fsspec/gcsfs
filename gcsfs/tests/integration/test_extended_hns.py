@@ -12,14 +12,14 @@ that has been extended or modified to support HNS features, such as `mv` (rename
 and `mkdir`.
 """
 
-import os
 import uuid
 
 import pytest
 
 from gcsfs.extended_gcsfs import BucketType
-from gcsfs.tests.conftest import requires_hns, requires_real_gcs
-from gcsfs.tests.settings import TEST_HNS_BUCKET, TEST_PROJECT
+from gcsfs.tests.conftest import requires_hns
+from gcsfs.tests.conftest import requires_real_gcs
+from gcsfs.tests.settings import TEST_HNS_BUCKET
 
 pytestmark = [requires_real_gcs, requires_hns]
 

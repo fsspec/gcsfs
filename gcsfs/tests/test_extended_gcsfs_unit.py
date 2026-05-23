@@ -1,7 +1,6 @@
 # Unit tests for ExtendedGCSFileSystem.
 import io
 import logging
-import os
 from unittest import mock
 
 import pytest
@@ -10,18 +9,22 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 from google.cloud.storage.exceptions import DataCorruption
 
-from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
-from gcsfs.extended_gcsfs import (
-    BucketType,
-    ExtendedGcsFileSystem,
-    initiate_upload,
-    simple_upload,
-    upload_chunk,
-)
-from gcsfs.tests.conftest import csv_files, files, requires_rapid
-from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
+from gcsfs.checkers import ConsistencyChecker
+from gcsfs.checkers import MD5Checker
+from gcsfs.checkers import SizeChecker
+from gcsfs.extended_gcsfs import BucketType
+from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.extended_gcsfs import initiate_upload
+from gcsfs.extended_gcsfs import simple_upload
+from gcsfs.extended_gcsfs import upload_chunk
+from gcsfs.tests.conftest import csv_files
+from gcsfs.tests.conftest import files
+from gcsfs.tests.conftest import requires_rapid
+from gcsfs.tests.settings import TEST_BUCKET
+from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
-from gcsfs.tests.utils import is_real_gcs, tmpfile
+from gcsfs.tests.utils import is_real_gcs
+from gcsfs.tests.utils import tmpfile
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"

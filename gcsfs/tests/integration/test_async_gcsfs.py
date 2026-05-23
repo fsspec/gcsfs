@@ -12,14 +12,15 @@ These tests require specific configuration:
 - The `GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT` environment variable must be 'true'.
 """
 
-import os
 import uuid
 
 import pytest
 import pytest_asyncio
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-from gcsfs.tests.conftest import requires_real_gcs, requires_hns, requires_rapid
+from gcsfs.tests.conftest import requires_hns
+from gcsfs.tests.conftest import requires_rapid
+from gcsfs.tests.conftest import requires_real_gcs
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
 pytestmark = [requires_real_gcs, requires_hns, requires_rapid]
