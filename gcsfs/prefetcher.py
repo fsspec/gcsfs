@@ -2,6 +2,7 @@ import asyncio
 import ctypes
 import logging
 import threading
+import weakref
 from collections import deque
 
 import fsspec.asyn
@@ -22,10 +23,13 @@ PyBytes_AsString.argtypes = [ctypes.py_object]
 def _fast_slice(src_bytes, offset, read_size):
     if read_size == 0:
         return b""
+    if offset < 0 or offset + read_size > len(src_bytes):
+        raise ValueError("Slice indices out of bounds")
     dest_bytes = PyBytes_FromStringAndSize(None, read_size)
     src_ptr = PyBytes_AsString(src_bytes)
     dest_ptr = PyBytes_AsString(dest_bytes)
 
+    # Releases the GIL
     ctypes.memmove(dest_ptr, src_ptr + offset, read_size)
     return dest_bytes
 
@@ -125,7 +129,7 @@ class PrefetchProducer:
     # Threshold for disabling proactive prefetching on large, variable reads.
     #
     # If the average read size exceeds this value and patterns are variable,
-    # prefetching shifts from an I/O bottleneck to a CPU bottleneck. When a user
+    # prefetching shifts from an I/O bottleneck to a memory(CPU) bottleneck. When a user
     # requests random massive sizes (e.g., jumping between 64MB and INF), the
     # producer still fetches chunks based on the rolling average. The consumer
     # then has to pick up multiple chunks and stitch them together to match the
@@ -176,7 +180,7 @@ class PrefetchProducer:
 
         self.consumer = consumer
         self.tracker = tracker
-        self.orchestrator = orchestrator
+        self.orchestrator = weakref.proxy(orchestrator)
         self._user_max_prefetch_size = user_max_prefetch_size
 
         self.current_offset = 0
@@ -228,6 +232,9 @@ class PrefetchProducer:
         for task in list(self._active_tasks):
             if not task.done():
                 tasks_to_wait.append(task)
+
+        # We do not cancel the network task, instead we wait on them.
+        # This is intentionally done to avoid MRD stream disruption.
         self._active_tasks.clear()
 
         # Clear out any leftover items in the queue
@@ -289,7 +296,7 @@ class PrefetchProducer:
                     and avg_io_size > self._user_max_prefetch_size
                 )
 
-                # Disable prefetching ahead if highly variable AND average > 64MB, or if it exceeds user max
+                # Disable prefetching ahead if variable AND average > 64MB, or if it exceeds user max
                 if (
                     is_variable and avg_io_size > PrefetchProducer.VARIABLE_IO_THRESHOLD
                 ) or exceeds_user_max:
@@ -385,6 +392,10 @@ class PrefetchProducer:
                     await self.queue.put(download_task)
                     self.current_offset += actual_size
 
+                if self.current_offset >= self.size:
+                    logger.debug("Producer reached EOF. Exiting background loop.")
+                    self.is_stopped = True
+                    break
         except asyncio.CancelledError:
             logger.debug("PrefetchProducer loop was cancelled.")
             pass
@@ -395,7 +406,7 @@ class PrefetchProducer:
                 exc_info=True,
             )
             self.is_stopped = True
-            self.orchestrator._set_error(e)
+            self.orchestrator.set_error(e)
             await self.queue.put(e)
 
 
@@ -425,7 +436,7 @@ class PrefetchConsumer:
         self.queue = queue
         self.wakeup_event = wakeup_event
         self.tracker = tracker
-        self.orchestrator = orchestrator
+        self.orchestrator = weakref.proxy(orchestrator)
         self.sequential_streak = 0
         self.offset = 0
         self.target_offset = 0
@@ -472,7 +483,7 @@ class PrefetchConsumer:
 
             if not available:
                 is_producer_stopped = (
-                    not hasattr(self.orchestrator, "producer")
+                    self.orchestrator.producer is None
                     or self.orchestrator.producer.is_stopped
                 )
                 if is_producer_stopped and self.queue.empty():
@@ -487,7 +498,7 @@ class PrefetchConsumer:
 
                 if isinstance(task, Exception):
                     logger.error("Consumer retrieved an exception: %s", task)
-                    self.orchestrator._set_error(task)
+                    self.orchestrator.set_error(task)
                     raise task
 
                 try:
@@ -527,7 +538,7 @@ class PrefetchConsumer:
                     raise
                 except Exception as e:
                     logger.error("Consumer caught an error: %s", e, exc_info=True)
-                    self.orchestrator._set_error(e)
+                    self.orchestrator.set_error(e)
                     raise e
 
             if not self._current_block:
@@ -594,6 +605,8 @@ class BackgroundPrefetcher:
     user's reading history, routes seek operations, and links the producer's
     network tasks with the consumer's data slicing logic.
     """
+
+    producer = None
 
     def __init__(self, fetcher, size: int, concurrency: int, max_prefetch_size=None):
         """Initializes the background prefetcher.
@@ -665,9 +678,13 @@ class BackgroundPrefetcher:
         """Context manager exit point. Ensures the prefetcher is cleanly closed."""
         self.close()
 
-    def _set_error(self, e: Exception):
+    def set_error(self, e: Exception):
         logger.error("Global error state set in BackgroundPrefetcher: %s", e)
         self._error = e
+
+        # Stop the producer loop.
+        if self.producer and not self.producer.is_stopped:
+            asyncio.run_coroutine_threadsafe(self.producer.stop(), self.loop)
 
     async def _restart_producer(self, new_offset: int):
         logger.debug(
@@ -751,6 +768,8 @@ class BackgroundPrefetcher:
                 )
                 self.is_stopped = True
                 self._error = e
+                if self.producer and not self.producer.is_stopped:
+                    asyncio.run_coroutine_threadsafe(self.producer.stop(), self.loop)
                 raise
 
             if self.is_stopped:

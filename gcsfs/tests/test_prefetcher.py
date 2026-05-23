@@ -137,6 +137,7 @@ def test_producer_concurrency_streak_and_min_chunk():
     bp.producer.MIN_CHUNK_SIZE = 10
 
     # Do 6 reads to push the streak well past the MIN_STREAKS threshold
+    # Update these values as BackgroundPrefetcher constant changes.
     for i in range(6):
         bp._fetch(i * 50, (i + 1) * 50)
 
