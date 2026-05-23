@@ -18,19 +18,10 @@ import uuid
 import pytest
 
 from gcsfs.extended_gcsfs import BucketType
-from gcsfs.tests.settings import TEST_HNS_BUCKET
-from gcsfs.tests.utils import is_real_gcs
+from gcsfs.tests.conftest import requires_hns, requires_real_gcs
+from gcsfs.tests.settings import TEST_HNS_BUCKET, TEST_PROJECT
 
-should_run_hns = os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false").lower() in (
-    "true",
-    "1",
-)
-
-# Skip these tests if not running against a real GCS backend or if experimentation flag is not set.
-pytestmark = pytest.mark.skipif(
-    not is_real_gcs() or not should_run_hns,
-    reason="This test class is for real GCS HNS buckets only and requires experimental flag.",
-)
+pytestmark = [requires_real_gcs, requires_hns]
 
 
 class TestExtendedGcsFileSystemMv:

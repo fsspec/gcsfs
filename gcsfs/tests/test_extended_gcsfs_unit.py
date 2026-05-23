@@ -18,7 +18,7 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import csv_files, files
+from gcsfs.tests.conftest import csv_files, files, requires_rapid
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
@@ -33,18 +33,8 @@ a = TEST_ZONAL_BUCKET + "/zonal/test/a"
 b = TEST_ZONAL_BUCKET + "/zonal/test/b"
 c = TEST_ZONAL_BUCKET + "/zonal/test/c"
 
-REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
-
-# If the condition is True, only then tests in this file are run.
-should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
-    "true",
-    "1",
-)
 pytestmark = [
-    pytest.mark.skipif(
-        not should_run,
-        reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set",
-    ),
+    requires_rapid,
     pytest.mark.skipif(
         is_real_gcs(),
         reason="Contains Unit tests using mocks, does not require testing on real GCS.",

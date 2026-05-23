@@ -19,26 +19,10 @@ import pytest
 import pytest_asyncio
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.tests.conftest import requires_real_gcs, requires_hns, requires_rapid
 from gcsfs.tests.settings import TEST_HNS_BUCKET
-from gcsfs.tests.utils import is_real_gcs
 
-REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
-
-# If the condition is True, only then tests in this file are run.
-should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
-    "true",
-    "1",
-)
-pytestmark = [
-    pytest.mark.skipif(
-        not should_run,
-        reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set",
-    ),
-    pytest.mark.skipif(
-        not is_real_gcs(),
-        reason="Skipping tests on emulator, requires real GCS.",
-    ),
-]
+pytestmark = [requires_real_gcs, requires_hns, requires_rapid]
 
 
 @pytest_asyncio.fixture
