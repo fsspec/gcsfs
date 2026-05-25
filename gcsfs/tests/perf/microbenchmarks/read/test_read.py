@@ -59,7 +59,7 @@ def _read_op_rand(
     return total_bytes_read
 
 
-def _read_op_repeatedly_open_same_file(
+def _read_op_reopen(
     gcs, file_paths, chunk_size, runtime, block_size, mrd_pool_size=None
 ):
     """Repeatedly open file, read a chunk, and close it to measure connection overhead."""
@@ -149,8 +149,8 @@ def _build_read_worker(params, gcs, file_paths):
 
     if params.pattern == "seq":
         op = _read_op_seq
-    elif params.pattern == "repeatedly_open_same_file":
-        op = _read_op_repeatedly_open_same_file
+    elif params.pattern == "reopen":
+        op = _read_op_reopen
     elif params.pattern == "rand":
         op = _random_read_worker
         offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
@@ -198,10 +198,10 @@ def _process_worker_fixed_duration(
                 )
                 for _ in range(threads)
             ]
-        elif pattern == "repeatedly_open_same_file":
+        elif pattern == "reopen":
             futures = [
                 executor.submit(
-                    _read_op_repeatedly_open_same_file,
+                    _read_op_reopen,
                     gcs,
                     file_paths,
                     chunk_size,
