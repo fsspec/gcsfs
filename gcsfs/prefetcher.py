@@ -698,7 +698,14 @@ class BackgroundPrefetcher:
     async def _async_fetch(self, start, end):
         logger.debug("Executing _async_fetch for range %d - %d.", start, end)
 
-        if start != self.user_offset:
+        # If the prefetcher is in error state, let's do a hard seek to start offset.
+        if self._error:
+            logger.info(
+                "Recovering from error state. Restarting producer at offset: %d", start
+            )
+            self.user_offset = start
+            await self._restart_producer(start)
+        elif start != self.user_offset:
             if self.user_offset < start <= self.producer.current_offset:
                 logger.debug(
                     "Soft seek detected. Skipping ahead from %d to %d.",
@@ -747,10 +754,6 @@ class BackgroundPrefetcher:
             return b""
 
         with self._lock:
-            if self._error:
-                logger.error("Cannot fetch data: instance has an active error state.")
-                raise self._error
-
             if self.is_stopped:
                 logger.error(
                     "Cannot fetch data: BackgroundPrefetcher is stopped or closed."
@@ -766,7 +769,6 @@ class BackgroundPrefetcher:
                 logger.error(
                     "Exception raised during synchronous fetch: %s", e, exc_info=True
                 )
-                self.is_stopped = True
                 self._error = e
                 if self.producer and not self.producer.is_stopped:
                     asyncio.run_coroutine_threadsafe(self.producer.stop(), self.loop)

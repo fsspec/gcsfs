@@ -172,18 +172,31 @@ def test_producer_loop_space_constraints():
     bp.close()
 
 
-def test_producer_error_propagation():
+def test_producer_error_propagation_and_recovery():
     fetcher = MockFetcher(b"A" * 2000, fail_at_call=3)
     bp = BackgroundPrefetcher(fetcher=fetcher, size=2000, concurrency=4)
 
     for i in range(2):
         bp._fetch(i * 100, (i + 1) * 100)
 
+    # 3rd read triggers the network timeout
     with pytest.raises(OSError, match="Simulated Network Timeout"):
         bp._fetch(400, 500)
 
+    # The prefetcher is now in an error state
+    assert isinstance(bp._error, OSError)
 
-def test_read_after_close_or_error():
+    # Disable the mock failure so it can succeed on retry
+    fetcher.fail_at_call = None
+
+    # The next fetch should seamlessly recover, wiping the error and returning data
+    data = bp._fetch(400, 500)
+    assert data == b"A" * 100
+    assert bp._error is None
+    bp.close()
+
+
+def test_read_after_close():
     bp = BackgroundPrefetcher(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=4)
     bp.close()
 
@@ -191,11 +204,18 @@ def test_read_after_close_or_error():
     with pytest.raises(RuntimeError, match="The file instance has been closed"):
         bp._fetch(0, 10)
 
-    bp2 = BackgroundPrefetcher(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=4)
-    bp2._error = ValueError("Pre-existing error")
-    with pytest.raises(ValueError, match="Pre-existing error"):
-        bp2._fetch(0, 10)
-    bp2.close()
+
+def test_read_recovers_after_error():
+    bp = BackgroundPrefetcher(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=4)
+
+    # Simulate an error state from a previous failed read
+    bp._error = ValueError("Pre-existing error")
+
+    # The new error-recovery logic allows a subsequent read to clear the error and succeed
+    assert bp._fetch(0, 10) == b"X" * 10
+    assert bp._error is None
+
+    bp.close()
 
 
 def test_empty_queue_when_stopped():
@@ -278,7 +298,8 @@ def test_async_fetch_exception_trapping():
         with pytest.raises(RuntimeError, match="Simulated sync crash"):
             bp._fetch(0, 10)
 
-    assert bp.is_stopped is True
+    # Orchestrator is no longer permanently stopped on standard exceptions
+    assert bp.is_stopped is False
     assert isinstance(bp._error, RuntimeError)
     bp.close()
 
@@ -361,7 +382,7 @@ def test_producer_loop_exception():
         with pytest.raises(ValueError, match="Producer crash"):
             bp._fetch(0, 10)
 
-    assert bp.is_stopped is True
+    assert bp.is_stopped is False
     assert bp._error == error_object
     bp.close()
 
