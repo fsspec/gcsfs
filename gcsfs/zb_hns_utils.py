@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import contextlib
 import ctypes
 import logging
@@ -182,33 +183,47 @@ class DirectMemmoveBuffer:
     """
     A buffer-like object that writes data directly to memory asynchronously.
 
-    This class provides a `write` interface that queues `ctypes.memmove` operations
-    to a thread pool executor, limiting the maximum number of concurrent pending
-    writes using a semaphore. It is useful for high-performance data transfers
-    where memory copies need to be offloaded from the main thread.
+    This class provides an interface that queues `ctypes.memmove` operations
+    to a thread pool executor. It provides synchronous backpressure: if `max_pending`
+    operations are currently writing, the `write()` call will safely block the
+    calling thread (e.g., an asyncio loop) until capacity frees up.
+
+    Memory allocation is natively deferred. If the payload precisely aligns
+    with expected bounds sequentially, it gracefully overrides manual memmoves
+    using true Zero-Copy payload replacement safely under the hood.
+
+    Note: This class is now strictly Thread-Safe
     """
 
-    def __init__(self, start_address, end_address, executor, max_pending=5):
+    THRESHOLD_BYTES_FOR_SCHEDULING = 128 * 1024
+
+    def __init__(self, expected_size, executor, max_pending=5):
         """
         Initializes the DirectMemmoveBuffer.
 
         Args:
-            start_address (int): The starting memory address where data will be written.
-            end_address (int): The absolute ending memory address. Writes exceeding
-                this boundary will be rejected to prevent overflows.
+            expected_size (int): The total amount of bytes expected to populate memory.
             executor (concurrent.futures.Executor): The thread pool executor to run the
                 memmove operations. The lifecycle of this executor is managed by the caller.
             max_pending (int, optional): The maximum number of pending write operations
                 allowed in the queue. Defaults to 5.
         """
-        self.start_address = start_address
-        self.end_address = end_address
+        self.expected_size = expected_size
         self.executor = executor
 
         # Volatile state variables. Must only be amended while holding self._lock.
-        self.current_offset = 0
         self._pending_count = 0
         self._error = None
+        self._total_bytes_written = 0
+        self._stop_accepting_writes = False
+        self._is_closed = False
+
+        # Track allocated (start, end) intervals to prevent overlapping views.
+        self._allocated_intervals = []
+
+        # PyBytes Native Pointers & Allocation tracking natively handled
+        self._result_bytes = None
+        self._start_address = None
 
         # Primitives:
         # 1. semaphore: Provides backpressure by limiting the number of active tasks.
@@ -219,6 +234,74 @@ class DirectMemmoveBuffer:
         self._done_event = threading.Event()
         self._done_event.set()
 
+    class PartialView:
+        """A bounded memory writer providing robust overfill/underfill constraint validations."""
+
+        def __init__(self, parent, start_offset, expected_size):
+            self.parent = parent
+            self.start_offset = start_offset
+            self.expected_size = expected_size
+            self.current_offset = 0
+            self._view_lock = threading.Lock()
+
+        def write(self, data):
+            """
+            Schedules a write operation to memory mapping.
+            """
+            if not isinstance(data, bytes):
+                raise ValueError(f"Expected bytes, but got {type(data)}")
+            size = len(data)
+            with self._view_lock:
+                if self.current_offset + size > self.expected_size:
+                    error_msg = (
+                        f"Attempted to write {size} bytes "
+                        f"at offset {self.current_offset}. "
+                        f"Max capacity is {self.expected_size} bytes."
+                    )
+                    raise BufferError(error_msg)
+
+                abs_offset = self.start_offset + self.current_offset
+                self.current_offset += size
+
+            return self.parent._submit_write(abs_offset, data, size)
+
+        def close(self):
+            """
+            Validates boundaries enforcing complete local payload consistency.
+            """
+            with self._view_lock:
+                if self.current_offset < self.expected_size:
+                    error_msg = (
+                        f"Expected {self.expected_size} bytes, "
+                        f"but only received {self.current_offset} bytes. "
+                        f"Buffer contains uninitialized data."
+                    )
+                    raise BufferError(error_msg)
+
+    def get_view(self, offset, size):
+        """Constructs secure mapped offset references correctly handling constraint layouts."""
+        if offset < 0 or offset + size > self.expected_size:
+            raise ValueError("Invalid view requested: exceeds physical boundaries!")
+
+        start = offset
+        end = offset + size
+
+        with self._lock:
+            if self._stop_accepting_writes or self._is_closed:
+                raise ValueError("Cannot get view on a closed/closing buffer.")
+
+            # Enforce Write-Once memory semantics: prevent overlapping views
+            for a_start, a_end in self._allocated_intervals:
+                if max(start, a_start) < min(end, a_end):
+                    raise ValueError(
+                        f"Overlapping view requested: [{start}, {end}) "
+                        f"overlaps with already allocated view [{a_start}, {a_end})"
+                    )
+
+            self._allocated_intervals.append((start, end))
+
+        return self.PartialView(self, offset, size)
+
     def _decrement_pending(self):
         """Helper to cleanly release concurrency primitives after a task finishes."""
         self.semaphore.release()
@@ -227,86 +310,119 @@ class DirectMemmoveBuffer:
             if self._pending_count == 0:
                 self._done_event.set()
 
-    def write(self, data):
-        """
-        Schedules a write operation to memory.
-
-        Calculates the destination address based on the current offset, increments the offset,
-        and submits the memory move operation to the executor. Blocks if the number of
-        pending operations reaches `max_pending`.
-
-        Args:
-            data: The data to be written to memory. Must support the buffer protocol.
-
-        Returns:
-            concurrent.futures.Future: A future object representing the execution of the
-                memory move operation.
-
-        Raises:
-            Exception: If any previous asynchronous write operation encountered an error.
-            BufferError: If the write exceeds the allocated memory boundaries.
-        """
-        if self._error:
-            raise self._error
-
-        size = len(data)
-        with self._lock:
-            dest = self.start_address + self.current_offset
-            if dest + size > self.end_address:
-                error_msg = (
-                    f"Attempted to write {size} bytes "
-                    f"at offset {self.current_offset}. "
-                    f"Max capacity is {self.end_address - self.start_address} bytes."
-                )
-                raise BufferError(error_msg)
-
-            self.current_offset += size
-        data_bytes = bytes(data) if not isinstance(data, bytes) else data
-
+    def _submit_write(self, dest_offset, data_bytes, size):
         self.semaphore.acquire()
-        with self._lock:
-            if self._pending_count == 0:
-                self._done_event.clear()
-            self._pending_count += 1
 
         try:
-            return self.executor.submit(self._do_memmove, dest, data_bytes, size)
-        except BaseException as e:
-            self._error = e
-            self._decrement_pending()
-            raise e
+            with self._lock:
+                if self._stop_accepting_writes or self._is_closed:
+                    raise ValueError("I/O operation on closed buffer.")
+
+                if self._error:
+                    raise self._error
+
+                if self._result_bytes is None:
+                    if dest_offset == 0 and size == self.expected_size:
+                        self._result_bytes = data_bytes
+                        self.semaphore.release()  # Release because we skip the executor
+                        fut = concurrent.futures.Future()
+                        fut.set_result(None)
+                        self._total_bytes_written += size
+                        return fut
+                    else:
+                        self._result_bytes = PyBytes_FromStringAndSize(
+                            None, self.expected_size
+                        )
+                        self._start_address = PyBytes_AsString(self._result_bytes)
+
+                # Defensive programming: gracefully catch internal overwrite attempts
+                if self._start_address is None:
+                    raise BufferError(
+                        "Attempted to execute standard write over a Zero-Copied payload."
+                    )
+
+                dest = self._start_address + dest_offset
+                if self._pending_count == 0:
+                    self._done_event.clear()
+                self._pending_count += 1
+
+        except BaseException:
+            self.semaphore.release()
+            raise
+
+        if size <= self.THRESHOLD_BYTES_FOR_SCHEDULING:
+            # Fast path, no need to send it to executor
+            try:
+                self._do_memmove(dest, data_bytes, size)
+            except BaseException:
+                # The exception is already captured in self._error by _do_memmove
+                pass
+
+            fut = concurrent.futures.Future()
+            with self._lock:
+                local_err = self._error
+            if local_err:
+                fut.set_exception(local_err)
+            else:
+                fut.set_result(None)
+            return fut
+        else:
+            try:
+                # Slow path, schedule it on executor.
+                return self.executor.submit(self._do_memmove, dest, data_bytes, size)
+            except BaseException as e:
+                with self._lock:
+                    self._error = e
+                self._decrement_pending()
+                raise e
 
     def _do_memmove(self, dest, data_bytes, size):
         try:
+            with self._lock:
+                if self._error:
+                    return
+
             ctypes.memmove(dest, data_bytes, size)
-        except Exception as e:
-            self._error = e
-            raise e
+            with self._lock:
+                self._total_bytes_written += size
+
+        except BaseException as e:
+            with self._lock:
+                if self._error is None:
+                    self._error = e
+            raise
         finally:
             self._decrement_pending()
 
+    def get_value(self):
+        with self._lock:
+            if self._error:
+                raise self._error
+            if not self._is_closed:
+                raise RuntimeError("Buffer is still not closed yet!")
+            if self._result_bytes is None and self.expected_size == 0:
+                return b""
+            if self._total_bytes_written < self.expected_size:
+                raise BufferError(
+                    f"Buffer incomplete: Expected {self.expected_size} bytes but "
+                    f"only populated {self._total_bytes_written}. Returning this "
+                    f"payload would leak uninitialized memory."
+                )
+            return self._result_bytes
+
     def close(self):
         """
-        Waits for all pending write operations to complete and checks for errors.
-        Blocks the calling thread until the queue of memory operations is entirely
-        processed.
-
-        Raises:
-            Exception: If any background write operation failed during execution.
-            BufferError: If the buffer was not filled to the expected capacity.
+        Locks the buffer preventing further incoming writes, waits for all pending
+        write operations to complete, and checks for errors.
         """
-        self._done_event.wait()
-        if self._error:
-            raise self._error
+        with self._lock:
+            self._stop_accepting_writes = True
 
-        expected_size = self.end_address - self.start_address
-        if self.current_offset < expected_size:
-            error_msg = (
-                f"Expected {expected_size} bytes, "
-                f"but only received {self.current_offset} bytes. "
-                f"Buffer contains uninitialized data."
-            )
-            raise BufferError(error_msg)
+        self._done_event.wait()
+        with self._lock:
+            self._is_closed = True
+            if self._error:
+                raise self._error
 
 
 class MRDPool:
