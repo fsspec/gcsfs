@@ -29,6 +29,28 @@ from gcsfs.tests.settings import (
 )
 from gcsfs.tests.utils import is_real_gcs
 
+# Bucket type helpers
+is_real_gcs_bucket = is_real_gcs()
+is_hns_bucket = os.environ.get("GCSFS_RUN_HNS_TESTS", "false").lower() in ("true", "1")
+is_rapid_bucket = os.environ.get("GCSFS_RUN_RAPID_TESTS", "false").lower() in (
+    "true",
+    "1",
+)
+
+# Skip markers for test decoration
+requires_real_gcs = pytest.mark.skipif(
+    not is_real_gcs_bucket,
+    reason="Requires real GCS (STORAGE_EMULATOR_HOST must be https://storage.googleapis.com)",
+)
+requires_hns = pytest.mark.skipif(
+    not is_hns_bucket,
+    reason="Requires HNS support (GCSFS_RUN_HNS_TESTS env var must be set)",
+)
+requires_rapid = pytest.mark.skipif(
+    not is_rapid_bucket,
+    reason="Requires zonal support (GCSFS_RUN_RAPID_TESTS env var must be set)",
+)
+
 files = {
     "test/accounts.1.json": (
         b'{"amount": 100, "name": "Alice"}\n'
