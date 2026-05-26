@@ -24,6 +24,7 @@ steps:
         mkdir -p /workspace/.ssh
         ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h
     waitFor: ["-"]
 
   # 2. Initialize shared variables.
@@ -38,11 +39,17 @@ steps:
       - |
         SHORT_BUILD_ID=$${BUILD_ID:0:8}
         # Define shared variables
-        SAFE_BRANCH=$(echo "$${BRANCH_NAME:-unknown}" | tr -c 'a-zA-Z0-9_.-' '-')
+        SAFE_BRANCH=$(echo -n "$${BRANCH_NAME:-unknown}" | tr -c 'a-zA-Z0-9_.-' '-')
 
         # Error out if the branch is unknown
         if [ "$${SAFE_BRANCH}" = "unknown" ]; then
           echo "ERROR: BRANCH_NAME is not set or evaluates to unknown. Failing the build."
+          exit 1
+        fi
+
+        # Error out if required variables are not set
+        if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_BENCHMARK_TYPE}" ]; then
+          echo "ERROR: One or more required variables (_INFRA_PREFIX, _ZONE, _BENCHMARK_TYPE) are not set."
           exit 1
         fi
 

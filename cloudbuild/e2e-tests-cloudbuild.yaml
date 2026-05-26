@@ -35,6 +35,8 @@ steps:
         ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb || { echo "generate-ssh-key" >> /workspace/FAILED; exit 1; }
         # Save the public key content to a file for the cleanup step
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+        # Add key to OS Login with TTL
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=1h
     waitFor: ["-"]
     allowFailure: true
 
