@@ -120,7 +120,10 @@ def gcsfs_benchmark_read(extended_gcs_factory, request):
         params,
         "benchmark-read",
         create_files=True,
-        gcs_kwargs={"block_size": params.block_size_bytes},
+        gcs_kwargs={
+            "block_size": params.block_size_bytes,
+            "mrd_pool_cache_size": params.mrd_pool_cache_size,
+        },
     )
 
 
@@ -355,6 +358,10 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["depth"] = getattr(params, "depth", "N/A")
     benchmark.extra_info["folders"] = getattr(params, "folders", "N/A")
     benchmark.extra_info["target_type"] = getattr(params, "target_type", "N/A")
+    benchmark.extra_info["mrd_pool_cache_size"] = getattr(
+        params, "mrd_pool_cache_size", "N/A"
+    )
+    benchmark.extra_info["mrd_pool_size"] = getattr(params, "mrd_pool_size", "N/A")
 
     benchmark.group = benchmark_group
 

@@ -385,7 +385,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     # cleanup (which can handle cross-thread calls).
     @staticmethod
     def close_session(loop, session: aiohttp.ClientSession, asynchronous=False):
-        if session.closed:
+        if session is None or session.closed:
             return
         force_close = False
         try:

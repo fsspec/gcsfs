@@ -10,6 +10,7 @@ import fsspec
 import pytest
 import pytest_asyncio
 import requests
+from fsspec import asyn
 from google.cloud import storage
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
@@ -276,6 +277,7 @@ def gcs(gcs_factory, buckets_to_delete, populate_bucket):
         yield gcs
     finally:
         _cleanup_gcs(gcs, bucket_populated=populate_bucket)
+        _close_gcs(gcs)
         # Remove the dynamically added attribute. This prevents state leakage
         # into subsequent tests that can share this cached fsspec instance.
         if hasattr(gcs, "finalize_on_close"):
@@ -297,6 +299,7 @@ def extended_gcs_factory(gcs_factory, buckets_to_delete, populate_bucket):
 
     for fs in created_instances:
         _cleanup_gcs(fs, bucket_populated=populate_bucket)
+        _close_gcs(fs)
 
 
 @pytest.fixture
@@ -308,6 +311,7 @@ def extended_gcsfs(gcs_factory, buckets_to_delete, populate_bucket):
         yield extended_gcsfs
     finally:
         _cleanup_gcs(extended_gcsfs, bucket_populated=populate_bucket)
+        _close_gcs(extended_gcsfs)
 
 
 def _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=True):
@@ -319,6 +323,20 @@ def _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=True):
                 gcs.rm(files_to_delete)
     except Exception as e:
         logging.warning(f"Failed to clean up GCS bucket {bucket}: {e}")
+
+
+def _close_gcs(gcs):
+    """Close gcs instance resources for sync fixtures."""
+    if hasattr(gcs, "close_resources"):
+        asyn.sync(gcs.loop, gcs.close_resources)
+    GCSFileSystem.close_session(gcs.loop, gcs._session, gcs.asynchronous)
+
+
+async def _close_gcs_async(gcs):
+    """Close gcs instance resources for async fixtures."""
+    if hasattr(gcs, "close_resources"):
+        await gcs.close_resources()
+    GCSFileSystem.close_session(gcs.loop, gcs._session, gcs.asynchronous)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -381,6 +399,7 @@ def gcs_versioned(gcs_factory, buckets_to_delete):
             logging.warning(
                 f"Failed to clean up versioned bucket {TEST_VERSIONED_BUCKET} after test: {e}"
             )
+        _close_gcs(gcs)
 
 
 def cleanup_versioned_bucket(gcs, bucket_name, prefix=None):
@@ -477,6 +496,7 @@ def gcs_hns(gcs_factory, buckets_to_delete):
         yield gcs
     finally:
         _cleanup_gcs(gcs, bucket=TEST_HNS_BUCKET)
+        _close_gcs(gcs)
 
 
 @pytest.fixture
@@ -546,7 +566,10 @@ async def async_gcs():
     token = "anon" if not os.getenv("STORAGE_EMULATOR_HOST") else None
     GCSFileSystem.clear_instance_cache()
     gcs = GCSFileSystem(asynchronous=True, token=token)
-    yield gcs
+    try:
+        yield gcs
+    finally:
+        await _close_gcs_async(gcs)
 
 
 def pytest_addoption(parser):
