@@ -76,6 +76,17 @@ The following benchmarks show the time taken (in seconds) to rename a directory 
 
 For more details on managing these buckets, refer to the official documentation for `Hierarchical Namespace <https://cloud.google.com/storage/docs/hns-overview>`_.
 
+.. _bucket-type-detection-and-caching:
+
+Bucket Type Detection and Caching
+---------------------------------
+
+Before routing directory-level or file-level operations, the ``ExtendedGcsFileSystem`` performs a bucket type detection query via the Cloud Storage Control API's ``get_storage_layout`` method to determine if the bucket is HNS-enabled or Zonal.
+
+* **Success Caching:** Once the bucket type is successfully determined, the filesystem caches this layout type to avoid repeated API lookup overhead for subsequent operations.
+* **Non-Caching of UNKNOWN:** If the bucket type detection returns ``UNKNOWN`` (for instance, due to transient network failures), it is **intentionally not cached**. This ensures that transient lookup failures do not permanently degrade HNS or Zonal performance.
+* **Fallback Behavior:** If the bucket type is flagged as ``UNKNOWN``, the filesystem gracefully falls back to standard flat-namespace GCS operations without raising an error. The filesystem will retry the lookup on subsequent requests, allowing it to automatically adopt HNS/Zonal optimizations if the issue resolves.
+
 Disabling HNS Support
 ------------------------------
 

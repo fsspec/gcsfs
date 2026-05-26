@@ -53,6 +53,9 @@ making Rapid Storage support fully backward compatible for all operations.
 
 At initialization, ``ExtendedGcsFileSystem`` evaluates the underlying bucket's storage layout. If it detects Rapid storage, file-level operations are dynamically routed to the ``ZonalFile`` class instead of the standard ``GCSFile``.
 
+.. note::
+   For detailed information on how bucket type detection works and the layout caching strategy, please refer to the HNS documentation on :ref:`bucket-type-detection-and-caching`.
+
 Unlike standard operations which use HTTP endpoints, ``ZonalFile`` utilizes the Google Cloud Storage gRPC API—specifically the ``AsyncMultiRangeDownloader`` (MRD) for reads and ``AsyncAppendableObjectWriter`` (AAOW) for writes.
 
 Operation Semantics: Standard vs. Rapid Storage
