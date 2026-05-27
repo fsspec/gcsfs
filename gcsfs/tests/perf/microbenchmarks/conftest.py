@@ -41,20 +41,22 @@ def _write_file(gcs, path, file_size, chunk_size):
 
 
 def _prepare_files(gcs, file_paths, file_size=0):
-    if file_size > 0:
+    if file_size == 0:
+        try:
+            gcs.pipe({path: b"" for path in file_paths})
+        except Exception as e:
+            pytest.fail(f"Failed to pipe files: {e}")
+    else:
         chunk_size = min(100 * MB, file_size)
         pool_size = 16
-    else:
-        chunk_size = 1
-        pool_size = min(200, len(file_paths))
 
-    args = [(gcs, path, file_size, chunk_size) for path in file_paths]
-    ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(pool_size) as pool:
-        try:
-            pool.starmap(_write_file, args)
-        except RuntimeError as e:
-            pytest.fail(str(e))
+        args = [(gcs, path, file_size, chunk_size) for path in file_paths]
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(pool_size) as pool:
+            try:
+                pool.starmap(_write_file, args)
+            except RuntimeError as e:
+                pytest.fail(str(e))
 
 
 def _prepare_folders(gcs, folder_paths):
@@ -93,7 +95,7 @@ def _benchmark_io_fixture_helper(
     try:
         gcs.rm(prefix, recursive=True)
     except Exception as e:
-        logging.error(f"Failed to clean up benchmark files: {e}")
+        logging.error(f"Failed to clean up benchmark files: {e!r}")
 
 
 @pytest.fixture
@@ -256,7 +258,7 @@ def _benchmark_listing_fixture_helper(
         try:
             gcs.rm(f"{prefix}*", recursive=True)
         except Exception as e:
-            logging.error(f"Failed to clean up benchmark files: {e}")
+            logging.error(f"Failed to clean up benchmark files: {e!r}")
 
 
 @pytest.fixture
