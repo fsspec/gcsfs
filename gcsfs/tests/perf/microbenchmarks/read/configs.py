@@ -22,7 +22,7 @@ class ReadConfigurator(BaseBenchmarkConfigurator):
         )
         block_sizes_mb = scenario.get("block_sizes_mb", [5])
         mrd_pool_cache_sizes = scenario.get("mrd_pool_cache_sizes", [16])
-        mrd_pool_sizes = scenario.get("mrd_pool_sizes", [1])
+        mrd_pool_sizes = scenario.get("mrd_pool_sizes", [None])
 
         pattern = scenario.get("pattern", "seq")
         runtime = common_config.get("runtime", 30)

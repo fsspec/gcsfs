@@ -21,5 +21,5 @@ class ReadBenchmarkParameters(IOBenchmarkParameters):
     # Size of the MRD pool cache. Default is 16.
     mrd_pool_cache_size: int = 16
 
-    # Size of the MRD pool. Default is 1.
-    mrd_pool_size: int = 1
+    # Size of the MRD pool. Default is None.
+    mrd_pool_size: int | None = None
