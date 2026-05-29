@@ -63,6 +63,39 @@ steps:
         echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
+  # 2.5 Clean up leaked resources from previous failed builds.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-leaked-resources"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        source /workspace/build_vars.env
+        echo "Cleaning up leaked resources with prefix: ${_INFRA_PREFIX}"
+
+        CURRENT_TIME=$$(date +%s)
+        # 5 hours threshold
+        THRESHOLD=18000
+
+        VMS=$$(gcloud compute instances list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-vm-'" --format="value(name,zone,creationTimestamp)")
+
+        while read -r name zone creation_time; do
+          if [ -z "$$name" ]; then continue; fi
+
+          CREATION_SECONDS=$$(date -d "$$creation_time" +%s)
+          AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
+
+          if [ $$AGE -gt $$THRESHOLD ]; then
+            echo "Deleting leaked VM: $$name in zone $$zone (Age: $$AGE seconds)"
+            gcloud compute instances delete "$$name" --project="${PROJECT_ID}" --zone="$$zone" --quiet || true
+          else
+            echo "Skipping VM: $$name (Age: $$AGE seconds)"
+          fi
+        done <<< "$$VMS"
+    waitFor: ["init-variables"]
+    allowFailure: true
+
+
   # 3. Create all necessary GCS buckets in parallel.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create-buckets"
@@ -97,77 +130,37 @@ steps:
     waitFor: ["init-variables"]
     allowFailure: true
 
-  # 4a. Create a VM for IO benchmarks.
+  # 4. Create a VM for benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-io-vm"
+    id: "create-vm"
     entrypoint: "bash"
     args:
       - "-c"
       - |
         set -e
-        trap 'echo "create-io-vm" >> /workspace/FAILED' ERR
+        trap 'echo "create-vm" >> /workspace/FAILED' ERR
         ${_SKIP_IF_FAILED}
-        # Conditional execution based on benchmark type
-        case "${_BENCHMARK_TYPE}" in
-          IO)
-            echo "Provisioning ${_BENCHMARK_TYPE} VM"
-            ;;
-          *)
-            echo "Skipping create-io-vm. Benchmark type is ${_BENCHMARK_TYPE}."
-            exit 0
-            ;;
-        esac
-
+        
         source /workspace/build_vars.env
-
-        echo "Creating VM: $${VM_NAME}"
+        
+        # Set machine type and optimizations based on benchmark type
+        if [ "${_BENCHMARK_TYPE}" = "IO" ]; then
+          MACHINE_TYPE="${_IO_VM_TYPE}"
+          EXTRA_ARGS=(
+            "--boot-disk-type=hyperdisk-balanced"
+            "--network-interface=network-tier=PREMIUM,nic-type=GVNIC"
+            "--network-performance-configs=total-egress-bandwidth-tier=TIER_1"
+          )
+        else
+          MACHINE_TYPE="${_METADATA_VM_TYPE}"
+          EXTRA_ARGS=()
+        fi
+        
+        echo "Creating VM: $${VM_NAME} in zone: ${_ZONE}"
         gcloud compute instances create "$$VM_NAME" \
             --project="${PROJECT_ID}" \
             --zone="${_ZONE}" \
-            --machine-type="${_IO_VM_TYPE}" \
-            --image-family="ubuntu-2404-lts-amd64" \
-            --image-project="ubuntu-os-cloud" \
-            --boot-disk-type="hyperdisk-balanced" \
-            --boot-disk-size="30GB" \
-            --network-interface="network-tier=PREMIUM,nic-type=GVNIC" \
-            --network-performance-configs="total-egress-bandwidth-tier=TIER_1" \
-            --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
-            --metadata="enable-oslogin=TRUE" \
-            --service-account="${_VM_SERVICE_ACCOUNT}" \
-            --tags="allow-ssh" \
-            --labels="build-id=$$RUN_ID" \
-            --quiet
-    waitFor: ["init-variables"]
-    allowFailure: true
-
-  # 4b. Create a VM for METADATA benchmarks.
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-metadata-vm"
-    entrypoint: "bash"
-    args:
-      - "-c"
-      - |
-        set -e
-        trap 'echo "create-metadata-vm" >> /workspace/FAILED' ERR
-        ${_SKIP_IF_FAILED}
-        # Conditional execution based on benchmark type
-        case "${_BENCHMARK_TYPE}" in
-          METADATA)
-            echo "Provisioning ${_BENCHMARK_TYPE} VM"
-            ;;
-          *)
-            echo "Skipping create-metadata-vm. Benchmark type is ${_BENCHMARK_TYPE}."
-            exit 0
-            ;;
-        esac
-
-        source /workspace/build_vars.env
-
-        echo "Creating VM: $${VM_NAME}"
-        gcloud compute instances create "$$VM_NAME" \
-            --project="${PROJECT_ID}" \
-            --zone="${_ZONE}" \
-            --machine-type="${_METADATA_VM_TYPE}" \
+            --machine-type="$$MACHINE_TYPE" \
             --image-family="ubuntu-2404-lts-amd64" \
             --image-project="ubuntu-os-cloud" \
             --boot-disk-size="30GB" \
@@ -176,7 +169,8 @@ steps:
             --service-account="${_VM_SERVICE_ACCOUNT}" \
             --tags="allow-ssh" \
             --labels="build-id=$$RUN_ID" \
-            --quiet
+            --quiet \
+            "${EXTRA_ARGS[@]}"
     waitFor: ["init-variables"]
     allowFailure: true
 
@@ -262,6 +256,12 @@ steps:
           pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
           pip install --upgrade 'git+https://github.com/googleapis/google-cloud-python.git@main#subdirectory=packages/google-cloud-storage'
           echo '--- Installing GCSFS packages ---'
+          # Manual builds via 'gcloud builds submit' don't upload .git directory,
+          # causing hatch-vcs to fail. We use a dummy version in that case.
+          if [ ! -d .git ]; then
+            echo 'Warning: .git directory not found, using dummy version for installation'
+            export SETUPTOOLS_SCM_PRETEND_VERSION='0.0.0'
+          fi
           pip install -e . > /dev/null
           echo '--- Installing requirements for benchmarks ---'
           pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt > /dev/null
@@ -374,8 +374,7 @@ steps:
           echo "All benchmarks completed successfully."
         fi
     waitFor:
-      - "create-io-vm"
-      - "create-metadata-vm"
+      - "create-vm"
       - "create-buckets"
       - "generate-ssh-key"
 
