@@ -140,9 +140,9 @@ steps:
         set -e
         trap 'echo "create-vm" >> /workspace/FAILED' ERR
         ${_SKIP_IF_FAILED}
-        
+
         source /workspace/build_vars.env
-        
+
         # Set machine type and optimizations based on benchmark type
         if [ "${_BENCHMARK_TYPE}" = "IO" ]; then
           MACHINE_TYPE="${_IO_VM_TYPE}"
@@ -155,7 +155,7 @@ steps:
           MACHINE_TYPE="${_METADATA_VM_TYPE}"
           EXTRA_ARGS=()
         fi
-        
+
         echo "Creating VM: $${VM_NAME} in zone: ${_ZONE}"
         gcloud compute instances create "$$VM_NAME" \
             --project="${PROJECT_ID}" \
