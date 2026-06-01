@@ -179,6 +179,50 @@ async def close_aaow(aaow, finalize_on_close=False):
             )
 
 
+class PartialView:
+    """A bounded memory writer providing robust overfill/underfill constraint validations."""
+
+    def __init__(self, parent, start_offset, expected_size):
+        self.parent = parent
+        self.start_offset = start_offset
+        self.expected_size = expected_size
+        self.current_offset = 0
+        self._view_lock = threading.Lock()
+
+    def write(self, data):
+        """
+        Schedules a write operation to memory mapping.
+        """
+        if not isinstance(data, bytes):
+            raise ValueError(f"Expected bytes, but got {type(data)}")
+        size = len(data)
+        with self._view_lock:
+            if self.current_offset + size > self.expected_size:
+                error_msg = (
+                    f"Attempted to write {size} bytes "
+                    f"at offset {self.current_offset}. "
+                    f"Max capacity is {self.expected_size} bytes."
+                )
+                raise BufferError(error_msg)
+
+            abs_offset = self.start_offset + self.current_offset
+            self.current_offset += size
+
+        return self.parent._submit_write(abs_offset, data, size)
+
+    def close(self):
+        """
+        Validates boundaries enforcing complete local payload consistency.
+        """
+        if self.current_offset < self.expected_size:
+            error_msg = (
+                f"Expected {self.expected_size} bytes, "
+                f"but only received {self.current_offset} bytes. "
+                f"Buffer contains uninitialized data."
+            )
+            raise BufferError(error_msg)
+
+
 class DirectMemmoveBuffer:
     """
     A buffer-like object that writes data directly to memory asynchronously.
@@ -234,50 +278,6 @@ class DirectMemmoveBuffer:
         self._done_event = threading.Event()
         self._done_event.set()
 
-    class PartialView:
-        """A bounded memory writer providing robust overfill/underfill constraint validations."""
-
-        def __init__(self, parent, start_offset, expected_size):
-            self.parent = parent
-            self.start_offset = start_offset
-            self.expected_size = expected_size
-            self.current_offset = 0
-            self._view_lock = threading.Lock()
-
-        def write(self, data):
-            """
-            Schedules a write operation to memory mapping.
-            """
-            if not isinstance(data, bytes):
-                raise ValueError(f"Expected bytes, but got {type(data)}")
-            size = len(data)
-            with self._view_lock:
-                if self.current_offset + size > self.expected_size:
-                    error_msg = (
-                        f"Attempted to write {size} bytes "
-                        f"at offset {self.current_offset}. "
-                        f"Max capacity is {self.expected_size} bytes."
-                    )
-                    raise BufferError(error_msg)
-
-                abs_offset = self.start_offset + self.current_offset
-                self.current_offset += size
-
-            return self.parent._submit_write(abs_offset, data, size)
-
-        def close(self):
-            """
-            Validates boundaries enforcing complete local payload consistency.
-            """
-            with self._view_lock:
-                if self.current_offset < self.expected_size:
-                    error_msg = (
-                        f"Expected {self.expected_size} bytes, "
-                        f"but only received {self.current_offset} bytes. "
-                        f"Buffer contains uninitialized data."
-                    )
-                    raise BufferError(error_msg)
-
     def get_view(self, offset, size):
         """Constructs secure mapped offset references correctly handling constraint layouts."""
         if offset < 0 or offset + size > self.expected_size:
@@ -300,7 +300,7 @@ class DirectMemmoveBuffer:
 
             self._allocated_intervals.append((start, end))
 
-        return self.PartialView(self, offset, size)
+        return PartialView(self, offset, size)
 
     def _decrement_pending(self):
         """Helper to cleanly release concurrency primitives after a task finishes."""
@@ -323,17 +323,17 @@ class DirectMemmoveBuffer:
 
                 if self._result_bytes is None:
                     if dest_offset == 0 and size == self.expected_size:
+                        # fastpath: return buffer directly
                         self._result_bytes = data_bytes
                         self.semaphore.release()  # Release because we skip the executor
                         fut = concurrent.futures.Future()
                         fut.set_result(None)
                         self._total_bytes_written += size
                         return fut
-                    else:
-                        self._result_bytes = PyBytes_FromStringAndSize(
-                            None, self.expected_size
-                        )
-                        self._start_address = PyBytes_AsString(self._result_bytes)
+                    self._result_bytes = PyBytes_FromStringAndSize(
+                        None, self.expected_size
+                    )
+                    self._start_address = PyBytes_AsString(self._result_bytes)
 
                 # Defensive programming: gracefully catch internal overwrite attempts
                 if self._start_address is None:
@@ -359,8 +359,7 @@ class DirectMemmoveBuffer:
                 pass
 
             fut = concurrent.futures.Future()
-            with self._lock:
-                local_err = self._error
+            local_err = self._error
             if local_err:
                 fut.set_exception(local_err)
             else:
