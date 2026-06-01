@@ -750,7 +750,7 @@ async def test_mrd_pool_close_donates_and_repools(mock_cache):
     await mrd_pool.close()
 
     assert mrd_pool._closed is True
-    assert mrd_pool._free_mrds.qsize() == 2
+    assert mrd_pool._free_mrds.qsize() == 0
     assert len(mock_cache.queue) == 2
     assert captured == [(mrd_pool._key, [mock_mrd_a, mock_mrd_b])]
 
