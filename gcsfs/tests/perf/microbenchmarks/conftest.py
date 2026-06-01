@@ -41,12 +41,15 @@ def _write_file(gcs, path, file_size, chunk_size):
 
 
 def _prepare_files(gcs, file_paths, file_size=0):
-    if file_size > 0:
-        chunk_size = min(100 * MB, file_size)
-        pool_size = 16
-    else:
-        chunk_size = 1
-        pool_size = min(200, len(file_paths))
+    if file_size == 0:
+        try:
+            gcs.pipe({path: b"" for path in file_paths})
+            return
+        except Exception as e:
+            pytest.fail(f"Failed to pipe files: {e}")
+
+    chunk_size = min(100 * MB, file_size)
+    pool_size = 16
 
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("spawn")
@@ -77,23 +80,25 @@ def _benchmark_io_fixture_helper(
         f"of size {params.file_size_bytes / MB:.2f} MB each."
     )
 
-    if create_files:
-        start_time = time.perf_counter()
-        _prepare_files(gcs, file_paths, params.file_size_bytes)
-
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        logging.info(
-            f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
-        )
-
-    yield gcs, file_paths, params
-
-    # --- Teardown ---
-    logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
     try:
-        gcs.rm(prefix, recursive=True)
-    except Exception as e:
-        logging.error(f"Failed to clean up benchmark files: {e}")
+        if create_files:
+            start_time = time.perf_counter()
+            _prepare_files(gcs, file_paths, params.file_size_bytes)
+
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logging.info(
+                f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
+            )
+
+        yield gcs, file_paths, params
+
+    finally:
+        # --- Teardown ---
+        logging.info(f"Tearing down benchmark '{params.name}': deleting files.")
+        try:
+            gcs.rm(prefix, recursive=True)
+        except Exception as e:
+            logging.error(f"Failed to clean up benchmark files: {e!r}")
 
 
 @pytest.fixture
@@ -209,54 +214,56 @@ def _benchmark_listing_fixture_helper(
 
             levels[d] = current_level_folders
 
-    # Create empty folders first if specified
-    if create_folders:
+    try:
+        # Create empty folders first if specified
+        if create_folders:
+            logging.info(
+                f"Setting up benchmark '{params.name}': creating {len(target_dirs)} "
+                f"folders at depth {depth} with prefix '{prefix}'."
+            )
+            start_time = time.perf_counter()
+            _prepare_folders(gcs, target_dirs)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logging.info(
+                f"Benchmark '{params.name}' setup created {len(target_dirs)} folders in {duration_ms:.2f} ms."
+            )
+
+        file_paths = []
+        for folder in target_dirs:
+            for i in range(files_per_folder):
+                file_paths.append(f"{folder}/file_{i}")
+
+        params.files = len(file_paths)
+
         logging.info(
-            f"Setting up benchmark '{params.name}': creating {len(target_dirs)} "
-            f"folders at depth {depth} with prefix '{prefix}'."
+            f"Setting up benchmark '{params.name}': creating {len(file_paths)} "
+            f"files at depth {depth} with prefix '{prefix}' distributed across {len(target_dirs)} "
+            f"folders and with {files_per_folder} files per folder."
         )
+
         start_time = time.perf_counter()
-        _prepare_folders(gcs, target_dirs)
+        _prepare_files(gcs, file_paths, getattr(params, "file_size_bytes", 0))
+
         duration_ms = (time.perf_counter() - start_time) * 1000
         logging.info(
-            f"Benchmark '{params.name}' setup created {len(target_dirs)} folders in {duration_ms:.2f} ms."
+            f"Benchmark '{params.name}' setup created {len(file_paths)} files in {duration_ms:.2f} ms."
         )
 
-    file_paths = []
-    for folder in target_dirs:
-        for i in range(files_per_folder):
-            file_paths.append(f"{folder}/file_{i}")
+        if require_file_paths:
+            yield gcs, target_dirs, file_paths, prefix, params
+        else:
+            yield gcs, target_dirs, prefix, params
 
-    params.files = len(file_paths)
-
-    logging.info(
-        f"Setting up benchmark '{params.name}': creating {len(file_paths)} "
-        f"files at depth {depth} with prefix '{prefix}' distributed across {len(target_dirs)} "
-        f"folders and with {files_per_folder} files per folder."
-    )
-
-    start_time = time.perf_counter()
-    _prepare_files(gcs, file_paths, getattr(params, "file_size_bytes", 0))
-
-    duration_ms = (time.perf_counter() - start_time) * 1000
-    logging.info(
-        f"Benchmark '{params.name}' setup created {len(file_paths)} files in {duration_ms:.2f} ms."
-    )
-
-    if require_file_paths:
-        yield gcs, target_dirs, file_paths, prefix, params
-    else:
-        yield gcs, target_dirs, prefix, params
-
-    if teardown:
-        # --- Teardown ---
-        logging.info(
-            f"Tearing down benchmark '{params.name}': deleting files and folders."
-        )
-        try:
-            gcs.rm(f"{prefix}*", recursive=True)
-        except Exception as e:
-            logging.error(f"Failed to clean up benchmark files: {e}")
+    finally:
+        if teardown:
+            # --- Teardown ---
+            logging.info(
+                f"Tearing down benchmark '{params.name}': deleting files and folders."
+            )
+            try:
+                gcs.rm(f"{prefix}*", recursive=True)
+            except Exception as e:
+                logging.error(f"Failed to clean up benchmark files: {e!r}")
 
 
 @pytest.fixture
