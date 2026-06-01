@@ -189,3 +189,18 @@ Multi Stream Performance (48 Process)
 +---------+--------------+-----------------+-----------------+--------------------------+------------------+------------------+--------------------------+
 | rand    | 100.00       | 8276.16         | 10171.59        | 10172.54                 | 20621.17         | 23598.05         | 24086.18                 |
 +---------+--------------+-----------------+-----------------+--------------------------+------------------+------------------+--------------------------+
+
+Seeing the Prefetcher in Action
+===============================
+
+Real-world applications rarely do just one thing; they often switch between entirely different reading patterns mid-file. To understand how the engine balances aggressive fetching with careful memory management, we can look at a dynamic workload transition.
+
+The graph below plots the size of the data requested by the application (User Read Size) against the volume of data the prefetcher is fetching in the background (Scheduled/Queued Data).
+
+.. image:: _static/prefetch_dynamic_transition.png
+
+Notice how the prefetcher mirrors the application's behaviour across three distinct phases:
+
+1. **Sequential reading (0–10s):** The application starts by reading 16MB chunks. After three reads, the prefetcher ramps up its background fetching. It maintains a buffer ahead of the application so the user never waits on the network.
+2. **Random seeks (10–20s):** The application starts jumping randomly around the file. Prefetching would be harmful here. The engine detects the broken streak and drops the background buffer to zero, ensuring no network bandwidth or memory is wasted downloading data.
+3. **Larger sequential reads (20–30s):** The application resumes reading sequentially, but this time stepping up to 100MB chunks. The algorithm detects the new streak, calculates the new rolling average, and rebuilds the background buffer—this time scaling it up to handle the larger data chunks.

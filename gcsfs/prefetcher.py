@@ -2,6 +2,7 @@ import asyncio
 import ctypes
 import logging
 import threading
+import weakref
 from collections import deque
 
 import fsspec.asyn
@@ -22,10 +23,13 @@ PyBytes_AsString.argtypes = [ctypes.py_object]
 def _fast_slice(src_bytes, offset, read_size):
     if read_size == 0:
         return b""
+    if offset < 0 or offset + read_size > len(src_bytes):
+        raise ValueError("Slice indices out of bounds")
     dest_bytes = PyBytes_FromStringAndSize(None, read_size)
     src_ptr = PyBytes_AsString(src_bytes)
     dest_ptr = PyBytes_AsString(dest_bytes)
 
+    # Releases the GIL
     ctypes.memmove(dest_ptr, src_ptr + offset, read_size)
     return dest_bytes
 
@@ -78,6 +82,23 @@ class RunningAverageTracker:
             return 1024 * 1024  # 1MB
         return self._sum // count
 
+    @property
+    def is_variable(self) -> bool:
+        """Determines if the history contains distinct chunk sizes."""
+        count = len(self._history)
+        if count < 2:
+            return False
+
+        return len(set(self._history)) > 1
+
+    @property
+    def last_value(self) -> int:
+        """Returns the most recent entry in the history."""
+        if not self._history:
+            raise RuntimeError("No entry found in history")
+
+        return self._history[-1]
+
     def clear(self):
         """Clears the history and resets the sum to zero."""
         logger.debug("Clearing RunningAverageTracker history.")
@@ -101,6 +122,24 @@ class PrefetchProducer:
     # to maximum of 2 * io_size and 128MB
     MIN_PREFETCH_SIZE = 128 * 1024 * 1024
 
+    # The prefetching starts on the third read.
+    MIN_STREAKS_FOR_PREFETCHING = 3
+
+    # Threshold for disabling proactive prefetching on large, variable reads.
+    #
+    # If the average read size exceeds this value and patterns are variable,
+    # prefetching shifts from an I/O bottleneck to a memory(CPU) bottleneck. When a user
+    # requests random massive sizes (e.g., jumping between 64MB and INF), the
+    # producer still fetches chunks based on the rolling average. The consumer
+    # then has to pick up multiple chunks and stitch them together to match the
+    # exact requested size.
+    #
+    # For small average read sizes, this byte assembly is fast and the bottleneck
+    # remains the network I/O. However, for massive reads (>= 64MB), the extra
+    # step of copying and assembling huge byte strings in memory severely slows
+    # down the operation.
+    VARIABLE_IO_THRESHOLD = 64 * 1024 * 1024
+
     def __init__(
         self,
         fetcher,
@@ -108,10 +147,9 @@ class PrefetchProducer:
         concurrency: int,
         queue: asyncio.Queue,
         wakeup_event: asyncio.Event,
-        get_user_offset,
-        get_io_size,
-        get_sequential_streak,
-        on_error,
+        consumer: "PrefetchConsumer",
+        tracker: RunningAverageTracker,
+        orchestrator: "BackgroundPrefetcher",
         user_max_prefetch_size=None,
     ):
         """Initializes the background producer.
@@ -122,10 +160,9 @@ class PrefetchProducer:
             concurrency (int): Maximum number of concurrent fetch tasks.
             queue (asyncio.Queue): The shared queue to push download tasks into.
             wakeup_event (asyncio.Event): Event used to wake the producer from an idle state.
-            get_user_offset (Callable): Function returning the user's current read offset.
-            get_io_size (Callable): Function returning the adaptive IO size.
-            get_sequential_streak (Callable): Function returning the current sequential read streak.
-            on_error (Callable): Callback triggered when a background error occurs.
+            consumer (PrefetchConsumer): The consumer reading the prefetched chunks.
+            tracker (RunningAverageTracker): Tracker for history of read sizes.
+            orchestrator (BackgroundPrefetcher): The parent object managing the operation.
             user_max_prefetch_size (int, optional): A hard limit for prefetch size overrides.
         """
         logger.debug(
@@ -140,10 +177,9 @@ class PrefetchProducer:
         self.queue = queue
         self.wakeup_event = wakeup_event
 
-        self.get_user_offset = get_user_offset
-        self.get_io_size = get_io_size
-        self.get_sequential_streak = get_sequential_streak
-        self.on_error = on_error
+        self.consumer = consumer
+        self.tracker = tracker
+        self.orchestrator = weakref.proxy(orchestrator)
         self._user_max_prefetch_size = user_max_prefetch_size
 
         self.current_offset = 0
@@ -161,9 +197,9 @@ class PrefetchProducer:
         if self._user_max_prefetch_size is not None:
             return min(
                 self._user_max_prefetch_size,
-                max(2 * self.get_io_size(), self.MIN_PREFETCH_SIZE),
+                max(2 * self.tracker.average, self.MIN_PREFETCH_SIZE),
             )
-        return max(2 * self.get_io_size(), self.MIN_PREFETCH_SIZE)
+        return max(2 * self.tracker.average, self.MIN_PREFETCH_SIZE)
 
     def start(self):
         """Starts the background producer loop.
@@ -195,6 +231,9 @@ class PrefetchProducer:
         for task in list(self._active_tasks):
             if not task.done():
                 tasks_to_wait.append(task)
+
+        # We do not cancel the network task, instead we wait on them.
+        # This is intentionally done to avoid MRD stream disruption.
         self._active_tasks.clear()
 
         # Clear out any leftover items in the queue
@@ -236,7 +275,7 @@ class PrefetchProducer:
         self.start()
 
     async def _loop(self):
-        """The main background loop that calculates sizes and spawns fetch tasks."""
+        """The main background loop that delegates calculations and spawns tasks."""
         logger.debug("PrefetchProducer internal loop is now running.")
         try:
             while not self.is_stopped:
@@ -246,70 +285,10 @@ class PrefetchProducer:
                 if self.is_stopped:
                     break
 
-                io_size = self.get_io_size()
-                streak = self.get_sequential_streak()
-                prefetch_size = min((streak + 1) * io_size, self.max_prefetch_size)
-
-                logger.debug(
-                    "Producer awake. Current offset: %d, User offset: %d, Prefetch size: %d",
-                    self.current_offset,
-                    self.get_user_offset(),
-                    prefetch_size,
-                )
-
-                while (
-                    not self.is_stopped
-                    and (self.current_offset - self.get_user_offset()) < prefetch_size
-                    and self.current_offset < self.size
-                ):
-                    user_offset = self.get_user_offset()
-                    space_remaining = self.size - self.current_offset
-                    prefetch_space_available = prefetch_size - (
-                        self.current_offset - user_offset
-                    )
-
-                    if prefetch_size >= self.MIN_CHUNK_SIZE:
-                        if prefetch_space_available >= self.MIN_CHUNK_SIZE:
-                            actual_size = min(
-                                max(self.MIN_CHUNK_SIZE, io_size), space_remaining
-                            )
-                        else:
-                            break
-                    else:
-                        actual_size = min(io_size, space_remaining)
-
-                    if streak < 2:
-                        sfactor = self.concurrency
-                    else:
-                        sfactor = min(
-                            self.concurrency,
-                            max(
-                                1,
-                                actual_size * self.concurrency // prefetch_size,
-                            ),
-                        )
-
-                    logger.debug(
-                        "Spawning fetch task. Offset: %d, Size: %d, Split Factor: %d",
-                        self.current_offset,
-                        actual_size,
-                        sfactor,
-                    )
-
-                    download_task = asyncio.create_task(
-                        self.fetcher(
-                            self.current_offset, actual_size, split_factor=sfactor
-                        )
-                    )
-                    self._active_tasks.add(download_task)
-                    download_task.add_done_callback(self._active_tasks.discard)
-
-                    await self.queue.put(download_task)
-                    self.current_offset += actual_size
+                await self._process_prefetch_cycle()
 
         except asyncio.CancelledError:
             logger.debug("PrefetchProducer loop was cancelled.")
-            pass
         except Exception as e:
             logger.error(
                 "PrefetchProducer loop encountered an unexpected error: %s",
@@ -317,8 +296,131 @@ class PrefetchProducer:
                 exc_info=True,
             )
             self.is_stopped = True
-            self.on_error(e)
+            self.orchestrator.set_error(e)
             await self.queue.put(e)
+
+    def _calculate_prefetch_params(self) -> tuple[int, int, int]:
+        """
+        Evaluates current trackers and state to determine sizes.
+
+        Returns:
+            tuple: (prefetch_size, io_size, effective_prefetch_size)
+        """
+        avg_io_size = self.tracker.average
+        streak = self.consumer.sequential_streak
+        is_variable = self.tracker.is_variable
+        last_read_size = self.tracker.last_value
+
+        exceeds_user_max = (
+            self._user_max_prefetch_size is not None
+            and avg_io_size > self._user_max_prefetch_size
+        )
+
+        # Disable prefetching ahead if variable AND average > 64MB, or if it exceeds user max
+        if (
+            is_variable and avg_io_size > self.VARIABLE_IO_THRESHOLD
+        ) or exceeds_user_max:
+            logger.debug(
+                "Large IO detected (variable > 64MB or > user max). Disabling background prefetching."
+            )
+            prefetch_multiplier = 1
+        elif streak < self.MIN_STREAKS_FOR_PREFETCHING:
+            prefetch_multiplier = 1
+        else:
+            prefetch_multiplier = streak - self.MIN_STREAKS_FOR_PREFETCHING + 1
+
+        if self.queue.empty() or prefetch_multiplier == 1:
+            io_size = last_read_size
+        else:
+            io_size = avg_io_size
+
+        prefetch_size = min(prefetch_multiplier * io_size, self.max_prefetch_size)
+        if self.consumer.offset + prefetch_size < self.consumer.target_offset:
+            prefetch_size = self.consumer.target_offset - self.consumer.offset
+
+        if is_variable:
+            effective_prefetch_size = prefetch_size
+        else:
+            effective_prefetch_size = (prefetch_size // io_size) * io_size
+            if effective_prefetch_size == 0:
+                effective_prefetch_size = prefetch_size
+
+        return prefetch_size, io_size, effective_prefetch_size
+
+    async def _process_prefetch_cycle(self):
+        """Executes a single cycle of enqueuing fetch tasks."""
+        prefetch_size, io_size, effective_prefetch_size = (
+            self._calculate_prefetch_params()
+        )
+
+        logger.debug(
+            "Producer awake. Current offset: %d, User offset: %d, Prefetch size: %d",
+            self.current_offset,
+            self.consumer.offset,
+            prefetch_size,
+        )
+
+        while (
+            not self.is_stopped
+            and (self.current_offset - self.consumer.offset) < prefetch_size
+            and self.current_offset < self.size
+        ):
+            user_offset = self.consumer.offset
+            space_remaining = self.size - self.current_offset
+            prefetch_space_available = prefetch_size - (
+                self.current_offset - user_offset
+            )
+
+            if prefetch_size >= self.MIN_CHUNK_SIZE:
+                if prefetch_space_available >= self.MIN_CHUNK_SIZE:
+                    actual_size = min(
+                        max(self.MIN_CHUNK_SIZE, io_size), space_remaining
+                    )
+                else:
+                    break
+            else:
+                actual_size = min(io_size, space_remaining)
+
+            if prefetch_space_available < actual_size:
+                if (
+                    self.tracker.is_variable
+                    or prefetch_space_available == prefetch_size
+                ):
+                    actual_size = prefetch_space_available
+                else:
+                    break
+
+            streak = self.consumer.sequential_streak
+            if streak < self.MIN_STREAKS_FOR_PREFETCHING:
+                sfactor = self.concurrency
+            else:
+                sfactor = min(
+                    self.concurrency,
+                    max(
+                        1,
+                        actual_size * self.concurrency // effective_prefetch_size,
+                    ),
+                )
+
+            logger.debug(
+                "Spawning fetch task. Offset: %d, Size: %d, Split Factor: %d",
+                self.current_offset,
+                actual_size,
+                sfactor,
+            )
+
+            download_task = asyncio.create_task(
+                self.fetcher(self.current_offset, actual_size, split_factor=sfactor)
+            )
+            self._active_tasks.add(download_task)
+            download_task.add_done_callback(self._active_tasks.discard)
+
+            await self.queue.put(download_task)
+            self.current_offset += actual_size
+
+        if self.current_offset >= self.size:
+            logger.debug("Producer reached EOF. Exiting background loop.")
+            self.is_stopped = True
 
 
 class PrefetchConsumer:
@@ -332,24 +434,25 @@ class PrefetchConsumer:
         self,
         queue: asyncio.Queue,
         wakeup_event: asyncio.Event,
-        is_producer_stopped,
-        on_error,
+        tracker: RunningAverageTracker,
+        orchestrator: "BackgroundPrefetcher",
     ):
         """Initializes the consumer.
 
         Args:
             queue (asyncio.Queue): The shared queue containing fetch tasks.
             wakeup_event (asyncio.Event): Event used to wake the producer when more data is needed.
-            is_producer_stopped (Callable): Function returning whether the producer has been halted.
-            on_error (Callable): Callback triggered when a fetch error is encountered.
+            tracker (RunningAverageTracker): Tracker for history of read sizes.
+            orchestrator (BackgroundPrefetcher): The parent object managing the operation.
         """
         logger.debug("Initializing PrefetchConsumer.")
         self.queue = queue
         self.wakeup_event = wakeup_event
-        self.is_producer_stopped = is_producer_stopped
-        self.on_error = on_error
+        self.tracker = tracker
+        self.orchestrator = weakref.proxy(orchestrator)
         self.sequential_streak = 0
         self.offset = 0
+        self.target_offset = 0
         self._current_block = b""
         self._current_block_idx = 0
 
@@ -364,6 +467,7 @@ class PrefetchConsumer:
             new_offset,
         )
         self.offset = new_offset
+        self.target_offset = new_offset
         self.sequential_streak = 0
         self._current_block = b""
         self._current_block_idx = 0
@@ -384,12 +488,18 @@ class PrefetchConsumer:
 
         chunks = []
         processed = 0
+        self.target_offset = self.offset + size
 
         while processed < size:
             available = len(self._current_block) - self._current_block_idx
+            trigger_wakeup = False
 
             if not available:
-                if self.is_producer_stopped() and self.queue.empty():
+                is_producer_stopped = (
+                    self.orchestrator.producer is None
+                    or self.orchestrator.producer.is_stopped
+                )
+                if is_producer_stopped and self.queue.empty():
                     logger.debug("Consumer reached EOF.")
                     break
 
@@ -401,15 +511,37 @@ class PrefetchConsumer:
 
                 if isinstance(task, Exception):
                     logger.error("Consumer retrieved an exception: %s", task)
-                    self.on_error(task)
+                    self.orchestrator.set_error(task)
                     raise task
 
                 try:
                     block = await task
 
                     self.sequential_streak += 1
-                    if self.sequential_streak >= 2:
-                        self.wakeup_event.set()
+                    if (
+                        self.sequential_streak
+                        >= PrefetchProducer.MIN_STREAKS_FOR_PREFETCHING
+                    ):
+                        exceeds_user_max = (
+                            self.orchestrator.max_prefetch_size is not None
+                            and self.tracker.average
+                            > self.orchestrator.max_prefetch_size
+                        )
+                        is_massive_variable = (
+                            self.tracker.is_variable
+                            and self.tracker.average
+                            > PrefetchProducer.VARIABLE_IO_THRESHOLD
+                        )
+
+                        # Suppress proactive wakeups to prevent large CPU assembly
+                        # on erratic large reads or exceeding max
+                        if not (is_massive_variable or exceeds_user_max):
+                            trigger_wakeup = True
+                        else:
+                            logger.debug(
+                                "Suppressing proactive producer wakeup due to massive variable"
+                                " workload or exceeding user max prefetch."
+                            )
 
                     self._current_block = block
                     self._current_block_idx = 0
@@ -418,7 +550,7 @@ class PrefetchConsumer:
                     raise
                 except Exception as e:
                     logger.error("Consumer caught an error: %s", e, exc_info=True)
-                    self.on_error(e)
+                    self.orchestrator.set_error(e)
                     raise e
 
             if not self._current_block:
@@ -440,6 +572,8 @@ class PrefetchConsumer:
             self._current_block_idx += take
             processed += take
             self.offset += take
+            if trigger_wakeup:
+                self.wakeup_event.set()
 
         return chunks
 
@@ -484,6 +618,8 @@ class BackgroundPrefetcher:
     network tasks with the consumer's data slicing logic.
     """
 
+    producer = None
+
     def __init__(self, fetcher, size: int, concurrency: int, max_prefetch_size=None):
         """Initializes the background prefetcher.
 
@@ -504,6 +640,7 @@ class BackgroundPrefetcher:
         )
         self.size = size
         self.concurrency = concurrency
+        self.max_prefetch_size = max_prefetch_size
 
         if max_prefetch_size is not None and max_prefetch_size <= 0:
             logger.error("Invalid max_prefetch_size provided: %s", max_prefetch_size)
@@ -523,8 +660,8 @@ class BackgroundPrefetcher:
         self.consumer = PrefetchConsumer(
             queue=self.queue,
             wakeup_event=self.wakeup_event,
-            is_producer_stopped=self._is_producer_stopped,
-            on_error=self._set_error,
+            tracker=self.read_tracker,
+            orchestrator=self,
         )
 
         self.producer = PrefetchProducer(
@@ -533,10 +670,9 @@ class BackgroundPrefetcher:
             concurrency=self.concurrency,
             queue=self.queue,
             wakeup_event=self.wakeup_event,
-            get_user_offset=lambda: self.consumer.offset,
-            get_io_size=self._get_adaptive_io_size,
-            get_sequential_streak=lambda: self.consumer.sequential_streak,
-            on_error=self._set_error,
+            consumer=self.consumer,
+            tracker=self.read_tracker,
+            orchestrator=self,
             user_max_prefetch_size=max_prefetch_size,
         )
 
@@ -554,15 +690,13 @@ class BackgroundPrefetcher:
         """Context manager exit point. Ensures the prefetcher is cleanly closed."""
         self.close()
 
-    def _get_adaptive_io_size(self) -> int:
-        return self.read_tracker.average
-
-    def _is_producer_stopped(self) -> bool:
-        return self.producer.is_stopped if hasattr(self, "producer") else True
-
-    def _set_error(self, e: Exception):
+    def set_error(self, e: Exception):
         logger.error("Global error state set in BackgroundPrefetcher: %s", e)
         self._error = e
+
+        # Stop the producer loop.
+        if self.producer and not self.producer.is_stopped:
+            asyncio.run_coroutine_threadsafe(self.producer.stop(), self.loop)
 
     async def _restart_producer(self, new_offset: int):
         logger.debug(
@@ -576,7 +710,14 @@ class BackgroundPrefetcher:
     async def _async_fetch(self, start, end):
         logger.debug("Executing _async_fetch for range %d - %d.", start, end)
 
-        if start != self.user_offset:
+        # If the prefetcher is in error state, let's do a hard seek to start offset.
+        if self._error:
+            logger.info(
+                "Recovering from error state. Restarting producer at offset: %d", start
+            )
+            self.user_offset = start
+            await self._restart_producer(start)
+        elif start != self.user_offset:
             if self.user_offset < start <= self.producer.current_offset:
                 logger.debug(
                     "Soft seek detected. Skipping ahead from %d to %d.",
@@ -625,10 +766,6 @@ class BackgroundPrefetcher:
             return b""
 
         with self._lock:
-            if self._error:
-                logger.error("Cannot fetch data: instance has an active error state.")
-                raise self._error
-
             if self.is_stopped:
                 logger.error(
                     "Cannot fetch data: BackgroundPrefetcher is stopped or closed."
@@ -644,8 +781,9 @@ class BackgroundPrefetcher:
                 logger.error(
                     "Exception raised during synchronous fetch: %s", e, exc_info=True
                 )
-                self.is_stopped = True
                 self._error = e
+                if self.producer and not self.producer.is_stopped:
+                    asyncio.run_coroutine_threadsafe(self.producer.stop(), self.loop)
                 raise
 
             if self.is_stopped:
