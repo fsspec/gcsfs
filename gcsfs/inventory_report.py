@@ -512,13 +512,13 @@ class InventoryReport:
         # need to fetch the name.
         if use_snapshot_listing is True:
             obj = gcs_file_system._process_object(
+                bucket,
                 {
                     key: value
                     for key, value in zip(
                         metadata_fields, inventory_report_line.strip().split(delimiter)
                     )
                 },
-                bucket,
             )
         else:
             obj = {"name": inventory_report_line.strip().split(delimiter)[obj_name_idx]}
