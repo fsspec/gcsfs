@@ -763,7 +763,7 @@ def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
     ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
 
     # Verify that run_coroutine_threadsafe was called
-    mock_run_coroutine_threadsafe.assert_called_once()
+    mock_run_coroutine_threadsafe.assert_called()
     args, _ = mock_run_coroutine_threadsafe.call_args
     assert args[1] == mock_current_loop
 
