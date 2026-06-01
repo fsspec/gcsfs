@@ -44,19 +44,20 @@ def _prepare_files(gcs, file_paths, file_size=0):
     if file_size == 0:
         try:
             gcs.pipe({path: b"" for path in file_paths})
+            return
         except Exception as e:
             pytest.fail(f"Failed to pipe files: {e}")
-    else:
-        chunk_size = min(100 * MB, file_size)
-        pool_size = 16
 
-        args = [(gcs, path, file_size, chunk_size) for path in file_paths]
-        ctx = multiprocessing.get_context("spawn")
-        with ctx.Pool(pool_size) as pool:
-            try:
-                pool.starmap(_write_file, args)
-            except RuntimeError as e:
-                pytest.fail(str(e))
+    chunk_size = min(100 * MB, file_size)
+    pool_size = 16
+
+    args = [(gcs, path, file_size, chunk_size) for path in file_paths]
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(pool_size) as pool:
+        try:
+            pool.starmap(_write_file, args)
+        except RuntimeError as e:
+            pytest.fail(str(e))
 
 
 def _prepare_folders(gcs, folder_paths):
