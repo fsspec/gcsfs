@@ -2,7 +2,9 @@ import logging
 import multiprocessing
 import os
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
+from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_benchmark_extra_info,
     publish_fixed_duration_benchmark_extra_info,
@@ -10,6 +12,7 @@ from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_resource_metrics,
 )
 from gcsfs.tests.settings import BENCHMARK_CPU_AFFINITY
+from gcsfs.tests.utils import is_real_gcs
 
 
 def filter_test_cases(all_cases):
@@ -116,6 +119,18 @@ def run_multi_threaded_fixed_duration(
 
     # This is to ensure the JSON report is generated correctly by pytest-benchmark
     benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)
+
+
+def _multiprocess_worker_wrapper(worker_target, args):
+    """Wrapper to apply emulator mock inside spawned child processes."""
+    if not is_real_gcs():
+        with mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
+            return_value=BucketType.UNKNOWN,
+        ):
+            worker_target(*args)
+    else:
+        worker_target(*args)
 
 
 def run_multi_process(
