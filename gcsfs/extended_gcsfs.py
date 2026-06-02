@@ -1199,16 +1199,53 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
         """
-        if isinstance(path, list):
-            # For HNS check, we can check for bucket type from the first path.
-            bucket, _, _ = self.split_path(path[0]) if path else (None, None, None)
-        else:
+        if not isinstance(path, list):
             bucket, _, _ = self.split_path(path)
+            return await self._rm_bucket_paths(
+                bucket,
+                path,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                batchsize=batchsize,
+            )
 
-        is_hns = await self._is_bucket_hns_enabled(bucket)
+        if not path:
+            return []
 
-        if not is_hns:
-            # Fall back to the parent's async rm implementation for non-HNS buckets.
+        grouped = {}
+        for p in path:
+            bucket, _, _ = self.split_path(p)
+            grouped.setdefault(bucket, []).append(p)
+
+        results = []
+        succeeded = False
+
+        for bucket, bucket_paths in grouped.items():
+            try:
+                result = await self._rm_bucket_paths(
+                    bucket,
+                    bucket_paths,
+                    recursive=recursive,
+                    maxdepth=maxdepth,
+                    batchsize=batchsize,
+                )
+            except FileNotFoundError:
+                continue
+
+            succeeded = True
+            if result:
+                results.extend(result)
+
+        if not succeeded:
+            raise FileNotFoundError(path)
+
+        return results
+
+    async def _rm_bucket_paths(
+        self, bucket, path, recursive=False, maxdepth=None, batchsize=20
+    ):
+        """Helper method to handle the rm operation for paths within a single bucket."""
+        if not await self._is_bucket_hns_enabled(bucket):
             return await super()._rm(
                 path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
             )
@@ -1217,11 +1254,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             path, recursive=recursive, maxdepth=maxdepth, detail=True
         )
 
-        # Separate files and directories based on their type.
-        # Directories must be deleted from the deepest first.
         files = list({p["name"] for p in paths if p["type"] == "file"})
         dirs = sorted(
-            list({p["name"] for p in paths if p["type"] == "directory"}),
+            {p["name"] for p in paths if p["type"] == "directory"},
             reverse=True,
         )
 
