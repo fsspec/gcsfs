@@ -458,9 +458,10 @@ class MRDPool:
                     self._rr_index = (self._rr_index + 1) % len(self._all_mrds)
 
             if mrd is None:
-                # Either the queue was non-empty, or the pool is full and sharing
-                # is disabled: block until a holder returns an MRD. NOTE: the lock
-                # is intentionally held across this await -- get_mrd's finally
+                # If the queue was non-empty, this gets an MRD immediately without blocking.
+                # If the queue was empty (pool is full and sharing is disabled), this blocks
+                # until a holder returns an MRD.
+                # NOTE: the lock is intentionally held across this await -- get_mrd's finally
                 # returns MRDs via put_nowait WITHOUT the lock, so a waiter blocked
                 # here is still unblocked by a concurrent release (no deadlock).
                 mrd = await self._free_mrds.get()

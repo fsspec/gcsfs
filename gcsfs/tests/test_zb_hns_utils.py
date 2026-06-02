@@ -19,14 +19,9 @@ generation = "12345"
 
 @pytest.mark.asyncio
 async def test_shared_mrd_closed_only_by_last_holder():
-    from unittest import mock
-
-    from gcsfs.zb_hns_utils import MRDPool
-
     class FakeMRD:
         def __init__(self):
             self.persisted_size = 0
-            self.bucket_name, self.object_name = "b", "o"
             self.close_count = 0
 
         async def close(self):
