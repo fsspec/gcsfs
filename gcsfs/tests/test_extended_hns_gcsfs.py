@@ -2274,6 +2274,60 @@ class TestExtendedGcsFileSystemRm:
                 batchsize=self.BATCH_SIZE,
             )
 
+    def test_rm_mixed_buckets_all_dne_raises_error(self, gcs_hns, gcs_hns_mocks):
+        """Test mixed bucket rm raises FileNotFoundError if all bucket groups fail."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+        hns_file = "hns-bucket/file.txt"
+
+        async def mock_lookup_bucket_type(bucket):
+            if bucket == "flat-bucket":
+                return BucketType.NON_HIERARCHICAL
+            elif bucket == "hns-bucket":
+                return BucketType.HIERARCHICAL
+            return BucketType.UNKNOWN
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+            mocks["async_lookup_bucket_type"].side_effect = mock_lookup_bucket_type
+            mocks["super_rm"].side_effect = FileNotFoundError()
+            mocks["info"].side_effect = FileNotFoundError()  # For HNS file check
+
+            with pytest.raises(FileNotFoundError):
+                gcsfs.rm([flat_file, hns_file])
+
+    def test_rm_mixed_buckets_one_dne_one_exists_succeeds(self, gcs_hns, gcs_hns_mocks):
+        """Test mixed bucket rm succeeds if at least one bucket group succeeds."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+        hns_file = "hns-bucket/file.txt"
+
+        async def mock_lookup_bucket_type(bucket):
+            if bucket == "flat-bucket":
+                return BucketType.NON_HIERARCHICAL
+            elif bucket == "hns-bucket":
+                return BucketType.HIERARCHICAL
+            return BucketType.UNKNOWN
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mocks["async_lookup_bucket_type"].side_effect = mock_lookup_bucket_type
+            # Flat fails, but HNS succeeds
+            mocks["super_rm"].side_effect = FileNotFoundError()
+            mock_expand.return_value = [{"name": hns_file, "type": "file"}]
+            mock_delete_files.return_value = []
+
+            # This should succeed since the HNS group succeeded, suppressing flat's FileNotFoundError
+            gcsfs.rm([flat_file, hns_file])
+
+            mocks["super_rm"].assert_awaited_once()
+            mock_expand.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
