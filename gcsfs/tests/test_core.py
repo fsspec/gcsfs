@@ -1313,6 +1313,46 @@ def test_get_put_file_in_dir(protocol, gcs):
         assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
 
 
+@pytest.mark.asyncio
+async def test_upload_chunk_shortfall():
+    from gcsfs.core import upload_chunk
+
+    fs_mock = mock.AsyncMock()
+
+    data = b"0123456789"
+    location = "http://mock-location"
+    offset = 0
+    size = 10
+    content_type = "application/octet-stream"
+
+    call_count = 0
+
+    async def mock_call(method, loc, headers=None, data=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"Range": "bytes=0-4"}, None
+        else:
+            return {}, '{"generation": "12345"}'
+
+    fs_mock._call.side_effect = mock_call
+
+    result = await upload_chunk(fs_mock, location, data, offset, size, content_type)
+
+    assert result == {"generation": "12345"}
+    assert call_count == 2
+
+    call_args_list = fs_mock._call.call_args_list
+
+    args1, kwargs1 = call_args_list[0]
+    assert kwargs1["headers"]["Content-Range"] == "bytes 0-9/10"
+
+    args2, kwargs2 = call_args_list[1]
+    assert kwargs2["headers"]["Content-Range"] == "bytes 5-9/10"
+
+    assert kwargs2["data"].getvalue() == b"56789"
+
+
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
 def test_put_file_resumable_upload_cleanup_on_chunk_failure(protocol, gcs):
     rpath = protocol + TEST_BUCKET + "/resumable_cleanup_test"
