@@ -856,7 +856,7 @@ async def test_close_resources_with_exceptions(caplog):
     fs._mrd_pool_cache = mock_cache
 
     with caplog.at_level(logging.WARNING, logger="gcsfs"):
-        await fs.close_resources()
+        await fs._close_resources()
 
     assert "Failed to close grpc_client: grpc fail" in caplog.text
     assert "Failed to close storage_control_client: storage control fail" in caplog.text

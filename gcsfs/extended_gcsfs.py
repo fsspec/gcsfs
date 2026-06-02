@@ -241,7 +241,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             )
         return self._storage_control_client
 
-    async def close_resources(self):
+    async def _close_resources(self):
         """
         Close gRPC clients, channels, and other resources.
 
