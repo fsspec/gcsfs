@@ -20,6 +20,7 @@ generation = "12345"
 @pytest.mark.asyncio
 async def test_shared_mrd_closed_only_by_last_holder():
     from unittest import mock
+
     from gcsfs.zb_hns_utils import MRDPool
 
     class FakeMRD:
@@ -27,6 +28,7 @@ async def test_shared_mrd_closed_only_by_last_holder():
             self.persisted_size = 0
             self.bucket_name, self.object_name = "b", "o"
             self.close_count = 0
+
         async def close(self):
             self.close_count += 1
 
@@ -36,18 +38,20 @@ async def test_shared_mrd_closed_only_by_last_holder():
 
     await pool.initialize()
 
-    cm_a = pool.get_mrd(); mrd_a = await cm_a.__aenter__()   # exclusive
-    cm_b = pool.get_mrd(); mrd_b = await cm_b.__aenter__()   # round-robin share
-    assert mrd_a is mrd_b                                    # same MRD shared
+    cm_a = pool.get_mrd()
+    mrd_a = await cm_a.__aenter__()  # exclusive
+    cm_b = pool.get_mrd()
+    mrd_b = await cm_b.__aenter__()  # round-robin share
+    assert mrd_a is mrd_b  # same MRD shared
 
     await pool.close()
-    assert mrd_a.close_count == 0                            # still in use -> not closed
+    assert mrd_a.close_count == 0  # still in use -> not closed
 
     await cm_a.__aexit__(None, None, None)
-    assert mrd_a.close_count == 0                            # B still holds it
+    assert mrd_a.close_count == 0  # B still holds it
 
     await cm_b.__aexit__(None, None, None)
-    assert mrd_a.close_count == 1                            # last holder closes it exactly once
+    assert mrd_a.close_count == 1  # last holder closes it exactly once
 
 
 @pytest.mark.asyncio
