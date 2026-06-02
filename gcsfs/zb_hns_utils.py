@@ -446,8 +446,11 @@ class MRDPool:
             # Only return the MRD to the free queue if we were the ones who took it out
             # or if we just spawned it. This prevents duplicate entries in the queue
             # when multiple concurrent tasks share the same MRD via round-robin.
-            if (create_new or used_from_queue) and not self._closed:
-                self._free_mrds.put_nowait(mrd)
+            if create_new or used_from_queue:
+                if self._closed:
+                    await close_mrd(mrd)
+                else:
+                    self._free_mrds.put_nowait(mrd)
 
     async def close(self):
         """
@@ -459,15 +462,19 @@ class MRDPool:
         async with self._lock:
             if self._closed:
                 return
+            self._closed = True
+
+            free_mrds = []
+            while not self._free_mrds.empty():
+                free_mrds.append(self._free_mrds.get_nowait())
 
             try:
                 if self._cache is not None:
-                    await self._cache.release(self._key, self._all_mrds)
+                    await self._cache.release(self._key, free_mrds)
                 else:
-                    await _close_mrds(self._all_mrds, raise_exception=True)
+                    await _close_mrds(free_mrds, raise_exception=True)
             finally:
                 self._all_mrds.clear()
-                self._closed = True
 
 
 def _drain_queue(q):
