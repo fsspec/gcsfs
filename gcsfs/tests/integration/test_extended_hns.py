@@ -981,7 +981,7 @@ class TestExtendedGcsFileSystemRm:
 
         # Ensure clean state and create targets
         gcsfs.touch(flat_file)
-        gcsfs.mkdir(hns_empty_dir)
+        gcsfs.mkdir(hns_empty_dir, create_parents=True)
         gcsfs.touch(hns_file)
 
         assert gcsfs.exists(flat_file)
