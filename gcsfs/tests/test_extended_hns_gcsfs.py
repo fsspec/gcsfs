@@ -2216,13 +2216,12 @@ class TestExtendedGcsFileSystemRm:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
 
-    def test_rm_empty_list_raises_error_no_lookup(self, gcs_hns, gcs_hns_mocks):
-        """Test that rm([]) raises FileNotFoundError and doesn't do bucket lookup."""
+    def test_rm_empty_list_returns_empty_no_lookup(self, gcs_hns, gcs_hns_mocks):
+        """Test that rm([]) returns [] and doesn't do bucket lookup."""
         gcsfs = gcs_hns
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            with pytest.raises(FileNotFoundError):
-                gcsfs.rm([])
+            assert gcsfs.rm([]) == []
 
             mocks["async_lookup_bucket_type"].assert_not_called()
 

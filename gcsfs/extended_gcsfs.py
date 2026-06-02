@@ -1210,7 +1210,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             )
 
         if not path:
-            raise FileNotFoundError(path)
+            return []
 
         grouped = {}
         for p in path:
