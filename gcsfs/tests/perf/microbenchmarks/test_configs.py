@@ -12,10 +12,7 @@ from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     ListingConfigurator,
     get_listing_benchmark_cases,
 )
-from gcsfs.tests.perf.microbenchmarks.open.configs import (
-    OpenConfigurator,
-    get_open_benchmark_cases,
-)
+from gcsfs.tests.perf.microbenchmarks.open.configs import get_open_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.read.configs import (
     ReadConfigurator,
     get_read_benchmark_cases,

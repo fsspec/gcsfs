@@ -8,4 +8,5 @@ class OpenBenchmarkParameters(BaseBenchmarkParameters):
     """
     Parameters for Open benchmarks.
     """
+
     folders: int
