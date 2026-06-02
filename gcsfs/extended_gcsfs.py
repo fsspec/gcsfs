@@ -241,25 +241,31 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             )
         return self._storage_control_client
 
-    async def close_resources(self):
-        """Close gRPC clients, channels, and other resources."""
-        if self._grpc_client is not None:
+    async def _close_resources(self):
+        """
+        Close gRPC clients, channels, and other resources.
+
+        Order matters: pooled MRDs ride on the gRPC channel, so the MRD pool
+        cache must be drained BEFORE the gRPC transport is closed. The storage
+        control client owns a separate channel and is independent.
+        """
+        if self._mrd_pool_cache is not None:
             try:
-                await self._grpc_client.grpc_client.transport.close()
+                await self._mrd_pool_cache.close()
             except Exception as e:
-                logger.warning(f"Failed to close grpc_client: {e}")
-            self._grpc_client = None
+                logger.warning(f"Failed to close MRDPoolCache: {e}")
         if self._storage_control_client is not None:
             try:
                 await self._storage_control_client.transport.close()
             except Exception as e:
                 logger.warning(f"Failed to close storage_control_client: {e}")
             self._storage_control_client = None
-        if self._mrd_pool_cache is not None:
+        if self._grpc_client is not None:
             try:
-                await self._mrd_pool_cache.close()
+                await self._grpc_client.grpc_client.transport.close()
             except Exception as e:
-                logger.warning(f"Failed to close MRDPoolCache: {e}")
+                logger.warning(f"Failed to close grpc_client: {e}")
+            self._grpc_client = None
 
     async def _lookup_bucket_type(self, bucket):
         if bucket in self._storage_layout_cache:

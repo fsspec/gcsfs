@@ -327,15 +327,15 @@ def _cleanup_gcs(gcs, bucket=TEST_BUCKET, bucket_populated=True):
 
 def _close_gcs(gcs):
     """Close gcs instance resources for sync fixtures."""
-    if hasattr(gcs, "close_resources"):
-        asyn.sync(gcs.loop, gcs.close_resources)
+    if hasattr(gcs, "_close_resources"):
+        asyn.sync(gcs.loop, gcs._close_resources)
     GCSFileSystem.close_session(gcs.loop, gcs._session, gcs.asynchronous)
 
 
 async def _close_gcs_async(gcs):
     """Close gcs instance resources for async fixtures."""
-    if hasattr(gcs, "close_resources"):
-        await gcs.close_resources()
+    if hasattr(gcs, "_close_resources"):
+        await gcs._close_resources()
     GCSFileSystem.close_session(gcs.loop, gcs._session, gcs.asynchronous)
 
 
