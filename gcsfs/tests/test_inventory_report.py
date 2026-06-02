@@ -422,7 +422,7 @@ class TestInventoryReport:
 
         # Mock GCSFileSystem.
         gcs_file_system = mock.MagicMock(spec=GCSFileSystem)
-        gcs_file_system._process_object = mock.Mock(side_effect=lambda obj, bucket: obj)
+        gcs_file_system._process_object = mock.Mock(side_effect=lambda bucket, obj: obj)
 
         result = InventoryReport._parse_inventory_report_line(
             inventory_report_line=inventory_report_line,
