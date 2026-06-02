@@ -323,6 +323,23 @@ def gcsfs_benchmark_info(extended_gcs_factory, request):
     )
 
 
+@pytest.fixture
+def gcsfs_benchmark_open(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a open benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-open",
+        teardown=True,
+        create_folders=True,
+        require_file_paths=True,
+    )
+
+
 def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info):
     """
     Hook to post-process benchmark results before generating the JSON report.

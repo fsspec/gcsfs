@@ -2,7 +2,7 @@
 
 ## Introduction
 
-GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, listing, delete, and rename.
+GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, listing, delete, rename, and open.
 
 These benchmarks are built using the `pytest` and `pytest-benchmark` frameworks. Each benchmark test is a parameterized pytest case, where the parameters are dynamically configured at runtime from YAML configuration files. This allows for flexible and extensive testing scenarios without modifying the code.
 
@@ -48,6 +48,9 @@ The benchmarks use a set of parameter classes to define the configuration for ea
 *   **Info Parameters**: Specific to Info operations (extends Listing Parameters).
     *    `target_type`: The type of target to query: "bucket", "folder", or "file".
 
+*   **Open Parameters**: Specific to Open operations.
+    *    `folders`: Number of folders to distribute files into.
+
 ## Configuration
 
 Configuration values are stored in YAML files (e.g., `configs.yaml`) located within each benchmark's directory. These files define:
@@ -77,7 +80,7 @@ The `run.py` script is the central entry point for executing benchmarks. It hand
 
 | Option | Description | Required |
 | :--- | :--- | :--- |
-| `--group` | The benchmark group to run (e.g., `read`, `write`, `listing`, `info`). Runs all groups if not specified. | No |
+| `--group` | The benchmark group to run (e.g., `read`, `write`, `listing`, `info`, `open`). Runs all groups if not specified. | No |
 | `--config` | Specific scenario names to run (e.g., `read_seq`, `list_flat`). Accepts multiple values. | No |
 | `--regional-bucket` | Name of the regional GCS bucket. | Yes* |
 | `--zonal-bucket` | Name of the zonal GCS bucket. | Yes* |

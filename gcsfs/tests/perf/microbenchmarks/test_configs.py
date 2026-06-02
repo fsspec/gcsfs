@@ -12,6 +12,10 @@ from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     ListingConfigurator,
     get_listing_benchmark_cases,
 )
+from gcsfs.tests.perf.microbenchmarks.open.configs import (
+    OpenConfigurator,
+    get_open_benchmark_cases,
+)
 from gcsfs.tests.perf.microbenchmarks.read.configs import (
     ReadConfigurator,
     get_read_benchmark_cases,
@@ -266,3 +270,7 @@ def test_validate_actual_yaml_configs():
         # Info
         cases = get_info_benchmark_cases()
         assert len(cases) > 0, "Info config produced no cases"
+
+        # Open
+        cases = get_open_benchmark_cases()
+        assert len(cases) > 0, "Open config produced no cases"
