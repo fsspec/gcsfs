@@ -360,6 +360,31 @@ class MRDPool:
         self.mrd_supports_multi_request = (
             False  # Change this to true once mrd supports concurrent requests.
         )
+        # Maps each checked-out AsyncMultiRangeDownloader to its number of active
+        # get_mrd() holders. An MRD is only requeued into _free_mrds (or closed,
+        # when the pool is closing) by whichever holder releases it LAST, so an
+        # MRD still being driven by a round-robin sharer is never closed/requeued
+        # out from under it.
+        self._inflight = {}
+
+    def _mark_inflight(self, mrd):
+        """Record one more holder of `mrd`. Called under self._lock while the MRD
+        is handed to exactly one get_mrd() caller."""
+        self._inflight[mrd] = self._inflight.get(mrd, 0) + 1
+
+    def _release_inflight(self, mrd):
+        """Drop one holder of `mrd`; return True iff this was the LAST holder
+        (so the caller must now requeue or close it).
+
+        Both helpers only do synchronous dict mutations with no `await`, so they
+        are atomic under asyncio even though get_mrd's finally runs WITHOUT
+        self._lock."""
+        count = self._inflight.get(mrd, 0) - 1
+        if count > 0:
+            self._inflight[mrd] = count
+            return False
+        self._inflight.pop(mrd, None)
+        return True
 
     async def _create_mrd(self):
         await self.gcsfs._get_grpc_client()
@@ -410,8 +435,6 @@ class MRDPool:
         Raises:
             Exception: Bubbles up any exceptions encountered during MRD creation.
         """
-        create_new = False
-        used_from_queue = False
         mrd = None
 
         async with self._lock:
@@ -421,32 +444,37 @@ class MRDPool:
             if self._free_mrds.empty():
                 if self._active_count < self.pool_size:
                     self._active_count += 1
-                    create_new = True
+                    try:
+                        mrd = await self._get_or_create_mrd()
+                    except BaseException as e:
+                        self._active_count -= 1
+                        raise e
                 elif self.mrd_supports_multi_request and self._all_mrds:
-                    # Pool is full, queue is empty, and we are allowed to share a busy MRD.
-                    # Get the mrd in round robin fasion.
+                    # Pool is full and the queue is empty: share a busy MRD in
+                    # round-robin fashion. The MRD now has multiple holders;
+                    # refcounting ensures it is requeued/closed only once the
+                    # LAST holder is done with it.
                     mrd = self._all_mrds[self._rr_index]
                     self._rr_index = (self._rr_index + 1) % len(self._all_mrds)
 
-            if create_new:
-                try:
-                    mrd = await self._get_or_create_mrd()
-                except BaseException as e:
-                    self._active_count -= 1
-                    raise e
-            elif mrd is None:
-                # We did not spawn a new one and we did not grab one via round-robin.
-                # This means we must wait for a free one from the queue.
+            if mrd is None:
+                # If the queue was non-empty, this gets an MRD immediately without blocking.
+                # If the queue was empty (pool is full and sharing is disabled), this blocks
+                # until a holder returns an MRD.
+                # NOTE: the lock is intentionally held across this await -- get_mrd's finally
+                # returns MRDs via put_nowait WITHOUT the lock, so a waiter blocked
+                # here is still unblocked by a concurrent release (no deadlock).
                 mrd = await self._free_mrds.get()
-                used_from_queue = True
+
+            self._mark_inflight(mrd)
 
         try:
             yield mrd
         finally:
-            # Only return the MRD to the free queue if we were the ones who took it out
-            # or if we just spawned it. This prevents duplicate entries in the queue
-            # when multiple concurrent tasks share the same MRD via round-robin.
-            if create_new or used_from_queue:
+            # Intentionally lock-free (see note above). Only the holder that
+            # releases the MRD last requeues or closes it, so a round-robin
+            # sharer is never torn down by a peer or by close().
+            if self._release_inflight(mrd):
                 if self._closed:
                     await close_mrd(mrd)
                 else:
@@ -458,6 +486,8 @@ class MRDPool:
 
         Iterates through all instantiated downloaders and releases them back to
         the cache if available, otherwise closes them.
+
+        In-flight MRDs are not touched here; the last get_mrd() holder closes them on return once _closed is set.
         """
         async with self._lock:
             if self._closed:

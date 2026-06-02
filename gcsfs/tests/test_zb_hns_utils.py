@@ -18,6 +18,38 @@ generation = "12345"
 
 
 @pytest.mark.asyncio
+async def test_shared_mrd_closed_only_by_last_holder():
+    class FakeMRD:
+        def __init__(self):
+            self.persisted_size = 0
+            self.close_count = 0
+
+        async def close(self):
+            self.close_count += 1
+
+    pool = MRDPool(mock.Mock(), "b", "o", 1, pool_size=1, cache=None)
+    pool.mrd_supports_multi_request = True
+    pool._create_mrd = mock.AsyncMock(side_effect=lambda: FakeMRD())
+
+    await pool.initialize()
+
+    cm_a = pool.get_mrd()
+    mrd_a = await cm_a.__aenter__()  # exclusive
+    cm_b = pool.get_mrd()
+    mrd_b = await cm_b.__aenter__()  # round-robin share
+    assert mrd_a is mrd_b  # same MRD shared
+
+    await pool.close()
+    assert mrd_a.close_count == 0  # still in use -> not closed
+
+    await cm_a.__aexit__(None, None, None)
+    assert mrd_a.close_count == 0  # B still holds it
+
+    await cm_b.__aexit__(None, None, None)
+    assert mrd_a.close_count == 1  # last holder closes it exactly once
+
+
+@pytest.mark.asyncio
 async def test_download_range():
     """
     Tests that download_range calls mrd.download_ranges with the correct
@@ -295,9 +327,12 @@ def mock_gcsfs():
     new_callable=mock.AsyncMock,
 )
 async def test_mrd_pool_scaling(create_mrd_mock, mock_gcsfs):
-    mrd_instance_mock = mock.AsyncMock()
-    mrd_instance_mock.persisted_size = 1024
-    create_mrd_mock.return_value = mrd_instance_mock
+    def mock_mrd_factory(*args, **kwargs):
+        m = mock.AsyncMock()
+        m.persisted_size = 1024
+        return m
+
+    create_mrd_mock.side_effect = mock_mrd_factory
 
     pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=2)
 
@@ -307,12 +342,11 @@ async def test_mrd_pool_scaling(create_mrd_mock, mock_gcsfs):
     create_mrd_mock.assert_awaited_once()
 
     async with pool.get_mrd() as mrd1:
-        assert mrd1 == mrd_instance_mock
-
         # Since mrd1 is in use, getting another one should spawn a new MRD
-        async with pool.get_mrd() as _:
+        async with pool.get_mrd() as mrd2:
             assert pool._active_count == 2
             assert create_mrd_mock.call_count == 2
+            assert mrd1 is not mrd2
 
     # Both should have been returned to the free queue
     assert pool._free_mrds.qsize() == 2
