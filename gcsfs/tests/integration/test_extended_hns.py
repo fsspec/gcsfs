@@ -18,7 +18,7 @@ import pytest
 
 from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.conftest import requires_hns, requires_real_gcs
-from gcsfs.tests.settings import TEST_HNS_BUCKET
+from gcsfs.tests.settings import TEST_BUCKET, TEST_HNS_BUCKET
 
 pytestmark = [requires_real_gcs, requires_hns]
 
@@ -967,6 +967,48 @@ class TestExtendedGcsFileSystemRm:
 
         assert not gcsfs.exists(files[0])
         assert gcsfs.exists(files[1])  # subdir file still exists
+
+    @pytest.mark.parametrize("order", ["flat_first", "hns_first"])
+    def test_rm_mixed_buckets_order(self, gcs_hns, order):
+        """Test mixed flat and HNS bucket deletes in different orders."""
+        gcsfs = gcs_hns
+        unique_id = uuid.uuid4().hex
+
+        flat_file = f"{TEST_BUCKET}/mixed_rm_{unique_id}/file.txt"
+        hns_empty_dir = f"{TEST_HNS_BUCKET}/mixed_rm_{unique_id}/empty_dir"
+        hns_file = f"{TEST_HNS_BUCKET}/mixed_rm_{unique_id}/nested_dir/file.txt"
+        hns_nested_dir = f"{TEST_HNS_BUCKET}/mixed_rm_{unique_id}/nested_dir"
+
+        # Ensure clean state and create targets
+        gcsfs.touch(flat_file)
+        gcsfs.mkdir(hns_empty_dir)
+        gcsfs.touch(hns_file)
+
+        assert gcsfs.exists(flat_file)
+        assert gcsfs.exists(hns_empty_dir) and gcsfs.isdir(hns_empty_dir)
+        assert gcsfs.exists(hns_file)
+
+        if order == "flat_first":
+            paths = [flat_file, hns_empty_dir, hns_nested_dir]
+        else:
+            paths = [hns_empty_dir, hns_nested_dir, flat_file]
+
+        try:
+            gcsfs.rm(paths, recursive=True)
+
+            # Assert all targets no longer exist
+            assert not gcsfs.exists(flat_file)
+            assert not gcsfs.exists(hns_empty_dir)
+            assert not gcsfs.exists(hns_nested_dir)
+            assert not gcsfs.exists(hns_file)
+        finally:
+            # Cleanup if anything remained
+            for p in [flat_file, hns_empty_dir, hns_nested_dir]:
+                try:
+                    if gcsfs.exists(p):
+                        gcsfs.rm(p, recursive=True)
+                except Exception:
+                    pass
 
 
 @pytest.fixture()

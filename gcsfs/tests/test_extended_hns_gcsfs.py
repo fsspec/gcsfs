@@ -2134,6 +2134,147 @@ class TestExtendedGcsFileSystemRm:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
 
+    def test_rm_mixed_buckets_flat_first(self, gcs_hns, gcs_hns_mocks):
+        """Test rm with mixed buckets where the flat bucket is first in the list."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+        hns_empty_dir = "hns-bucket/empty_dir"
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        async def mock_lookup_bucket_type(bucket):
+            if bucket == "flat-bucket":
+                return BucketType.NON_HIERARCHICAL
+            elif bucket == "hns-bucket":
+                return BucketType.HIERARCHICAL
+            return BucketType.UNKNOWN
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mocks["async_lookup_bucket_type"].side_effect = mock_lookup_bucket_type
+            mock_expand.return_value = [{"name": hns_empty_dir, "type": "directory"}]
+            mock_delete_files.return_value = []
+
+            gcsfs.rm([flat_file, hns_empty_dir], recursive=True)
+
+            # Assert GCSFileSystem._rm (super_rm) is called ONLY with [flat_file]
+            mocks["super_rm"].assert_awaited_once_with(
+                [flat_file], recursive=True, maxdepth=None, batchsize=self.BATCH_SIZE
+            )
+
+            # Assert HNS-specific helper called _expand_path_with_details ONLY with [hns_empty_dir]
+            mock_expand.assert_awaited_once_with(
+                [hns_empty_dir], recursive=True, maxdepth=None, detail=True
+            )
+
+            # Assert folder deletion is used only for [hns_empty_dir]
+            expected_request = self._get_delete_folder_request(gcsfs, hns_empty_dir)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request, retry=mock.ANY, timeout=mock.ANY
+            )
+
+    def test_rm_mixed_buckets_hns_first(self, gcs_hns, gcs_hns_mocks):
+        """Test rm with mixed buckets where the HNS bucket is first in the list."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+        hns_empty_dir = "hns-bucket/empty_dir"
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        async def mock_lookup_bucket_type(bucket):
+            if bucket == "flat-bucket":
+                return BucketType.NON_HIERARCHICAL
+            elif bucket == "hns-bucket":
+                return BucketType.HIERARCHICAL
+            return BucketType.UNKNOWN
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mocks["async_lookup_bucket_type"].side_effect = mock_lookup_bucket_type
+            mock_expand.return_value = [{"name": hns_empty_dir, "type": "directory"}]
+            mock_delete_files.return_value = []
+
+            gcsfs.rm([hns_empty_dir, flat_file], recursive=True)
+
+            # Assert both branches still run per bucket and in correct groups
+            mocks["super_rm"].assert_awaited_once_with(
+                [flat_file], recursive=True, maxdepth=None, batchsize=self.BATCH_SIZE
+            )
+            mock_expand.assert_awaited_once_with(
+                [hns_empty_dir], recursive=True, maxdepth=None, detail=True
+            )
+            expected_request = self._get_delete_folder_request(gcsfs, hns_empty_dir)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request, retry=mock.ANY, timeout=mock.ANY
+            )
+
+    def test_rm_empty_list_raises_error_no_lookup(self, gcs_hns, gcs_hns_mocks):
+        """Test that rm([]) raises FileNotFoundError and doesn't do bucket lookup."""
+        gcsfs = gcs_hns
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+            with pytest.raises(FileNotFoundError):
+                gcsfs.rm([])
+
+            mocks["async_lookup_bucket_type"].assert_not_called()
+
+    def test_rm_same_bucket_hns_efficiency(self, gcs_hns, gcs_hns_mocks):
+        """Test that rm on multiple HNS paths in the same bucket remains efficient."""
+        gcsfs = gcs_hns
+        hns_file1 = "hns-bucket/file1.txt"
+        hns_file2 = "hns-bucket/file2.txt"
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mock_expand.return_value = [
+                {"name": hns_file1, "type": "file"},
+                {"name": hns_file2, "type": "file"},
+            ]
+            mock_delete_files.return_value = []
+
+            gcsfs.rm([hns_file1, hns_file2])
+
+            # Calls _expand_path_with_details exactly once for the whole group
+            mock_expand.assert_awaited_once_with(
+                [hns_file1, hns_file2], recursive=False, maxdepth=None, detail=True
+            )
+            mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
+                [hns_file1, hns_file2]
+            )
+            mocks["super_rm"].assert_not_called()
+
+    def test_rm_same_bucket_flat_efficiency(self, gcs_hns, gcs_hns_mocks):
+        """Test that rm on multiple flat paths in the same bucket remains efficient."""
+        gcsfs = gcs_hns
+        flat_file1 = "flat-bucket/file1.txt"
+        flat_file2 = "flat-bucket/file2.txt"
+
+        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+            gcsfs.rm([flat_file1, flat_file2])
+
+            # Calls super()._rm exactly once for the whole group
+            mocks["super_rm"].assert_awaited_once_with(
+                [flat_file1, flat_file2],
+                recursive=False,
+                maxdepth=None,
+                batchsize=self.BATCH_SIZE,
+            )
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
