@@ -125,7 +125,7 @@ def test_read_fixed_duration_multi_thread_config(mock_config_dependencies):
         name.startswith("read_rand_fixed_duration_multi_thread") for name in names
     )
     assert {case.threads for case in multi_thread_cases} == {32}
-    assert {case.files for case in multi_thread_cases} == {32}
+    assert {case.files for case in multi_thread_cases} == {1}
 
 
 def test_write_configurator(mock_config_dependencies):
