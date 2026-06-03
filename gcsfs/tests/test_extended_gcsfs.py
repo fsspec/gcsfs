@@ -30,14 +30,9 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import (
-    _MULTI_THREADED_TEST_DATA_SIZE,
-    csv_files,
-    files,
-    text_files,
-)
+from gcsfs.tests.conftest import csv_files, files, requires_rapid, text_files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
 
 file = "test/accounts.1.json"
@@ -50,20 +45,11 @@ file2 = "test/accounts.2.json"
 file2_path = f"{TEST_ZONAL_BUCKET}/{file2}"
 json_data2 = files[file2]
 
-REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
-
 a = TEST_ZONAL_BUCKET + "/zonal/test/a"
 b = TEST_ZONAL_BUCKET + "/zonal/test/b"
 c = TEST_ZONAL_BUCKET + "/zonal/test/c"
 
-# If the condition is True, only then tests in this file are run.
-should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
-    "true",
-    "1",
-)
-pytestmark = pytest.mark.skipif(
-    not should_run, reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set"
-)
+pytestmark = [requires_rapid]
 
 
 @pytest.fixture
@@ -73,10 +59,7 @@ def gcs_bucket_mocks():
     @contextlib.contextmanager
     def _gcs_bucket_mocks_factory(file_data, bucket_type_val):
         """Creates mocks for a given file content and bucket type."""
-        is_real_gcs = (
-            os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
-        )
-        if is_real_gcs:
+        if is_real_gcs():
             yield None
             return
         patch_target_lookup_bucket_type = (
@@ -107,6 +90,16 @@ def gcs_bucket_mocks():
         mock_downloader.object_name = "mock_object"
 
         mock_create_mrd = mock.AsyncMock(return_value=mock_downloader)
+
+        mock_pool = mock.AsyncMock(spec=MRDPool)
+        mock_pool.persisted_size = len(file_data)
+        mock_pool.get_mrd.return_value.__aenter__.return_value = mock_downloader
+
+        async def close_pool():
+            await mock_downloader.close()
+
+        mock_pool.close.side_effect = close_pool
+
         with (
             mock.patch(
                 patch_target_sync_lookup_bucket_type, return_value=bucket_type_val
@@ -119,12 +112,19 @@ def gcs_bucket_mocks():
             mock.patch(
                 patch_target_gcsfs_cat_file, new_callable=mock.AsyncMock
             ) as mock_cat_file,
+            mock.patch(
+                "gcsfs.zb_hns_utils.MRDPoolCache.get", new_callable=mock.AsyncMock
+            ) as mock_pool_cache_get,
         ):
+            mock_pool_cache_get.return_value = mock_pool
+
             mocks = {
                 "sync_lookup_bucket_type": mock_sync_lookup_bucket_type,
                 "create_mrd": mock_create_mrd,
                 "downloader": mock_downloader,
                 "cat_file": mock_cat_file,
+                "pool_cache_get": mock_pool_cache_get,
+                "pool": mock_pool,
             }
             yield mocks
             # Common assertion for all tests using this mock
@@ -326,8 +326,7 @@ def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
         assert f.read() == b"o, world!"  # Check cache works as well
 
 
-@pytest.mark.asyncio
-async def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
+def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
     """
     Tests that cat_file can read from an unfinalized file successfully
     """
@@ -335,16 +334,27 @@ async def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
 
     # Files are not finalized by default
-    await extended_gcsfs._pipe_file(file_path, b"Hello, world!")
+    extended_gcsfs.pipe({file_path: b"Hello, world!"})
 
-    data = await extended_gcsfs._cat_file(file_path)
+    data = extended_gcsfs.cat(file_path)
     assert data == b"Hello, world!"
 
 
 # ========================== Zonal Multithreaded Read Tests ===========================
+_MULTI_THREADED_TEST_DATA_SIZE = 5 * 1024 * 1024  # 5MB
 _MULTI_THREADED_TEST_FILE = "multi_threaded_test_file"
-_MULTI_THREADED_TEST_DATA = text_files[_MULTI_THREADED_TEST_FILE]
+pattern = b"0123456789abcdef"
+_MULTI_THREADED_TEST_DATA = (
+    pattern * (_MULTI_THREADED_TEST_DATA_SIZE // len(pattern))
+    + pattern[: _MULTI_THREADED_TEST_DATA_SIZE % len(pattern)]
+)
 _MULTI_THREADED_TEST_FILE_PATH = f"{TEST_ZONAL_BUCKET}/{_MULTI_THREADED_TEST_FILE}"
+
+
+@pytest.fixture
+def multi_threaded_test_file(extended_gcsfs):
+    extended_gcsfs.pipe(_MULTI_THREADED_TEST_FILE_PATH, _MULTI_THREADED_TEST_DATA)
+
 
 _TEST_BLOCK_SIZE_FOR_CHUNK_BOUNDARY = 1 * 1024 * 1024  # 1MB
 _NUM_CONCURRENCY_THREADS = 10
@@ -371,7 +381,9 @@ def _read_range_from_fs(fs, path, offset, length, block_size=None):
         return f.read(length)
 
 
-def test_multithreaded_read_disjoint_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_disjoint_ranges_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads of disjoint ranges from the same file.
     Verifies that different parts of the file can be fetched simultaneously without data mix-up.
@@ -394,12 +406,14 @@ def test_multithreaded_read_disjoint_ranges_zb(extended_gcsfs, gcs_bucket_mocks)
         assert results[2] == _MULTI_THREADED_TEST_DATA[4096:5120]
 
         if mocks:
-            assert mocks["create_mrd"].call_count == len(read_tasks)
+            assert mocks["pool_cache_get"].call_count == len(read_tasks)
             assert mocks["downloader"].download_ranges.call_count >= len(read_tasks)
-            assert mocks["downloader"].close.call_count == len(read_tasks)
+            assert mocks["pool"].close.call_count == len(read_tasks)
 
 
-def test_multithreaded_read_overlapping_ranges_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_overlapping_ranges_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads of overlapping ranges from the same file.
     """
@@ -431,9 +445,9 @@ def test_multithreaded_read_overlapping_ranges_zb(extended_gcsfs, gcs_bucket_moc
         assert results[2] == _MULTI_THREADED_TEST_DATA[0:2048]
 
         if mocks:
-            assert mocks["create_mrd"].call_count == len(read_tasks)
+            assert mocks["pool_cache_get"].call_count == len(read_tasks)
             assert mocks["downloader"].download_ranges.call_count >= len(read_tasks)
-            assert mocks["downloader"].close.call_count == len(read_tasks)
+            assert mocks["pool"].close.call_count == len(read_tasks)
 
 
 def test_default_cache_is_readahead_chunked(extended_gcsfs, gcs_bucket_mocks):
@@ -443,7 +457,9 @@ def test_default_cache_is_readahead_chunked(extended_gcsfs, gcs_bucket_mocks):
             assert isinstance(f.cache, caching.ReadAheadChunked)
 
 
-def test_multithreaded_read_chunk_boundary_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_chunk_boundary_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests concurrent reads that straddle internal buffering chunk boundaries.
     Verifies correct stitching of data from multiple internal requests.
@@ -509,9 +525,9 @@ def test_multithreaded_read_chunk_boundary_zb(extended_gcsfs, gcs_bucket_mocks):
         )
 
         if mocks:
-            assert mocks["create_mrd"].call_count == len(read_tasks)
+            assert mocks["pool_cache_get"].call_count == len(read_tasks)
             assert mocks["downloader"].download_ranges.call_count >= len(read_tasks)
-            assert mocks["downloader"].close.call_count == len(read_tasks)
+            assert mocks["pool"].close.call_count == len(read_tasks)
 
 
 def _read_random_range(fs, path, file_size, read_length):
@@ -522,7 +538,9 @@ def _read_random_range(fs, path, file_size, read_length):
         return f.read(read_length)
 
 
-def test_multithreaded_read_high_concurrency_zb(extended_gcsfs, gcs_bucket_mocks):
+def test_multithreaded_read_high_concurrency_zb(
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
+):
     """
     Tests high-concurrency reads to stress the connection pooling and handling.
     Verifies that many concurrent requests do not lead to crashes or deadlocks.
@@ -550,16 +568,16 @@ def test_multithreaded_read_high_concurrency_zb(extended_gcsfs, gcs_bucket_mocks
             assert res in _MULTI_THREADED_TEST_DATA  # Ensure the content is valid
 
         if mocks:
-            assert mocks["create_mrd"].call_count == _NUM_CONCURRENCY_THREADS
+            assert mocks["pool_cache_get"].call_count == _NUM_CONCURRENCY_THREADS
             assert (
                 mocks["downloader"].download_ranges.call_count
                 >= _NUM_CONCURRENCY_THREADS
             )
-            assert mocks["downloader"].close.call_count == _NUM_CONCURRENCY_THREADS
+            assert mocks["pool"].close.call_count == _NUM_CONCURRENCY_THREADS
 
 
 def test_multithreaded_read_one_fails_others_survive_zb(
-    extended_gcsfs, gcs_bucket_mocks
+    extended_gcsfs, gcs_bucket_mocks, multi_threaded_test_file
 ):
     """
     Tests fault tolerance: one thread's read operation fails, but others complete successfully.
@@ -635,11 +653,11 @@ def test_multithreaded_read_one_fails_others_survive_zb(
                     == _MULTI_THREADED_TEST_DATA[i * 1024 : i * 1024 + 1024]
                 )
 
-        assert mocks["create_mrd"].call_count == _NUM_FAIL_SURVIVE_THREADS
+        assert mocks["pool_cache_get"].call_count == _NUM_FAIL_SURVIVE_THREADS
         assert (
             mocks["downloader"].download_ranges.call_count >= _NUM_FAIL_SURVIVE_THREADS
         )
-        assert mocks["downloader"].close.call_count == _NUM_FAIL_SURVIVE_THREADS
+        assert mocks["pool"].close.call_count == _NUM_FAIL_SURVIVE_THREADS
 
 
 # =========================== Zonal Multiprocess Read Tests ===========================
@@ -665,7 +683,7 @@ def _read_range_and_get_pid(path, offset, length, block_size=None):
     return data, os.getpid()
 
 
-def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
+def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs, multi_threaded_test_file):
     """
     Tests concurrent reads of disjoint ranges from the same file in different processes.
     """
@@ -694,7 +712,9 @@ def test_multiprocess_read_disjoint_ranges_zb(extended_gcsfs):
     assert os.getpid() not in pids
 
 
-def test_multiprocess_read_overlapping_ranges_zb(extended_gcsfs):
+def test_multiprocess_read_overlapping_ranges_zb(
+    extended_gcsfs, multi_threaded_test_file
+):
     """
     Tests concurrent reads of overlapping ranges from the same file in different processes.
     """
@@ -733,7 +753,7 @@ def _read_with_passed_fs(fs, path, offset, length):
         return f.read(length)
 
 
-def test_multiprocess_shared_fs_zb(extended_gcsfs):
+def test_multiprocess_shared_fs_zb(extended_gcsfs, multi_threaded_test_file):
     """
     Tests passing the filesystem object itself to child processes.
     """
@@ -1092,27 +1112,36 @@ def test_get_directory_from_zonal_bucket(extended_gcsfs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "source_bucket, dest_bucket, should_fail",
+    "source_bucket_type, dest_bucket_type, should_fail",
     [
-        (TEST_ZONAL_BUCKET, TEST_ZONAL_BUCKET, True),
-        (TEST_ZONAL_BUCKET, TEST_BUCKET, True),
-        (TEST_BUCKET, TEST_ZONAL_BUCKET, True),
-        (TEST_BUCKET, TEST_BUCKET, False),
+        (BucketType.ZONAL_HIERARCHICAL, BucketType.ZONAL_HIERARCHICAL, True),
+        (BucketType.ZONAL_HIERARCHICAL, BucketType.NON_HIERARCHICAL, True),
+        (BucketType.NON_HIERARCHICAL, BucketType.ZONAL_HIERARCHICAL, True),
+        (BucketType.NON_HIERARCHICAL, BucketType.NON_HIERARCHICAL, False),
     ],
 )
 async def test_cp_file_not_implemented_error(
-    async_gcs, source_bucket, dest_bucket, should_fail
+    async_gcs, source_bucket_type, dest_bucket_type, should_fail
 ):
+    source_bucket = (
+        TEST_ZONAL_BUCKET
+        if source_bucket_type == BucketType.ZONAL_HIERARCHICAL
+        else TEST_BUCKET
+    )
+    dest_bucket = (
+        TEST_ZONAL_BUCKET
+        if dest_bucket_type == BucketType.ZONAL_HIERARCHICAL
+        else TEST_BUCKET
+    )
     """
     Tests _cp_file behavior for combinations of Zonal and Standard buckets.
     """
     short_uuid = str(uuid.uuid4())[:8]
     source_path = f"{source_bucket}/source_{short_uuid}"
     dest_path = f"{dest_bucket}/dest_{short_uuid}"
-    is_real_gcs = os.getenv("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
 
     # Source file needs to exist for last case when super method is called for standard buckets
-    if is_real_gcs:
+    if is_real_gcs():
         await async_gcs._pipe_file(source_path, b"test data", finalize_on_close=True)
 
     async def mock_is_zonal(bucket):
@@ -1120,7 +1149,7 @@ async def test_cp_file_not_implemented_error(
 
     is_zonal_patch_cm = (
         mock.patch.object(async_gcs, "_is_zonal_bucket", side_effect=mock_is_zonal)
-        if not is_real_gcs
+        if not is_real_gcs()
         else contextlib.nullcontext()
     )
 
@@ -1135,7 +1164,7 @@ async def test_cp_file_not_implemented_error(
             ):
                 await async_gcs._cp_file(source_path, dest_path)
         else:  # Standard -> Standard
-            if is_real_gcs:
+            if is_real_gcs():
                 await async_gcs._cp_file(source_path, dest_path)
                 assert await async_gcs._cat(dest_path) == b"test data"
             else:
@@ -1356,13 +1385,9 @@ async def test_fetch_range_split_out_of_bounds(extended_gcsfs):
 async def test_fetch_range_split_concurrent_success(extended_gcsfs):
     """Tests MRDPool creation, cleanup, and concurrent _cat_file dispatching."""
     mock_pool = mock.AsyncMock()
+    extended_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            mock.patch(
-                "gcsfs.extended_gcsfs.zb_hns_utils.MRDPool", return_value=mock_pool
-            )
-        )
         stack.enter_context(
             mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
         )
@@ -1382,8 +1407,7 @@ async def test_fetch_range_split_concurrent_success(extended_gcsfs):
 
         assert result == [b"chunk1", b"chunk2"]
 
-        # Pool should be initialized and closed safely
-        mock_pool.initialize.assert_awaited_once()
+        # Pool should be closed safely
         mock_pool.close.assert_awaited_once()
 
         # Verify _cat_file was called for each chunk with the correct bounds
@@ -1404,13 +1428,9 @@ async def test_fetch_range_split_concurrent_success(extended_gcsfs):
 async def test_fetch_range_split_concurrent_exception(extended_gcsfs):
     """Tests that exceptions in the concurrent tasks bubble up correctly."""
     mock_pool = mock.AsyncMock()
+    extended_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            mock.patch(
-                "gcsfs.extended_gcsfs.zb_hns_utils.MRDPool", return_value=mock_pool
-            )
-        )
         stack.enter_context(
             mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
         )
@@ -1438,13 +1458,9 @@ async def test_fetch_range_split_concurrent_exception(extended_gcsfs):
 async def test_cat_file_zero_length_read(extended_gcsfs):
     """Tests that _cat_file returns empty bytes and cleans up if length resolves to 0."""
     mock_pool = mock.AsyncMock()
+    extended_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            mock.patch(
-                "gcsfs.extended_gcsfs.zb_hns_utils.MRDPool", return_value=mock_pool
-            )
-        )
         stack.enter_context(
             mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
         )
@@ -1472,8 +1488,7 @@ async def test_cat_file_zero_length_read(extended_gcsfs):
         # It should exit early before fetching anything
         mock_concurrent_fetch.assert_not_awaited()
 
-        # Pool should still be initialized and immediately closed
-        mock_pool.initialize.assert_awaited_once()
+        # Pool should still be closed safely
         mock_pool.close.assert_awaited_once()
 
 
@@ -1483,13 +1498,9 @@ async def test_cat_file_concurrency_threshold(extended_gcsfs):
     # Set a dummy threshold for the test
     extended_gcsfs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 1000
     mock_pool = mock.AsyncMock()
+    extended_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            mock.patch(
-                "gcsfs.extended_gcsfs.zb_hns_utils.MRDPool", return_value=mock_pool
-            )
-        )
         stack.enter_context(
             mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
         )
@@ -1599,3 +1610,16 @@ async def test_cat_file_non_zonal_fallback(extended_gcsfs):
         mock_super_cat.assert_awaited_once_with(
             "standard_bucket/obj", start=10, end=20, concurrency=2, custom_arg="val"
         )
+
+
+def test_extended_gcsfs_garbage_collection():
+    import gc
+    import weakref
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    ref = weakref.ref(fs)
+
+    del fs
+    gc.collect()
+
+    assert ref() is None

@@ -22,3 +22,31 @@ scenarios:
     pattern: "rand"
     processes: [1, 16, 48]
     files: 1
+
+  - name: "read_seq_fixed_duration_multi_thread"
+    pattern: "seq"
+    threads: [32]
+    files: 1
+    processes: [1]
+
+  - name: "read_rand_fixed_duration_multi_thread"
+    pattern: "rand"
+    threads: [32]
+    files: 1
+    processes: [1]
+
+  - name: "read_reopen_fixed_duration"
+    pattern: "reopen"
+    bucket_types:
+      - "zonal"
+    file_sizes_mb:
+      - 256
+    chunk_sizes_mb:
+      - 1
+    mrd_pool_cache_sizes:
+      - 16
+      - 0
+    mrd_pool_sizes:
+      - 1
+      - 4
+    threads: [1]

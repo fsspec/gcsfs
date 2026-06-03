@@ -11,10 +11,18 @@ class ReadConfigurator(BaseBenchmarkConfigurator):
         procs_list = scenario.get("processes", [1])
         threads_list = scenario.get("threads", [1])
         rounds = common_config.get("rounds", 1)
-        bucket_types = common_config.get("bucket_types", ["regional"])
-        file_sizes_mb = common_config.get("file_sizes_mb", [128])
-        chunk_sizes_mb = common_config.get("chunk_sizes_mb", [16])
+        bucket_types = scenario.get(
+            "bucket_types", common_config.get("bucket_types", ["regional"])
+        )
+        file_sizes_mb = scenario.get(
+            "file_sizes_mb", common_config.get("file_sizes_mb", [128])
+        )
+        chunk_sizes_mb = scenario.get(
+            "chunk_sizes_mb", common_config.get("chunk_sizes_mb", [16])
+        )
         block_sizes_mb = scenario.get("block_sizes_mb", [5])
+        mrd_pool_cache_sizes = scenario.get("mrd_pool_cache_sizes", [16])
+        mrd_pool_sizes = scenario.get("mrd_pool_sizes", [None])
 
         pattern = scenario.get("pattern", "seq")
         runtime = common_config.get("runtime", 30)
@@ -28,6 +36,8 @@ class ReadConfigurator(BaseBenchmarkConfigurator):
             chunk_sizes_mb,
             block_sizes_mb,
             bucket_types,
+            mrd_pool_cache_sizes,
+            mrd_pool_sizes,
         )
 
         for (
@@ -37,13 +47,16 @@ class ReadConfigurator(BaseBenchmarkConfigurator):
             chunk_size_mb,
             block_size_mb,
             bucket_type,
+            mrd_cache_size,
+            mrd_pool_size,
         ) in param_combinations:
             bucket_name = self.get_bucket_name(bucket_type)
             if not bucket_name:
                 continue
 
             name = (
-                f"{scenario['name']}_{procs}procs_{threads}threads_"
+                f"{scenario['name']}_mrd_pool_cache_{mrd_cache_size}_mrd_pool_"
+                f"{mrd_pool_size}_{procs}procs_{threads}threads_"
                 f"{size_mb}MB_file_{chunk_size_mb}MB_chunk_{block_size_mb}MB_block_{bucket_type}"
             )
 
@@ -65,6 +78,8 @@ class ReadConfigurator(BaseBenchmarkConfigurator):
                 block_size_bytes=int(block_size_mb * MB),
                 file_size_bytes=int(size_mb * MB),
                 runtime=runtime,
+                mrd_pool_cache_size=mrd_cache_size,
+                mrd_pool_size=mrd_pool_size,
             )
             cases.append(params)
         return cases

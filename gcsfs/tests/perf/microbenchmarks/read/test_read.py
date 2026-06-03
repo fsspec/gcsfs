@@ -9,20 +9,25 @@ from gcsfs.tests.perf.microbenchmarks.read.configs import get_read_benchmark_cas
 from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
     run_multi_process,
+    run_multi_threaded_fixed_duration,
     run_single_threaded_fixed_duration,
 )
 
 BENCHMARK_GROUP = "read"
 
 
-def _read_op_seq(gcs, file_paths, chunk_size, runtime, block_size):
+def _read_op_seq(gcs, file_paths, chunk_size, runtime, block_size, mrd_pool_size=None):
     """Read files sequentially for a fixed duration."""
     total_bytes_read = 0
     start_time = time.perf_counter()
     files_it = itertools.cycle(file_paths)
+    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    if mrd_pool_size is not None:
+        open_kwargs["pool_size"] = mrd_pool_size
+
     while time.perf_counter() - start_time < runtime:
         path = next(files_it)
-        with gcs.open(path, "rb", block_size=block_size, cache_type="none") as f:
+        with gcs.open(path, "rb", **open_kwargs) as f:
             while time.perf_counter() - start_time < runtime:
                 data = f.read(chunk_size)
                 if not data:
@@ -31,14 +36,20 @@ def _read_op_seq(gcs, file_paths, chunk_size, runtime, block_size):
     return total_bytes_read
 
 
-def _read_op_rand(gcs, file_paths, chunk_size, offsets, runtime, block_size):
+def _read_op_rand(
+    gcs, file_paths, chunk_size, offsets, runtime, block_size, mrd_pool_size=None
+):
     """Read files from random offsets for a fixed duration."""
     total_bytes_read = 0
     start_time = time.perf_counter()
     files_it = itertools.cycle(file_paths)
+    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    if mrd_pool_size is not None:
+        open_kwargs["pool_size"] = mrd_pool_size
+
     while time.perf_counter() - start_time < runtime:
         path = next(files_it)
-        with gcs.open(path, "rb", cache_type="none", block_size=block_size) as f:
+        with gcs.open(path, "rb", **open_kwargs) as f:
             for offset in offsets:
                 if time.perf_counter() - start_time >= runtime:
                     break
@@ -48,17 +59,40 @@ def _read_op_rand(gcs, file_paths, chunk_size, offsets, runtime, block_size):
     return total_bytes_read
 
 
-def _random_read_worker(gcs, file_paths, chunk_size, offsets, runtime, block_size):
+def _read_op_reopen(
+    gcs, file_paths, chunk_size, runtime, block_size, mrd_pool_size=None
+):
+    """Repeatedly open file, read a chunk, and close it to measure connection overhead."""
+    total_bytes_read = 0
+    start_time = time.perf_counter()
+    files_it = itertools.cycle(file_paths)
+    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    if mrd_pool_size is not None:
+        open_kwargs["pool_size"] = mrd_pool_size
+
+    while time.perf_counter() - start_time < runtime:
+        path = next(files_it)
+        with gcs.open(path, "rb", **open_kwargs) as f:
+            data = f.read(chunk_size)
+            total_bytes_read += len(data)
+    return total_bytes_read
+
+
+def _random_read_worker(
+    gcs, file_paths, chunk_size, offsets, runtime, block_size, mrd_pool_size=None
+):
     """A worker that reads files from random offsets."""
     local_offsets = list(offsets)
     random.shuffle(local_offsets)
     return _read_op_rand(
-        gcs, file_paths, chunk_size, local_offsets, runtime, block_size
+        gcs, file_paths, chunk_size, local_offsets, runtime, block_size, mrd_pool_size
     )
 
 
 all_benchmark_cases = get_read_benchmark_cases()
-single_threaded_cases, _, multi_process_cases = filter_test_cases(all_benchmark_cases)
+single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_cases(
+    all_benchmark_cases
+)
 
 
 @pytest.mark.parametrize(
@@ -70,12 +104,53 @@ single_threaded_cases, _, multi_process_cases = filter_test_cases(all_benchmark_
 def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read
 
+    op, op_args = _build_read_worker(params, gcs, file_paths)
+
+    run_single_threaded_fixed_duration(
+        benchmark, monitor, params, op, op_args, BENCHMARK_GROUP
+    )
+
+
+@pytest.mark.parametrize(
+    "gcsfs_benchmark_read",
+    multi_threaded_cases,
+    indirect=True,
+    ids=lambda p: p.name,
+)
+def test_read_multi_threaded(benchmark, gcsfs_benchmark_read, monitor):
+    gcs, file_paths, params = gcsfs_benchmark_read
+
+    args_list = []
+    for _ in range(params.threads):
+        thread_file_paths = list(file_paths)
+        random.shuffle(thread_file_paths)
+        _, op_args = _build_read_worker(params, gcs, thread_file_paths)
+        args_list.append(op_args)
+
+    op, _ = _build_read_worker(params, gcs, file_paths)
+
+    run_multi_threaded_fixed_duration(
+        benchmark, monitor, params, op, args_list, BENCHMARK_GROUP
+    )
+
+
+def _build_read_worker(params, gcs, file_paths):
     op = None
     block_size = params.block_size_bytes
-    op_args = (gcs, file_paths, params.chunk_size_bytes, params.runtime, block_size)
+    mrd_pool_size = getattr(params, "mrd_pool_size", None)
+    op_args = (
+        gcs,
+        file_paths,
+        params.chunk_size_bytes,
+        params.runtime,
+        block_size,
+        mrd_pool_size,
+    )
 
     if params.pattern == "seq":
         op = _read_op_seq
+    elif params.pattern == "reopen":
+        op = _read_op_reopen
     elif params.pattern == "rand":
         op = _random_read_worker
         offsets = list(range(0, params.file_size_bytes, params.chunk_size_bytes))
@@ -86,11 +161,12 @@ def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
             offsets,
             params.runtime,
             block_size,
+            mrd_pool_size,
         )
+    else:
+        raise ValueError(f"Unsupported read pattern: {params.pattern}")
 
-    run_single_threaded_fixed_duration(
-        benchmark, monitor, params, op, op_args, BENCHMARK_GROUP
-    )
+    return op, op_args
 
 
 def _process_worker_fixed_duration(
@@ -104,6 +180,7 @@ def _process_worker_fixed_duration(
     index,
     runtime,
     block_size,
+    mrd_pool_size=None,
 ):
     """A worker function for each process to read files for a fixed duration."""
     with ThreadPoolExecutor(max_workers=threads) as executor:
@@ -111,7 +188,26 @@ def _process_worker_fixed_duration(
         if pattern == "seq":
             futures = [
                 executor.submit(
-                    _read_op_seq, gcs, file_paths, chunk_size, runtime, block_size
+                    _read_op_seq,
+                    gcs,
+                    file_paths,
+                    chunk_size,
+                    runtime,
+                    block_size,
+                    mrd_pool_size,
+                )
+                for _ in range(threads)
+            ]
+        elif pattern == "reopen":
+            futures = [
+                executor.submit(
+                    _read_op_reopen,
+                    gcs,
+                    file_paths,
+                    chunk_size,
+                    runtime,
+                    block_size,
+                    mrd_pool_size,
                 )
                 for _ in range(threads)
             ]
@@ -126,6 +222,7 @@ def _process_worker_fixed_duration(
                     offsets,
                     runtime,
                     block_size,
+                    mrd_pool_size,
                 )
                 for _ in range(threads)
             ]
@@ -161,6 +258,7 @@ def test_read_multi_process(
             i,
             params.runtime,
             params.block_size_bytes,
+            getattr(params, "mrd_pool_size", None),
         )
 
     run_multi_process(
@@ -171,6 +269,9 @@ def test_read_multi_process(
         worker_target=_process_worker_fixed_duration,
         args_builder=args_builder,
         benchmark_group=BENCHMARK_GROUP,
-        gcs_kwargs={"block_size": params.block_size_bytes},
+        gcs_kwargs={
+            "block_size": params.block_size_bytes,
+            "mrd_pool_cache_size": getattr(params, "mrd_pool_cache_size", 16),
+        },
         request=request,
     )

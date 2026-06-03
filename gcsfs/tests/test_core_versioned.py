@@ -7,6 +7,7 @@ from google.cloud import storage
 
 from gcsfs import GCSFileSystem
 from gcsfs.tests.settings import TEST_VERSIONED_BUCKET
+from gcsfs.tests.utils import is_real_gcs
 
 a = TEST_VERSIONED_BUCKET + "/tmp/test/a"
 b = TEST_VERSIONED_BUCKET + "/tmp/test/b"
@@ -22,7 +23,7 @@ def is_versioning_enabled():
     """
     # Don't skip when using an emulator, as we create the versioned bucket ourselves.
     global _VERSIONED_BUCKET_CREATED_BY_TESTS
-    if os.environ.get("STORAGE_EMULATOR_HOST") != "https://storage.googleapis.com":
+    if not is_real_gcs():
         return True, ""
     try:
         gcs = GCSFileSystem(project=os.getenv("GCSFS_TEST_PROJECT", "project"))

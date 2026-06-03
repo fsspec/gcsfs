@@ -69,10 +69,14 @@ class ZonalFile(GCSFile):
         self.pool_size = pool_size
         object_size = None
         if "r" in self.mode:
-            self.mrd_pool = zb_hns_utils.MRDPool(
-                self.gcsfs, bucket, key, generation, self.pool_size
+            self.mrd_pool = asyn.sync(
+                self.gcsfs.loop,
+                self.gcsfs._mrd_pool_cache.get,
+                bucket,
+                key,
+                generation,
+                self.pool_size,
             )
-            asyn.sync(self.gcsfs.loop, self.mrd_pool.initialize)
             object_size = self.mrd_pool.persisted_size
 
             if object_size is None:

@@ -39,6 +39,8 @@ case "$TEST_SUITE" in
     export GCSFS_HNS_TEST_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_REQ_PAYS_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
     ulimit -n 4096
+    export GCSFS_RUN_HNS_TESTS="true"
+    export GCSFS_RUN_RAPID_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
     # Excludes tests related to requster pays as Zonal buckets do not support requester pays feature
     pytest "${ARGS[@]}" \
@@ -56,6 +58,7 @@ case "$TEST_SUITE" in
     export GCSFS_HNS_TEST_BUCKET="gcsfs-test-hns-${SHORT_BUILD_ID}"
     export GCSFS_TEST_REQ_PAYS_BUCKET="gcsfs-test-hns-req-pay-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_REQ_PAYS_BUCKET="gcsfs-test-hns-req-pay-${SHORT_BUILD_ID}"
+    export GCSFS_RUN_HNS_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
     # Excludes tests that are not applicable to HNS buckets:
     # - test_extended_gcsfs.py, test_zonal_file.py: Zonal bucket specific tests which won't work on HNS bucket.

@@ -487,8 +487,7 @@ def test_rm_recursive(gcs):
 
 def test_rm_chunked_batch(gcs):
     files = [f"{TEST_BUCKET}/t{i}" for i in range(303)]
-    for fn in files:
-        gcs.touch(fn)
+    gcs.pipe({fn: b"" for fn in files})
 
     files_created = gcs.find(TEST_BUCKET)
     for fn in files:
@@ -511,8 +510,7 @@ def test_rm_wildcards_in_directory(gcs):
         f"{base_dir}/b1.dat",
         f"{base_dir}/subdir/nested.txt",
     ]
-    for f in files:
-        gcs.touch(f)
+    gcs.pipe({f: b"" for f in files})
 
     # 1. Test '?' wildcard (non-recursive)
     gcs.rm(f"{base_dir}/file?.txt")
@@ -1315,6 +1313,46 @@ def test_get_put_file_in_dir(protocol, gcs):
         assert gcs.cat(protocol + TEST_BUCKET + "/temp_dir/accounts.1.json") == data1
 
 
+@pytest.mark.asyncio
+async def test_upload_chunk_shortfall():
+    from gcsfs.core import upload_chunk
+
+    fs_mock = mock.AsyncMock()
+
+    data = b"0123456789"
+    location = "http://mock-location"
+    offset = 0
+    size = 10
+    content_type = "application/octet-stream"
+
+    call_count = 0
+
+    async def mock_call(method, loc, headers=None, data=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"Range": "bytes=0-4"}, None
+        else:
+            return {}, '{"generation": "12345"}'
+
+    fs_mock._call.side_effect = mock_call
+
+    result = await upload_chunk(fs_mock, location, data, offset, size, content_type)
+
+    assert result == {"generation": "12345"}
+    assert call_count == 2
+
+    call_args_list = fs_mock._call.call_args_list
+
+    args1, kwargs1 = call_args_list[0]
+    assert kwargs1["headers"]["Content-Range"] == "bytes 0-9/10"
+
+    args2, kwargs2 = call_args_list[1]
+    assert kwargs2["headers"]["Content-Range"] == "bytes 5-9/10"
+
+    assert kwargs2["data"].getvalue() == b"56789"
+
+
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
 def test_put_file_resumable_upload_cleanup_on_chunk_failure(protocol, gcs):
     rpath = protocol + TEST_BUCKET + "/resumable_cleanup_test"
@@ -1843,8 +1881,8 @@ def test_user_project_fallback_google_default(monkeypatch):
 
 
 @pytest.mark.parametrize("requester_pays", [True, TEST_PROJECT])
-def test_requester_pays_cat(requester_pays_bucket, requester_pays):
-    gcs = GCSFileSystem(requester_pays=requester_pays)
+def test_requester_pays_cat(gcs_factory, requester_pays_bucket, requester_pays):
+    gcs = gcs_factory(requester_pays=requester_pays)
     file_path = f"{requester_pays_bucket}/test_file.txt"
     data = b"test data requester pays"
 
@@ -1852,14 +1890,14 @@ def test_requester_pays_cat(requester_pays_bucket, requester_pays):
     assert gcs.cat(file_path) == data
 
 
-def test_requester_pays_fails_without_user_project(requester_pays_bucket):
+def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_factory):
     """Test that operations on a requester-pays bucket fail if the flag is not set."""
-    fs = GCSFileSystem(requester_pays=False)
+    fs = gcs_factory(requester_pays=False)
     with pytest.raises(ValueError, match="Bucket is requester pays"):
         fs.ls(requester_pays_bucket)
 
 
-def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
+def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""
     fs = gcs_factory(requester_pays=True)
@@ -2019,7 +2057,6 @@ def test_find_dircache(gcs):
         f"{TEST_BUCKET}/2014-01-01.csv",
         f"{TEST_BUCKET}/2014-01-02.csv",
         f"{TEST_BUCKET}/2014-01-03.csv",
-        f"{TEST_BUCKET}/multi_threaded_test_file",
         f"{TEST_BUCKET}/zonal",
     }
     assert set(gcs.ls(f"{TEST_BUCKET}/nested")) == {
@@ -2402,23 +2439,17 @@ def test_find_maxdepth(gcs):
 
 
 def test_sign(gcs, monkeypatch):
+    if not gcs.on_google:
+        pytest.skip("Emulator does not support signing")
+
     file = TEST_BUCKET + "/test.jpg"
     with gcs.open(file, "wb") as f:
         f.write(b"This is a test string")
     assert gcs.cat(file) == b"This is a test string"
 
-    # `sign` is creating a google Client on its own, it needs a realistically
-    # looking credentials file.
-    if not gcs.on_google:
-        monkeypatch.setenv(
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            os.path.dirname(__file__) + "/fake-service-account-credentials.json",
-        )
-
     current_ts_utc = int(datetime.now(tz=timezone.utc).timestamp())
     result = gcs.sign(file)
 
-    # Check it here since emulator doesn't really validate those values
     params = parse_qs(urlparse(result).query)
     assert int(params["Expires"][0]) >= current_ts_utc + 100
 
@@ -2495,6 +2526,7 @@ def test_default_gcp_universe(monkeypatch):
     # Make sure we simulate a mock less connection
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", raising=False)
 
     fs = fsspec.filesystem("gcs", token="anon")
     assert fs.base == "https://storage.googleapis.com/storage/v1/"

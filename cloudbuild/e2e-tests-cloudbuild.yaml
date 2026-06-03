@@ -18,6 +18,8 @@ substitutions:
   _SHORT_BUILD_ID: ${BUILD_ID:0:8}
   _SKIP_IF_FAILED: '[[ -f /workspace/FAILED ]] && echo "⚠️ Skipping: Previous failure" && exit 0'
   _TEST_ENV_VARS: "SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}'"
+  _INSTALL_FSSPEC_HEAD: "false"
+  _INSTALL_GCSFS_FROM_PYPI: "false"
 
 steps:
   # Generate a persistent SSH key for this build run.
@@ -33,6 +35,8 @@ steps:
         ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb || { echo "generate-ssh-key" >> /workspace/FAILED; exit 1; }
         # Save the public key content to a file for the cleanup step
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+        # Add key to OS Login with TTL
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=1h
     waitFor: ["-"]
     allowFailure: true
 
@@ -78,7 +82,7 @@ steps:
           --zone=${_ZONE} \
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
-          --command="bash cloudbuild/setup_vm.sh" || { echo "setup-vm (setup script)" >> /workspace/FAILED; exit 1; }
+          --command="export INSTALL_FSSPEC_HEAD='${_INSTALL_FSSPEC_HEAD}' INSTALL_GCSFS_FROM_PYPI='${_INSTALL_GCSFS_FROM_PYPI}' && bash cloudbuild/setup_vm.sh" || { echo "setup-vm (setup script)" >> /workspace/FAILED; exit 1; }
     waitFor: ["create-resources", "generate-ssh-key"]
     allowFailure: true
 

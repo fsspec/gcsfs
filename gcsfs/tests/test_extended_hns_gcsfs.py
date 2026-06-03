@@ -17,18 +17,13 @@ from google.cloud import storage_control_v2
 
 from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
+from gcsfs.tests.conftest import requires_hns
 from gcsfs.tests.settings import TEST_HNS_BUCKET
+from gcsfs.tests.utils import is_real_gcs
 
-REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
+pytestmark = [requires_hns]
 
-# If the condition is True, only then tests in this file are run.
-should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
-    "true",
-    "1",
-)
-pytestmark = pytest.mark.skipif(
-    not should_run, reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set"
-)
+ORIGINAL_GET_BUCKET_TYPE = ExtendedGcsFileSystem._get_bucket_type
 
 FIXED_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 FIXED_REQUEST_ID = str(FIXED_UUID)
@@ -677,7 +672,7 @@ class TestExtendedGcsFileSystemMkdir:
         bucket, folder_path = dir_path.split("/", 1)
         return storage_control_v2.CreateFolderRequest(
             parent=f"projects/_/buckets/{bucket}",
-            folder_id=folder_path.rstrip("/"),
+            folder_id=folder_path.rstrip("/") + "/",
             recursive=recursive,
             request_id=FIXED_REQUEST_ID,
         )
@@ -754,7 +749,7 @@ class TestExtendedGcsFileSystemMkdir:
             mocks["super_mkdir"].assert_not_called()
 
     @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
+        is_real_gcs(),
         reason="This test is only to check that create_folder is not called for non-HNS buckets.",
     )
     def test_mkdir_non_hns_bucket_falls_back(self, gcs_hns, gcs_hns_mocks):
@@ -1591,7 +1586,7 @@ class TestExtendedGcsFileSystemRmdir:
             mocks["super_rmdir"].assert_not_called()
 
     @pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com",
+        is_real_gcs(),
         reason="This test is only to check that delete_folder is not called in case of non-HNS buckets."
         "In real GCS on non-HNS bucket there would be no empty directories to delete.",
     )
@@ -2152,24 +2147,100 @@ async def test_get_control_plane_client_quota_project_id(
     requester_pays, expected_quota_project
 ):
 
-    fs = ExtendedGcsFileSystem(project="my-project", requester_pays=requester_pays)
+    with mock.patch.dict(os.environ, {"STORAGE_EMULATOR_HOST": ""}):
+        ExtendedGcsFileSystem.clear_instance_cache()
+        fs = ExtendedGcsFileSystem(project="my-project", requester_pays=requester_pays)
+
+        mock_transport_cls = mock.Mock()
+        mock_channel = mock.Mock()
+        mock_transport_cls.create_channel.return_value = mock_channel
+
+        with mock.patch.object(
+            storage_control_v2.StorageControlAsyncClient,
+            "get_transport_class",
+            return_value=mock_transport_cls,
+        ) as mock_get_transport:
+
+            await fs._get_control_plane_client()
+
+            mock_get_transport.assert_called_once_with("grpc_asyncio")
+            mock_transport_cls.create_channel.assert_called_once()
+            kwargs = mock_transport_cls.create_channel.call_args.kwargs
+            assert kwargs["quota_project_id"] == expected_quota_project
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint_url, env_updates, expected_host",
+    [
+        ("https://my-endpoint.com", {}, "my-endpoint.com"),
+        ("https://my-endpoint.com/storage/v1/", {}, "my-endpoint.com"),
+        (
+            None,
+            {
+                "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
+                "STORAGE_EMULATOR_HOST": "",
+            },
+            "storage.apis-tpczero.goog",
+        ),
+        (
+            None,
+            {
+                "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
+                "STORAGE_EMULATOR_HOST": "http://my-emulator.com",
+            },
+            "my-emulator.com",
+        ),
+        (
+            None,
+            {
+                "GOOGLE_CLOUD_UNIVERSE_DOMAIN": "apis-tpczero.goog",
+                "STORAGE_EMULATOR_HOST": "http://my-emulator.com/storage/v1/",
+            },
+            "my-emulator.com",
+        ),
+        (
+            None,
+            {"STORAGE_EMULATOR_HOST": "http://my-emulator.com"},
+            "my-emulator.com",
+        ),
+        (
+            None,
+            {"STORAGE_EMULATOR_HOST": "https://my-emulator.com"},
+            "my-emulator.com",
+        ),
+        (None, {"STORAGE_EMULATOR_HOST": ""}, "storage.googleapis.com"),
+    ],
+)
+async def test_get_control_plane_client_endpoint(
+    endpoint_url, env_updates, expected_host
+):
+    fs_kwargs = {"token": "anon"}
+    if endpoint_url:
+        fs_kwargs["endpoint_url"] = endpoint_url
 
     mock_transport_cls = mock.Mock()
     mock_channel = mock.Mock()
     mock_transport_cls.create_channel.return_value = mock_channel
 
-    with mock.patch.object(
-        storage_control_v2.StorageControlAsyncClient,
-        "get_transport_class",
-        return_value=mock_transport_cls,
-    ) as mock_get_transport:
+    import os
+
+    with (
+        mock.patch.object(
+            storage_control_v2.StorageControlAsyncClient,
+            "get_transport_class",
+            return_value=mock_transport_cls,
+        ),
+        mock.patch.dict(os.environ, env_updates),
+    ):
+        ExtendedGcsFileSystem.clear_instance_cache()
+        fs = ExtendedGcsFileSystem(**fs_kwargs)
 
         await fs._get_control_plane_client()
 
-        mock_get_transport.assert_called_once_with("grpc_asyncio")
         mock_transport_cls.create_channel.assert_called_once()
         kwargs = mock_transport_cls.create_channel.call_args.kwargs
-        assert kwargs["quota_project_id"] == expected_quota_project
+        assert kwargs.get("host") == expected_host
 
 
 def test_extended_gcsfs_retry_init():
@@ -2248,3 +2319,93 @@ class TestStorageControlRetryExecution:
             mock_create.assert_called_once()
             kwargs = mock_create.call_args.kwargs
             assert kwargs["timeout"] == 30.0  # STORAGE_CONTROL_RPC_TIMEOUT
+
+
+class TestExtendedGcsFileSystemBucketType:
+    """Unit tests for ExtendedGcsFileSystem _get_bucket_type and grpc_client."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_get_bucket_type_on_emulator(self):
+        """Override the global session mock to allow testing the real _get_bucket_type."""
+        with mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
+            new=ORIGINAL_GET_BUCKET_TYPE,
+        ):
+            yield
+
+    @pytest.fixture
+    def extended_gcsfs(self):
+        ExtendedGcsFileSystem.clear_instance_cache()
+        return ExtendedGcsFileSystem(token="anon")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "location_type, hns_enabled, expected_bucket_type",
+        [
+            ("zone", None, BucketType.ZONAL_HIERARCHICAL),
+            ("region", True, BucketType.HIERARCHICAL),
+            ("region", False, BucketType.NON_HIERARCHICAL),
+        ],
+    )
+    async def test_get_bucket_type_detection(
+        self, extended_gcsfs, location_type, hns_enabled, expected_bucket_type
+    ):
+        fs = extended_gcsfs
+        mock_response = mock.Mock()
+        mock_response.location_type = location_type
+        if hns_enabled is not None:
+            mock_response.hierarchical_namespace = mock.Mock(enabled=hns_enabled)
+
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as mock_client_getter:
+            mock_client = mock_client_getter.return_value
+            mock_client.get_storage_layout = mock.AsyncMock(return_value=mock_response)
+
+            bucket_type = await fs._get_bucket_type("test-bucket")
+            assert bucket_type == expected_bucket_type
+
+            if location_type == "zone":
+                mock_client.get_storage_layout.assert_awaited_once_with(
+                    name="projects/_/buckets/test-bucket/storageLayout",
+                    retry=mock.ANY,
+                    timeout=mock.ANY,
+                )
+
+    @pytest.mark.asyncio
+    async def test_get_bucket_type_not_found(self, extended_gcsfs, caplog):
+        import logging
+
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as mock_client_getter:
+            mock_client = mock_client_getter.return_value
+            mock_client.get_storage_layout = mock.AsyncMock(
+                side_effect=api_exceptions.NotFound("Not Found")
+            )
+
+            with caplog.at_level(logging.WARNING, logger="gcsfs"):
+                bucket_type = await fs._get_bucket_type("missing-bucket")
+                assert bucket_type == BucketType.UNKNOWN
+                assert "not found or you lack permissions" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_get_bucket_type_general_exception(self, extended_gcsfs, caplog):
+        import logging
+
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as mock_client_getter:
+            mock_client = mock_client_getter.return_value
+            mock_client.get_storage_layout = mock.AsyncMock(
+                side_effect=Exception("Error")
+            )
+
+            with caplog.at_level(logging.WARNING, logger="gcsfs"):
+                bucket_type = await fs._get_bucket_type("error-bucket")
+                assert bucket_type == BucketType.UNKNOWN
+                assert "Could not determine bucket type" in caplog.text

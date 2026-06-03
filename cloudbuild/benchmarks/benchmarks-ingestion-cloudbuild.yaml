@@ -11,6 +11,11 @@ steps:
     args:
       - '-c'
       - |
+        if [ -z "${_DATASET_NAME}" ] || [ -z "${_INFRA_PREFIX}" ]; then
+          echo "ERROR: One or more required variables (_DATASET_NAME, _INFRA_PREFIX) are not set."
+          exit 1
+        fi
+
         bq show ${PROJECT_ID}:${_DATASET_NAME} || \
         bq mk --dataset --location=${LOCATION} ${PROJECT_ID}:${_DATASET_NAME}
 

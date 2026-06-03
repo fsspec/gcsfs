@@ -12,32 +12,16 @@ These tests require specific configuration:
 - The `GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT` environment variable must be 'true'.
 """
 
-import os
 import uuid
 
 import pytest
 import pytest_asyncio
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.tests.conftest import requires_hns, requires_rapid, requires_real_gcs
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
-REQUIRED_ENV_VAR = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
-
-# If the condition is True, only then tests in this file are run.
-should_run = os.getenv(REQUIRED_ENV_VAR, "false").lower() in (
-    "true",
-    "1",
-)
-pytestmark = [
-    pytest.mark.skipif(
-        not should_run,
-        reason=f"Skipping tests: {REQUIRED_ENV_VAR} env variable is not set",
-    ),
-    pytest.mark.skipif(
-        os.environ.get("STORAGE_EMULATOR_HOST") != "https://storage.googleapis.com",
-        reason="Skipping tests on emulator, requires real GCS.",
-    ),
-]
+pytestmark = [requires_real_gcs, requires_hns, requires_rapid]
 
 
 @pytest_asyncio.fixture
