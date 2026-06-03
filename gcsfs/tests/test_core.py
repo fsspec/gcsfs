@@ -1428,6 +1428,134 @@ def test_errors(gcs):
         assert "bucket" in str(e)
 
 
+def test_get_file_request_direct(gcs):
+    rpath = f"{TEST_BUCKET}/test_seq_download.txt"
+    data = b"sequential_data_" * 1024
+    gcs.pipe(rpath, data)
+
+    url = gcs.url(rpath)
+
+    with tempdir() as tmpdir:
+        lpath = os.path.join(tmpdir, "out_seq.txt")
+        callback = mock.Mock()
+
+        fsspec.asyn.sync(gcs.loop, gcs._get_file_request, url, lpath, callback=callback)
+
+        with open(lpath, "rb") as f:
+            assert f.read() == data
+
+        assert callback.set_size.called
+        assert callback.relative_update.called
+
+
+def test_get_file_concurrent_direct(gcs, monkeypatch):
+    rpath = f"{TEST_BUCKET}/test_conc_download.txt"
+    data = os.urandom(5 * 1024 * 1024)
+    gcs.pipe(rpath, data)
+
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1024)
+
+    with tempdir() as tmpdir:
+        lpath = os.path.join(tmpdir, "out_conc.txt")
+        callback = mock.Mock()
+
+        fsspec.asyn.sync(
+            gcs.loop,
+            gcs._get_file_concurrent,
+            rpath,
+            lpath,
+            concurrency=4,
+            callback=callback,
+            chunk_size=1024 * 1024,
+        )
+
+        with open(lpath, "rb") as f:
+            assert f.read() == data
+
+        assert callback.set_size.called
+        assert callback.relative_update.called
+
+
+def test_get_file_concurrent_zero_bytes(gcs):
+    rpath = f"{TEST_BUCKET}/test_conc_zero.txt"
+    gcs.pipe(rpath, b"")
+
+    with tempdir() as tmpdir:
+        lpath = os.path.join(tmpdir, "out_zero.txt")
+        callback = mock.Mock()
+
+        fsspec.asyn.sync(
+            gcs.loop,
+            gcs._get_file_concurrent,
+            rpath,
+            lpath,
+            concurrency=3,
+            callback=callback,
+        )
+
+        assert os.path.exists(lpath)
+        assert os.path.getsize(lpath) == 0
+
+
+def test_get_file_concurrent_exception_cancellation(gcs, monkeypatch):
+    rpath = f"{TEST_BUCKET}/test_conc_exception.txt"
+    data = os.urandom(2 * 1024 * 1024)
+    gcs.pipe(rpath, data)
+
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1024)
+
+    import builtins
+
+    original_open = builtins.open
+
+    def mocked_open(name, *args, **kwargs):
+        if name.endswith("out_conc_fail.txt") and args[0] == "rb+":
+            raise OSError("Simulated local disk failure")
+        return original_open(name, *args, **kwargs)
+
+    with tempdir() as tmpdir:
+        lpath = os.path.join(tmpdir, "out_conc_fail.txt")
+        with mock.patch("builtins.open", side_effect=mocked_open):
+            with pytest.raises(OSError, match="Simulated local disk failure"):
+                fsspec.asyn.sync(
+                    gcs.loop,
+                    gcs._get_file_concurrent,
+                    rpath,
+                    lpath,
+                    concurrency=3,
+                    chunk_size=1024 * 100,
+                )
+
+
+def test_get_file_concurrent_consistency_check(gcs, monkeypatch):
+    rpath = f"{TEST_BUCKET}/test_conc_consistency.txt"
+    data = b"consistency_check_data_" * 1024
+    gcs.pipe(rpath, data)
+
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1024)
+
+    with tempdir() as tmpdir:
+        lpath = os.path.join(tmpdir, "out_conc_consistency.txt")
+
+        with mock.patch("gcsfs.core.get_consistency_checker") as mock_checker_factory:
+            mock_checker = mock.Mock()
+            mock_checker_factory.return_value = mock_checker
+
+            fsspec.asyn.sync(
+                gcs.loop,
+                gcs._get_file_concurrent,
+                rpath,
+                lpath,
+                concurrency=2,
+                consistency="md5",
+                chunk_size=1024,
+            )
+
+            assert mock_checker_factory.called
+            assert mock_checker.update.called
+            assert mock_checker.validate_json_response.called
+
+
 def test_read_small(gcs):
     fn = TEST_BUCKET + "/2014-01-01.csv"
     with gcs.open(fn, "rb", block_size=10) as f:
