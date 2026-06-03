@@ -1,0 +1,20 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+    - "hns"
+
+scenarios:
+  - name: "open_file"
+    files: [1000]
+    folders: [1]
+
+  - name: "open_multi_thread_file"
+    files: [1000]
+    folders: [1]
+    threads: [4, 16, 64]
+
+  - name: "open_multi_process_file"
+    files: [1000]
+    folders: [1]
+    processes: [4, 16, 64]
