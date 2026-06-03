@@ -188,7 +188,10 @@ def run_multi_process(
                     p_args = args_builder(
                         worker_gcs_instances[i], i, process_data_shared
                     )
-                    p = ctx.Process(target=worker_target, args=p_args)
+                    p = ctx.Process(
+                        target=_multiprocess_worker_wrapper,
+                        args=(worker_target, p_args),
+                    )
                     processes.append(p)
                     p.start()
             finally:
