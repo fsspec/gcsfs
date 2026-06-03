@@ -667,6 +667,8 @@ def test_direct_memmove_buffer_overlapping_views():
 
     buf.close()
     executor.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_close_mrds():
     mrd1 = mock.AsyncMock()

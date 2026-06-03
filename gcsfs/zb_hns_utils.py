@@ -1,6 +1,6 @@
 import asyncio
-import concurrent.futures
 import collections
+import concurrent.futures
 import contextlib
 import ctypes
 import logging
