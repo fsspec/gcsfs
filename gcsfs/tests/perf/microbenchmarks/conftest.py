@@ -40,6 +40,15 @@ def _write_file(gcs, path, file_size, chunk_size):
         )
 
 
+def _init_pool_worker():
+    """Initializer for spawned pool workers to bypass _get_bucket_type calls on emulator."""
+    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
+
+    patch = _patch_get_bucket_type_for_emulator()
+    if patch:
+        patch.start()
+
+
 def _prepare_files(gcs, file_paths, file_size=0):
     if file_size == 0:
         try:
@@ -53,7 +62,7 @@ def _prepare_files(gcs, file_paths, file_size=0):
 
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(pool_size) as pool:
+    with ctx.Pool(pool_size, initializer=_init_pool_worker) as pool:
         try:
             pool.starmap(_write_file, args)
         except RuntimeError as e:

@@ -118,6 +118,18 @@ def run_multi_threaded_fixed_duration(
     benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)
 
 
+def _multiprocess_worker_wrapper(worker_target, args):
+    """Wrapper to apply emulator mock inside spawned child processes."""
+    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
+
+    patch = _patch_get_bucket_type_for_emulator()
+    if patch:
+        with patch:
+            worker_target(*args)
+    else:
+        worker_target(*args)
+
+
 def run_multi_process(
     benchmark,
     monitor_cls,
@@ -173,7 +185,10 @@ def run_multi_process(
                     p_args = args_builder(
                         worker_gcs_instances[i], i, process_data_shared
                     )
-                    p = ctx.Process(target=worker_target, args=p_args)
+                    p = ctx.Process(
+                        target=_multiprocess_worker_wrapper,
+                        args=(worker_target, p_args),
+                    )
                     processes.append(p)
                     p.start()
             finally:

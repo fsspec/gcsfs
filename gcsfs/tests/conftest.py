@@ -122,11 +122,11 @@ def _avoid_adc_timeout(monkeypatch):
 @pytest.fixture(scope="session", autouse=True)
 def _mock_get_bucket_type_on_emulator():
     """Mock _get_bucket_type to return UNKNOWN instantly on emulator."""
-    if not is_real_gcs():
-        with mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
-            return_value=BucketType.UNKNOWN,
-        ):
+    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
+
+    patch = _patch_get_bucket_type_for_emulator()
+    if patch:
+        with patch:
             yield
     else:
         yield
