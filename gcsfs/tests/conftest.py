@@ -20,6 +20,7 @@ from gcsfs import GCSFileSystem
 from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import (
     TEST_BUCKET,
+    TEST_FLAT_BUCKET,
     TEST_HNS_BUCKET,
     TEST_HNS_REQUESTER_PAYS_BUCKET,
     TEST_PROJECT,
@@ -496,6 +497,31 @@ def gcs_hns(gcs_factory, buckets_to_delete):
         yield gcs
     finally:
         _cleanup_gcs(gcs, bucket=TEST_HNS_BUCKET)
+        _close_gcs(gcs)
+
+
+@pytest.fixture
+def flat_bucket(gcs_factory, buckets_to_delete):
+    """
+    Provides the name of a dedicated standard (non-HNS) bucket.
+
+    In the HNS test suite TEST_BUCKET and TEST_HNS_BUCKET may both point at
+    HNS-enabled buckets, so tests that need to exercise genuinely mixed
+    HNS/flat behavior cannot rely on TEST_BUCKET being flat. This fixture
+    creates a standard bucket (HNS disabled), registers it for end-of-session
+    cleanup, and cleans its contents before and after the test.
+    """
+    gcs = gcs_factory()
+    try:
+        if not gcs.exists(TEST_FLAT_BUCKET):
+            gcs.mkdir(TEST_FLAT_BUCKET)
+            buckets_to_delete.add(TEST_FLAT_BUCKET)
+        else:
+            _cleanup_gcs(gcs, bucket=TEST_FLAT_BUCKET)
+        gcs.invalidate_cache()
+        yield TEST_FLAT_BUCKET
+    finally:
+        _cleanup_gcs(gcs, bucket=TEST_FLAT_BUCKET)
         _close_gcs(gcs)
 
 

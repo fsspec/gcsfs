@@ -1192,8 +1192,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         Deletes files and directories.
 
         This method overrides the parent `_rm` to correctly handle directory
-        deletion in HNS-enabled buckets. For non-HNS buckets, it falls back
-        to the parent implementation.
+        deletion in HNS-enabled buckets. Input paths are grouped by bucket and
+        each bucket is routed independently: HNS buckets use HNS-specific
+        deletion, while non-HNS buckets fall back to the parent implementation.
+        This means a single call may mix paths from HNS and flat buckets, and
+        the per-bucket groups are deleted concurrently.
 
         For HNS buckets, it first expands the path to get a list of all files
         and directories, then categorizes them. It deletes files in batches
@@ -1205,16 +1208,61 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
         """
-        if isinstance(path, list):
-            # For HNS check, we can check for bucket type from the first path.
-            bucket, _, _ = self.split_path(path[0]) if path else (None, None, None)
-        else:
-            bucket, _, _ = self.split_path(path)
+        # Normalize to a list so single-path and multi-path inputs share a
+        # single code path.
+        if isinstance(path, str):
+            path = [path]
 
-        is_hns = await self._is_bucket_hns_enabled(bucket)
+        if not path:
+            return []
 
-        if not is_hns:
-            # Fall back to the parent's async rm implementation for non-HNS buckets.
+        # Group paths by bucket so each bucket is routed independently to the
+        # correct deletion strategy (HNS vs. flat), while same-bucket paths are
+        # still batched together.
+        grouped = {}
+        for p in path:
+            bucket, _, _ = self.split_path(p)
+            grouped.setdefault(bucket, []).append(p)
+
+        # Buckets are independent of one another, so delete each group
+        # concurrently.
+        bucket_results = await asyn._run_coros_in_chunks(
+            [
+                self._rm_bucket_paths(
+                    bucket,
+                    bucket_paths,
+                    recursive=recursive,
+                    maxdepth=maxdepth,
+                    batchsize=batchsize,
+                )
+                for bucket, bucket_paths in grouped.items()
+            ],
+            return_exceptions=True,
+        )
+
+        results = []
+        succeeded = False
+        for res in bucket_results:
+            if isinstance(res, FileNotFoundError):
+                # A bucket group matched nothing; tolerated unless every group
+                # fails.
+                continue
+            if isinstance(res, Exception):
+                raise res
+            succeeded = True
+            if res:
+                results.extend(res)
+
+        if not succeeded:
+            raise FileNotFoundError(path)
+
+        return results
+
+    async def _rm_bucket_paths(
+        self, bucket, path, recursive=False, maxdepth=None, batchsize=20
+    ):
+        """Helper method to handle the rm operation for paths within a single bucket."""
+        if not await self._is_bucket_hns_enabled(bucket):
             return await super()._rm(
                 path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
             )
@@ -1223,11 +1271,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             path, recursive=recursive, maxdepth=maxdepth, detail=True
         )
 
-        # Separate files and directories based on their type.
-        # Directories must be deleted from the deepest first.
+        # Separate files and directories based on their type. Directories are
+        # sorted in reverse so they are deleted from the deepest first.
         files = list({p["name"] for p in paths if p["type"] == "file"})
         dirs = sorted(
-            list({p["name"] for p in paths if p["type"] == "directory"}),
+            {p["name"] for p in paths if p["type"] == "directory"},
             reverse=True,
         )
 
