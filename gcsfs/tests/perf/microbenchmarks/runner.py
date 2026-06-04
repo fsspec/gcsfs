@@ -2,9 +2,7 @@ import logging
 import multiprocessing
 import os
 from concurrent.futures import ThreadPoolExecutor
-from unittest import mock
 
-from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_benchmark_extra_info,
     publish_fixed_duration_benchmark_extra_info,
@@ -12,7 +10,6 @@ from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_resource_metrics,
 )
 from gcsfs.tests.settings import BENCHMARK_CPU_AFFINITY
-from gcsfs.tests.utils import is_real_gcs
 
 
 def filter_test_cases(all_cases):
