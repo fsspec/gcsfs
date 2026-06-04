@@ -509,9 +509,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         f"mrd path: {m_client.bucket_name}/{m_client.object_name} | "
-                        f"Requested 1 ranges: [({o}, {s})] | "
-                        f"total bytes requested: {s} | "
-                        f"total bytes downloaded: {s}"
+                        f"Requested range: [({o}, {s})]"
                     )
                 await m_client.download_ranges([(o, s, b)])
 
