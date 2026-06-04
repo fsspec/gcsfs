@@ -1936,19 +1936,94 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             checker.validate_http_response(r)  # validate file consistency
             return r.status, r.headers, r.request_info, data
 
+    def _init_local_file(self, lpath, total_size):
+        """Creates the target directory and pre-allocates the file size."""
+        os.makedirs(os.path.dirname(lpath) or os.curdir, exist_ok=True)
+        if total_size == 0:
+            open(lpath, "wb").close()
+        else:
+            with open(lpath, "wb") as f:
+                f.truncate(total_size)
+
+    @retry_request(retries=retries)
+    async def _download_chunk_to_file(
+        self,
+        url,
+        rpath,
+        lpath,
+        start_offset,
+        end_offset,
+        chunk_size,
+        headers,
+        callback,
+        **kwargs,
+    ):
+        """Fetches a specific byte range of a file and writes it to disk."""
+        req_headers = {"Range": f"bytes={start_offset}-{end_offset - 1}"}
+        if headers:
+            req_headers.update(headers)
+
+        bytes_written = 0
+        await self._set_session()
+
+        async with self.session.get(
+            url,
+            headers=self._get_headers(req_headers),
+            params=self._get_params(kwargs),
+            timeout=self.requests_timeout,
+        ) as r:
+            validate_response(r.status, None, rpath)
+            local_f = None
+            try:
+                local_f = open(lpath, "rb+")
+                local_f.seek(start_offset)
+                while True:
+                    chunk = await r.content.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    local_f.write(chunk)
+                    callback.relative_update(len(chunk))
+                    bytes_written += len(chunk)
+
+                expected_bytes = end_offset - start_offset
+                if bytes_written != expected_bytes:
+                    raise RuntimeError(
+                        f"Connection closed early. Expected {expected_bytes} bytes, got {bytes_written}."
+                    )
+            except BaseException:
+                callback.relative_update(-bytes_written)
+                raise
+            finally:
+                if local_f is not None:
+                    local_f.close()
+
+    async def _verify_file_consistency(self, lpath, details, consistency):
+        """Verifies the integrity of the downloaded file in a background thread."""
+        loop = asyncio.get_running_loop()
+        checker = get_consistency_checker(consistency)
+
+        def verify_file():
+            with open(lpath, "rb") as f:
+                while True:
+                    data = f.read(1024 * 1024)
+                    if not data:
+                        break
+                    checker.update(data)
+            checker.validate_json_response(details)
+
+        await loop.run_in_executor(None, verify_file)
+
     async def _get_file_concurrent(
         self, rpath, lpath, concurrency, headers=None, callback=None, **kwargs
     ):
-        """
-        Concurrent write the gcs object into the disk.
-        """
+        """Main orchestrator for concurrent file downloads."""
         consistency = kwargs.pop("consistency", self.consistency)
-        chunk_size = kwargs.pop(
-            "chunk_size", 128 * 1024
-        )  # 128KB micro-chunks for streaming
+        chunk_size = kwargs.pop("chunk_size", 128 * 1024)
 
         details = await self._info(rpath, **kwargs)
         total_size = details.get("size", 0)
+
         if total_size < self.MIN_CHUNK_SIZE_FOR_CONCURRENCY:
             concurrency = 1
 
@@ -1962,9 +2037,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         callback = callback or NoOpCallback()
         callback.set_size(total_size)
 
-        os.makedirs(os.path.dirname(lpath) or os.curdir, exist_ok=True)
+        self._init_local_file(lpath, total_size)
+
         if total_size == 0:
-            open(lpath, "wb").close()
             if check_consistency:
                 checker = get_consistency_checker(consistency)
                 checker.update(b"")
@@ -1972,57 +2047,26 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             return
 
         part_size = (total_size + concurrency - 1) // max(1, concurrency)
-        with open(lpath, "wb") as f:
-            f.truncate(total_size)
-
-        loop = asyncio.get_running_loop()
         url = self.url(rpath)
-
-        @retry_request(retries=self.retries)
-        async def stream_and_write(start_offset, end_offset):
-            req_headers = {"Range": f"bytes={start_offset}-{end_offset - 1}"}
-            if headers:
-                req_headers.update(headers)
-
-            bytes_written = 0
-            await self._set_session()
-            async with self.session.get(
-                url,
-                headers=self._get_headers(req_headers),
-                params=self._get_params(kwargs),
-                timeout=self.requests_timeout,
-            ) as r:
-                validate_response(r.status, None, rpath)
-                local_f = None
-                try:
-                    local_f = open(lpath, "rb+")
-                    local_f.seek(start_offset)
-                    while True:
-                        chunk = await r.content.read(chunk_size)
-                        if not chunk:
-                            break
-
-                        local_f.write(chunk)
-
-                        callback.relative_update(len(chunk))
-                        bytes_written += len(chunk)
-
-                    expected_bytes = end_offset - start_offset
-                    if bytes_written != expected_bytes:
-                        raise RuntimeError(
-                            f"Connection closed early. Expected {expected_bytes} bytes, got {bytes_written}."
-                        )
-                except BaseException:
-                    callback.relative_update(-bytes_written)
-                    raise
-                finally:
-                    if local_f is not None:
-                        local_f.close()
-
         tasks = []
+
         for offset in range(0, total_size, part_size):
             end = min(offset + part_size, total_size)
-            tasks.append(asyncio.create_task(stream_and_write(offset, end)))
+            tasks.append(
+                asyncio.create_task(
+                    self._download_chunk_to_file(
+                        url,
+                        rpath,
+                        lpath,
+                        offset,
+                        end,
+                        chunk_size,
+                        headers,
+                        callback,
+                        **kwargs,
+                    )
+                )
+            )
 
         try:
             await asyncio.gather(*tasks)
@@ -2038,19 +2082,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 "On-the-fly checksum disabled for concurrent out-of-order downloads. "
                 "Verifying file integrity post-download."
             )
-            checker = get_consistency_checker(consistency)
-
-            def verify_file():
-                with open(lpath, "rb") as f:
-                    while True:
-                        data = f.read(1024 * 1024)
-                        if not data:
-                            break
-                        checker.update(data)
-                checker.validate_json_response(details)
-
-            # Execute the hashing in a background thread to keep the event loop unblocked
-            await loop.run_in_executor(None, verify_file)
+            await self._verify_file_consistency(lpath, details, consistency)
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
         if os.path.isdir(lpath):
