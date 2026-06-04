@@ -197,6 +197,7 @@ class PartialView:
         """
         if not isinstance(data, bytes):
             raise ValueError(f"Expected bytes, but got {type(data)}")
+
         size = len(data)
         with self._view_lock:
             if self.current_offset + size > self.expected_size:
@@ -313,6 +314,17 @@ class DirectMemmoveBuffer:
                 self._done_event.set()
 
     def _submit_write(self, dest_offset, data_bytes, size):
+        if size == 0:
+            with self._lock:
+                if self._stop_accepting_writes or self._is_closed:
+                    raise ValueError("I/O operation on closed buffer.")
+                if self._error:
+                    raise self._error
+
+            fut = concurrent.futures.Future()
+            fut.set_result(None)
+            return fut
+
         self.semaphore.acquire()
 
         try:

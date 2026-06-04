@@ -1192,3 +1192,77 @@ async def test_mrd_pool_cache_max_queue_size_zero(init_mrd_mock, mock_gcsfs):
     queue = cache._mrd_queues[("bucket", "obj", "1")]
     assert len(queue) == 0
     mrd_instance.close.assert_awaited_once()
+
+
+def test_direct_memmove_buffer_zero_byte_write_after_zero_copy():
+    """
+    Tests that a zero-byte write (like a gRPC range completion chunk)
+    does not crash the buffer, especially after the zero-copy fast path
+    has left self._start_address as None.
+    """
+    data = b"exact_size_payload"
+    size = len(data)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    # 1. Trigger the zero-copy fast path
+    future1 = view.write(data)
+    future1.result()
+
+    # 2. Trigger the empty chunk write
+    # This should return a completed future and NOT raise a BufferError
+    future2 = view.write(b"")
+    future2.result()
+
+    view.close()
+    buf.close()
+
+    # Verify the payload was still handled via zero-copy successfully
+    result = buf.get_value()
+    assert result is data
+
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_zero_byte_write_closed_state():
+    """
+    Tests that zero-byte writes still respect the closed state of the buffer.
+    """
+    size = 10
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    # Force the buffer closed
+    buf.close()
+
+    # Even a zero-byte write should fail if the buffer is no longer accepting I/O
+    with pytest.raises(ValueError, match="I/O operation on closed buffer."):
+        view.write(b"")
+
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_zero_byte_write_error_state():
+    """
+    Tests that zero-byte writes still raise background errors if the buffer
+    is in a failed state.
+    """
+    size = 10
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    # Manually inject a background error
+    buf._error = RuntimeError("Simulated background failure")
+
+    # A zero-byte write should surface the pending error
+    with pytest.raises(RuntimeError, match="Simulated background failure"):
+        view.write(b"")
+
+    # Clean up the error so we can safely close the test
+    buf._error = None
+    buf._stop_accepting_writes = True
+    executor.shutdown()
