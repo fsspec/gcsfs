@@ -123,11 +123,11 @@ def run_multi_threaded_fixed_duration(
 
 def _multiprocess_worker_wrapper(worker_target, args):
     """Wrapper to apply emulator mock inside spawned child processes."""
-    if not is_real_gcs():
-        with mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
-            return_value=BucketType.UNKNOWN,
-        ):
+    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
+
+    patch = _patch_get_bucket_type_for_emulator()
+    if patch:
+        with patch:
             worker_target(*args)
     else:
         worker_target(*args)

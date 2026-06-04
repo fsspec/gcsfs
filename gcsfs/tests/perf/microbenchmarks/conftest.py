@@ -42,15 +42,11 @@ def _write_file(gcs, path, file_size, chunk_size):
 
 def _init_pool_worker():
     """Initializer for spawned pool workers to bypass _get_bucket_type calls on emulator."""
-    from gcsfs.tests.utils import is_real_gcs
+    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
 
-    if not is_real_gcs():
-        from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
-
-        async def mock_get_bucket_type(self, bucket):
-            return BucketType.UNKNOWN
-
-        ExtendedGcsFileSystem._get_bucket_type = mock_get_bucket_type
+    patch = _patch_get_bucket_type_for_emulator()
+    if patch:
+        patch.start()
 
 
 def _prepare_files(gcs, file_paths, file_size=0):
