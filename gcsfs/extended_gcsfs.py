@@ -506,6 +506,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         async def _download(o, s, b, mrd_or_pool):
             async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m_client:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f"mrd path: {m_client.bucket_name}/{m_client.object_name} | "
+                        f"Requested 1 ranges: [({o}, {s})] | "
+                        f"total bytes requested: {s} | "
+                        f"total bytes downloaded: {s}"
+                    )
                 await m_client.download_ranges([(o, s, b)])
 
         for i in range(concurrency):
