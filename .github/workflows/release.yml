@@ -14,9 +14,65 @@ jobs:
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  e2e-tests:
+    name: Wait for E2E Integration Tests (Cloud Build)
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+      checks: read
+    steps:
+      - name: Wait for Google Cloud Build check to pass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMMIT_SHA="${{ github.sha }}"
+          POLL_INTERVAL=120
+          TIMEOUT=2700
+
+          echo "Waiting for Cloud Build check to complete for commit ${COMMIT_SHA}..."
+          START_TIME=$(date +%s)
+
+          while true; do
+            STATUS_JSON=$(gh api "repos/${{ github.repository }}/commits/${COMMIT_SHA}/check-runs" 2>/dev/null || echo "")
+
+            if [ -n "$STATUS_JSON" ]; then
+              CHECK_STATE=$(echo "$STATUS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | sort_by(.id) | last | .conclusion' 2>/dev/null || echo "null")
+              CHECK_STATUS=$(echo "$STATUS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | sort_by(.id) | last | .status' 2>/dev/null || echo "null")
+            else
+              CHECK_STATE="null"
+              CHECK_STATUS="null"
+            fi
+
+            if [ -n "$CHECK_STATE" ] && [ "$CHECK_STATE" != "null" ]; then
+              echo "Found check run. Status: ${CHECK_STATUS}, Conclusion: ${CHECK_STATE}"
+              if [ "$CHECK_STATUS" = "completed" ]; then
+                if [ "$CHECK_STATE" = "success" ]; then
+                  echo "✅ Cloud Build check passed!"
+                  exit 0
+                else
+                  echo "❌ Cloud Build check failed with conclusion: ${CHECK_STATE}"
+                  exit 1
+                fi
+              fi
+            else
+              echo "Waiting for Cloud Build check to appear or start..."
+            fi
+
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+            if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+              echo "❌ Timeout waiting for Cloud Build check after ${TIMEOUT} seconds."
+              exit 1
+            fi
+
+            sleep "$POLL_INTERVAL"
+          done
+
   build:
     name: Build artifacts
-    needs: ci
+    needs: [ci, e2e-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
