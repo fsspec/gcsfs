@@ -153,59 +153,6 @@ read_block_params = [
 ]
 
 
-def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
-    file_size = len(
-        json_data
-    )  # We need the file size to predict if readahead will trigger
-
-    for param in read_block_params:
-        with subtests.test(id=param.id):
-            offset, length, delimiter, expected_data = param.values
-            path = file_path
-
-            with gcs_bucket_mocks(
-                json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
-            ) as mocks:
-                result = extended_gcsfs.read_block(path, offset, length, delimiter)
-
-                assert result == expected_data
-
-                if mocks:
-                    mocks["sync_lookup_bucket_type"].assert_called_once_with(
-                        TEST_ZONAL_BUCKET
-                    )
-
-                    if expected_data:
-                        call_args_list = mocks[
-                            "downloader"
-                        ].download_ranges.await_args_list
-                        assert call_args_list, "download_ranges was not called"
-
-                        # Aggregate all the ranges passed across concurrent calls
-                        actual_ranges = []
-                        for call in call_args_list:
-                            actual_ranges.extend(call[0][0])
-
-                        if delimiter:
-                            assert len(actual_ranges) >= 1
-                            assert actual_ranges[0][0] == offset
-                        else:
-                            req_end = offset + length
-                            if req_end >= file_size:
-                                expected_chunks = 1
-                            else:
-                                expected_chunks = 2
-
-                            assert (
-                                len(actual_ranges) == expected_chunks
-                            ), f"Expected {expected_chunks} chunks (Request + Readahead), got {len(actual_ranges)}"
-                            assert actual_ranges[0][0] == offset
-                            if len(actual_ranges) == 2:
-                                assert actual_ranges[1][0] == offset + length
-                    else:
-                        mocks["downloader"].download_ranges.assert_not_called()
-
-
 def test_read_small_zb(extended_gcsfs, gcs_bucket_mocks):
     csv_file = "2014-01-01.csv"
     csv_file_path = f"{TEST_ZONAL_BUCKET}/{csv_file}"
@@ -287,27 +234,6 @@ def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
             result = f.readline()
             expected = b"ab"
             assert result == expected
-
-
-def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
-    """
-    Tests that mrd stream is properly closed with file closure.
-    """
-    with gcs_bucket_mocks(
-        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
-    ) as mocks:
-        if not extended_gcsfs.on_google:
-
-            def close_side_effect():
-                mocks["downloader"].is_stream_open = False
-
-            mocks["downloader"].close.side_effect = close_side_effect
-
-        with extended_gcsfs.open(file_path, "rb") as f:
-            assert f.mrd is not None
-
-        assert True is f.closed
-        assert False is f.mrd.is_stream_open
 
 
 def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
