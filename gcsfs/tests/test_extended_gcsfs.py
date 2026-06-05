@@ -1260,6 +1260,7 @@ async def test_concurrent_mrd_fetch_success(extended_gcsfs):
     # Add spec so isinstance() checks pass
     mock_pool = mock.AsyncMock(spec=MRDPool)
     mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
+    mock_mrd.object_name = "test_object"
 
     # Set up the context manager mock return value
     mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
@@ -1287,6 +1288,7 @@ async def test_concurrent_mrd_fetch_exception_masking(extended_gcsfs):
     # Add spec so isinstance() checks pass
     mock_pool = mock.AsyncMock(spec=MRDPool)
     mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
+    mock_mrd.object_name = "test_object"
 
     # Set up the context manager mock return value
     mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
@@ -1566,6 +1568,7 @@ async def test_concurrent_mrd_fetch_buffer_error_surfaced(extended_gcsfs):
     """Tests that BufferError is surfaced if tasks succeed but buffers are underfilled."""
     mock_pool = mock.AsyncMock(spec=MRDPool)
     mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
+    mock_mrd.object_name = "test_object"
     mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
 
     async def underfilling_download(ranges):
