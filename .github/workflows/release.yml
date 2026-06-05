@@ -28,7 +28,7 @@ jobs:
       - name: Wait for Google Cloud Build check to pass
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash cloudbuild/wait_for_cloud_build.sh
+        run: bash .github/workflows/wait_for_cloud_build.sh
 
   build:
     name: Build artifacts
