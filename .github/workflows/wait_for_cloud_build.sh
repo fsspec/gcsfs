@@ -23,17 +23,21 @@ echo "Waiting for Cloud Build checks to complete for commit ${COMMIT_SHA} in ${G
 START_TIME=$(date +%s)
 
 while true; do
-  API_RESPONSE=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${COMMIT_SHA}/check-runs?per_page=100" 2>&1)
-  API_EXIT_CODE=$?
-  if [ $API_EXIT_CODE -eq 0 ]; then
+  if API_RESPONSE=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${COMMIT_SHA}/check-runs?per_page=100" 2>&1); then
     CHECK_RUNS_JSON="$API_RESPONSE"
   else
+    API_EXIT_CODE=$?
     echo "⚠️ Warning: gh api call failed with exit status $API_EXIT_CODE. Error: $API_RESPONSE"
     CHECK_RUNS_JSON=""
   fi
 
   if [ -n "$CHECK_RUNS_JSON" ]; then
-    LATEST_CHECK_RUNS=$(echo "$CHECK_RUNS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | group_by(.name) | map(sort_by(.id) | last) | .[] | "\(.name):\(.status):\(.conclusion)"' 2>/dev/null)
+    if LATEST_CHECK_RUNS=$(echo "$CHECK_RUNS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | group_by(.name) | map(sort_by(.id) | last) | .[] | "\(.name):\(.status):\(.conclusion)"' 2>/dev/null); then
+      :
+    else
+      echo "⚠️ Warning: Failed to parse check runs JSON."
+      LATEST_CHECK_RUNS=""
+    fi
   else
     LATEST_CHECK_RUNS=""
   fi
