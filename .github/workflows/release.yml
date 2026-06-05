@@ -35,37 +35,60 @@ jobs:
           START_TIME=$(date +%s)
 
           while true; do
-            API_OUT=$(gh api "repos/${{ github.repository }}/commits/${COMMIT_SHA}/check-runs?per_page=100" 2>&1)
-            API_STATUS=$?
-            if [ $API_STATUS -eq 0 ]; then
-              STATUS_JSON="$API_OUT"
+            API_RESPONSE=$(gh api "repos/${{ github.repository }}/commits/${COMMIT_SHA}/check-runs?per_page=100" 2>&1)
+            API_EXIT_CODE=$?
+            if [ $API_EXIT_CODE -eq 0 ]; then
+              CHECK_RUNS_JSON="$API_RESPONSE"
             else
-              echo "⚠️ Warning: gh api call failed with exit status $API_STATUS. Error: $API_OUT"
-              STATUS_JSON=""
+              echo "⚠️ Warning: gh api call failed with exit status $API_EXIT_CODE. Error: $API_RESPONSE"
+              CHECK_RUNS_JSON=""
             fi
 
-            if [ -n "$STATUS_JSON" ]; then
-              CHECK_RUN_INFO=$(echo "$STATUS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | sort_by(.id) | last | "\(.status) \(.conclusion)"' 2>/dev/null || echo "null null")
-              CHECK_STATUS=$(echo "$CHECK_RUN_INFO" | cut -d' ' -f1)
-              CHECK_STATE=$(echo "$CHECK_RUN_INFO" | cut -d' ' -f2)
+            if [ -n "$CHECK_RUNS_JSON" ]; then
+              LATEST_CHECK_RUNS=$(echo "$CHECK_RUNS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | group_by(.name) | map(sort_by(.id) | last) | .[] | "\(.name):\(.status):\(.conclusion)"' 2>/dev/null)
             else
-              CHECK_STATUS="null"
-              CHECK_STATE="null"
+              LATEST_CHECK_RUNS=""
             fi
 
-            if [ "$CHECK_STATUS" != "null" ] && [ -n "$CHECK_STATUS" ]; then
-              echo "Found Cloud Build check run. Status: ${CHECK_STATUS}, Conclusion: ${CHECK_STATE}"
-              if [ "$CHECK_STATUS" = "completed" ]; then
-                if [ "$CHECK_STATE" = "success" ]; then
-                  echo "✅ Cloud Build check passed!"
-                  exit 0
+            if [ -n "$LATEST_CHECK_RUNS" ]; then
+              ALL_CHECKS_PASSED=true
+              ANY_CHECK_FAILED=false
+              FAILED_CHECK_NAME=""
+              FAILED_CHECK_CONCLUSION=""
+              ANY_CHECK_IN_PROGRESS=false
+
+              while IFS= read -r CHECK_RUN_RECORD; do
+                [ -z "$CHECK_RUN_RECORD" ] && continue
+                CHECK_NAME=$(echo "$CHECK_RUN_RECORD" | cut -d':' -f1)
+                CHECK_STATUS=$(echo "$CHECK_RUN_RECORD" | cut -d':' -f2)
+                CHECK_CONCLUSION=$(echo "$CHECK_RUN_RECORD" | cut -d':' -f3)
+
+                echo "Found Cloud Build check run: $CHECK_NAME. Status: $CHECK_STATUS, Conclusion: $CHECK_CONCLUSION"
+
+                if [ "$CHECK_STATUS" = "completed" ]; then
+                  if [ "$CHECK_CONCLUSION" != "success" ]; then
+                    ALL_CHECKS_PASSED=false
+                    ANY_CHECK_FAILED=true
+                    FAILED_CHECK_NAME="$CHECK_NAME"
+                    FAILED_CHECK_CONCLUSION="$CHECK_CONCLUSION"
+                  fi
                 else
-                  echo "❌ Cloud Build check failed with conclusion: ${CHECK_STATE}"
-                  exit 1
+                  ALL_CHECKS_PASSED=false
+                  ANY_CHECK_IN_PROGRESS=true
                 fi
+              done <<< "$LATEST_CHECK_RUNS"
+
+              if [ "$ALL_CHECKS_PASSED" = true ]; then
+                echo "✅ All Cloud Build checks passed!"
+                exit 0
+              elif [ "$ANY_CHECK_FAILED" = true ]; then
+                echo "❌ Cloud Build check '$FAILED_CHECK_NAME' failed with conclusion: $FAILED_CHECK_CONCLUSION"
+                exit 1
+              elif [ "$ANY_CHECK_IN_PROGRESS" = true ]; then
+                echo "Waiting for all Cloud Build checks to complete..."
               fi
             else
-              echo "Waiting for Cloud Build check to appear..."
+              echo "Waiting for Cloud Build check(s) to appear..."
             fi
 
             CURRENT_TIME=$(date +%s)
