@@ -35,18 +35,26 @@ jobs:
           START_TIME=$(date +%s)
 
           while true; do
-            STATUS_JSON=$(gh api "repos/${{ github.repository }}/commits/${COMMIT_SHA}/check-runs" 2>/dev/null || echo "")
-
-            if [ -n "$STATUS_JSON" ]; then
-              CHECK_STATE=$(echo "$STATUS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | sort_by(.id) | last | .conclusion' 2>/dev/null || echo "null")
-              CHECK_STATUS=$(echo "$STATUS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | sort_by(.id) | last | .status' 2>/dev/null || echo "null")
+            API_OUT=$(gh api "repos/${{ github.repository }}/commits/${COMMIT_SHA}/check-runs?per_page=100" 2>&1)
+            API_STATUS=$?
+            if [ $API_STATUS -eq 0 ]; then
+              STATUS_JSON="$API_OUT"
             else
-              CHECK_STATE="null"
-              CHECK_STATUS="null"
+              echo "⚠️ Warning: gh api call failed with exit status $API_STATUS. Error: $API_OUT"
+              STATUS_JSON=""
             fi
 
-            if [ -n "$CHECK_STATE" ] && [ "$CHECK_STATE" != "null" ]; then
-              echo "Found check run. Status: ${CHECK_STATUS}, Conclusion: ${CHECK_STATE}"
+            if [ -n "$STATUS_JSON" ]; then
+              CHECK_RUN_INFO=$(echo "$STATUS_JSON" | jq -r '[.check_runs[] | select(.app.slug == "google-cloud-build")] | sort_by(.id) | last | "\(.status) \(.conclusion)"' 2>/dev/null || echo "null null")
+              CHECK_STATUS=$(echo "$CHECK_RUN_INFO" | cut -d' ' -f1)
+              CHECK_STATE=$(echo "$CHECK_RUN_INFO" | cut -d' ' -f2)
+            else
+              CHECK_STATUS="null"
+              CHECK_STATE="null"
+            fi
+
+            if [ "$CHECK_STATUS" != "null" ] && [ -n "$CHECK_STATUS" ]; then
+              echo "Found Cloud Build check run. Status: ${CHECK_STATUS}, Conclusion: ${CHECK_STATE}"
               if [ "$CHECK_STATUS" = "completed" ]; then
                 if [ "$CHECK_STATE" = "success" ]; then
                   echo "✅ Cloud Build check passed!"
@@ -57,7 +65,7 @@ jobs:
                 fi
               fi
             else
-              echo "Waiting for Cloud Build check to appear or start..."
+              echo "Waiting for Cloud Build check to appear..."
             fi
 
             CURRENT_TIME=$(date +%s)
