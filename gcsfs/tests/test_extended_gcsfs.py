@@ -153,9 +153,6 @@ read_block_params = [
 ]
 
 
-
-
-
 def test_read_small_zb(extended_gcsfs, gcs_bucket_mocks):
     csv_file = "2014-01-01.csv"
     csv_file_path = f"{TEST_ZONAL_BUCKET}/{csv_file}"
@@ -237,9 +234,6 @@ def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
             result = f.readline()
             expected = b"ab"
             assert result == expected
-
-
-
 
 
 def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
