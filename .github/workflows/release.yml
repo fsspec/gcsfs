@@ -14,9 +14,25 @@ jobs:
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  e2e-tests:
+    name: Wait for E2E Integration Tests (Cloud Build)
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+      checks: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+      - name: Wait for Google Cloud Build check to pass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/workflows/wait_for_cloud_build.sh
+
   build:
     name: Build artifacts
-    needs: ci
+    needs: [ci, e2e-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
