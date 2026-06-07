@@ -292,7 +292,7 @@ steps:
           echo "[$$VM_NAME]: Launching benchmark run for $$group:$$config"
 
           CUSTOM_ENV=""
-          if [[ "$$group" == *"read"* ]] && [[ " $${BUCKET_TYPES} " =~ " regional " ]] && [[ "$${ENABLE_EXPERIMENTAL_READS}" == "true" ]]; then
+          if [[ "$$group" == *"read"* ]] && [[ "$${ENABLE_EXPERIMENTAL_READS}" == "true" ]]; then
             CUSTOM_ENV="export USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='true'; export DEFAULT_GCSFS_CONCURRENCY=4"
           fi
 
