@@ -23,12 +23,15 @@ pytestmark = [requires_rapid]
 def mock_gcsfs():
     fs = mock.Mock()
     fs._split_path.return_value = ("test-bucket", "test-key", "123")
+    fs._process_object.side_effect = lambda b, x: x
     fs.split_path.return_value = ("test-bucket", "test-key", "123")
     fs.info.return_value = {"size": 1000, "generation": "123", "name": "test-key"}
     fs.loop = mock.Mock()
     # Stub the MRDPoolCache so ZonalFile.__init__ doesn't try real RPCs.
     mock_pool = mock.Mock()
     mock_pool.persisted_size = 1000
+    mock_pool.close = mock.AsyncMock()
+    mock_pool.object_metadata = None
     fs._mrd_pool_cache = mock.Mock()
     fs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
     return fs
@@ -706,3 +709,51 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     await pool_c.close()
     await fs._mrd_pool_cache.close()
     fs.loop.close()
+
+
+def test_extract_metadata_dict_checksums():
+    from unittest import mock
+
+    from gcsfs.zonal_file import _extract_metadata_dict
+
+    obj_meta = mock.Mock()
+    obj_meta.name = "test-key"
+    obj_meta.size = 1000
+    obj_meta.generation = 12345
+    obj_meta.metageneration = 1
+    obj_meta._pb = mock.Mock()
+    # Mock MessageToDict to return a dict with checksums
+    with mock.patch("google.protobuf.json_format.MessageToDict") as m2d:
+        m2d.return_value = {
+            "checksums": {"crc32c": 2591144780, "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg=="},
+            "createTime": "2023-01-01T00:00:00Z",
+            "updateTime": "2023-01-01T00:00:00Z",
+            "updateStorageClassTime": "2023-01-01T00:00:00Z",
+            "deleteTime": "2023-01-01T00:00:00Z",
+        }
+        res = _extract_metadata_dict(obj_meta, "test-bucket", "test-key")
+        assert res["crc32c"] == "mnG7TA=="
+        assert res["md5Hash"] == "1B2M2Y8AsgTpgAmY7PhCfg=="
+        assert res["timeCreated"] == "2023-01-01T00:00:00Z"
+        assert res["updated"] == "2023-01-01T00:00:00Z"
+        assert res["timeStorageClassUpdated"] == "2023-01-01T00:00:00Z"
+        assert res["timeDeleted"] == "2023-01-01T00:00:00Z"
+
+
+def test_extract_metadata_dict_fallback():
+    from unittest import mock
+
+    from gcsfs.zonal_file import _extract_metadata_dict
+
+    obj_meta = mock.Mock()
+    obj_meta.name = "test-key"
+    obj_meta.size = 1000
+    obj_meta.generation = 12345
+    obj_meta.metageneration = 1
+    # Trigger exception
+    with mock.patch("google.protobuf.json_format.MessageToDict", side_effect=Exception):
+        res = _extract_metadata_dict(obj_meta, "test-bucket", "test-key")
+        assert res["name"] == "test-key"
+        assert res["bucket"] == "test-bucket"
+        assert res["size"] == 1000
+        assert res["generation"] == "12345"

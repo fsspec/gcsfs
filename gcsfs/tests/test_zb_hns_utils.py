@@ -134,6 +134,8 @@ async def test_init_aaow_with_flush_interval_bytes():
 async def test_init_mrd_success():
     """Tests successful initialization of MRD."""
     mock_mrd_instance = mock.Mock()
+    # Explicitly set read_obj_str to None to avoid auto-mocking
+    mock_mrd_instance.read_obj_str = None
     with mock.patch(
         "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
         new_callable=mock.AsyncMock,
@@ -147,6 +149,47 @@ async def test_init_mrd_success():
             mock_grpc_client, bucket_name, object_name, generation
         )
         assert result is mock_mrd_instance
+
+
+@pytest.mark.asyncio
+async def test_init_mrd_metadata_extraction():
+    """Tests that metadata is extracted from python-storage response."""
+
+    # Case 1: All metadata present
+    mock_mrd_1 = mock.Mock()
+    mock_mrd_1.read_obj_str = mock.Mock()
+    meta1 = mock.Mock()
+    meta1.configure_mock(
+        name="test-object", size=1024, generation=123456789, content_type="text/plain"
+    )
+    mock_mrd_1.read_obj_str.object_metadata = meta1
+
+    # Case 2: Generation missing
+    mock_mrd_2 = mock.Mock()
+    mock_mrd_2.read_obj_str = mock.Mock()
+    meta2 = mock.Mock()
+    meta2.configure_mock(
+        name="test-object", size=1024, generation=None, content_type="text/plain"
+    )
+    mock_mrd_2.read_obj_str.object_metadata = meta2
+
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        new_callable=mock.AsyncMock,
+    ) as mock_create_mrd:
+        # Test Case 1
+        mock_create_mrd.return_value = mock_mrd_1
+        result1 = await zb_hns_utils.init_mrd(
+            mock_grpc_client, bucket_name, object_name, generation
+        )
+        assert result1.object_metadata is meta1
+
+        # Test Case 2
+        mock_create_mrd.return_value = mock_mrd_2
+        result2 = await zb_hns_utils.init_mrd(
+            mock_grpc_client, bucket_name, object_name, generation
+        )
+        assert result2.object_metadata is meta2
 
 
 @pytest.mark.asyncio
