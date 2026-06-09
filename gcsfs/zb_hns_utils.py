@@ -478,6 +478,7 @@ class MRDPool:
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
         self._lock = asyncio.Lock()
+        self._mrd_available = asyncio.Condition(self._lock)
         self.persisted_size = None
         self._initialized = False
         self._closed = False
@@ -503,9 +504,8 @@ class MRDPool:
         """Drop one holder of `mrd`; return True iff this was the LAST holder
         (so the caller must now requeue or close it).
 
-        Both helpers only do synchronous dict mutations with no `await`, so they
-        are atomic under asyncio even though get_mrd's finally runs WITHOUT
-        self._lock."""
+        Both helpers only do synchronous dict mutations with no `await`. They
+        are called while self._lock is held."""
         count = self._inflight.get(mrd, 0) - 1
         if count > 0:
             self._inflight[mrd] = count
@@ -565,47 +565,50 @@ class MRDPool:
         mrd = None
 
         async with self._lock:
-            if self._closed:
-                raise RuntimeError("MRDPool is closed.")
+            while mrd is None:
+                if self._closed:
+                    raise RuntimeError("MRDPool is closed.")
 
-            if self._free_mrds.empty():
-                if self._active_count < self.pool_size:
-                    self._active_count += 1
-                    try:
-                        mrd = await self._get_or_create_mrd()
-                    except BaseException as e:
-                        self._active_count -= 1
-                        raise e
-                elif self.mrd_supports_multi_request and self._all_mrds:
-                    # Pool is full and the queue is empty: share a busy MRD in
-                    # round-robin fashion. The MRD now has multiple holders;
-                    # refcounting ensures it is requeued/closed only once the
-                    # LAST holder is done with it.
-                    mrd = self._all_mrds[self._rr_index]
-                    self._rr_index = (self._rr_index + 1) % len(self._all_mrds)
-
-            if mrd is None:
-                # If the queue was non-empty, this gets an MRD immediately without blocking.
-                # If the queue was empty (pool is full and sharing is disabled), this blocks
-                # until a holder returns an MRD.
-                # NOTE: the lock is intentionally held across this await -- get_mrd's finally
-                # returns MRDs via put_nowait WITHOUT the lock, so a waiter blocked
-                # here is still unblocked by a concurrent release (no deadlock).
-                mrd = await self._free_mrds.get()
+                try:
+                    mrd = self._free_mrds.get_nowait()
+                except asyncio.QueueEmpty:
+                    if self._active_count < self.pool_size:
+                        self._active_count += 1
+                        try:
+                            mrd = await self._get_or_create_mrd()
+                        except BaseException as e:
+                            self._active_count -= 1
+                            self._mrd_available.notify()
+                            raise e
+                    elif self.mrd_supports_multi_request and self._all_mrds:
+                        # Pool is full and the queue is empty: share a busy MRD in
+                        # round-robin fashion. The MRD now has multiple holders;
+                        # refcounting ensures it is requeued/closed only once the
+                        # LAST holder is done with it.
+                        mrd = self._all_mrds[self._rr_index]
+                        self._rr_index = (self._rr_index + 1) % len(self._all_mrds)
+                    else:
+                        await self._mrd_available.wait()
 
             self._mark_inflight(mrd)
 
         try:
             yield mrd
         finally:
-            # Intentionally lock-free (see note above). Only the holder that
-            # releases the MRD last requeues or closes it, so a round-robin
-            # sharer is never torn down by a peer or by close().
-            if self._release_inflight(mrd):
-                if self._closed:
-                    await close_mrd(mrd)
-                else:
-                    self._free_mrds.put_nowait(mrd)
+            close_after_release = False
+            async with self._lock:
+                # Only the holder that releases the MRD last requeues or closes
+                # it, so a round-robin sharer is never torn down by a peer or by
+                # close().
+                if self._release_inflight(mrd):
+                    if self._closed:
+                        close_after_release = True
+                    else:
+                        self._free_mrds.put_nowait(mrd)
+                        self._mrd_available.notify()
+
+            if close_after_release:
+                await close_mrd(mrd)
 
     async def close(self):
         """
@@ -625,13 +628,13 @@ class MRDPool:
             while not self._free_mrds.empty():
                 free_mrds.append(self._free_mrds.get_nowait())
 
-            try:
-                if self._cache is not None:
-                    await self._cache.release(self._key, free_mrds)
-                else:
-                    await _close_mrds(free_mrds, raise_exception=True)
-            finally:
-                self._all_mrds.clear()
+            self._all_mrds.clear()
+            self._mrd_available.notify_all()
+
+        if self._cache is not None:
+            await self._cache.release(self._key, free_mrds)
+        else:
+            await _close_mrds(free_mrds, raise_exception=True)
 
 
 def _drain_queue(q):

@@ -425,7 +425,7 @@ async def test_mrd_pool_close_with_exceptions(create_mrd_mock, mock_gcsfs):
 
 
 @pytest.mark.asyncio
-async def test_mrd_pool_queue_filled_during_lock_wait(mock_gcsfs):
+async def test_mrd_pool_get_mrd_reuses_free_mrd(mock_gcsfs):
     pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
     mrd_mock = mock.AsyncMock()
 
@@ -436,10 +436,8 @@ async def test_mrd_pool_queue_filled_during_lock_wait(mock_gcsfs):
     with mock.patch.object(pool, "_create_mrd", side_effect=fake_create_mrd):
         await pool.initialize()
 
-        side_effects = [True] + [False] * 10
-        with mock.patch.object(pool._free_mrds, "empty", side_effect=side_effects):
-            async with pool.get_mrd() as mrd:
-                assert mrd == mrd_mock
+        async with pool.get_mrd() as mrd:
+            assert mrd == mrd_mock
 
         # We should not have spawned a new MRD
         assert pool._active_count == 1
@@ -864,6 +862,71 @@ async def test_mrd_pool_get_mrd_after_close_raises(mock_cache):
     with pytest.raises(RuntimeError, match="MRDPool is closed"):
         async with mrd_pool.get_mrd():
             pass
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_close_not_blocked_by_exhausted_pool_waiter(mock_gcsfs):
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
+    mrd = mock.AsyncMock()
+
+    with mock.patch.object(pool, "_create_mrd", return_value=mrd):
+        await pool.initialize()
+
+    holder_cm = pool.get_mrd()
+    held_mrd = await holder_cm.__aenter__()
+    assert held_mrd is mrd
+
+    async def waiting_get():
+        async with pool.get_mrd():
+            return "acquired"
+
+    waiter_task = asyncio.create_task(waiting_get())
+    await asyncio.sleep(0)
+    assert not waiter_task.done()
+
+    close_task = asyncio.create_task(pool.close())
+    done, _ = await asyncio.wait({close_task}, timeout=0.1)
+    if close_task not in done:
+        await holder_cm.__aexit__(None, None, None)
+        await asyncio.gather(close_task, waiter_task)
+        pytest.fail("close() waited for an exhausted-pool get_mrd() waiter")
+
+    await close_task
+    with pytest.raises(RuntimeError, match="MRDPool is closed"):
+        await asyncio.wait_for(waiter_task, timeout=0.1)
+
+    await holder_cm.__aexit__(None, None, None)
+    mrd.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_close_wakes_all_exhausted_pool_waiters(mock_gcsfs):
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
+    mrd = mock.AsyncMock()
+
+    with mock.patch.object(pool, "_create_mrd", return_value=mrd):
+        await pool.initialize()
+
+    holder_cm = pool.get_mrd()
+    await holder_cm.__aenter__()
+
+    async def waiting_get():
+        async with pool.get_mrd():
+            return "acquired"
+
+    waiter_tasks = [asyncio.create_task(waiting_get()) for _ in range(10)]
+    await asyncio.sleep(0)
+    assert all(not task.done() for task in waiter_tasks)
+
+    await asyncio.wait_for(pool.close(), timeout=0.1)
+    results = await asyncio.gather(*waiter_tasks, return_exceptions=True)
+    assert all(
+        isinstance(result, RuntimeError) and str(result) == "MRDPool is closed."
+        for result in results
+    )
+
+    await holder_cm.__aexit__(None, None, None)
+    mrd.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
