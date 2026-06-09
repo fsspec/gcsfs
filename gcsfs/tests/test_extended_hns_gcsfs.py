@@ -671,6 +671,52 @@ class TestExtendedGcsFileSystemMvFile:
                 await gcsfs._mv_file_cache_update(path3, path4)
                 mock_super_update.assert_awaited_once_with(path3, path4, None)
 
+    @pytest.mark.asyncio
+    async def test_mv_file_hns_cache_update_version_aware(self):
+        """A versioned source path (key#generation) must still match the
+        generation-free name stored in the parent's cached listing."""
+        fs = ExtendedGcsFileSystem(token="anon", version_aware=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        src_name = f"{parent}/file1.txt"
+        path1 = f"{src_name}#123"  # move a specific source generation
+        path2 = f"{parent}/file2.txt"
+
+        fs.dircache[parent] = [
+            {"name": src_name, "type": "file"},
+            {"name": f"{parent}/keep.txt", "type": "file"},
+        ]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            await fs._mv_file_cache_update(path1, path2)
+
+        names = [e["name"] for e in fs.dircache[parent]]
+        assert src_name not in names  # the source generation entry is removed
+        assert f"{parent}/keep.txt" in names
+
+    @pytest.mark.asyncio
+    async def test_mv_file_hns_cache_update_keeps_other_generations(self):
+        """Moving one object generation must not evict the other
+        still-present generations of the same name from the parent's listing."""
+        fs = ExtendedGcsFileSystem(token="anon", version_aware=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        src_name = f"{parent}/file1.txt"
+        path1 = f"{src_name}#123"  # move only generation 123
+        path2 = f"{parent}/file2.txt"
+
+        fs.dircache[parent] = [
+            {"name": src_name, "type": "file", "generation": "123"},
+            {"name": src_name, "type": "file", "generation": "456"},
+            {"name": f"{parent}/keep.txt", "type": "file", "generation": "789"},
+        ]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            await fs._mv_file_cache_update(path1, path2)
+
+        entries = [(e["name"], e.get("generation")) for e in fs.dircache[parent]]
+        assert (src_name, "123") not in entries  # the moved generation is gone
+        assert (src_name, "456") in entries  # the other generation survives
+        assert (f"{parent}/keep.txt", "789") in entries
+
 
 class TestExtendedGcsFileSystemMkdir:
     """Tests for the mkdir method in ExtendedGcsFileSystem."""

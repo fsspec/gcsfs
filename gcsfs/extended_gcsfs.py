@@ -688,17 +688,25 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         For non-HNS buckets or cross-bucket moves, it falls back to the default
         behavior (invalidating the cache for both source and destination parents).
         """
-        src_bucket, _, _ = self.split_path(path1)
+        src_bucket, src_key, src_generation = self.split_path(path1)
         dest_bucket, _, _ = self.split_path(path2)
 
         if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
             src_parent = self._parent(path1)
             if src_parent in self.dircache:
-                path1_stripped = self._strip_protocol(path1)
+                # Match the generation-free name stored in the listing (an
+                # explicit source generation, key#generation, is not part of the
+                # cached entry name); when a generation is given, only that
+                # version is removed so other cached versions are left intact.
+                removed = {
+                    f"{src_bucket}/{src_key}": {
+                        None if src_generation is None else str(src_generation)
+                    }
+                }
                 self.dircache[src_parent] = [
                     e
                     for e in self.dircache[src_parent]
-                    if e.get("name") != path1_stripped
+                    if not self._entry_was_deleted(e, removed)
                 ]
             dest_parent = self._parent(path2)
             if dest_parent in self.dircache and response:
@@ -706,6 +714,27 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 self.dircache[dest_parent].append(new_entry)
         else:
             await super()._mv_file_cache_update(path1, path2, response)
+
+    @staticmethod
+    def _entry_was_deleted(entry, removed):
+        """Whether a cached listing ``entry`` was removed by a delete.
+
+        ``removed`` maps a generation-free name to the set of deleted generations
+        for that name. A ``None`` in the set (a delete with no specific
+        generation), or an entry that carries no generation of its own, matches
+        by name alone; otherwise the entry's generation must be one of the
+        deleted generations, so deleting one version leaves the others cached.
+        """
+        generations = removed.get(entry.get("name"))
+        if generations is None:
+            return False
+        if None in generations:
+            return True
+        entry_generation = entry.get("generation")
+        if entry_generation is None:
+            return True
+        return str(entry_generation) in generations
+
 
     async def _mv(self, path1, path2, **kwargs):
         """
