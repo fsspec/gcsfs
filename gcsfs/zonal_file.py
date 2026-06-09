@@ -68,6 +68,7 @@ class ZonalFile(GCSFile):
         self.gcsfs = gcsfs
         self.pool_size = pool_size
         object_size = None
+        self._details = None
         if "r" in self.mode:
             self.mrd_pool = asyn.sync(
                 self.gcsfs.loop,
@@ -78,6 +79,12 @@ class ZonalFile(GCSFile):
                 self.pool_size,
             )
             object_size = self.mrd_pool.persisted_size
+
+            if getattr(self.mrd_pool, "object_metadata", None):
+                raw_details = _extract_metadata_dict(
+                    self.mrd_pool.object_metadata, bucket, key
+                )
+                self._details = self.gcsfs._process_object(bucket, raw_details)
 
             if object_size is None:
                 logger.warning(
@@ -393,3 +400,90 @@ class ZonalFile(GCSFile):
                 self.aaow,
                 finalize_on_close=self.finalize_on_close,
             )
+
+
+def _extract_metadata_dict(obj_meta, bucket, key):
+    """
+    Extracts the full object metadata from the gRPC Object protobuf and formats it
+    into a dictionary exactly matching the JSON response from the REST API `fs.info()`.
+
+    This ensures that downstream users or `fsspec` internals accessing `f.details`
+    will see all metadata fields (e.g. `storageClass`, `timeCreated`, `crc32c`)
+    without needing an additional HTTP request.
+
+    Note: The resulting dictionary perfectly mimics the REST API, with two exceptions
+    that are safely ignored by fsspec:
+    1. REST API Routing Links (`kind`, `id`, `selfLink`, `mediaLink`) are missing
+       because they do not exist in the gRPC protocol.
+    2. Default Booleans (e.g. `temporaryHold: False`) may be omitted because
+       Protobuf 3 `MessageToDict` omits default/empty values.
+    """
+    try:
+        from google.protobuf.json_format import MessageToDict
+
+        # Use preserving_proto_field_name=False to output camelCase JSON keys
+        details = MessageToDict(obj_meta._pb, preserving_proto_field_name=False)
+    except Exception:
+        # If MessageToDict fails (e.g. proto version mismatch), fallback to an empty
+        # dict and rely on the manual population below for minimum required fields.
+        details = {}
+
+    # The REST API natively returns the short bucket name. gRPC returns projects/_/buckets/...
+    # Note: We do NOT prepend the bucket to 'name' or inject 'type' because
+    # self.gcsfs._process_object() will dynamically handle those steps for us!
+    name = getattr(obj_meta, "name", key)
+    details["name"] = name if isinstance(name, str) else key
+    details["bucket"] = bucket
+
+    # MessageToDict converts 64-bit ints to strings by default to prevent JSON precision
+    # loss in JS. We explicitly override it here because fsspec strictly expects an integer.
+    size = getattr(obj_meta, "size", None)
+    if isinstance(size, int):
+        details["size"] = size
+
+    # We populate these fields manually as a fallback safety net in case MessageToDict
+    # failed and `details` is `{}`. These are the absolute bare-minimum required for fsspec.
+    gen = getattr(obj_meta, "generation", None)
+    if isinstance(gen, (int, str)):
+        details["generation"] = str(gen)
+    ct = getattr(obj_meta, "content_type", None)
+    if isinstance(ct, str):
+        details["contentType"] = ct
+
+    # Flatten checksums to the top level (as expected by REST users and fsspec logic)
+    if "checksums" in details:
+        checksums = details.pop("checksums")
+        if "crc32c" in checksums:
+            # gRPC CRC32C is a 32-bit integer, but REST API exposes it as a base64 encoded string
+            import base64
+            import struct
+
+            crc_int = checksums["crc32c"]
+            details["crc32c"] = base64.b64encode(struct.pack(">I", crc_int)).decode(
+                "utf-8"
+            )
+        if "md5Hash" in checksums:
+            # md5Hash is bytes in proto, so MessageToDict already converted it to base64
+            details["md5Hash"] = checksums["md5Hash"]
+
+    # Rename and normalize timestamps to match the REST JSON representation exactly.
+    # We truncate fractional seconds to 6 digits (microseconds) to prevent ValueError
+    # in `_parse_timestamp` on Python versions < 3.11 when nanosecond precision is returned.
+    def normalize_ts(ts):
+        if isinstance(ts, str) and "." in ts:
+            base, frac = ts.rstrip("Z").split(".", 1)
+            return f"{base}.{frac[:6]:0<6}Z"
+        return ts
+
+    if "createTime" in details:
+        details["timeCreated"] = normalize_ts(details.pop("createTime"))
+    if "updateTime" in details:
+        details["updated"] = normalize_ts(details.pop("updateTime"))
+    if "updateStorageClassTime" in details:
+        details["timeStorageClassUpdated"] = normalize_ts(
+            details.pop("updateStorageClassTime")
+        )
+    if "deleteTime" in details:
+        details["timeDeleted"] = normalize_ts(details.pop("deleteTime"))
+
+    return details

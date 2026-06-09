@@ -39,9 +39,14 @@ async def init_mrd(grpc_client, bucket_name, object_name, generation=None):
     Wraps Google API errors into standard Python exceptions.
     """
     try:
-        return await AsyncMultiRangeDownloader.create_mrd(
+        mrd = await AsyncMultiRangeDownloader.create_mrd(
             grpc_client, bucket_name, object_name, generation
         )
+
+        # Extract metadata from the updated Python SDK
+        read_obj_str = getattr(mrd, "read_obj_str", None)
+        mrd.object_metadata = getattr(read_obj_str, "object_metadata", None)
+        return mrd
     except NotFound:
         # We wrap the error here to match standard Python error handling
         # and avoid leaking Google API exceptions to users.
@@ -479,6 +484,7 @@ class MRDPool:
         self._active_count = 0
         self._lock = asyncio.Lock()
         self.persisted_size = None
+        self.object_metadata = None
         self._initialized = False
         self._closed = False
 
@@ -541,6 +547,7 @@ class MRDPool:
                 mrd = await self._create_mrd()
                 self._all_mrds.append(mrd)
                 self.persisted_size = mrd.persisted_size
+                self.object_metadata = getattr(mrd, "object_metadata", None)
                 self._free_mrds.put_nowait(mrd)
                 self._active_count += 1
 
