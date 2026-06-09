@@ -735,7 +735,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             return True
         return str(entry_generation) in generations
 
-
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
