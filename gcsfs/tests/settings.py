@@ -12,8 +12,6 @@ TEST_VERSIONED_BUCKET = _get_bucket_name(
     "GCSFS_TEST_VERSIONED_BUCKET", "gcsfs_test_versioned"
 )
 TEST_HNS_BUCKET = _get_bucket_name("GCSFS_HNS_TEST_BUCKET", "gcsfs_hns_test")
-# Expected to point at a standard (non-HNS / flat) bucket.
-TEST_FLAT_BUCKET = _get_bucket_name("GCSFS_FLAT_TEST_BUCKET", "gcsfs_flat_test")
 TEST_ZONAL_BUCKET = _get_bucket_name("GCSFS_ZONAL_TEST_BUCKET", "gcsfs_zonal_test")
 TEST_PROJECT = os.getenv("GCSFS_TEST_PROJECT", "project")
 TEST_REGION = os.getenv("GCSFS_TEST_REGION", "us-central1")
