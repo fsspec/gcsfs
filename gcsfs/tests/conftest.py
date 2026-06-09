@@ -20,7 +20,6 @@ from gcsfs import GCSFileSystem
 from gcsfs.extended_gcsfs import BucketType
 from gcsfs.tests.settings import (
     TEST_BUCKET,
-    TEST_FLAT_BUCKET,
     TEST_HNS_BUCKET,
     TEST_HNS_REQUESTER_PAYS_BUCKET,
     TEST_PROJECT,
@@ -500,28 +499,34 @@ def gcs_hns(gcs_factory, buckets_to_delete):
         _close_gcs(gcs)
 
 
-@pytest.fixture
-def flat_bucket(gcs_factory, buckets_to_delete):
+@pytest.fixture(scope="session")
+def flat_bucket_name(gcs_factory, buckets_to_delete):
     """
-    Provides the name of a dedicated standard (non-HNS) bucket.
-
-    In the HNS test suite TEST_BUCKET and TEST_HNS_BUCKET may both point at
-    HNS-enabled buckets, so tests that need to exercise genuinely mixed
-    HNS/flat behavior cannot rely on TEST_BUCKET being flat. This fixture
-    creates a standard bucket (HNS disabled), registers it for end-of-session
-    cleanup, and cleans its contents before and after the test.
+    Creates a dedicated standard (non-HNS) bucket once per test session.
     """
     gcs = gcs_factory()
     try:
-        if not gcs.exists(TEST_FLAT_BUCKET):
-            gcs.mkdir(TEST_FLAT_BUCKET)
-            buckets_to_delete.add(TEST_FLAT_BUCKET)
-        else:
-            _cleanup_gcs(gcs, bucket=TEST_FLAT_BUCKET)
-        gcs.invalidate_cache()
-        yield TEST_FLAT_BUCKET
+        bucket_name = f"gcsfs-test-flat-{uuid.uuid4().hex}"
+        gcs.mkdir(bucket_name)
+        buckets_to_delete.add(bucket_name)
+        yield bucket_name
     finally:
-        _cleanup_gcs(gcs, bucket=TEST_FLAT_BUCKET)
+        _close_gcs(gcs)
+
+
+@pytest.fixture
+def flat_bucket(flat_bucket_name, gcs_factory):
+    """
+    Provides the name of a dedicated standard (non-HNS) bucket,
+    and cleans its contents before and after each test.
+    """
+    gcs = gcs_factory()
+    try:
+        _cleanup_gcs(gcs, bucket=flat_bucket_name)
+        gcs.invalidate_cache()
+        yield flat_bucket_name
+    finally:
+        _cleanup_gcs(gcs, bucket=flat_bucket_name)
         _close_gcs(gcs)
 
 
