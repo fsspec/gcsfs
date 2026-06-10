@@ -706,3 +706,22 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     await pool_c.close()
     await fs._mrd_pool_cache.close()
     fs.loop.close()
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_cache_sets_file_details():
+    fs = mock.Mock()
+    fs._info = mock.AsyncMock(return_value={"generation": "123", "size": 100})
+    
+    from gcsfs.zb_hns_utils import MRDPoolCache
+    cache = MRDPoolCache(fs)
+    
+    file_obj = mock.Mock()
+    file_obj._details = None
+    
+    with mock.patch("gcsfs.zb_hns_utils.MRDPool") as mock_pool:
+        # Prevent actually calling mrd_pool.initialize() which would fail on a mock
+        mock_pool.return_value.initialize = mock.AsyncMock()
+        await cache.get("bucket", "key", generation=None, file_obj=file_obj)
+        
+    assert file_obj._details == {"generation": "123", "size": 100}
