@@ -151,6 +151,12 @@ case "$TEST_SUITE" in
       "--deselect=gcsfs/tests/test_core.py::test_requester_pays_fails_without_user_project"
     )
 
+    # Zonal bucket doesnt have concurrenct disk downloads yet.
+    ZONAL_DESELECTS+=(
+      "--deselect=gcsfs/tests/test_core.py::test_get_file_range_header_fallback"
+      "--deselect=gcsfs/tests/test_core.py::test_get_file_top_level_concurrency"
+    )
+
     pytest "${ARGS[@]}" "${ZONAL_DESELECTS[@]}" gcsfs/tests/test_core.py
     ;;
 esac

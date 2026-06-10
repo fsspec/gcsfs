@@ -1984,6 +1984,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     if not chunk:
                         break
 
+                    # Offloading it to thread doesn't improve performance.
+                    # See https://github.com/fsspec/gcsfs/pull/862#discussion_r3356862167
                     local_f.write(chunk)
                     callback.relative_update(len(chunk))
                     bytes_written += len(chunk)
