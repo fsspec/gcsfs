@@ -80,8 +80,6 @@ jobs:
       - name: Run Extended tests (Zonal & HNS Enabled)
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-service-account-credentials.json
-          export GCSFS_RUN_HNS_TESTS="true"
-          export GCSFS_RUN_RAPID_TESTS="true"
           pytest -vv -s \
             --cov=gcsfs --cov-append --cov-report=xml \
             --log-format="%(asctime)s %(levelname)s %(message)s" \

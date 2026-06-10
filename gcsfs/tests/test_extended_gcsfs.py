@@ -30,7 +30,7 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import csv_files, files, requires_rapid, text_files
+from gcsfs.tests.conftest import csv_files, files, text_files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
@@ -48,8 +48,6 @@ json_data2 = files[file2]
 a = TEST_ZONAL_BUCKET + "/zonal/test/a"
 b = TEST_ZONAL_BUCKET + "/zonal/test/b"
 c = TEST_ZONAL_BUCKET + "/zonal/test/c"
-
-pytestmark = [requires_rapid]
 
 
 @pytest.fixture
