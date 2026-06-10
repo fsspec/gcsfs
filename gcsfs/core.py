@@ -1940,7 +1940,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         """Creates the target directory and pre-allocates the file size."""
         os.makedirs(os.path.dirname(lpath) or os.curdir, exist_ok=True)
         if total_size == 0:
-            open(lpath, "wb").close()
+            with open(lpath, "wb"):
+                pass
         else:
             with open(lpath, "wb") as f:
                 f.truncate(total_size)
@@ -1959,9 +1960,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         **kwargs,
     ):
         """Fetches a specific byte range of a file and writes it to disk."""
-        req_headers = {"Range": f"bytes={start_offset}-{end_offset - 1}"}
+        req_headers = {}
         if headers:
             req_headers.update(headers)
+        req_headers["Range"] = f"bytes={start_offset}-{end_offset - 1}"
 
         bytes_written = 0
         await self._set_session()
@@ -1988,8 +1990,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
                 expected_bytes = end_offset - start_offset
                 if bytes_written != expected_bytes:
-                    raise RuntimeError(
-                        f"Connection closed early. Expected {expected_bytes} bytes, got {bytes_written}."
+                    raise aiohttp.client_exceptions.ClientPayloadError(
+                        f"Connection closed early. Expected {expected_bytes} bytes, "
+                        f"got {bytes_written} at offset {start_offset}."
                     )
             except BaseException:
                 callback.relative_update(-bytes_written)
@@ -2027,6 +2030,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         if total_size < self.MIN_CHUNK_SIZE_FOR_CONCURRENCY:
             concurrency = 1
 
+        if concurrency == 1:
+            return await self._get_file_request(
+                self.url(rpath), lpath, headers=headers, callback=callback, **kwargs
+            )
+
         check_consistency = consistency not in ("none", None)
 
         # Prevent silent corruption by pinning the exact object generation
@@ -2046,7 +2054,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 checker.validate_json_response(details)
             return
 
-        part_size = (total_size + concurrency - 1) // max(1, concurrency)
+        part_size = max(chunk_size, (total_size + concurrency - 1) // concurrency)
         url = self.url(rpath)
         tasks = []
 
@@ -2070,15 +2078,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
         try:
             await asyncio.gather(*tasks)
-        except BaseException as e:
+        except BaseException:
             for t in tasks:
                 if not t.done():
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            raise e
+            raise
 
         if check_consistency:
-            logger.debug(
+            logger.warning(
                 "On-the-fly checksum disabled for concurrent out-of-order downloads. "
                 "Verifying file integrity post-download."
             )
@@ -2091,13 +2099,32 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         callback = callback or NoOpCallback()
 
         concurrency = kwargs.pop("concurrency", DEFAULT_CONCURRENCY)
-        if concurrency > 1:
-            await self._get_file_concurrent(
-                rpath, lpath, concurrency, callback=callback, **kwargs
+
+        # If the user provides a custom Range header, fall back to the sequential path.
+        # Parsing range headers client-side to spawn concurrent tasks is messy because
+        # formats vary widely (e.g., bytes=-500, bytes=100-, bytes=0-50, 100-150).
+        # Building a flawless parser for this edge case introduces unnecessary risk.
+        # Also, if users want concurrent range downloads, gcsfs already handles that
+        # natively through cat_file(start=..., end=...).
+        headers = kwargs.get("headers", {})
+        if headers and any(k.lower() == "range" for k in headers):
+            logger.debug(
+                "Custom Range header detected. Falling back to sequential download."
             )
-        else:
-            u2 = self.url(rpath)
-            await self._get_file_request(u2, lpath, callback=callback, **kwargs)
+            concurrency = 1
+
+        try:
+            if concurrency > 1:
+                await self._get_file_concurrent(
+                    rpath, lpath, concurrency, callback=callback, **kwargs
+                )
+            else:
+                u2 = self.url(rpath)
+                await self._get_file_request(u2, lpath, callback=callback, **kwargs)
+        except BaseException:
+            if os.path.exists(lpath):
+                os.remove(lpath)
+            raise
 
     def _open(
         self,

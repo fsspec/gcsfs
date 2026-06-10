@@ -9,6 +9,7 @@ from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
+import aiohttp
 import fsspec.asyn
 import fsspec.core
 import pytest
@@ -1568,6 +1569,163 @@ def test_read_small(gcs):
         assert gcs.cat(fn) == b"".join(out)
         # cache drop
         assert len(f.cache.cache) < len(out)
+
+
+def test_download_chunk_to_file_range_header_override(gcs):
+    rpath = f"{TEST_BUCKET}/test_chunk_range.txt"
+    gcs.pipe(rpath, b"1234567890")
+
+    url = gcs.url(rpath)
+    with tempdir() as tmpdir:
+        os.makedirs(tmpdir, exist_ok=True)
+
+        lpath = os.path.join(tmpdir, "out_range.txt")
+        with open(lpath, "wb") as f:
+            f.truncate(10)
+
+        callback = mock.Mock()
+
+        # User tries to pass a conflicting Range header
+        user_headers = {"Range": "bytes=0-1", "Custom-Header": "test-value"}
+
+        with mock.patch.object(
+            gcs, "_get_headers", wraps=gcs._get_headers
+        ) as mock_get_headers:
+            # Safely run the async function on the fsspec background loop
+            fsspec.asyn.sync(
+                gcs.loop,
+                gcs._download_chunk_to_file,
+                url=url,
+                rpath=rpath,
+                lpath=lpath,
+                start_offset=2,
+                end_offset=5,
+                chunk_size=1024,
+                headers=user_headers,
+                callback=callback,
+            )
+
+            # Verify the strict range calculation forced its way into the final headers
+            req_headers = mock_get_headers.call_args[0][0]
+            assert req_headers["Range"] == "bytes=2-4"
+            assert req_headers["Custom-Header"] == "test-value"
+
+            # Verify the data was written correctly to the local file
+            with open(lpath, "rb") as f:
+                f.seek(2)
+                assert f.read(3) == b"345"
+
+
+def test_get_file_range_header_fallback(gcs, monkeypatch):
+    """
+    Test that passing a custom Range header to get_file forces concurrency=1
+    and routes to the sequential downloader, bypassing the concurrent orchestrator.
+    """
+    rpath = f"{TEST_BUCKET}/test_range_fallback.txt"
+    data = b"0123456789"
+    gcs.pipe(rpath, data)
+
+    # Lower the threshold so it WOULD use concurrency if it weren't for the header
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 2)
+
+    with tempdir() as tmpdir:
+        os.makedirs(tmpdir, exist_ok=True)
+        lpath = os.path.join(tmpdir, "out_range_fallback.txt")
+
+        with mock.patch.object(
+            gcs, "_get_file_concurrent", wraps=gcs._get_file_concurrent
+        ) as mock_conc:
+            with mock.patch.object(
+                gcs, "_get_file_request", wraps=gcs._get_file_request
+            ) as mock_seq:
+
+                # Request bytes 2, 3, and 4 (concurrency=4 is ignored)
+                gcs.get_file(
+                    rpath, lpath, concurrency=4, headers={"Range": "bytes=2-4"}
+                )
+
+                # Assert concurrent orchestrator was completely bypassed
+                mock_conc.assert_not_called()
+
+                # Assert sequential downloader was triggered
+                mock_seq.assert_called_once()
+
+        # Verify the file was created and contains exactly the requested range
+        with open(lpath, "rb") as f:
+            assert f.read() == b"234"
+
+
+def test_get_file_top_level_concurrency(gcs, monkeypatch):
+    """
+    Test that the top-level get_file method correctly accepts the concurrency
+    parameter and routes it to the concurrent implementation.
+    """
+    rpath = f"{TEST_BUCKET}/test_top_level_conc.txt"
+    # Create 2MB of random data
+    data = os.urandom(2 * 1024 * 1024)
+    gcs.pipe(rpath, data)
+
+    # Lower the threshold so we don't need a massive file to trigger concurrency
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1024)
+
+    with tempdir() as tmpdir:
+        os.makedirs(tmpdir, exist_ok=True)
+        lpath = os.path.join(tmpdir, "out_top_level_conc.txt")
+
+        # Spy on the internal concurrent orchestrator
+        with mock.patch.object(
+            gcs, "_get_file_concurrent", wraps=gcs._get_file_concurrent
+        ) as mock_conc:
+
+            # Call the public-facing, top-level method
+            gcs.get_file(rpath, lpath, concurrency=3)
+
+            # Assert the concurrent path was chosen
+            mock_conc.assert_called_once()
+
+            # Assert the concurrency=3 parameter was successfully passed down
+            # Note: call_args[0] contains the positional arguments (rpath, lpath, concurrency)
+            assert mock_conc.call_args[0][2] == 3
+
+        # Verify the data integrity of the final downloaded file
+        with open(lpath, "rb") as f:
+            assert f.read() == data
+
+
+def test_download_chunk_to_file_early_closure(gcs):
+    rpath = f"{TEST_BUCKET}/test_chunk_early.txt"
+    # Create a 5-byte file
+    gcs.pipe(rpath, b"12345")
+
+    url = gcs.url(rpath)
+    with tempdir() as tmpdir:
+        os.makedirs(tmpdir, exist_ok=True)
+
+        lpath = os.path.join(tmpdir, "out_early.txt")
+        with open(lpath, "wb") as f:
+            f.truncate(10)
+
+        callback = mock.Mock()
+
+        # Request 10 bytes, but the remote file only has 5.
+        # The stream will terminate early, testing our fallback check.
+        with pytest.raises(
+            aiohttp.client_exceptions.ClientPayloadError,
+            match="Connection closed early. Expected 10 bytes",
+        ):
+            # Safely run the async function on the fsspec background loop
+            fsspec.asyn.sync(
+                gcs.loop,
+                gcs._download_chunk_to_file,
+                url=url,
+                rpath=rpath,
+                lpath=lpath,
+                start_offset=0,
+                end_offset=10,
+                chunk_size=1024,
+                headers=None,
+                callback=callback,
+            )
 
 
 def test_seek_delimiter(gcs):
