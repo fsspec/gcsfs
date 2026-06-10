@@ -76,6 +76,7 @@ class ZonalFile(GCSFile):
                 key,
                 generation,
                 self.pool_size,
+                self,
             )
             object_size = self.mrd_pool.persisted_size
 

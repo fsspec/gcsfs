@@ -711,7 +711,7 @@ class MRDPoolCache:
             mrds_to_close.extend(_drain_queue(self._mrd_queues.pop(evict_key, None)))
         return mrds_to_close
 
-    async def get(self, bucket_name, object_name, generation, pool_size):
+    async def get(self, bucket_name, object_name, generation, pool_size, file_obj=None):
         """
         Gets an MRDPool for the specified object.
 
@@ -733,6 +733,8 @@ class MRDPoolCache:
         if generation is None:
             info = await fs._info(f"{bucket_name}/{object_name}")
             generation = info.get("generation")
+            if file_obj is not None:
+                file_obj._details = info
         key = (bucket_name, object_name, generation)
 
         self._incref(key)
