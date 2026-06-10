@@ -76,8 +76,9 @@ class ZonalFile(GCSFile):
                 key,
                 generation,
                 self.pool_size,
-                self,
             )
+            if getattr(self.mrd_pool, "details", None) is not None:
+                self._details = self.mrd_pool.details
             object_size = self.mrd_pool.persisted_size
 
             if object_size is None:
