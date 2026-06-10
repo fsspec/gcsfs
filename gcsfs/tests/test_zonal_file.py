@@ -723,6 +723,6 @@ async def test_mrd_pool_cache_sets_file_details():
     with mock.patch("gcsfs.zb_hns_utils.MRDPool") as mock_pool:
         # Prevent actually calling mrd_pool.initialize() which would fail on a mock
         mock_pool.return_value.initialize = mock.AsyncMock()
-        await cache.get("bucket", "key", generation=None, file_obj=file_obj)
+        await cache.get("bucket", "key", generation=None, pool_size=1, file_obj=file_obj)
 
     assert file_obj._details == {"generation": "123", "size": 100}
