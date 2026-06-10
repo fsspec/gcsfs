@@ -1,7 +1,6 @@
 import asyncio
 import ctypes
 import logging
-import threading
 import weakref
 from collections import deque
 
@@ -262,6 +261,8 @@ class PrefetchProducer:
                 len(tasks_to_wait),
             )
             await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+
+        self.wakeup_event.clear()
 
     async def restart(self, new_offset: int):
         """Stops current tasks and restarts the background loop at a new byte offset.
@@ -649,37 +650,62 @@ class BackgroundPrefetcher:
             )
 
         self.loop = fsspec.asyn.get_loop()
-        self._lock = threading.Lock()
         self._error = None
         self.is_stopped = False
-        self.queue = asyncio.Queue()
-        self.wakeup_event = asyncio.Event()
         self.user_offset = 0
         self.read_tracker = RunningAverageTracker(maxlen=10)
 
-        self.consumer = PrefetchConsumer(
-            queue=self.queue,
-            wakeup_event=self.wakeup_event,
-            tracker=self.read_tracker,
-            orchestrator=self,
-        )
+        self.queue = None
+        self.wakeup_event = None
+        self._async_lock = None
+        self.consumer = None
+        self.producer = None
 
-        self.producer = PrefetchProducer(
-            fetcher=fetcher,
-            size=self.size,
-            concurrency=self.concurrency,
-            queue=self.queue,
-            wakeup_event=self.wakeup_event,
-            consumer=self.consumer,
-            tracker=self.read_tracker,
-            orchestrator=self,
-            user_max_prefetch_size=max_prefetch_size,
-        )
+        def _start():
+            # Ensures all primitives bind directly to `self.loop`
+            self.queue = asyncio.Queue()
+            self.wakeup_event = asyncio.Event()
+            self._async_lock = asyncio.Lock()
 
-        async def _start():
+            self.consumer = PrefetchConsumer(
+                queue=self.queue,
+                wakeup_event=self.wakeup_event,
+                tracker=self.read_tracker,
+                orchestrator=self,
+            )
+
+            self.producer = PrefetchProducer(
+                fetcher=fetcher,
+                size=self.size,
+                concurrency=self.concurrency,
+                queue=self.queue,
+                wakeup_event=self.wakeup_event,
+                consumer=self.consumer,
+                tracker=self.read_tracker,
+                orchestrator=self,
+                user_max_prefetch_size=max_prefetch_size,
+            )
             self.producer.start()
 
-        fsspec.asyn.sync(self.loop, _start)
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is self.loop and current_loop.is_running():
+            _start()
+        elif current_loop is not None and current_loop != self.loop:
+            raise RuntimeError(
+                "Multiple event loops are not supported for this class,"
+                " This is meant for run by either synchronous, or by fsspec event loop."
+            )
+        else:
+
+            async def _start_wrapper():
+                _start()
+
+            fsspec.asyn.sync(self.loop, _start_wrapper)
+
         logger.debug("BackgroundPrefetcher initialization complete.")
 
     def __enter__(self):
@@ -690,13 +716,17 @@ class BackgroundPrefetcher:
         """Context manager exit point. Ensures the prefetcher is cleanly closed."""
         self.close()
 
+    async def __aenter__(self):
+        """Async context manager entry point."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit point. Ensures the prefetcher is cleanly closed."""
+        await self.aclose()
+
     def set_error(self, e: Exception):
         logger.error("Global error state set in BackgroundPrefetcher: %s", e)
         self._error = e
-
-        # Stop the producer loop.
-        if self.producer and not self.producer.is_stopped:
-            asyncio.run_coroutine_threadsafe(self.producer.stop(), self.loop)
 
     async def _restart_producer(self, new_offset: int):
         logger.debug(
@@ -708,44 +738,78 @@ class BackgroundPrefetcher:
         self.read_tracker.clear()
 
     async def _async_fetch(self, start, end):
-        logger.debug("Executing _async_fetch for range %d - %d.", start, end)
+        """Core internal async fetching logic, protected safely by the async lock."""
+        async with self._async_lock:
+            try:
+                if self.is_stopped:
+                    raise RuntimeError("The file instance has been closed.")
 
-        # If the prefetcher is in error state, let's do a hard seek to start offset.
-        if self._error:
-            logger.info(
-                "Recovering from error state. Restarting producer at offset: %d", start
-            )
-            self.user_offset = start
-            await self._restart_producer(start)
-        elif start != self.user_offset:
-            if self.user_offset < start <= self.producer.current_offset:
-                logger.debug(
-                    "Soft seek detected. Skipping ahead from %d to %d.",
-                    self.user_offset,
-                    start,
+                logger.debug("Executing _async_fetch for range %d - %d.", start, end)
+
+                # If the prefetcher is in error state, let's do a hard seek to start offset.
+                if self._error:
+                    logger.info(
+                        "Recovering from error state. Restarting producer at offset: %d",
+                        start,
+                    )
+                    self.user_offset = start
+                    await self._restart_producer(start)
+                elif start != self.user_offset:
+                    if self.user_offset < start <= self.producer.current_offset:
+                        logger.debug(
+                            "Soft seek detected. Skipping ahead from %d to %d.",
+                            self.user_offset,
+                            start,
+                        )
+                        skip_amount = start - self.user_offset
+                        await self.consumer.skip(skip_amount)
+                        self.user_offset = start
+                    else:
+                        logger.debug(
+                            "Hard seek detected. Moving user offset from %d to %d.",
+                            self.user_offset,
+                            start,
+                        )
+                        self.user_offset = start
+                        await self._restart_producer(start)
+
+                requested_size = end - start
+                self.read_tracker.add(requested_size)
+
+                chunk = await self.consumer.consume(requested_size)
+                self.user_offset += len(chunk)
+
+                logger.debug("Completed _async_fetch. Returned %d bytes.", len(chunk))
+                return chunk
+            except asyncio.CancelledError as e:
+                self._error = e
+                raise
+            except Exception as e:
+                logger.error(
+                    "Exception raised during asynchronous fetch: %s", e, exc_info=True
                 )
-                skip_amount = start - self.user_offset
-                await self.consumer.skip(skip_amount)
-                self.user_offset = start
-            else:
-                logger.debug(
-                    "Hard seek detected. Moving user offset from %d to %d.",
-                    self.user_offset,
-                    start,
-                )
-                self.user_offset = start
-                await self._restart_producer(start)
+                self._error = e
+                if self.producer and not self.producer.is_stopped:
+                    await self.producer.stop()
+                raise
 
-        requested_size = end - start
-        self.read_tracker.add(requested_size)
+    async def _async_close(self):
+        """Asynchronous teardown logic protected by the async lock."""
+        async with self._async_lock:
+            if self.is_stopped:
+                return
 
-        chunk = await self.consumer.consume(requested_size)
-        self.user_offset += len(chunk)
+            self.is_stopped = True
+            logger.debug("Acquired async lock. Tearing down producer and buffers.")
 
-        logger.debug("Completed _async_fetch. Returned %d bytes.", len(chunk))
-        return chunk
+            if self.producer:
+                await self.producer.stop()
 
-    def _fetch(self, start: int | None, end: int | None) -> bytes:
+            self.consumer.clear_buffer()
+            logger.debug("BackgroundPrefetcher closed successfully.")
+
+    async def afetch(self, start: int | None, end: int | None) -> bytes:
+        """Asynchronous API counterpart to `_fetch`."""
         if start is None:
             start = 0
         if end is None:
@@ -753,63 +817,32 @@ class BackgroundPrefetcher:
 
         end = min(end, self.size)
         logger.debug(
-            "Synchronous _fetch called for bounds start=%s, end=%s.", start, end
+            "Asynchronous afetch called for bounds start=%s, end=%s.", start, end
         )
 
         if start >= self.size or start >= end:
-            logger.warning(
-                "Invalid bounds or EOF reached in _fetch. Start: %d, End: %d, Size: %d",
-                start,
-                end,
-                self.size,
-            )
             return b""
 
-        with self._lock:
-            if self.is_stopped:
-                logger.error(
-                    "Cannot fetch data: BackgroundPrefetcher is stopped or closed."
-                )
-                raise RuntimeError(
-                    "The file instance has been closed. This can occur if a close operation "
-                    "is executed concurrently while a read operation is still in progress."
-                )
+        if self.is_stopped:
+            logger.error(
+                "Cannot fetch data: BackgroundPrefetcher is stopped or closed."
+            )
+            raise RuntimeError(
+                "The file instance has been closed. This can occur if a close operation "
+                "is executed concurrently while a read operation is still in progress."
+            )
 
-            try:
-                result = fsspec.asyn.sync(self.loop, self._async_fetch, start, end)
-            except Exception as e:
-                logger.error(
-                    "Exception raised during synchronous fetch: %s", e, exc_info=True
-                )
-                self._error = e
-                if self.producer and not self.producer.is_stopped:
-                    asyncio.run_coroutine_threadsafe(self.producer.stop(), self.loop)
-                raise
+        return await self._async_fetch(start, end)
 
-            if self.is_stopped:
-                logger.error("Instance was stopped mid-fetch operation.")
-                raise RuntimeError(
-                    "The file instance has been closed. This can occur if a close operation "
-                    "is executed concurrently while a read operation is still in progress."
-                )
+    def fetch(self, start: int | None, end: int | None) -> bytes:
+        """Synchronous API wrapper delegating to `afetch`."""
+        # Delegates all boundaries, checking, and fetching to the async event loop perfectly
+        return fsspec.asyn.sync(self.loop, self.afetch, start, end)
 
-            return result
+    async def aclose(self):
+        """Safely shuts down the prefetcher from an asynchronous context."""
+        await self._async_close()
 
     def close(self):
-        """Safely shuts down the prefetcher.
-
-        This cancels all background network tasks and blocks until everything
-        is completely cleaned up. It also clears the internal consumer buffer.
-        """
-        logger.debug("Closing BackgroundPrefetcher and cleaning up resources.")
-        if self.is_stopped:
-            logger.debug(
-                "BackgroundPrefetcher is already stopped. Skipping close operation."
-            )
-            return
-
-        self.is_stopped = True
-        with self._lock:
-            fsspec.asyn.sync(self.loop, self.producer.stop)
-            self.consumer.clear_buffer()
-        logger.debug("BackgroundPrefetcher closed successfully.")
+        """Safely shuts down the prefetcher from a synchronous context."""
+        fsspec.asyn.sync(self.loop, self._async_close)

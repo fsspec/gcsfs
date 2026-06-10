@@ -84,24 +84,24 @@ def test_sequential_read_spanning_blocks(prefetcher_factory):
     bp = prefetcher_factory(fetcher=fetcher, size=300, concurrency=4)
     bp.read_tracker.add(100)  # Seed the adaptive tracker
 
-    assert bp._fetch(0, 100) == b"A" * 100
-    assert bp._fetch(100, 150) == b"B" * 50
+    assert bp.fetch(0, 100) == b"A" * 100
+    assert bp.fetch(100, 150) == b"B" * 50
     assert bp.consumer._current_block_idx == 50
-    assert bp._fetch(150, 250) == b"B" * 50 + b"C" * 50
-    assert bp._fetch(250, 300) == b"C" * 50
-    assert bp._fetch(300, 310) == b""
+    assert bp.fetch(150, 250) == b"B" * 50 + b"C" * 50
+    assert bp.fetch(250, 300) == b"C" * 50
+    assert bp.fetch(300, 310) == b""
 
 
 def test_fetch_default_args_and_out_of_bounds(prefetcher_factory):
     fetcher = MockFetcher(b"12345")
     bp = prefetcher_factory(fetcher=fetcher, size=5, concurrency=4)
 
-    assert bp._fetch(None, None) == b"12345"
-    assert bp._fetch(None, 2) == b"12"
-    assert bp._fetch(5, 10) == b""
-    assert bp._fetch(10, 20) == b""
-    assert bp._fetch(2, 2) == b""
-    assert bp._fetch(4, 2) == b""
+    assert bp.fetch(None, None) == b"12345"
+    assert bp.fetch(None, 2) == b"12"
+    assert bp.fetch(5, 10) == b""
+    assert bp.fetch(10, 20) == b""
+    assert bp.fetch(2, 2) == b""
+    assert bp.fetch(4, 2) == b""
 
 
 def test_seek_logic(prefetcher_factory):
@@ -109,12 +109,12 @@ def test_seek_logic(prefetcher_factory):
     fetcher = MockFetcher(data)
     bp = prefetcher_factory(fetcher=fetcher, size=100, concurrency=4)
 
-    assert bp._fetch(0, 10) == data[0:10]
-    assert bp._fetch(10, 20) == data[10:20]
+    assert bp.fetch(0, 10) == data[0:10]
+    assert bp.fetch(10, 20) == data[10:20]
     assert bp.user_offset == 20
-    assert bp._fetch(50, 60) == data[50:60]
+    assert bp.fetch(50, 60) == data[50:60]
     assert bp.user_offset == 60
-    assert bp._fetch(10, 20) == data[10:20]
+    assert bp.fetch(10, 20) == data[10:20]
     assert bp.user_offset == 20
 
 
@@ -127,7 +127,7 @@ def test_exception_placed_in_queue(prefetcher_factory):
     fsspec.asyn.sync(bp.loop, inject_error)
 
     with pytest.raises(ValueError, match="Injected Producer Error"):
-        bp._fetch(0, 50)
+        bp.fetch(0, 50)
 
     assert isinstance(bp._error, ValueError)
 
@@ -147,7 +147,7 @@ def test_producer_concurrency_streak_and_min_chunk(prefetcher_factory):
     # Update these values as BackgroundPrefetcher constant changes.
     target_streak = bp.producer.MIN_STREAKS_FOR_PREFETCHING + 3
     for i in range(target_streak):
-        bp._fetch(i * 50, (i + 1) * 50)
+        bp.fetch(i * 50, (i + 1) * 50)
 
     fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
 
@@ -169,7 +169,7 @@ def test_producer_loop_space_constraints(prefetcher_factory):
     original_min_chunk = bp.producer.MIN_CHUNK_SIZE
     bp.producer.MIN_CHUNK_SIZE = 200
 
-    assert bp._fetch(0, 10) == b"Y" * 10
+    assert bp.fetch(0, 10) == b"Y" * 10
 
     fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
     sizes = [call["size"] for call in fetcher.calls]
@@ -183,11 +183,11 @@ def test_producer_error_propagation_and_recovery(prefetcher_factory):
     bp = prefetcher_factory(fetcher=fetcher, size=2000, concurrency=4)
 
     for i in range(2):
-        bp._fetch(i * 100, (i + 1) * 100)
+        bp.fetch(i * 100, (i + 1) * 100)
 
     # 3rd read triggers the network timeout
     with pytest.raises(OSError, match="Simulated Network Timeout"):
-        bp._fetch(400, 500)
+        bp.fetch(400, 500)
 
     # The prefetcher is now in an error state
     assert isinstance(bp._error, OSError)
@@ -196,7 +196,7 @@ def test_producer_error_propagation_and_recovery(prefetcher_factory):
     fetcher.fail_at_call = None
 
     # The next fetch should seamlessly recover, wiping the error and returning data
-    data = bp._fetch(400, 500)
+    data = bp.fetch(400, 500)
     assert data == b"A" * 100
     assert bp._error is None
 
@@ -207,7 +207,7 @@ def test_read_after_close(prefetcher_factory):
 
     assert bp.is_stopped is True
     with pytest.raises(RuntimeError, match="The file instance has been closed"):
-        bp._fetch(0, 10)
+        bp.fetch(0, 10)
 
 
 def test_read_recovers_after_error(prefetcher_factory):
@@ -217,7 +217,7 @@ def test_read_recovers_after_error(prefetcher_factory):
     bp._error = ValueError("Pre-existing error")
 
     # The new error-recovery logic allows a subsequent read to clear the error and succeed
-    assert bp._fetch(0, 10) == b"X" * 10
+    assert bp.fetch(0, 10) == b"X" * 10
     assert bp._error is None
 
 
@@ -226,7 +226,7 @@ def test_empty_queue_when_stopped(prefetcher_factory):
     bp.is_stopped = True
 
     with pytest.raises(RuntimeError, match="The file instance has been closed"):
-        bp._fetch(0, 100)
+        bp.fetch(0, 100)
 
 
 def test_cancel_all_tasks_cleans_queue_with_exceptions(prefetcher_factory):
@@ -287,22 +287,23 @@ def test_read_task_cancellation(prefetcher_factory):
 def test_async_fetch_exception_trapping(prefetcher_factory):
     bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=4)
 
-    def bad_sync(*args, **kwargs):
-        raise RuntimeError("Simulated sync crash")
+    async def bad_consume(*args, **kwargs):
+        raise RuntimeError("Simulated async crash")
 
-    with mock.patch("fsspec.asyn.sync", side_effect=bad_sync):
-        with pytest.raises(RuntimeError, match="Simulated sync crash"):
-            bp._fetch(0, 10)
+    bp.consumer.consume = bad_consume
 
-    # Orchestrator is no longer permanently stopped on standard exceptions
-    assert bp.is_stopped is False
+    with pytest.raises(RuntimeError, match="Simulated async crash"):
+        bp.fetch(0, 10)
+
+    # Orchestrator should capture the error internally and halt producer processing correctly
     assert isinstance(bp._error, RuntimeError)
+    assert bp.producer.is_stopped is True
 
 
 def test_read_past_eof_internal(prefetcher_factory):
     bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 50), size=50, concurrency=4)
     bp.user_offset = 50
-    res = bp._fetch(50, 60)
+    res = bp.fetch(50, 60)
     assert res == b""
 
 
@@ -311,9 +312,9 @@ def test_fetch_with_exact_block_matches(prefetcher_factory):
     bp = prefetcher_factory(fetcher=MockFetcher(data), size=100, concurrency=4)
     bp.read_tracker.add(50)
 
-    assert bp._fetch(0, 50) == b"X" * 50
+    assert bp.fetch(0, 50) == b"X" * 50
     assert bp.consumer._current_block_idx == 50
-    assert bp._fetch(50, 100) == b"X" * 50
+    assert bp.fetch(50, 100) == b"X" * 50
 
 
 def test_queue_empty_race_condition(prefetcher_factory):
@@ -334,7 +335,7 @@ def test_producer_space_remaining_break(prefetcher_factory):
         concurrency=4,
         max_prefetch_size=150,
     )
-    bp._fetch(0, 10)
+    bp.fetch(0, 10)
     fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
 
 
@@ -368,7 +369,7 @@ def test_producer_loop_exception(prefetcher_factory):
     ) as mocked_avg:
         mocked_avg.side_effect = error_object
         with pytest.raises(ValueError, match="Producer crash"):
-            bp._fetch(0, 10)
+            bp.fetch(0, 10)
 
     assert bp.is_stopped is False
     assert bp._error == error_object
@@ -376,32 +377,20 @@ def test_producer_loop_exception(prefetcher_factory):
 
 def test_seek_same_offset(prefetcher_factory):
     bp = prefetcher_factory(fetcher=MockFetcher(b""), size=100, concurrency=4)
-    fsspec.asyn.sync(bp.loop, bp._async_fetch, 0, 10)
+    bp.fetch(0, 10)
 
 
 def test_read_history_maxlen(prefetcher_factory):
     bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 2000), size=2000, concurrency=4)
     for i in range(12):
-        bp._fetch(i * 10, (i + 1) * 10)
+        bp.fetch(i * 10, (i + 1) * 10)
     assert len(bp.read_tracker._history) == 10
 
 
 def test_fast_slice_branch(prefetcher_factory):
     bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 200), size=200, concurrency=4)
-    assert bp._fetch(0, 10) == b"X" * 10
-    assert bp._fetch(10, 20) == b"X" * 10
-
-
-def test_fetch_stopped_during_execution(prefetcher_factory):
-    bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=4)
-
-    async def fake_async_fetch(start, end):
-        bp.is_stopped = True
-        return b"fake"
-
-    with mock.patch.object(bp, "_async_fetch", new=fake_async_fetch):
-        with pytest.raises(RuntimeError, match="The file instance has been closed"):
-            bp._fetch(0, 10)
+    assert bp.fetch(0, 10) == b"X" * 10
+    assert bp.fetch(10, 20) == b"X" * 10
 
 
 def test_async_fetch_not_block_break(prefetcher_factory):
@@ -413,7 +402,7 @@ def test_async_fetch_not_block_break(prefetcher_factory):
     bp.consumer.consume = fake_consume
     bp.user_offset = 0
 
-    res = fsspec.asyn.sync(bp.loop, bp._async_fetch, 0, 50)
+    res = bp.fetch(0, 50)
     assert res == b""
 
 
@@ -423,7 +412,7 @@ def test_fetch_stopped_before_execution(prefetcher_factory):
     bp._error = None
 
     with pytest.raises(RuntimeError, match="The file instance has been closed"):
-        bp._fetch(0, 10)
+        bp.fetch(0, 10)
 
 
 def test_async_fetch_zero_copy_remainder(prefetcher_factory):
@@ -431,7 +420,7 @@ def test_async_fetch_zero_copy_remainder(prefetcher_factory):
     bp.consumer._current_block = b"ABCDE"
     bp.consumer._current_block_idx = 0
     bp.user_offset = 0
-    res = fsspec.asyn.sync(bp.loop, bp._async_fetch, 0, 5)
+    res = bp.fetch(0, 5)
     assert res == b"ABCDE"
     assert bp.consumer._current_block_idx == 5
 
@@ -540,7 +529,7 @@ def test_massive_read_disables_proactive_prefetching(prefetcher_factory):
     # Do enough reads to build a sequential streak and trigger large averages
     # Reading 60 bytes at a time. Average = 60. Threshold = 50.
     for i in range(4):
-        bp._fetch(i * 60, (i + 1) * 60)
+        bp.fetch(i * 60, (i + 1) * 60)
 
     fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
 
@@ -560,7 +549,7 @@ def test_normal_read_allows_proactive_prefetching(prefetcher_factory):
 
     # Reading 60 bytes at a time. Average = 60. Threshold = 100.
     for i in range(4):
-        bp._fetch(i * 60, (i + 1) * 60)
+        bp.fetch(i * 60, (i + 1) * 60)
 
     fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
 
@@ -577,7 +566,7 @@ def test_target_offset_expands_prefetch(prefetcher_factory):
     bp.read_tracker.add(10)
 
     # The consumer requests a massive chunk (500 bytes), far exceeding normal prefetch windows
-    bp._fetch(0, 500)
+    bp.fetch(0, 500)
 
     fsspec.asyn.sync(bp.loop, asyncio.sleep, 0.1)
 
@@ -615,3 +604,20 @@ def test_producer_min_chunk_inner_empty_queue_shrink(prefetcher_factory):
     assert fetcher.call_count > 0
 
     bp.producer.MIN_CHUNK_SIZE = original_min_chunk
+
+
+def test_async_context_manager_and_afetch(prefetcher_factory):
+    bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=4)
+
+    async def run_async():
+        async with bp as ctx:
+            res = await ctx.afetch(0, 10)
+            assert res == b"X" * 10
+            # Test default bounds -> (0, 100). Validates a backwards hard seek internally.
+            res_all = await ctx.afetch(None, None)
+            assert len(res_all) == 100
+
+        assert bp.is_stopped is True
+        assert bp.consumer._current_block == b""  # Buffer cleanly cleared on async exit
+
+    fsspec.asyn.sync(bp.loop, run_async)

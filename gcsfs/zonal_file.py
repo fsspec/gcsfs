@@ -193,7 +193,7 @@ class ZonalFile(GCSFile):
 
             try:
                 if chunk_lengths is None:
-                    return self._prefetch_engine._fetch(start, end)
+                    return self._prefetch_engine.fetch(start, end)
 
                 # Fetch chunks sequentially through the prefetch engine
                 # Spawning concurrent task is worst here, because that would act as seek for prefetcher.

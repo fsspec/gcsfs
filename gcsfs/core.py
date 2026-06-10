@@ -2366,7 +2366,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         try:
             if hasattr(self, "_prefetch_engine") and self._prefetch_engine:
-                return self._prefetch_engine._fetch(start=start, end=end)
+                return self._prefetch_engine.fetch(start=start, end=end)
             return self.fs.cat_file(
                 self.path, start=start, end=end, concurrency=self.concurrency
             )
