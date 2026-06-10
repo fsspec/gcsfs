@@ -20,7 +20,6 @@ from gcsfs.extended_gcsfs import (
 )
 from gcsfs.tests.conftest import csv_files, files, requires_rapid
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
 from gcsfs.zb_hns_utils import MRDPoolCache
 
@@ -741,9 +740,7 @@ def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
     Tests that _finalize_mrd_pool_cache uses asyncio.run_coroutine_threadsafe
     when current_loop is running.
     """
-    import gc
 
-    gc.collect()
 
     mock_pool = mock.MagicMock(spec=MRDPoolCache)
     mock_pool._closed = False
@@ -776,9 +773,7 @@ def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):
     """
     Tests that _finalize_mrd_pool_cache uses asyn.sync when asyn.loop[0] is running.
     """
-    import gc
 
-    gc.collect()
 
     mock_pool = mock.MagicMock(spec=MRDPoolCache)
     mock_pool._closed = False
@@ -810,11 +805,9 @@ def test_finalize_mrd_pool_cache_asyn_loop_running_timeout(monkeypatch):
     """
     Tests that _finalize_mrd_pool_cache ignores FSTimeoutError from asyn.sync.
     """
-    import gc
 
     import fsspec
 
-    gc.collect()
 
     mock_pool = mock.MagicMock(spec=MRDPoolCache)
     mock_pool._closed = False

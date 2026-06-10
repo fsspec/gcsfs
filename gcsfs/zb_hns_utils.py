@@ -43,9 +43,6 @@ async def init_mrd(grpc_client, bucket_name, object_name, generation=None):
             grpc_client, bucket_name, object_name, generation
         )
 
-        # Extract metadata from the updated Python SDK
-        read_obj_str = getattr(mrd, "read_obj_str", None)
-        mrd.object_metadata = getattr(read_obj_str, "object_metadata", None)
         return mrd
     except NotFound:
         # We wrap the error here to match standard Python error handling

@@ -423,7 +423,8 @@ def _extract_metadata_dict(obj_meta, bucket, key):
 
         # Use preserving_proto_field_name=False to output camelCase JSON keys
         details = MessageToDict(obj_meta._pb, preserving_proto_field_name=False)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Failed to extract gRPC object metadata: {e}")
         # If MessageToDict fails (e.g. proto version mismatch), fallback to an empty
         # dict and rely on the manual population below for minimum required fields.
         details = {}

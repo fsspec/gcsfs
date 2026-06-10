@@ -658,3 +658,13 @@ def pytest_ignore_collect(collection_path, config):
                     return True
 
     return None
+
+@pytest.fixture(autouse=True)
+def cleanup_mrd_pool_caches():
+    """Properly close leaked MRDPoolCache instances to prevent flaky tests."""
+    yield
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+    for fs in ExtendedGcsFileSystem._cache.values():
+        if getattr(fs, "_mrd_pool_cache", None):
+            fs._mrd_pool_cache.close()
+    ExtendedGcsFileSystem.clear_instance_cache()
