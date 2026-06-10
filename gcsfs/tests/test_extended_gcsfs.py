@@ -30,10 +30,12 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import csv_files, files, text_files
+from gcsfs.tests.conftest import csv_files, files, requires_extended_support, text_files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
+
+pytestmark = [requires_extended_support]
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"

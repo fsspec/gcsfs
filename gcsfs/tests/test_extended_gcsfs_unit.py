@@ -18,7 +18,7 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import csv_files, files
+from gcsfs.tests.conftest import csv_files, files, requires_extended_support
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
@@ -35,6 +35,7 @@ b = TEST_ZONAL_BUCKET + "/zonal/test/b"
 c = TEST_ZONAL_BUCKET + "/zonal/test/c"
 
 pytestmark = [
+    requires_extended_support,
     pytest.mark.skipif(
         is_real_gcs(),
         reason="Contains Unit tests using mocks, does not require testing on real GCS.",

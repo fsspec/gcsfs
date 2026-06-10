@@ -9,11 +9,14 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
 
+from gcsfs.tests.conftest import requires_extended_support
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zonal_file import ZonalFile
 
 test_data = b"hello world"
+
+pytestmark = [requires_extended_support]
 
 
 @pytest.fixture

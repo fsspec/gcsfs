@@ -51,6 +51,13 @@ requires_rapid = pytest.mark.skipif(
     not is_rapid_bucket,
     reason="Requires zonal support (GCSFS_RUN_RAPID_TESTS env var must be set)",
 )
+is_extended_support = os.environ.get(
+    "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true"
+).lower() in ("true", "1")
+requires_extended_support = pytest.mark.skipif(
+    not is_extended_support,
+    reason="Requires GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT to be enabled",
+)
 
 files = {
     "test/accounts.1.json": (
