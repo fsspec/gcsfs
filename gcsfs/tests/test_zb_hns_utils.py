@@ -866,6 +866,14 @@ async def test_mrd_pool_get_mrd_after_close_raises(mock_cache):
 
 @pytest.mark.asyncio
 async def test_mrd_pool_close_not_blocked_by_exhausted_pool_waiter(mock_gcsfs):
+    """
+    Test that MRDPool.close() does not deadlock when there is a task blocked
+    on get_mrd() because the pool is exhausted.
+
+    This verifies that the get_mrd() waiter releases its lock while waiting on the
+    asyncio.Condition variable, allowing the close() call to acquire the lock,
+    mark the pool as closed, and trigger cleanup.
+    """
     pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
     mrd = mock.AsyncMock()
 
@@ -901,6 +909,13 @@ async def test_mrd_pool_close_not_blocked_by_exhausted_pool_waiter(mock_gcsfs):
 
 @pytest.mark.asyncio
 async def test_mrd_pool_close_wakes_all_exhausted_pool_waiters(mock_gcsfs):
+    """
+    Test that MRDPool.close() notifies and wakes up all tasks currently waiting
+    for an MRD to become available.
+
+    Each waiter should immediately wake up, detect that the pool has been closed,
+    and raise a RuntimeError("MRDPool is closed.") instead of hanging indefinitely.
+    """
     pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
     mrd = mock.AsyncMock()
 
