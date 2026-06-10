@@ -707,6 +707,65 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         else:
             await super()._mv_file_cache_update(path1, path2, response)
 
+    async def _rm_file_cache_update(self, path):
+        """
+        Update the cache after a file delete operation.
+
+        This is the single-path form of :meth:`_rm_files_cache_update`; see that
+        method for the HNS-aware behavior.
+        """
+        await self._rm_files_cache_update([path])
+
+    async def _rm_files_cache_update(self, paths):
+        """
+        Update the cache after a (batch) file delete operation.
+
+        For HNS-enabled buckets, directories are first-class persistent objects,
+        so deleting a file only changes the contents of its immediate parent.
+        Each deleted entry is removed from its immediate parent's listing
+        (grouped per parent so each listing is rewritten only once), avoiding the
+        redundant invalidation of all ancestor directories up to the root.
+
+        Entries are matched by name only; the object generation is not taken
+        into account. Non-HNS paths fall back to the default broad invalidation
+        of the parents and all of their ancestors.
+        """
+        # Split each path once and resolve each distinct bucket's HNS status
+        # once, concurrently, rather than awaiting a (cached) lookup per path.
+        split_paths = [(path, *self.split_path(path)) for path in paths]
+        buckets = list({bucket for _, bucket, _, _ in split_paths})
+        hns_enabled = dict(
+            zip(
+                buckets,
+                await asyncio.gather(
+                    *(self._is_bucket_hns_enabled(bucket) for bucket in buckets)
+                ),
+            )
+        )
+
+        # Group the names to drop by their immediate parent so each listing is
+        # rewritten only once. Non-HNS paths fall back to broad invalidation.
+        removed_names_by_parent = {}
+        non_hns_paths = []
+        for path, bucket, key, _ in split_paths:
+            if hns_enabled[bucket]:
+                removed_names_by_parent.setdefault(self._parent(path), set()).add(
+                    f"{bucket}/{key}"
+                )
+            else:
+                non_hns_paths.append(path)
+
+        for parent, removed_names in removed_names_by_parent.items():
+            if parent in self.dircache:
+                self.dircache[parent] = [
+                    e
+                    for e in self.dircache[parent]
+                    if e.get("name") not in removed_names
+                ]
+
+        if non_hns_paths:
+            await super()._rm_files_cache_update(non_hns_paths)
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an

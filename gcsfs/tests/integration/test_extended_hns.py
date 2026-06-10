@@ -793,8 +793,8 @@ class TestExtendedGcsFileSystemRm:
 
     def test_rm_file_cache_invalidation(self, gcs_hns):
         """
-        Test that rm on a file invalidates the cache for the file's direct
-        parent and all ancestor directories, but not sibling directories.
+        Test that rm on a file in an HNS bucket updates the parent's cache in-place
+        (does not invalidate it) and does not invalidate sibling or ancestor directories.
         """
         gcsfs = gcs_hns
         base_dir = f"{TEST_HNS_BUCKET}/rm_file_cache_base"
@@ -816,13 +816,20 @@ class TestExtendedGcsFileSystemRm:
         gcsfs.rm(file_to_delete)
 
         # --- Assert Cache Invalidation ---
-        # The parent of the deleted file and all its ancestors should be invalidated.
+        # The parent of the deleted file should not be invalidated (it remains in dircache).
         assert (
-            parent_dir not in gcsfs.dircache
-        ), "Direct parent of deleted file should be invalidated."
+            parent_dir in gcsfs.dircache
+        ), "Direct parent of deleted file should not be invalidated."
+        # The deleted file itself should be removed from the parent's cache listing.
+        parent_listing = gcsfs.dircache[parent_dir]
+        assert not any(
+            e["name"] == file_to_delete for e in parent_listing
+        ), "Deleted file should be removed from parent's cache listing."
+
+        # Ancestor directories should also remain in cache.
         assert (
-            base_dir not in gcsfs.dircache
-        ), "Ancestor directory of deleted file should be invalidated."
+            base_dir in gcsfs.dircache
+        ), "Ancestor directory of deleted file should not be invalidated."
 
         # The cache for sibling directories should remain untouched.
         assert (
@@ -831,8 +838,8 @@ class TestExtendedGcsFileSystemRm:
 
     def test_rm_recursive_cache_invalidation(self, gcs_hns):
         """
-        Test that recursive rm invalidates the cache for the deleted directory,
-        its descendants, and its direct parent, but not unrelated directories.
+        Test that recursive rm in HNS bucket invalidates the cache for the deleted directory
+        and its descendants, and updates the direct parent's cache in-place (does not invalidate it).
         """
         gcsfs = gcs_hns
         base_dir = f"{TEST_HNS_BUCKET}/rm_rec_cache_base"
@@ -860,10 +867,16 @@ class TestExtendedGcsFileSystemRm:
             nested_dir not in gcsfs.dircache
         ), "Descendant of deleted dir should be gone."
 
-        # The direct parent's cache should be invalidated.
+        # The direct parent's cache should not be invalidated (it remains in dircache).
         assert (
-            base_dir not in gcsfs.dircache
-        ), "Parent of deleted dir should be invalidated."
+            base_dir in gcsfs.dircache
+        ), "Parent of deleted dir should not be invalidated."
+
+        # The deleted directory should be removed from the parent's listing.
+        parent_listing = gcsfs.dircache[base_dir]
+        assert not any(
+            e["name"] == dir_to_delete for e in parent_listing
+        ), "Deleted directory should be removed from parent's cache listing."
 
         # The cache for sibling directories should remain untouched.
         assert (

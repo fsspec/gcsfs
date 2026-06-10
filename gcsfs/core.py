@@ -1480,13 +1480,18 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
     mv_file = asyn.sync_wrapper(_mv_file)
 
+    async def _rm_file_cache_update(self, path):
+        self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
+
+    async def _rm_files_cache_update(self, paths):
+        parents = set(self._parent(p) for p in paths) | set(paths)
+        [self.invalidate_cache(parent) for parent in parents]
+
     async def _rm_file(self, path, **kwargs):
         bucket, key, generation = self.split_path(path)
         if key:
             await self._call("DELETE", "b/{}/o/{}", bucket, key, generation=generation)
-            # TODO: This can be optimized for HNS buckets by not invalidating the entire parent
-            # directory structure from cache but to just remove the deleted file entry from immediate parent's cache.
-            self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
+            await self._rm_file_cache_update(path)
         else:
             await self._rmdir(path)
 
@@ -1539,15 +1544,15 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             )
 
             boundary = headers["Content-Type"].split("=", 1)[1]
-            parents = set(self._parent(p) for p in paths) | set(paths)
-            [self.invalidate_cache(parent) for parent in parents]
             txt = content.decode()
             responses = txt.split(boundary)[1:-1]
+            deleted = []
             for path, response in zip(paths, responses):
                 m = re.search("HTTP/[0-9.]+ ([0-9]+)", response)
                 code = int(m.groups()[0]) if m else None
                 if code in [200, 204]:
                     out.append(path)
+                    deleted.append(path)
                 elif code in errs and retry < 5:
                     remaining.append(path)
                 else:
@@ -1560,6 +1565,12 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                         out.append(OSError(msg2.groups()[0]))
                     else:
                         out.append(OSError(f"{path}: {code}"))
+            # Only update the cache for objects we actually deleted. Updating it
+            # for failed paths would evict still-present objects from the cache
+            # (the HNS targeted update mutates the parent listing in place and
+            # does not self-correct on the next listing).
+            if deleted:
+                await self._rm_files_cache_update(deleted)
             if remaining:
                 paths = remaining
                 await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))

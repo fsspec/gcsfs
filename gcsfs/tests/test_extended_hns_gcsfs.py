@@ -672,6 +672,171 @@ class TestExtendedGcsFileSystemMvFile:
                 mock_super_update.assert_awaited_once_with(path3, path4, None)
 
 
+class TestExtendedGcsFileSystemRmFile:
+    """Unit tests for the _rm_file cache update in ExtendedGcsFileSystem."""
+
+    @pytest.mark.asyncio
+    async def test_rm_file_hns_cache_update(self):
+        """For HNS buckets, _rm_file removes only the deleted entry from the
+        immediate parent's listing and leaves ancestor directory caches intact."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        grandparent = f"{TEST_HNS_BUCKET}/grandparent"
+        parent = f"{grandparent}/parent"
+        path = f"{parent}/file1.txt"
+
+        # Pre-populate the cache with the immediate parent and its ancestors.
+        fs.dircache[parent] = [
+            {"name": path, "type": "file"},
+            {"name": f"{parent}/other.txt", "type": "file"},
+        ]
+        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+
+        with (
+            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock),
+        ):
+            await fs._rm_file(path)
+
+        # The immediate parent's listing is updated, not cleared.
+        assert parent in fs.dircache
+        names = [e["name"] for e in fs.dircache[parent]]
+        assert path not in names
+        assert f"{parent}/other.txt" in names
+
+        # Ancestor directory caches are left intact: HNS directories are
+        # first-class objects, so the redundant invalidation up to the root
+        # is avoided.
+        assert grandparent in fs.dircache
+        assert TEST_HNS_BUCKET in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_file_cache_update_non_hns_fallback(self):
+        """For non-HNS buckets, _rm_file_cache_update falls back to the base
+        behavior which invalidates the parent and all of its ancestors."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        grandparent = f"{TEST_HNS_BUCKET}/grandparent"
+        parent = f"{grandparent}/parent"
+        path = f"{parent}/file1.txt"
+
+        fs.dircache[parent] = [{"name": path, "type": "file"}]
+        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
+            await fs._rm_file_cache_update(path)
+
+        # The base behavior invalidates the parent and walks up to the root.
+        assert parent not in fs.dircache
+        assert grandparent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_files_hns_cache_update(self):
+        """For HNS buckets, batch delete removes only the deleted entries from
+        their immediate parents' listings and leaves ancestor caches intact."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        grandparent = f"{TEST_HNS_BUCKET}/grandparent"
+        parent = f"{grandparent}/parent"
+        path1 = f"{parent}/file1.txt"
+        path2 = f"{parent}/file2.txt"
+
+        fs.dircache[parent] = [
+            {"name": path1, "type": "file"},
+            {"name": path2, "type": "file"},
+            {"name": f"{parent}/keep.txt", "type": "file"},
+        ]
+        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            await fs._rm_files_cache_update([path1, path2])
+
+        # The shared parent's listing keeps its surviving entry.
+        assert parent in fs.dircache
+        names = [e["name"] for e in fs.dircache[parent]]
+        assert path1 not in names
+        assert path2 not in names
+        assert f"{parent}/keep.txt" in names
+
+        # Ancestor directory caches are left intact.
+        assert grandparent in fs.dircache
+        assert TEST_HNS_BUCKET in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_files_cache_update_non_hns_fallback(self):
+        """For non-HNS buckets, the batch cache update falls back to the base
+        behavior which invalidates the parents and all of their ancestors."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        grandparent = f"{TEST_HNS_BUCKET}/grandparent"
+        parent = f"{grandparent}/parent"
+        path = f"{parent}/file1.txt"
+
+        fs.dircache[parent] = [{"name": path, "type": "file"}]
+        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
+            await fs._rm_files_cache_update([path])
+
+        assert parent not in fs.dircache
+        assert grandparent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_files_failed_delete_does_not_evict_from_cache(self):
+        """A failed delete in a batch must not be removed from the parent's
+        cached listing: the object still exists in GCS, so the targeted HNS
+        cache update must only see the objects that were actually deleted."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        ok_path = f"{parent}/ok.txt"
+        bad_path = f"{parent}/bad.txt"
+
+        fs.dircache[parent] = [
+            {"name": ok_path, "type": "file"},
+            {"name": bad_path, "type": "file"},
+        ]
+
+        # Batch response: ok.txt is deleted (204), bad.txt fails permanently
+        # (400, which is not retriable).
+        boundary = "==========7330845974216740156=="
+        mock_response_content = (
+            f"\n--{boundary}\n"
+            "Content-Type: application/http\n"
+            "\n"
+            "HTTP/1.1 204 No Content\n"
+            "\n"
+            f"\n--{boundary}\n"
+            "Content-Type: application/http\n"
+            "\n"
+            "HTTP/1.1 400 Bad Request\n"
+            "Content-Type: text/plain\n"
+            "\n"
+            "Error without braces\n"
+            f"--{boundary}--\n"
+        ).encode()
+        mock_headers = {"Content-Type": f"multipart/mixed; boundary={boundary}"}
+
+        with (
+            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        ):
+            mock_call.return_value = (mock_headers, mock_response_content)
+            out = await fs._rm_files([ok_path, bad_path])
+
+        # The failed delete is surfaced to the caller ...
+        assert ok_path in out
+        assert any(isinstance(o, OSError) for o in out)
+
+        # ... and the parent listing keeps the still-present object while
+        # dropping only the one that was actually deleted.
+        assert parent in fs.dircache
+        names = [e["name"] for e in fs.dircache[parent]]
+        assert ok_path not in names
+        assert bad_path in names
+
+
 class TestExtendedGcsFileSystemMkdir:
     """Tests for the mkdir method in ExtendedGcsFileSystem."""
 
@@ -1904,7 +2069,10 @@ class TestExtendedGcsFileSystemRmdir:
             gcsfs.rmdir(folder_path)
 
             assert not gcsfs.exists(folder_path)
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            # The bucket type is looked up both for the rmdir itself and for the
+            # targeted cache update when the placeholder object is deleted via
+            # _rm_file. The lookup is cached, so this is not an extra API call.
+            mocks["async_lookup_bucket_type"].assert_any_call(TEST_HNS_BUCKET)
             expected_request = self._get_delete_folder_request(folder_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
