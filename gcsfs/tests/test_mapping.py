@@ -127,3 +127,26 @@ def test_map_pickle(gcs):
     e = pickle.loads(b)
 
     assert dict(e) == {"x": b"1234567890"}
+
+
+def test_gcsmap_uses_extended_gcsfilesystem(monkeypatch):
+    import importlib
+
+    import gcsfs
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    monkeypatch.setenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true")
+    importlib.reload(gcsfs)
+    importlib.reload(gcsfs.mapping)
+
+    # Invalidate cached current instance if any to ensure a new one is created
+    # based on the mocked environment.
+    gcsfs.GCSFileSystem.clear_instance_cache()
+
+    try:
+        mapper = gcsfs.mapping.GCSMap("test-bucket")
+        assert isinstance(mapper.fs, ExtendedGcsFileSystem)
+    finally:
+        monkeypatch.delenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", raising=False)
+        importlib.reload(gcsfs)
+        importlib.reload(gcsfs.mapping)
