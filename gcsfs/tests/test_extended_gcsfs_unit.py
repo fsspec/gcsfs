@@ -696,17 +696,23 @@ async def test_get_all_folders_start_dir_calculation(
 async def test_process_limits_to_offset_and_length_info_calls():
     extended_gcsfs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
     path = "bucket/file"
-    with mock.patch.object(extended_gcsfs, "_info", new_callable=mock.AsyncMock) as mock_info:
+    with mock.patch.object(
+        extended_gcsfs, "_info", new_callable=mock.AsyncMock
+    ) as mock_info:
         mock_info.return_value = {"size": 100}
 
         # Test case where size is fetched
-        await extended_gcsfs._process_limits_to_offset_and_length(path, start=-10, end=-5)
+        await extended_gcsfs._process_limits_to_offset_and_length(
+            path, start=-10, end=-5
+        )
         mock_info.assert_awaited_once_with(path)
 
         mock_info.reset_mock()
 
         # Test case where size is fetched (None, None)
-        await extended_gcsfs._process_limits_to_offset_and_length(path, start=None, end=None)
+        await extended_gcsfs._process_limits_to_offset_and_length(
+            path, start=None, end=None
+        )
         mock_info.assert_awaited_once_with(path)
 
         mock_info.reset_mock()
@@ -720,8 +726,11 @@ async def test_process_limits_to_offset_and_length_info_calls():
         mock_info.reset_mock()
 
         # Test case where size is provided
-        await extended_gcsfs._process_limits_to_offset_and_length(path, start=-10, end=-5, file_size=100)
+        await extended_gcsfs._process_limits_to_offset_and_length(
+            path, start=-10, end=-5, file_size=100
+        )
         mock_info.assert_not_called()
+
 
 def test_extended_gcsfs_constructs_mrd_pool_cache(monkeypatch):
     # Avoid creating real gRPC clients
