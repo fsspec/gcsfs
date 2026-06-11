@@ -205,7 +205,9 @@ def run_multi_process(
                         if remaining_p.is_alive():
                             remaining_p.terminate()
                             remaining_p.join()
-                    raise RuntimeError(f"Worker process {i} exited with code {p.exitcode}")
+                    raise RuntimeError(
+                        f"Worker process {i} exited with code {p.exitcode}"
+                    )
 
             if getattr(params, "runtime", None):
                 results.append(int(sum(process_data_shared[:])))

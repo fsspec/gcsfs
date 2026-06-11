@@ -139,7 +139,9 @@ def test_run_multi_process(mock_mp, mock_benchmark, mock_monitor):
     # Mock shared array
 
     class MockArray:
-        def __setitem__(self, idx, val): pass
+        def __setitem__(self, idx, val):
+            pass
+
         def __getitem__(self, idx):
             if isinstance(idx, slice):
                 return [1.0, 2.0]
@@ -147,7 +149,6 @@ def test_run_multi_process(mock_mp, mock_benchmark, mock_monitor):
 
     mock_array = MockArray()
     mock_ctx.Array.return_value = mock_array
-
 
     runner.run_multi_process(
         mock_benchmark,
@@ -196,7 +197,9 @@ def test_run_multi_process_child_fails(mock_mp, mock_benchmark, mock_monitor):
     mock_ctx.Process.side_effect = [mock_process1, mock_process2]
 
     class MockArray:
-        def __setitem__(self, idx, val): pass
+        def __setitem__(self, idx, val):
+            pass
+
         def __getitem__(self, idx):
             if isinstance(idx, slice):
                 return [1.0, 2.0]
@@ -217,7 +220,8 @@ def test_run_multi_process_child_fails(mock_mp, mock_benchmark, mock_monitor):
         )
 
     assert mock_process2.terminate.call_count == 1
-    assert mock_process2.join.call_count == 2 # 1 for wait, 1 for after terminate
+    assert mock_process2.join.call_count == 2  # 1 for wait, 1 for after terminate
+
 
 @mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
 def test_run_multi_process_resets_shared_data(mock_mp, mock_benchmark, mock_monitor):
@@ -235,9 +239,11 @@ def test_run_multi_process_resets_shared_data(mock_mp, mock_benchmark, mock_moni
 
     # Use a real list or dict to simulate the array so we can assert it was reset
     shared_data = {}
+
     class MockArray:
         def __setitem__(self, idx, val):
             shared_data[idx] = val
+
         def __getitem__(self, idx):
             if isinstance(idx, slice):
                 return [shared_data.get(0, 0.0), shared_data.get(1, 0.0)]
