@@ -484,9 +484,6 @@ class MRDPool:
 
         self._all_mrds = []
         self._rr_index = 0
-        self.mrd_supports_multi_request = (
-            False  # Change this to true once mrd supports concurrent requests.
-        )
         # Maps each checked-out AsyncMultiRangeDownloader to its number of active
         # get_mrd() holders. An MRD is only requeued into _free_mrds (or closed,
         # when the pool is closing) by whichever holder releases it LAST, so an
@@ -576,7 +573,7 @@ class MRDPool:
                     except BaseException as e:
                         self._active_count -= 1
                         raise e
-                elif self.mrd_supports_multi_request and self._all_mrds:
+                elif self._all_mrds:
                     # Pool is full and the queue is empty: share a busy MRD in
                     # round-robin fashion. The MRD now has multiple holders;
                     # refcounting ensures it is requeued/closed only once the
