@@ -1,5 +1,7 @@
 import time
+
 from gcsfs.tests.perf.microbenchmarks.resource_monitor import ResourceMonitor
+
 
 def test_resource_monitor_duration():
     """
