@@ -131,6 +131,7 @@ def test_map_pickle(gcs):
 
 def test_gcsmap_uses_extended_gcsfilesystem(monkeypatch):
     import importlib
+
     import gcsfs
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
