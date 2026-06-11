@@ -717,9 +717,8 @@ async def test_process_limits_to_offset_and_length_info_calls():
 
         mock_info.reset_mock()
 
-        # Test case where size is not fetched because start and end are positive and end > size
-        # wait, if end > size, it actually WILL fetch size to clamp length.
-        # But if start=10, end=5, it returns offset, 0 without fetching size
+        # Test case where size is not fetched because start and end are positive and end <= start
+        # When end <= start, the function returns early without needing size.
         await extended_gcsfs._process_limits_to_offset_and_length(path, start=10, end=5)
         mock_info.assert_not_called()
 
