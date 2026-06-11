@@ -3031,3 +3031,12 @@ async def test_info_parallel_dir_first(gcs):
 
         assert mock_get_object.call_count == 1
         assert mock_get_dir.call_count == 1
+
+
+def test_open_generation_forwarded():
+    fs = gcsfs.core.GCSFileSystem()
+    with mock.patch("gcsfs.core.GCSFile") as mock_gcs_file:
+        fs.open("test/key", "rb", generation="123")
+        mock_gcs_file.assert_called_once()
+        _, kwargs = mock_gcs_file.call_args
+        assert kwargs.get("generation") == "123"
