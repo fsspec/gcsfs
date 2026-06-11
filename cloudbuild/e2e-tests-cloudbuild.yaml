@@ -30,15 +30,9 @@ steps:
     args:
       - "-c"
       - |
-        mkdir -p /workspace/.ssh
-        # Generate the SSH key
-        ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb || { echo "generate-ssh-key" >> /workspace/FAILED; exit 1; }
-        # Save the public key content to a file for the cleanup step
-        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
-        # Add key to OS Login with TTL
-        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=1h
+        echo "Simulating permission failure for testing"
+        exit 1
     waitFor: ["-"]
-    allowFailure: true
 
   # Create all necessary GCS buckets AND the GCE VM in parallel.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -56,7 +50,6 @@ steps:
       - "SHORT_BUILD_ID=${_SHORT_BUILD_ID}"
       - "ZONAL_VM_SERVICE_ACCOUNT=${_ZONAL_VM_SERVICE_ACCOUNT}"
     waitFor: ["-"]
-    allowFailure: true
 
   # Set up the VM for integration tests.
   # This step uses 'gcloud compute ssh' to execute a script.
@@ -84,7 +77,6 @@ steps:
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export INSTALL_FSSPEC_HEAD='${_INSTALL_FSSPEC_HEAD}' INSTALL_GCSFS_FROM_PYPI='${_INSTALL_GCSFS_FROM_PYPI}' && bash cloudbuild/setup_vm.sh" || { echo "setup-vm (setup script)" >> /workspace/FAILED; exit 1; }
     waitFor: ["create-resources", "generate-ssh-key"]
-    allowFailure: true
 
   # Run Tests (Parallel Blocks)
   # We reuse a single remote runner script, passing env vars to control which suite runs.
@@ -103,7 +95,6 @@ steps:
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='standard' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-standard-tests" >> /workspace/FAILED; exit 1; }
     waitFor: ["setup-vm", "create-resources"]
-    allowFailure: true
 
   # Zonal Tests
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -119,7 +110,6 @@ steps:
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='zonal' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-zonal-tests" >> /workspace/FAILED; exit 1; }
     waitFor: ["setup-vm", "create-resources"]
-    allowFailure: true
 
   # Zonal Core Tests
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -135,7 +125,6 @@ steps:
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='zonal-core' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-zonal-core-tests" >> /workspace/FAILED; exit 1; }
     waitFor: ["setup-vm", "create-resources"]
-    allowFailure: true
 
   # HNS Tests
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -151,7 +140,6 @@ steps:
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export TEST_SUITE='hns' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-hns-tests" >> /workspace/FAILED; exit 1; }
     waitFor: ["setup-vm", "create-resources"]
-    allowFailure: true
 
   # Cleanup
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
