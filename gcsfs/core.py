@@ -1977,6 +1977,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             acl=acl,
             autocommit=autocommit,
             fixed_key_metadata=fixed_key_metadata,
+            generation=generation,
             **kwargs,
         )
 
