@@ -6,7 +6,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import zb_hns_utils
-from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile
+from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile, _coalesce_generation
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
     ReadAheadChunked,
@@ -57,7 +57,8 @@ class ZonalFile(GCSFile):
         of `_MAX_CHUNK_SIZE_BYTES` (2 MiB). Note that this higher default value may
         increase memory usage.
         """
-        bucket, key, generation = gcsfs._split_path(path)
+        bucket, key, path_generation = gcsfs.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
         if not key:
             raise OSError("Attempt to open a bucket")
         self.aaow = None

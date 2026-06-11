@@ -34,6 +34,31 @@ def mock_gcsfs():
     return fs
 
 
+def test_zonal_file_generation_kwarg_handling(mock_gcsfs):
+    """Test that ZonalFile explicitly provided generation kwarg is not dropped."""
+    from gcsfs.zonal_file import ZonalFile
+
+    # split_path returns None for generation when it's not in the path
+    mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", None)
+    ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb", generation="456")
+
+    mock_gcsfs._mrd_pool_cache.get.assert_called_once_with(
+        "test-bucket", "test-key", "456", mock.ANY
+    )
+
+
+def test_zonal_file_generation_path_handling(mock_gcsfs):
+    """Test that ZonalFile parses generation from the path when provided."""
+    from gcsfs.zonal_file import ZonalFile
+
+    mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", "123")
+    ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key#123", mode="rb")
+
+    mock_gcsfs._mrd_pool_cache.get.assert_called_once_with(
+        "test-bucket", "test-key", "123", mock.ANY
+    )
+
+
 @pytest.mark.parametrize(
     "setup_action, error_match",
     [
