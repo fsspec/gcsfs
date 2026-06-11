@@ -5,8 +5,8 @@ import psutil
 
 
 class ResourceMonitor:
-    def __init__(self):
-        self.interval = 1.0
+    def __init__(self, interval=1.0):
+        self.interval = interval
 
         self.vcpus = psutil.cpu_count() or 1
         self.max_cpu = 0.0
@@ -29,12 +29,12 @@ class ResourceMonitor:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
         self.duration = time.perf_counter() - self.start_time
         end_net = psutil.net_io_counters()
 
         self.net_sent = end_net.bytes_sent - self.start_net.bytes_sent
         self.net_recv = end_net.bytes_recv - self.start_net.bytes_recv
+        self.stop()
 
     def _monitor(self):
         psutil.cpu_percent(interval=None)
@@ -63,7 +63,7 @@ class ResourceMonitor:
             except psutil.NoSuchProcess:
                 pass
 
-            time.sleep(self.interval)
+            self._stop_event.wait(self.interval)
 
     def start(self):
         self._thread = threading.Thread(target=self._monitor, daemon=True)
