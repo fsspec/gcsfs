@@ -3033,7 +3033,6 @@ async def test_info_parallel_dir_first(gcs):
         assert mock_get_dir.call_count == 1
 
 
-
 def test_open_generation_forwarded():
     fs = gcsfs.core.GCSFileSystem()
     with mock.patch("gcsfs.core.GCSFile") as mock_gcs_file:
