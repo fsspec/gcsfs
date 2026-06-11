@@ -167,6 +167,9 @@ def run_multi_process(
             logging.info(
                 f"Multi-process {benchmark_group} benchmark: Starting round {round_num + 1}/{params.rounds}."
             )
+            for i in range(params.processes):
+                process_data_shared[i] = 0.0
+
             processes = []
 
             affinity_set = False
@@ -195,8 +198,14 @@ def run_multi_process(
                 if affinity_set:
                     os.sched_setaffinity(0, old_affinity)
 
-            for p in processes:
+            for i, p in enumerate(processes):
                 p.join()
+                if p.exitcode != 0:
+                    for remaining_p in processes:
+                        if remaining_p.is_alive():
+                            remaining_p.terminate()
+                            remaining_p.join()
+                    raise RuntimeError(f"Worker process {i} exited with code {p.exitcode}")
 
             if getattr(params, "runtime", None):
                 results.append(int(sum(process_data_shared[:])))
