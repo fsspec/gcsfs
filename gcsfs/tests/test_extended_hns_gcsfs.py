@@ -17,11 +17,11 @@ from google.cloud import storage_control_v2
 
 from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
-from gcsfs.tests.conftest import requires_extended_support
+from gcsfs.tests.conftest import requires_hns
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 from gcsfs.tests.utils import is_real_gcs
 
-pytestmark = [requires_extended_support]
+pytestmark = [requires_hns]
 
 ORIGINAL_GET_BUCKET_TYPE = ExtendedGcsFileSystem._get_bucket_type
 

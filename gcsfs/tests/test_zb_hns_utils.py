@@ -8,10 +8,7 @@ import pytest
 from google.api_core.exceptions import NotFound
 
 from gcsfs import zb_hns_utils
-from gcsfs.tests.conftest import requires_extended_support
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool, MRDPoolCache, _close_mrds
-
-pytestmark = [requires_extended_support]
 
 mock_grpc_client = mock.Mock()
 bucket_name = "test-bucket"

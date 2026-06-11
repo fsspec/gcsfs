@@ -43,20 +43,17 @@ requires_real_gcs = pytest.mark.skipif(
     not is_real_gcs_bucket,
     reason="Requires real GCS (STORAGE_EMULATOR_HOST must be https://storage.googleapis.com)",
 )
-requires_hns = pytest.mark.skipif(
-    not is_hns_bucket,
-    reason="Requires HNS support (GCSFS_RUN_HNS_TESTS env var must be set)",
-)
-requires_rapid = pytest.mark.skipif(
-    not is_rapid_bucket,
-    reason="Requires zonal support (GCSFS_RUN_RAPID_TESTS env var must be set)",
-)
 is_extended_support = os.environ.get(
     "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true"
 ).lower() in ("true", "1")
-requires_extended_support = pytest.mark.skipif(
-    not is_extended_support,
-    reason="Requires GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT to be enabled",
+
+requires_hns = pytest.mark.skipif(
+    not is_extended_support or (is_real_gcs_bucket and not is_hns_bucket),
+    reason="Requires HNS support and GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT to be enabled",
+)
+requires_rapid = pytest.mark.skipif(
+    not is_extended_support or (is_real_gcs_bucket and not is_rapid_bucket),
+    reason="Requires zonal support and GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT to be enabled",
 )
 
 files = {
