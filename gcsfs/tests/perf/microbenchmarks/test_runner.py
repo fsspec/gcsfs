@@ -187,11 +187,11 @@ def test_run_multi_process_child_fails(mock_mp, mock_benchmark, mock_monitor):
     mock_mp.get_context.return_value = mock_ctx
 
     mock_process1 = mock.Mock()
-    mock_process1.exitcode = 0
+    mock_process1.exitcode = 1
     mock_process1.is_alive.return_value = False
 
     mock_process2 = mock.Mock()
-    mock_process2.exitcode = 1
+    mock_process2.exitcode = None
     mock_process2.is_alive.return_value = True
 
     mock_ctx.Process.side_effect = [mock_process1, mock_process2]
@@ -208,7 +208,7 @@ def test_run_multi_process_child_fails(mock_mp, mock_benchmark, mock_monitor):
     mock_array = MockArray()
     mock_ctx.Array.return_value = mock_array
 
-    with pytest.raises(RuntimeError, match="Worker process 1 exited with code 1"):
+    with pytest.raises(RuntimeError, match="Worker process 0 exited with code 1"):
         runner.run_multi_process(
             mock_benchmark,
             mock_monitor,
@@ -219,8 +219,10 @@ def test_run_multi_process_child_fails(mock_mp, mock_benchmark, mock_monitor):
             "listing",
         )
 
-    assert mock_process2.terminate.call_count == 1
-    assert mock_process2.join.call_count == 2  # 1 for wait, 1 for after terminate
+    mock_process1.join.assert_called_once()
+    mock_process1.terminate.assert_not_called()
+    mock_process2.terminate.assert_called_once()
+    mock_process2.join.assert_called_once()
 
 
 @mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
@@ -233,7 +235,6 @@ def test_run_multi_process_resets_shared_data(mock_mp, mock_benchmark, mock_moni
     mock_ctx = mock.Mock()
     mock_mp.get_context.return_value = mock_ctx
     mock_process = mock.Mock()
-    mock_process.exitcode = 0
     mock_process.exitcode = 0
     mock_ctx.Process.return_value = mock_process
 
