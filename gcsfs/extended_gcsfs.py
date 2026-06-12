@@ -149,6 +149,13 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             self._mrd_pool_cache,
         )
 
+    async def _get_threshold_for_disk_reads(self, bucket):
+        if await self._is_zonal_bucket(bucket):
+            return (
+                5 * 1024 * 1024
+            )  # Thanks to our in house, zero copy DirectMemmoveBuffer
+        return await super()._get_threshold_for_disk_reads(bucket)
+
     @staticmethod
     def _finalize_mrd_pool_cache(loop, cache):
         """Tear down the MRDPoolCache when ExtendedGcsFileSystem is garbage collected."""
@@ -1659,7 +1666,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         self.invalidate_cache(self._parent(path))
 
-    async def _get_file(self, rpath, lpath, callback=None, **kwargs):
+    async def _get_file_request(
+        self, rpath, lpath, *args, headers=None, callback=None, **kwargs
+    ):
         """
         Downloads a file from GCS to a local path.
 
@@ -1678,17 +1687,18 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             For Zonal buckets, `chunksize` bytes (int) can be provided to control
             the download chunk size (default is 128KB).
         """
-        bucket, key, generation = self.split_path(rpath)
+        bucket, key, path_generation = self.split_path(rpath)
+
         if not await self._is_zonal_bucket(bucket):
-            return await super()._get_file(
-                rpath,
-                lpath,
-                callback=callback,
-                **kwargs,
+            return await super()._get_file_request(
+                rpath, lpath, *args, headers=headers, callback=callback, **kwargs
             )
 
         if os.path.isdir(lpath):
             return
+
+        # Coalesce generation: URL parsed vs kwargs
+        generation = path_generation or kwargs.get("generation")
         callback = callback or NoOpCallback()
 
         mrd_pool = await self._mrd_pool_cache.get(bucket, key, generation, pool_size=1)
@@ -1701,7 +1711,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                         "Falling back to _info() to get the file size. "
                         "This may result in incorrect behavior for unfinalized objects."
                     )
-                    size = (await self._info(rpath))["size"]
+                    size = (await self._info(rpath, **kwargs)).get("size", 0)
+
                 callback.set_size(size)
 
                 lparent = os.path.dirname(lpath) or os.curdir

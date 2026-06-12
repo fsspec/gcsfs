@@ -1,3 +1,5 @@
+import asyncio
+import builtins
 import concurrent.futures
 import io
 import os
@@ -3031,3 +3033,295 @@ async def test_info_parallel_dir_first(gcs):
 
         assert mock_get_object.call_count == 1
         assert mock_get_dir.call_count == 1
+
+
+def test_get_file_routing_and_thresholds(gcs):
+    """Test that get_file correctly routes to sequential or concurrent paths based on size thresholds."""
+    fn = f"{TEST_BUCKET}/get_routing.txt"
+    # Create an 8MB file
+    data = os.urandom(8 * 1024 * 1024)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out.txt")
+
+        with (
+            mock.patch.object(
+                gcs, "_get_file_request", wraps=gcs._get_file_request
+            ) as mock_req,
+            mock.patch.object(
+                gcs, "_get_file_concurrent", wraps=gcs._get_file_concurrent
+            ) as mock_conc,
+        ):
+
+            # 1. Concurrency = 1 (Should route directly to sequential)
+            gcs.get_file(fn, lpath, concurrency=1)
+            assert open(lpath, "rb").read() == data
+            assert mock_req.call_count == 1
+            assert mock_conc.call_count == 0
+
+            mock_req.reset_mock()
+            mock_conc.reset_mock()
+            os.remove(lpath)
+
+            # 2. Standard Bucket (100MB threshold)
+            # 8MB is < 100MB, so it should gracefully fall back to sequential internally
+            with mock.patch.object(
+                gcs,
+                "_get_threshold_for_disk_reads",
+                new_callable=mock.AsyncMock,
+                return_value=100 * 1024 * 1024,
+            ):
+                gcs.get_file(fn, lpath, concurrency=4)
+                assert open(lpath, "rb").read() == data
+                assert mock_conc.call_count == 1
+                assert mock_req.call_count == 1
+
+            mock_req.reset_mock()
+            mock_conc.reset_mock()
+            os.remove(lpath)
+
+            # 3. Zonal Bucket (5MB threshold)
+            # 8MB is >= 5MB, so it should fully execute via the concurrent prefetcher logic
+            with mock.patch.object(
+                gcs,
+                "_get_threshold_for_disk_reads",
+                new_callable=mock.AsyncMock,
+                return_value=5 * 1024 * 1024,
+            ):
+                gcs.get_file(fn, lpath, concurrency=4)
+                assert open(lpath, "rb").read() == data
+                assert mock_conc.call_count == 1
+                assert mock_req.call_count == 0
+
+
+def test_get_file_concurrent_data_integrity(gcs):
+    """Test that the concurrent file fetch stitches blocks together correctly."""
+    fn = f"{TEST_BUCKET}/get_integrity.txt"
+    file_size = 20 * 1024 * 1024  # 20MB (larger than 5MB default)
+    data = os.urandom(file_size)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_integrity.txt")
+
+        # Lower threshold to force true concurrency (no longer modifying MIN_CHUNK_SIZE_FOR_CONCURRENCY)
+        with mock.patch.object(
+            gcs,
+            "_get_threshold_for_disk_reads",
+            new_callable=mock.AsyncMock,
+            return_value=5 * 1024 * 1024,
+        ):
+            gcs.get_file(fn, lpath, concurrency=4, chunk_size=5 * 1024 * 1024)
+
+        assert os.path.getsize(lpath) == file_size
+        with open(lpath, "rb") as f:
+            assert f.read() == data
+
+
+def test_get_file_concurrent_exception_cancellation(gcs):
+    """Ensure that if a chunk fails during concurrent download, the exception is raised and file is cleaned up."""
+    fn = f"{TEST_BUCKET}/get_exception.txt"
+    file_size = 10 * 1024 * 1024  # 10MB (larger than 5MB default)
+    data = os.urandom(file_size)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_exception.txt")
+        original_cat = gcs._cat_file
+
+        async def mock_fail_cat(path, start, end, **kwargs):
+            if (
+                start > 0
+            ):  # Force failure on subsequent chunks, allowing the first chunk to write
+                raise OSError("Simulated Download Error")
+            return await original_cat(path, start, end, **kwargs)
+
+        with mock.patch.object(
+            gcs,
+            "_get_threshold_for_disk_reads",
+            new_callable=mock.AsyncMock,
+            return_value=2 * 1024 * 1024,
+        ):
+            with mock.patch.object(gcs, "_cat_file", side_effect=mock_fail_cat):
+                with pytest.raises(OSError, match="Simulated Download Error"):
+                    gcs.get_file(fn, lpath, concurrency=4, chunk_size=2 * 1024 * 1024)
+
+        # File should be removed by the clean-up block in _get_file
+        assert not os.path.exists(lpath)
+
+
+def test_get_file_concurrent_consistency(gcs):
+    """Ensure concurrent path appropriately invokes the file consistency checker."""
+    fn = f"{TEST_BUCKET}/get_consistency.txt"
+    data = b"consistency test data" * 300000  # ~6.3MB (larger than 5MB default)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_consistency.txt")
+
+        # Mock the dynamic threshold lookup to 1 byte so it stays concurrent
+        with mock.patch.object(
+            gcs,
+            "_get_threshold_for_disk_reads",
+            new_callable=mock.AsyncMock,
+            return_value=1,
+        ):
+
+            # Mock the internal validate method of the checker
+            with mock.patch(
+                "gcsfs.checkers.MD5Checker.validate_json_response"
+            ) as mock_validate:
+                gcs.get_file(fn, lpath, concurrency=2, consistency="md5")
+                mock_validate.assert_called_once()
+
+
+def test_get_file_concurrent_no_pwrite(gcs):
+    """Coverage: `with open(lpath, "rb+") as f: f.seek(offset); f.write(chunk)`"""
+    fn = f"{TEST_BUCKET}/no_pwrite.txt"
+    data = b"fallback_test_data" * (1024 * 1024)  # ~18MB (larger than 5MB default)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_no_pwrite.txt")
+
+        # Safely mock `hasattr(os, 'pwrite')` returning False
+        orig_hasattr = builtins.hasattr
+
+        def mock_hasattr(obj, name):
+            if obj is os and name == "pwrite":
+                return False
+            return orig_hasattr(obj, name)
+
+        with (
+            mock.patch.object(
+                gcs,
+                "_get_threshold_for_disk_reads",
+                new_callable=mock.AsyncMock,
+                return_value=-1,
+            ),
+            mock.patch("builtins.hasattr", side_effect=mock_hasattr),
+        ):
+
+            gcs.get_file(fn, lpath, concurrency=2, chunk_size=10 * 1024 * 1024)
+
+        with open(lpath, "rb") as f:
+            assert f.read() == data
+
+
+def test_get_file_concurrent_early_eof(gcs):
+    """Coverage: `if not data: break` mid-stream"""
+    fn = f"{TEST_BUCKET}/early_eof.txt"
+    data = b"1234567890" * 1024 * 1024  # ~10MB (larger than 5MB default)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_early_eof.txt")
+
+        with (
+            mock.patch.object(
+                gcs,
+                "_get_threshold_for_disk_reads",
+                new_callable=mock.AsyncMock,
+                return_value=-1,
+            ),
+            mock.patch(
+                "gcsfs.prefetcher.BackgroundPrefetcher.afetch",
+                new_callable=mock.AsyncMock,
+            ) as mock_afetch,
+        ):
+
+            # 1st call gives data, 2nd call returns empty b"" forcing an early break
+            mock_afetch.side_effect = [b"12345", b""]
+            gcs.get_file(fn, lpath, concurrency=2, chunk_size=5)
+
+        # The file was pre-allocated to size ~10MB, but early EOF stopped writing at 5
+        assert os.path.getsize(lpath) == len(data)
+        with open(lpath, "rb") as f:
+            assert f.read(5) == b"12345"
+
+
+def test_get_file_concurrent_write_exception_in_loop(gcs):
+    """Coverage: `if exceptions: raise exceptions[0]` (Inside the pending loop)"""
+    fn = f"{TEST_BUCKET}/write_exc_loop.txt"
+    data = b"1234567890" * 1024 * 1024  # ~10MB (larger than 5MB default)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_write_exc_loop.txt")
+
+        with (
+            mock.patch.object(
+                gcs,
+                "_get_threshold_for_disk_reads",
+                new_callable=mock.AsyncMock,
+                return_value=-1,
+            ),
+            mock.patch("os.pwrite", side_effect=OSError("Disk Full Loop")),
+        ):
+            with pytest.raises(OSError, match="Disk Full Loop"):
+                # Chunk size small to produce many pending_writes and trigger the loop check
+                gcs.get_file(fn, lpath, concurrency=2, chunk_size=5 * 1024 * 1024)
+
+
+def test_get_file_concurrent_write_exception_in_finally(gcs):
+    """Coverage: `if exc: exceptions.append(exc)` (Inside the finally clean-up block)"""
+    fn = f"{TEST_BUCKET}/write_exc_finally.txt"
+    data = b"1234567890" * 1024 * 1024  # ~10MB (larger than 5MB default)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_write_exc_finally.txt")
+
+        with (
+            mock.patch.object(
+                gcs,
+                "_get_threshold_for_disk_reads",
+                new_callable=mock.AsyncMock,
+                return_value=-1,
+            ),
+            mock.patch("os.pwrite", side_effect=OSError("Disk Full Finally")),
+        ):
+            with pytest.raises(OSError, match="Disk Full Finally"):
+                gcs.get_file(fn, lpath, concurrency=3, chunk_size=20 * 1024 * 1024)
+
+
+def test_get_file_concurrent_cancelled_error(gcs):
+    """Coverage: `except asyncio.CancelledError: break/pass` inside the finally block"""
+    fn = f"{TEST_BUCKET}/cancelled.txt"
+    data = b"1234567890" * 1024 * 1024  # ~10MB (larger than 5MB default)
+    gcs.pipe(fn, data)
+
+    with tempdir() as dn:
+        lpath = os.path.join(dn, "out_cancelled.txt")
+
+        # Create a mock that forces the exact exception we are trying to cover
+        async def mock_wait(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        with (
+            mock.patch.object(
+                gcs,
+                "_get_threshold_for_disk_reads",
+                new_callable=mock.AsyncMock,
+                return_value=-1,
+            ),
+            mock.patch("gcsfs.core.asyncio.wait", side_effect=mock_wait),
+        ):
+            gcs.get_file(fn, lpath, concurrency=2, chunk_size=20 * 1024 * 1024)
+
+
+def test_init_local_file(gcs):
+    """Coverage: `if total_size == 0:` inside `_init_local_file`"""
+    with tempdir() as dn:
+        # Cover normal pre-allocation
+        lpath = os.path.join(dn, "prealloc.txt")
+        gcs._init_local_file(lpath, 1024)
+        assert os.path.exists(lpath)
+        assert os.path.getsize(lpath) == 1024
+
+        # Cover zero-size pre-allocation
+        lpath_zero = os.path.join(dn, "zero.txt")
+        gcs._init_local_file(lpath_zero, 0)
+        assert os.path.exists(lpath_zero)
+        assert os.path.getsize(lpath_zero) == 0

@@ -10,6 +10,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import sys
 import uuid
 import warnings
 import weakref
@@ -304,6 +305,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async_impl = True
     MIN_CHUNK_SIZE_FOR_CONCURRENCY = 5 * 1024 * 1024
 
+    # This threshold applies to the standard bucket, whereas the zonal bucket
+    # uses a 5MB threshold. This difference exists because the standard bucket
+    # lacks the `DirectMemmoveBuffer` implementation used in the zonal bucket.
+    THRESOLD_FOR_DISK_READS = 100 * 1024 * 1024
+
     def __init__(
         self,
         project=DEFAULT_PROJECT,
@@ -375,6 +381,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     @property
     def project(self):
         return self.credentials.project
+
+    async def _get_threshold_for_disk_reads(self, bucket):
+        return 100 * 1024 * 1024
 
     # Clean up the aiohttp session
     #
@@ -1905,6 +1914,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async def _get_file_request(
         self, rpath, lpath, *args, headers=None, callback=None, **kwargs
     ):
+        rpath = self.url(rpath)
         consistency = kwargs.pop("consistency", self.consistency)
         await self._set_session()
         async with self.session.get(
@@ -1936,12 +1946,208 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             checker.validate_http_response(r)  # validate file consistency
             return r.status, r.headers, r.request_info, data
 
+    def _init_local_file(self, lpath, total_size):
+        """Creates the target directory and pre-allocates the file size."""
+        os.makedirs(os.path.dirname(lpath) or os.curdir, exist_ok=True)
+        if total_size == 0:
+            with open(lpath, "wb"):
+                pass
+        else:
+            with open(lpath, "wb") as f:
+                f.truncate(total_size)
+
+    @retry_request(retries=retries)
+    async def _get_file_concurrent(
+        self,
+        rpath,
+        lpath,
+        concurrency,
+        chunk_size,
+        max_prefetch_size,
+        headers=None,
+        callback=None,
+        **kwargs,
+    ):
+        """Main orchestrator for concurrent file downloads utilizing BackgroundPrefetcher."""
+        details = await self._info(rpath, **kwargs)
+        total_size = details.get("size", 0)
+
+        # Concurrency typically improves performance for RAM downloads exceeding 5MB.
+        # However, for disk-backed reads in the standard bucket, _cat_file uses
+        # b"".join, which creates an additional data copy of chunks. Additionally,
+        # prefetching is ineffective for reads under 100MB because it only activates
+        # from the third read onward and scales linearly. These factors often make
+        # concurrent processing slower than writing data as it arrives.
+        #
+        #
+        # Note that the number is 5MB for zonal buckets, Thanks to our in-house, zero-copy
+        # DirectMemmoveBuffer, we didn't integrated it initially with standard bucket, because
+        # we first want to stabilise that in zonal bucket (lower traffic compared to standard)
+        #
+        # Promoting DirectMemmoveBuffer (currently used in the Zonal bucket)
+        # to the standard bucket will enable in-place assembly and lower this
+        # threshold. Until then, the concurrent path for standard is enabled only for disk
+        # reads of 100MB or more.
+        bucket, _, _ = self.split_path(rpath)
+        threshold = await self._get_threshold_for_disk_reads(bucket)
+        if total_size <= max(self.MIN_CHUNK_SIZE_FOR_CONCURRENCY, threshold):
+            concurrency = 1
+
+        if concurrency == 1:
+            return await self._get_file_request(
+                rpath, lpath, headers=headers, callback=callback, **kwargs
+            )
+
+        consistency = kwargs.pop("consistency", self.consistency)
+        check_consistency = consistency not in ("none", None)
+
+        # Prevent silent corruption by pinning the exact object generation
+        generation = details.get("generation")
+        if generation and "generation" not in kwargs:
+            kwargs["generation"] = generation
+
+        callback = callback or NoOpCallback()
+        callback.set_size(total_size)
+
+        # pre-allocate the file, it is required so multiple file descriptors can seek/write safely.
+        self._init_local_file(lpath, total_size)
+        checker = get_consistency_checker(consistency)
+
+        async def fetcher(start, size, split_factor=1):
+            # No need to worry about MRDPool creation in _cat_file.
+            # Thanks to our in-house MRDPoolCache.
+            return await self._cat_file(
+                rpath,
+                start=start,
+                end=start + size,
+                concurrency=split_factor,
+                headers=headers,
+                **kwargs,
+            )
+
+        from .prefetcher import BackgroundPrefetcher
+
+        prefetcher = BackgroundPrefetcher(
+            fetcher=fetcher,
+            size=total_size,
+            concurrency=concurrency,
+            max_prefetch_size=max_prefetch_size,
+        )
+
+        fd = None
+
+        def write_chunk(offset, chunk):
+            if fd is not None:
+                written = 0
+                chunk_view = memoryview(chunk)
+                while written < len(chunk):
+                    written += os.pwrite(fd, chunk_view[written:], offset + written)
+            else:
+                # Thread-safe fallback for older Windows versions (Python < 3.12)
+                with open(lpath, "rb+") as f:
+                    f.seek(offset)
+                    f.write(chunk)
+
+        pending_writes = set()
+        try:
+            if hasattr(os, "pwrite"):
+                fd = os.open(lpath, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+
+            async with prefetcher:
+                offset = 0
+                while offset < total_size:
+                    read_size = min(chunk_size, total_size - offset)
+
+                    data = await prefetcher.afetch(offset, offset + read_size)
+
+                    if not data:
+                        break
+
+                    if check_consistency:
+                        checker.update(data)
+
+                    callback.relative_update(len(data))
+
+                    task = asyncio.create_task(
+                        asyncio.to_thread(write_chunk, offset, data)
+                    )
+                    pending_writes.add(task)
+
+                    if len(pending_writes) >= concurrency:
+                        done, pending_writes = await asyncio.wait(
+                            pending_writes, return_when=asyncio.FIRST_COMPLETED
+                        )
+
+                        exceptions = []
+                        for t in done:
+                            exc = t.exception()
+                            if exc:
+                                exceptions.append(exc)
+
+                        if exceptions:
+                            raise exceptions[0]
+
+                    offset += len(data)
+        finally:
+            all_done = set()
+            was_cancelled = False
+            if pending_writes:
+                while pending_writes:
+                    try:
+                        done_wait, pending_writes = await asyncio.wait(pending_writes)
+                        all_done.update(done_wait)
+                    except asyncio.CancelledError:
+                        was_cancelled = True
+                        pass
+
+            if fd is not None:
+                os.close(fd)
+
+            exceptions = []
+            for t in all_done:
+                exc = t.exception()
+                if exc:
+                    exceptions.append(exc)
+
+            if was_cancelled:
+                raise asyncio.CancelledError()
+
+            if exceptions and sys.exc_info()[1] is None:
+                raise exceptions[0]
+
+        if check_consistency:
+            checker.validate_json_response(details)
+
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
-        u2 = self.url(rpath)
         if os.path.isdir(lpath):
             return
+
         callback = callback or NoOpCallback()
-        await self._get_file_request(u2, lpath, callback=callback, **kwargs)
+
+        concurrency = kwargs.pop("concurrency", DEFAULT_CONCURRENCY)
+        chunk_size = kwargs.pop("chunk_size", 16 * 1024 * 1024)
+        max_prefetch_size = kwargs.pop(
+            "max_prefetch_size", 2 * concurrency * chunk_size
+        )
+
+        try:
+            # The concurrent path uses `_cat_file` to interact with gcsfs which doesn't take headers as argument.
+            if concurrency > 1 and "headers" not in kwargs:
+                await self._get_file_concurrent(
+                    rpath,
+                    lpath,
+                    concurrency,
+                    callback=callback,
+                    chunk_size=chunk_size,
+                    max_prefetch_size=max_prefetch_size,
+                    **kwargs,
+                )
+            else:
+                await self._get_file_request(rpath, lpath, callback=callback, **kwargs)
+        except BaseException:
+            if os.path.exists(lpath):
+                os.remove(lpath)
+            raise
 
     def _open(
         self,
