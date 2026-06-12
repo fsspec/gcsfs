@@ -482,6 +482,11 @@ async def test_rm_batch_not_found_invalidates_stale_cache(gcs):
     parent = TEST_BUCKET + "/cached"
     path = parent + "/already_gone"
     gcs.dircache[parent] = [{"name": path, "type": "file"}]
+    is_hns = (
+        await gcs._is_bucket_hns_enabled(TEST_BUCKET)
+        if hasattr(gcs, "_is_bucket_hns_enabled")
+        else False
+    )
 
     boundary = "==========7330845974216740156=="
     mock_response_content = (
@@ -504,7 +509,11 @@ async def test_rm_batch_not_found_invalidates_stale_cache(gcs):
         assert len(out) == 1
         assert isinstance(out[0], OSError)
         assert "No such object" in str(out[0])
-        assert parent not in gcs.dircache
+        if is_hns:
+            assert parent in gcs.dircache
+            assert path not in [entry["name"] for entry in gcs.dircache[parent]]
+        else:
+            assert parent not in gcs.dircache
 
 
 def test_rm_recursive(gcs):
