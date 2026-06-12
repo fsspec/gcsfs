@@ -764,7 +764,10 @@ def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
 
     # Verify that run_coroutine_threadsafe was called
     assert mock_run_coroutine_threadsafe.call_count >= 1
-    assert any(args[1] == mock_current_loop for args, kwargs in mock_run_coroutine_threadsafe.call_args_list)
+    assert any(
+        args[1] == mock_current_loop
+        for args, kwargs in mock_run_coroutine_threadsafe.call_args_list
+    )
 
 
 def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):
