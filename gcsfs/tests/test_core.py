@@ -3325,6 +3325,8 @@ def test_init_local_file(gcs):
         gcs._init_local_file(lpath_zero, 0)
         assert os.path.exists(lpath_zero)
         assert os.path.getsize(lpath_zero) == 0
+
+
 def test_open_generation_forwarded():
     fs = gcsfs.core.GCSFileSystem()
     with mock.patch("gcsfs.core.GCSFile") as mock_gcs_file:
