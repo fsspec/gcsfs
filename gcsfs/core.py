@@ -27,6 +27,7 @@ from fsspec.implementations.http import get_client
 from fsspec.utils import other_paths, setup_logging, stringify_path
 
 from . import __version__ as version
+from ._dircache import DirCacheUpdater
 from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed
 from .credentials import GoogleCredentials
@@ -179,7 +180,7 @@ def _is_directory_marker(entry):
     return entry["size"] == 0 and entry["name"].endswith("/")
 
 
-class GCSFileSystem(asyn.AsyncFileSystem):
+class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
 
@@ -1438,10 +1439,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             )
         await self._write_file_cache_update(path2)
 
-    async def _mv_file_cache_update(self, path1, path2, response=None):
-        self.invalidate_cache(self._parent(path1))
-        self.invalidate_cache(self._parent(path2))
-
     async def _mv_file(self, path1, path2, **kwargs):
         src_bucket, src_key, generation1 = self.split_path(path1)
         dest_bucket, dest_key, generation2 = self.split_path(path2)
@@ -1479,20 +1476,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         await super()._mv_file(path1, path2, **kwargs)
 
     mv_file = asyn.sync_wrapper(_mv_file)
-
-    async def _rm_file_cache_update(self, path):
-        # Single-path form of _rm_files_cache_update; kept as one code path so
-        # subclasses only need to override the batch method.
-        await self._rm_files_cache_update([path])
-
-    async def _rm_files_cache_update(self, paths):
-        parents = set(self._parent(p) for p in paths) | set(paths)
-        [self.invalidate_cache(parent) for parent in parents]
-
-    async def _write_file_cache_update(self, path):
-        # A file was created or overwritten at ``path`` (via put/pipe/cp). The
-        # default behavior invalidates the parent and all of its ancestors.
-        self.invalidate_cache(self._parent(path))
 
     async def _rm_file(self, path, **kwargs):
         bucket, key, generation = self.split_path(path)

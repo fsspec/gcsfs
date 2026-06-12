@@ -700,6 +700,32 @@ class TestExtendedGcsFileSystemMvFile:
         assert dest_grandparent not in fs.dircache
         assert TEST_HNS_BUCKET not in fs.dircache
 
+    @pytest.mark.asyncio
+    async def test_mv_file_hns_replaces_cached_destination_entry(self):
+        """Moving a file over an already-cached destination must not leave
+        duplicate or stale destination entries in the parent listing."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        src = f"{parent}/src.txt"
+        dst = f"{parent}/dst.txt"
+
+        fs.dircache[parent] = [
+            {"name": src, "type": "file", "size": 1},
+            {"name": dst, "type": "file", "size": 10},
+            {"name": f"{parent}/keep.txt", "type": "file", "size": 20},
+        ]
+
+        response = {"bucket": TEST_HNS_BUCKET, "name": "parent/dst.txt", "size": 1}
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            await fs._mv_file_cache_update(src, dst, response)
+
+        entries = fs.dircache[parent]
+        names = [e["name"] for e in entries]
+        assert src not in names
+        assert names.count(dst) == 1
+        assert any(e["name"] == dst and e["size"] == 1 for e in entries)
+        assert f"{parent}/keep.txt" in names
+
 
 class TestExtendedGcsFileSystemRmFile:
     """Unit tests for the _rm_file cache update in ExtendedGcsFileSystem."""
@@ -708,7 +734,7 @@ class TestExtendedGcsFileSystemRmFile:
     async def test_rm_file_hns_cache_update(self):
         """For HNS buckets, _rm_file removes only the deleted entry from the
         immediate parent's listing and leaves ancestor directory caches intact."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/grandparent"
         parent = f"{grandparent}/parent"
         path = f"{parent}/file1.txt"
@@ -743,7 +769,7 @@ class TestExtendedGcsFileSystemRmFile:
     async def test_rm_file_cache_update_non_hns_fallback(self):
         """For non-HNS buckets, _rm_file_cache_update falls back to the base
         behavior which invalidates the parent and all of its ancestors."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/grandparent"
         parent = f"{grandparent}/parent"
         path = f"{parent}/file1.txt"
@@ -764,7 +790,7 @@ class TestExtendedGcsFileSystemRmFile:
     async def test_rm_files_hns_cache_update(self):
         """For HNS buckets, batch delete removes only the deleted entries from
         their immediate parents' listings and leaves ancestor caches intact."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/grandparent"
         parent = f"{grandparent}/parent"
         path1 = f"{parent}/file1.txt"
@@ -796,7 +822,7 @@ class TestExtendedGcsFileSystemRmFile:
     async def test_rm_files_cache_update_non_hns_fallback(self):
         """For non-HNS buckets, the batch cache update falls back to the base
         behavior which invalidates the parents and all of their ancestors."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/grandparent"
         parent = f"{grandparent}/parent"
         path = f"{parent}/file1.txt"
@@ -817,7 +843,7 @@ class TestExtendedGcsFileSystemRmFile:
         """A failed delete in a batch must not be removed from the parent's
         cached listing: the object still exists in GCS, so the targeted HNS
         cache update must only see the objects that were actually deleted."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         parent = f"{TEST_HNS_BUCKET}/parent"
         ok_path = f"{parent}/ok.txt"
         bad_path = f"{parent}/bad.txt"
@@ -875,7 +901,7 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
         """For HNS buckets, creating a file invalidates only the immediate
         parent's listing; ancestor directory caches are left intact because in
         HNS the ancestors' listings are unaffected by adding a file."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/gp"
         parent = f"{grandparent}/p"
         path = f"{parent}/new.txt"
@@ -897,7 +923,7 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
     async def test_write_file_cache_update_non_hns_broad_invalidate(self):
         """For non-HNS buckets, the write-path cache update falls back to the
         base broad invalidation of the parent and all of its ancestors."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/gp"
         parent = f"{grandparent}/p"
         path = f"{parent}/new.txt"
@@ -919,7 +945,7 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
         """A standard-bucket cp on an HNS bucket invalidates only the
         destination's immediate parent, leaving the destination's ancestors and
         the source's parent untouched."""
-        fs = ExtendedGcsFileSystem(token="anon")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/gp"
         dest_parent = f"{grandparent}/p"
         dst = f"{dest_parent}/new.txt"
@@ -1083,6 +1109,31 @@ class TestExtendedGcsFileSystemCacheHelpers:
         fs._cache_add_entry(parent, {"name": f"{parent}/b", "type": "file"})
 
         assert parent not in fs.dircache
+
+    def test_update_dircache_after_rename_clears_destination_descendants(self):
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        src = f"{TEST_HNS_BUCKET}/src"
+        dst = f"{TEST_HNS_BUCKET}/dst"
+        dst_child = f"{dst}/child"
+
+        fs.dircache[TEST_HNS_BUCKET] = [
+            {"name": src, "type": "directory"},
+            {"name": dst, "type": "directory"},
+        ]
+        fs.dircache[src] = [{"name": f"{src}/new.txt", "type": "file"}]
+        fs.dircache[f"{src}/nested"] = [
+            {"name": f"{src}/nested/new.txt", "type": "file"}
+        ]
+        fs.dircache[dst] = [{"name": f"{dst}/old.txt", "type": "file"}]
+        fs.dircache[dst_child] = [{"name": f"{dst_child}/old.txt", "type": "file"}]
+
+        fs._update_dircache_after_rename(src, dst)
+
+        assert src not in fs.dircache
+        assert f"{src}/nested" not in fs.dircache
+        assert dst not in fs.dircache
+        assert dst_child not in fs.dircache
+        assert [e["name"] for e in fs.dircache[TEST_HNS_BUCKET]] == [dst]
 
 
 class TestExtendedGcsFileSystemMkdir:
