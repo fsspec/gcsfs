@@ -133,12 +133,21 @@ def test_run_multi_process(mock_mp, mock_benchmark, mock_monitor):
     mock_ctx = mock.Mock()
     mock_mp.get_context.return_value = mock_ctx
     mock_process = mock.Mock()
+    mock_process.exitcode = 0
     mock_ctx.Process.return_value = mock_process
 
     # Mock shared array
-    mock_array = mock.Mock()
-    # Simulate durations for 2 processes
-    mock_array.__getitem__ = mock.Mock(return_value=[1.0, 2.0])
+
+    class MockArray:
+        def __setitem__(self, idx, val):
+            pass
+
+        def __getitem__(self, idx):
+            if isinstance(idx, slice):
+                return [1.0, 2.0]
+            return 1.0
+
+    mock_array = MockArray()
     mock_ctx.Array.return_value = mock_array
 
     runner.run_multi_process(
@@ -165,3 +174,100 @@ def test_run_multi_process(mock_mp, mock_benchmark, mock_monitor):
     # Check runs in extra_info
     assert mock_benchmark.extra_info["runs"] == [2.0, 2.0]
     assert mock_benchmark.extra_info["min_run"] == 2.0
+
+
+@mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
+def test_run_multi_process_child_fails(mock_mp, mock_benchmark, mock_monitor):
+    params = MockParams(processes=2, rounds=1)
+    extended_gcs_factory = mock.Mock(return_value="gcs_instance")
+    worker_target = mock.Mock()
+    args_builder = mock.Mock(return_value=("arg1",))
+
+    mock_ctx = mock.Mock()
+    mock_mp.get_context.return_value = mock_ctx
+
+    mock_process1 = mock.Mock()
+    mock_process1.exitcode = 1
+    mock_process1.is_alive.return_value = False
+
+    mock_process2 = mock.Mock()
+    mock_process2.exitcode = None
+    mock_process2.is_alive.return_value = True
+
+    mock_ctx.Process.side_effect = [mock_process1, mock_process2]
+
+    class MockArray:
+        def __setitem__(self, idx, val):
+            pass
+
+        def __getitem__(self, idx):
+            if isinstance(idx, slice):
+                return [1.0, 2.0]
+            return 1.0
+
+    mock_array = MockArray()
+    mock_ctx.Array.return_value = mock_array
+
+    with pytest.raises(RuntimeError, match="Worker process 0 exited with code 1"):
+        runner.run_multi_process(
+            mock_benchmark,
+            mock_monitor,
+            params,
+            extended_gcs_factory,
+            worker_target,
+            args_builder,
+            "listing",
+        )
+
+    mock_process1.join.assert_called_once()
+    mock_process1.terminate.assert_not_called()
+    mock_process2.terminate.assert_called_once()
+    mock_process2.join.assert_called_once()
+
+
+@mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
+def test_run_multi_process_resets_shared_data(mock_mp, mock_benchmark, mock_monitor):
+    params = MockParams(processes=2, rounds=2)
+    extended_gcs_factory = mock.Mock(return_value="gcs_instance")
+    worker_target = mock.Mock()
+    args_builder = mock.Mock(return_value=("arg1",))
+
+    mock_ctx = mock.Mock()
+    mock_mp.get_context.return_value = mock_ctx
+    mock_process = mock.Mock()
+    mock_process.exitcode = 0
+    mock_ctx.Process.return_value = mock_process
+
+    # Use a real list or dict to simulate the array so we can assert it was reset
+    shared_data = {}
+
+    class MockArray:
+        def __setitem__(self, idx, val):
+            shared_data[idx] = val
+
+        def __getitem__(self, idx):
+            if isinstance(idx, slice):
+                return [shared_data.get(0, 0.0), shared_data.get(1, 0.0)]
+            return shared_data[idx]
+
+    mock_array = MockArray()
+    mock_ctx.Array.return_value = mock_array
+
+    # Set some initial non-zero data
+    shared_data[0] = 10.0
+    shared_data[1] = 20.0
+
+    runner.run_multi_process(
+        mock_benchmark,
+        mock_monitor,
+        params,
+        extended_gcs_factory,
+        worker_target,
+        args_builder,
+        "listing",
+    )
+
+    # If it was reset to 0 at the start of each round, and the worker target is a mock
+    # that doesn't actually run (since we mocked Process), the final results appended
+    # will be 0.0, because the array was reset and never populated by the non-running mock process.
+    assert mock_benchmark.extra_info["runs"] == [0.0, 0.0]
