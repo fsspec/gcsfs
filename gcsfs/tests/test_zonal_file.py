@@ -29,6 +29,7 @@ def mock_gcsfs():
     # Stub the MRDPoolCache so ZonalFile.__init__ doesn't try real RPCs.
     mock_pool = mock.Mock()
     mock_pool.persisted_size = 1000
+    mock_pool.details = None
     fs._mrd_pool_cache = mock.Mock()
     fs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
     return fs
