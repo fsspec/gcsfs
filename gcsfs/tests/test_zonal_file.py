@@ -29,9 +29,53 @@ def mock_gcsfs():
     # Stub the MRDPoolCache so ZonalFile.__init__ doesn't try real RPCs.
     mock_pool = mock.Mock()
     mock_pool.persisted_size = 1000
+    mock_pool.details = None
     fs._mrd_pool_cache = mock.Mock()
     fs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
     return fs
+
+
+@mock.patch("gcsfs.zonal_file.asyn.sync")
+def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
+    """Test that ZonalFile explicitly provided generation kwarg is not dropped."""
+    from gcsfs.zonal_file import ZonalFile
+
+    # split_path returns None for generation when it's not in the path
+    mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", None)
+    zf = ZonalFile(
+        gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb", generation="456"
+    )
+
+    expected_call = mock.call(
+        mock_gcsfs.loop,
+        mock_gcsfs._mrd_pool_cache.get,
+        "test-bucket",
+        "test-key",
+        "456",
+        mock.ANY,
+    )
+    assert expected_call in mock_sync.call_args_list
+    zf.close()
+
+
+@mock.patch("gcsfs.zonal_file.asyn.sync")
+def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
+    """Test that ZonalFile parses generation from the path when provided."""
+    from gcsfs.zonal_file import ZonalFile
+
+    mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", "123")
+    zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key#123", mode="rb")
+
+    expected_call = mock.call(
+        mock_gcsfs.loop,
+        mock_gcsfs._mrd_pool_cache.get,
+        "test-bucket",
+        "test-key",
+        "123",
+        mock.ANY,
+    )
+    assert expected_call in mock_sync.call_args_list
+    zf.close()
 
 
 @pytest.mark.parametrize(
@@ -706,3 +750,20 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     await pool_c.close()
     await fs._mrd_pool_cache.close()
     fs.loop.close()
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_cache_sets_pool_details():
+    fs = mock.Mock()
+    fs._info = mock.AsyncMock(return_value={"generation": "123", "size": 100})
+
+    from gcsfs.zb_hns_utils import MRDPoolCache
+
+    cache = MRDPoolCache(fs)
+
+    with mock.patch("gcsfs.zb_hns_utils.MRDPool") as mock_pool:
+        # Prevent actually calling mrd_pool.initialize() which would fail on a mock
+        mock_pool.return_value.initialize = mock.AsyncMock()
+        pool = await cache.get("bucket", "key", generation=None, pool_size=1)
+
+    assert pool.details == {"generation": "123", "size": 100}

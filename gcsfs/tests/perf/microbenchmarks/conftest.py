@@ -19,6 +19,18 @@ def _format_mb(value):
 
 
 @pytest.fixture
+def gcsfs_benchmark_glob(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a glob benchmark run.
+    It creates a directory structure with 0-byte files.
+    """
+    params = request.param
+    yield from _benchmark_listing_fixture_helper(
+        extended_gcs_factory, params, "benchmark-glob", teardown=True
+    )
+
+
+@pytest.fixture
 def populate_bucket():
     return False
 

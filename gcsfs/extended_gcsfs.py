@@ -369,21 +369,23 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         """
         size = file_size
 
+        async def _get_size():
+            nonlocal size
+            if size is None:
+                size = (await self._info(path))["size"]
+            return size
+
         if start is None:
             offset = 0
         elif start < 0:
-            size = (await self._info(path))["size"] if size is None else size
-            # If start is negative and larger than the file size, we should start from 0.
-            offset = max(0, size + start)
+            offset = max(0, await _get_size() + start)
         else:
             offset = start
 
         if end is None:
-            size = (await self._info(path))["size"] if size is None else size
-            effective_end = size
+            effective_end = await _get_size()
         elif end < 0:
-            size = (await self._info(path))["size"] if size is None else size
-            effective_end = size + end
+            effective_end = await _get_size() + end
         else:
             effective_end = end
 
@@ -392,9 +394,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             return offset, 0
         else:
             length = effective_end - offset  # Normal case
-            size = (await self._info(path))["size"] if size is None else size
-            if effective_end > size:
-                length = max(0, size - offset)  # Clamp and ensure non-negative
+            s = await _get_size()
+            if effective_end > s:
+                length = max(0, s - offset)  # Clamp and ensure non-negative
 
         return offset, length
 

@@ -28,6 +28,4 @@ if os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true").lower() in ("true", "1
         )
         # Fallback to core GCSFileSystem, do not register here
 
-# TODO: GCSMap still refers to the original GCSFileSystem. This will be
-# addressed in a future update.
 __all__ = ["GCSFileSystem", "GCSMap"]

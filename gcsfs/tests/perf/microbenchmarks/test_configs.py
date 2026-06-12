@@ -4,6 +4,7 @@ import pytest
 
 from gcsfs.tests.perf.microbenchmarks import configs
 from gcsfs.tests.perf.microbenchmarks.delete.configs import get_delete_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.glob.configs import get_glob_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.info.configs import (
     InfoConfigurator,
     get_info_benchmark_cases,
@@ -271,3 +272,7 @@ def test_validate_actual_yaml_configs():
         # Open
         cases = get_open_benchmark_cases()
         assert len(cases) > 0, "Open config produced no cases"
+
+        # Glob
+        cases = get_glob_benchmark_cases()
+        assert len(cases) > 0, "Glob config produced no cases"
