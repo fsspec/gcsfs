@@ -748,7 +748,7 @@ class MRDPoolCache:
         )
         if info is not None:
             mrd_pool.details = info
-            
+
         try:
             await mrd_pool.initialize()
         except BaseException:
