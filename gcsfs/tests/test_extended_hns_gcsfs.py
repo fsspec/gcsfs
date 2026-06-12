@@ -18,8 +18,8 @@ from google.cloud import storage_control_v2
 from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
 from gcsfs.tests.conftest import requires_hns
-from gcsfs.tests.settings import TEST_HNS_BUCKET
-from gcsfs.tests.utils import is_real_gcs
+from gcsfs.tests.settings import TEST_HNS_BUCKET, TEST_ZONAL_BUCKET
+from gcsfs.tests.utils import is_real_gcs, tmpfile
 
 pytestmark = [requires_hns]
 
@@ -671,6 +671,35 @@ class TestExtendedGcsFileSystemMvFile:
                 await gcsfs._mv_file_cache_update(path3, path4)
                 mock_super_update.assert_awaited_once_with(path3, path4, None)
 
+    @pytest.mark.asyncio
+    async def test_mv_file_hns_uncached_dest_parent_invalidates_dest_ancestors(self):
+        """Moving a file into a destination parent that is not cached (which the
+        move may have created) must invalidate the destination's ancestors,
+        while the source entry is still dropped in place."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        src_parent = f"{TEST_HNS_BUCKET}/src"
+        src = f"{src_parent}/a.txt"
+        dest_grandparent = f"{TEST_HNS_BUCKET}/destgp"
+        dest_parent = f"{dest_grandparent}/p"
+        dst = f"{dest_parent}/a.txt"
+
+        # Source parent cached (with the file); destination parent NOT cached,
+        # but a destination ancestor IS cached.
+        fs.dircache[src_parent] = [{"name": src, "type": "file"}]
+        fs.dircache[dest_grandparent] = [{"name": dest_parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": dest_grandparent, "type": "directory"}]
+
+        response = {"bucket": TEST_HNS_BUCKET, "name": "destgp/p/a.txt", "size": 5}
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            await fs._mv_file_cache_update(src, dst, response)
+
+        # The source entry is dropped in place (removal never affects ancestors).
+        assert src not in [e["name"] for e in fs.dircache.get(src_parent, [])]
+        # The destination's ancestors are invalidated, since the move may have
+        # created dest_parent.
+        assert dest_grandparent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
 
 class TestExtendedGcsFileSystemRmFile:
     """Unit tests for the _rm_file cache update in ExtendedGcsFileSystem."""
@@ -835,6 +864,225 @@ class TestExtendedGcsFileSystemRmFile:
         names = [e["name"] for e in fs.dircache[parent]]
         assert ok_path not in names
         assert bad_path in names
+
+
+class TestExtendedGcsFileSystemWriteFileCacheUpdate:
+    """Unit tests for the write-path cache update (_write_file_cache_update),
+    shared by put_file, pipe_file, and cp_file."""
+
+    @pytest.mark.asyncio
+    async def test_write_file_cache_update_hns_pops_only_immediate_parent(self):
+        """For HNS buckets, creating a file invalidates only the immediate
+        parent's listing; ancestor directory caches are left intact because in
+        HNS the ancestors' listings are unaffected by adding a file."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        grandparent = f"{TEST_HNS_BUCKET}/gp"
+        parent = f"{grandparent}/p"
+        path = f"{parent}/new.txt"
+
+        fs.dircache[parent] = [{"name": f"{parent}/existing.txt", "type": "file"}]
+        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            await fs._write_file_cache_update(path)
+
+        # Only the immediate parent is invalidated.
+        assert parent not in fs.dircache
+        # Ancestors are left intact (no walk to the root).
+        assert grandparent in fs.dircache
+        assert TEST_HNS_BUCKET in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_write_file_cache_update_non_hns_broad_invalidate(self):
+        """For non-HNS buckets, the write-path cache update falls back to the
+        base broad invalidation of the parent and all of its ancestors."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        grandparent = f"{TEST_HNS_BUCKET}/gp"
+        parent = f"{grandparent}/p"
+        path = f"{parent}/new.txt"
+
+        fs.dircache[parent] = [{"name": f"{parent}/existing.txt", "type": "file"}]
+        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
+            await fs._write_file_cache_update(path)
+
+        # The base behavior invalidates the parent and walks up to the root.
+        assert parent not in fs.dircache
+        assert grandparent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_cp_file_hns_invalidates_only_immediate_parent(self):
+        """A standard-bucket cp on an HNS bucket invalidates only the
+        destination's immediate parent, leaving the destination's ancestors and
+        the source's parent untouched."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        grandparent = f"{TEST_HNS_BUCKET}/gp"
+        dest_parent = f"{grandparent}/p"
+        dst = f"{dest_parent}/new.txt"
+        src_parent = f"{TEST_HNS_BUCKET}/src"
+        src = f"{src_parent}/old.txt"
+
+        fs.dircache[dest_parent] = [
+            {"name": f"{dest_parent}/existing.txt", "type": "file"}
+        ]
+        fs.dircache[grandparent] = [{"name": dest_parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+        fs.dircache[src_parent] = [{"name": src, "type": "file"}]
+
+        with (
+            mock.patch.object(fs, "_is_zonal_bucket", return_value=False),
+            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        ):
+            mock_call.return_value = {"done": True}
+            await fs._cp_file(src, dst)
+
+        # Only the destination's immediate parent is invalidated.
+        assert dest_parent not in fs.dircache
+        # Ancestors of the destination and the source's parent are untouched.
+        assert grandparent in fs.dircache
+        assert TEST_HNS_BUCKET in fs.dircache
+        assert src_parent in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_write_file_cache_update_hns_uncached_parent_falls_back_to_broad(
+        self,
+    ):
+        """When the immediate parent is not cached, the write may have created
+        it (HNS auto-creates missing parent folders on object write), so a
+        cached ancestor must be invalidated rather than left to hide the new
+        directory. The single-level shortcut only applies to an already-cached
+        (known to exist) parent."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        grandparent = f"{TEST_HNS_BUCKET}/gp"
+        parent = f"{grandparent}/p"
+        path = f"{parent}/new.txt"
+
+        # The immediate parent is NOT cached; an ancestor IS cached.
+        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
+
+        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
+            await fs._write_file_cache_update(path)
+
+        # Broad invalidation: cached ancestors are popped so a re-list picks up
+        # any directory the write implicitly created.
+        assert grandparent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_pipe_file_zonal_routes_through_write_cache_update(self):
+        """The zonal pipe_file path routes its cache update through
+        _write_file_cache_update so the HNS single-level invalidation applies."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append = mock.AsyncMock()
+
+        with (
+            mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                new_callable=mock.AsyncMock,
+                return_value=writer,
+            ),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                new_callable=mock.AsyncMock,
+            ),
+            mock.patch.object(
+                fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+            ) as mock_update,
+        ):
+            await fs._pipe_file(path, b"some-data")
+
+        mock_update.assert_awaited_once_with(path)
+
+    @pytest.mark.asyncio
+    async def test_put_file_zonal_routes_through_write_cache_update(self):
+        """The zonal put_file path routes its cache update through
+        _write_file_cache_update so the HNS single-level invalidation applies."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append_from_file = mock.AsyncMock()
+
+        with tmpfile() as lpath:
+            with open(lpath, "wb") as f:
+                f.write(b"some-data")
+
+            with (
+                mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+                mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                    new_callable=mock.AsyncMock,
+                    return_value=writer,
+                ),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                    new_callable=mock.AsyncMock,
+                ),
+                mock.patch.object(
+                    fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+                ) as mock_update,
+            ):
+                await fs._put_file(lpath, rpath)
+
+        mock_update.assert_awaited_once_with(rpath)
+
+
+class TestExtendedGcsFileSystemCacheHelpers:
+    """Unit tests for the shared low-level dircache primitives."""
+
+    def test_cache_drop_entries_removes_named_entries(self):
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/p"
+        fs.dircache[parent] = [
+            {"name": f"{parent}/a", "type": "file"},
+            {"name": f"{parent}/b", "type": "file"},
+            {"name": f"{parent}/c", "type": "file"},
+        ]
+
+        fs._cache_drop_entries(parent, {f"{parent}/a", f"{parent}/c"})
+
+        assert [e["name"] for e in fs.dircache[parent]] == [f"{parent}/b"]
+
+    def test_cache_drop_entries_noop_when_parent_uncached(self):
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/p"
+
+        # Must not raise and must not materialize the missing key.
+        fs._cache_drop_entries(parent, {f"{parent}/a"})
+
+        assert parent not in fs.dircache
+
+    def test_cache_add_entry_appends_to_parent(self):
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/p"
+        fs.dircache[parent] = [{"name": f"{parent}/a", "type": "file"}]
+        entry = {"name": f"{parent}/b", "type": "file"}
+
+        fs._cache_add_entry(parent, entry)
+
+        assert entry in fs.dircache[parent]
+
+    def test_cache_add_entry_noop_when_parent_uncached(self):
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/p"
+
+        fs._cache_add_entry(parent, {"name": f"{parent}/b", "type": "file"})
+
+        assert parent not in fs.dircache
 
 
 class TestExtendedGcsFileSystemMkdir:

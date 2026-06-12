@@ -1436,7 +1436,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 json_out=True,
                 sourceGeneration=g1,
             )
-        self.invalidate_cache(self._parent(path2))
+        await self._write_file_cache_update(path2)
 
     async def _mv_file_cache_update(self, path1, path2, response=None):
         self.invalidate_cache(self._parent(path1))
@@ -1481,11 +1481,18 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     mv_file = asyn.sync_wrapper(_mv_file)
 
     async def _rm_file_cache_update(self, path):
-        self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
+        # Single-path form of _rm_files_cache_update; kept as one code path so
+        # subclasses only need to override the batch method.
+        await self._rm_files_cache_update([path])
 
     async def _rm_files_cache_update(self, paths):
         parents = set(self._parent(p) for p in paths) | set(paths)
         [self.invalidate_cache(parent) for parent in parents]
+
+    async def _write_file_cache_update(self, path):
+        # A file was created or overwritten at ``path`` (via put/pipe/cp). The
+        # default behavior invalidates the parent and all of its ancestors.
+        self.invalidate_cache(self._parent(path))
 
     async def _rm_file(self, path, **kwargs):
         bucket, key, generation = self.split_path(path)
@@ -1547,6 +1554,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             txt = content.decode()
             responses = txt.split(boundary)[1:-1]
             deleted = []
+            confirmed_absent = []
             for path, response in zip(paths, responses):
                 m = re.search("HTTP/[0-9.]+ ([0-9]+)", response)
                 code = int(m.groups()[0]) if m else None
@@ -1556,6 +1564,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 elif code in errs and retry < 5:
                     remaining.append(path)
                 else:
+                    if code == 404:
+                        confirmed_absent.append(path)
                     msg = re.search("{(.*)}", response.replace("\n", ""))
                     if msg:
                         msg2 = re.search("({.*})", msg.groups()[0])
@@ -1565,12 +1575,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                         out.append(OSError(msg2.groups()[0]))
                     else:
                         out.append(OSError(f"{path}: {code}"))
-            # Only update the cache for objects we actually deleted. Updating it
-            # for failed paths would evict still-present objects from the cache
-            # (the HNS targeted update mutates the parent listing in place and
-            # does not self-correct on the next listing).
-            if deleted:
-                await self._rm_files_cache_update(deleted)
+            # Only update the cache for objects we actually deleted, or that GCS
+            # confirms are already absent. Updating it for other failed paths
+            # would evict still-present objects from the cache (the HNS targeted
+            # update mutates the parent listing in place and does not self-correct
+            # on the next listing).
+            cache_updates = deleted + confirmed_absent
+            if cache_updates:
+                await self._rm_files_cache_update(cache_updates)
             if remaining:
                 paths = remaining
                 await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
@@ -1690,7 +1702,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             checker.update(data)
             checker.validate_json_response(out)
 
-        self.invalidate_cache(self._parent(path))
+        await self._write_file_cache_update(path)
         return location
 
     async def _put_file(
@@ -1769,7 +1781,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
                 checker.validate_json_response(out)
 
-            self.invalidate_cache(self._parent(rpath))
+            await self._write_file_cache_update(rpath)
 
     async def _isdir(self, path):
 

@@ -477,6 +477,36 @@ async def test_rm_batch_error(gcs):
         assert f"{path}: 400" in str(out[0])
 
 
+@pytest.mark.asyncio
+async def test_rm_batch_not_found_invalidates_stale_cache(gcs):
+    parent = TEST_BUCKET + "/cached"
+    path = parent + "/already_gone"
+    gcs.dircache[parent] = [{"name": path, "type": "file"}]
+
+    boundary = "==========7330845974216740156=="
+    mock_response_content = (
+        f"\n--{boundary}\n"
+        "Content-Type: application/http\n"
+        "\n"
+        "HTTP/1.1 404 Not Found\n"
+        "Content-Type: application/json\n"
+        "\n"
+        '{"error": {"code": 404, "message": "No such object"}}\n'
+        f"--{boundary}--\n"
+    ).encode()
+    mock_headers = {"Content-Type": f"multipart/mixed; boundary={boundary}"}
+
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        mock_call.return_value = (mock_headers, mock_response_content)
+
+        out = await gcs._rm_files([path])
+
+        assert len(out) == 1
+        assert isinstance(out[0], OSError)
+        assert "No such object" in str(out[0])
+        assert parent not in gcs.dircache
+
+
 def test_rm_recursive(gcs):
     files = ["/a", "/a/b", "/a/c"]
     for fn in files:
