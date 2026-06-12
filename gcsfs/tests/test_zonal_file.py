@@ -29,6 +29,7 @@ def mock_gcsfs():
     # Stub the MRDPoolCache so ZonalFile.__init__ doesn't try real RPCs.
     mock_pool = mock.Mock()
     mock_pool.persisted_size = 1000
+    mock_pool.details = None
     fs._mrd_pool_cache = mock.Mock()
     fs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
     return fs
@@ -749,3 +750,20 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     await pool_c.close()
     await fs._mrd_pool_cache.close()
     fs.loop.close()
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_cache_sets_pool_details():
+    fs = mock.Mock()
+    fs._info = mock.AsyncMock(return_value={"generation": "123", "size": 100})
+
+    from gcsfs.zb_hns_utils import MRDPoolCache
+
+    cache = MRDPoolCache(fs)
+
+    with mock.patch("gcsfs.zb_hns_utils.MRDPool") as mock_pool:
+        # Prevent actually calling mrd_pool.initialize() which would fail on a mock
+        mock_pool.return_value.initialize = mock.AsyncMock()
+        pool = await cache.get("bucket", "key", generation=None, pool_size=1)
+
+    assert pool.details == {"generation": "123", "size": 100}

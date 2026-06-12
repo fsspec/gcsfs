@@ -478,6 +478,7 @@ class MRDPool:
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
         self._lock = asyncio.Lock()
+        self.details = None
         self.persisted_size = None
         self._initialized = False
         self._closed = False
@@ -730,6 +731,7 @@ class MRDPoolCache:
         if fs is None:
             raise RuntimeError("ExtendedGcsFileSystem has been garbage collected.")
 
+        info = None
         if generation is None:
             info = await fs._info(f"{bucket_name}/{object_name}")
             generation = info.get("generation")
@@ -744,6 +746,9 @@ class MRDPoolCache:
             pool_size,
             cache=self,
         )
+        if info is not None:
+            mrd_pool.details = info
+
         try:
             await mrd_pool.initialize()
         except BaseException:
