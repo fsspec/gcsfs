@@ -27,7 +27,6 @@ async def test_shared_mrd_closed_only_by_last_holder():
             self.close_count += 1
 
     pool = MRDPool(mock.Mock(), "b", "o", 1, pool_size=1, cache=None)
-    pool.mrd_supports_multi_request = True
     pool._create_mrd = mock.AsyncMock(side_effect=lambda: FakeMRD())
 
     await pool.initialize()
@@ -437,11 +436,27 @@ async def test_mrd_pool_queue_filled_during_lock_wait(mock_gcsfs):
         await pool.initialize()
 
         side_effects = [True] + [False] * 10
-        with mock.patch.object(pool._free_mrds, "empty", side_effect=side_effects):
-            async with pool.get_mrd() as mrd:
-                assert mrd == mrd_mock
+        # When `_free_mrds.empty` evaluates to True on the first pass,
+        # it checks `_all_mrds`. If it's non-empty, it does a round-robin
+        # instead of blocking on `_free_mrds.get()`. So, the mock doesn't
+        # really test waiting on lock anymore because round-robin returns
+        # immediately. Let's force `_all_mrds` to be empty temporarily to test
+        # the blocking wait behavior if sharing is not possible (e.g., initial
+        # scale up but the only MRD was closed/removed, which shouldn't happen
+        # in practice but covers the logic branch).
+        with mock.patch.object(pool, "_all_mrds", []):
+            with mock.patch.object(pool._free_mrds, "empty", side_effect=side_effects):
+                # We need a task to put the mrd into the queue while we're waiting
+                async def put_mrd_later():
+                    await asyncio.sleep(0.01)
+                    await pool._free_mrds.put(mrd_mock)
 
-        # We should not have spawned a new MRD
+                asyncio.create_task(put_mrd_later())
+
+                async with pool.get_mrd() as mrd:
+                    assert mrd == mrd_mock
+
+        # We should not have spawned a new MRD beyond the first
         assert pool._active_count == 1
 
 
@@ -458,9 +473,6 @@ async def test_mrd_pool_round_robin_multi_request(mock_gcsfs):
     async def fake_create_mrd():
         mrd = mrd_mocks.pop(0)
         return mrd
-
-    # Enable the multi-request feature manually for this test
-    pool.mrd_supports_multi_request = True
 
     with mock.patch.object(pool, "_create_mrd", side_effect=fake_create_mrd):
         await pool.initialize()
@@ -773,18 +785,16 @@ async def test_mrd_pool_pool_size_cap(init_mrd_mock, mock_cache, mock_gcsfs):
     async with mrd_pool.get_mrd(), mrd_pool.get_mrd():
         assert mrd_pool._active_count == 2
 
-        # A third concurrent get_mrd must wait, not create a third MRD
+        # A third concurrent get_mrd must NOT create a third MRD
+        # Because we changed `mrd_supports_multi_request` to always True,
+        # it will round-robin and share an existing MRD immediately
         async def third():
             async with mrd_pool.get_mrd():
                 pass
 
         third_task = asyncio.create_task(third())
-        await asyncio.sleep(0)  # let third start and block on _free_mrds.get()
+        await asyncio.wait_for(third_task, timeout=1.0)
         assert init_mrd_mock.await_count == 2  # never grew past 2
-        assert not third_task.done()
-
-    await asyncio.wait_for(third_task, timeout=1.0)
-    assert init_mrd_mock.await_count == 2  # third reused; no new creation
 
 
 @pytest.mark.asyncio
