@@ -305,11 +305,6 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     async_impl = True
     MIN_CHUNK_SIZE_FOR_CONCURRENCY = 5 * 1024 * 1024
 
-    # This threshold applies to the standard bucket, whereas the zonal bucket
-    # uses a 5MB threshold. This difference exists because the standard bucket
-    # lacks the `DirectMemmoveBuffer` implementation used in the zonal bucket.
-    THRESOLD_FOR_DISK_READS = 100 * 1024 * 1024
-
     def __init__(
         self,
         project=DEFAULT_PROJECT,
@@ -382,6 +377,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
     def project(self):
         return self.credentials.project
 
+    # This threshold applies to the standard bucket, whereas the zonal bucket
+    # uses a 5MB threshold. This difference exists because the standard bucket
+    # lacks the `DirectMemmoveBuffer` implementation used in the zonal bucket.
     async def _get_threshold_for_disk_reads(self, bucket):
         return 100 * 1024 * 1024
 

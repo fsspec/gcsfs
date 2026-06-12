@@ -203,7 +203,7 @@ class ZonalFile(GCSFile):
                 results = []
                 current_offset = start if start is not None else 0
                 for length in chunk_lengths:
-                    data = self._prefetch_engine._fetch(
+                    data = self._prefetch_engine.fetch(
                         current_offset, current_offset + length
                     )
                     results.append(data)
