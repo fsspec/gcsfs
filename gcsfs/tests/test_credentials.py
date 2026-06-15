@@ -83,7 +83,16 @@ def test_connect_cloud_not_on_google():
 
 
 @pytest.mark.parametrize("token", ["", "incorrect.token", "x" * 100])
-def test_credentials_from_raw_token(token):
+def test_credentials_from_raw_token(token, monkeypatch):
+    # An invalid token yields a 401 "Invalid Credentials", which gcsfs treats as
+    # retriable (to ride out transient token-expiry races). This token is
+    # permanently invalid, so all 6 retries fire with exponential backoff (~33s).
+    # The backoff is not what this test verifies, so no-op the retry sleep to keep
+    # it fast while still asserting the eventual error.
+    async def _no_backoff(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("gcsfs.retry.asyncio.sleep", _no_backoff)
     with patch.dict(os.environ, {"FETCH_RAW_TOKEN_EXPIRY": "false"}):
         fs = GCSFileSystem(project="myproject", token=token)
         if not fs.on_google:

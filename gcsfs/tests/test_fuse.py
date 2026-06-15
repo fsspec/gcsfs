@@ -33,9 +33,12 @@ def test_fuse(gcs, fsspec_fuse_run):
     th.daemon = True
     th.start()
 
-    time.sleep(5)
-    timeout = 20
-    n = 40
+    # This test is xfail (the mount does not work in CI), so keep the waits short:
+    # we only need enough time to confirm the mount never becomes usable, not to
+    # wait out a 25s window before the inevitable failure.
+    time.sleep(1)
+    timeout = 3
+    n = 6
     for i in range(n):
         logging.debug(f"Attempt # {i + 1} / {n} to create lock file.")
         try:
