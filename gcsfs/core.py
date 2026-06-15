@@ -2030,6 +2030,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             size=total_size,
             concurrency=concurrency,
             max_prefetch_size=max_prefetch_size,
+            loop=self.loop,
         )
 
         fd = None
@@ -2086,6 +2087,11 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                             raise exceptions[0]
 
                     offset += len(data)
+
+                if offset != total_size:
+                    raise aiohttp.client_exceptions.ClientError(
+                        f"Expected {total_size} bytes, but only received {offset} bytes"
+                    )
         finally:
             all_done = set()
             was_cancelled = False
@@ -2384,6 +2390,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 self.size,
                 max_prefetch_size=max_prefetch_size,
                 concurrency=self.concurrency,
+                loop=self.gcsfs.loop,
             )
         else:
             self._prefetch_engine = None

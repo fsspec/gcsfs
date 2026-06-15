@@ -11,6 +11,7 @@ from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
+import aiohttp
 import fsspec.asyn
 import fsspec.core
 import pytest
@@ -3210,9 +3211,9 @@ def test_get_file_concurrent_no_pwrite(gcs):
 
 
 def test_get_file_concurrent_early_eof(gcs):
-    """Coverage: `if not data: break` mid-stream"""
+    """Coverage: integrity check raises ClientError after retries."""
     fn = f"{TEST_BUCKET}/early_eof.txt"
-    data = b"1234567890" * 1024 * 1024  # ~10MB (larger than 5MB default)
+    data = b"1234567890" * 1024 * 1024  # ~10MB
     gcs.pipe(fn, data)
 
     with tempdir() as dn:
@@ -3230,15 +3231,21 @@ def test_get_file_concurrent_early_eof(gcs):
                 new_callable=mock.AsyncMock,
             ) as mock_afetch,
         ):
+            # Define a function to simulate consistent truncation across retries
+            async def mock_afetch_truncated(start, end):
+                if start == 0:
+                    return b"12345"  # Only return the first 5 bytes
+                return b""  # Return EOF for any subsequent range
 
-            # 1st call gives data, 2nd call returns empty b"" forcing an early break
-            mock_afetch.side_effect = [b"12345", b""]
-            gcs.get_file(fn, lpath, concurrency=2, chunk_size=5)
+            mock_afetch.side_effect = mock_afetch_truncated
 
-        # The file was pre-allocated to size ~10MB, but early EOF stopped writing at 5
-        assert os.path.getsize(lpath) == len(data)
-        with open(lpath, "rb") as f:
-            assert f.read(5) == b"12345"
+            # The function will retry several times, but always fail the integrity check.
+            # We assert that it eventually raises the ClientError.
+            with pytest.raises(
+                aiohttp.ClientError,
+                match="Expected 10485760 bytes, but only received 5 bytes",
+            ):
+                gcs.get_file(fn, lpath, concurrency=2, chunk_size=5)
 
 
 def test_get_file_concurrent_write_exception_in_loop(gcs):

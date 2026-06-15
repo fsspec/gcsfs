@@ -621,7 +621,9 @@ class BackgroundPrefetcher:
 
     producer = None
 
-    def __init__(self, fetcher, size: int, concurrency: int, max_prefetch_size=None):
+    def __init__(
+        self, fetcher, size: int, concurrency: int, max_prefetch_size=None, loop=None
+    ):
         """Initializes the background prefetcher.
 
         Args:
@@ -629,6 +631,10 @@ class BackgroundPrefetcher:
             size (int): Total byte size of the file being read.
             concurrency (int): Number of concurrent network requests to use for large chunks.
             max_prefetch_size (int, optional): Maximum bytes to prefetch ahead of the current user offset.
+            loop (asyncio.AbstractEventLoop, optional): The event loop to attach the prefetcher to.
+                If executing synchronously, this should be the fsspec background loop. If executing
+                asynchronously (asynchronous=True), this should be None so it can automatically
+                inherit the user's currently running event loop.
 
         Raises:
             ValueError: If max_prefetch_size is provided but is not a positive integer.
@@ -649,7 +655,7 @@ class BackgroundPrefetcher:
                 "max_prefetch_size should be a positive integer to use adaptive prefetching!"
             )
 
-        self.loop = fsspec.asyn.get_loop()
+        self.loop = loop
         self._error = None
         self.is_stopped = False
         self.user_offset = 0
@@ -692,19 +698,22 @@ class BackgroundPrefetcher:
         except RuntimeError:
             current_loop = None
 
-        if current_loop is self.loop and current_loop.is_running():
+        if current_loop is self.loop and self.loop is not None:
+            # We are already safely running inside the fsspec background loop
             _start()
-        elif current_loop is not None and current_loop != self.loop:
-            raise RuntimeError(
-                "Multiple event loops are not supported for this class,"
-                " This is meant for run by either synchronous, or by fsspec event loop."
-            )
-        else:
-
+        elif self.loop is not None:
+            # We are on the main thread; schedule setup on the fsspec background loop
             async def _start_wrapper():
                 _start()
 
             fsspec.asyn.sync(self.loop, _start_wrapper)
+        elif current_loop is not None:
+            # asynchronous=True: use the user's active event loop
+            self.loop = current_loop
+            _start()
+        else:
+            # asynchronous=True but called completely outside of an async context
+            raise RuntimeError("No event loop found")
 
         logger.debug("BackgroundPrefetcher initialization complete.")
 

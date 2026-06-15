@@ -12,6 +12,9 @@ def prefetcher_factory():
     prefetchers = []
 
     def _make_prefetcher(**kwargs):
+        if "loop" not in kwargs:
+            kwargs["loop"] = fsspec.asyn.get_loop()
+
         bp = BackgroundPrefetcher(**kwargs)
         prefetchers.append(bp)
         return bp
@@ -621,3 +624,47 @@ def test_async_context_manager_and_afetch(prefetcher_factory):
         assert bp.consumer._current_block == b""  # Buffer cleanly cleared on async exit
 
     fsspec.asyn.sync(bp.loop, run_async)
+
+
+def test_init_with_explicit_loop(prefetcher_factory):
+    """Verify that passing an explicit loop assigns it correctly."""
+    loop = fsspec.asyn.get_loop()
+    bp = prefetcher_factory(
+        fetcher=MockFetcher(b"X"), size=100, concurrency=1, loop=loop
+    )
+    assert bp.loop is loop
+
+
+@pytest.mark.asyncio
+async def test_init_with_running_loop():
+    """Verify asynchronous=True behavior where it inherits the user's running loop."""
+    current = asyncio.get_running_loop()
+    # explicitly passing loop=None simulates asynchronous=True behavior
+    bp = BackgroundPrefetcher(
+        fetcher=MockFetcher(b"X"), size=100, concurrency=1, loop=None
+    )
+    assert bp.loop is current
+    await bp.aclose()
+
+
+def test_init_within_fsspec_loop(prefetcher_factory):
+    """Verify the edge case where the prefetcher is initialized while already running inside the target loop."""
+    loop = fsspec.asyn.get_loop()
+
+    async def init_inside_loop():
+        bp = BackgroundPrefetcher(
+            fetcher=MockFetcher(b"X"), size=100, concurrency=1, loop=loop
+        )
+        assert bp.loop is loop
+        await bp.aclose()
+
+    # Submit the initialization directly onto the background thread
+    fsspec.asyn.sync(loop, init_inside_loop)
+
+
+def test_init_no_loop_raises_error():
+    """Verify synchronous execution strictly fails if no explicit loop or active loop is found."""
+    with pytest.raises(RuntimeError, match="No event loop found"):
+        BackgroundPrefetcher(
+            fetcher=MockFetcher(b"X"), size=100, concurrency=1, loop=None
+        )
