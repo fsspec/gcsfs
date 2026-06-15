@@ -6,14 +6,15 @@ consistent with the bucket. This module groups that concern into two mixins so
 the bookkeeping lives in one place rather than being interleaved with the I/O
 in :mod:`gcsfs.core` and :mod:`gcsfs.extended_gcsfs`:
 
-- :class:`DirCacheUpdater` -- the default strategy. Broadly invalidates the
-  affected parent directory and all of its ancestors, so the next listing
-  re-reads them from the bucket.
+- :class:`DirCacheUpdater` -- the default strategy. For deletes and moves it
+  broadly invalidates the affected parent directory and all of its ancestors, so
+  the next listing re-reads them from the bucket. For writes it invalidates only
+  the immediate parent when that parent is already cached (and therefore known to
+  exist), falling back to broad ancestor invalidation otherwise.
 - :class:`HnsDirCacheUpdater` -- a targeted strategy for Hierarchical Namespace
   (HNS) buckets, where directories are first-class persistent objects. It
-  mutates parent listings in place for deletes and moves, and invalidates only
-  the immediate parent listing for writes, falling back to the broad strategy
-  for non-HNS paths.
+  mutates parent listings in place for deletes and moves, falling back to the
+  broad strategy for non-HNS paths.
 
 Both are mixed into a filesystem class and rely on the host class for
 ``dircache``, ``split_path``, ``_parent``, ``_strip_protocol``,
@@ -24,7 +25,12 @@ import asyncio
 
 
 class DirCacheUpdater:
-    """Default ``dircache`` update strategy: broad ancestor invalidation.
+    """Default ``dircache`` update strategy.
+
+    Deletes and moves broadly invalidate the affected parent and all of its
+    ancestors; writes invalidate only the immediate parent when it is already
+    cached (and therefore known to exist), otherwise they fall back to broad
+    ancestor invalidation.
 
     Mixed into :class:`gcsfs.core.GCSFileSystem`. The methods are the hooks that
     the mutating I/O paths (``_rm_file``, ``_rm_files``, ``_put_file``, ...) call
@@ -47,9 +53,28 @@ class DirCacheUpdater:
             self.invalidate_cache(parent)
 
     async def _write_file_cache_update(self, path):
-        # A file was created or overwritten at ``path`` (via put/pipe/cp). The
-        # default behavior invalidates the parent and all of its ancestors.
-        self.invalidate_cache(self._parent(path))
+        # A file was created or overwritten at ``path`` (via put/pipe/cp).
+        #
+        # When the immediate parent's listing is already cached, we have listed
+        # it before, so it already exists and adding a file inside it cannot
+        # create a new directory in any ancestor's listing. Invalidate only that
+        # immediate parent so the new file is picked up on its next listing.
+        #
+        # When the parent is not cached, this write may have implicitly created
+        # it (and intermediate directories) -- flat buckets simulate directories
+        # from object prefixes, and HNS buckets auto-create missing parents on
+        # object write. Leaving a cached ancestor untouched would hide the new
+        # directory, so fall back to invalidating the parent and all ancestors.
+        #
+        # Like the rest of this module, this relies on the dircache being
+        # consistent with the bucket (this client is the sole mutator between
+        # listings); concurrent external mutations are reconciled only by
+        # ``invalidate_cache`` / listings expiry, not here.
+        parent = self._parent(path)
+        if parent in self.dircache:
+            self.dircache.pop(parent, None)
+        else:
+            self.invalidate_cache(parent)
 
 
 class HnsDirCacheUpdater(DirCacheUpdater):
@@ -57,10 +82,10 @@ class HnsDirCacheUpdater(DirCacheUpdater):
 
     Mixed into :class:`gcsfs.extended_gcsfs.ExtendedGcsFileSystem`. For HNS
     buckets directories are persistent objects, so deletes and moves usually
-    only change the contents of the immediate parent's listing. Writes
-    invalidate the immediate parent listing without walking every ancestor up to
-    the bucket root. Non-HNS / cross-bucket paths defer to
-    :class:`DirCacheUpdater` via ``super()``.
+    only change the contents of the immediate parent's listing. Non-HNS /
+    cross-bucket paths defer to :class:`DirCacheUpdater` via ``super()``. The
+    write path is bucket-type-agnostic and handled entirely by
+    :meth:`DirCacheUpdater._write_file_cache_update`.
     """
 
     def _cache_drop_entries(self, parent, names):
@@ -118,6 +143,12 @@ class HnsDirCacheUpdater(DirCacheUpdater):
             path1 (str): The source path that was renamed.
             path2 (str): The destination path.
         """
+        # dircache keys and entry names are stored without the protocol, so
+        # normalize the incoming paths first; otherwise the pop/startswith
+        # matching below silently misses every cached entry for a ``gs://`` path.
+        path1 = self._strip_protocol(path1)
+        path2 = self._strip_protocol(path2)
+
         # 1. Find and remove all descendant paths of the source from the cache.
         source_prefix = f"{path1.rstrip('/')}/"
         for key in list(self.dircache):
@@ -217,26 +248,3 @@ class HnsDirCacheUpdater(DirCacheUpdater):
 
         if non_hns_paths:
             await super()._rm_files_cache_update(non_hns_paths)
-
-    async def _write_file_cache_update(self, path):
-        """
-        Update the cache after a file create/overwrite (put/pipe/cp).
-
-        For HNS-enabled buckets the single-level shortcut (invalidate only the
-        immediate parent, not every ancestor up to the bucket root) is taken
-        only when that parent is already cached. A cached parent is one we have
-        listed, so it already exists, which means creating a file inside it
-        cannot add a new directory to any ancestor's listing.
-
-        When the parent is not cached we cannot rule out that this write
-        implicitly created it (HNS auto-creates missing parent folders on object
-        write); leaving a cached ancestor untouched would hide the new directory
-        from a subsequent listing. In that case, and for non-HNS buckets, fall
-        back to the default broad invalidation of the parent and all ancestors.
-        """
-        bucket, _, _ = self.split_path(path)
-        parent = self._parent(path)
-        if await self._is_bucket_hns_enabled(bucket) and parent in self.dircache:
-            self.dircache.pop(parent, None)
-        else:
-            await super()._write_file_cache_update(path)

@@ -897,10 +897,13 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
     shared by put_file, pipe_file, and cp_file."""
 
     @pytest.mark.asyncio
-    async def test_write_file_cache_update_hns_pops_only_immediate_parent(self):
-        """For HNS buckets, creating a file invalidates only the immediate
-        parent's listing; ancestor directory caches are left intact because in
-        HNS the ancestors' listings are unaffected by adding a file."""
+    async def test_write_file_cache_update_cached_parent_pops_only_immediate_parent(
+        self,
+    ):
+        """When the immediate parent is cached (known to exist), creating a file
+        invalidates only that parent's listing; ancestor directory caches are
+        left intact because adding a file cannot create a new directory in an
+        ancestor's listing. This shortcut is bucket-type-agnostic."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/gp"
         parent = f"{grandparent}/p"
@@ -910,35 +913,13 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._write_file_cache_update(path)
+        await fs._write_file_cache_update(path)
 
         # Only the immediate parent is invalidated.
         assert parent not in fs.dircache
         # Ancestors are left intact (no walk to the root).
         assert grandparent in fs.dircache
         assert TEST_HNS_BUCKET in fs.dircache
-
-    @pytest.mark.asyncio
-    async def test_write_file_cache_update_non_hns_broad_invalidate(self):
-        """For non-HNS buckets, the write-path cache update falls back to the
-        base broad invalidation of the parent and all of its ancestors."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-        grandparent = f"{TEST_HNS_BUCKET}/gp"
-        parent = f"{grandparent}/p"
-        path = f"{parent}/new.txt"
-
-        fs.dircache[parent] = [{"name": f"{parent}/existing.txt", "type": "file"}]
-        fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
-        fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
-
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
-            await fs._write_file_cache_update(path)
-
-        # The base behavior invalidates the parent and walks up to the root.
-        assert parent not in fs.dircache
-        assert grandparent not in fs.dircache
-        assert TEST_HNS_BUCKET not in fs.dircache
 
     @pytest.mark.asyncio
     async def test_cp_file_hns_invalidates_only_immediate_parent(self):
@@ -975,14 +956,15 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
         assert src_parent in fs.dircache
 
     @pytest.mark.asyncio
-    async def test_write_file_cache_update_hns_uncached_parent_falls_back_to_broad(
+    async def test_write_file_cache_update_uncached_parent_falls_back_to_broad(
         self,
     ):
         """When the immediate parent is not cached, the write may have created
-        it (HNS auto-creates missing parent folders on object write), so a
-        cached ancestor must be invalidated rather than left to hide the new
-        directory. The single-level shortcut only applies to an already-cached
-        (known to exist) parent."""
+        it (flat buckets simulate directories from object prefixes; HNS
+        auto-creates missing parent folders on object write), so a cached
+        ancestor must be invalidated rather than left to hide the new directory.
+        The single-level shortcut only applies to an already-cached (known to
+        exist) parent."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         grandparent = f"{TEST_HNS_BUCKET}/gp"
         parent = f"{grandparent}/p"
@@ -992,8 +974,7 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._write_file_cache_update(path)
+        await fs._write_file_cache_update(path)
 
         # Broad invalidation: cached ancestors are popped so a re-list picks up
         # any directory the write implicitly created.
@@ -1134,6 +1115,31 @@ class TestExtendedGcsFileSystemCacheHelpers:
         assert dst not in fs.dircache
         assert dst_child not in fs.dircache
         assert [e["name"] for e in fs.dircache[TEST_HNS_BUCKET]] == [dst]
+
+    def test_update_dircache_after_rename_strips_protocol(self):
+        """Protocol-qualified paths (``gs://...``) must mutate the same cache
+        keys/entries as stripped paths, since the dircache stores names without
+        the protocol. Without stripping, the pop/startswith matching no-ops."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        src = f"{TEST_HNS_BUCKET}/src"
+        dst = f"{TEST_HNS_BUCKET}/dst"
+
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": src, "type": "directory"}]
+        fs.dircache[src] = [{"name": f"{src}/new.txt", "type": "file"}]
+        fs.dircache[f"{src}/nested"] = [
+            {"name": f"{src}/nested/new.txt", "type": "file"}
+        ]
+
+        # Callers such as _mv pass the raw (protocol-qualified) paths through.
+        fs._update_dircache_after_rename(f"gs://{src}", f"gs://{dst}")
+
+        # Source and its descendants are dropped from the cache.
+        assert src not in fs.dircache
+        assert f"{src}/nested" not in fs.dircache
+        # The source entry is removed from, and the stripped destination entry
+        # added to, the parent listing.
+        names = [e["name"] for e in fs.dircache[TEST_HNS_BUCKET]]
+        assert names == [dst]
 
 
 class TestExtendedGcsFileSystemMkdir:
