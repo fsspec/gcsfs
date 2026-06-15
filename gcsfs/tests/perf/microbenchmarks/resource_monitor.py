@@ -37,29 +37,54 @@ class ResourceMonitor:
         self.stop()
 
     def _monitor(self):
-        psutil.cpu_percent(interval=None)
         current_process = psutil.Process()
+        known_procs = {
+            (current_process.pid, current_process.create_time()): current_process
+        }
+        current_process.cpu_percent(interval=None)
+
         while not self._stop_event.is_set():
             try:
                 # CPU and Memory tracking for current process tree
-                total_cpu = current_process.cpu_percent(interval=None)
-                current_mem = current_process.memory_info().rss
-                for child in current_process.children(recursive=True):
+                all_procs = [current_process] + current_process.children(recursive=True)
+
+                total_cpu = 0.0
+                current_mem = 0.0
+                alive_keys = set()
+
+                for p in all_procs:
                     try:
-                        total_cpu += child.cpu_percent(interval=None)
-                        current_mem += child.memory_info().rss
+                        current_mem += p.memory_info().rss
+
+                        # CPU: Track processes across loops to properly calculate cpu_percent
+                        proc_key = (p.pid, p.create_time())
+                        alive_keys.add(proc_key)
+
+                        if proc_key not in known_procs:
+                            known_procs[proc_key] = p
+                            # Prime newly discovered process. As per psutil docs:
+                            # "the first time this is called it will return a meaningless
+                            # 0.0 value which you are supposed to ignore."
+                            p.cpu_percent(interval=None)
+                        else:
+                            total_cpu += known_procs[proc_key].cpu_percent(
+                                interval=None
+                            )
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
+
+                # Remove dead processes from tracking dictionary
+                known_procs = {
+                    k: proc for k, proc in known_procs.items() if k in alive_keys
+                }
 
                 # Normalize CPU by number of vcpus
                 global_cpu = total_cpu / self.vcpus
 
-                mem = current_mem
-
                 if global_cpu > self.max_cpu:
                     self.max_cpu = global_cpu
-                if mem > self.max_mem:
-                    self.max_mem = mem
+                if current_mem > self.max_mem:
+                    self.max_mem = current_mem
             except psutil.NoSuchProcess:
                 pass
 
