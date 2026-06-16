@@ -986,6 +986,7 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
         assert grandparent not in fs.dircache
         assert TEST_HNS_BUCKET not in fs.dircache
 
+
 class TestExtendedGcsFileSystemCacheHelpers:
     """Unit tests for the shared low-level dircache primitives."""
 
