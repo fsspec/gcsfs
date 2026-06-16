@@ -4,6 +4,11 @@ Hierarchical Namespace (HNS) enabled features.
 
 These tests are designed to run with mocked GCS backends to isolate and verify
 the logic within the filesystem extension without making real API calls.
+
+Test placement: keep HNS-specific ExtendedGcsFileSystem tests here. Standard
+filesystem behavior belongs in test_core.py, pure dircache strategy tests belong
+in test_dircache.py, and zonal-specific filesystem routing belongs in
+test_zonal_file.py.
 """
 
 import contextlib
@@ -18,8 +23,8 @@ from google.cloud import storage_control_v2
 from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
 from gcsfs.tests.conftest import requires_hns
-from gcsfs.tests.settings import TEST_HNS_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import is_real_gcs, tmpfile
+from gcsfs.tests.settings import TEST_HNS_BUCKET
+from gcsfs.tests.utils import is_real_gcs
 
 pytestmark = [requires_hns]
 
@@ -980,73 +985,6 @@ class TestExtendedGcsFileSystemWriteFileCacheUpdate:
         # any directory the write implicitly created.
         assert grandparent not in fs.dircache
         assert TEST_HNS_BUCKET not in fs.dircache
-
-    @pytest.mark.asyncio
-    async def test_pipe_file_zonal_routes_through_write_cache_update(self):
-        """The zonal pipe_file path routes its cache update through
-        _write_file_cache_update so the HNS single-level invalidation applies."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-        fs._grpc_client = mock.MagicMock()
-        path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
-
-        writer = mock.MagicMock()
-        writer.append = mock.AsyncMock()
-
-        with (
-            mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
-            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
-            mock.patch(
-                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
-                new_callable=mock.AsyncMock,
-                return_value=writer,
-            ),
-            mock.patch(
-                "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
-                new_callable=mock.AsyncMock,
-            ),
-            mock.patch.object(
-                fs, "_write_file_cache_update", new_callable=mock.AsyncMock
-            ) as mock_update,
-        ):
-            await fs._pipe_file(path, b"some-data")
-
-        mock_update.assert_awaited_once_with(path)
-
-    @pytest.mark.asyncio
-    async def test_put_file_zonal_routes_through_write_cache_update(self):
-        """The zonal put_file path routes its cache update through
-        _write_file_cache_update so the HNS single-level invalidation applies."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-        fs._grpc_client = mock.MagicMock()
-        rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
-
-        writer = mock.MagicMock()
-        writer.append_from_file = mock.AsyncMock()
-
-        with tmpfile() as lpath:
-            with open(lpath, "wb") as f:
-                f.write(b"some-data")
-
-            with (
-                mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
-                mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
-                mock.patch(
-                    "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
-                    new_callable=mock.AsyncMock,
-                    return_value=writer,
-                ),
-                mock.patch(
-                    "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
-                    new_callable=mock.AsyncMock,
-                ),
-                mock.patch.object(
-                    fs, "_write_file_cache_update", new_callable=mock.AsyncMock
-                ) as mock_update,
-            ):
-                await fs._put_file(lpath, rpath)
-
-        mock_update.assert_awaited_once_with(rpath)
-
 
 class TestExtendedGcsFileSystemCacheHelpers:
     """Unit tests for the shared low-level dircache primitives."""

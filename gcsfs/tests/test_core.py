@@ -29,6 +29,11 @@ TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
 TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 TEST_KMS_KEY = gcsfs.tests.settings.TEST_KMS_KEY
 
+# Test placement: keep common behavior and standard-bucket coverage in this
+# file. HNS-specific filesystem behavior belongs in test_extended_hns_gcsfs.py
+# or integration/test_extended_hns.py; zonal-specific behavior belongs in
+# test_zonal_file.py.
+
 
 def test_simple(gcs, monkeypatch):
     monkeypatch.setattr(GoogleCredentials, "tokens", None)
@@ -2419,6 +2424,31 @@ def test_copy_cache_invalidated(gcs):
 
     # Prior to fix the following failed as cache stale
     assert gcs.isfile(target_file2)
+
+
+def test_write_file_cache_invalidates_only_immediate_parent_standard(gcs, flat_bucket):
+    """Standard buckets use the write-cache shortcut when the parent is cached."""
+    base_dir = f"{flat_bucket}/write_cache_std_{uuid.uuid4().hex}"
+    parent_dir = f"{base_dir}/parent"
+    sibling_dir = f"{base_dir}/sibling"
+    new_file = f"{parent_dir}/new.txt"
+
+    gcs.touch(f"{parent_dir}/existing.txt")
+    gcs.touch(f"{sibling_dir}/sibling_file.txt")
+
+    gcs.ls(base_dir)
+    gcs.ls(parent_dir)
+    gcs.ls(sibling_dir)
+    assert base_dir in gcs.dircache
+    assert parent_dir in gcs.dircache
+    assert sibling_dir in gcs.dircache
+
+    gcs.pipe_file(new_file, b"hello world")
+
+    assert parent_dir not in gcs.dircache
+    assert base_dir in gcs.dircache
+    assert sibling_dir in gcs.dircache
+    assert new_file in gcs.ls(parent_dir, detail=False)
 
 
 def test_transaction(gcs):

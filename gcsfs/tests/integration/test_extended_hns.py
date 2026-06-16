@@ -10,6 +10,10 @@ configuration:
 Each test class within this module should focus on a specific filesystem operation
 that has been extended or modified to support HNS features, such as `mv` (rename)
 and `mkdir`.
+
+Test placement: keep real-GCS HNS behavior in this file. Standard-bucket
+integration behavior belongs in test_core.py; zonal-specific behavior belongs
+in zonal test modules such as test_zonal_file.py.
 """
 
 import uuid
@@ -1071,45 +1075,6 @@ class TestExtendedGcsFileSystemWriteCacheInvalidation:
         ), "Sibling directory cache should not be invalidated on write."
 
         # The new file is visible once the parent is re-listed.
-        assert new_file in gcsfs.ls(parent_dir, detail=False)
-
-    def test_write_file_cache_invalidates_only_immediate_parent_standard(
-        self, gcs_hns, flat_bucket
-    ):
-        """The single-level write shortcut is bucket-type-agnostic: on a standard
-        (non-HNS) bucket, writing into a cached directory likewise invalidates
-        only the immediate parent and leaves ancestor/sibling caches intact."""
-        gcsfs = gcs_hns
-        base_dir = f"{flat_bucket}/write_cache_std_{uuid.uuid4().hex}"
-        parent_dir = f"{base_dir}/parent"
-        sibling_dir = f"{base_dir}/sibling"
-        new_file = f"{parent_dir}/new.txt"
-
-        # --- Setup ---
-        gcsfs.touch(f"{parent_dir}/existing.txt")
-        gcsfs.touch(f"{sibling_dir}/sibling_file.txt")
-
-        # --- Populate Cache ---
-        gcsfs.ls(base_dir)
-        gcsfs.ls(parent_dir)
-        gcsfs.ls(sibling_dir)
-        assert base_dir in gcsfs.dircache
-        assert parent_dir in gcsfs.dircache
-        assert sibling_dir in gcsfs.dircache
-
-        # --- Perform write ---
-        gcsfs.pipe_file(new_file, b"hello world")
-
-        assert (
-            parent_dir not in gcsfs.dircache
-        ), "Immediate parent of written file should be invalidated."
-        assert (
-            base_dir in gcsfs.dircache
-        ), "Ancestor directory should not be invalidated on write."
-        assert (
-            sibling_dir in gcsfs.dircache
-        ), "Sibling directory cache should not be invalidated on write."
-
         assert new_file in gcsfs.ls(parent_dir, detail=False)
 
     def test_write_file_uncached_parent_invalidates_ancestors(self, gcs_hns):
