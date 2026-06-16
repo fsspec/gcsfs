@@ -21,7 +21,15 @@ import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.credentials import GoogleCredentials
-from gcsfs.tests.conftest import a, allfiles, b, csv_files, files, text_files
+from gcsfs.tests.conftest import (
+    a,
+    allfiles,
+    b,
+    csv_files,
+    files,
+    requires_real_gcs,
+    text_files,
+)
 from gcsfs.tests.utils import tempdir, tmpfile
 
 TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
@@ -269,6 +277,66 @@ def test_multi_upload(gcs):
         f.write(d)
     assert gcs.cat(fn) == d + b"xx" + d
     assert gcs.info(fn)["contentType"] == "application/octet-stream"
+
+
+def test_streaming_upload_aligns_non_final_chunk():
+    class MockGCSFileSystem:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, method, location, headers=None, data=None):
+            assert method == "POST"
+            assert location == "mock-location"
+            length = int(headers["Content-Length"])
+            content_range = headers["Content-Range"]
+            self.calls.append((headers, data))
+            assert length % gcsfs.core.GCS_MIN_BLOCK_SIZE == 0
+            assert content_range == f"bytes 0-{length - 1}/*"
+            return {"Range": f"bytes=0-{length - 1}"}, None
+
+    # Reproduces https://github.com/fsspec/gcsfs/issues/886:
+    # the reported failing request was 5,250,002 bytes. The default block size
+    # is 5 MiB (5,242,880 bytes), leaving a 7,122-byte unaligned overflow.
+    overflow = 7122
+    fs = MockGCSFileSystem()
+    f = gcsfs.core.GCSFile.__new__(gcsfs.core.GCSFile)
+    f.buffer = io.BytesIO(b"x" * (gcsfs.core.DEFAULT_BLOCK_SIZE + overflow))
+    f.offset = 0
+    f.autocommit = True
+    f.content_type = "application/octet-stream"
+    f.location = "mock-location"
+    f.gcsfs = fs
+    f.checker = gcsfs.checkers.get_consistency_checker(None)
+
+    assert f._upload_chunk(final=False) is False
+    assert len(fs.calls) == 1
+    assert len(fs.calls[0][1]) == gcsfs.core.DEFAULT_BLOCK_SIZE
+    assert f.buffer.getvalue() == b"x" * overflow
+    assert f.buffer.tell() == overflow
+    assert f.offset == gcsfs.core.DEFAULT_BLOCK_SIZE
+
+
+@requires_real_gcs
+def test_streaming_upload_unaligned_flush_real_gcs(gcs):
+    # Keep this in sync with test_streaming_upload_aligns_non_final_chunk. This
+    # is the same overflow reported in https://github.com/fsspec/gcsfs/issues/886.
+    overflow = 7122
+    first = b"x" * (gcsfs.core.DEFAULT_BLOCK_SIZE - 10)
+    second = b"y" * (overflow + 10)
+    path = f"{TEST_BUCKET}/streaming_unaligned_flush_{uuid.uuid4().hex}"
+
+    try:
+        with gcs.open(path, "wb") as f:
+            f.write(first)
+            f.write(second)
+
+        assert gcs.info(path)["size"] == len(first) + len(second)
+        assert gcs.cat(path) == first + second
+    finally:
+        try:
+            gcs.rm(path)
+        except FileNotFoundError:
+            pass
 
 
 def test_multi_upload_with_kms(gcs):

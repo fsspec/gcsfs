@@ -2252,8 +2252,16 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
             # Select the biggest possible chunk of data to be uploaded
             chunk_length = min(l, GCS_MAX_BLOCK_SIZE)
+            # This chunk finalizes the upload when it is the final flush, we are
+            # autocommitting, and all remaining data fits in a single chunk.
+            finalizes_upload = final and self.autocommit and chunk_length == l
+            if not finalizes_upload:
+                # GCS requires non-final resumable-upload chunks to be
+                # multiples of 256 KiB:
+                # https://cloud.google.com/storage/docs/performing-resumable-uploads#multiple-chunk-upload
+                chunk_length = (chunk_length // GCS_MIN_BLOCK_SIZE) * GCS_MIN_BLOCK_SIZE
             chunk = data[:chunk_length]
-            if final and self.autocommit and chunk_length == l:
+            if finalizes_upload:
                 if l:
                     # last chunk
                     head["Content-Range"] = "bytes %i-%i/%i" % (
