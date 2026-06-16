@@ -13,6 +13,7 @@ export STORAGE_EMULATOR_HOST=https://storage.googleapis.com
 export GCSFS_TEST_PROJECT=${PROJECT_ID}
 export GCSFS_TEST_KMS_KEY=projects/${PROJECT_ID}/locations/${REGION}/keyRings/${KEY_RING}/cryptoKeys/${KEY_NAME}
 export GOOGLE_CLOUD_PROJECT=${PROJECT_ID}
+export GCSFS_TEST_BUCKET_WORKER_SEPARATOR="${GCSFS_TEST_BUCKET_WORKER_SEPARATOR:--}"
 
 # Pytest Arguments
 ARGS=(
@@ -21,7 +22,13 @@ ARGS=(
   "--log-format=%(asctime)s %(levelname)s %(message)s"
   "--log-date-format=%H:%M:%S"
   --color=no
+  --durations=50
 )
+
+PYTEST_XDIST_WORKERS="${PYTEST_XDIST_WORKERS:-1}"
+if [[ "${PYTEST_XDIST_WORKERS}" =~ ^[0-9]+$ ]] && (( PYTEST_XDIST_WORKERS > 1 )); then
+  ARGS+=(-n "${PYTEST_XDIST_WORKERS}")
+fi
 
 echo "--- Running Test Suite: ${TEST_SUITE} ---"
 

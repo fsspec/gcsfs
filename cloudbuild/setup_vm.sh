@@ -10,7 +10,7 @@ python3 -m venv env
 source env/bin/activate
 
 pip install --upgrade pip > /dev/null
-pip install pytest pytest-timeout pytest-subtests pytest-asyncio build hatchling hatch-vcs fusepy google-cloud-storage > /dev/null
+pip install pytest pytest-timeout pytest-subtests pytest-asyncio pytest-xdist build hatchling hatch-vcs fusepy google-cloud-storage > /dev/null
 if [ "$INSTALL_GCSFS_FROM_PYPI" = "true" ]; then
     echo '--- Installing gcsfs from PyPI ---'
     pip install gcsfs > /dev/null

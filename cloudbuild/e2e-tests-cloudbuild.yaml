@@ -17,9 +17,19 @@ substitutions:
   _ZONE: "us-central1-a"
   _SHORT_BUILD_ID: ${BUILD_ID:0:8}
   _SKIP_IF_FAILED: '[[ -f /workspace/FAILED ]] && echo "⚠️ Skipping: Previous failure" && exit 0'
-  _TEST_ENV_VARS: "SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}'"
+  _TEST_ENV_VARS: "SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}' GCSFS_TEST_BUCKET_WORKER_SEPARATOR='-'"
   _INSTALL_FSSPEC_HEAD: "false"
   _INSTALL_GCSFS_FROM_PYPI: "false"
+  _MACHINE_TYPE: "n2-standard-16"
+  # Per-suite pytest-xdist worker counts. The heavy suites (standard, hns) run nearly
+  # all of gcsfs/ and are the wall-clock long poles, so they get more workers; zonal
+  # suites are small. Each value drives BOTH the suite's `pytest -n` AND the number of
+  # per-worker bucket variants created/deleted for that suite's buckets, so they must
+  # stay in lockstep. Tune from each build's step timings.
+  _WORKERS_STANDARD: "4"
+  _WORKERS_HNS: "8"
+  _WORKERS_ZONAL: "2"
+  _WORKERS_ZONAL_CORE: "2"
 
 steps:
   # Generate a persistent SSH key for this build run.
@@ -40,21 +50,45 @@ steps:
     waitFor: ["-"]
     allowFailure: true
 
-  # Create all necessary GCS buckets AND the GCE VM in parallel.
+  # Create the GCE VM. Split from bucket creation so that VM provisioning + setup
+  # (setup-vm) runs in parallel with bucket creation instead of waiting for it.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-resources"
+    id: "create-vm"
     entrypoint: "bash"
     args:
       - "-c"
       - |
         ${_SKIP_IF_FAILED}
-        bash cloudbuild/create_resources.sh || { echo "create-resources" >> /workspace/FAILED; exit 1; }
+        bash cloudbuild/create_vm.sh || { echo "create-vm" >> /workspace/FAILED; exit 1; }
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "ZONE=${_ZONE}"
+      - "SHORT_BUILD_ID=${_SHORT_BUILD_ID}"
+      - "ZONAL_VM_SERVICE_ACCOUNT=${_ZONAL_VM_SERVICE_ACCOUNT}"
+      - "MACHINE_TYPE=${_MACHINE_TYPE}"
+    waitFor: ["-"]
+    allowFailure: true
+
+  # Create all necessary GCS buckets (and per-worker variants) in parallel with
+  # VM provisioning/setup.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        bash cloudbuild/create_buckets.sh || { echo "create-buckets" >> /workspace/FAILED; exit 1; }
     env:
       - "PROJECT_ID=${PROJECT_ID}"
       - "REGION=${_REGION}"
       - "ZONE=${_ZONE}"
       - "SHORT_BUILD_ID=${_SHORT_BUILD_ID}"
-      - "ZONAL_VM_SERVICE_ACCOUNT=${_ZONAL_VM_SERVICE_ACCOUNT}"
+      - "WORKERS_STANDARD=${_WORKERS_STANDARD}"
+      - "WORKERS_HNS=${_WORKERS_HNS}"
+      - "WORKERS_ZONAL=${_WORKERS_ZONAL}"
+      - "WORKERS_ZONAL_CORE=${_WORKERS_ZONAL_CORE}"
+      - "GCSFS_TEST_BUCKET_WORKER_SEPARATOR=-"
     waitFor: ["-"]
     allowFailure: true
 
@@ -83,7 +117,7 @@ steps:
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
           --command="export INSTALL_FSSPEC_HEAD='${_INSTALL_FSSPEC_HEAD}' INSTALL_GCSFS_FROM_PYPI='${_INSTALL_GCSFS_FROM_PYPI}' && bash cloudbuild/setup_vm.sh" || { echo "setup-vm (setup script)" >> /workspace/FAILED; exit 1; }
-    waitFor: ["create-resources", "generate-ssh-key"]
+    waitFor: ["create-vm", "generate-ssh-key"]
     allowFailure: true
 
   # Run Tests (Parallel Blocks)
@@ -101,8 +135,8 @@ steps:
           --zone=${_ZONE} \
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
-          --command="export TEST_SUITE='standard' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-standard-tests" >> /workspace/FAILED; exit 1; }
-    waitFor: ["setup-vm", "create-resources"]
+          --command="export TEST_SUITE='standard' PYTEST_XDIST_WORKERS='${_WORKERS_STANDARD}' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-standard-tests" >> /workspace/FAILED; exit 1; }
+    waitFor: ["setup-vm", "create-buckets"]
     allowFailure: true
 
   # Zonal Tests
@@ -117,8 +151,8 @@ steps:
           --zone=${_ZONE} \
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
-          --command="export TEST_SUITE='zonal' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-zonal-tests" >> /workspace/FAILED; exit 1; }
-    waitFor: ["setup-vm", "create-resources"]
+          --command="export TEST_SUITE='zonal' PYTEST_XDIST_WORKERS='${_WORKERS_ZONAL}' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-zonal-tests" >> /workspace/FAILED; exit 1; }
+    waitFor: ["setup-vm", "create-buckets"]
     allowFailure: true
 
   # Zonal Core Tests
@@ -133,8 +167,8 @@ steps:
           --zone=${_ZONE} \
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
-          --command="export TEST_SUITE='zonal-core' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-zonal-core-tests" >> /workspace/FAILED; exit 1; }
-    waitFor: ["setup-vm", "create-resources"]
+          --command="export TEST_SUITE='zonal-core' PYTEST_XDIST_WORKERS='${_WORKERS_ZONAL_CORE}' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-zonal-core-tests" >> /workspace/FAILED; exit 1; }
+    waitFor: ["setup-vm", "create-buckets"]
     allowFailure: true
 
   # HNS Tests
@@ -149,8 +183,8 @@ steps:
           --zone=${_ZONE} \
           --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine \
-          --command="export TEST_SUITE='hns' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-hns-tests" >> /workspace/FAILED; exit 1; }
-    waitFor: ["setup-vm", "create-resources"]
+          --command="export TEST_SUITE='hns' PYTEST_XDIST_WORKERS='${_WORKERS_HNS}' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-hns-tests" >> /workspace/FAILED; exit 1; }
+    waitFor: ["setup-vm", "create-buckets"]
     allowFailure: true
 
   # Cleanup
@@ -165,6 +199,11 @@ steps:
       - "SHORT_BUILD_ID=${_SHORT_BUILD_ID}"
       - "ZONE=${_ZONE}"
       - "PROJECT_ID=${PROJECT_ID}"
+      - "WORKERS_STANDARD=${_WORKERS_STANDARD}"
+      - "WORKERS_HNS=${_WORKERS_HNS}"
+      - "WORKERS_ZONAL=${_WORKERS_ZONAL}"
+      - "WORKERS_ZONAL_CORE=${_WORKERS_ZONAL_CORE}"
+      - "GCSFS_TEST_BUCKET_WORKER_SEPARATOR=-"
     waitFor:
       [
         "run-standard-tests",
