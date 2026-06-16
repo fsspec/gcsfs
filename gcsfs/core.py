@@ -1591,7 +1591,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 [self._rm_file(f) for f in files], return_exceptions=True, batch_size=5
             )
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=100):
+        # 100 is the maximum number of operations allowed in a single GCS batch
+        # request (https://cloud.google.com/storage/docs/batch); using the full
+        # limit minimizes the number of round-trips when deleting many objects.
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
