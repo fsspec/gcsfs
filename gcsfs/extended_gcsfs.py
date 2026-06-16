@@ -1745,6 +1745,69 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         finally:
             await mrd_pool.close()
 
+    async def _get_file_concurrent(
+        self,
+        rpath,
+        lpath,
+        concurrency,
+        chunk_size,
+        max_prefetch_size,
+        headers=None,
+        callback=None,
+        fetcher_fn=None,
+        **kwargs,
+    ):
+        bucket, key, path_generation = self.split_path(rpath)
+
+        # Delegate standard buckets to the original implementation
+        if not await self._is_zonal_bucket(bucket):
+            return await super()._get_file_concurrent(
+                rpath,
+                lpath,
+                concurrency,
+                chunk_size,
+                max_prefetch_size,
+                headers=headers,
+                callback=callback,
+                fetcher_fn=fetcher_fn,
+                **kwargs,
+            )
+
+        generation = path_generation or kwargs.get("generation")
+
+        # Initialize the MRDPool once for this concurrent operation
+        mrd_pool = await self._mrd_pool_cache.get(
+            bucket, key, generation, pool_size=concurrency
+        )
+
+        # Define a custom fetcher that passes the pool to _cat_file
+        async def custom_fetcher(start, size, split_factor=1):
+            return await self._cat_file(
+                rpath,
+                start=start,
+                end=start + size,
+                mrd=mrd_pool,  # Inject the shared pool here
+                concurrency=split_factor,
+                headers=headers,
+                **kwargs,
+            )
+
+        try:
+            return await super()._get_file_concurrent(
+                rpath,
+                lpath,
+                concurrency,
+                chunk_size,
+                max_prefetch_size,
+                headers=headers,
+                callback=callback,
+                fetcher_fn=custom_fetcher,  # Pass our custom fetcher up the chain
+                **kwargs,
+            )
+        finally:
+            # Ensure the pool is closed when the download completes or fails
+            await mrd_pool.close()
+
     async def _do_list_objects(
         self,
         path,

@@ -1964,6 +1964,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         max_prefetch_size,
         headers=None,
         callback=None,
+        fetcher_fn=None,
         **kwargs,
     ):
         """Main orchestrator for concurrent file downloads utilizing BackgroundPrefetcher."""
@@ -2011,22 +2012,24 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         self._init_local_file(lpath, total_size)
         checker = get_consistency_checker(consistency)
 
-        async def fetcher(start, size, split_factor=1):
-            # No need to worry about MRDPool creation in _cat_file.
-            # Thanks to our in-house MRDPoolCache.
-            return await self._cat_file(
-                rpath,
-                start=start,
-                end=start + size,
-                concurrency=split_factor,
-                headers=headers,
-                **kwargs,
-            )
+        if fetcher_fn is None:
+
+            async def default_fetcher(start, size, split_factor=1):
+                return await self._cat_file(
+                    rpath,
+                    start=start,
+                    end=start + size,
+                    concurrency=split_factor,
+                    headers=headers,
+                    **kwargs,
+                )
+
+            fetcher_fn = default_fetcher
 
         from .prefetcher import BackgroundPrefetcher
 
         prefetcher = BackgroundPrefetcher(
-            fetcher=fetcher,
+            fetcher=fetcher_fn,
             size=total_size,
             concurrency=concurrency,
             max_prefetch_size=max_prefetch_size,
