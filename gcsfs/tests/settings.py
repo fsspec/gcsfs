@@ -3,8 +3,7 @@ import os
 
 def _get_bucket_name(env_var: str, default_name: str) -> str:
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
-    worker_separator = os.environ.get("GCSFS_TEST_BUCKET_WORKER_SEPARATOR", "_")
-    suffix = f"{worker_separator}{worker_id}" if worker_id else ""
+    suffix = f"-{worker_id}" if worker_id else ""
     return os.getenv(env_var, default_name) + suffix
 
 

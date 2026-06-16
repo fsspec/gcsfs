@@ -7,13 +7,12 @@ WORKERS_STANDARD="${WORKERS_STANDARD:-1}"
 WORKERS_HNS="${WORKERS_HNS:-1}"
 WORKERS_ZONAL="${WORKERS_ZONAL:-1}"
 WORKERS_ZONAL_CORE="${WORKERS_ZONAL_CORE:-1}"
-GCSFS_TEST_BUCKET_WORKER_SEPARATOR="${GCSFS_TEST_BUCKET_WORKER_SEPARATOR:--}"
 
 worker_suffixes() {
     local workers="$1"
     if [[ "${workers}" =~ ^[0-9]+$ ]] && (( workers > 1 )); then
         for ((i = 0; i < workers; i++)); do
-            echo "${GCSFS_TEST_BUCKET_WORKER_SEPARATOR}gw${i}"
+            echo "-gw${i}"
         done
     fi
 }

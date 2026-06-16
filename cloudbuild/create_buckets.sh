@@ -18,13 +18,27 @@ WORKERS_STANDARD="${WORKERS_STANDARD:-1}"
 WORKERS_HNS="${WORKERS_HNS:-1}"
 WORKERS_ZONAL="${WORKERS_ZONAL:-1}"
 WORKERS_ZONAL_CORE="${WORKERS_ZONAL_CORE:-1}"
-GCSFS_TEST_BUCKET_WORKER_SEPARATOR="${GCSFS_TEST_BUCKET_WORKER_SEPARATOR:--}"
+BACKGROUND_PIDS=()
+
+wait_for_background_jobs() {
+    local pid
+    local status=0
+
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        if ! wait "${pid}"; then
+            status=1
+        fi
+    done
+
+    BACKGROUND_PIDS=()
+    return "${status}"
+}
 
 worker_suffixes() {
     local workers="$1"
     if [[ "${workers}" =~ ^[0-9]+$ ]] && (( workers > 1 )); then
         for ((i = 0; i < workers; i++)); do
-            echo "${GCSFS_TEST_BUCKET_WORKER_SEPARATOR}gw${i}"
+            echo "-gw${i}"
         done
     fi
 }
@@ -38,12 +52,14 @@ create_bucket_variants() {
         --project="${PROJECT_ID}" \
         --location="${REGION}" \
         "$@" &
+    BACKGROUND_PIDS+=("$!")
 
     while IFS= read -r suffix; do
         gcloud storage buckets create "gs://${bucket_base}${suffix}" \
             --project="${PROJECT_ID}" \
             --location="${REGION}" \
             "$@" &
+        BACKGROUND_PIDS+=("$!")
     done < <(worker_suffixes "${workers}")
 }
 
@@ -53,9 +69,11 @@ update_bucket_variants() {
     shift 2
 
     gcloud storage buckets update "gs://${bucket_base}" "$@" &
+    BACKGROUND_PIDS+=("$!")
 
     while IFS= read -r suffix; do
         gcloud storage buckets update "gs://${bucket_base}${suffix}" "$@" &
+        BACKGROUND_PIDS+=("$!")
     done < <(worker_suffixes "${workers}")
 }
 
@@ -97,7 +115,7 @@ create_bucket_variants "${WORKERS_ZONAL_CORE}" "gcsfs-test-zonal-core-${SHORT_BU
     --uniform-bucket-level-access
 
 # Wait for all background bucket creation jobs to finish
-wait
+wait_for_background_jobs
 
 echo "--- Enabling versioning on versioned bucket ---"
 update_bucket_variants "${WORKERS_STANDARD}" "gcsfs-test-versioned-${SHORT_BUILD_ID}" \
@@ -111,4 +129,4 @@ echo "--- Enabling requester pays on standard bucket ---"
 update_bucket_variants "${WORKERS_STANDARD}" "gcsfs-test-standard-req-pay-${SHORT_BUILD_ID}" \
     --requester-pays
 
-wait
+wait_for_background_jobs

@@ -17,7 +17,7 @@ substitutions:
   _ZONE: "us-central1-a"
   _SHORT_BUILD_ID: ${BUILD_ID:0:8}
   _SKIP_IF_FAILED: '[[ -f /workspace/FAILED ]] && echo "⚠️ Skipping: Previous failure" && exit 0'
-  _TEST_ENV_VARS: "SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}' GCSFS_TEST_BUCKET_WORKER_SEPARATOR='-'"
+  _TEST_ENV_VARS: "SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}'"
   _INSTALL_FSSPEC_HEAD: "false"
   _INSTALL_GCSFS_FROM_PYPI: "false"
   _MACHINE_TYPE: "n2-standard-16"
@@ -88,7 +88,6 @@ steps:
       - "WORKERS_HNS=${_WORKERS_HNS}"
       - "WORKERS_ZONAL=${_WORKERS_ZONAL}"
       - "WORKERS_ZONAL_CORE=${_WORKERS_ZONAL_CORE}"
-      - "GCSFS_TEST_BUCKET_WORKER_SEPARATOR=-"
     waitFor: ["-"]
     allowFailure: true
 
@@ -203,7 +202,6 @@ steps:
       - "WORKERS_HNS=${_WORKERS_HNS}"
       - "WORKERS_ZONAL=${_WORKERS_ZONAL}"
       - "WORKERS_ZONAL_CORE=${_WORKERS_ZONAL_CORE}"
-      - "GCSFS_TEST_BUCKET_WORKER_SEPARATOR=-"
     waitFor:
       [
         "run-standard-tests",
