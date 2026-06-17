@@ -25,9 +25,10 @@ ARGS=(
 )
 
 PYTEST_XDIST_WORKERS="${PYTEST_XDIST_WORKERS:-1}"
-if [[ "${PYTEST_XDIST_WORKERS}" =~ ^[0-9]+$ ]] && (( PYTEST_XDIST_WORKERS > 1 )); then
-  ARGS+=(-n "${PYTEST_XDIST_WORKERS}")
+if ! [[ "${PYTEST_XDIST_WORKERS}" =~ ^[0-9]+$ ]] || (( PYTEST_XDIST_WORKERS <= 0 )); then
+  PYTEST_XDIST_WORKERS=1
 fi
+ARGS+=(-n "${PYTEST_XDIST_WORKERS}")
 
 echo "--- Running Test Suite: ${TEST_SUITE} ---"
 

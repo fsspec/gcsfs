@@ -2,27 +2,35 @@
 set -e
 
 # Per-suite worker counts must match those used by create_buckets.sh so that every
-# variant created is also deleted (no orphaned buckets).
+# worker variant created is also deleted.
 WORKERS_STANDARD="${WORKERS_STANDARD:-1}"
 WORKERS_HNS="${WORKERS_HNS:-1}"
 WORKERS_ZONAL="${WORKERS_ZONAL:-1}"
 WORKERS_ZONAL_CORE="${WORKERS_ZONAL_CORE:-1}"
 
+worker_count() {
+    local workers="$1"
+    if [[ "${workers}" =~ ^[0-9]+$ ]] && (( workers > 0 )); then
+        echo "${workers}"
+    else
+        echo "1"
+    fi
+}
+
 worker_suffixes() {
     local workers="$1"
-    if [[ "${workers}" =~ ^[0-9]+$ ]] && (( workers > 1 )); then
-        for ((i = 0; i < workers; i++)); do
-            echo "-gw${i}"
-        done
-    fi
+    local count
+    count="$(worker_count "${workers}")"
+
+    for ((i = 0; i < count; i++)); do
+        echo "-gw${i}"
+    done
 }
 
 delete_bucket_variants() {
     local workers="$1"
     local bucket_base="$2"
     shift 2
-
-    gcloud storage rm --recursive "gs://${bucket_base}" "$@" || true &
 
     while IFS= read -r suffix; do
         gcloud storage rm --recursive "gs://${bucket_base}${suffix}" "$@" || true &

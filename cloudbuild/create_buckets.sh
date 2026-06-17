@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-# Creates all GCS buckets (and their per-xdist-worker variants) needed by the
+# Creates all GCS buckets (or their per-xdist-worker variants) needed by the
 # integration tests.
 #
 # Split out of the former create_resources.sh so that bucket creation runs in
@@ -8,8 +8,8 @@ set -e
 #
 # Per-suite worker counts: each suite runs `pytest -n <N>` and each xdist worker
 # uses its own bucket variant (`<base>-gw<i>`, see gcsfs/tests/settings.py). Each
-# bucket group is used by exactly one suite, so we create that group's variants at
-# the suite's worker count. These MUST match the per-suite PYTEST_XDIST_WORKERS
+# bucket group is used by exactly one suite, so we create that group's bucket names
+# at the suite's worker count. These MUST match the per-suite PYTEST_XDIST_WORKERS
 # passed to the test steps, or workers will reference buckets that don't exist.
 #
 # Note: Variables like $PROJECT_ID, $REGION, $ZONE are passed via 'env' in cloudbuild.yaml
@@ -19,6 +19,15 @@ WORKERS_HNS="${WORKERS_HNS:-1}"
 WORKERS_ZONAL="${WORKERS_ZONAL:-1}"
 WORKERS_ZONAL_CORE="${WORKERS_ZONAL_CORE:-1}"
 BACKGROUND_PIDS=()
+
+worker_count() {
+    local workers="$1"
+    if [[ "${workers}" =~ ^[0-9]+$ ]] && (( workers > 0 )); then
+        echo "${workers}"
+    else
+        echo "1"
+    fi
+}
 
 wait_for_background_jobs() {
     local pid
@@ -36,23 +45,18 @@ wait_for_background_jobs() {
 
 worker_suffixes() {
     local workers="$1"
-    if [[ "${workers}" =~ ^[0-9]+$ ]] && (( workers > 1 )); then
-        for ((i = 0; i < workers; i++)); do
-            echo "-gw${i}"
-        done
-    fi
+    local count
+    count="$(worker_count "${workers}")"
+
+    for ((i = 0; i < count; i++)); do
+        echo "-gw${i}"
+    done
 }
 
 create_bucket_variants() {
     local workers="$1"
     local bucket_base="$2"
     shift 2
-
-    gcloud storage buckets create "gs://${bucket_base}" \
-        --project="${PROJECT_ID}" \
-        --location="${REGION}" \
-        "$@" &
-    BACKGROUND_PIDS+=("$!")
 
     while IFS= read -r suffix; do
         gcloud storage buckets create "gs://${bucket_base}${suffix}" \
@@ -67,9 +71,6 @@ update_bucket_variants() {
     local workers="$1"
     local bucket_base="$2"
     shift 2
-
-    gcloud storage buckets update "gs://${bucket_base}" "$@" &
-    BACKGROUND_PIDS+=("$!")
 
     while IFS= read -r suffix; do
         gcloud storage buckets update "gs://${bucket_base}${suffix}" "$@" &
