@@ -1148,7 +1148,9 @@ def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
                             assert (
                                 len(actual_ranges) == expected_chunks
                             ), f"Expected {expected_chunks} chunks (Request + Readahead), got {len(actual_ranges)}"
-                            actual_offsets = sorted(range_[0] for range_ in actual_ranges)
+                            actual_offsets = sorted(
+                                range_[0] for range_ in actual_ranges
+                            )
                             expected_offsets = [offset]
                             if len(actual_ranges) == 2:
                                 expected_offsets.append(offset + length)
