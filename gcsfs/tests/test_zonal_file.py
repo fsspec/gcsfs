@@ -676,20 +676,20 @@ def test_zonal_file_fetch_range_with_prefetch_engine(mock_sync, mock_gcsfs):
     mock_engine = mock.Mock()
     zf._prefetch_engine = mock_engine
 
-    mock_engine._fetch.return_value = b"all_data"
+    mock_engine.fetch.return_value = b"all_data"
     result = zf._fetch_range(start=0, end=10)
     assert result == b"all_data"
-    mock_engine._fetch.assert_called_once_with(0, 10)
+    mock_engine.fetch.assert_called_once_with(0, 10)
 
     mock_engine.reset_mock()
-    mock_engine._fetch.side_effect = [b"chunk1", b"chunk2"]
+    mock_engine.fetch.side_effect = [b"chunk1", b"chunk2"]
     result = zf._fetch_range(start=0, chunk_lengths=[6, 6])
     assert result == [b"chunk1", b"chunk2"]
-    mock_engine._fetch.assert_has_calls([mock.call(0, 6), mock.call(6, 12)])
+    mock_engine.fetch.assert_has_calls([mock.call(0, 6), mock.call(6, 12)])
 
     mock_engine.reset_mock()
-    mock_engine._fetch.side_effect = None
-    mock_engine._fetch.return_value = b"short"
+    mock_engine.fetch.side_effect = None
+    mock_engine.fetch.return_value = b"short"
 
     result = zf._fetch_range(start=0, chunk_lengths=[10])
     assert result == [b""]
@@ -758,7 +758,7 @@ def test_zonal_file_fetch_range_unhandled_runtime_error(mock_sync, mock_gcsfs):
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
     mock_engine = mock.Mock()
     zf._prefetch_engine = mock_engine
-    mock_engine._fetch.side_effect = RuntimeError(
+    mock_engine.fetch.side_effect = RuntimeError(
         "A completely different error occurred"
     )
 
