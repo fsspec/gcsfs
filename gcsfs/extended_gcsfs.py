@@ -26,6 +26,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
+from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.core import GCSFile, GCSFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
@@ -77,7 +78,7 @@ async def _get_mrd_size(mrd_or_pool):
         return m.persisted_size
 
 
-class ExtendedGcsFileSystem(GCSFileSystem):
+class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     """
     This class will be used when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT env variable is set to true.
     ExtendedGcsFileSystem is a subclass of GCSFileSystem that adds new logic for bucket types
@@ -634,81 +635,6 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
 
-    def _update_dircache_after_rename(self, path1, path2):
-        """
-        Performs a targeted update of the directory cache after a successful
-        folder rename operation.
-
-        This involves three main steps:
-        1. Removing the source folder and all its descendants from the cache.
-        2. Removing the source folder's entry from its parent's listing.
-        3. Adding the new destination folder's entry to its parent's listing.
-
-        Args:
-            path1 (str): The source path that was renamed.
-            path2 (str): The destination path.
-        """
-        # 1. Find and remove all descendant paths of the source from the cache.
-        source_prefix = f"{path1.rstrip('/')}/"
-        for key in list(self.dircache):
-            if key.startswith(source_prefix):
-                self.dircache.pop(key, None)
-
-        # 2. Remove the old source entry from its parent's listing.
-        self.dircache.pop(path1, None)
-        parent1 = self._parent(path1)
-        if parent1 in self.dircache:
-            self.dircache[parent1] = [
-                e for e in self.dircache[parent1] if e.get("name") != path1
-            ]
-
-        # 3. Invalidate the destination path and update its parent's cache.
-        self.dircache.pop(path2, None)
-        parent2 = self._parent(path2)
-        if parent2 in self.dircache:
-            _, key2, _ = self.split_path(path2)
-            new_entry = {
-                "Key": key2,
-                "Size": 0,
-                "name": path2,
-                "size": 0,
-                "type": "directory",
-                "storageClass": "DIRECTORY",
-            }
-            self.dircache[parent2].append(new_entry)
-
-    async def _mv_file_cache_update(self, path1, path2, response=None):
-        """
-        Update the cache after a file move operation.
-
-        For HNS-enabled buckets where the move is within the same bucket, this method
-        directly updates the directory cache by removing the source entry from it's
-        parent cache and adding destination path as a new entry in it's corresponding parent cache.
-        This avoids invalidating the entire parent directory cache, which is beneficial for HNS
-        performance.
-
-        For non-HNS buckets or cross-bucket moves, it falls back to the default
-        behavior (invalidating the cache for both source and destination parents).
-        """
-        src_bucket, _, _ = self.split_path(path1)
-        dest_bucket, _, _ = self.split_path(path2)
-
-        if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
-            src_parent = self._parent(path1)
-            if src_parent in self.dircache:
-                path1_stripped = self._strip_protocol(path1)
-                self.dircache[src_parent] = [
-                    e
-                    for e in self.dircache[src_parent]
-                    if e.get("name") != path1_stripped
-                ]
-            dest_parent = self._parent(path2)
-            if dest_parent in self.dircache and response:
-                new_entry = self._process_object(dest_bucket, response)
-                self.dircache[dest_parent].append(new_entry)
-        else:
-            await super()._mv_file_cache_update(path1, path2, response)
-
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
@@ -937,17 +863,10 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
             # Instead of invalidating the parent cache, update it to add the new entry.
-            parent_path = self._parent(path)
-            if parent_path in self.dircache:
-                new_entry = {
-                    "Key": key.rstrip("/"),
-                    "Size": 0,
-                    "name": path,
-                    "size": 0,
-                    "type": "directory",
-                    "storageClass": "DIRECTORY",
-                }
-                self.dircache[parent_path].append(new_entry)
+            self._cache_add_entry(
+                self._parent(path),
+                self._directory_cache_entry(path, key.rstrip("/")),
+            )
         except api_exceptions.Conflict as e:
             logger.debug(f"Directory already exists: {path}: {e}")
         except api_exceptions.FailedPrecondition as e:
@@ -1066,12 +985,8 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
             # Remove the directory from the cache and from its parent's listing.
             self.dircache.pop(path, None)
-            parent = self._parent(path)
-            if parent in self.dircache:
-                # Remove the deleted directory entry from the parent's listing.
-                self.dircache[parent] = [
-                    e for e in self.dircache[parent] if e.get("name") != path
-                ]
+            # Remove the deleted directory entry from the parent's listing.
+            self._cache_drop_entries(self._parent(path), {path})
             return
         except api_exceptions.NotFound as e:
             # This can happen if the directory does not exist, or if the path
@@ -1587,7 +1502,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
             await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
-        self.invalidate_cache(self._parent(rpath))
+        await self._write_file_cache_update(rpath)
 
     async def _pipe_file(
         self,
@@ -1659,7 +1574,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
             await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
-        self.invalidate_cache(self._parent(path))
+        await self._write_file_cache_update(path)
 
     async def _get_file(self, rpath, lpath, callback=None, **kwargs):
         """

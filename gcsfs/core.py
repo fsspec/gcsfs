@@ -27,6 +27,7 @@ from fsspec.implementations.http import get_client
 from fsspec.utils import other_paths, setup_logging, stringify_path
 
 from . import __version__ as version
+from ._dircache import DirCacheUpdater
 from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed
 from .credentials import GoogleCredentials
@@ -179,7 +180,7 @@ def _is_directory_marker(entry):
     return entry["size"] == 0 and entry["name"].endswith("/")
 
 
-class GCSFileSystem(asyn.AsyncFileSystem):
+class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
 
@@ -1436,11 +1437,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 json_out=True,
                 sourceGeneration=g1,
             )
-        self.invalidate_cache(self._parent(path2))
-
-    async def _mv_file_cache_update(self, path1, path2, response=None):
-        self.invalidate_cache(self._parent(path1))
-        self.invalidate_cache(self._parent(path2))
+        await self._write_file_cache_update(path2)
 
     async def _mv_file(self, path1, path2, **kwargs):
         src_bucket, src_key, generation1 = self.split_path(path1)
@@ -1484,9 +1481,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         bucket, key, generation = self.split_path(path)
         if key:
             await self._call("DELETE", "b/{}/o/{}", bucket, key, generation=generation)
-            # TODO: This can be optimized for HNS buckets by not invalidating the entire parent
-            # directory structure from cache but to just remove the deleted file entry from immediate parent's cache.
-            self.invalidate_cache(posixpath.dirname(self._strip_protocol(path)))
+            await self._rm_file_cache_update(path)
         else:
             await self._rmdir(path)
 
@@ -1539,18 +1534,21 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             )
 
             boundary = headers["Content-Type"].split("=", 1)[1]
-            parents = set(self._parent(p) for p in paths) | set(paths)
-            [self.invalidate_cache(parent) for parent in parents]
             txt = content.decode()
             responses = txt.split(boundary)[1:-1]
+            deleted = []
+            confirmed_absent = []
             for path, response in zip(paths, responses):
                 m = re.search("HTTP/[0-9.]+ ([0-9]+)", response)
                 code = int(m.groups()[0]) if m else None
                 if code in [200, 204]:
                     out.append(path)
+                    deleted.append(path)
                 elif code in errs and retry < 5:
                     remaining.append(path)
                 else:
+                    if code == 404:
+                        confirmed_absent.append(path)
                     msg = re.search("{(.*)}", response.replace("\n", ""))
                     if msg:
                         msg2 = re.search("({.*})", msg.groups()[0])
@@ -1560,6 +1558,14 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                         out.append(OSError(msg2.groups()[0]))
                     else:
                         out.append(OSError(f"{path}: {code}"))
+            # Only update the cache for objects we actually deleted, or that GCS
+            # confirms are already absent. Updating it for other failed paths
+            # would evict still-present objects from the cache (the HNS targeted
+            # update mutates the parent listing in place and does not self-correct
+            # on the next listing).
+            cache_updates = deleted + confirmed_absent
+            if cache_updates:
+                await self._rm_files_cache_update(cache_updates)
             if remaining:
                 paths = remaining
                 await asyncio.sleep(min(random.random() + 2 ** (retry - 1), 32))
@@ -1682,7 +1688,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             checker.update(data)
             checker.validate_json_response(out)
 
-        self.invalidate_cache(self._parent(path))
+        await self._write_file_cache_update(path)
         return location
 
     async def _put_file(
@@ -1761,7 +1767,7 @@ class GCSFileSystem(asyn.AsyncFileSystem):
 
                 checker.validate_json_response(out)
 
-            self.invalidate_cache(self._parent(rpath))
+            await self._write_file_cache_update(rpath)
 
     async def _isdir(self, path):
 

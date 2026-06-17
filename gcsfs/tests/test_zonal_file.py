@@ -1,4 +1,10 @@
-"""Tests for ZonalFile write operations."""
+"""Tests for zonal write operations.
+
+Test placement: keep zonal-specific write behavior here, including ZonalFile
+tests and ExtendedGcsFileSystem zonal write routing tests. Standard filesystem
+behavior belongs in test_core.py; HNS-specific behavior belongs in
+test_extended_hns_gcsfs.py or integration/test_extended_hns.py.
+"""
 
 import asyncio
 import os
@@ -9,6 +15,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
 
+from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests.conftest import requires_rapid
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
@@ -17,6 +24,72 @@ from gcsfs.zonal_file import ZonalFile
 test_data = b"hello world"
 
 pytestmark = [requires_rapid]
+
+
+class TestZonalGcsFileSystemWriteFileCacheUpdate:
+    @pytest.mark.asyncio
+    async def test_pipe_file_zonal_routes_through_write_cache_update(self):
+        """The zonal pipe_file path routes through the shared cache updater."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append = mock.AsyncMock()
+
+        with (
+            mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                new_callable=mock.AsyncMock,
+                return_value=writer,
+            ),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                new_callable=mock.AsyncMock,
+            ),
+            mock.patch.object(
+                fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+            ) as mock_update,
+        ):
+            await fs._pipe_file(path, b"some-data")
+
+        mock_update.assert_awaited_once_with(path)
+
+    @pytest.mark.asyncio
+    async def test_put_file_zonal_routes_through_write_cache_update(self):
+        """The zonal put_file path routes through the shared cache updater."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append_from_file = mock.AsyncMock()
+
+        with tmpfile() as lpath:
+            with open(lpath, "wb") as f:
+                f.write(b"some-data")
+
+            with (
+                mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+                mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                    new_callable=mock.AsyncMock,
+                    return_value=writer,
+                ),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                    new_callable=mock.AsyncMock,
+                ),
+                mock.patch.object(
+                    fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+                ) as mock_update,
+            ):
+                await fs._put_file(lpath, rpath)
+
+        mock_update.assert_awaited_once_with(rpath)
 
 
 @pytest.fixture
