@@ -1148,9 +1148,11 @@ def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
                             assert (
                                 len(actual_ranges) == expected_chunks
                             ), f"Expected {expected_chunks} chunks (Request + Readahead), got {len(actual_ranges)}"
-                            assert actual_ranges[0][0] == offset
+                            actual_offsets = sorted(range_[0] for range_ in actual_ranges)
+                            expected_offsets = [offset]
                             if len(actual_ranges) == 2:
-                                assert actual_ranges[1][0] == offset + length
+                                expected_offsets.append(offset + length)
+                            assert actual_offsets == expected_offsets
                     else:
                         mocks["downloader"].download_ranges.assert_not_called()
 
