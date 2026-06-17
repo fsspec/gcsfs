@@ -537,10 +537,12 @@ class MRDPool:
                 raise RuntimeError("Cannot initialize a closed MRDPool.")
 
             if not self._initialized and self._active_count == 0:
-                if not self.finalized:
-                    mrd = await self._create_mrd()
-                else:
+                if self.finalized:
                     mrd = await self._get_or_create_mrd()
+                else:
+                    # Always create a new MRD for unfinalized objects to get the up-to-date persisted_size
+                    mrd = await self._create_mrd()
+                    self._all_mrds.append(mrd)
                 self.persisted_size = mrd.persisted_size
                 self._free_mrds.put_nowait(mrd)
                 self._active_count += 1
