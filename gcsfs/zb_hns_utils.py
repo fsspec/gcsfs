@@ -465,6 +465,7 @@ class MRDPool:
         bucket_name,
         object_name,
         generation,
+        finalized,
         pool_size,
         cache=None,
     ):
@@ -480,6 +481,7 @@ class MRDPool:
         self._lock = asyncio.Lock()
         self.details = None
         self.persisted_size = None
+        self.finalized = finalized
         self._initialized = False
         self._closed = False
 
@@ -535,9 +537,12 @@ class MRDPool:
                 raise RuntimeError("Cannot initialize a closed MRDPool.")
 
             if not self._initialized and self._active_count == 0:
-                # Always create a new MRD on initialization to get the up-to-date persisted_size
-                mrd = await self._create_mrd()
-                self._all_mrds.append(mrd)
+                if self.finalized:
+                    mrd = await self._get_or_create_mrd()
+                else:
+                    # Always create a new MRD for unfinalized objects to get the up-to-date persisted_size
+                    mrd = await self._create_mrd()
+                    self._all_mrds.append(mrd)
                 self.persisted_size = mrd.persisted_size
                 self._free_mrds.put_nowait(mrd)
                 self._active_count += 1
@@ -728,11 +733,11 @@ class MRDPoolCache:
         if fs is None:
             raise RuntimeError("ExtendedGcsFileSystem has been garbage collected.")
 
-        info = None
+        info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
         if generation is None:
-            info = await fs._info(f"{bucket_name}/{object_name}")
             generation = info.get("generation")
         key = (bucket_name, object_name, generation)
+        finalized = info.get("timeFinalized") is not None
 
         self._incref(key)
         mrd_pool = MRDPool(
@@ -740,6 +745,7 @@ class MRDPoolCache:
             bucket_name,
             object_name,
             generation,
+            finalized,
             pool_size,
             cache=self,
         )

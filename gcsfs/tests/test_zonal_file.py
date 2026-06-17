@@ -789,6 +789,9 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     fs.loop = asyncio.new_event_loop()
     fs._get_grpc_client = mock.AsyncMock()
     fs.grpc_client = mock.Mock()
+    fs._info = mock.AsyncMock(
+        return_value={"generation": "1", "timeFinalized": "2026-06-17T00:00:00Z"}
+    )
 
     from gcsfs.zb_hns_utils import MRDPoolCache
 
@@ -810,15 +813,17 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     # Verify reuse after close
     pool_c = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=2)
 
-    assert init_mrd_mock.await_count == 3  # 2 from before + 1 from pool_c init
+    assert (
+        init_mrd_mock.await_count == 2
+    )  # 2 from before, pool_c init reuses from cache
 
     async with pool_c.get_mrd() as m1:
-        assert m1 is mock_mrds[2]  # The one created in pool_c.initialize()
+        assert m1 is a_mrd  # Reused from cache during pool_c.initialize()
 
         async with pool_c.get_mrd() as m2:
-            assert m2 is b_mrd or m2 is a_mrd  # Reused from cache
+            assert m2 is b_mrd  # Reused from cache during get_mrd()
 
-    assert init_mrd_mock.await_count == 3  # No new calls in get_mrd
+    assert init_mrd_mock.await_count == 2  # No new calls at all
 
     await pool_c.close()
     await fs._mrd_pool_cache.close()
@@ -828,7 +833,13 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
 @pytest.mark.asyncio
 async def test_mrd_pool_cache_sets_pool_details():
     fs = mock.Mock()
-    fs._info = mock.AsyncMock(return_value={"generation": "123", "size": 100})
+    fs._info = mock.AsyncMock(
+        return_value={
+            "generation": "123",
+            "size": 100,
+            "timeFinalized": "2026-06-17T00:00:00Z",
+        }
+    )
 
     from gcsfs.zb_hns_utils import MRDPoolCache
 
@@ -839,4 +850,8 @@ async def test_mrd_pool_cache_sets_pool_details():
         mock_pool.return_value.initialize = mock.AsyncMock()
         pool = await cache.get("bucket", "key", generation=None, pool_size=1)
 
-    assert pool.details == {"generation": "123", "size": 100}
+    assert pool.details == {
+        "generation": "123",
+        "size": 100,
+        "timeFinalized": "2026-06-17T00:00:00Z",
+    }

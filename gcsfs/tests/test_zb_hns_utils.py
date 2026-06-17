@@ -26,7 +26,7 @@ async def test_shared_mrd_closed_only_by_last_holder():
         async def close(self):
             self.close_count += 1
 
-    pool = MRDPool(mock.Mock(), "b", "o", 1, pool_size=1, cache=None)
+    pool = MRDPool(mock.Mock(), "b", "o", 1, True, 1, cache=None)
     pool._create_mrd = mock.AsyncMock(side_effect=lambda: FakeMRD())
 
     await pool.initialize()
@@ -304,7 +304,7 @@ async def test_mrd_pool_close():
         "google.cloud.storage.asyncio.async_multi_range_downloader.AsyncMultiRangeDownloader.create_mrd",
         return_value=mrd_instance_mock,
     ):
-        pool = MRDPool(gcsfs_mock, "bucket", "obj", "123", pool_size=1)
+        pool = MRDPool(gcsfs_mock, "bucket", "obj", "123", True, 1)
         await pool.initialize()
 
         await pool.close()
@@ -316,6 +316,9 @@ async def test_mrd_pool_close():
 def mock_gcsfs():
     gcsfs_mock = mock.Mock()
     gcsfs_mock._get_grpc_client = mock.AsyncMock()
+    gcsfs_mock._info = mock.AsyncMock(
+        return_value={"generation": "123", "timeFinalized": "2026-06-17T00:00:00Z"}
+    )
     return gcsfs_mock
 
 
@@ -332,7 +335,7 @@ async def test_mrd_pool_scaling(create_mrd_mock, mock_gcsfs):
 
     create_mrd_mock.side_effect = mock_mrd_factory
 
-    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=2)
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 2)
 
     await pool.initialize()
     assert pool.persisted_size == 1024
@@ -356,7 +359,7 @@ async def test_mrd_pool_scaling(create_mrd_mock, mock_gcsfs):
     new_callable=mock.AsyncMock,
 )
 async def test_mrd_pool_double_initialize(create_mrd_mock, mock_gcsfs):
-    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=2)
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 2)
 
     await pool.initialize()
     await pool.initialize()  # Second call should be a no-op
@@ -367,7 +370,7 @@ async def test_mrd_pool_double_initialize(create_mrd_mock, mock_gcsfs):
 
 @pytest.mark.asyncio
 async def test_mrd_pool_initialize_after_close(mock_gcsfs):
-    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 1)
     await pool.close()
 
     with pytest.raises(RuntimeError, match="Cannot initialize a closed MRDPool"):
@@ -386,7 +389,7 @@ async def test_mrd_pool_get_mrd_creation_error(create_mrd_mock, mock_gcsfs):
     # Second creation fails when pool tries to scale
     create_mrd_mock.side_effect = [valid_mrd, Exception("Network Error")]
 
-    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=2)
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 2)
     await pool.initialize()
 
     # Consume the initialized MRD
@@ -413,7 +416,7 @@ async def test_mrd_pool_close_with_exceptions(create_mrd_mock, mock_gcsfs):
     bad_mrd_instance.close.side_effect = RuntimeError("Close failed")
     create_mrd_mock.return_value = bad_mrd_instance
 
-    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 1)
     await pool.initialize()
 
     with pytest.raises(RuntimeError, match="Close failed"):
@@ -425,7 +428,7 @@ async def test_mrd_pool_close_with_exceptions(create_mrd_mock, mock_gcsfs):
 
 @pytest.mark.asyncio
 async def test_mrd_pool_queue_filled_during_lock_wait(mock_gcsfs):
-    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=1)
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 1)
     mrd_mock = mock.AsyncMock()
 
     # Simulate _create_mrd so we correctly populate _all_mrds
@@ -462,7 +465,7 @@ async def test_mrd_pool_queue_filled_during_lock_wait(mock_gcsfs):
 
 @pytest.mark.asyncio
 async def test_mrd_pool_round_robin_multi_request(mock_gcsfs):
-    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", pool_size=2)
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 2)
     mrd1 = mock.AsyncMock()
     mrd2 = mock.AsyncMock()
 
@@ -740,9 +743,7 @@ async def test_mrd_pool_get_mrd_from_local_free_queue(mock_cache):
     mock_mrd = mock.AsyncMock()
     mock_cache.queue.append(mock_mrd)
 
-    mrd_pool = MRDPool(
-        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
-    )
+    mrd_pool = MRDPool(mock.Mock(), "bucket", "obj", "123", True, 2, cache=mock_cache)
     async with mrd_pool.get_mrd() as mrd:
         assert mrd is mock_mrd
         assert mrd_pool._active_count == 1
@@ -762,9 +763,7 @@ async def test_mrd_pool_get_mrd_creates_when_empty(
     new_mrd = mock.AsyncMock()
     init_mrd_mock.return_value = new_mrd
 
-    mrd_pool = MRDPool(
-        mock_gcsfs, "bucket", "obj", "123", pool_size=2, cache=mock_cache
-    )
+    mrd_pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 2, cache=mock_cache)
     async with mrd_pool.get_mrd() as mrd:
         assert mrd is new_mrd
 
@@ -778,9 +777,7 @@ async def test_mrd_pool_get_mrd_creates_when_empty(
 async def test_mrd_pool_pool_size_cap(init_mrd_mock, mock_cache, mock_gcsfs):
     init_mrd_mock.side_effect = lambda *a, **kw: mock.AsyncMock()
 
-    mrd_pool = MRDPool(
-        mock_gcsfs, "bucket", "obj", "123", pool_size=2, cache=mock_cache
-    )
+    mrd_pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 2, cache=mock_cache)
     # Hold two slots open concurrently
     async with mrd_pool.get_mrd(), mrd_pool.get_mrd():
         assert mrd_pool._active_count == 2
@@ -803,9 +800,7 @@ async def test_mrd_pool_create_failure_decrements_active(
     init_mrd_mock, mock_cache, mock_gcsfs
 ):
     init_mrd_mock.side_effect = RuntimeError("init failed")
-    mrd_pool = MRDPool(
-        mock_gcsfs, "bucket", "obj", "123", pool_size=2, cache=mock_cache
-    )
+    mrd_pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 2, cache=mock_cache)
 
     with pytest.raises(RuntimeError, match="init failed"):
         async with mrd_pool.get_mrd():
@@ -828,9 +823,7 @@ async def test_mrd_pool_close_donates_and_repools(mock_cache):
 
     mock_mrd_a = mock.AsyncMock()
     mock_mrd_b = mock.AsyncMock()
-    mrd_pool = MRDPool(
-        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
-    )
+    mrd_pool = MRDPool(mock.Mock(), "bucket", "obj", "123", True, 2, cache=mock_cache)
     mrd_pool._free_mrds.put_nowait(mock_mrd_a)
     mrd_pool._free_mrds.put_nowait(mock_mrd_b)
     mrd_pool._all_mrds.extend([mock_mrd_a, mock_mrd_b])
@@ -853,9 +846,7 @@ async def test_mrd_pool_close_idempotent(mock_cache):
 
     mock_cache.release = mock.AsyncMock(side_effect=mock_release)
 
-    mrd_pool = MRDPool(
-        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
-    )
+    mrd_pool = MRDPool(mock.Mock(), "bucket", "obj", "123", True, 2, cache=mock_cache)
     await mrd_pool.close()
     await mrd_pool.close()  # second call is a no-op
 
@@ -866,9 +857,7 @@ async def test_mrd_pool_close_idempotent(mock_cache):
 async def test_mrd_pool_get_mrd_after_close_raises(mock_cache):
     mock_cache.release = mock.AsyncMock()
 
-    mrd_pool = MRDPool(
-        mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache
-    )
+    mrd_pool = MRDPool(mock.Mock(), "bucket", "obj", "123", True, 2, cache=mock_cache)
     await mrd_pool.close()
 
     with pytest.raises(RuntimeError, match="MRDPool is closed"):
@@ -878,7 +867,7 @@ async def test_mrd_pool_get_mrd_after_close_raises(mock_cache):
 
 @pytest.mark.asyncio
 async def test_mrd_pool_close_concurrently(mock_cache):
-    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache)
+    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", True, 2, cache=mock_cache)
 
     # Mock release to take some time to yield control
     async def slow_release(key, mrds):
@@ -895,7 +884,7 @@ async def test_mrd_pool_close_concurrently(mock_cache):
 
 @pytest.mark.asyncio
 async def test_mrd_pool_close_exception_handling(mock_cache):
-    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", pool_size=2, cache=mock_cache)
+    pool = MRDPool(mock.Mock(), "bucket", "obj", "123", True, 2, cache=mock_cache)
     mrd = mock.AsyncMock()
     pool._all_mrds.append(mrd)
     pool._free_mrds.put_nowait(mrd)
@@ -1080,10 +1069,14 @@ async def test_mrd_pool_cache_release_reuses_mrd_on_get(init_mrd_mock, mock_gcsf
     b = await cache.get("bucket", "obj", "1", pool_size=2)
 
     async with b.get_mrd() as m1:
-        assert m1 is mock_mrds[1]  # The one created in b.initialize()
+        assert (
+            m1 is a_mrd
+        )  # Reused from cache (originally from a) during b.initialize()
 
         async with b.get_mrd() as m2:
-            assert m2 is a_mrd  # Reused from cache (originally from a)
+            assert (
+                m2 is mock_mrds[1]
+            )  # Created on demand since cache is empty and pool size is 2
 
     assert init_mrd_mock.await_count == 2
 
@@ -1276,3 +1269,74 @@ def test_direct_memmove_buffer_zero_byte_write_error_state():
     buf._error = None
     buf._stop_accepting_writes = True
     executor.shutdown()
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_finalized_reuses_cached_mrd_on_init(
+    init_mrd_mock, mock_cache, mock_gcsfs
+):
+    # Cached MRD
+    cached_mrd = mock.AsyncMock()
+    cached_mrd.persisted_size = 100
+    mock_cache.queue.append(cached_mrd)
+
+    # Create finalized pool (finalized=True)
+    mrd_pool = MRDPool(
+        mock_gcsfs,
+        "bucket",
+        "obj",
+        "123",
+        finalized=True,
+        pool_size=1,
+        cache=mock_cache,
+    )
+
+    # Initialize. Should reuse cached MRD.
+    await mrd_pool.initialize()
+    assert mrd_pool.persisted_size == 100
+    init_mrd_mock.assert_not_called()  # Should not create new MRD
+    assert len(mock_cache.queue) == 0  # Cached MRD was reused
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_unfinalized_reuses_cached_mrd_after_init(
+    init_mrd_mock, mock_cache, mock_gcsfs
+):
+    # Cached MRD
+    cached_mrd = mock.AsyncMock()
+    cached_mrd.persisted_size = 100
+    mock_cache.queue.append(cached_mrd)
+
+    # New MRD for initialization
+    new_mrd = mock.AsyncMock()
+    new_mrd.persisted_size = 200
+    init_mrd_mock.return_value = new_mrd
+
+    # Create unfinalized pool (finalized=False)
+    mrd_pool = MRDPool(
+        mock_gcsfs,
+        "bucket",
+        "obj",
+        "123",
+        finalized=False,
+        pool_size=2,
+        cache=mock_cache,
+    )
+
+    # 1. Initialize. Should create a new MRD (not reuse cached one) to get up-to-date size.
+    await mrd_pool.initialize()
+    assert mrd_pool.persisted_size == 200
+    init_mrd_mock.assert_awaited_once()  # Created new MRD
+    assert len(mock_cache.queue) == 1  # Cached MRD still in cache
+
+    # 2. Get MRDs. First should be new_mrd, second should be cached_mrd (scale up).
+    async with mrd_pool.get_mrd() as mrd1:
+        assert mrd1 is new_mrd
+        async with mrd_pool.get_mrd() as mrd2:
+            assert mrd2 is cached_mrd
+            assert len(mock_cache.queue) == 0  # Cached MRD was reused
+
+    # init_mrd should not have been called again
+    assert init_mrd_mock.await_count == 1
