@@ -445,7 +445,7 @@ steps:
       - "-c"
       - |
         if [[ -f /workspace/FAILED ]]; then
-          echo "Build failed. The following steps reported failures:"
+          echo "GCSFS Microbenchmark Build failed. The following steps reported failures:"
           sort -u /workspace/FAILED | sed 's/^/ - /'
           exit 1
         fi
