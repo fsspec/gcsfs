@@ -450,6 +450,91 @@ class TestExtendedGcsFileSystemMkdir:
         assert gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.HIERARCHICAL
 
 
+class TestExtendedGcsFileSystemMakedirs:
+    """Integration tests for the makedirs method in ExtendedGcsFileSystem."""
+
+    def test_hns_makedirs_success(self, gcs_hns):
+        """Test successful HNS folder creation via makedirs."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/new_dir_integration_{uuid.uuid4().hex}"
+        dir_path = f"{base_dir}/nested/one_more"
+
+        try:
+            gcsfs.makedirs(dir_path)
+            assert gcsfs.isdir(dir_path)
+            assert gcsfs.isdir(f"{base_dir}/nested")
+            assert gcsfs.isdir(base_dir)
+        finally:
+            try:
+                gcsfs.rm(base_dir, recursive=True)
+            except FileNotFoundError:
+                pass
+
+    def test_hns_makedirs_existing_dir_exist_ok_true(self, gcs_hns):
+        """Test makedirs when folder already exists and exist_ok=True (no-op)."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/existing_dir_makedirs_{uuid.uuid4().hex}"
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.isdir(dir_path)
+
+        try:
+            gcsfs.makedirs(dir_path, exist_ok=True)
+            assert gcsfs.isdir(dir_path)
+        finally:
+            try:
+                gcsfs.rm(dir_path, recursive=True)
+            except FileNotFoundError:
+                pass
+
+    def test_hns_makedirs_existing_dir_exist_ok_false(self, gcs_hns):
+        """Test makedirs raises FileExistsError if folder exists and exist_ok=False."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/existing_dir_makedirs_fail_{uuid.uuid4().hex}"
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.isdir(dir_path)
+
+        try:
+            with pytest.raises(FileExistsError):
+                gcsfs.makedirs(dir_path, exist_ok=False)
+        finally:
+            try:
+                gcsfs.rm(dir_path, recursive=True)
+            except FileNotFoundError:
+                pass
+
+    def test_hns_makedirs_existing_file_error(self, gcs_hns):
+        """Test makedirs raises FileExistsError if a file exists at the path."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/existing_file_makedirs_{uuid.uuid4().hex}.txt"
+        gcsfs.touch(file_path)
+        assert gcsfs.isfile(file_path)
+
+        try:
+            with pytest.raises(FileExistsError):
+                gcsfs.makedirs(file_path, exist_ok=True)
+
+            with pytest.raises(FileExistsError):
+                gcsfs.makedirs(file_path, exist_ok=False)
+        finally:
+            try:
+                gcsfs.rm(file_path)
+            except FileNotFoundError:
+                pass
+
+    def test_makedirs_in_non_existent_bucket_with_create_parents_succeeds(
+        self, gcs_hns, buckets_to_delete
+    ):
+        """Test that makedirs with create_parents behavior creates the bucket."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-bm-{uuid.uuid4().hex[:12]}"
+        dir_path = f"{bucket_name}/some/nested/dir"
+        buckets_to_delete.add(bucket_name)
+
+        assert not gcsfs.exists(bucket_name)
+        gcsfs.makedirs(dir_path)
+        assert gcsfs.exists(bucket_name)
+
+
 class TestExtendedGcsFileSystemRmdir:
     """Integration tests for the rmdir method in ExtendedGcsFileSystem."""
 

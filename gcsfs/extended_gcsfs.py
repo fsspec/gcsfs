@@ -885,6 +885,54 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     mkdir = asyn.sync_wrapper(_mkdir)
 
+    async def _makedirs(self, path, exist_ok=False):
+        """Recursively make directories.
+
+        Creates directory at path and any intervening required directories.
+        For HNS buckets, it creates native folder objects and respects the `exist_ok` parameter.
+
+        Parameters
+        ----------
+        path : str
+            Leaf directory name.
+        exist_ok : bool (False)
+            If False, will error if the target directory already exists.
+            If True, will succeed silently if it exists as a directory, but
+            will still error if it exists as a file.
+
+        Raises
+        ------
+        FileExistsError
+            If `exist_ok` is False and the directory already exists, or if a
+            file already exists at the target path regardless of `exist_ok`.
+        """
+        bucket, key, _ = self.split_path(path)
+
+        if not key:
+            await super()._makedirs(path, exist_ok=exist_ok)
+            return
+
+        # Fall back to parent class for non-HNS buckets
+        is_hns = await self._is_bucket_hns_enabled(bucket)
+        if not is_hns:
+            await super()._makedirs(path, exist_ok=exist_ok)
+            return
+
+        # For HNS buckets, check existence and path type
+        try:
+            info = await self._info(path)
+            if info["type"] != "directory":
+                raise FileExistsError(f"A file already exists at the path: {path}")
+            if not exist_ok:
+                raise FileExistsError(f"Directory already exists: {path}")
+            return
+        except FileNotFoundError:
+            pass
+
+        await self._mkdir(path, create_parents=True)
+
+    makedirs = asyn.sync_wrapper(_makedirs)
+
     async def _get_directory_info(self, path, bucket, key, generation):
         """
         Override to use Storage Control API's get_folder for HNS buckets.

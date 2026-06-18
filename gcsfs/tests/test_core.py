@@ -2319,6 +2319,32 @@ def test_mkdir_with_path(gcs):
     gcs.rm(f"{TEST_BUCKET + 'new'}", recursive=True)
 
 
+def test_makedirs(gcs, buckets_to_delete):
+    # Test recursive bucket creation via makedirs on standard GCS
+    bucket_name = f"gcsfs-makedirs-{uuid4().hex[:12]}"
+    dir_path = f"{bucket_name}/some/nested/dir"
+    buckets_to_delete.add(bucket_name)
+
+    assert not gcs.exists(bucket_name)
+    try:
+        gcs.makedirs(dir_path)
+        assert gcs.exists(bucket_name)
+
+        # makedirs is a no-op on flat namespace, should not fail or raise FileExistsError
+        gcs.makedirs(dir_path, exist_ok=False)
+        gcs.makedirs(dir_path, exist_ok=True)
+
+        # Test bucket-only makedirs with exist_ok
+        gcs.makedirs(bucket_name, exist_ok=True)
+        with pytest.raises(FileExistsError):
+            gcs.makedirs(bucket_name, exist_ok=False)
+    finally:
+        try:
+            gcs.rm(bucket_name, recursive=True)
+        except FileNotFoundError:
+            pass
+
+
 def test_deep_find_wthdirs(gcs):
     gcs.touch(f"{TEST_BUCKET}/deep/nested/dir")
     assert gcs.find(f"{TEST_BUCKET}/deep/nested") == [f"{TEST_BUCKET}/deep/nested/dir"]
