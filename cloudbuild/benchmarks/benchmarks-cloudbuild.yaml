@@ -171,7 +171,7 @@ steps:
             --labels="build-id=$$RUN_ID" \
             --quiet \
             "$${EXTRA_ARGS[@]}"
-    waitFor: ["init-variables"]
+    waitFor: ["cleanup-leaked-resources"]
     allowFailure: true
 
   # 5. Run benchmarks.
