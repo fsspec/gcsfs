@@ -130,16 +130,6 @@ To reproduce using more combinations, please see the `gcsfs/perf/microbenchmarks
      - 628.59
      - 64.50
      - ~9x
-   * - 1 MB
-     - 48 Processes
-     - 16932
-     - 2202
-     - ~7x
-   * - 16 MB
-     - 48 Processes
-     - 19213.27
-     - 4010.50
-     - ~4x
 
 .. list-table:: **Random Reads Throughput (MB/s)**
    :header-rows: 1
@@ -159,16 +149,6 @@ To reproduce using more combinations, please see the `gcsfs/perf/microbenchmarks
      - 602.12
      - 66.92
      - ~9x
-   * - 64 KB
-     - 48 Processes
-     - 2081
-     - 51
-     - ~40x
-   * - 16 MB
-     - 48 Processes
-     - 21448
-     - 4504
-     - ~4x
 
 .. list-table:: **Writes Throughput (MB/s)**
    :header-rows: 1
