@@ -4,6 +4,20 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.5.0
+--------
+
+* add pypi environment to release workflow (#836)
+* fix HttpError message formatting and handle None content in validate_response (#835)
+* adjust fsspec dependency version constraint (#834)
+* add support for partial prefixes in find method for HNS buckets (#831)
+* fix issue with special characters in rm method (#831)
+* update zonal doc (#828)
+* add workflow to automate PyPI package publishing on release (#824)
+* enable branch-wise tracking in benchmarks (#819)
+* update the benchmark config, and fix the block size propagation (#808)
+* integrate prefetcher engine with zonal buckets (#805)
+
 2026.4.0
 --------
 
