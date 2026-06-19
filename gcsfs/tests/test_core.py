@@ -3499,8 +3499,8 @@ def test_get_headers_includes_cache_type(gcs):
 
 
 def test_user_agent_includes_cache_type_in_read(gcs):
-    # Zonal buckets use gRPC path which does not use HTTP client,
-    # and we only implemented HTTP User-Agent changes for now.
+    # TODO(lankita): Remove this skip when User-Agent is updated to include cache_type for gRPC/rapid buckets.
+    # Zonal buckets currently use the gRPC path which does not use the HTTP client.
     if hasattr(gcs, "_is_zonal_bucket") and sync(
         gcs.loop, gcs._is_zonal_bucket, TEST_BUCKET
     ):
