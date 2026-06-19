@@ -3478,3 +3478,67 @@ def test_open_generation_forwarded():
         mock_gcs_file.assert_called_once()
         _, kwargs = mock_gcs_file.call_args
         assert kwargs.get("generation") == "123"
+
+
+def test_get_headers_includes_cache_type(gcs):
+    # Test that _get_headers correctly appends cache_type to User-Agent
+    headers = gcs._get_headers(None, cache_type="test_cache")
+    assert "cache_type/test_cache" in headers["User-Agent"]
+    assert "python-gcsfs/" in headers["User-Agent"]
+
+    # Test that it doesn't append if cache_type is None
+    headers_none = gcs._get_headers(None, cache_type=None)
+    assert "cache_type/" not in headers_none["User-Agent"]
+    assert headers_none["User-Agent"] == "python-gcsfs/" + version
+
+    # Test that it doesn't override if User-Agent is already present
+    headers_preset = gcs._get_headers({"User-Agent": "custom-ua"}, cache_type="test_cache")
+    assert headers_preset["User-Agent"] == "custom-ua"
+
+
+@pytest.mark.asyncio
+async def test_gcsfile_propagates_cache_type(gcs):
+    import json
+    path = TEST_BUCKET + "/test_cache_file"
+    captured_headers = []
+
+    def mock_request_side_effect(method, url, *args, **kwargs):
+        captured_headers.append(kwargs.get("headers", {}))
+        response = mock.Mock()
+        response.status = 200
+        response.headers = {}
+        response.request_info = mock.Mock()
+        
+        if "download" in url or "alt=media" in url:
+            response.read = mock.AsyncMock(return_value=b"some data")
+        else:
+            # Metadata request (JSON)
+            metadata = {
+                "kind": "storage#object",
+                "name": "test_cache_file",
+                "bucket": TEST_BUCKET,
+                "size": "9",
+                "generation": "1",
+                "timeFinalized": "2026-06-19T00:00:00Z",
+            }
+            response.read = mock.AsyncMock(return_value=json.dumps(metadata).encode())
+            
+        m = mock.AsyncMock()
+        m.__aenter__ = mock.AsyncMock(return_value=response)
+        return m
+
+    await gcs._set_session()
+
+    with mock.patch.object(
+        gcs.session,
+        "request",
+        side_effect=mock_request_side_effect
+    ):
+        f = gcsfs.core.GCSFile(gcs, path, mode="rb", cache_type="mmap")
+        data = await f._async_fetch_range(0, 9)
+        
+        assert data == b"some data"
+        
+        user_agents = [h.get("User-Agent") for h in captured_headers]
+        assert f"python-gcsfs/{version} cache_type/mmap" in user_agents
+        assert f"python-gcsfs/{version}" in user_agents
