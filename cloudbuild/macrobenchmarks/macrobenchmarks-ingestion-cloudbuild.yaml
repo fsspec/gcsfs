@@ -1,0 +1,89 @@
+substitutions:
+  _DATASET_NAME: ""
+  _INFRA_PREFIX: ""
+
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'ensure-dataset'
+    entrypoint: 'bash'
+    waitFor: ['-']
+    args:
+      - '-c'
+      - |
+        if [ -z "${_DATASET_NAME}" ] || [ -z "${_INFRA_PREFIX}" ]; then
+          echo "ERROR: _DATASET_NAME and _INFRA_PREFIX are required."; exit 1
+        fi
+        # Namespace the dataset by infra prefix so each prefixed results bucket
+        # always lands in its own dataset (stable per-dataset dedup; two prefixes
+        # never clobber one history table). BigQuery dataset names allow only
+        # [A-Za-z0-9_], so collapse the hyphens infra prefixes carry. The $$ is
+        # Cloud Build's escape for a literal $ (this is a shell var, not a
+        # substitution); the leading ${_...} are Cloud Build substitutions.
+        DATASET_NAME=$$(echo "${_INFRA_PREFIX}_${_DATASET_NAME}" | tr '-' '_')
+        bq show ${PROJECT_ID}:$${DATASET_NAME} || \
+        bq mk --dataset --location=${LOCATION} ${PROJECT_ID}:$${DATASET_NAME}
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'update-staging-table'
+    entrypoint: 'bash'
+    waitFor: ['ensure-dataset']
+    args:
+      - '-c'
+      - |
+        set -e
+        # _INFRA_PREFIX selects the results bucket the external table reads
+        # (gs://<_INFRA_PREFIX>-macrobench-results/*.csv); a missing value would
+        # render gs://-macrobench-results and silently read nothing. Require it
+        # here too (not only in ensure-dataset) so this step is safe in isolation.
+        if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_DATASET_NAME}" ]; then
+          echo "ERROR: _INFRA_PREFIX and _DATASET_NAME are required."; exit 1
+        fi
+        # Same namespaced dataset as ensure-dataset (kept self-contained).
+        DATASET_NAME=$$(echo "${_INFRA_PREFIX}_${_DATASET_NAME}" | tr '-' '_')
+        # Render the @INFRA_PREFIX@ placeholder into a /workspace copy rather
+        # than editing the checked-in schema in place (keeps the tracked file
+        # pristine and the build idempotent/re-runnable).
+        sed "s/@INFRA_PREFIX@/${_INFRA_PREFIX}/g" \
+          cloudbuild/macrobenchmarks/macrobenchmarks_schema.json \
+          > /workspace/staging_schema.json
+        # Fail loudly if the placeholder survived (e.g. the value was empty or
+        # the schema drifted) rather than creating a table over a bad URI.
+        if grep -q '@INFRA_PREFIX@' /workspace/staging_schema.json; then
+          echo "ERROR: _INFRA_PREFIX was not applied to the staging schema."; exit 1
+        fi
+        # Drop the external table if it exists to force a clean recreation and schema update
+        bq --project_id=${PROJECT_ID} rm -f $${DATASET_NAME}.staging
+
+        bq --project_id=${PROJECT_ID} mk \
+          --external_table_definition=/workspace/staging_schema.json \
+          $${DATASET_NAME}.staging
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'run-ingestion'
+    entrypoint: 'bash'
+    waitFor: ['update-staging-table']
+    args:
+      - '-c'
+      - |
+        set -e
+        if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_DATASET_NAME}" ]; then
+          echo "ERROR: _INFRA_PREFIX and _DATASET_NAME are required."; exit 1
+        fi
+        # Same namespaced dataset as the prior steps (kept self-contained).
+        DATASET_NAME=$$(echo "${_INFRA_PREFIX}_${_DATASET_NAME}" | tr '-' '_')
+        # Render placeholders into a /workspace copy; BigQuery cannot bind table
+        # identifiers as query parameters, so they are substituted textually,
+        # but never into the tracked source file.
+        sed -e "s/@PROJECT_ID@/${PROJECT_ID}/g" \
+            -e "s/@DATASET_NAME@/$${DATASET_NAME}/g" \
+            cloudbuild/macrobenchmarks/ingest.sql > /workspace/ingest.sql
+        bq query --use_legacy_sql=false \
+                 --project_id=${PROJECT_ID} \
+                 < /workspace/ingest.sql
+
+timeout: "14400s"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${LOCATION}/workerPools/cloud-build-worker-pool"
