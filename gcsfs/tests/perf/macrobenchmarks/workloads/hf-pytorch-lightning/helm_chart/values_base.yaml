@@ -1,0 +1,40 @@
+# Default values for the gcsfs-only CPU emulator.
+# 2 c4-standard-192 nodes x 8 procs per node = 16 ranks.
+
+# Pins workloads to the c4-standard-192 node pool created by the run pipeline.
+nodeSelector:
+  cloud.google.com/gke-nodepool: c4-standard-192
+
+serviceAccount: default
+namespace: default
+workload_launcher: launcher.sh
+
+workload:
+  configFile: llama_3_1_8b_cpu_sim.py
+  configPath: /workload/configs/
+  image: nvcr.io/nvidia/pytorch:25.01-py3
+  nodes: 2
+  ranksPerNode: 8
+  singlePodPerNode: true
+  steps: 100
+  hfToken:
+  ckptWriterInterval: 25
+  ckptToKeep: 1
+  modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
+  # gcsfs-under-test (git ref or gcsfs==<version>); fed to launcher REQUIREMENTS.
+  requirements:
+  envs:
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: LOG_LEVEL
+      value: INFO
+    - name: GCSFS_LOG_LEVEL
+      value: INFO
+
+# gcsfs-only storage configuration (gs:// via gcsfs/fsspec). The experimental
+# zonal-bucket/HNS path is on by default in gcsfs (GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT
+# defaults to "true"), so it is intentionally not set here.
+gcsfs:
+  datasetPath: ""
+  ckptWritePath: ""
+  ckptLoadPath: ""
