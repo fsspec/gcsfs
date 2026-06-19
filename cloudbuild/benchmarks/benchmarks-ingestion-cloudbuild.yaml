@@ -31,9 +31,9 @@ steps:
         sed -i "s/@INFRA_PREFIX@/${_INFRA_PREFIX}/g" cloudbuild/benchmarks/benchmarks_schema.json
 
         # Drop the external table if it exists to force a clean recreation and schema update
-        bq rm --project_id=${PROJECT_ID} -f ${_DATASET_NAME}.staging
+        bq --project_id=${PROJECT_ID} rm -f ${_DATASET_NAME}.staging
 
-        bq mk --project_id=${PROJECT_ID} \
+        bq --project_id=${PROJECT_ID} mk \
           --external_table_definition=cloudbuild/benchmarks/benchmarks_schema.json \
           ${_DATASET_NAME}.staging
 
