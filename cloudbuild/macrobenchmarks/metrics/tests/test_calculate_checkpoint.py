@@ -93,4 +93,3 @@ def test_empty():
     assert calculate.calc_write_metrics([]) == {}
     assert calculate.calc_restore_metrics([]) == {}
     assert calculate.calc_delete_metrics([]) == {}
-
