@@ -30,9 +30,11 @@ steps:
         # Inject the dynamically provided bucket name into the JSON schema
         sed -i "s/@INFRA_PREFIX@/${_INFRA_PREFIX}/g" cloudbuild/benchmarks/benchmarks_schema.json
 
+        # Drop the external table if it exists to force a clean recreation and schema update
+        bq rm --project_id=${PROJECT_ID} -f ${_DATASET_NAME}.staging
+
         bq mk --project_id=${PROJECT_ID} \
           --external_table_definition=cloudbuild/benchmarks/benchmarks_schema.json \
-          --force \
           ${_DATASET_NAME}.staging
 
   # Step 2: Perform Token Replacement and run ingestion script
