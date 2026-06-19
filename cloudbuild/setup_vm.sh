@@ -3,7 +3,7 @@ set -e
 
 echo '--- Installing dependencies on VM ---'
 sudo apt-get update > /dev/null
-sudo apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git > /dev/null
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3-venv fuse fuse3 libfuse2 git > /dev/null
 
 echo '--- Installing Python and dependencies on VM ---'
 python3 -m venv env

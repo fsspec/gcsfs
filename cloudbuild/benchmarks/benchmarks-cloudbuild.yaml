@@ -22,9 +22,9 @@ steps:
       - "-c"
       - |
         mkdir -p /workspace/.ssh
-        ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
+        ssh-keygen -q -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
-        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h > /dev/null
     waitFor: ["-"]
 
   # 2. Initialize shared variables.
@@ -445,7 +445,7 @@ steps:
       - "-c"
       - |
         if [[ -f /workspace/FAILED ]]; then
-          echo "Build failed. The following steps reported failures:"
+          echo "GCSFS Microbenchmark Build failed. The following steps reported failures:"
           sort -u /workspace/FAILED | sed 's/^/ - /'
           exit 1
         fi
