@@ -1465,7 +1465,10 @@ async def test_upload_chunk_shortfall():
     args2, kwargs2 = call_args_list[1]
     assert kwargs2["headers"]["Content-Range"] == "bytes 5-9/10"
 
-    assert kwargs2["data"].getvalue() == b"56789"
+    sent_data = kwargs2["data"]
+    if hasattr(sent_data, "getvalue"):
+        sent_data = sent_data.getvalue()
+    assert sent_data == b"56789"
 
 
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
