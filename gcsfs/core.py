@@ -491,7 +491,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     @retry_request(retries=retries)
     async def _request(
-        self, method, path, *args, headers=None, json=None, data=None, cache_type=None, **kwargs
+        self,
+        method,
+        path,
+        *args,
+        headers=None,
+        json=None,
+        data=None,
+        cache_type=None,
+        **kwargs,
     ):
         await self._set_session()
         if hasattr(data, "seek"):

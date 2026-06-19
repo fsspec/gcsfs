@@ -3492,53 +3492,31 @@ def test_get_headers_includes_cache_type(gcs):
     assert headers_none["User-Agent"] == "python-gcsfs/" + version
 
     # Test that it doesn't override if User-Agent is already present
-    headers_preset = gcs._get_headers({"User-Agent": "custom-ua"}, cache_type="test_cache")
+    headers_preset = gcs._get_headers(
+        {"User-Agent": "custom-ua"}, cache_type="test_cache"
+    )
     assert headers_preset["User-Agent"] == "custom-ua"
 
 
-@pytest.mark.asyncio
-async def test_gcsfile_propagates_cache_type(gcs):
-    import json
-    path = TEST_BUCKET + "/test_cache_file"
-    captured_headers = []
-
-    def mock_request_side_effect(method, url, *args, **kwargs):
-        captured_headers.append(kwargs.get("headers", {}))
-        response = mock.Mock()
-        response.status = 200
-        response.headers = {}
-        response.request_info = mock.Mock()
-        
-        if "download" in url or "alt=media" in url:
-            response.read = mock.AsyncMock(return_value=b"some data")
-        else:
-            # Metadata request (JSON)
-            metadata = {
-                "kind": "storage#object",
-                "name": "test_cache_file",
-                "bucket": TEST_BUCKET,
-                "size": "9",
-                "generation": "1",
-                "timeFinalized": "2026-06-19T00:00:00Z",
-            }
-            response.read = mock.AsyncMock(return_value=json.dumps(metadata).encode())
-            
-        m = mock.AsyncMock()
-        m.__aenter__ = mock.AsyncMock(return_value=response)
-        return m
-
-    await gcs._set_session()
+def test_user_agent_includes_cache_type_in_read(gcs):
+    fn = TEST_BUCKET + "/2014-01-01.csv"
 
     with mock.patch.object(
-        gcs.session,
-        "request",
-        side_effect=mock_request_side_effect
-    ):
-        f = gcsfs.core.GCSFile(gcs, path, mode="rb", cache_type="mmap")
-        data = await f._async_fetch_range(0, 9)
-        
-        assert data == b"some data"
-        
-        user_agents = [h.get("User-Agent") for h in captured_headers]
-        assert f"python-gcsfs/{version} cache_type/mmap" in user_agents
-        assert f"python-gcsfs/{version}" in user_agents
+        gcs.session, "request", wraps=gcs.session.request
+    ) as mock_session_request:
+        with gcs.open(fn, "rb", block_size=10, cache_type="mmap") as f:
+            out = []
+            while True:
+                data = f.read(3)
+                if data == b"":
+                    break
+                out.append(data)
+            assert gcs.cat(fn) == b"".join(out)
+
+        # Verify that the user-agent header has cache_type
+        user_agents = [
+            call.kwargs.get("headers", {}).get("User-Agent")
+            for call in mock_session_request.call_args_list
+        ]
+        expected_ua = f"python-gcsfs/{version} cache_type/mmap"
+        assert expected_ua in user_agents
