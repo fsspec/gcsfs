@@ -12,8 +12,9 @@ import functools
 import json
 import os
 
-SCHEMA_PATH = os.path.join(os.path.dirname(__file__), os.pardir,
-                           "macrobenchmarks_schema.json")
+SCHEMA_PATH = os.path.join(
+    os.path.dirname(__file__), os.pardir, "macrobenchmarks_schema.json"
+)
 
 
 @functools.lru_cache(maxsize=1)
@@ -26,5 +27,4 @@ def external_table_definition() -> dict:
 @functools.lru_cache(maxsize=1)
 def fieldnames() -> list:
     """Summary CSV column names, in BigQuery-schema declaration order."""
-    return [field["name"]
-            for field in external_table_definition()["schema"]["fields"]]
+    return [field["name"] for field in external_table_definition()["schema"]["fields"]]

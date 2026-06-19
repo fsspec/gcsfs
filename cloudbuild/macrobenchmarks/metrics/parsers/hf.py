@@ -15,18 +15,44 @@ from typing import Dict, Iterable, List
 from metrics import raw_store, schema
 
 # --- regexes (verbatim from tessellations hf.py) ---------------------------
-STEP_METRICS_PATTERN = r"Global Rank: 0 \| Step: ([0-9]+) \| Loss: [0-9.]+ \| Step Time: ([0-9.]+)s \| Throughput: [0-9.]+ samples/s"
-CHECKPOINT_START_PATTERN = r"Checkpoint Save : Rank: ([0-9]+) : Step: ([0-9]+) : Start time: ([0-9.]+) seconds: Path: (.*)"
-CHECKPOINT_END_PATTERN = r"Finished saving checkpoint to (.*) in ([0-9.]+) seconds for global_step ([0-9]+)\s+from rank ([0-9]+)"
-CHECKPOINT_RESTORE_START_PATTERN = r"Checkpoint Restore Start : Rank : ([0-9]+) : Start time: ([0-9.]+) seconds : Path: (.*)"
-CHECKPOINT_RESTORE_END_PATTERN = r"Finished restoring checkpoint : Rank : ([0-9]+) : Duration: ([0-9.]+) seconds : End Time: ([0-9.]+) seconds : Path: (.*)"
-CHECKPOINT_DELETE_PATTERN = r"Finished deleting checkpoint (.*) in ([0-9.]+) seconds for global_step ([0-9]+) from rank ([0-9]+)"
-ACCELERATOR_BLOCKED_TIME_PATTERN = r"\[_TrainingEpochLoop\]\.train_dataloader_next\s+(?:\|\s+[\d\.]+\s+){2}\|\s+([\d\.]+)\s+\|\s+([\d\.]+)\s+\|"
+STEP_METRICS_PATTERN = (
+    r"Global Rank: 0 \| Step: ([0-9]+) \| Loss: [0-9.]+ \| "
+    r"Step Time: ([0-9.]+)s \| Throughput: [0-9.]+ samples/s"
+)
+CHECKPOINT_START_PATTERN = (
+    r"Checkpoint Save : Rank: ([0-9]+) : Step: ([0-9]+) : "
+    r"Start time: ([0-9.]+) seconds: Path: (.*)"
+)
+CHECKPOINT_END_PATTERN = (
+    r"Finished saving checkpoint to (.*) in ([0-9.]+) seconds for "
+    r"global_step ([0-9]+)\s+from rank ([0-9]+)"
+)
+CHECKPOINT_RESTORE_START_PATTERN = (
+    r"Checkpoint Restore Start : Rank : ([0-9]+) : "
+    r"Start time: ([0-9.]+) seconds : Path: (.*)"
+)
+CHECKPOINT_RESTORE_END_PATTERN = (
+    r"Finished restoring checkpoint : Rank : ([0-9]+) : "
+    r"Duration: ([0-9.]+) seconds : End Time: ([0-9.]+) seconds : "
+    r"Path: (.*)"
+)
+CHECKPOINT_DELETE_PATTERN = (
+    r"Finished deleting checkpoint (.*) in ([0-9.]+) seconds for "
+    r"global_step ([0-9]+) from rank ([0-9]+)"
+)
+ACCELERATOR_BLOCKED_TIME_PATTERN = (
+    r"\[_TrainingEpochLoop\]\.train_dataloader_next\s+"
+    r"(?:\|\s+[\d\.]+\s+){2}\|\s+([\d\.]+)\s+\|\s+([\d\.]+)\s+\|"
+)
 
 ALL_PATTERNS = [
-    STEP_METRICS_PATTERN, CHECKPOINT_START_PATTERN, CHECKPOINT_END_PATTERN,
-    CHECKPOINT_RESTORE_START_PATTERN, CHECKPOINT_RESTORE_END_PATTERN,
-    CHECKPOINT_DELETE_PATTERN, ACCELERATOR_BLOCKED_TIME_PATTERN
+    STEP_METRICS_PATTERN,
+    CHECKPOINT_START_PATTERN,
+    CHECKPOINT_END_PATTERN,
+    CHECKPOINT_RESTORE_START_PATTERN,
+    CHECKPOINT_RESTORE_END_PATTERN,
+    CHECKPOINT_DELETE_PATTERN,
+    ACCELERATOR_BLOCKED_TIME_PATTERN,
 ]
 
 
@@ -40,21 +66,24 @@ class LogEntry:
 class ParsedRawMetrics:
     step_metrics: List[schema.StepMetrics] = field(default_factory=list)
     write_metrics: Dict[int, List[schema.WriteDurationMetrics]] = field(
-        default_factory=lambda: defaultdict(list))
+        default_factory=lambda: defaultdict(list)
+    )
     restore_metrics: Dict[int, List[schema.RestoreDurationMetrics]] = field(
-        default_factory=lambda: defaultdict(list))
+        default_factory=lambda: defaultdict(list)
+    )
     delete_metrics: Dict[int, List[schema.DeleteDurationMetrics]] = field(
-        default_factory=lambda: defaultdict(list))
-    data_loading_metrics: List[schema.DataLoadingMetrics] = field(
-        default_factory=list)
+        default_factory=lambda: defaultdict(list)
+    )
+    data_loading_metrics: List[schema.DataLoadingMetrics] = field(default_factory=list)
 
 
-def parse_entries(entries: Iterable[LogEntry], *, run_id: str,
-                  checkpoint_location: str) -> ParsedRawMetrics:
+def parse_entries(
+    entries: Iterable[LogEntry], *, run_id: str, checkpoint_location: str
+) -> ParsedRawMetrics:
     """Scrape raw metrics from log entries (mirrors hf.py._scrape_raw_metrics)."""
     out = ParsedRawMetrics()
-    checkpoint_starts = {}   # (step, rank) -> {start_time, path}
-    restore_starts = {}      # rank -> {start_time, path}
+    checkpoint_starts = {}  # (step, rank) -> {start_time, path}
+    restore_starts = {}  # rank -> {start_time, path}
 
     for entry in entries:
         message = entry.message
@@ -66,9 +95,12 @@ def parse_entries(entries: Iterable[LogEntry], *, run_id: str,
         if m:
             try:
                 out.step_metrics.append(
-                    schema.StepMetrics(step=int(m.group(1)),
-                                       step_duration=float(m.group(2)),
-                                       step_end_time=ts))
+                    schema.StepMetrics(
+                        step=int(m.group(1)),
+                        step_duration=float(m.group(2)),
+                        step_end_time=ts,
+                    )
+                )
             except (ValueError, IndexError):
                 print(f"Warning: Could not parse step metrics from: {message}")
 
@@ -98,7 +130,9 @@ def parse_entries(entries: Iterable[LogEntry], *, run_id: str,
                         checkpoint_location=checkpoint_location,
                         checkpoint_step=step,
                         start_time=start_time,
-                        end_time=start_time + duration))
+                        end_time=start_time + duration,
+                    )
+                )
                 del checkpoint_starts[(step, rank)]
 
         m = re.search(CHECKPOINT_DELETE_PATTERN, message)
@@ -116,7 +150,9 @@ def parse_entries(entries: Iterable[LogEntry], *, run_id: str,
                         checkpoint_location=checkpoint_location,
                         checkpoint_step=step,
                         start_time=end_time - duration,
-                        end_time=end_time))
+                        end_time=end_time,
+                    )
+                )
 
         m = re.search(CHECKPOINT_RESTORE_START_PATTERN, message)
         if m:
@@ -147,7 +183,9 @@ def parse_entries(entries: Iterable[LogEntry], *, run_id: str,
                         global_rank=rank,
                         checkpoint_location=start_info["path"],
                         start_time=start_info["start_time"],
-                        end_time=float(m.group(3))))
+                        end_time=float(m.group(3)),
+                    )
+                )
                 del restore_starts[rank]
 
         m = re.search(ACCELERATOR_BLOCKED_TIME_PATTERN, message)
@@ -159,31 +197,36 @@ def parse_entries(entries: Iterable[LogEntry], *, run_id: str,
                         epoch_idx=-1,
                         accelerator_blocked_time=float(m.group(1)),
                         accelerator_blocked_percent=float(m.group(2)),
-                        update_timestamp=None))
+                        update_timestamp=None,
+                    )
+                )
             except (ValueError, IndexError):
-                print("Warning: Could not parse accelerator blocked time "
-                      f"metrics from: {message}")
+                print(
+                    "Warning: Could not parse accelerator blocked time "
+                    f"metrics from: {message}"
+                )
 
     return out
 
 
-def build_filter(*, project: str, run_id: str, start_time: str,
-                 end_time: str) -> str:
+def build_filter(*, project: str, run_id: str, start_time: str, end_time: str) -> str:
     """Cloud Logging filter mirroring hf.py._scrape_raw_metrics."""
     regex_or = " OR ".join(f'textPayload =~ "{p}"' for p in ALL_PATTERNS)
     return (
         'resource.type="k8s_container" '
         f'resource.labels.project_id="{project}" '
         f'resource.labels.pod_name:"{run_id}-workload-0-" '
-        'severity>=DEFAULT '
+        "severity>=DEFAULT "
         f'timestamp>="{start_time}" '
         f'timestamp<="{end_time}" '
-        f'AND ({regex_or})')
+        f"AND ({regex_or})"
+    )
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Scrape HF benchmark metrics "
-                                     "from Cloud Logging into raw CSVs.")
+    parser = argparse.ArgumentParser(
+        description="Scrape HF benchmark metrics " "from Cloud Logging into raw CSVs."
+    )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument("--start-time", required=True, help="RFC3339")
@@ -194,20 +237,27 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
 
     from google.cloud import logging as cloud_logging
+
     client = cloud_logging.Client(project=args.project)
-    filter_string = build_filter(project=args.project, run_id=args.run_id,
-                                 start_time=args.start_time,
-                                 end_time=args.end_time)
+    filter_string = build_filter(
+        project=args.project,
+        run_id=args.run_id,
+        start_time=args.start_time,
+        end_time=args.end_time,
+    )
 
     def _entries():
-        for e in client.list_entries(filter_=filter_string,
-                                     order_by="timestamp asc"):
-            payload = e.payload if isinstance(e.payload, str) else (
-                e.payload.get("message", "") if e.payload else "")
+        for e in client.list_entries(filter_=filter_string, order_by="timestamp asc"):
+            payload = (
+                e.payload
+                if isinstance(e.payload, str)
+                else (e.payload.get("message", "") if e.payload else "")
+            )
             yield LogEntry(timestamp=e.timestamp.timestamp(), message=payload)
 
-    parsed = parse_entries(_entries(), run_id=args.run_id,
-                           checkpoint_location=args.checkpoint_location)
+    parsed = parse_entries(
+        _entries(), run_id=args.run_id, checkpoint_location=args.checkpoint_location
+    )
     raw_store.write_raw_metrics(parsed, args.out_dir, run_type=args.run_type)
     print(f"Wrote raw metrics to {args.out_dir}")
 

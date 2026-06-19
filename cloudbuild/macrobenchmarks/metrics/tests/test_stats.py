@@ -1,4 +1,5 @@
 import math
+
 from metrics import stats
 
 
@@ -8,7 +9,7 @@ def test_duration_stats_basic():
     assert s["max"] == 4.0
     assert s["avg"] == 2.5
     assert math.isclose(s["stddev"], 1.2909944487358056)
-    assert s["p50"] == 2.5    # numpy linear interpolation
+    assert s["p50"] == 2.5  # numpy linear interpolation
     assert s["p100"] == 4.0
 
 

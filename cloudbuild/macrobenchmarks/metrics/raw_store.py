@@ -20,6 +20,7 @@ from metrics import schema
 @dataclass
 class RawMetricTables:
     """Flat row dicts read back from the raw-metric tree, by metric kind."""
+
     step_rows: List[dict] = field(default_factory=list)
     write_rows: List[dict] = field(default_factory=list)
     restore_rows: List[dict] = field(default_factory=list)
@@ -27,8 +28,9 @@ class RawMetricTables:
     dl_rows: List[dict] = field(default_factory=list)
 
 
-def write_raw_metrics(parsed, out_dir: str, *,
-                      run_type: str = "perf_optimization") -> None:
+def write_raw_metrics(
+    parsed, out_dir: str, *, run_type: str = "perf_optimization"
+) -> None:
     """Write parsed metrics to the tessellations-compatible relative layout.
 
     ``parsed`` is any object exposing the ``ParsedRawMetrics`` attributes
@@ -37,56 +39,96 @@ def write_raw_metrics(parsed, out_dir: str, *,
     """
     if parsed.step_metrics:
         _write_csv(
-            os.path.join(out_dir, schema.STEP_METRICS_DIRECTORY,
-                         schema.STEP_METRICS_FILE),
-            schema.StepMetrics, parsed.step_metrics)
+            os.path.join(
+                out_dir, schema.STEP_METRICS_DIRECTORY, schema.STEP_METRICS_FILE
+            ),
+            schema.StepMetrics,
+            parsed.step_metrics,
+        )
 
     for rank, rows in parsed.write_metrics.items():
         _write_csv(
-            os.path.join(out_dir, schema.WRITE_DURATION_DIRECTORY,
-                         schema.PERSISTENT_STORAGE_DIRECTORY,
-                         schema.PER_ACCELERATOR_DIRECTORY, f"{rank}.csv"),
-            schema.WriteDurationMetrics, rows)
+            os.path.join(
+                out_dir,
+                schema.WRITE_DURATION_DIRECTORY,
+                schema.PERSISTENT_STORAGE_DIRECTORY,
+                schema.PER_ACCELERATOR_DIRECTORY,
+                f"{rank}.csv",
+            ),
+            schema.WriteDurationMetrics,
+            rows,
+        )
 
     for rank, rows in parsed.restore_metrics.items():
         _write_csv(
-            os.path.join(out_dir, schema.RESTORE_DURATION_DIRECTORY,
-                         schema.PERSISTENT_STORAGE_DIRECTORY,
-                         schema.PER_ACCELERATOR_DIRECTORY, f"{rank}.csv"),
-            schema.RestoreDurationMetrics, rows)
+            os.path.join(
+                out_dir,
+                schema.RESTORE_DURATION_DIRECTORY,
+                schema.PERSISTENT_STORAGE_DIRECTORY,
+                schema.PER_ACCELERATOR_DIRECTORY,
+                f"{rank}.csv",
+            ),
+            schema.RestoreDurationMetrics,
+            rows,
+        )
 
     for rank, rows in parsed.delete_metrics.items():
         _write_csv(
-            os.path.join(out_dir, run_type,
-                         schema.DELETE_DURATION_DIRECTORY, f"{rank}.csv"),
-            schema.DeleteDurationMetrics, rows)
+            os.path.join(
+                out_dir, run_type, schema.DELETE_DURATION_DIRECTORY, f"{rank}.csv"
+            ),
+            schema.DeleteDurationMetrics,
+            rows,
+        )
 
     if parsed.data_loading_metrics:
         _write_csv(
-            os.path.join(out_dir, schema.CALCULATED_METRICS_DIRECTORY,
-                         schema.DATA_LOADING_METRICS_FILE),
-            schema.DataLoadingMetrics, parsed.data_loading_metrics)
+            os.path.join(
+                out_dir,
+                schema.CALCULATED_METRICS_DIRECTORY,
+                schema.DATA_LOADING_METRICS_FILE,
+            ),
+            schema.DataLoadingMetrics,
+            parsed.data_loading_metrics,
+        )
 
 
-def read_raw_metrics(in_dir: str, *,
-                     run_type: str = "perf_optimization") -> RawMetricTables:
+def read_raw_metrics(
+    in_dir: str, *, run_type: str = "perf_optimization"
+) -> RawMetricTables:
     """Read the raw-metric tree under ``in_dir`` into flat row dicts."""
     return RawMetricTables(
-        step_rows=_read_csv(os.path.join(
-            in_dir, schema.STEP_METRICS_DIRECTORY, schema.STEP_METRICS_FILE)),
-        write_rows=_read_all_csvs_in(os.path.join(
-            in_dir, schema.WRITE_DURATION_DIRECTORY,
-            schema.PERSISTENT_STORAGE_DIRECTORY,
-            schema.PER_ACCELERATOR_DIRECTORY)),
-        restore_rows=_read_all_csvs_in(os.path.join(
-            in_dir, schema.RESTORE_DURATION_DIRECTORY,
-            schema.PERSISTENT_STORAGE_DIRECTORY,
-            schema.PER_ACCELERATOR_DIRECTORY)),
-        delete_rows=_read_all_csvs_in(os.path.join(
-            in_dir, run_type, schema.DELETE_DURATION_DIRECTORY)),
-        dl_rows=_read_csv(os.path.join(
-            in_dir, schema.CALCULATED_METRICS_DIRECTORY,
-            schema.DATA_LOADING_METRICS_FILE)),
+        step_rows=_read_csv(
+            os.path.join(
+                in_dir, schema.STEP_METRICS_DIRECTORY, schema.STEP_METRICS_FILE
+            )
+        ),
+        write_rows=_read_all_csvs_in(
+            os.path.join(
+                in_dir,
+                schema.WRITE_DURATION_DIRECTORY,
+                schema.PERSISTENT_STORAGE_DIRECTORY,
+                schema.PER_ACCELERATOR_DIRECTORY,
+            )
+        ),
+        restore_rows=_read_all_csvs_in(
+            os.path.join(
+                in_dir,
+                schema.RESTORE_DURATION_DIRECTORY,
+                schema.PERSISTENT_STORAGE_DIRECTORY,
+                schema.PER_ACCELERATOR_DIRECTORY,
+            )
+        ),
+        delete_rows=_read_all_csvs_in(
+            os.path.join(in_dir, run_type, schema.DELETE_DURATION_DIRECTORY)
+        ),
+        dl_rows=_read_csv(
+            os.path.join(
+                in_dir,
+                schema.CALCULATED_METRICS_DIRECTORY,
+                schema.DATA_LOADING_METRICS_FILE,
+            )
+        ),
     )
 
 
