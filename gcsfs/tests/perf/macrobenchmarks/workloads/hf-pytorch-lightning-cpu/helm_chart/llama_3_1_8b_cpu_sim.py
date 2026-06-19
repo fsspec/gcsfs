@@ -31,6 +31,7 @@ import time
 from datetime import timedelta
 
 import torch.multiprocessing
+
 # Match the original training script: forkserver before any other torch import
 # that could spawn workers.
 try:
@@ -60,7 +61,9 @@ run_id = os.environ.get("RUN_ID")
 if not run_id:
     raise SystemExit("RUN_ID env var is required.")
 
-log_format = "%(asctime)s - %(levelname)s - %(name)s - [Thread: %(thread)d] - %(message)s"
+log_format = (
+    "%(asctime)s - %(levelname)s - %(name)s - [Thread: %(thread)d] - %(message)s"
+)
 logging.basicConfig(
     format=log_format,
     level=log_level,
@@ -73,10 +76,8 @@ SIMULATED_STEP_SECONDS = 1.0
 
 # ---- Config (env-overridable, mirrors original script's pattern) ----------
 preset_max_steps = int(os.getenv("MAX_STEPS", "1000"))
-gradient_accumulation_steps = int(os.getenv("GRADIENT_ACCUMULATION_STEPS",
-                                            "4"))
-per_device_train_batch_size = int(os.getenv("PER_DEVICE_TRAIN_BATCH_SIZE",
-                                            "8"))
+gradient_accumulation_steps = int(os.getenv("GRADIENT_ACCUMULATION_STEPS", "4"))
+per_device_train_batch_size = int(os.getenv("PER_DEVICE_TRAIN_BATCH_SIZE", "8"))
 dataloader_num_workers = int(os.getenv("DATALOADER_NUM_WORKERS", "16"))
 checkpoint_load_path = os.getenv("CKPT_LOAD_PATH", None)
 checkpoint_write_interval = int(os.getenv("CHECKPOINT_WRITE_INTERVAL", "25"))
@@ -130,7 +131,8 @@ if not use_local_files_only and not os.environ.get("HF_TOKEN"):
     raise SystemExit(
         "HF_TOKEN env var is required when MODEL_ID is a HuggingFace repo "
         "(Llama-3.1-8B is gated). Set MODEL_ID=gs://... to use a "
-        "pre-downloaded copy instead.")
+        "pre-downloaded copy instead."
+    )
 
 # Optional: checkpoint write path. If unset, the checkpoint callback is
 # omitted entirely (matches the original behavior). Strip trailing slash for
@@ -147,8 +149,9 @@ if checkpoint_write_path:
 world_size = int(os.environ.get("WORLD_SIZE", "1"))
 local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
 num_nodes = max(1, world_size // local_world_size)
-global_batch_size = (per_device_train_batch_size *
-                     gradient_accumulation_steps * world_size)
+global_batch_size = (
+    per_device_train_batch_size * gradient_accumulation_steps * world_size
+)
 logging.info("global_batch_size: %d", global_batch_size)
 
 # ---- Tokenizer ------------------------------------------------------------
@@ -157,7 +160,8 @@ logging.info("global_batch_size: %d", global_batch_size)
 # placed the tokenizer files alongside the weights, so ``local_files_only``
 # avoids any network access from this process.
 tokenizer = transformers.AutoTokenizer.from_pretrained(
-    model_id, local_files_only=use_local_files_only)
+    model_id, local_files_only=use_local_files_only
+)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -216,7 +220,7 @@ class LlamaLitModel(pl.LightningModule):
         # over the frozen self.model), so without the square the loss is a
         # constant whose sign is random per run -- ~50% of runs would emit a
         # negative loss and capture zero step metrics.
-        return (self.trainable(torch.zeros(1, 8))**2).sum()
+        return (self.trainable(torch.zeros(1, 8)) ** 2).sum()
 
     @staticmethod
     def _materialize_adamw_state(optimizer):
@@ -228,12 +232,15 @@ class LlamaLitModel(pl.LightningModule):
                     continue
                 state["step"] = torch.zeros((), dtype=torch.float32)
                 state["exp_avg"] = torch.zeros_like(
-                    p, memory_format=torch.preserve_format)
+                    p, memory_format=torch.preserve_format
+                )
                 state["exp_avg_sq"] = torch.zeros_like(
-                    p, memory_format=torch.preserve_format)
+                    p, memory_format=torch.preserve_format
+                )
                 if group["amsgrad"]:
                     state["max_exp_avg_sq"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format)
+                        p, memory_format=torch.preserve_format
+                    )
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -260,8 +267,7 @@ class StepTimeCallback(Callback):
         if batch_idx % trainer.accumulate_grad_batches == 0:
             self.start_time = time.perf_counter()
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch,
-                           batch_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         # Only emit metrics on micro-batches that complete an optimizer step;
         # otherwise step_time would cover a single micro-batch while
         # global_batch_size counts the whole accumulation window, inflating
@@ -340,10 +346,7 @@ class LoggedModelCheckpoint(ModelCheckpoint):
 
 class LoggedDDPStrategy(DDPStrategy):
 
-    def load_checkpoint(self,
-                        checkpoint_path,
-                        weights_only: bool = False,
-                        **kwargs):
+    def load_checkpoint(self, checkpoint_path, weights_only: bool = False, **kwargs):
         # Under DDP every rank restores, and calc_restore_metrics aggregates the
         # distributed restore as max(end) - min(start) ACROSS ranks. perf_counter
         # is monotonic-from-boot and per-machine, so mixing ranks on different
@@ -358,8 +361,7 @@ class LoggedDDPStrategy(DDPStrategy):
             checkpoint_path,
         )
         start_time = time.perf_counter()
-        checkpoint = super().load_checkpoint(checkpoint_path, weights_only,
-                                             **kwargs)
+        checkpoint = super().load_checkpoint(checkpoint_path, weights_only, **kwargs)
         duration = time.perf_counter() - start_time
         logging.info(
             "Finished restoring checkpoint : Rank : %d : Duration: %.2f seconds : End Time: %.2f seconds : Path: %s",
@@ -435,7 +437,8 @@ if __name__ == "__main__":
                 save_last=False,
                 monitor="step",
                 mode="max",
-            ))
+            )
+        )
     callbacks.append(StepTimeCallback())
 
     # ---- Strategy: DDP on CPU via gloo --------------------------------------
@@ -478,12 +481,9 @@ if __name__ == "__main__":
     )
 
     if checkpoint_load_path:
-        logging.info("[INFO] Resuming from checkpoint: %s",
-                     checkpoint_load_path)
+        logging.info("[INFO] Resuming from checkpoint: %s", checkpoint_load_path)
     else:
         checkpoint_load_path = None
 
-    trainer.fit(LlamaLitModel(model),
-                train_loader,
-                ckpt_path=checkpoint_load_path)
+    trainer.fit(LlamaLitModel(model), train_loader, ckpt_path=checkpoint_load_path)
     logging.info("[INFO] Training Completed.")
