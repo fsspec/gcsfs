@@ -26,6 +26,7 @@ echo "Installing standalone gcloud CLI..."
 cd /tmp
 curl -sSO https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz
 tar -xf google-cloud-cli-linux-x86_64.tar.gz
+rm google-cloud-cli-linux-x86_64.tar.gz
 export PATH=$PATH:/tmp/google-cloud-sdk/bin
 cd -
 
