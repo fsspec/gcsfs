@@ -3499,6 +3499,13 @@ def test_get_headers_includes_cache_type(gcs):
 
 
 def test_user_agent_includes_cache_type_in_read(gcs):
+    # Zonal buckets use gRPC path which does not use HTTP client,
+    # and we only implemented HTTP User-Agent changes for now.
+    if hasattr(gcs, "_is_zonal_bucket") and sync(
+        gcs.loop, gcs._is_zonal_bucket, TEST_BUCKET
+    ):
+        pytest.skip("Zonal buckets use gRPC, skipping HTTP User-Agent test")
+
     fn = TEST_BUCKET + "/2014-01-01.csv"
 
     with mock.patch.object(
