@@ -588,7 +588,7 @@ async def test_get_file_incomplete_download(
         ):
             mock_info.return_value = {"size": len(json_data)}
             with pytest.raises(
-                aiohttp.client_exceptions.ClientError,
+                aiohttp.ClientError,
                 match="Expected .* bytes, but only received .* bytes",
             ):
                 await async_gcs._get_file(file_path, str(lpath))
