@@ -1026,27 +1026,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     mkdir = asyn.sync_wrapper(_mkdir)
 
-    async def _makedirs(self, path, exist_ok=False):
-        """Recursively make directories.
-
-        Creates bucket or directory at path, including any intermediate parent buckets.
-        Since standard GCS uses a flat namespace with simulated folders, this is typically
-        a no-op for subdirectories unless bucket creation is triggered.
-
-        For HNS-enabled buckets, this is overridden to support native folder creation.
-        """
-        bucket, key, _ = self.split_path(path)
-        if not key:
-            if bucket in ["", "/"]:
-                raise ValueError("Cannot create root bucket")
-            if await self._exists(bucket):
-                if not exist_ok:
-                    raise FileExistsError(f"Bucket already exists: {bucket}")
-                return
-        await self._mkdir(path, create_parents=True)
-
-    makedirs = asyn.sync_wrapper(_makedirs)
-
     async def _rmdir(self, bucket):
         """Delete an empty bucket
 
