@@ -747,9 +747,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     return []
                 except FileNotFoundError:
                     pass
-                except Exception as e:
-                    logger.warning(f"Error fetching directory info for {path}: {e}")
-                    raise
             raise
 
     async def _mkdir(
