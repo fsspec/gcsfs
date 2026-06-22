@@ -21,12 +21,9 @@ def _write_op_seq_fixed_duration(gcs, file_path, chunk_size, runtime):
 
     # Pre-generate chunk to avoid overhead during write loop
     data_chunk = os.urandom(chunk_size)
-
+    start_time = time.perf_counter()
     try:
         with gcs.open(file_path, "wb", finalize_on_close=True) as f:
-            # Start timing only after setup (data generation and upload
-            # initiation) so the runtime window measures the write loop alone.
-            start_time = time.perf_counter()
             while time.perf_counter() - start_time < runtime:
                 f.write(data_chunk)
                 total_bytes_written += chunk_size
