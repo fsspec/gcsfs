@@ -561,9 +561,6 @@ async def test_get_file_warning_on_missing_persisted_size(
             assert lpath.read_bytes() == json_data
 
 
-import aiohttp
-
-
 @pytest.mark.asyncio
 async def test_get_file_incomplete_download(
     async_gcs, gcs_bucket_mocks, tmp_path, file_path
