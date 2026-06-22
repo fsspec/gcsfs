@@ -2694,8 +2694,8 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
 
 def test_cat_file_routing_and_thresholds(gcs):
     fn = f"{TEST_BUCKET}/core_routing.txt"
-    # Create an 8MB file
-    data = os.urandom(8 * 1024 * 1024)
+    # Create a 21MB file
+    data = os.urandom(21 * 1024 * 1024)
     gcs.pipe(fn, data)
 
     # 1. Concurrency = 1 (Should route to sequential)
@@ -2727,12 +2727,13 @@ def test_cat_file_routing_and_thresholds(gcs):
             assert mock_conc.call_count == 1
             assert mock_seq.call_count == 1
 
-    # 3. Concurrency = 4, and read size (8MB) >= MIN_CHUNK_SIZE_FOR_CONCURRENCY (5MB)
+    # 3. Concurrency = 4, and read size (21MB) >= MIN_CHUNK_SIZE_FOR_CONCURRENCY (5MB)
+    # math.ceil(21MB / 5MB) = 5, so it should not be capped below 4.
     with mock.patch.object(
         gcs, "_cat_file_sequential", wraps=gcs._cat_file_sequential
     ) as mock_seq:
         res = fsspec.asyn.sync(
-            gcs.loop, gcs._cat_file, fn, start=0, end=8 * 1024 * 1024, concurrency=4
+            gcs.loop, gcs._cat_file, fn, start=0, end=21 * 1024 * 1024, concurrency=4
         )
         assert res == data
         # Should call sequential 4 times (once for each concurrent chunk)
