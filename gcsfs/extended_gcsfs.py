@@ -855,6 +855,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self, path, bucket, key, create_parents, exist_ok=True
     ):
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
+
+        # Preemptively check if the path already exists to ensure fsspec compatibility
+        try:
+            info = await self._info(path)
+            if info["type"] != "directory":
+                raise FileExistsError(f"A file already exists at the path: {path}")
+            if not exist_ok:
+                raise FileExistsError(f"Directory already exists: {path}")
+            return
+        except FileNotFoundError:
+            pass
+
         parent = f"projects/_/buckets/{bucket}"
         folder_id = key.rstrip("/") + "/"
         request = storage_control_v2.CreateFolderRequest(
@@ -878,15 +890,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
         except api_exceptions.Conflict as e:
             logger.debug(f"Conflict detected for path: {path}: {e}")
-            # On conflict, inspect the path to see what caused the conflict and check exist_ok
-            try:
-                info = await self._info(path)
-                if info["type"] != "directory":
-                    raise FileExistsError(f"A file already exists at the path: {path}")
-                if not exist_ok:
-                    raise FileExistsError(f"Directory already exists: {path}")
-            except FileNotFoundError:
-                # Fallback if the folder is deleted concurrently
+            # Under race conditions, folder might have been created concurrently
+            if not exist_ok:
                 raise FileExistsError(f"Directory already exists: {path}") from e
         except api_exceptions.FailedPrecondition as e:
             # This error can occur if create_parents=False and the parent dir doesn't exist.
