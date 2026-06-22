@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import uuid
 import weakref
@@ -495,9 +496,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool):
         """Helper to handle concurrent chunk downloads cleanly."""
-        concurrency = (
-            concurrency if length >= self.MIN_CHUNK_SIZE_FOR_CONCURRENCY else 1
-        )
+        if length >= self.MIN_CHUNK_SIZE_FOR_CONCURRENCY:
+            concurrency = min(
+                concurrency,
+                math.ceil(length / self.MIN_CHUNK_SIZE_FOR_CONCURRENCY),
+                length,
+            )
+        else:
+            concurrency = 1
+
         part_size = length // concurrency
 
         tasks = []

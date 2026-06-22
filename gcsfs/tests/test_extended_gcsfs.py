@@ -1211,6 +1211,31 @@ async def test_concurrent_mrd_fetch_success(extended_gcsfs):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_mrd_fetch_extreme_concurrency(extended_gcsfs):
+    """Tests that _concurrent_mrd_fetch caps concurrency to the number of chunks."""
+    mock_pool = mock.AsyncMock(spec=MRDPool)
+    mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
+    mock_mrd.object_name = "test_object"
+
+    mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
+
+    async def fake_download(ranges):
+        for offset, length, buf in ranges:
+            buf.write(b"A" * length)
+
+    mock_mrd.download_ranges.side_effect = fake_download
+
+    file_size = 20 * 1024 * 1024  # 20MB
+    result = await extended_gcsfs._concurrent_mrd_fetch(
+        offset=0, length=file_size, concurrency=1000, mrd_or_pool=mock_pool
+    )
+
+    assert len(result) == file_size
+    # length (20MB) / MIN_CHUNK_SIZE_FOR_CONCURRENCY (5MB) = 4, so it should call download 4 times
+    assert mock_mrd.download_ranges.call_count == 4
+
+
+@pytest.mark.asyncio
 async def test_concurrent_mrd_fetch_exception_masking(extended_gcsfs):
     """
     Tests that original exceptions in concurrent fetches are not masked by BufferErrors.

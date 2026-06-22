@@ -2752,6 +2752,29 @@ def test_cat_file_concurrent_data_integrity(gcs):
     assert res == data
 
 
+def test_cat_file_extreme_concurrency(gcs):
+    fn = f"{TEST_BUCKET}/core_extreme_concurrency.txt"
+    file_size = 20 * 1024 * 1024  # 20MB
+    data = os.urandom(file_size)
+    gcs.pipe(fn, data)
+
+    with mock.patch.object(
+        gcs, "_cat_file_sequential", wraps=gcs._cat_file_sequential
+    ) as mock_seq:
+        res = fsspec.asyn.sync(
+            gcs.loop,
+            gcs._cat_file_concurrent,
+            fn,
+            start=0,
+            end=file_size,
+            concurrency=1000,
+        )
+        assert len(res) == file_size
+        assert res == data
+        # min(1000, math.ceil(20MB / 5MB), 20MB) = min(1000, 4, 20971520) = 4
+        assert mock_seq.call_count == 4
+
+
 def test_cat_file_concurrent_exception_cancellation(gcs):
     fn = f"{TEST_BUCKET}/core_exception.txt"
     data = b"0123456789" * 6000000  # ~6MB
