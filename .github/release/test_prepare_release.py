@@ -178,3 +178,44 @@ def test_update_changelog_file_short_underline(tmp_path):
         prepare_release.update_changelog_file(
             str(changelog), "2026.4.1", ["* New feature"]
         )
+
+
+def test_update_fsspec_dependency(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    initial_content = """[project]
+name = "gcsfs"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "fsspec>=2026.3.0",
+    "google-auth>=1.2",
+]
+"""
+    pyproject.write_text(initial_content, encoding="utf-8")
+
+    prepare_release.update_fsspec_dependency(str(pyproject), 2026, 6)
+
+    expected_content = """[project]
+name = "gcsfs"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "fsspec>=2026.6.0",
+    "google-auth>=1.2",
+]
+"""
+    assert pyproject.read_text(encoding="utf-8") == expected_content
+
+
+def test_update_fsspec_dependency_not_found(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    initial_content = """[project]
+name = "gcsfs"
+dependencies = [
+    "aiohttp>=3.9.0",
+]
+"""
+    pyproject.write_text(initial_content, encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="Could not find fsspec dependency in pyproject.toml"
+    ):
+        prepare_release.update_fsspec_dependency(str(pyproject), 2026, 6)

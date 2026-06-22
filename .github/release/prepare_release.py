@@ -123,8 +123,35 @@ def update_changelog_file(changelog_path, version, entries):
     print(f"Successfully updated changelog with version {version}")
 
 
+def update_fsspec_dependency(pyproject_path, current_year, current_month):
+    """Updates the fsspec dependency in pyproject.toml to >= YYYY.M.0."""
+    if not os.path.exists(pyproject_path):
+        raise FileNotFoundError(f"pyproject.toml not found at {pyproject_path}")
+
+    with open(pyproject_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    target_version = f"{current_year}.{current_month}.0"
+    pattern = re.compile(r'("fsspec>=)([^"]+)(")')
+
+    new_content, count = pattern.subn(rf"\g<1>{target_version}\g<3>", content)
+
+    if count == 0:
+        raise ValueError(
+            "Could not find fsspec dependency in pyproject.toml to update."
+        )
+
+    with open(pyproject_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    print(
+        f"Successfully updated fsspec dependency in pyproject.toml to >= {target_version}"
+    )
+
+
 def main():
     changelog_path = "docs/source/changelog.rst"
+    pyproject_path = "pyproject.toml"
 
     try:
         # 1. Retrieve the latest release tag from Git
@@ -141,6 +168,11 @@ def main():
 
         # 4. Update the changelog file in place with the new release section
         update_changelog_file(changelog_path, next_version, entries)
+
+        # 4b. Update the fsspec dependency in pyproject.toml to match the current month's release
+        version_parts = parse_version(next_version)
+        current_year, current_month, _ = version_parts
+        update_fsspec_dependency(pyproject_path, current_year, current_month)
 
         # 5. Output the version to GITHUB_ENV for downstream workflow consumption
         print(f"NEXT_VERSION={next_version}")
