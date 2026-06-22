@@ -4,6 +4,7 @@ import io
 import logging
 from unittest import mock
 
+import aiohttp
 import pytest
 from google.cloud.storage.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
