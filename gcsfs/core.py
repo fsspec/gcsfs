@@ -1218,10 +1218,13 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             return await self._cat_file_sequential(path, start=start, end=end, **kwargs)
 
         total_size = end - start
-        concurrency = min(
-            concurrency,
-            math.ceil(total_size / self.MIN_CHUNK_SIZE_FOR_CONCURRENCY),
-            total_size,
+        concurrency = max(
+            1,
+            min(
+                concurrency,
+                math.ceil(total_size / self.MIN_CHUNK_SIZE_FOR_CONCURRENCY),
+                total_size,
+            ),
         )
         part_size = total_size // concurrency
         tasks = []
