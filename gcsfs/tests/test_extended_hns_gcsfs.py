@@ -2985,3 +2985,34 @@ class TestExtendedGcsFileSystemBucketType:
                 bucket_type = await fs._get_bucket_type("error-bucket")
                 assert bucket_type == BucketType.UNKNOWN
                 assert "Could not determine bucket type" in caplog.text
+import pytest
+from unittest import mock
+from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+@pytest.mark.asyncio
+async def test_list_objects_file_not_found_hns():
+    fs = ExtendedGcsFileSystem(token="anon")
+    with mock.patch("gcsfs.core.GCSFileSystem._list_objects", new_callable=mock.AsyncMock) as mock_super_list, \
+         mock.patch.object(fs, "split_path", return_value=("bucket", "key", "gen")), \
+         mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True), \
+         mock.patch.object(fs, "_get_directory_info", new_callable=mock.AsyncMock) as mock_dir_info:
+
+        mock_super_list.side_effect = FileNotFoundError()
+        mock_dir_info.side_effect = FileNotFoundError()
+
+        with pytest.raises(FileNotFoundError):
+            await fs._list_objects("gs://bucket/key")
+
+@pytest.mark.asyncio
+async def test_list_objects_unexpected_exception_hns():
+    fs = ExtendedGcsFileSystem(token="anon")
+    with mock.patch("gcsfs.core.GCSFileSystem._list_objects", new_callable=mock.AsyncMock) as mock_super_list, \
+         mock.patch.object(fs, "split_path", return_value=("bucket", "key", "gen")), \
+         mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True), \
+         mock.patch.object(fs, "_get_directory_info", new_callable=mock.AsyncMock) as mock_dir_info:
+
+        mock_super_list.side_effect = FileNotFoundError()
+        mock_dir_info.side_effect = Exception("API Error")
+
+        with pytest.raises(Exception, match="API Error"):
+            await fs._list_objects("gs://bucket/key")
