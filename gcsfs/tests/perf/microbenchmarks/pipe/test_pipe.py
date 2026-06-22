@@ -18,9 +18,7 @@ BENCHMARK_GROUP = "pipe"
 def _pipe_op(gcs, file_path, data_buffer, chunk_size):
     """Pipe data buffer to a single file."""
     try:
-        gcs.pipe(
-            file_path, data_buffer, chunksize=chunk_size, finalize_on_close=True
-        )
+        gcs.pipe(file_path, data_buffer, chunksize=chunk_size, finalize_on_close=True)
     except Exception as e:
         logging.error(f"Error piping to {file_path}: {e}")
         raise
