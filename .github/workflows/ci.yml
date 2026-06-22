@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - '**'
+      - "**"
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -72,9 +72,10 @@ jobs:
         run: |
           pip install -r cloudbuild/macrobenchmarks/metrics/requirements.txt
           PYTHONPATH=cloudbuild/macrobenchmarks pytest cloudbuild/macrobenchmarks/metrics/tests
-
+      - name: Run Release Automation Tests
+        run: |
+          pytest -vv .github/release/
       - name: Run all tests (Standard, Zonal & HNS Enabled) with default ON extended feature support
-
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-service-account-credentials.json
           pytest -vv -s \
