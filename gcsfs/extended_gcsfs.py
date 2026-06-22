@@ -1655,7 +1655,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         callback.relative_update(len(data))
 
                 if offset != size:
-                    raise aiohttp.client_exceptions.ClientError(
+                    raise aiohttp.ClientError(
                         f"Expected {size} bytes, but only received {offset} bytes"
                     )
         except Exception as e:
