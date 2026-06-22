@@ -456,14 +456,8 @@ class TestExtendedGcsFileSystemMkdir:
         gcsfs.touch(file_path)
         assert gcsfs.isfile(file_path)
 
-        try:
-            with pytest.raises(FileExistsError, match="A file already exists"):
-                gcsfs.mkdir(file_path)
-        finally:
-            try:
-                gcsfs.rm(file_path)
-            except FileNotFoundError:
-                pass
+        with pytest.raises(FileExistsError, match="A file already exists"):
+            gcsfs.mkdir(file_path)
 
 
 class TestExtendedGcsFileSystemMakedirs:
@@ -475,16 +469,10 @@ class TestExtendedGcsFileSystemMakedirs:
         base_dir = f"{TEST_HNS_BUCKET}/new_dir_integration_{uuid.uuid4().hex}"
         dir_path = f"{base_dir}/nested/one_more"
 
-        try:
-            gcsfs.makedirs(dir_path)
-            assert gcsfs.isdir(dir_path)
-            assert gcsfs.isdir(f"{base_dir}/nested")
-            assert gcsfs.isdir(base_dir)
-        finally:
-            try:
-                gcsfs.rm(base_dir, recursive=True)
-            except FileNotFoundError:
-                pass
+        gcsfs.makedirs(dir_path)
+        assert gcsfs.isdir(dir_path)
+        assert gcsfs.isdir(f"{base_dir}/nested")
+        assert gcsfs.isdir(base_dir)
 
     def test_hns_makedirs_existing_dir_exist_ok_true(self, gcs_hns):
         """Test makedirs when folder already exists and exist_ok=True (no-op)."""
@@ -493,14 +481,8 @@ class TestExtendedGcsFileSystemMakedirs:
         gcsfs.mkdir(dir_path)
         assert gcsfs.isdir(dir_path)
 
-        try:
-            gcsfs.makedirs(dir_path, exist_ok=True)
-            assert gcsfs.isdir(dir_path)
-        finally:
-            try:
-                gcsfs.rm(dir_path, recursive=True)
-            except FileNotFoundError:
-                pass
+        gcsfs.makedirs(dir_path, exist_ok=True)
+        assert gcsfs.isdir(dir_path)
 
     def test_hns_makedirs_existing_dir_exist_ok_false(self, gcs_hns):
         """Test makedirs raises FileExistsError if folder exists and exist_ok=False."""
@@ -509,14 +491,8 @@ class TestExtendedGcsFileSystemMakedirs:
         gcsfs.mkdir(dir_path)
         assert gcsfs.isdir(dir_path)
 
-        try:
-            with pytest.raises(FileExistsError):
-                gcsfs.makedirs(dir_path, exist_ok=False)
-        finally:
-            try:
-                gcsfs.rm(dir_path, recursive=True)
-            except FileNotFoundError:
-                pass
+        with pytest.raises(FileExistsError):
+            gcsfs.makedirs(dir_path, exist_ok=False)
 
     def test_hns_makedirs_existing_file_error(self, gcs_hns):
         """Test makedirs raises FileExistsError if a file exists at the path."""
@@ -525,17 +501,11 @@ class TestExtendedGcsFileSystemMakedirs:
         gcsfs.touch(file_path)
         assert gcsfs.isfile(file_path)
 
-        try:
-            with pytest.raises(FileExistsError):
-                gcsfs.makedirs(file_path, exist_ok=True)
+        with pytest.raises(FileExistsError):
+            gcsfs.makedirs(file_path, exist_ok=True)
 
-            with pytest.raises(FileExistsError):
-                gcsfs.makedirs(file_path, exist_ok=False)
-        finally:
-            try:
-                gcsfs.rm(file_path)
-            except FileNotFoundError:
-                pass
+        with pytest.raises(FileExistsError):
+            gcsfs.makedirs(file_path, exist_ok=False)
 
     def test_makedirs_in_non_existent_bucket_fails(self, gcs_hns):
         """Test that makedirs raises FileNotFoundError if the target bucket does not exist."""
