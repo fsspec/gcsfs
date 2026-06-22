@@ -574,8 +574,17 @@ async def test_get_file_incomplete_download(
         lpath = tmp_path / "output.txt"
 
         # Simulate download_range returning a shorter byte string than expected
+        # by returning some data on first call, then empty bytes (EOF) on subsequent calls.
+        # This ensures the download terminates early and raises ClientError, even if
+        # the expected size happens to be a multiple of the chunk size.
+        download_called = False
+
         async def mock_download_range(*args, **kwargs):
-            return b"short"
+            nonlocal download_called
+            if not download_called:
+                download_called = True
+                return b"short"
+            return b""
 
         with (
             mock.patch(
