@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from glob import has_magic
 
+import aiohttp
 import fsspec
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
@@ -1652,6 +1653,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         f2.write(data)
                         offset += len(data)
                         callback.relative_update(len(data))
+
+                if offset != size:
+                    raise aiohttp.client_exceptions.ClientError(
+                        f"Expected {size} bytes, but only received {offset} bytes"
+                    )
         except Exception as e:
             # Clean up the corrupted file before raising error
             if os.path.exists(lpath):

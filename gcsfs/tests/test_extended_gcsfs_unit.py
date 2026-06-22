@@ -561,6 +561,45 @@ async def test_get_file_warning_on_missing_persisted_size(
             assert lpath.read_bytes() == json_data
 
 
+import aiohttp
+
+
+@pytest.mark.asyncio
+async def test_get_file_incomplete_download(
+    async_gcs, gcs_bucket_mocks, tmp_path, file_path
+):
+    """
+    Tests that _get_file raises ClientError and correctly removes the local file
+    when the downloaded bytes are less than the expected size.
+    """
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        lpath = tmp_path / "output.txt"
+
+        # Simulate download_range returning a shorter byte string than expected
+        async def mock_download_range(*args, **kwargs):
+            return b"short"
+
+        with (
+            mock.patch(
+                "gcsfs.zb_hns_utils.download_range",
+                side_effect=mock_download_range,
+            ),
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            with pytest.raises(
+                aiohttp.client_exceptions.ClientError,
+                match="Expected .* bytes, but only received .* bytes",
+            ):
+                await async_gcs._get_file(file_path, str(lpath))
+
+            # The local file should not exist after the failed download
+            assert not lpath.exists()
+
+
 @pytest.mark.asyncio
 async def test_get_file_exception_cleanup(
     async_gcs, gcs_bucket_mocks, tmp_path, file_path
