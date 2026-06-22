@@ -3481,3 +3481,23 @@ def test_open_generation_forwarded():
         mock_gcs_file.assert_called_once()
         _, kwargs = mock_gcs_file.call_args
         assert kwargs.get("generation") == "123"
+
+
+@pytest.mark.asyncio
+async def test_cat_file_generation():
+    fs = gcsfs.core.GCSFileSystem(token="anon")
+
+    with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        with mock.patch.object(
+            fs, "_process_limits", new_callable=mock.AsyncMock
+        ) as mock_limits:
+            mock_limits.return_value = "bytes=0-10"
+            mock_call.return_value = ({}, b"data")
+
+            await fs._cat_file_sequential(
+                "bucket/file", start=0, end=10, generation="12345"
+            )
+
+            assert mock_call.call_count == 1
+            url = mock_call.call_args[0][1]
+            assert "generation=12345" in url

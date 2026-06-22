@@ -1173,10 +1173,11 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         else:
             return [o["name"] for o in out]
 
-    def url(self, path):
+    def url(self, path, generation=None):
         """Get HTTP URL of the given path"""
         u = "{}/download/storage/v1/b/{}/o/{}?alt=media{}"
-        bucket, object, generation = self.split_path(path)
+        bucket, object, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
         object = quote(object)
         return u.format(
             self._location,
@@ -1193,7 +1194,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if start is not None and end is not None and start >= end >= 0:
             return b""
 
-        u2 = self.url(path)
+        u2 = self.url(path, generation=kwargs.get("generation"))
         if start is not None or end is not None:
             head = {"Range": await self._process_limits(path, start, end)}
         else:
