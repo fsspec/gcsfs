@@ -2987,13 +2987,6 @@ class TestExtendedGcsFileSystemBucketType:
                 assert "Could not determine bucket type" in caplog.text
 
 
-from unittest import mock
-
-import pytest
-
-from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-
-
 @pytest.mark.asyncio
 async def test_list_objects_file_not_found_hns():
     fs = ExtendedGcsFileSystem(token="anon")
@@ -3001,7 +2994,6 @@ async def test_list_objects_file_not_found_hns():
         mock.patch(
             "gcsfs.core.GCSFileSystem._list_objects", new_callable=mock.AsyncMock
         ) as mock_super_list,
-        mock.patch.object(fs, "split_path", return_value=("bucket", "key", "gen")),
         mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
         mock.patch.object(
             fs, "_get_directory_info", new_callable=mock.AsyncMock
@@ -3022,7 +3014,6 @@ async def test_list_objects_unexpected_exception_hns():
         mock.patch(
             "gcsfs.core.GCSFileSystem._list_objects", new_callable=mock.AsyncMock
         ) as mock_super_list,
-        mock.patch.object(fs, "split_path", return_value=("bucket", "key", "gen")),
         mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
         mock.patch.object(
             fs, "_get_directory_info", new_callable=mock.AsyncMock
