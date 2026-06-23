@@ -1,0 +1,10 @@
+# yamllint disable
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ .Release.Name }}-config"
+data:
+  workload-configuration: |-
+{{ .Files.Get .Values.workload.configFile | nindent 4 }}
+  requirements.txt: |-
+{{ .Files.Get "requirements.txt" | nindent 4 }}
