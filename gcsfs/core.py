@@ -30,7 +30,7 @@ from fsspec.utils import other_paths, setup_logging, stringify_path
 from . import __version__ as version
 from ._dircache import DirCacheUpdater
 from .checkers import get_consistency_checker
-from .concurrency import parallel_tasks_first_completed
+from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
@@ -1213,22 +1213,20 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if start >= end:
             return b""
 
-        if concurrency <= 1 or end - start < self.MIN_CHUNK_SIZE_FOR_CONCURRENCY:
+        ranges = split_range(
+            end - start, concurrency, self.MIN_CHUNK_SIZE_FOR_CONCURRENCY
+        )
+        if len(ranges) == 1:
             return await self._cat_file_sequential(path, start=start, end=end, **kwargs)
 
-        total_size = end - start
-        part_size = total_size // concurrency
         tasks = []
 
-        for i in range(concurrency):
-            offset = start + (i * part_size)
-            actual_size = (
-                part_size if i < concurrency - 1 else total_size - (i * part_size)
-            )
+        for relative_offset, size in ranges:
+            offset = start + relative_offset
             tasks.append(
                 asyncio.create_task(
                     self._cat_file_sequential(
-                        path, start=offset, end=offset + actual_size, **kwargs
+                        path, start=offset, end=offset + size, **kwargs
                     )
                 )
             )

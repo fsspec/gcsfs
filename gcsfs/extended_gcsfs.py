@@ -27,6 +27,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
+from gcsfs.concurrency import split_range
 from gcsfs.core import GCSFile, GCSFileSystem
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
@@ -495,10 +496,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool):
         """Helper to handle concurrent chunk downloads cleanly."""
-        concurrency = (
-            concurrency if length >= self.MIN_CHUNK_SIZE_FOR_CONCURRENCY else 1
-        )
-        part_size = length // concurrency
+        ranges = split_range(length, concurrency, self.MIN_CHUNK_SIZE_FOR_CONCURRENCY)
 
         tasks = []
         views = []
@@ -516,9 +514,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     )
                 await m_client.download_ranges([(o, s, view)])
 
-        for i in range(concurrency):
-            part_offset = offset + (i * part_size)
-            actual_size = part_size if i < concurrency - 1 else length - (i * part_size)
+        for relative_offset, actual_size in ranges:
+            part_offset = offset + relative_offset
 
             # Give each task a restricted view of the master buffer
             view = master_buffer.get_view(part_offset - offset, actual_size)
@@ -620,7 +617,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return await self._concurrent_mrd_fetch(
                 offset,
                 length,
-                concurrency if length >= self.MIN_CHUNK_SIZE_FOR_CONCURRENCY else 1,
+                concurrency,
                 mrd,
             )
 
