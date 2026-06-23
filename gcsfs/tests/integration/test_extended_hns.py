@@ -533,6 +533,19 @@ class TestExtendedGcsFileSystemMakedirs:
 
         gcsfs.makedirs(TEST_HNS_BUCKET, exist_ok=True)  # Should succeed silently
 
+    def test_hns_makedirs_with_protocol(self, gcs_hns):
+        """Test successful HNS folder creation via makedirs with protocol prefix."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/new_dir_protocol_{uuid.uuid4().hex}"
+        dir_path = f"gs://{base_dir}/nested/one_more"
+        stripped_dir_path = f"{base_dir}/nested/one_more"
+
+        gcsfs.makedirs(dir_path)
+        assert gcsfs.isdir(dir_path)
+        assert gcsfs.isdir(stripped_dir_path)
+        assert gcsfs.isdir(f"{base_dir}/nested")
+        assert gcsfs.isdir(base_dir)
+
 
 class TestExtendedGcsFileSystemRmdir:
     """Integration tests for the rmdir method in ExtendedGcsFileSystem."""

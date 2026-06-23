@@ -931,6 +931,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             If `exist_ok` is False and the directory already exists, or if a
             file already exists at the target path regardless of `exist_ok`.
         """
+        path = self._strip_protocol(path)
         bucket, key, _ = self.split_path(path)
 
         if bucket in ["", "/"]:
