@@ -856,7 +856,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
 
-        # Preemptively check if the path already exists to ensure fsspec compatibility
+        # Preemptively check if the path already exists to ensure fsspec compatibility.
+        # This check is required because GCS natively allows a file and a folder
+        # with the exact same name to co-exist at the same level. Consequently, the GCS
+        # server's create_folder API will succeed silently and not raise a Conflict
+        # if a file already exists at the target path. To enforce standard POSIX/fsspec
+        # filesystem semantics (forbidding file/directory name collisions), we need to
+        # explicitly verify client-side that no file occupies the target path.
         try:
             info = await self._info(path)
             if info["type"] != "directory":
