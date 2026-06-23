@@ -23,7 +23,7 @@ def _write_op_seq_fixed_duration(gcs, file_path, chunk_size, runtime):
     data_chunk = os.urandom(chunk_size)
     start_time = time.perf_counter()
     try:
-        with gcs.open(file_path, "wb", finalize_on_close=True) as f:
+        with gcs.open(file_path, "wb") as f:
             while time.perf_counter() - start_time < runtime:
                 f.write(data_chunk)
                 total_bytes_written += chunk_size
