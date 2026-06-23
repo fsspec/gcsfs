@@ -92,8 +92,8 @@ Under the Hood Lifecycle
 * The prefetcher returns requested bytes from its local queue while the producer continues pulling chunks from GCS.
 * Calling ``file.close()`` triggers ``_prefetch_engine.close()``, safely canceling pending network tasks and clearing memory buffers to prevent memory leaks.
 
-Benchmarking with No Cache
---------------------------
+Standard Buckets Benchmarking with No Cache
+-------------------------------------------
 
 Single Stream Performance (1 Process)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
