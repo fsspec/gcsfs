@@ -18,11 +18,10 @@ BENCHMARK_GROUP = "write"
 def _write_op_seq_fixed_duration(gcs, file_path, chunk_size, runtime):
     """Write to a single file sequentially for a fixed duration."""
     total_bytes_written = 0
-    start_time = time.perf_counter()
 
     # Pre-generate chunk to avoid overhead during write loop
     data_chunk = os.urandom(chunk_size)
-
+    start_time = time.perf_counter()
     try:
         with gcs.open(file_path, "wb") as f:
             while time.perf_counter() - start_time < runtime:
