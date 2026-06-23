@@ -2695,13 +2695,12 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
         gcs.version_aware = original_version_aware
 
 
-def test_cat_file_routing_and_thresholds(gcs):
+def test_cat_file_routing_and_thresholds(gcs, monkeypatch):
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
     fn = f"{TEST_BUCKET}/core_routing.txt"
-    # Create an 8MB file
-    data = os.urandom(8 * 1024 * 1024)
+    data = b"0123456789abcdefghijk"
     gcs.pipe(fn, data)
 
-    # 1. Concurrency = 1 (Should route to sequential)
     with mock.patch.object(
         gcs, "_cat_file_sequential", wraps=gcs._cat_file_sequential
     ) as mock_seq:
@@ -2715,7 +2714,6 @@ def test_cat_file_routing_and_thresholds(gcs):
             assert mock_seq.call_count == 1
             assert mock_conc.call_count == 0
 
-    # 2. Concurrency = 4, but read size (1MB) is < MIN_CHUNK_SIZE_FOR_CONCURRENCY (5MB)
     with mock.patch.object(
         gcs, "_cat_file_sequential", wraps=gcs._cat_file_sequential
     ) as mock_seq:
@@ -2723,23 +2721,24 @@ def test_cat_file_routing_and_thresholds(gcs):
             gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
         ) as mock_conc:
             res = fsspec.asyn.sync(
-                gcs.loop, gcs._cat_file, fn, start=0, end=1024 * 1024, concurrency=4
+                gcs.loop, gcs._cat_file, fn, start=0, end=4, concurrency=4
             )
-            assert res == data[: 1024 * 1024]
-            # It hits the concurrent wrapper, but bails out to sequential internally
+            assert res == data[:4]
             assert mock_conc.call_count == 1
             assert mock_seq.call_count == 1
 
-    # 3. Concurrency = 4, and read size (8MB) >= MIN_CHUNK_SIZE_FOR_CONCURRENCY (5MB)
     with mock.patch.object(
         gcs, "_cat_file_sequential", wraps=gcs._cat_file_sequential
     ) as mock_seq:
         res = fsspec.asyn.sync(
-            gcs.loop, gcs._cat_file, fn, start=0, end=8 * 1024 * 1024, concurrency=4
+            gcs.loop, gcs._cat_file, fn, start=0, end=len(data), concurrency=4
         )
         assert res == data
-        # Should call sequential 4 times (once for each concurrent chunk)
         assert mock_seq.call_count == 4
+        assert [
+            (call.kwargs["start"], call.kwargs["end"])
+            for call in mock_seq.call_args_list
+        ] == [(0, 5), (5, 10), (10, 15), (15, 21)]
 
 
 def test_cat_file_concurrent_data_integrity(gcs):
@@ -2753,6 +2752,31 @@ def test_cat_file_concurrent_data_integrity(gcs):
     )
     assert len(res) == file_size
     assert res == data
+
+
+def test_cat_file_concurrent_caps_tasks(gcs, monkeypatch):
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
+    fn = f"{TEST_BUCKET}/core_capped_concurrency.txt"
+    data = b"0123456789abcdefghij"
+    gcs.pipe(fn, data)
+
+    with mock.patch.object(
+        gcs, "_cat_file_sequential", wraps=gcs._cat_file_sequential
+    ) as mock_seq:
+        res = fsspec.asyn.sync(
+            gcs.loop,
+            gcs._cat_file_concurrent,
+            fn,
+            start=0,
+            end=len(data),
+            concurrency=1000,
+        )
+        assert res == data
+        assert mock_seq.call_count == 4
+        assert [
+            (call.kwargs["start"], call.kwargs["end"])
+            for call in mock_seq.call_args_list
+        ] == [(0, 5), (5, 10), (10, 15), (15, 20)]
 
 
 def test_cat_file_concurrent_exception_cancellation(gcs):

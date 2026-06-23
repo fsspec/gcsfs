@@ -1184,15 +1184,10 @@ def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
             mocks["downloader"].close.assert_awaited()
 
 
-@pytest.mark.asyncio
-async def test_concurrent_mrd_fetch_success(extended_gcsfs):
-    """Tests that _concurrent_mrd_fetch successfully downloads and stitches chunks."""
-    # Add spec so isinstance() checks pass
+def _mrd_pool_with_downloads():
     mock_pool = mock.AsyncMock(spec=MRDPool)
     mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
     mock_mrd.object_name = "test_object"
-
-    # Set up the context manager mock return value
     mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
 
     async def fake_download(ranges):
@@ -1200,27 +1195,50 @@ async def test_concurrent_mrd_fetch_success(extended_gcsfs):
             buf.write(b"A" * length)
 
     mock_mrd.download_ranges.side_effect = fake_download
+    return mock_pool, mock_mrd
+
+
+@pytest.mark.asyncio
+async def test_concurrent_mrd_fetch_success(extended_gcsfs, monkeypatch):
+    """Tests that _concurrent_mrd_fetch successfully downloads and stitches chunks."""
+    monkeypatch.setattr(extended_gcsfs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
+    mock_pool, mock_mrd = _mrd_pool_with_downloads()
 
     result = await extended_gcsfs._concurrent_mrd_fetch(
-        offset=0, length=5 * 1024 * 1024, concurrency=4, mrd_or_pool=mock_pool
+        offset=0, length=4, concurrency=4, mrd_or_pool=mock_pool
     )
 
-    assert len(result) == 5 * 1024 * 1024
-    assert result == b"A" * 5 * 1024 * 1024
+    assert result == b"A" * 4
     assert mock_mrd.download_ranges.call_count == 4
 
 
 @pytest.mark.asyncio
-async def test_concurrent_mrd_fetch_exception_masking(extended_gcsfs):
+async def test_concurrent_mrd_fetch_caps_tasks(extended_gcsfs, monkeypatch):
+    """Tests that _concurrent_mrd_fetch caps concurrency to the number of chunks."""
+    monkeypatch.setattr(extended_gcsfs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
+    mock_pool, mock_mrd = _mrd_pool_with_downloads()
+
+    result = await extended_gcsfs._concurrent_mrd_fetch(
+        offset=0, length=20, concurrency=1000, mrd_or_pool=mock_pool
+    )
+
+    assert result == b"A" * 20
+    assert mock_mrd.download_ranges.call_count == 4
+    assert [
+        call.args[0][0][:2] for call in mock_mrd.download_ranges.call_args_list
+    ] == [(0, 5), (5, 5), (10, 5), (15, 5)]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_mrd_fetch_exception_masking(extended_gcsfs, monkeypatch):
     """
     Tests that original exceptions in concurrent fetches are not masked by BufferErrors.
     """
-    # Add spec so isinstance() checks pass
+    monkeypatch.setattr(extended_gcsfs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
     mock_pool = mock.AsyncMock(spec=MRDPool)
     mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
     mock_mrd.object_name = "test_object"
 
-    # Set up the context manager mock return value
     mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
 
     call_count = 0
@@ -1229,7 +1247,6 @@ async def test_concurrent_mrd_fetch_exception_masking(extended_gcsfs):
         nonlocal call_count
         call_count += 1
         if call_count == 2:
-            # Simulate a network drop on the second concurrent chunk
             raise DataCorruption(None, "Simulated Network Drop")
         for offset, length, buf in ranges:
             buf.write(b"A" * length)
@@ -1238,7 +1255,7 @@ async def test_concurrent_mrd_fetch_exception_masking(extended_gcsfs):
 
     with pytest.raises(DataCorruption, match="Simulated Network Drop"):
         await extended_gcsfs._concurrent_mrd_fetch(
-            offset=0, length=5 * 1024 * 1024, concurrency=4, mrd_or_pool=mock_pool
+            offset=0, length=4, concurrency=4, mrd_or_pool=mock_pool
         )
 
 
@@ -1425,10 +1442,11 @@ async def test_cat_file_zero_length_read(extended_gcsfs):
 
 
 @pytest.mark.asyncio
-async def test_cat_file_concurrency_threshold(extended_gcsfs):
-    """Tests that _cat_file passes concurrency=1 to the fetcher if under the chunk size threshold."""
-    # Set a dummy threshold for the test
-    extended_gcsfs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 1000
+async def test_cat_file_delegates_resolved_range_to_mrd_fetch(
+    extended_gcsfs, monkeypatch
+):
+    """Tests that _cat_file delegates the resolved range to the concurrent fetcher."""
+    monkeypatch.setattr(extended_gcsfs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1000)
     mock_pool = mock.AsyncMock()
     extended_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
 
@@ -1457,13 +1475,15 @@ async def test_cat_file_concurrency_threshold(extended_gcsfs):
 
         await extended_gcsfs._cat_file("bucket/obj", concurrency=4)
 
-        # Because length (500) < MIN_CHUNK_SIZE_FOR_CONCURRENCY (1000), it should override concurrency to 1
-        mock_concurrent_fetch.assert_awaited_once_with(0, 500, 1, mock_pool)
+        mock_concurrent_fetch.assert_awaited_once_with(0, 500, 4, mock_pool)
 
 
 @pytest.mark.asyncio
-async def test_concurrent_mrd_fetch_base_exception_cancellation(extended_gcsfs):
+async def test_concurrent_mrd_fetch_base_exception_cancellation(
+    extended_gcsfs, monkeypatch
+):
     """Tests that pending tasks are cancelled if a BaseException occurs."""
+    monkeypatch.setattr(extended_gcsfs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
     mock_pool = mock.AsyncMock(spec=MRDPool)
 
     # Create fake tasks to track cancellation
@@ -1472,10 +1492,15 @@ async def test_concurrent_mrd_fetch_base_exception_cancellation(extended_gcsfs):
 
     mock_task2 = mock.Mock(spec=asyncio.Task)
     mock_task2.done.return_value = True  # Finished, should NOT be cancelled
+    task_mocks = iter([mock_task1, mock_task2])
+
+    def fake_create_task(coro):
+        coro.close()
+        return next(task_mocks)
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch("asyncio.create_task", side_effect=[mock_task1, mock_task2])
+            mock.patch("asyncio.create_task", side_effect=fake_create_task)
         )
         mock_gather = stack.enter_context(
             mock.patch("asyncio.gather", new_callable=mock.AsyncMock)
@@ -1485,7 +1510,7 @@ async def test_concurrent_mrd_fetch_base_exception_cancellation(extended_gcsfs):
 
         with pytest.raises(KeyboardInterrupt):
             await extended_gcsfs._concurrent_mrd_fetch(
-                offset=0, length=1024, concurrency=2, mrd_or_pool=mock_pool
+                offset=0, length=2, concurrency=2, mrd_or_pool=mock_pool
             )
 
         # Assert exactly the logic: if not t.done(): t.cancel()

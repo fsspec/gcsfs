@@ -2,7 +2,22 @@ import asyncio
 
 import pytest
 
-from gcsfs.concurrency import parallel_tasks_first_completed
+from gcsfs.concurrency import parallel_tasks_first_completed, split_range
+
+
+@pytest.mark.parametrize(
+    "size, concurrency, min_chunk_size, expected",
+    [
+        (0, 4, 5, []),
+        (4, 4, 5, [(0, 4)]),
+        (5, 4, 5, [(0, 5)]),
+        (20, 1000, 5, [(0, 5), (5, 5), (10, 5), (15, 5)]),
+        (21, 4, 5, [(0, 5), (5, 5), (10, 5), (15, 6)]),
+        (21, 1000, 5, [(0, 5), (5, 5), (10, 5), (15, 6)]),
+    ],
+)
+def test_split_range_caps_concurrency(size, concurrency, min_chunk_size, expected):
+    assert split_range(size, concurrency, min_chunk_size) == expected
 
 
 @pytest.mark.asyncio
