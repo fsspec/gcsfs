@@ -1,0 +1,54 @@
+name: Release Preparation
+
+# Monthly release orchestrator (Preparation Phase):
+#   1. Calculates the next CalVer version and updates the changelog.
+#   2. Commits changes to a new release branch and pushes it.
+#   3. Opens a Pull Request for review.
+on:
+  schedule:
+    - cron: "0 0 5 * *" # Runs on the 5th of every month
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run Prepare Release Script
+        run: python3 .github/release/prepare_release.py
+
+      - name: Create Branch and Commit
+        run: |
+          git checkout -b "$BRANCH_NAME"
+          git add docs/source/changelog.rst
+          git commit -m "chore: release $VERSION"
+          git push --force origin "$BRANCH_NAME"
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "chore: release $VERSION" \
+            --body "Automated monthly release for GCSFS version $VERSION. Once CI passes and you are ready to release, please merge this PR manually. Merging will automatically tag the release and publish it to PyPI." \
+            --head "$BRANCH_NAME" \
+            --base "main" \
+            --label "autorelease"

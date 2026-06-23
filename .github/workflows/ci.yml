@@ -68,6 +68,9 @@ jobs:
         run: |
           pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
           pytest gcsfs/tests/perf/microbenchmarks --run-benchmarks-infra
+      - name: Run Release Automation Tests
+        run: |
+          pytest -vv .github/release/
       - name: Run all tests (Standard, Zonal & HNS Enabled) with default ON extended feature support
 
         run: |
