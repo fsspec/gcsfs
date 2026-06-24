@@ -116,3 +116,39 @@ class TestDirCacheUpdaterMv:
 
         assert src_parent not in fs.dircache
         assert dst_parent not in fs.dircache
+
+
+class TestDirCacheUpdaterMkdirRmdir:
+    @pytest.mark.asyncio
+    async def test_mkdir_invalidates_root_cache(self):
+        fs = _fs()
+        # Seed the root cache (list of buckets)
+        fs.dircache[""] = [{"name": "bucket1", "type": "directory"}]
+
+        # Mock _call to prevent actual network requests
+        async def mock_call(*args, **kwargs):
+            return {"name": "new-bucket"}
+
+        fs._call = mock_call
+
+        await fs._mkdir("new-bucket")
+
+        # The root cache must be invalidated because a new bucket was created
+        assert "" not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rmdir_invalidates_root_cache(self):
+        fs = _fs()
+        # Seed the root cache (list of buckets)
+        fs.dircache[""] = [{"name": "bucket1", "type": "directory"}]
+
+        # Mock _call to prevent actual network requests
+        async def mock_call(*args, **kwargs):
+            return {}
+
+        fs._call = mock_call
+
+        await fs._rmdir("bucket1")
+
+        # The root cache must be invalidated because a bucket was removed
+        assert "" not in fs.dircache
