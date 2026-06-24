@@ -1572,8 +1572,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # Works for both 'overwrite' and 'create' modes
         writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
         try:
-            for i in range(0, len(data), chunksize):
-                await writer.append(data[i : i + chunksize])
+            with memoryview(data) as data_view:
+                for i in range(0, len(data_view), chunksize):
+                    await writer.append(data_view[i : i + chunksize])
         finally:
             finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
             await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
