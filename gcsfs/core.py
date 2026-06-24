@@ -11,6 +11,7 @@ import os
 import posixpath
 import re
 import sys
+import threading
 import uuid
 import warnings
 import weakref
@@ -351,6 +352,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
+        self._thread_local_storage_client = threading.local()
 
         if check_connection:
             warnings.warn(
@@ -2269,12 +2271,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         URL : str
             The signed URL
         """
-        from google.cloud import storage
+        client = getattr(self._thread_local_storage_client, "instance", None)
+        if client is None:
+            from google.cloud import storage
 
-        client = storage.Client(
-            credentials=self.credentials.credentials,
-            project=self.project,
-        )
+            client = storage.Client(
+                credentials=self.credentials.credentials,
+                project=self.project,
+            )
+            self._thread_local_storage_client.instance = client
 
         bucket, key, generation = self.split_path(path)
         bucket = client.bucket(bucket)
