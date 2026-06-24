@@ -117,7 +117,7 @@ export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
 export PYTHONPATH=${PYTHONPATH:-}:/workload/configs
 
 torchrun \
-  --nproc_per_node="${GPUS_PER_NODE:-8}" \
+  --nproc_per_node="${GPUS_PER_NODE:-4}" \
   --nnodes="$NNODES" \
   --node_rank="$NODE_RANK" \
   --master_addr="$MASTER_ADDR" \

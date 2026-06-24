@@ -64,10 +64,16 @@ for attempt in $(seq 1 5); do
       "${RESUME_ARGS[@]}" \
       --require-data-loading-metrics \
       --bucket-type "${_BUCKET_TYPE}" --zone "${_ZONE}" --region "$REGION" \
-      --nodes "${_NODES}" --steps "${_STEPS}" --checkpoint-interval "${_CHECKPOINT_INTERVAL}" \
+      --machine-type "${_MACHINE_TYPE}" \
+      --nodes "${_NODES}" --ranks-per-node "${_RANKS_PER_NODE}" \
+      --steps "${_STEPS}" --checkpoint-interval "${_CHECKPOINT_INTERVAL}" \
+      --checkpoints-to-keep "${_CKPT_TO_KEEP}" \
       --dataset-path "${_DATASET_PATH}" --model-id "${_MODEL_ID}" \
+      --image "${_IMAGE}" \
       --training-strategy "${_TRAINING_STRATEGY}" \
-      --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}"; then
+      --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}" \
+      --per-device-batch "${_PER_DEVICE_BATCH}" --grad-accum "${_GRAD_ACCUM}" \
+      --dataloader-workers "${_DATALOADER_WORKERS}"; then
     SCRAPE_OK=true
     break
   fi

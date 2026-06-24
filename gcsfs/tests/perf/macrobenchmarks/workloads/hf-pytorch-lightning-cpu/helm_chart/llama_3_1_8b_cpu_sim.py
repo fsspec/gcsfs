@@ -82,7 +82,11 @@ logging.info("simulated_step_compute_seconds: %s", SIMULATED_STEP_COMPUTE_SECOND
 
 # ---- Config (env-overridable, mirrors original script's pattern) ----------
 preset_max_steps = int(os.getenv("MAX_STEPS", "1000"))
-gradient_accumulation_steps = int(os.getenv("GRADIENT_ACCUMULATION_STEPS", "4"))
+# Default 1 (not the launcher-overridden 4 this once carried): the launcher and
+# the Helm template both set GRADIENT_ACCUMULATION_STEPS=1 to match the GPU
+# a4_v1 run, so 1 is the effective value -- the standalone smoke test should
+# agree rather than silently use a different accumulation.
+gradient_accumulation_steps = int(os.getenv("GRADIENT_ACCUMULATION_STEPS", "1"))
 per_device_train_batch_size = int(os.getenv("PER_DEVICE_TRAIN_BATCH_SIZE", "8"))
 dataloader_num_workers = int(os.getenv("DATALOADER_NUM_WORKERS", "16"))
 checkpoint_load_path = os.getenv("CKPT_LOAD_PATH", None)
