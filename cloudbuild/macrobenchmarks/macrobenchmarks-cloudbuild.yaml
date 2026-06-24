@@ -1,0 +1,167 @@
+substitutions:
+  _INFRA_PREFIX: ""
+  _ZONE: ""
+  _GKE_SERVICE_ACCOUNT: ""
+  _WORKLOAD: "hf-pytorch-lightning-cpu"
+  _BUCKET_TYPE: "regional"
+  _NODES: "2"
+  _STEPS: "100"
+  _CHECKPOINT_INTERVAL: "25"
+  _DATASET_PATH: ""
+  _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
+  _HF_TOKEN: ""
+  # Optional gs:// checkpoint to resume from, exercising the restore IO path.
+  # Empty (default) = fresh run, no restore. Must point at a checkpoint that
+  # outlives the run (e.g. a seeded bucket), not the per-run ephemeral one.
+  _CHECKPOINT_LOAD_PATH: ""
+  _REQUIREMENTS: ""
+  _TRAINING_STRATEGY: "ddp"
+  _SIMULATED_STEP_COMPUTE_SECONDS: "1.0"
+  _JOBSET_VERSION: "v0.12.0"
+  _SKIP_CLEANUP: "false"
+
+# Each step's logic lives in scripts/<step>.sh; the step bodies below are just
+# the env wiring (Cloud Build substitutions reach the scripts as environment
+# variables) plus dependency ordering. See scripts/lib.sh.
+steps:
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "init-variables"
+    entrypoint: "bash"
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "BUILD_ID=${BUILD_ID}"
+      - "BRANCH_NAME=${BRANCH_NAME}"
+      - "_INFRA_PREFIX=${_INFRA_PREFIX}"
+      - "_ZONE=${_ZONE}"
+      - "_GKE_SERVICE_ACCOUNT=${_GKE_SERVICE_ACCOUNT}"
+      - "_DATASET_PATH=${_DATASET_PATH}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_NODES=${_NODES}"
+      - "_STEPS=${_STEPS}"
+      - "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}"
+      - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
+      - "_MODEL_ID=${_MODEL_ID}"
+      - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
+      - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
+    args: ["cloudbuild/macrobenchmarks/scripts/init_variables.sh"]
+    waitFor: ["-"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-leaked-resources"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_INFRA_PREFIX=${_INFRA_PREFIX}"
+    args: ["cloudbuild/macrobenchmarks/scripts/cleanup_leaked_resources.sh"]
+    waitFor: ["init-variables"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-buckets"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "LOCATION=${LOCATION}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_ZONE=${_ZONE}"
+    args: ["cloudbuild/macrobenchmarks/scripts/create_buckets.sh"]
+    waitFor: ["init-variables"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-cluster"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_GKE_SERVICE_ACCOUNT=${_GKE_SERVICE_ACCOUNT}"
+      - "_NODES=${_NODES}"
+      - "_JOBSET_VERSION=${_JOBSET_VERSION}"
+    args: ["cloudbuild/macrobenchmarks/scripts/create_cluster.sh"]
+    waitFor: ["create-buckets"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-workload"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_WORKLOAD=${_WORKLOAD}"
+      - "_DATASET_PATH=${_DATASET_PATH}"
+      - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
+      - "_MODEL_ID=${_MODEL_ID}"
+      - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
+      - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
+      - "_HF_TOKEN=${_HF_TOKEN}"
+      - "_STEPS=${_STEPS}"
+      - "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}"
+      - "_NODES=${_NODES}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+    args: ["cloudbuild/macrobenchmarks/scripts/run_workload.sh"]
+    waitFor: ["create-cluster"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "scrape-metrics"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_STEPS=${_STEPS}"
+      - "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}"
+      - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
+      - "_WORKLOAD=${_WORKLOAD}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_ZONE=${_ZONE}"
+      - "_NODES=${_NODES}"
+      - "_DATASET_PATH=${_DATASET_PATH}"
+      - "_MODEL_ID=${_MODEL_ID}"
+      - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
+      - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
+    args: ["cloudbuild/macrobenchmarks/scripts/scrape_metrics.sh"]
+    waitFor: ["run-workload"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-helm"
+    entrypoint: "bash"
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_SKIP_CLEANUP=${_SKIP_CLEANUP}"
+    args: ["cloudbuild/macrobenchmarks/scripts/cleanup_helm.sh"]
+    waitFor: ["scrape-metrics"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-cluster"
+    entrypoint: "bash"
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_SKIP_CLEANUP=${_SKIP_CLEANUP}"
+    args: ["cloudbuild/macrobenchmarks/scripts/cleanup_cluster.sh"]
+    waitFor: ["cleanup-helm"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-buckets"
+    entrypoint: "bash"
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_SKIP_CLEANUP=${_SKIP_CLEANUP}"
+    args: ["cloudbuild/macrobenchmarks/scripts/delete_buckets.sh"]
+    waitFor: ["scrape-metrics"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-failure"
+    entrypoint: "bash"
+    args: ["cloudbuild/macrobenchmarks/scripts/check_failure.sh"]
+    waitFor: ["cleanup-cluster", "delete-buckets"]
+
+timeout: "21600s"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${LOCATION}/workerPools/cloud-build-worker-pool"

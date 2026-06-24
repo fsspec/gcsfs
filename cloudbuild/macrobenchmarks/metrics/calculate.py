@@ -1,0 +1,380 @@
+"""Aggregate raw-metric CSVs into one flat summary row.
+
+Mirrors the reference metric calculators
+(metrics/results_generation/metrics_calculators/) for the metrics the HF
+emulated workload produces. MFU/TFLOPs intentionally excluded.
+"""
+
+import argparse
+import csv
+import os
+import sys
+from collections import defaultdict
+
+from metrics import raw_store, stats, summary_schema
+
+PER_STEP_STABILIZATION_STEPS = 0
+STABLE_WINDOW_STABILIZATION_STEPS = 10
+
+
+def calc_step_time_metrics(step_rows: list) -> dict:
+    """Step-time metrics (mirrors TrainingMetricsCalculator)."""
+    rows = [
+        r
+        for r in step_rows
+        if r.get("step") is not None and r.get("step_duration") is not None
+    ]
+    if not rows:
+        return {}
+
+    out = {}
+    first_step = min(r["step"] for r in rows)
+
+    # mean_step_time: mean of per-step durations after skipping PER_STEP steps.
+    per_step_durations = [
+        r["step_duration"]
+        for r in rows
+        if r["step"] >= first_step + PER_STEP_STABILIZATION_STEPS
+    ]
+    if per_step_durations:
+        out["mean_step_time"] = stats.mean(per_step_durations)
+
+    # window metrics need step_end_time.
+    end_rows = [r for r in rows if r.get("step_end_time") is not None]
+    for label, skip in (
+        ("training_window", PER_STEP_STABILIZATION_STEPS),
+        ("stable_window", STABLE_WINDOW_STABILIZATION_STEPS),
+    ):
+        total, avg = _window_duration(end_rows, first_step + skip)
+        if total is not None:
+            out[f"{label}_total_step_duration"] = total
+            out[f"{label}_avg_step_time"] = avg
+    return out
+
+
+def _window_duration(end_rows: list, first_stable_step: int):
+    """total = last.step_end_time - first.step_end_time + first.step_duration."""
+    window = sorted(
+        (r for r in end_rows if r["step"] >= first_stable_step), key=lambda r: r["step"]
+    )
+    if not window:
+        return None, None
+    first, last = window[0], window[-1]
+    total = last["step_end_time"] - first["step_end_time"] + first["step_duration"]
+    return total, total / len(window)
+
+
+def _durations_by_group(rows: list, key_fields: tuple) -> dict:
+    """duration = max(end_time) - min(start_time) per group key."""
+    groups = defaultdict(lambda: {"starts": [], "ends": []})
+    for r in rows:
+        key = tuple(r[f] for f in key_fields)
+        groups[key]["starts"].append(r["start_time"])
+        groups[key]["ends"].append(r["end_time"])
+    return {
+        k: {"duration": max(v["ends"]) - min(v["starts"]), "min_end": min(v["ends"])}
+        for k, v in groups.items()
+    }
+
+
+def _prefixed(stats_dict: dict, prefix: str, count: int, count_name: str) -> dict:
+    out = {count_name: count}
+    for k, v in stats_dict.items():
+        out[f"{prefix}_{k}"] = v
+    return out
+
+
+def calc_write_metrics(write_rows: list) -> dict:
+    if not write_rows:
+        return {}
+    groups = _durations_by_group(write_rows, ("checkpoint_step", "checkpoint_location"))
+    durations = [g["duration"] for g in groups.values()]
+    return _prefixed(
+        stats.duration_stats(durations),
+        "checkpoint_write_time",
+        len(durations),
+        "num_checkpoint_write_datapoints",
+    )
+
+
+def calc_delete_metrics(delete_rows: list) -> dict:
+    if not delete_rows:
+        return {}
+    groups = _durations_by_group(
+        delete_rows, ("checkpoint_step", "checkpoint_location")
+    )
+    durations = [g["duration"] for g in groups.values()]
+    return _prefixed(
+        stats.duration_stats(durations),
+        "checkpoint_delete_time",
+        len(durations),
+        "num_checkpoint_delete_datapoints",
+    )
+
+
+def calc_restore_metrics(restore_rows: list) -> dict:
+    if not restore_rows:
+        return {}
+    # Group by the restored checkpoint (checkpoint_location is the loaded path):
+    # all ranks restoring one checkpoint collapse into a single distributed
+    # datapoint (max end - min start), while two distinct restores stay
+    # separate. Under DDP a normal resume restores one checkpoint, so this is
+    # one datapoint.
+    groups = _durations_by_group(
+        restore_rows, ("checkpoint_step", "checkpoint_location")
+    )
+    durations = [g["duration"] for g in groups.values()]
+    out = _prefixed(
+        stats.duration_stats(durations),
+        "checkpoint_restore_time",
+        len(durations),
+        "num_checkpoint_restore_datapoints",
+    )
+    # checkpoint_restore_time_initial = duration of the earliest-ending restore.
+    initial_key = min(groups, key=lambda k: groups[k]["min_end"])
+    out["checkpoint_restore_time_initial"] = groups[initial_key]["duration"]
+    return out
+
+
+# Summary column order is owned by macrobenchmarks_schema.json (the BigQuery
+# external-table definition); the CSV header derives from it so the two cannot
+# drift. See metrics/summary_schema.py.
+SUMMARY_FIELDNAMES = summary_schema.fieldnames()
+
+
+def calc_data_loading_metrics(dl_rows: list) -> dict:
+    """Run-wide accelerator-blocked datapoint, taken from the bottleneck rank.
+
+    Every rank emits the Lightning profiler summary, so several run-wide
+    (epoch_idx == -1) rows can be present (the log filter spans both node pods).
+    The distributed step is gated by the slowest rank, so report the
+    bottleneck: the run-wide row with the greatest accelerator_blocked_time,
+    passing both of its fields through together. This is deterministic
+    regardless of log/ingestion order, unlike picking the first row.
+    """
+    candidates = [
+        r
+        for r in dl_rows
+        if r.get("epoch_idx") == -1
+        and r.get("accelerator_blocked_time") is not None
+        and r.get("accelerator_blocked_percent") is not None
+    ]
+    if not candidates:
+        return {}
+    row = max(candidates, key=lambda r: r["accelerator_blocked_time"])
+    return {
+        "accelerator_blocked_time": row["accelerator_blocked_time"],
+        "accelerator_blocked_percent": row["accelerator_blocked_percent"],
+    }
+
+
+def build_summary_row(
+    *,
+    run_id: str,
+    workload_name: str,
+    requirements: str,
+    step_rows: list,
+    write_rows: list,
+    restore_rows: list,
+    delete_rows: list,
+    dl_rows: list,
+    dimensions: dict = None,
+) -> dict:
+    row = {
+        "run_id": run_id,
+        "workload_name": workload_name,
+        "requirements": requirements,
+    }
+    if dimensions:
+        row.update({k: v for k, v in dimensions.items() if v is not None})
+    row.update(calc_step_time_metrics(step_rows))
+    row.update(calc_write_metrics(write_rows))
+    row.update(calc_restore_metrics(restore_rows))
+    row.update(calc_delete_metrics(delete_rows))
+    row.update(calc_data_loading_metrics(dl_rows))
+    return row
+
+
+def validate_required_metrics(
+    *,
+    step_rows: list,
+    write_rows: list,
+    restore_rows: list = None,
+    dl_rows: list = None,
+    expected_steps: int = 0,
+    min_write_datapoints: int = 0,
+    min_restore_datapoints: int = 0,
+    require_data_loading: bool = False,
+    resume_run: bool = False,
+    checkpoint_interval: int = 0,
+) -> None:
+    """Fail if required benchmark metrics are missing or incomplete."""
+    observed_steps = {
+        r["step"]
+        for r in step_rows
+        if r.get("step") is not None and r.get("step_duration") is not None
+    }
+    if expected_steps:
+        if resume_run:
+            if not observed_steps or max(observed_steps) < expected_steps:
+                found = max(observed_steps) if observed_steps else "none"
+                _fail_validation(
+                    f"expected resumed run to reach step {expected_steps}, "
+                    f"found {found}"
+                )
+        elif len(observed_steps) < expected_steps:
+            _fail_validation(
+                f"expected at least {expected_steps} step metrics, found "
+                f"{len(observed_steps)}"
+            )
+
+    if min_write_datapoints:
+        groups = _durations_by_group(
+            write_rows, ("checkpoint_step", "checkpoint_location")
+        )
+        write_datapoints = len(groups)
+        required_write_datapoints = min_write_datapoints
+        if resume_run and checkpoint_interval and observed_steps:
+            first_step, last_step = min(observed_steps), max(observed_steps)
+            required_write_datapoints = sum(
+                1
+                for step in range(
+                    checkpoint_interval, last_step + 1, checkpoint_interval
+                )
+                if step >= first_step
+            )
+        if write_datapoints < required_write_datapoints:
+            _fail_validation(
+                f"expected at least {required_write_datapoints} checkpoint write "
+                f"datapoints, found {write_datapoints}"
+            )
+
+    if min_restore_datapoints:
+        restore_datapoints = len(
+            _durations_by_group(
+                restore_rows or [], ("checkpoint_step", "checkpoint_location")
+            )
+        )
+        if restore_datapoints < min_restore_datapoints:
+            _fail_validation(
+                f"expected at least {min_restore_datapoints} checkpoint "
+                f"restore datapoints, found {restore_datapoints}"
+            )
+
+    if require_data_loading:
+        # The profiler summary that carries accelerator_blocked_* is emitted
+        # last and is the most likely casualty of Cloud Logging lag / a parser
+        # miss. Require a run-wide (epoch_idx == -1) row with both fields
+        # populated so we never upload a "successful" summary with N/A
+        # data-loading metrics.
+        has_run_wide = any(
+            r.get("epoch_idx") == -1
+            and r.get("accelerator_blocked_time") is not None
+            and r.get("accelerator_blocked_percent") is not None
+            for r in (dl_rows or [])
+        )
+        if not has_run_wide:
+            _fail_validation(
+                "required data-loading metrics missing: no epoch_idx == -1 row "
+                "with non-null accelerator_blocked_time and "
+                "accelerator_blocked_percent"
+            )
+
+
+def _fail_validation(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Aggregate raw metric CSVs into one summary row."
+    )
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--workload-name", required=True)
+    parser.add_argument("--requirements", required=True)
+    parser.add_argument("--in-dir", required=True)
+    parser.add_argument("--out-file", required=True)
+    parser.add_argument("--run-type", default="perf_optimization")
+    parser.add_argument("--expected-steps", type=int, default=0)
+    parser.add_argument("--min-write-datapoints", type=int, default=0)
+    parser.add_argument("--min-restore-datapoints", type=int, default=0)
+    parser.add_argument(
+        "--require-data-loading-metrics",
+        action="store_true",
+        help="Fail unless a run-wide accelerator-blocked " "datapoint is present.",
+    )
+    parser.add_argument(
+        "--resume-run",
+        action="store_true",
+        help="Validate against a resumed run's observed step "
+        "range instead of a fresh-run step count.",
+    )
+    parser.add_argument("--bucket-type")
+    parser.add_argument("--zone")
+    parser.add_argument("--region")
+    parser.add_argument("--nodes", type=int)
+    parser.add_argument("--steps", type=int)
+    parser.add_argument("--checkpoint-interval", type=int)
+    parser.add_argument("--dataset-path")
+    parser.add_argument("--model-id")
+    parser.add_argument("--training-strategy")
+    parser.add_argument("--simulated-step-compute-seconds", type=float)
+    args = parser.parse_args(argv)
+
+    tables = raw_store.read_raw_metrics(args.in_dir, run_type=args.run_type)
+    step_rows = tables.step_rows
+    write_rows = tables.write_rows
+    restore_rows = tables.restore_rows
+    delete_rows = tables.delete_rows
+    dl_rows = tables.dl_rows
+
+    validate_required_metrics(
+        step_rows=step_rows,
+        write_rows=write_rows,
+        dl_rows=dl_rows,
+        restore_rows=restore_rows,
+        expected_steps=args.expected_steps,
+        min_write_datapoints=args.min_write_datapoints,
+        min_restore_datapoints=args.min_restore_datapoints,
+        require_data_loading=args.require_data_loading_metrics,
+        resume_run=args.resume_run,
+        checkpoint_interval=args.checkpoint_interval,
+    )
+
+    dimensions = {
+        "bucket_type": args.bucket_type,
+        "zone": args.zone,
+        "region": args.region,
+        "nodes": args.nodes,
+        "steps": args.steps,
+        "checkpoint_interval": args.checkpoint_interval,
+        "dataset_path": args.dataset_path,
+        "model_id": args.model_id,
+        "training_strategy": args.training_strategy,
+        "simulated_step_compute_seconds": args.simulated_step_compute_seconds,
+    }
+    row = build_summary_row(
+        run_id=args.run_id,
+        workload_name=args.workload_name,
+        requirements=args.requirements,
+        step_rows=step_rows,
+        write_rows=write_rows,
+        restore_rows=restore_rows,
+        delete_rows=delete_rows,
+        dl_rows=dl_rows,
+        dimensions=dimensions,
+    )
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.out_file)), exist_ok=True)
+    with open(args.out_file, "w", newline="") as fh:
+        writer = csv.DictWriter(
+            fh, fieldnames=SUMMARY_FIELDNAMES, restval="N/A", extrasaction="ignore"
+        )
+        writer.writeheader()
+        writer.writerow(row)
+    print(f"Wrote summary to {args.out_file}")
+
+
+if __name__ == "__main__":
+    main()

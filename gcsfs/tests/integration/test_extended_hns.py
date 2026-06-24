@@ -449,6 +449,103 @@ class TestExtendedGcsFileSystemMkdir:
         assert gcsfs.exists(bucket_path)
         assert gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.HIERARCHICAL
 
+    def test_hns_mkdir_existing_file_error(self, gcs_hns):
+        """Test mkdir raises FileExistsError if a file exists at the path."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/existing_file_mkdir_{uuid.uuid4().hex}.txt"
+        gcsfs.touch(file_path)
+        assert gcsfs.isfile(file_path)
+
+        with pytest.raises(FileExistsError, match="A file already exists"):
+            gcsfs.mkdir(file_path)
+
+
+class TestExtendedGcsFileSystemMakedirs:
+    """Integration tests for the makedirs method in ExtendedGcsFileSystem."""
+
+    def test_hns_makedirs_success(self, gcs_hns):
+        """Test successful HNS folder creation via makedirs."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/new_dir_integration_{uuid.uuid4().hex}"
+        dir_path = f"{base_dir}/nested/one_more"
+
+        gcsfs.makedirs(dir_path)
+        assert gcsfs.isdir(dir_path)
+        assert gcsfs.isdir(f"{base_dir}/nested")
+        assert gcsfs.isdir(base_dir)
+
+    def test_hns_makedirs_existing_dir_exist_ok_true(self, gcs_hns):
+        """Test makedirs when folder already exists and exist_ok=True (no-op)."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/existing_dir_makedirs_{uuid.uuid4().hex}"
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.isdir(dir_path)
+
+        gcsfs.makedirs(dir_path, exist_ok=True)
+        assert gcsfs.isdir(dir_path)
+
+    def test_hns_makedirs_existing_dir_exist_ok_false(self, gcs_hns):
+        """Test makedirs raises FileExistsError if folder exists and exist_ok=False."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/existing_dir_makedirs_fail_{uuid.uuid4().hex}"
+        gcsfs.mkdir(dir_path)
+        assert gcsfs.isdir(dir_path)
+
+        with pytest.raises(FileExistsError):
+            gcsfs.makedirs(dir_path, exist_ok=False)
+
+    def test_hns_makedirs_existing_file_error(self, gcs_hns):
+        """Test makedirs raises FileExistsError if a file exists at the path."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/existing_file_makedirs_{uuid.uuid4().hex}.txt"
+        gcsfs.touch(file_path)
+        assert gcsfs.isfile(file_path)
+
+        with pytest.raises(FileExistsError):
+            gcsfs.makedirs(file_path, exist_ok=True)
+
+        with pytest.raises(FileExistsError):
+            gcsfs.makedirs(file_path, exist_ok=False)
+
+    def test_makedirs_in_non_existent_bucket_fails(self, gcs_hns):
+        """Test that makedirs raises FileNotFoundError if the target bucket does not exist."""
+        gcsfs = gcs_hns
+        bucket_name = f"gcsfs-non-existent-{uuid.uuid4().hex[:12]}"
+        dir_path = f"{bucket_name}/some/nested/dir"
+
+        assert not gcsfs.exists(bucket_name)
+        with pytest.raises(FileNotFoundError, match="Bucket does not exist"):
+            gcsfs.makedirs(dir_path)
+
+    def test_makedirs_bucket_only_behavior(self, gcs_hns):
+        """Test makedirs on bucket-only paths raises FileNotFoundError if
+        bucket doesn't exist, and FileExistsError if exists and not exist_ok."""
+        gcsfs = gcs_hns
+        non_existent_bucket = f"gcsfs-non-existent-{uuid.uuid4().hex[:12]}"
+
+        # Case 1: Bucket does not exist
+        with pytest.raises(FileNotFoundError, match="Bucket does not exist"):
+            gcsfs.makedirs(non_existent_bucket)
+
+        # Case 2: Bucket exists
+        with pytest.raises(FileExistsError, match="Bucket already exists"):
+            gcsfs.makedirs(TEST_HNS_BUCKET, exist_ok=False)
+
+        gcsfs.makedirs(TEST_HNS_BUCKET, exist_ok=True)  # Should succeed silently
+
+    def test_hns_makedirs_with_protocol(self, gcs_hns):
+        """Test successful HNS folder creation via makedirs with protocol prefix."""
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/new_dir_protocol_{uuid.uuid4().hex}"
+        dir_path = f"gs://{base_dir}/nested/one_more"
+        stripped_dir_path = f"{base_dir}/nested/one_more"
+
+        gcsfs.makedirs(dir_path)
+        assert gcsfs.isdir(dir_path)
+        assert gcsfs.isdir(stripped_dir_path)
+        assert gcsfs.isdir(f"{base_dir}/nested")
+        assert gcsfs.isdir(base_dir)
+
 
 class TestExtendedGcsFileSystemRmdir:
     """Integration tests for the rmdir method in ExtendedGcsFileSystem."""

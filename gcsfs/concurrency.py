@@ -2,6 +2,27 @@ import asyncio
 from contextlib import asynccontextmanager
 
 
+def split_range(size, concurrency, min_chunk_size):
+    """Split a byte range into no more chunks than the configured minimum warrants."""
+    if size <= 0:
+        return []
+
+    min_chunk_size = max(1, min_chunk_size)
+    if concurrency <= 1 or size < min_chunk_size:
+        chunk_count = 1
+    else:
+        chunk_count = min(concurrency, size // min_chunk_size)
+
+    part_size = size // chunk_count
+    return [
+        (
+            i * part_size,
+            part_size if i < chunk_count - 1 else size - (i * part_size),
+        )
+        for i in range(chunk_count)
+    ]
+
+
 @asynccontextmanager
 async def parallel_tasks_first_completed(coros):
     """

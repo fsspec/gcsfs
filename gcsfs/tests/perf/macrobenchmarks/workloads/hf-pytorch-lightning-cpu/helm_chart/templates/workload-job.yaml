@@ -1,0 +1,133 @@
+# yamllint disable
+{{- $root := . -}}
+{{ $timestamp := now | date "2006-01-02-15-04-05" }}
+{{ $jobuuid := uuidv4 }}
+{{ $nodes := .Values.workload.nodes }}
+{{ $ranksPerNode := default 8 .Values.workload.ranksPerNode }}
+{{ $worldSize := mul .Values.workload.nodes $ranksPerNode }}
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: "{{ .Release.Name }}"
+  namespace: default
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: workload
+    replicas: 1
+    template:
+      spec:
+        parallelism: {{ $nodes }}
+        completions: {{ $nodes }}
+        backoffLimit: 0
+        completionMode: Indexed
+        ttlSecondsAfterFinished: 43200
+        template:
+          metadata:
+            name: {{ .Release.Name }}
+            annotations:
+              kubectl.kubernetes.io/default-container: workload
+          spec:
+            serviceAccountName: {{ $root.Values.serviceAccount }}
+            subdomain: "{{ .Release.Name }}"
+            restartPolicy: Never
+            {{- if $root.Values.nodeSelector }}
+            nodeSelector:
+              {{- toYaml $root.Values.nodeSelector | nindent 14 }}
+            {{- end }}
+            {{- if $root.Values.workload.singlePodPerNode }}
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      jobset.sigs.k8s.io/jobset-name: "{{ .Release.Name }}"
+            {{- end }}
+            volumes:
+            - name: workload-configuration
+              configMap:
+                name: "{{ .Release.Name }}-config"
+                items:
+                - key: workload-configuration
+                  path: {{ $root.Values.workload.configFile }}
+                - key: requirements.txt
+                  path: requirements.txt
+            - name: workload-launcher
+              configMap:
+                name: "{{ .Release.Name }}-launcher"
+            - name: shared-memory
+              emptyDir:
+                medium: "Memory"
+                sizeLimit: 250Gi
+            containers:
+            - name: workload
+              image: "{{ $root.Values.workload.image }}"
+              imagePullPolicy: Always
+              env:
+              - name: JOB_TIMESTAMP
+                value: "{{ $timestamp }}"
+              - name: JOB_UUID
+                value: "{{ $jobuuid }}"
+              - name: RUN_ID
+                value: "{{ .Release.Name }}"
+              - name: JOB_COMPLETION_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+              - name: MASTER_ADDR
+                value: "{{ .Release.Name }}-workload-0-0.{{ .Release.Name }}.default.svc.cluster.local"
+              - name: MASTER_PORT
+                value: "6002"
+              - name: WORLD_SIZE
+                value: "{{ $worldSize }}"
+              - name: NNODES
+                value: "{{ $nodes }}"
+              - name: GPUS_PER_NODE
+                value: "{{ $ranksPerNode }}"
+              - name: MAX_STEPS
+                value: "{{ $root.Values.workload.steps }}"
+              {{- if $root.Values.workload.hfToken }}
+              - name: HF_TOKEN
+                value: "{{ $root.Values.workload.hfToken }}"
+              {{- end }}
+              - name: DATASET_PATH
+                value: "{{ $root.Values.gcsfs.datasetPath }}"
+              - name: CKPT_WRITE_PATH
+                value: "{{ $root.Values.gcsfs.ckptWritePath }}"
+              - name: CKPT_LOAD_PATH
+                value: "{{ $root.Values.gcsfs.ckptLoadPath }}"
+              - name: CHECKPOINT_WRITE_INTERVAL
+                value: "{{ $root.Values.workload.ckptWriterInterval }}"
+              - name: CKPT_TO_KEEP
+                value: "{{ $root.Values.workload.ckptToKeep }}"
+              - name: MODEL_ID
+                value: "{{ $root.Values.workload.modelId }}"
+              - name: TRAINING_STRATEGY
+                value: "{{ $root.Values.workload.trainingStrategy }}"
+              - name: SIMULATED_STEP_COMPUTE_SECONDS
+                value: "{{ $root.Values.workload.simulatedStepComputeSeconds }}"
+              - name: REQUIREMENTS
+                value: "{{ $root.Values.workload.requirements }}"
+              {{- if $root.Values.workload.envs }}
+              {{- toYaml .Values.workload.envs | nindent 14 }}
+              {{- end }}
+              - name: PYTHON_MAIN
+                value: "{{ $root.Values.workload.configPath }}{{ $root.Values.workload.configFile }}"
+              command:
+              - bash
+              - -c
+              - |
+                echo "Pod on $(hostname --fqdn) is running"
+                echo "Pod is assigned job index of $JOB_COMPLETION_INDEX"
+                sleep 10
+                bash /workload/launcher/launch-workload.sh
+              volumeMounts:
+                - name: workload-configuration
+                  mountPath: {{ $root.Values.workload.configPath }}
+                - name: workload-launcher
+                  mountPath: /workload/launcher
+                - name: shared-memory
+                  mountPath: /dev/shm

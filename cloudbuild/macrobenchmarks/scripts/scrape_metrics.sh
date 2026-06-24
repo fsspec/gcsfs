@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# scrape-metrics: scrape Cloud Logging into raw CSVs and aggregate them into one
+# summary row, retrying for Cloud Logging ingestion lag, then upload the summary
+# to the results bucket. calculate exits non-zero until the required metrics are
+# complete, gating the upload.
+set -e
+source "$(dirname "$0")/lib.sh"
+trap 'record_failure scrape-metrics' ERR
+skip_if_failed
+source "${BUILD_VARS_FILE}"
+pip3 install --break-system-packages --quiet -r cloudbuild/macrobenchmarks/metrics/requirements.txt
+START_TIME=$(cat /workspace/start_time.txt)
+END_TIME=$(cat /workspace/end_time.txt)
+RAW_DIR=/workspace/raw_metrics
+cd cloudbuild/macrobenchmarks
+DATE_DIR=$(date +%Y%m%d)
+TS_DIR=$(date +%Y%m%d-%H%M%S)
+SUMMARY=/workspace/${TS_DIR}.csv
+MIN_WRITE_DATAPOINTS=$((${_STEPS} / ${_CHECKPOINT_INTERVAL}))
+if [ "$MIN_WRITE_DATAPOINTS" -lt 1 ]; then
+  MIN_WRITE_DATAPOINTS=1
+fi
+MIN_RESTORE_DATAPOINTS=0
+RESUME_ARGS=()
+if [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then
+  MIN_RESTORE_DATAPOINTS=1
+  RESUME_ARGS=(--resume-run)
+fi
+# Cloud Logging ingestion lags pod termination by seconds-to-minutes, and the
+# last logs emitted (the final checkpoint write and the profiler summary that
+# carries the data-loading metric) are the most likely to still be in flight
+# when the JobSet reports Completed. Settle once, then re-scrape at a fixed 60s
+# interval until the required metrics validate (or attempts are exhausted).
+# calculate
+# exits non-zero when metrics are incomplete; running it as an `if` condition
+# keeps `set -e`/the ERR trap from aborting the step on a not-yet-complete
+# attempt.
+sleep 60
+SCRAPE_OK=false
+for attempt in $(seq 1 5); do
+  echo "Scrape attempt $attempt of 5..."
+  rm -rf "$RAW_DIR"
+  # The parser hits the Cloud Logging API; a transient API error should fall
+  # through to the backoff like the ingestion-lag case, not abort the step via
+  # set -e / the ERR trap. Guard it in a condition so a failure retries.
+  if ! python3 -m metrics.parsers.hf \
+      --run-id "$RUN_ID" --project "${PROJECT_ID}" \
+      --start-time "$START_TIME" --end-time "$END_TIME" \
+      --checkpoint-location "gs://$CHECKPOINT_BUCKET/checkpoints" \
+      --out-dir "$RAW_DIR"; then
+    echo "Scrape failed (transient?); waiting before retry..."
+    sleep 60
+    continue
+  fi
+  if python3 -m metrics.calculate \
+      --run-id "$RUN_ID" --workload-name "${_WORKLOAD}" \
+      --requirements "${_REQUIREMENTS}" --in-dir "$RAW_DIR" --out-file "$SUMMARY" \
+      --expected-steps "${_STEPS}" \
+      --min-write-datapoints "$MIN_WRITE_DATAPOINTS" \
+      --min-restore-datapoints "$MIN_RESTORE_DATAPOINTS" \
+      "${RESUME_ARGS[@]}" \
+      --require-data-loading-metrics \
+      --bucket-type "${_BUCKET_TYPE}" --zone "${_ZONE}" --region "$REGION" \
+      --nodes "${_NODES}" --steps "${_STEPS}" --checkpoint-interval "${_CHECKPOINT_INTERVAL}" \
+      --dataset-path "${_DATASET_PATH}" --model-id "${_MODEL_ID}" \
+      --training-strategy "${_TRAINING_STRATEGY}" \
+      --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}"; then
+    SCRAPE_OK=true
+    break
+  fi
+  echo "Required metrics incomplete; waiting for Cloud Logging ingestion..."
+  sleep 60
+done
+if [ "$SCRAPE_OK" != "true" ]; then
+  echo "Metrics still incomplete after retries."
+  # Record explicitly: bash's ERR trap does NOT fire on `exit`, so without this
+  # the allowFailure step leaves the FAILED ledger empty and check-failure would
+  # green a run that uploaded no summary.
+  record_failure scrape-metrics
+  exit 1
+fi
+gcloud storage cp "$SUMMARY" "gs://$RESULTS_BUCKET/branch=$BRANCH_NAME/$DATE_DIR/$RUN_ID/${TS_DIR}.csv"
