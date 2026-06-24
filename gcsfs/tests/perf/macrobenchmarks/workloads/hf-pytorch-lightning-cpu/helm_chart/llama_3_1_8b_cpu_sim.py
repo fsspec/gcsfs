@@ -96,9 +96,7 @@ model_id = os.getenv("MODEL_ID", "meta-llama/Llama-3.1-8B")
 # (The ``fsdp`` strategy is added by the fsdp-cpu-macrobench branch.)
 training_strategy = os.getenv("TRAINING_STRATEGY", "ddp").lower()
 if training_strategy not in ("ddp",):
-    raise SystemExit(
-        f"TRAINING_STRATEGY must be 'ddp' (got {training_strategy!r})."
-    )
+    raise SystemExit(f"TRAINING_STRATEGY must be 'ddp' (got {training_strategy!r}).")
 # Parity with the model_id: line -- a single grep-able config marker per knob.
 logging.info("training_strategy: %s", training_strategy)
 
