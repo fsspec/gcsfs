@@ -848,8 +848,28 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             path, create_parents=create_parents, **bucket_kwargs
         )
 
-    async def _create_hns_folder(self, path, bucket, key, create_parents):
+    async def _create_hns_folder(
+        self, path, bucket, key, create_parents, exist_ok=True
+    ):
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
+
+        # Preemptively check if the path already exists to ensure fsspec compatibility.
+        # This check is required because GCS natively allows a file and a folder
+        # with the exact same name to co-exist at the same level. Consequently, the GCS
+        # server's create_folder API will succeed silently and not raise a Conflict
+        # if a file already exists at the target path. To enforce standard POSIX/fsspec
+        # filesystem semantics (forbidding file/directory name collisions), we need to
+        # explicitly verify client-side that no file occupies the target path.
+        try:
+            info = await self._info(path)
+            if info["type"] != "directory":
+                raise FileExistsError(f"A file already exists at the path: {path}")
+            if not exist_ok:
+                raise FileExistsError(f"Directory already exists: {path}")
+            return
+        except FileNotFoundError:
+            pass
+
         parent = f"projects/_/buckets/{bucket}"
         folder_id = key.rstrip("/") + "/"
         request = storage_control_v2.CreateFolderRequest(
@@ -872,7 +892,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 self._directory_cache_entry(path, key.rstrip("/")),
             )
         except api_exceptions.Conflict as e:
-            logger.debug(f"Directory already exists: {path}: {e}")
+            logger.debug(f"Conflict detected for path: {path}: {e}")
+            # Under race conditions, folder might have been created concurrently
+            if not exist_ok:
+                raise FileExistsError(f"Directory already exists: {path}") from e
         except api_exceptions.FailedPrecondition as e:
             # This error can occur if create_parents=False and the parent dir doesn't exist.
             # Translate it to FileNotFoundError for fsspec compatibility.
@@ -881,6 +904,59 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             ) from e
 
     mkdir = asyn.sync_wrapper(_mkdir)
+
+    async def _makedirs(self, path, exist_ok=False):
+        """Recursively make directories.
+
+        For HNS-enabled buckets, this natively creates the folder objects recursively.
+        For standard GCS buckets, since folders are simulated, this is a no-op.
+
+        Parameters
+        ----------
+        path : str
+            Leaf directory name.
+        exist_ok : bool (False)
+            If False, will error if the target directory already exists.
+            If True, will succeed silently if it exists as a directory, but
+            will still error if it exists as a file.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the target bucket does not exist.
+        FileExistsError
+            If `exist_ok` is False and the directory already exists, or if a
+            file already exists at the target path regardless of `exist_ok`.
+        """
+        path = self._strip_protocol(path)
+        bucket, key, _ = self.split_path(path)
+
+        if bucket in ["", "/"]:
+            raise ValueError("Cannot create root bucket")
+
+        # First, check if the bucket exists
+        if not await self._exists(bucket):
+            raise FileNotFoundError(f"Bucket does not exist: {bucket}")
+
+        if not key:
+            # Bucket-only case: makedirs is not for bucket creation.
+            # Since the bucket exists, raise FileExistsError if not exist_ok.
+            if not exist_ok:
+                raise FileExistsError(f"Bucket already exists: {bucket}")
+            return
+
+        # Check if the bucket is HNS-enabled
+        is_hns = await self._is_bucket_hns_enabled(bucket)
+        if not is_hns:
+            # For non-HNS buckets, directory creation is a no-op
+            return
+
+        # Recursively create the native folders in the HNS bucket
+        await self._create_hns_folder(
+            path, bucket, key, create_parents=True, exist_ok=exist_ok
+        )
+
+    makedirs = asyn.sync_wrapper(_makedirs)
 
     async def _get_directory_info(self, path, bucket, key, generation):
         """
