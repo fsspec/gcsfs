@@ -929,7 +929,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             self.dircache.clear()
         else:
             path = self._strip_protocol(path).rstrip("/")
-
+            if not path:
+                self.dircache.pop("", None)
             while path:
                 self.dircache.pop(path, None)
                 path = self._parent(path)
@@ -1023,6 +1024,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             json_out=True,
         )
         self.invalidate_cache(bucket)
+        self.invalidate_cache("")
 
     mkdir = asyn.sync_wrapper(_mkdir)
 
