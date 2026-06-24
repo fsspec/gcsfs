@@ -52,6 +52,16 @@ def test_simple(gcs, monkeypatch):
     gcs.ls("/" + TEST_BUCKET)  # OK to lead with '/'
 
 
+def test_gcs_init_invalid_access():
+    with pytest.raises(ValueError) as excinfo:
+        GCSFileSystem(access="invalid_access_value", token="anon")
+    msg = str(excinfo.value)
+    assert msg.startswith("access must be one of {")
+    assert msg.endswith("}")
+    for scope in GCSFileSystem.scopes:
+        assert f"'{scope}'" in msg or f'"{scope}"' in msg
+
+
 def test_exists(gcs):
     # Existing file
     fn = TEST_BUCKET + "/nested/file1"
