@@ -668,3 +668,41 @@ def test_init_no_loop_raises_error():
         BackgroundPrefetcher(
             fetcher=MockFetcher(b"X"), size=100, concurrency=1, loop=None
         )
+
+
+def test_local_seek_optimization(prefetcher_factory):
+    data = b"0123456789" * 10
+    fetcher = MockFetcher(data)
+    bp = prefetcher_factory(fetcher=fetcher, size=100, concurrency=4)
+
+    # First fetch: read first 50 bytes (0-50)
+    # This will trigger a fetch. The block size fetched will be 50 bytes (covering [0, 50]).
+    assert bp.fetch(0, 50) == data[0:50]
+    assert len(bp.consumer._current_block) == 50
+    initial_fetch_calls = fetcher.call_count
+    assert initial_fetch_calls > 0
+
+    # 1. Perform a backward seek *within* the currently buffered block [0, 50].
+    # Seek back to 5 and read 10 bytes (5 to 15).
+    # This should be a zero-cost local seek and NOT increment the fetcher call count.
+    assert bp.fetch(5, 15) == data[5:15]
+    assert fetcher.call_count == initial_fetch_calls
+    assert bp.user_offset == 15
+
+    # 2. Perform a forward seek *within* the currently buffered block [0, 50].
+    # Seek forward to 30 and read 10 bytes (30 to 40).
+    # This should also be resolved locally and NOT increment the fetcher call count.
+    assert bp.fetch(30, 40) == data[30:40]
+    assert fetcher.call_count == initial_fetch_calls
+    assert bp.user_offset == 40
+
+    # 3. Read further to trigger a hard seek and load the next block [60, 100].
+    assert bp.fetch(60, 80) == data[60:80]
+    calls_after_next = fetcher.call_count
+    assert calls_after_next > initial_fetch_calls
+
+    # The currently buffered block in the consumer is now [60, 100].
+    # Seek backward to 10 (which is outside [60, 100]).
+    # This should trigger a hard seek and increment the fetcher call count.
+    assert bp.fetch(10, 20) == data[10:20]
+    assert fetcher.call_count > calls_after_next
