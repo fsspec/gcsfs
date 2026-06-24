@@ -2452,7 +2452,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def url(self):
         """HTTP link to this file's data"""
-        return self.fs.url(self.path)
+        return self.fs.url(self.path, generation=self.generation)
 
     def _upload_chunk(self, final=False):
         """Write one part of a multi-block file upload

@@ -3501,3 +3501,16 @@ async def test_cat_file_generation():
             assert mock_call.call_count == 1
             url = mock_call.call_args[0][1]
             assert "generation=12345" in url
+
+
+def test_file_url_generation():
+    fs = gcsfs.core.GCSFileSystem(token="anon")
+    f = gcsfs.core.GCSFile(fs, "bucket/file", mode="wb")
+    f.generation = "12345"
+
+    try:
+        assert f.url() == fs.url("bucket/file", generation="12345")
+        assert "generation=12345" in f.url()
+    finally:
+        # Avoid flushing the unused write buffer (and a network call) on GC.
+        f.closed = True
