@@ -21,7 +21,13 @@ workload:
   ckptWriterInterval: 25
   ckptToKeep: 1
   modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
-  # gcsfs-under-test (git ref or gcsfs==<version>); fed to launcher REQUIREMENTS.
+  # Parallel training strategy: ddp (fsdp is enabled by the FSDP branch).
+  trainingStrategy: ddp
+  # Per-step simulated compute time in seconds (stands in for GPU compute).
+  simulatedStepComputeSeconds: 1.0
+  # Packages installed/overridden for the run (gcsfs under test and/or a custom
+  # lightning build, etc.); fed to the launcher REQUIREMENTS install (runs last,
+  # so it overrides requirements.txt pins).
   requirements:
   envs:
     - name: GLOO_SOCKET_IFNAME

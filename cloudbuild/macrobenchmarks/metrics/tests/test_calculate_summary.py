@@ -54,7 +54,7 @@ def test_build_summary_row_keys_subset_of_fieldnames():
     row = calculate.build_summary_row(
         run_id="r",
         workload_name="hf-pytorch-lightning-cpu",
-        gcsfs_source="gcsfs==1.0",
+        requirements="gcsfs==1.0",
         step_rows=[{"step": 0, "step_duration": 1.0, "step_end_time": 1.0}],
         write_rows=[],
         restore_rows=[],
@@ -63,7 +63,7 @@ def test_build_summary_row_keys_subset_of_fieldnames():
     )
     assert row["run_id"] == "r"
     assert row["workload_name"] == "hf-pytorch-lightning-cpu"
-    assert row["gcsfs_source"] == "gcsfs==1.0"
+    assert row["requirements"] == "gcsfs==1.0"
     assert set(row).issubset(set(calculate.SUMMARY_FIELDNAMES))
 
 
@@ -82,7 +82,7 @@ def test_main_writes_one_row_summary(tmp_path):
             "r",
             "--workload-name",
             "hf-pytorch-lightning-cpu",
-            "--gcsfs-source",
+            "--requirements",
             "gcsfs==1.0",
             "--in-dir",
             str(in_dir),
@@ -110,7 +110,7 @@ def test_main_fails_when_required_step_metrics_are_missing(tmp_path):
                 "r",
                 "--workload-name",
                 "hf-pytorch-lightning-cpu",
-                "--gcsfs-source",
+                "--requirements",
                 "gcsfs==1.0",
                 "--in-dir",
                 str(tmp_path / "raw"),
@@ -140,7 +140,7 @@ def test_main_fails_when_required_write_metrics_are_missing(tmp_path):
                 "r",
                 "--workload-name",
                 "hf-pytorch-lightning-cpu",
-                "--gcsfs-source",
+                "--requirements",
                 "gcsfs==1.0",
                 "--in-dir",
                 str(in_dir),
@@ -271,7 +271,7 @@ def test_main_fails_when_required_data_loading_metrics_are_missing(tmp_path):
                 "r",
                 "--workload-name",
                 "hf-pytorch-lightning-cpu",
-                "--gcsfs-source",
+                "--requirements",
                 "gcsfs==1.0",
                 "--in-dir",
                 str(in_dir),
@@ -296,7 +296,7 @@ def test_main_fails_when_required_restore_metrics_are_missing(tmp_path):
                 "r",
                 "--workload-name",
                 "hf-pytorch-lightning-cpu",
-                "--gcsfs-source",
+                "--requirements",
                 "gcsfs==1.0",
                 "--in-dir",
                 str(in_dir),
@@ -322,7 +322,7 @@ def test_main_succeeds_when_required_restore_metrics_are_present(tmp_path):
             "r",
             "--workload-name",
             "hf-pytorch-lightning-cpu",
-            "--gcsfs-source",
+            "--requirements",
             "gcsfs==1.0",
             "--in-dir",
             str(in_dir),
@@ -351,7 +351,7 @@ def test_main_fails_when_data_loading_metrics_present_but_null(tmp_path):
                 "r",
                 "--workload-name",
                 "hf-pytorch-lightning-cpu",
-                "--gcsfs-source",
+                "--requirements",
                 "gcsfs==1.0",
                 "--in-dir",
                 str(in_dir),
@@ -375,7 +375,7 @@ def test_main_emits_run_dimension_columns(tmp_path):
             "r",
             "--workload-name",
             "hf-pytorch-lightning-cpu",
-            "--gcsfs-source",
+            "--requirements",
             "gcsfs==1.0",
             "--in-dir",
             str(in_dir),
@@ -412,6 +412,62 @@ def test_main_emits_run_dimension_columns(tmp_path):
     assert rows[0]["model_id"] == "gs://huggingface-model-weights/Llama-3.1-8B"
 
 
+def test_main_emits_training_strategy_column(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--training-strategy",
+            "ddp",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["training_strategy"] == "ddp"
+    assert "training_strategy" in calculate.SUMMARY_FIELDNAMES
+
+
+def test_main_emits_simulated_step_compute_seconds_column(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--simulated-step-compute-seconds",
+            "2.5",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["simulated_step_compute_seconds"] == "2.5"
+    assert "simulated_step_compute_seconds" in calculate.SUMMARY_FIELDNAMES
+
+
 def test_main_succeeds_with_required_data_loading_metrics(tmp_path):
     in_dir = tmp_path / "raw"
     _write_step_csv(in_dir)
@@ -423,7 +479,7 @@ def test_main_succeeds_with_required_data_loading_metrics(tmp_path):
             "r",
             "--workload-name",
             "hf-pytorch-lightning-cpu",
-            "--gcsfs-source",
+            "--requirements",
             "gcsfs==1.0",
             "--in-dir",
             str(in_dir),

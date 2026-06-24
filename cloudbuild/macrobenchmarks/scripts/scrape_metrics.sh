@@ -54,7 +54,7 @@ for attempt in $(seq 1 5); do
   fi
   if python3 -m metrics.calculate \
       --run-id "$RUN_ID" --workload-name "${_WORKLOAD}" \
-      --gcsfs-source "${_GCSFS_SOURCE}" --in-dir "$RAW_DIR" --out-file "$SUMMARY" \
+      --requirements "${_REQUIREMENTS}" --in-dir "$RAW_DIR" --out-file "$SUMMARY" \
       --expected-steps "${_STEPS}" \
       --min-write-datapoints "$MIN_WRITE_DATAPOINTS" \
       --min-restore-datapoints "$MIN_RESTORE_DATAPOINTS" \
@@ -62,7 +62,9 @@ for attempt in $(seq 1 5); do
       --require-data-loading-metrics \
       --bucket-type "${_BUCKET_TYPE}" --zone "${_ZONE}" --region "$REGION" \
       --nodes "${_NODES}" --steps "${_STEPS}" --checkpoint-interval "${_CHECKPOINT_INTERVAL}" \
-      --dataset-path "${_DATASET_PATH}" --model-id "${_MODEL_ID}"; then
+      --dataset-path "${_DATASET_PATH}" --model-id "${_MODEL_ID}" \
+      --training-strategy "${_TRAINING_STRATEGY}" \
+      --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}"; then
     SCRAPE_OK=true
     break
   fi

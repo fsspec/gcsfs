@@ -172,7 +172,7 @@ def build_summary_row(
     *,
     run_id: str,
     workload_name: str,
-    gcsfs_source: str,
+    requirements: str,
     step_rows: list,
     write_rows: list,
     restore_rows: list,
@@ -183,7 +183,7 @@ def build_summary_row(
     row = {
         "run_id": run_id,
         "workload_name": workload_name,
-        "gcsfs_source": gcsfs_source,
+        "requirements": requirements,
     }
     if dimensions:
         row.update({k: v for k, v in dimensions.items() if v is not None})
@@ -292,7 +292,7 @@ def main(argv=None) -> None:
     )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--workload-name", required=True)
-    parser.add_argument("--gcsfs-source", required=True)
+    parser.add_argument("--requirements", required=True)
     parser.add_argument("--in-dir", required=True)
     parser.add_argument("--out-file", required=True)
     parser.add_argument("--run-type", default="perf_optimization")
@@ -318,6 +318,8 @@ def main(argv=None) -> None:
     parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--dataset-path")
     parser.add_argument("--model-id")
+    parser.add_argument("--training-strategy")
+    parser.add_argument("--simulated-step-compute-seconds", type=float)
     args = parser.parse_args(argv)
 
     tables = raw_store.read_raw_metrics(args.in_dir, run_type=args.run_type)
@@ -349,11 +351,13 @@ def main(argv=None) -> None:
         "checkpoint_interval": args.checkpoint_interval,
         "dataset_path": args.dataset_path,
         "model_id": args.model_id,
+        "training_strategy": args.training_strategy,
+        "simulated_step_compute_seconds": args.simulated_step_compute_seconds,
     }
     row = build_summary_row(
         run_id=args.run_id,
         workload_name=args.workload_name,
-        gcsfs_source=args.gcsfs_source,
+        requirements=args.requirements,
         step_rows=step_rows,
         write_rows=write_rows,
         restore_rows=restore_rows,

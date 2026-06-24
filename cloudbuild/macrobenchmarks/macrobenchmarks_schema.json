@@ -10,7 +10,7 @@
     "fields": [
       {"name": "run_id", "type": "STRING", "description": "Cloud Build run id (prefixed buildid-)."},
       {"name": "workload_name", "type": "STRING", "description": "Benchmark workload name (e.g. hf-pytorch-lightning-cpu)."},
-      {"name": "gcsfs_source", "type": "STRING", "description": "gcsfs under test - a git ref or gcsfs==<version>."},
+      {"name": "requirements", "type": "STRING", "description": "Packages installed/overridden for the run -- git refs and/or pkg==<version> specs (e.g. gcsfs under test, a custom lightning build)."},
       {"name": "bucket_type", "type": "STRING", "description": "Storage tier of the run's buckets: regional, zonal (RAPID), or hns."},
       {"name": "zone", "type": "STRING", "description": "GCP zone the cluster and buckets ran in (e.g. us-central1-a)."},
       {"name": "region", "type": "STRING", "description": "GCP region derived from the zone (e.g. us-central1)."},
@@ -19,6 +19,8 @@
       {"name": "checkpoint_interval", "type": "INTEGER", "description": "Number of training steps between checkpoint writes."},
       {"name": "dataset_path", "type": "STRING", "description": "gs:// path of the training dataset (Parquet)."},
       {"name": "model_id", "type": "STRING", "description": "Model identifier or gs:// path of the model weights."},
+      {"name": "training_strategy", "type": "STRING", "description": "Parallel training strategy used for the run: ddp (fsdp is added by the FSDP branch)."},
+      {"name": "simulated_step_compute_seconds", "type": "FLOAT", "description": "Configured per-step simulated compute time in seconds (the training_step sleep standing in for GPU forward+backward)."},
       {"name": "mean_step_time", "type": "FLOAT", "description": "Mean per-step duration in seconds over all measured steps."},
       {"name": "stable_window_avg_step_time", "type": "FLOAT", "description": "Mean per-step duration in seconds over the stable window (after warmup steps)."},
       {"name": "stable_window_total_step_duration", "type": "FLOAT", "description": "Total wall-clock duration in seconds of the stable window."},
