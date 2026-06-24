@@ -2,8 +2,10 @@
 
 # CPU emulator launcher. Mirrors a4_v1/launcher.sh but drops the GPU-specific
 # bits (NCCL plugin, nvidia.com/gpu, RDMA NICs). Each pod on c4-standard-192
-# runs this; torchrun then forks 8 worker processes per pod that stand in for
-# the 8 GPU chips on an A4 node.
+# runs this; torchrun then forks GPUS_PER_NODE worker processes per pod (4 by
+# default), so 2 nodes x 4 = 8 ranks total. Per-node ranks are capped at 4 (not
+# 8) so a checkpoint-restoring run fits the 720GB c4-standard-192 host RAM; see
+# values_base.yaml.
 
 set -euo pipefail
 
@@ -31,7 +33,7 @@ export PATH=$PATH:/tmp/google-cloud-sdk/bin
 cd -
 
 # If MODEL_ID is a GCS path, pull the weights once per pod. cpu_sim.py will
-# then load from /tmp/<basename> with local_files_only=True, so the 8 ranks
+# then load from /tmp/<basename> with local_files_only=True, so the ranks
 # on this node do not race on the HuggingFace API. Skipping the download if
 # the directory already exists keeps pod restarts cheap.
 if [[ "${MODEL_ID:-}" == gs://* ]]; then
@@ -103,13 +105,13 @@ export NUM_TRAIN_EPOCHS=1
 export PER_DEVICE_TRAIN_BATCH_SIZE=${PER_DEVICE_TRAIN_BATCH_SIZE:-8}
 export GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 
-# Enable Python fault handler so a segfault in any of the 16 ranks dumps
+# Enable Python fault handler so a segfault in any of the 8 ranks dumps
 # a stack trace into pod logs.
 export PYTHONFAULTHANDLER=1
 # DataLoader workers do their own tokenization; cap BLAS threads per worker
-# so 8 ranks * 16 workers stay within the 192 vCPUs on c4-standard-192.
+# so 4 ranks * 16 workers stay within the 192 vCPUs on c4-standard-192.
 # (Lower DATALOADER_NUM_WORKERS if step-time IO timing looks CPU-bound:
-# 8 ranks * 16 workers = 128 procs vs 192 vCPUs.)
+# 4 ranks * 16 workers = 64 procs vs 192 vCPUs.)
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
 export PYTHONPATH=${PYTHONPATH:-}:/workload/configs

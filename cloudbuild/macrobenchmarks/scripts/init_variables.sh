@@ -26,6 +26,16 @@ case "${_TRAINING_STRATEGY:-ddp}" in
   ddp) ;;
   *) echo "ERROR: _TRAINING_STRATEGY must be ddp (got '${_TRAINING_STRATEGY}')."; exit 1 ;;
 esac
+# Reject an unknown seed-checkpoint toggle before provisioning anything.
+case "${_SEED_CHECKPOINT:-true}" in
+  true|false) ;;
+  *) echo "ERROR: _SEED_CHECKPOINT must be true|false (got '${_SEED_CHECKPOINT}')."; exit 1 ;;
+esac
+# An external checkpoint, if supplied, takes precedence and the seed step
+# no-ops; note it so a run that set both does not look mis-wired.
+if [ "${_SEED_CHECKPOINT:-true}" = "true" ] && [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then
+  echo "NOTE: _CHECKPOINT_LOAD_PATH is set; it overrides _SEED_CHECKPOINT (seed step will be skipped)."
+fi
 # Reject a non-numeric / negative simulated compute time before provisioning.
 if ! echo "${_SIMULATED_STEP_COMPUTE_SECONDS:-1.0}" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
   echo "ERROR: _SIMULATED_STEP_COMPUTE_SECONDS must be a non-negative number (got '${_SIMULATED_STEP_COMPUTE_SECONDS}')."; exit 1
@@ -96,7 +106,7 @@ gcloud compute machine-types describe c4-standard-192 --zone=${_ZONE} --project=
 echo "export BRANCH_NAME=${SAFE_BRANCH}" >> "${BUILD_VARS_FILE}"
 # Prepend 'buildid-' to ensure RUN_ID starts with a letter, satisfying GKE/K8s
 # DNS-1035 naming restrictions (since Cloud Build UUIDs can start with numbers).
-echo "export RUN_ID=buildid-${BUILD_ID}" >> "${BUILD_VARS_FILE}"
+echo "export RUN_ID=buildid-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
 echo "export CLUSTER_NAME=${_INFRA_PREFIX}-gke-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
 echo "export CHECKPOINT_BUCKET=${_INFRA_PREFIX}-macrobench-checkpoint-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
 echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-macrobench-results" >> "${BUILD_VARS_FILE}"
