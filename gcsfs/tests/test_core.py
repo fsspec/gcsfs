@@ -3,6 +3,7 @@ import builtins
 import concurrent.futures
 import io
 import os
+import threading
 import uuid
 from builtins import FileNotFoundError
 from datetime import datetime, timezone
@@ -3538,3 +3539,53 @@ def test_file_url_generation():
     finally:
         # Avoid flushing the unused write buffer (and a network call) on GC.
         f.closed = True
+
+
+def test_sign_client_caching():
+    fs = gcsfs.core.GCSFileSystem()
+
+    with mock.patch("google.cloud.storage.Client") as mock_client_cls:
+        # Yield distinct mock clients for the main thread and the background thread
+        mock_client_main = mock.MagicMock()
+        mock_client_thread = mock.MagicMock()
+        mock_client_cls.side_effect = [mock_client_main, mock_client_thread]
+
+        mock_blob = mock.MagicMock()
+        mock_client_main.bucket.return_value.blob.return_value = mock_blob
+        mock_client_thread.bucket.return_value.blob.return_value = mock_blob
+        mock_blob.generate_signed_url.return_value = "http://signed-url"
+
+        # First call on main thread
+        res1 = fs.sign("bucket/key")
+        assert res1 == "http://signed-url"
+        assert mock_client_cls.call_count == 1
+
+        # Second call on main thread - should reuse main thread's client
+        res2 = fs.sign("bucket/key")
+        assert res2 == "http://signed-url"
+        assert mock_client_cls.call_count == 1
+
+        # Now let's call from a different thread
+        client_in_thread = None
+
+        def thread_func():
+            nonlocal client_in_thread
+            fs.sign("bucket/key")
+            # Get the client that was cached for this thread
+            client_in_thread = getattr(
+                fs._thread_local_storage_client, "instance", None
+            )
+
+        t = threading.Thread(target=thread_func)
+        t.start()
+        t.join()
+
+        # Total instantiations should now be 2
+        assert mock_client_cls.call_count == 2
+
+        # Verify strict thread isolation
+        assert client_in_thread is mock_client_thread
+        assert (
+            getattr(fs._thread_local_storage_client, "instance", None)
+            is mock_client_main
+        )
