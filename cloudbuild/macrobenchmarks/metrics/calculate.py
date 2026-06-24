@@ -354,7 +354,12 @@ def main(argv=None) -> None:
     # here (not a flag) so it stays consistent with its components; left N/A
     # when any component is absent rather than reporting a partial product.
     global_batch_size = None
-    components = (args.per_device_batch, args.grad_accum, args.nodes, args.ranks_per_node)
+    components = (
+        args.per_device_batch,
+        args.grad_accum,
+        args.nodes,
+        args.ranks_per_node,
+    )
     if all(c is not None for c in components):
         global_batch_size = (
             args.per_device_batch * args.grad_accum * args.nodes * args.ranks_per_node
