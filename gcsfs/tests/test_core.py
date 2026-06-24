@@ -3548,3 +3548,52 @@ def test_file_url_generation():
     finally:
         # Avoid flushing the unused write buffer (and a network call) on GC.
         f.closed = True
+
+
+def test_get_headers_includes_cache_type(gcs):
+    # Test that _get_headers correctly appends cache_type to User-Agent
+    headers = gcs._get_headers(None, cache_type="test_cache")
+    assert "cache_type/test_cache" in headers["User-Agent"]
+    assert "python-gcsfs/" in headers["User-Agent"]
+
+    # Test that it doesn't append if cache_type is None
+    headers_none = gcs._get_headers(None, cache_type=None)
+    assert "cache_type/" not in headers_none["User-Agent"]
+    assert headers_none["User-Agent"] == "python-gcsfs/" + version
+
+    # Test that it doesn't override if User-Agent is already present
+    headers_preset = gcs._get_headers(
+        {"User-Agent": "custom-ua"}, cache_type="test_cache"
+    )
+    assert headers_preset["User-Agent"] == "custom-ua"
+
+
+def test_user_agent_includes_cache_type_in_read(gcs):
+    # TODO(lankita): Remove this skip when User-Agent is updated to include cache_type for gRPC/rapid buckets.
+    # Zonal buckets currently use the gRPC path which does not use the HTTP client.
+    if hasattr(gcs, "_is_zonal_bucket") and sync(
+        gcs.loop, gcs._is_zonal_bucket, TEST_BUCKET
+    ):
+        pytest.skip("Zonal buckets use gRPC, skipping HTTP User-Agent test")
+
+    fn = TEST_BUCKET + "/2014-01-01.csv"
+
+    with mock.patch.object(
+        gcs.session, "request", wraps=gcs.session.request
+    ) as mock_session_request:
+        with gcs.open(fn, "rb", block_size=10, cache_type="mmap") as f:
+            out = []
+            while True:
+                data = f.read(3)
+                if data == b"":
+                    break
+                out.append(data)
+            assert gcs.cat(fn) == b"".join(out)
+
+        # Verify that the user-agent header has cache_type
+        user_agents = [
+            call.kwargs.get("headers", {}).get("User-Agent")
+            for call in mock_session_request.call_args_list
+        ]
+        expected_ua = f"python-gcsfs/{version} cache_type/mmap"
+        assert expected_ua in user_agents

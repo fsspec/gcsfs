@@ -469,12 +469,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             params["userProject"] = user_project
         return params
 
-    def _get_headers(self, headers):
+    def _get_headers(self, headers, cache_type=None):
         out = {}
         if headers is not None:
             out.update(headers)
         if "User-Agent" not in out:
-            out["User-Agent"] = "python-gcsfs/" + version
+            ua = "python-gcsfs/" + version
+            if cache_type:
+                ua += f" cache_type/{cache_type}"
+            out["User-Agent"] = ua
         self.credentials.apply(out)
         return out
 
@@ -488,7 +491,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     @retry_request(retries=retries)
     async def _request(
-        self, method, path, *args, headers=None, json=None, data=None, **kwargs
+        self,
+        method,
+        path,
+        *args,
+        headers=None,
+        json=None,
+        data=None,
+        cache_type=None,
+        **kwargs,
     ):
         await self._set_session()
         if hasattr(data, "seek"):
@@ -498,7 +509,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             url=self._format_path(path, args),
             params=self._get_params(kwargs),
             json=json,
-            headers=self._get_headers(headers),
+            headers=self._get_headers(headers, cache_type=cache_type),
             data=data,
             timeout=self.requests_timeout,
         ) as r:
@@ -1202,7 +1213,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         else:
             head = {}
 
-        headers, out = await self._call("GET", u2, headers=head)
+        cache_type = kwargs.get("cache_type")
+        headers, out = await self._call("GET", u2, headers=head, cache_type=cache_type)
         return out
 
     async def _cat_file_concurrent(
@@ -2374,6 +2386,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             cache_options=cache_options,
             **kwargs,
         )
+        self.cache_type = cache_type
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
@@ -2602,7 +2615,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if hasattr(self, "_prefetch_engine") and self._prefetch_engine:
                 return self._prefetch_engine.fetch(start=start, end=end)
             return self.fs.cat_file(
-                self.path, start=start, end=end, concurrency=self.concurrency
+                self.path,
+                start=start,
+                end=end,
+                concurrency=self.concurrency,
+                cache_type=self.cache_type,
             )
         except RuntimeError as e:
             if "not satisfiable" in str(e):
@@ -2616,6 +2633,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             start=start_offset,
             end=start_offset + total_size,
             concurrency=split_factor,
+            cache_type=self.cache_type,
         )
 
     def close(self):
