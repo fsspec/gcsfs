@@ -62,4 +62,4 @@ echo "Seed checkpoint: $SEEDED_CKPT_PATH"
 echo "export SEEDED_CKPT_PATH=$SEEDED_CKPT_PATH" >> "${BUILD_VARS_FILE}"
 
 # Free the node pool so the benchmark run can schedule on all $_NODES nodes.
-helm uninstall "$SEED_RUN_ID" || true
+helm uninstall --wait "$SEED_RUN_ID" || true
