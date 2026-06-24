@@ -336,7 +336,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             **kwargs,
         )
         if access not in self.scopes:
-            raise ValueError("access must be one of {}", self.scopes)
+            raise ValueError(f"access must be one of {self.scopes}")
         if project is None:
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
