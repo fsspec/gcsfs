@@ -4,6 +4,7 @@ import io
 import logging
 from unittest import mock
 
+import aiohttp
 import pytest
 from google.cloud.storage.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
@@ -559,6 +560,51 @@ async def test_get_file_warning_on_missing_persisted_size(
             await async_gcs._get_file(file_path, str(lpath))
             assert "Falling back to _info() to get the file size" in caplog.text
             assert lpath.read_bytes() == json_data
+
+
+@pytest.mark.asyncio
+async def test_get_file_incomplete_download(
+    async_gcs, gcs_bucket_mocks, tmp_path, file_path
+):
+    """
+    Tests that _get_file raises ClientError and correctly removes the local file
+    when the downloaded bytes are less than the expected size.
+    """
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        lpath = tmp_path / "output.txt"
+
+        # Simulate download_range returning a shorter byte string than expected
+        # by returning some data on first call, then empty bytes (EOF) on subsequent calls.
+        # This ensures the download terminates early and raises ClientError, even if
+        # the expected size happens to be a multiple of the chunk size.
+        download_called = False
+
+        async def mock_download_range(*args, **kwargs):
+            nonlocal download_called
+            if not download_called:
+                download_called = True
+                return b"short"
+            return b""
+
+        with (
+            mock.patch(
+                "gcsfs.zb_hns_utils.download_range",
+                side_effect=mock_download_range,
+            ),
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+        ):
+            mock_info.return_value = {"size": len(json_data)}
+            with pytest.raises(
+                aiohttp.ClientError,
+                match="Expected .* bytes, but only received .* bytes",
+            ):
+                await async_gcs._get_file(file_path, str(lpath))
+
+            # The local file should not exist after the failed download
+            assert not lpath.exists()
 
 
 @pytest.mark.asyncio
