@@ -20,7 +20,9 @@ helm install "$RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
   --set workload.steps="${_STEPS}" \
   --set workload.ckptWriterInterval="${_CHECKPOINT_INTERVAL}" \
   --set workload.nodes="${_NODES}" \
-  --set workload.requirements="${_GCSFS_SOURCE}" \
+  --set workload.requirements="${_REQUIREMENTS}" \
+  --set workload.trainingStrategy="${_TRAINING_STRATEGY}" \
+  --set workload.simulatedStepComputeSeconds="${_SIMULATED_STEP_COMPUTE_SECONDS}" \
   --set serviceAccount=default
 echo "Waiting for JobSet $RUN_ID to complete..."
 WORKLOAD_COMPLETED=false

@@ -71,9 +71,11 @@ pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu tor
 pip3 install --no-cache-dir -r /workload/configs/requirements.txt
 
 if [[ -n "${REQUIREMENTS:-}" ]]; then
-  # Optional escape hatch: REQUIREMENTS env var lets a run pull in extra
-  # packages or version overrides without rebuilding the image or editing
-  # requirements.txt. Word-split intentional.
+  # Optional escape hatch: REQUIREMENTS lets a run install/override arbitrary
+  # packages (the gcsfs under test and/or a custom lightning build, etc.)
+  # without rebuilding the image or editing requirements.txt. It runs AFTER
+  # requirements.txt, so a spec here overrides the pinned versions there.
+  # Word-split intentional.
   # shellcheck disable=SC2086
   pip3 install $REQUIREMENTS
 fi
@@ -91,6 +93,9 @@ echo "Launching Torch distributed as node rank $NODE_RANK out of $NNODES nodes"
 # pod regardless of the c4 host's underlying NIC name (ens4/etc.).
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
 export TOKENIZERS_PARALLELISM=false
+
+# Parallel training strategy for cpu_sim.py (ddp default).
+export TRAINING_STRATEGY=${TRAINING_STRATEGY:-ddp}
 
 # Training parameters -- same defaults as a4_v1/launcher.sh so step time and
 # checkpoint cadence are directly comparable between the GPU and CPU runs.

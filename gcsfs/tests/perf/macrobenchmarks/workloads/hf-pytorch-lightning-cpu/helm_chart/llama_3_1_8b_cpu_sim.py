@@ -3,7 +3,7 @@
 Reproduces the GCS IO pattern (N_NODES x 8 ranks x 16 dataloader workers,
 periodic checkpoint writes of the full bf16 8B state dict) without GPUs. The
 real Llama model is loaded and held frozen so checkpoint file sizes match
-production; GPU compute is replaced by ``time.sleep(SIMULATED_STEP_SECONDS)``
+production; GPU compute is replaced by ``time.sleep(SIMULATED_STEP_COMPUTE_SECONDS)``
 in ``training_step``.
 
 Single-node launch (smoke test):
@@ -71,8 +71,13 @@ logging.basicConfig(
 )
 
 # ---- Simulated compute ----------------------------------------------------
-# Hardcoded per design: replaces GPU forward+backward in training_step.
-SIMULATED_STEP_SECONDS = 1.0
+# Per-step stand-in for GPU forward+backward in training_step. Configurable via
+# SIMULATED_STEP_COMPUTE_SECONDS (default 1.0) and recorded in the run summary.
+SIMULATED_STEP_COMPUTE_SECONDS = float(
+    os.getenv("SIMULATED_STEP_COMPUTE_SECONDS", "1.0")
+)
+# Single grep-able config marker per knob (parity with the model_id: line).
+logging.info("simulated_step_compute_seconds: %s", SIMULATED_STEP_COMPUTE_SECONDS)
 
 # ---- Config (env-overridable, mirrors original script's pattern) ----------
 preset_max_steps = int(os.getenv("MAX_STEPS", "1000"))
@@ -84,6 +89,18 @@ checkpoint_write_interval = int(os.getenv("CHECKPOINT_WRITE_INTERVAL", "25"))
 checkpoint_write_interval = min(checkpoint_write_interval, preset_max_steps)
 checkpoints_to_keep = int(os.getenv("CKPT_TO_KEEP", "1"))
 model_id = os.getenv("MODEL_ID", "meta-llama/Llama-3.1-8B")
+
+# Parallel training strategy. ``ddp`` (default) replicates the frozen model on
+# every rank and rank 0 writes the full checkpoint. Validate eagerly -- before
+# the 16 GB model load -- so a typo fails fast instead of after a long download.
+# (The ``fsdp`` strategy is added by the fsdp-cpu-macrobench branch.)
+training_strategy = os.getenv("TRAINING_STRATEGY", "ddp").lower()
+if training_strategy not in ("ddp",):
+    raise SystemExit(
+        f"TRAINING_STRATEGY must be 'ddp' (got {training_strategy!r})."
+    )
+# Parity with the model_id: line -- a single grep-able config marker per knob.
+logging.info("training_strategy: %s", training_strategy)
 
 # Map model_id to the canonical id and log it as ``model_id: <id>``.
 # NOTE: this macrobenchmarks pipeline does NOT consume this line -- it derives
@@ -190,7 +207,7 @@ class LlamaLitModel(pl.LightningModule):
     runs a fake forward via a tiny trainable Linear so DDP all-reduce has
     something to sync without paying 8B-param collective costs.
 
-    ``training_step`` sleeps for ``SIMULATED_STEP_SECONDS`` to mimic the time
+    ``training_step`` sleeps for ``SIMULATED_STEP_COMPUTE_SECONDS`` to mimic the time
     a GPU step would take. ``self.model``'s parameters end up in the
     Lightning state_dict, and AdamW is configured over ``self.model`` with
     materialized optimizer state. When ``ModelCheckpoint`` writes via fsspec
@@ -211,7 +228,7 @@ class LlamaLitModel(pl.LightningModule):
         # GCS read traffic we are benchmarking. The batch contents are then
         # ignored; we sleep to simulate GPU compute.
         del batch
-        time.sleep(SIMULATED_STEP_SECONDS)
+        time.sleep(SIMULATED_STEP_COMPUTE_SECONDS)
         # Real loss with a real grad path so backward + DDP all-reduce run.
         # Squared so the loss is always non-negative: the metrics pipeline's
         # step-metrics regex matches "Loss: [0-9.]+" (no leading '-'), so a
@@ -373,6 +390,26 @@ class LoggedDDPStrategy(DDPStrategy):
         return checkpoint
 
 
+def build_strategy(name):
+    """Construct the parallel-training strategy for ``name`` (currently ddp).
+
+    Uses the gloo CPU backend and a 600s collective timeout so a stuck rank
+    surfaces a Gloo timeout (which names the missing rank) within ~10 min
+    instead of hanging. (The ``fsdp`` branch is added by fsdp-cpu-macrobench.)
+    """
+    timeout = timedelta(seconds=600)
+    if name == "ddp":
+        # find_unused_parameters=False: the frozen Llama params have
+        # requires_grad=False, so only self.trainable participates in DDP
+        # autograd, and it is fully used -- no unused parameters.
+        return LoggedDDPStrategy(
+            timeout=timeout,
+            process_group_backend="gloo",
+            find_unused_parameters=False,
+        )
+    raise SystemExit(f"Unsupported TRAINING_STRATEGY: {name!r} (use ddp).")
+
+
 if __name__ == "__main__":
     # ---- Verify gcsfs is the active fsspec backend for "gs" ----------------
     # Matches the original benchmark's startup self-check; keeps the same log
@@ -442,19 +479,11 @@ if __name__ == "__main__":
     callbacks.append(StepTimeCallback())
 
     # ---- Strategy: DDP on CPU via gloo --------------------------------------
-    # We set find_unused_parameters=False because the frozen Llama params have
-    # requires_grad=False, meaning only self.trainable participates in DDP
-    # autograd. Since self.trainable is fully used in the training step, there
-    # are no unused parameters.
-    strategy = LoggedDDPStrategy(
-        # 600s (was 7200s): a stuck rank should surface a Gloo collective
-        # timeout -- which names the missing rank -- within ~10 min instead of
-        # hanging for 2h. Comfortably above the worst-case first-batch latency
-        # (DataLoader worker cold start + initial GCS streaming reads).
-        timeout=timedelta(seconds=600),
-        process_group_backend="gloo",
-        find_unused_parameters=False,
-    )
+    # Selected by TRAINING_STRATEGY (default ddp). The 600s collective timeout
+    # surfaces a stuck rank (which Gloo names) within ~10 min instead of
+    # hanging; it is comfortably above the worst-case first-batch latency
+    # (DataLoader worker cold start + initial GCS streaming reads).
+    strategy = build_strategy(training_strategy)
 
     # ---- Trainer ------------------------------------------------------------
     # accelerator="cpu" + devices=local_world_size dynamically matches the

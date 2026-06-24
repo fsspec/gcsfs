@@ -105,6 +105,10 @@ spec:
                 value: "{{ $root.Values.workload.ckptToKeep }}"
               - name: MODEL_ID
                 value: "{{ $root.Values.workload.modelId }}"
+              - name: TRAINING_STRATEGY
+                value: "{{ $root.Values.workload.trainingStrategy }}"
+              - name: SIMULATED_STEP_COMPUTE_SECONDS
+                value: "{{ $root.Values.workload.simulatedStepComputeSeconds }}"
               - name: REQUIREMENTS
                 value: "{{ $root.Values.workload.requirements }}"
               {{- if $root.Values.workload.envs }}

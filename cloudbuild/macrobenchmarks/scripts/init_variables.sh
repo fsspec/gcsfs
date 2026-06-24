@@ -10,8 +10,8 @@ SAFE_BRANCH=$(echo -n "${BRANCH_NAME:-unknown}" | tr -c 'a-zA-Z0-9_.-' '-')
 if [ "${SAFE_BRANCH}" = "unknown" ]; then
   echo "ERROR: BRANCH_NAME unset."; exit 1
 fi
-if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_GKE_SERVICE_ACCOUNT}" ] || [ -z "${_DATASET_PATH}" ] || [ -z "${_GCSFS_SOURCE}" ]; then
-  echo "ERROR: required substitution missing (_INFRA_PREFIX,_ZONE,_GKE_SERVICE_ACCOUNT,_DATASET_PATH,_GCSFS_SOURCE)."; exit 1
+if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_GKE_SERVICE_ACCOUNT}" ] || [ -z "${_DATASET_PATH}" ] || [ -z "${_REQUIREMENTS}" ]; then
+  echo "ERROR: required substitution missing (_INFRA_PREFIX,_ZONE,_GKE_SERVICE_ACCOUNT,_DATASET_PATH,_REQUIREMENTS)."; exit 1
 fi
 # Validate config before provisioning anything: an unsupported _BUCKET_TYPE
 # silently skips checkpoint-bucket creation, and a non-positive _CHECKPOINT_INTERVAL
@@ -21,6 +21,15 @@ case "${_BUCKET_TYPE}" in
   regional|zonal|hns) ;;
   *) echo "ERROR: _BUCKET_TYPE must be regional|zonal|hns (got '${_BUCKET_TYPE}')."; exit 1 ;;
 esac
+# Reject an unknown parallel strategy before provisioning anything.
+case "${_TRAINING_STRATEGY:-ddp}" in
+  ddp) ;;
+  *) echo "ERROR: _TRAINING_STRATEGY must be ddp (got '${_TRAINING_STRATEGY}')."; exit 1 ;;
+esac
+# Reject a non-numeric / negative simulated compute time before provisioning.
+if ! echo "${_SIMULATED_STEP_COMPUTE_SECONDS:-1.0}" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+  echo "ERROR: _SIMULATED_STEP_COMPUTE_SECONDS must be a non-negative number (got '${_SIMULATED_STEP_COMPUTE_SECONDS}')."; exit 1
+fi
 # Reject malformed zones before anything keys off them.
 if ! echo "${_ZONE}" | grep -Eq '^[a-z]+-[a-z]+[0-9]-[a-z]$'; then
   echo "ERROR: _ZONE must be a GCP zone like us-central1-a (got '${_ZONE}')."; exit 1
