@@ -111,6 +111,8 @@ echo "export BRANCH_NAME=${SAFE_BRANCH}" >> "${BUILD_VARS_FILE}"
 # DNS-1035 naming restrictions (since Cloud Build UUIDs can start with numbers).
 echo "export RUN_ID=buildid-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
 echo "export CLUSTER_NAME=${_INFRA_PREFIX}-gke-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
+echo "export NETWORK_NAME=${_INFRA_PREFIX}-net-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
+echo "export SUBNET_NAME=${_INFRA_PREFIX}-subnet-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
 echo "export CHECKPOINT_BUCKET=${_INFRA_PREFIX}-macrobench-checkpoint-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
 echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-macrobench-results" >> "${BUILD_VARS_FILE}"
 echo "export REGION=${REGION}" >> "${BUILD_VARS_FILE}"
