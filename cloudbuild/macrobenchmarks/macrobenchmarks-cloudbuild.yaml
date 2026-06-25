@@ -4,13 +4,16 @@ substitutions:
   _GKE_SERVICE_ACCOUNT: ""
   _WORKLOAD: "hf-pytorch-lightning-cpu"
   _BUCKET_TYPE: "regional"
+  _MACHINE_TYPE: "c4-standard-192"
   # 2 nodes x 4 ranks/node = 8-rank world. Ranks/node is capped at 4 (in the
   # workload chart) because a restoring run's per-rank peak RSS ~doubles to
   # ~92GB (resident model+optimizer plus the torch.load'd checkpoint), and
   # 8 ranks x 92GB OOMs the 720GB c4-standard-192. See values_base.yaml.
   _NODES: "2"
+  _RANKS_PER_NODE: "4"
   _STEPS: "100"
   _CHECKPOINT_INTERVAL: "25"
+  _CKPT_TO_KEEP: "1"
   _DATASET_PATH: ""
   _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
   _HF_TOKEN: ""
@@ -21,12 +24,19 @@ substitutions:
   # auto-generated per-run seed; with _SEED_CHECKPOINT=false, fresh run / no restore.
   _CHECKPOINT_LOAD_PATH: ""
   _REQUIREMENTS: ""
+  _IMAGE: "nvcr.io/nvidia/pytorch:25.01-py3"
   _TRAINING_STRATEGY: "ddp"
   # Auto-generate a per-run seed checkpoint and restore from it (measures the
   # restore IO path) when no external _CHECKPOINT_LOAD_PATH is supplied. Set to
   # "false" for a fresh-run baseline with no restore.
   _SEED_CHECKPOINT: "true"
   _SIMULATED_STEP_COMPUTE_SECONDS: "1.0"
+  # Per-rank micro-batch, optimizer-step accumulation, and dataloader workers.
+  # _GRAD_ACCUM defaults to 1 to match the launcher's effective value (and the
+  # GPU a4_v1 run); the sim's getenv default is overridden by the launcher.
+  _PER_DEVICE_BATCH: "8"
+  _GRAD_ACCUM: "1"
+  _DATALOADER_WORKERS: "16"
   _JOBSET_VERSION: "v0.12.0"
   _SKIP_CLEANUP: "false"
 
@@ -47,14 +57,20 @@ steps:
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_REQUIREMENTS=${_REQUIREMENTS}"
       - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
       - "_NODES=${_NODES}"
+      - "_RANKS_PER_NODE=${_RANKS_PER_NODE}"
       - "_STEPS=${_STEPS}"
       - "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}"
+      - "_CKPT_TO_KEEP=${_CKPT_TO_KEEP}"
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
       - "_SEED_CHECKPOINT=${_SEED_CHECKPOINT}"
       - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
+      - "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}"
+      - "_GRAD_ACCUM=${_GRAD_ACCUM}"
+      - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
     args: ["cloudbuild/macrobenchmarks/scripts/init_variables.sh"]
     waitFor: ["-"]
 
@@ -88,6 +104,7 @@ steps:
       - "PROJECT_ID=${PROJECT_ID}"
       - "_ZONE=${_ZONE}"
       - "_GKE_SERVICE_ACCOUNT=${_GKE_SERVICE_ACCOUNT}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
       - "_NODES=${_NODES}"
       - "_JOBSET_VERSION=${_JOBSET_VERSION}"
     args: ["cloudbuild/macrobenchmarks/scripts/create_cluster.sh"]
@@ -128,9 +145,16 @@ steps:
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_STEPS=${_STEPS}"
       - "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}"
+      - "_CKPT_TO_KEEP=${_CKPT_TO_KEEP}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
       - "_NODES=${_NODES}"
+      - "_RANKS_PER_NODE=${_RANKS_PER_NODE}"
       - "_REQUIREMENTS=${_REQUIREMENTS}"
       - "_SEED_CHECKPOINT=${_SEED_CHECKPOINT}"
+      - "_IMAGE=${_IMAGE}"
+      - "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}"
+      - "_GRAD_ACCUM=${_GRAD_ACCUM}"
+      - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
     args: ["cloudbuild/macrobenchmarks/scripts/run_workload.sh"]
     waitFor: ["seed-checkpoint"]
 
@@ -142,17 +166,24 @@ steps:
       - "PROJECT_ID=${PROJECT_ID}"
       - "_STEPS=${_STEPS}"
       - "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}"
+      - "_CKPT_TO_KEEP=${_CKPT_TO_KEEP}"
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
       - "_SEED_CHECKPOINT=${_SEED_CHECKPOINT}"
       - "_WORKLOAD=${_WORKLOAD}"
       - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_IMAGE=${_IMAGE}"
       - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
       - "_ZONE=${_ZONE}"
       - "_NODES=${_NODES}"
+      - "_RANKS_PER_NODE=${_RANKS_PER_NODE}"
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
       - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
+      - "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}"
+      - "_GRAD_ACCUM=${_GRAD_ACCUM}"
+      - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
     args: ["cloudbuild/macrobenchmarks/scripts/scrape_metrics.sh"]
     waitFor: ["run-workload"]
 

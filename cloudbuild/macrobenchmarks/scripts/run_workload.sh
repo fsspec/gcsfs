@@ -23,13 +23,20 @@ helm install "$RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
   --set gcsfs.ckptWritePath="gs://$CHECKPOINT_BUCKET/checkpoints" \
   --set-string gcsfs.ckptLoadPath="${EFFECTIVE_LOAD_PATH}" \
   --set workload.modelId="${_MODEL_ID}" \
+  --set-string workload.image="${_IMAGE}" \
   --set workload.hfToken="${_HF_TOKEN}" \
   --set workload.steps="${_STEPS}" \
   --set workload.ckptWriterInterval="${_CHECKPOINT_INTERVAL}" \
+  --set workload.ckptToKeep="${_CKPT_TO_KEEP}" \
   --set workload.nodes="${_NODES}" \
+  --set workload.ranksPerNode="${_RANKS_PER_NODE}" \
+  --set workload.perDeviceBatch="${_PER_DEVICE_BATCH}" \
+  --set workload.gradAccum="${_GRAD_ACCUM}" \
+  --set workload.dataloaderWorkers="${_DATALOADER_WORKERS}" \
   --set workload.requirements="${_REQUIREMENTS}" \
   --set workload.trainingStrategy="${_TRAINING_STRATEGY}" \
   --set workload.simulatedStepComputeSeconds="${_SIMULATED_STEP_COMPUTE_SECONDS}" \
+  --set "nodeSelector.cloud\.google\.com/gke-nodepool=${_MACHINE_TYPE}" \
   --set serviceAccount=default
 if ! wait_for_jobset "$RUN_ID" run-workload; then
   exit 1

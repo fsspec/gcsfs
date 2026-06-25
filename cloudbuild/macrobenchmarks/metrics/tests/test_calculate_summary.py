@@ -468,6 +468,101 @@ def test_main_emits_simulated_step_compute_seconds_column(tmp_path):
     assert "simulated_step_compute_seconds" in calculate.SUMMARY_FIELDNAMES
 
 
+def test_main_emits_new_config_dimension_columns(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--nodes",
+            "2",
+            "--ranks-per-node",
+            "4",
+            "--machine-type",
+            "c4-standard-192",
+            "--per-device-batch",
+            "8",
+            "--grad-accum",
+            "4",
+            "--dataloader-workers",
+            "16",
+            "--checkpoints-to-keep",
+            "1",
+            "--image",
+            "nvcr.io/nvidia/pytorch:25.01-py3",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["ranks_per_node"] == "4"
+    assert rows[0]["machine_type"] == "c4-standard-192"
+    assert rows[0]["per_device_train_batch_size"] == "8"
+    assert rows[0]["gradient_accumulation_steps"] == "4"
+    assert rows[0]["dataloader_num_workers"] == "16"
+    assert rows[0]["checkpoints_to_keep"] == "1"
+    assert rows[0]["image"] == "nvcr.io/nvidia/pytorch:25.01-py3"
+    # global_batch_size = per_device_batch * grad_accum * nodes * ranks_per_node
+    # = 8 * 4 * 2 * 4 = 256 (mirrors the sim's per_device * grad_accum *
+    # world_size, with world_size = nodes * ranks_per_node).
+    assert rows[0]["global_batch_size"] == "256"
+    for col in (
+        "ranks_per_node",
+        "machine_type",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+        "global_batch_size",
+        "dataloader_num_workers",
+        "checkpoints_to_keep",
+        "image",
+    ):
+        assert col in calculate.SUMMARY_FIELDNAMES
+
+
+def test_global_batch_size_omitted_when_components_missing(tmp_path):
+    # global_batch_size is derived from four dimension flags; if any is absent
+    # it must be left N/A rather than crash or report a partial product.
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--nodes",
+            "2",
+            "--per-device-batch",
+            "8",
+            "--grad-accum",
+            "4",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["global_batch_size"] == "N/A"
+
+
 def test_main_succeeds_with_required_data_loading_metrics(tmp_path):
     in_dir = tmp_path / "raw"
     _write_step_csv(in_dir)

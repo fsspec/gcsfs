@@ -48,7 +48,10 @@ fi
 # the worker-pool LOCATION, which may differ from _ZONE.
 ZONE="${_ZONE}"
 REGION="${ZONE%-*}"
-for pair in "_NODES=${_NODES}" "_STEPS=${_STEPS}" "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}"; do
+for pair in "_NODES=${_NODES}" "_RANKS_PER_NODE=${_RANKS_PER_NODE}" "_STEPS=${_STEPS}" \
+  "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}" "_CKPT_TO_KEEP=${_CKPT_TO_KEEP}" \
+  "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}" "_GRAD_ACCUM=${_GRAD_ACCUM}" \
+  "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"; do
   key=${pair%%=*}; val=${pair#*=}
   if ! echo "$val" | grep -Eq '^[1-9][0-9]*$'; then
     echo "ERROR: $key must be a positive integer (got '$val')."; exit 1
@@ -101,8 +104,8 @@ case "${_MODEL_ID}" in
 esac
 # Machine-type availability is best-effort (container.admin lacks
 # compute.machineTypes.get); the node-pool create fails fast if wrong.
-gcloud compute machine-types describe c4-standard-192 --zone=${_ZONE} --project=${PROJECT_ID} >/dev/null 2>&1 || \
-  echo "WARNING: could not verify c4-standard-192 in ${_ZONE} (may be a permissions gap, not a real problem)."
+gcloud compute machine-types describe "${_MACHINE_TYPE}" --zone=${_ZONE} --project=${PROJECT_ID} >/dev/null 2>&1 || \
+  echo "WARNING: could not verify ${_MACHINE_TYPE} in ${_ZONE} (may be a permissions gap, not a real problem)."
 echo "export BRANCH_NAME=${SAFE_BRANCH}" >> "${BUILD_VARS_FILE}"
 # Prepend 'buildid-' to ensure RUN_ID starts with a letter, satisfying GKE/K8s
 # DNS-1035 naming restrictions (since Cloud Build UUIDs can start with numbers).

@@ -313,13 +313,20 @@ def main(argv=None) -> None:
     parser.add_argument("--bucket-type")
     parser.add_argument("--zone")
     parser.add_argument("--region")
+    parser.add_argument("--machine-type")
     parser.add_argument("--nodes", type=int)
+    parser.add_argument("--ranks-per-node", type=int)
     parser.add_argument("--steps", type=int)
     parser.add_argument("--checkpoint-interval", type=int)
+    parser.add_argument("--checkpoints-to-keep", type=int)
     parser.add_argument("--dataset-path")
     parser.add_argument("--model-id")
     parser.add_argument("--training-strategy")
     parser.add_argument("--simulated-step-compute-seconds", type=float)
+    parser.add_argument("--per-device-batch", type=int)
+    parser.add_argument("--grad-accum", type=int)
+    parser.add_argument("--dataloader-workers", type=int)
+    parser.add_argument("--image")
     args = parser.parse_args(argv)
 
     tables = raw_store.read_raw_metrics(args.in_dir, run_type=args.run_type)
@@ -342,17 +349,41 @@ def main(argv=None) -> None:
         checkpoint_interval=args.checkpoint_interval,
     )
 
+    # global_batch_size = per_device_batch * grad_accum * world_size, with
+    # world_size = nodes * ranks_per_node -- mirrors the sim's formula. Derived
+    # here (not a flag) so it stays consistent with its components; left N/A
+    # when any component is absent rather than reporting a partial product.
+    global_batch_size = None
+    components = (
+        args.per_device_batch,
+        args.grad_accum,
+        args.nodes,
+        args.ranks_per_node,
+    )
+    if all(c is not None for c in components):
+        global_batch_size = (
+            args.per_device_batch * args.grad_accum * args.nodes * args.ranks_per_node
+        )
+
     dimensions = {
         "bucket_type": args.bucket_type,
         "zone": args.zone,
         "region": args.region,
+        "machine_type": args.machine_type,
         "nodes": args.nodes,
+        "ranks_per_node": args.ranks_per_node,
         "steps": args.steps,
         "checkpoint_interval": args.checkpoint_interval,
+        "checkpoints_to_keep": args.checkpoints_to_keep,
         "dataset_path": args.dataset_path,
         "model_id": args.model_id,
         "training_strategy": args.training_strategy,
         "simulated_step_compute_seconds": args.simulated_step_compute_seconds,
+        "per_device_train_batch_size": args.per_device_batch,
+        "gradient_accumulation_steps": args.grad_accum,
+        "global_batch_size": global_batch_size,
+        "dataloader_num_workers": args.dataloader_workers,
+        "image": args.image,
     }
     row = build_summary_row(
         run_id=args.run_id,
