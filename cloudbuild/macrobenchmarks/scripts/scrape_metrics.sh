@@ -22,7 +22,10 @@ if [ "$MIN_WRITE_DATAPOINTS" -lt 1 ]; then
 fi
 MIN_RESTORE_DATAPOINTS=0
 RESUME_ARGS=()
-if [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then
+# Restore is expected when an external checkpoint is supplied OR the per-run seed
+# was generated (_SEED_CHECKPOINT=true). Both make the measured run a resume, so
+# select calculate.py's resume-aware validation via --resume-run.
+if [ -n "${_CHECKPOINT_LOAD_PATH}" ] || [ "${_SEED_CHECKPOINT}" = "true" ]; then
   MIN_RESTORE_DATAPOINTS=1
   RESUME_ARGS=(--resume-run)
 fi

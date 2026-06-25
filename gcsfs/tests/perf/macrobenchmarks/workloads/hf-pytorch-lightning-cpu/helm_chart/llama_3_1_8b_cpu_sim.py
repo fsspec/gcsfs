@@ -1,19 +1,20 @@
 """CPU-only IO simulator for the Llama 3.1 8B Lightning training benchmark.
 
-Reproduces the GCS IO pattern (N_NODES x 8 ranks x 16 dataloader workers,
+Reproduces the GCS IO pattern (N_NODES x 4 ranks x 16 dataloader workers,
 periodic checkpoint writes of the full bf16 8B state dict) without GPUs. The
 real Llama model is loaded and held frozen so checkpoint file sizes match
 production; GPU compute is replaced by ``time.sleep(SIMULATED_STEP_COMPUTE_SECONDS)``
 in ``training_step``.
 
 Single-node launch (smoke test):
-    torchrun --nproc_per_node=8 --nnodes=1 llama_3_1_8b_cpu_sim.py
+    torchrun --nproc_per_node=4 --nnodes=1 llama_3_1_8b_cpu_sim.py
 
 Multi-node launch (the production emulator: 2 c4-standard-192 VMs, each
-running 8 processes that stand in for 8 GPU chips). The Helm chart in
+running 4 processes that stand in for GPU chips -- capped at 4/node, down from
+8, so a checkpoint-restoring run fits the 720GB host RAM). The Helm chart in
 ``emulated/templates/`` wires up the K8s JobSet and the per-pod launcher;
 on each pod it ultimately runs:
-    torchrun --nproc_per_node=8 --nnodes=$NNODES --node_rank=$NODE_RANK \\
+    torchrun --nproc_per_node=4 --nnodes=$NNODES --node_rank=$NODE_RANK \\
              --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \\
              llama_3_1_8b_cpu_sim.py
 
@@ -120,7 +121,7 @@ logging.info("model_id: %s", metadata_model_id)
 # ``/tmp/<basename>`` (gcloud storage cp -r). Remap ``model_id`` to the local
 # directory and force ``local_files_only`` so transformers does not phone home.
 # Matches a4_v1/llama_3_1_8b.py exactly so behavior is consistent across the
-# GPU and CPU-emulated benchmarks. Without this, 16 ranks (2 nodes x 8 procs)
+# GPU and CPU-emulated benchmarks. Without this, 8 ranks (2 nodes x 4 procs)
 # would concurrently pull the 16 GB Llama-3.1-8B weights from HuggingFace.
 use_local_files_only = False
 if model_id.startswith("gs://"):
@@ -485,7 +486,7 @@ if __name__ == "__main__":
 
     # ---- Trainer ------------------------------------------------------------
     # accelerator="cpu" + devices=local_world_size dynamically matches the
-    # local rank count (e.g., 8 devices with torchrun --nproc_per_node=8).
+    # local rank count (e.g., 4 devices with torchrun --nproc_per_node=4).
     # ``precision="bf16-mixed"`` is the closest CPU equivalent of the original
     # "bf16" setting; since training_step doesn't actually forward through
     # the Llama model, CPU bf16 op limitations don't affect correctness.

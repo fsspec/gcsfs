@@ -9,3 +9,7 @@ source "${BUILD_VARS_FILE}"
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash || true
 gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${_ZONE}" --project="${PROJECT_ID}" || true
 helm uninstall "$RUN_ID" || true
+# Best-effort: the seed release is normally uninstalled by the seed-checkpoint
+# step; clean up here in case that step failed mid-way. Whole-cluster deletion
+# in cleanup-cluster is the ultimate backstop.
+helm uninstall "${RUN_ID}-seed" || true

@@ -3,7 +3,8 @@
 {{ $timestamp := now | date "2006-01-02-15-04-05" }}
 {{ $jobuuid := uuidv4 }}
 {{ $nodes := .Values.workload.nodes }}
-{{ $ranksPerNode := default 8 .Values.workload.ranksPerNode }}
+{{/* Default 4 (not 8): a restoring rank's peak RSS ~doubles to ~92GB, so 8/node OOMs the 720GB c4-standard-192. See values_base.yaml. */}}
+{{ $ranksPerNode := default 4 .Values.workload.ranksPerNode }}
 {{ $worldSize := mul .Values.workload.nodes $ranksPerNode }}
 
 apiVersion: jobset.x-k8s.io/v1alpha2

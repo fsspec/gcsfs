@@ -1,5 +1,13 @@
 # Default values for the gcsfs-only CPU emulator.
-# 2 c4-standard-192 nodes x 8 procs per node = 16 ranks.
+# 2 c4-standard-192 nodes x 4 procs per node = 8 ranks.
+#
+# Why 4 ranks/node (not 8): when the run restores a checkpoint, every DDP rank
+# torch.load's the full ~48GB state (16GB model + 32GB AdamW) while still
+# holding the freshly-initialized model+optimizer, so per-rank peak RSS roughly
+# doubles to ~92GB. 8 ranks/node x 92GB exceeds the 720GB c4-standard-192 and
+# OOMs; 4 ranks/node (4x92 ~ 368GB) fits. This halves world_size from 16 to 8
+# (fewer total ranks -> lower aggregate GCS throughput, but per-rank IO -- the
+# thing under test -- is unchanged).
 
 # Pins workloads to the c4-standard-192 node pool created by the run pipeline.
 nodeSelector:
@@ -14,7 +22,7 @@ workload:
   configPath: /workload/configs/
   image: nvcr.io/nvidia/pytorch:25.01-py3
   nodes: 2
-  ranksPerNode: 8
+  ranksPerNode: 4
   singlePodPerNode: true
   steps: 100
   hfToken:
