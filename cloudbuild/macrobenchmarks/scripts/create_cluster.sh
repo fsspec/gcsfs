@@ -7,6 +7,20 @@ source "$(dirname "$0")/lib.sh"
 trap 'record_failure create-cluster' ERR
 skip_if_failed
 source "${BUILD_VARS_FILE}"
+
+echo "--- Creating dedicated VPC network: ${NETWORK_NAME} ---"
+gcloud compute networks create "${NETWORK_NAME}" \
+  --project="${PROJECT_ID}" \
+  --subnet-mode=custom --quiet
+
+echo "--- Creating dedicated subnetwork: ${SUBNET_NAME} ---"
+gcloud compute networks subnets create "${SUBNET_NAME}" \
+  --project="${PROJECT_ID}" \
+  --network="${NETWORK_NAME}" \
+  --region="${REGION}" \
+  --range="10.0.0.0/20" \
+  --enable-private-ip-google-access --quiet
+
 # `gcloud container clusters create` has no --node-pool flag and always names
 # its initial pool "default-pool", which would not match the workload's
 # nodeSelector (cloud.google.com/gke-nodepool=c4-standard-192). Create a small
@@ -20,6 +34,7 @@ gcloud container clusters create "$CLUSTER_NAME" \
   --service-account="${_GKE_SERVICE_ACCOUNT}" \
   --scopes="https://www.googleapis.com/auth/cloud-platform" \
   --private-ipv6-google-access-type=outbound-only \
+  --network="${NETWORK_NAME}" --subnetwork="${SUBNET_NAME}" \
   --no-enable-autoupgrade --quiet
 gcloud container node-pools create "c4-standard-192" \
   --cluster="$CLUSTER_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" \
