@@ -755,7 +755,6 @@ class BackgroundPrefetcher:
 
                 logger.debug("Executing _async_fetch for range %d - %d.", start, end)
 
-                block_offset = self.consumer.offset - self.consumer._current_block_idx
                 # If the prefetcher is in error state, let's do a hard seek to start offset.
                 if self._error:
                     logger.info(
@@ -765,6 +764,9 @@ class BackgroundPrefetcher:
                     self.user_offset = start
                     await self._restart_producer(start)
                 elif start != self.user_offset:
+                    block_offset = (
+                        self.consumer.offset - self.consumer._current_block_idx
+                    )
                     if self.user_offset < start <= self.producer.current_offset:
                         logger.debug(
                             "Soft seek detected. Skipping ahead from %d to %d.",
@@ -774,7 +776,7 @@ class BackgroundPrefetcher:
                         skip_amount = start - self.user_offset
                         await self.consumer.skip(skip_amount)
                         self.user_offset = start
-                    elif block_offset <= start < self.user_offset:
+                    elif block_offset <= start < self.consumer.offset:
                         logger.debug(
                             "Local seek performed. User offset moved from %d to %d. "
                             "Adjusting buffer index from %d to %d.",
