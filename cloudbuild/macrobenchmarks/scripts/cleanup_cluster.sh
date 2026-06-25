@@ -13,6 +13,13 @@ gcloud compute networks subnets delete "${SUBNET_NAME}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" --quiet || true
 
+echo "--- Deleting firewall rules on network: ${NETWORK_NAME} ---"
+FIREWALLS=$(gcloud compute firewall-rules list --project="${PROJECT_ID}" --filter="network=${NETWORK_NAME}" --format="value(name)" | tr '\n' ' ')
+if [ -n "$FIREWALLS" ]; then
+  echo "Deleting firewall rules: $FIREWALLS"
+  gcloud compute firewall-rules delete $FIREWALLS --project="${PROJECT_ID}" --quiet || true
+fi
+
 echo "--- Deleting dedicated VPC network: ${NETWORK_NAME} ---"
 gcloud compute networks delete "${NETWORK_NAME}" \
   --project="${PROJECT_ID}" --quiet || true

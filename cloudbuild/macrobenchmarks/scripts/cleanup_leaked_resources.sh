@@ -39,7 +39,7 @@ while read -r name creation_time; do
 done <<< "$BUCKETS"
 
 # Clean up leaked subnets
-SUBNETS=$(gcloud compute networks subnets list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-subnet-'" --format="value(name,region,creationTimestamp)" 2>/dev/null || true)
+SUBNETS=$(gcloud compute networks subnets list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-subnet-'" --format="value(name,region,creationTimestamp)")
 while read -r name region creation_time; do
   if [ -z "$name" ]; then continue; fi
   CREATED=$(date -d "$creation_time" +%s 2>/dev/null) || continue
@@ -52,12 +52,17 @@ while read -r name region creation_time; do
 done <<< "$SUBNETS"
 
 # Clean up leaked networks
-NETWORKS=$(gcloud compute networks list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-net-'" --format="value(name,creationTimestamp)" 2>/dev/null || true)
+NETWORKS=$(gcloud compute networks list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-net-'" --format="value(name,creationTimestamp)")
 while read -r name creation_time; do
   if [ -z "$name" ]; then continue; fi
   CREATED=$(date -d "$creation_time" +%s 2>/dev/null) || continue
   AGE=$((CURRENT_TIME - CREATED))
   if [ "$AGE" -gt "$THRESHOLD" ]; then
+    echo "Deleting firewall rules on leaked network $name"
+    FIREWALLS=$(gcloud compute firewall-rules list --project="${PROJECT_ID}" --filter="network=$name" --format="value(name)" | tr '\n' ' ')
+    if [ -n "$FIREWALLS" ]; then
+      gcloud compute firewall-rules delete $FIREWALLS --project="${PROJECT_ID}" --quiet || true
+    fi
     echo "Deleting leaked VPC network $name"
     gcloud compute networks delete "$name" --project="${PROJECT_ID}" --quiet || true
   fi
