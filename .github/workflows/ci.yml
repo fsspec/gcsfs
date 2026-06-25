@@ -37,9 +37,8 @@ jobs:
         uses: conda-incubator/setup-miniconda@v3
         with:
           environment-file: environment_gcsfs.yaml
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.PY }}
           activate-environment: gcsfs_test
-          conda-solver: classic
 
       - name: Conda info
         run: |
