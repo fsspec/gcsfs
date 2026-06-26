@@ -550,6 +550,7 @@ if __name__ == "__main__":
 
     # TODO: These are underscore private APIs, which may break during a Lightning upgrade.
     # We should consider contributing what we need into Lightning.
+    # Tracked in: https://github.com/Lightning-AI/pytorch-lightning/pull/21776
     # ==============================================================================
     # PROFILER HOOK 1: Profile the entire setup_data() phase
     # ==============================================================================
