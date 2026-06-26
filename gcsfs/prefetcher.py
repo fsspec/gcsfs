@@ -8,13 +8,11 @@ import fsspec.asyn
 
 logger = logging.getLogger(__name__)
 
-PyBytes_FromStringAndSize = ctypes.pythonapi.PyBytes_FromStringAndSize
-PyBytes_FromStringAndSize.restype = ctypes.py_object
-PyBytes_FromStringAndSize.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t]
-
-PyBytes_AsString = ctypes.pythonapi.PyBytes_AsString
-PyBytes_AsString.restype = ctypes.c_void_p
-PyBytes_AsString.argtypes = [ctypes.py_object]
+from gcsfs.zb_hns_utils import (
+    HAS_CPYTHON_API,
+    PyBytes_AsString,
+    PyBytes_FromStringAndSize,
+)
 
 
 # Please refer to following discussion to understand why this is required at this point
@@ -24,13 +22,17 @@ def _fast_slice(src_bytes, offset, read_size):
         return b""
     if offset < 0 or offset + read_size > len(src_bytes):
         raise ValueError("Slice indices out of bounds")
-    dest_bytes = PyBytes_FromStringAndSize(None, read_size)
-    src_ptr = PyBytes_AsString(src_bytes)
-    dest_ptr = PyBytes_AsString(dest_bytes)
 
-    # Releases the GIL
-    ctypes.memmove(dest_ptr, src_ptr + offset, read_size)
-    return dest_bytes
+    if HAS_CPYTHON_API:
+        dest_bytes = PyBytes_FromStringAndSize(None, read_size)
+        src_ptr = PyBytes_AsString(src_bytes)
+        dest_ptr = PyBytes_AsString(dest_bytes)
+        # Releases the GIL
+        ctypes.memmove(dest_ptr, src_ptr + offset, read_size)
+        return dest_bytes
+    else:
+        # Standard fallback for PyPy/non-CPython
+        return src_bytes[offset : offset + read_size]
 
 
 class RunningAverageTracker:

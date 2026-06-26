@@ -1340,3 +1340,42 @@ async def test_mrd_pool_unfinalized_reuses_cached_mrd_after_init(
 
     # init_mrd should not have been called again
     assert init_mrd_mock.await_count == 1
+
+
+@mock.patch("gcsfs.zb_hns_utils.HAS_CPYTHON_API", False)
+def test_direct_memmove_buffer_pypy_fallback():
+    """
+    Tests that when HAS_CPYTHON_API is False (e.g., on PyPy), the buffer correctly
+    falls back to using bytearray.
+    """
+    data1 = b"pypy_"
+    data2 = b"fallback"
+    size = len(data1) + len(data2)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    # Use max_pending=2 and split the write to prevent the zero-copy fast path
+    # from skipping the memory allocation phase.
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    future1 = view.write(data1)
+    future2 = view.write(data2)
+
+    future1.result()
+    future2.result()
+
+    view.close()
+    buf.close()
+
+    result_bytes = buf.get_value()
+
+    # 1. Verify the data is completely intact
+    assert result_bytes == b"pypy_fallback"
+
+    # 2. Verify it is standard Python bytes
+    assert isinstance(result_bytes, bytes)
+
+    # 3. Verify the fallback path was ACTUALLY taken by inspecting the internal buffer.
+    assert isinstance(buf._result_bytes, bytearray)
+
+    executor.shutdown()
