@@ -1,7 +1,9 @@
 import logging
 import multiprocessing
 import os
+import shutil
 import statistics
+import tempfile
 import time
 import uuid
 from typing import Any, List
@@ -35,14 +37,29 @@ def populate_bucket():
     return False
 
 
+def _random_chunks(total_size, max_chunk=100 * MB):
+    """Yield byte chunks summing to ``total_size``, each at most ``max_chunk``.
+
+    A single 1 MiB random block is generated once and repeated to fill each
+    chunk. ``os.urandom`` is CPU-bound (~200 MB/s) and otherwise dominates the
+    setup time for multi-GB files; repeating a block is several times faster
+    and still produces uncompressible bytes for the network/storage layer (GCS
+    does not compress object uploads), so measured throughput is unaffected.
+    """
+    block = os.urandom(min(1 * MB, total_size))
+    block_len = len(block)
+    remaining = total_size
+    while remaining > 0:
+        write_size = min(max_chunk, remaining)
+        repeats, remainder = divmod(write_size, block_len)
+        yield block * repeats + block[:remainder]
+        remaining -= write_size
+
+
 def _write_file(gcs, path, file_size, chunk_size):
-    chunks_to_write = file_size // chunk_size
-    remainder = file_size % chunk_size
     with gcs.open(path, "wb", finalize_on_close=True) as f:
-        for _ in range(chunks_to_write):
-            f.write(os.urandom(chunk_size))
-        if remainder > 0:
-            f.write(os.urandom(remainder))
+        for chunk in _random_chunks(file_size, chunk_size):
+            f.write(chunk)
 
     actual_size = gcs.info(path)["size"]
     if actual_size != file_size:
@@ -84,6 +101,13 @@ def _prepare_files(gcs, file_paths, file_size=0):
 def _prepare_folders(gcs, folder_paths):
     for path in folder_paths:
         gcs.mkdir(path, create_parents=True)
+
+
+def _write_local_file(path, file_size):
+    """Create a local source file of the given size for put benchmarks."""
+    with open(path, "wb") as f:
+        for chunk in _random_chunks(file_size):
+            f.write(chunk)
 
 
 def _benchmark_io_fixture_helper(
@@ -181,6 +205,75 @@ def gcsfs_benchmark_pipe(extended_gcs_factory, request):
         params,
         "benchmark-pipe",
         create_files=False,
+    )
+
+
+def _benchmark_put_fixture_helper(extended_gcs_factory, params, prefix_tag):
+    gcs = extended_gcs_factory()
+
+    prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
+    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
+
+    local_dir = tempfile.mkdtemp(prefix="gcsfs-benchmark-put-")
+    local_path = os.path.join(local_dir, "source")
+
+    logging.info(
+        f"Setting up benchmark '{params.name}': creating local source file of "
+        f"size {params.file_size_bytes / MB:.2f} MB at '{local_path}' and "
+        f"targeting {params.files} remote destination(s)."
+    )
+
+    try:
+        start_time = time.perf_counter()
+        _write_local_file(local_path, params.file_size_bytes)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logging.info(
+            f"Benchmark '{params.name}' setup created local source file in {duration_ms:.2f} ms."
+        )
+
+        # NOTE: The source file is written immediately before the benchmark and
+        # is shared by every process/round, so it stays resident in the OS page
+        # cache. These benchmarks therefore measure upload throughput from a
+        # cached source (representative of "upload a file you just produced"),
+        # not from cold disk.
+        yield gcs, local_path, file_paths, params
+
+        # Verify upload integrity outside the timed region. gcsfs defaults to
+        # consistency="none" (no client-side checksum on put), so we assert the
+        # uploaded object sizes match the local source. The cache is invalidated
+        # first because multi-process uploads run on separate gcs instances.
+        gcs.invalidate_cache()
+        for path in file_paths:
+            actual_size = gcs.info(path)["size"]
+            if actual_size != params.file_size_bytes:
+                raise RuntimeError(
+                    f"Upload integrity check failed for {path}. "
+                    f"Expected size: {params.file_size_bytes}, "
+                    f"Actual size: {actual_size}"
+                )
+
+    finally:
+        # --- Teardown ---
+        logging.info(
+            f"Tearing down benchmark '{params.name}': deleting remote files and local source."
+        )
+        try:
+            gcs.rm(prefix, recursive=True)
+        except Exception as e:
+            logging.error(f"Failed to clean up benchmark files: {e!r}")
+        shutil.rmtree(local_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def gcsfs_benchmark_put(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a put benchmark run.
+    It provides a GCSFS instance, a single local source file to upload, and a
+    list of remote destination paths to upload it to.
+    """
+    params = request.param
+    yield from _benchmark_put_fixture_helper(
+        extended_gcs_factory, params, "benchmark-put"
     )
 
 

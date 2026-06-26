@@ -1,0 +1,15 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+  file_sizes_mb:
+    - 4096 # 4 GB
+  chunk_sizes_mb:
+    - 50 # 50 MB Default chunk size
+  rounds: 3
+
+scenarios:
+  - name: "put_file"
+
+  - name: "put_file_multi_process"
+    processes: [4, 8]
