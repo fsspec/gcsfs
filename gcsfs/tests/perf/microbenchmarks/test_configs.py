@@ -14,6 +14,10 @@ from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     get_listing_benchmark_cases,
 )
 from gcsfs.tests.perf.microbenchmarks.open.configs import get_open_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.put.configs import (
+    PutConfigurator,
+    get_put_benchmark_cases,
+)
 from gcsfs.tests.perf.microbenchmarks.read.configs import (
     ReadConfigurator,
     get_read_benchmark_cases,
@@ -157,6 +161,29 @@ def test_write_configurator(mock_config_dependencies):
     assert case.files == 2  # threads * processes
 
 
+def test_put_configurator(mock_config_dependencies):
+    """Test that PutConfigurator correctly builds benchmark parameters."""
+    common = {
+        "bucket_types": ["regional"],
+        "file_sizes_mb": [200],
+        "chunk_sizes_mb": [50],
+        "rounds": 1,
+    }
+    scenario = {"name": "put_test", "processes": [2], "threads": [1]}
+
+    configurator = PutConfigurator("dummy")
+    cases = configurator.build_cases(scenario, common)
+
+    assert len(cases) == 1
+    case = cases[0]
+    assert case.name == "put_test_2procs_1threads_200MB_file_50MB_chunk_regional"
+    assert case.file_size_bytes == 200 * MB
+    assert case.chunk_size_bytes == 50 * MB
+    assert case.processes == 2
+    assert case.files == 2  # threads * processes
+    assert case.bucket_name == "test-bucket"
+
+
 def test_listing_configurator(mock_config_dependencies):
     """Test that ListingConfigurator correctly builds benchmark parameters."""
     common = {"bucket_types": ["regional"], "rounds": 1}
@@ -272,6 +299,10 @@ def test_validate_actual_yaml_configs():
         # Open
         cases = get_open_benchmark_cases()
         assert len(cases) > 0, "Open config produced no cases"
+
+        # Put
+        cases = get_put_benchmark_cases()
+        assert len(cases) > 0, "Put config produced no cases"
 
         # Glob
         cases = get_glob_benchmark_cases()
