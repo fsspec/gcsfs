@@ -47,9 +47,9 @@ import lightning.pytorch as pl
 import torch
 import transformers
 from lightning.pytorch.callbacks import Callback, DeviceStatsMonitor, ModelCheckpoint
-from lightning.pytorch.strategies import DDPStrategy
-from lightning.pytorch.loops.fit_loop import _FitLoop as FitLoop
 from lightning.pytorch.loops.fetchers import _PrefetchDataFetcher
+from lightning.pytorch.loops.fit_loop import _FitLoop as FitLoop
+from lightning.pytorch.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 
 # ---- Logging --------------------------------------------------------------
@@ -296,11 +296,13 @@ class StepTimeCallback(Callback):
         # throughput by gradient_accumulation_steps.
         if (batch_idx + 1) % trainer.accumulate_grad_batches != 0:
             return
-            
+
         # Calculate step time excluding the checkpointing time
         step_time = time.perf_counter() - self.start_time - self.ckpt_time
-        
-        per_rank_batch_size = per_device_train_batch_size * trainer.accumulate_grad_batches
+
+        per_rank_batch_size = (
+            per_device_train_batch_size * trainer.accumulate_grad_batches
+        )
         local_throughput = per_rank_batch_size / step_time
         global_throughput = global_batch_size / step_time
 
@@ -350,12 +352,12 @@ class LoggedModelCheckpoint(ModelCheckpoint):
         start_time = time.perf_counter()
         super()._save_checkpoint(trainer, filepath)
         duration = time.perf_counter() - start_time
-        
+
         # Accumulate checkpointing time to be excluded from step time
         for callback in trainer.callbacks:
             if isinstance(callback, StepTimeCallback):
                 callback.ckpt_time += duration
-                
+
         logging.info(
             "Finished saving checkpoint to %s in %.2f seconds for global_step %d from rank %d",
             filepath,
@@ -374,12 +376,12 @@ class LoggedModelCheckpoint(ModelCheckpoint):
         start_time = time.perf_counter()
         super()._remove_checkpoint(trainer, filepath)
         duration = time.perf_counter() - start_time
-        
+
         # Accumulate checkpointing time to be excluded from step time
         for callback in trainer.callbacks:
             if isinstance(callback, StepTimeCallback):
                 callback.ckpt_time += duration
-                
+
         logging.info(
             "Finished deleting checkpoint %s in %.2f seconds for global_step %d from rank %d",
             filepath,
@@ -557,8 +559,7 @@ if __name__ == "__main__":
         rank = self.trainer.global_rank
         logging.info(f"[RANK {rank}] [PROFILER] FitLoop.setup_data started")
         # We use the PL Profiler so this appears directly in the FIT Profiler Report
-        with self.trainer.profiler.profile(
-                "FitLoop.setup_data (Data loading)"):
+        with self.trainer.profiler.profile("FitLoop.setup_data (Data loading)"):
             return original_setup_data(self, *args, **kwargs)
 
     FitLoop.setup_data = profiled_setup_data
@@ -578,7 +579,8 @@ if __name__ == "__main__":
         # We log this to the console immediately for real-time visibility
         rank = os.environ.get("RANK", "0")
         logging.info(
-            f"[RANK {rank}] [PROFILER] _PrefetchDataFetcher.__iter__ (Worker Spawn and Data Loading) took {duration:.4f} seconds."
+            f"[RANK {rank}] [PROFILER] _PrefetchDataFetcher.__iter__ "
+            f"(Worker Spawn and Data Loading) took {duration:.4f} seconds."
         )
 
         return result
