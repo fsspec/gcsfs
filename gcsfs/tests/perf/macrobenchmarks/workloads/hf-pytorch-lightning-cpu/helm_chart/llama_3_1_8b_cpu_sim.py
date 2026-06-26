@@ -48,6 +48,8 @@ import torch
 import transformers
 from lightning.pytorch.callbacks import Callback, DeviceStatsMonitor, ModelCheckpoint
 from lightning.pytorch.strategies import DDPStrategy
+from lightning.pytorch.loops.fit_loop import _FitLoop as FitLoop
+from lightning.pytorch.loops.fetchers import _PrefetchDataFetcher
 from torch.utils.data import DataLoader
 
 # ---- Logging --------------------------------------------------------------
@@ -278,14 +280,14 @@ class LlamaLitModel(pl.LightningModule):
 class StepTimeCallback(Callback):
     """Logs ``step_time`` and ``throughput`` every optimizer step."""
 
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        # on_train_batch_* fire once per micro-batch. Start the timer on the
-        # first micro-batch of each gradient-accumulation window so step_time
-        # spans a full optimizer step -- which is what global_step counts and
-        # what global_batch_size (incl. gradient_accumulation_steps) accounts
-        # for. With accumulate_grad_batches=1 this is every batch.
-        if batch_idx % trainer.accumulate_grad_batches == 0:
-            self.start_time = time.perf_counter()
+    def __init__(self):
+        super().__init__()
+        self.ckpt_time = 0.0
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        # Start timer at the beginning of the epoch to capture the first batch's data loading time
+        self.start_time = time.perf_counter()
+        self.ckpt_time = 0.0
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         # Only emit metrics on micro-batches that complete an optimizer step;
@@ -294,23 +296,34 @@ class StepTimeCallback(Callback):
         # throughput by gradient_accumulation_steps.
         if (batch_idx + 1) % trainer.accumulate_grad_batches != 0:
             return
-        step_time = time.perf_counter() - self.start_time
-        throughput = global_batch_size / step_time
+            
+        # Calculate step time excluding the checkpointing time
+        step_time = time.perf_counter() - self.start_time - self.ckpt_time
+        
+        per_rank_batch_size = per_device_train_batch_size * trainer.accumulate_grad_batches
+        local_throughput = per_rank_batch_size / step_time
+        global_throughput = global_batch_size / step_time
 
         pl_module.log("step_time", step_time)
-        pl_module.log("throughput", throughput)
+        pl_module.log("local_throughput", local_throughput)
+        pl_module.log("global_throughput", global_throughput)
 
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs
         loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
         logging.info(
             "Global Rank: %d | Step: %d | Loss: %.4f | Step Time: %.4fs | "
-            "Throughput: %.2f samples/s",
+            "Throughput: %.2f samples/s | Local Throughput: %.2f samples/s",
             trainer.global_rank,
             trainer.global_step,
             loss_val,
             step_time,
-            throughput,
+            global_throughput,
+            local_throughput,
         )
+
+        # Reset the timer for the next step, capturing its data loading time.
+        self.start_time = time.perf_counter()
+        self.ckpt_time = 0.0
 
 
 class LoggedModelCheckpoint(ModelCheckpoint):
@@ -337,6 +350,12 @@ class LoggedModelCheckpoint(ModelCheckpoint):
         start_time = time.perf_counter()
         super()._save_checkpoint(trainer, filepath)
         duration = time.perf_counter() - start_time
+        
+        # Accumulate checkpointing time to be excluded from step time
+        for callback in trainer.callbacks:
+            if isinstance(callback, StepTimeCallback):
+                callback.ckpt_time += duration
+                
         logging.info(
             "Finished saving checkpoint to %s in %.2f seconds for global_step %d from rank %d",
             filepath,
@@ -355,6 +374,12 @@ class LoggedModelCheckpoint(ModelCheckpoint):
         start_time = time.perf_counter()
         super()._remove_checkpoint(trainer, filepath)
         duration = time.perf_counter() - start_time
+        
+        # Accumulate checkpointing time to be excluded from step time
+        for callback in trainer.callbacks:
+            if isinstance(callback, StepTimeCallback):
+                callback.ckpt_time += duration
+                
         logging.info(
             "Finished deleting checkpoint %s in %.2f seconds for global_step %d from rank %d",
             filepath,
@@ -431,11 +456,15 @@ if __name__ == "__main__":
     # pattern under test.
     logging.info("[INFO] Loading %s dataset", dataset_path)
     logging.info("[INFO] Using HF dataloader")
+    load_start = time.perf_counter()
     ds = datasets.load_dataset(
         "parquet",
         data_files=f"{dataset_path}/*.parquet",
         split="train",
         streaming=True,
+    )
+    logging.info(
+        f"[INFO] HF dataloader prepared in {time.perf_counter() - load_start:.4f}s"
     )
     # Shard the streaming dataset across DDP ranks. torchrun sets RANK and
     # WORLD_SIZE before Python starts, so reading from env works at this point
@@ -516,6 +545,48 @@ if __name__ == "__main__":
         logging.info("[INFO] Resuming from checkpoint: %s", checkpoint_load_path)
     else:
         checkpoint_load_path = None
+
+    # TODO: These are underscore private APIs, which may break during a Lightning upgrade.
+    # We should consider contributing what we need into Lightning.
+    # ==============================================================================
+    # PROFILER HOOK 1: Profile the entire setup_data() phase
+    # ==============================================================================
+    original_setup_data = FitLoop.setup_data
+
+    def profiled_setup_data(self, *args, **kwargs):
+        rank = self.trainer.global_rank
+        logging.info(f"[RANK {rank}] [PROFILER] FitLoop.setup_data started")
+        # We use the PL Profiler so this appears directly in the FIT Profiler Report
+        with self.trainer.profiler.profile(
+                "FitLoop.setup_data (Data loading)"):
+            return original_setup_data(self, *args, **kwargs)
+
+    FitLoop.setup_data = profiled_setup_data
+
+    # ==============================================================================
+    # PROFILER HOOK 2: Isolate the iter() call that spawns the workers
+    # ==============================================================================
+    original_fetcher_iter = _PrefetchDataFetcher.__iter__
+
+    def profiled_fetcher_iter(self):
+        start_time = time.perf_counter()
+
+        # This triggers the actual worker forks, gRPC init, and initial file opens
+        result = original_fetcher_iter(self)
+
+        duration = time.perf_counter() - start_time
+        # We log this to the console immediately for real-time visibility
+        rank = os.environ.get("RANK", "0")
+        logging.info(
+            f"[RANK {rank}] [PROFILER] _PrefetchDataFetcher.__iter__ (Worker Spawn and Data Loading) took {duration:.4f} seconds."
+        )
+
+        return result
+
+    _PrefetchDataFetcher.__iter__ = profiled_fetcher_iter
+    # ==============================================================================
+
+    logging.info("[INFO] Training Started.")
 
     trainer.fit(LlamaLitModel(model), train_loader, ckpt_path=checkpoint_load_path)
     logging.info("[INFO] Training Completed.")
