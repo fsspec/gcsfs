@@ -38,11 +38,21 @@ def populate_bucket():
 
 
 def _random_chunks(total_size, max_chunk=100 * MB):
-    """Yield random byte chunks summing to ``total_size``, each at most ``max_chunk``."""
+    """Yield byte chunks summing to ``total_size``, each at most ``max_chunk``.
+
+    A single 1 MiB random block is generated once and repeated to fill each
+    chunk. ``os.urandom`` is CPU-bound (~200 MB/s) and otherwise dominates the
+    setup time for multi-GB files; repeating a block is several times faster
+    and still produces uncompressible bytes for the network/storage layer (GCS
+    does not compress object uploads), so measured throughput is unaffected.
+    """
+    block = os.urandom(min(1 * MB, total_size))
+    block_len = len(block)
     remaining = total_size
     while remaining > 0:
         write_size = min(max_chunk, remaining)
-        yield os.urandom(write_size)
+        repeats, remainder = divmod(write_size, block_len)
+        yield block * repeats + block[:remainder]
         remaining -= write_size
 
 
