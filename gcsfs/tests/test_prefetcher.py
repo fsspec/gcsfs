@@ -706,3 +706,21 @@ def test_local_seek_optimization(prefetcher_factory):
     # This should trigger a hard seek and increment the fetcher call count.
     assert bp.fetch(10, 20) == data[10:20]
     assert fetcher.call_count > calls_after_next
+
+
+@mock.patch("gcsfs.prefetcher.HAS_CPYTHON_API", False)
+def test_fast_slice_pypy_fallback():
+    """
+    Tests that when HAS_CPYTHON_API is False (e.g., on PyPy), _fast_slice
+    correctly falls back to standard Python slicing and respects boundaries.
+    """
+    src = b"0123456789_pypy_fallback_test"
+
+    # 1. Verify standard extraction works perfectly
+    assert _fast_slice(src, 11, 13) == b"pypy_fallback"
+
+    # 2. Verify zero-length read
+    assert _fast_slice(src, 5, 0) == b""
+
+    # 3. Verify exact bounds
+    assert _fast_slice(src, 0, len(src)) == src

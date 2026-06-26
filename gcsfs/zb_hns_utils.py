@@ -24,13 +24,19 @@ MAX_PREFETCH_SIZE = 256 * 1024 * 1024
 logger = logging.getLogger("gcsfs")
 
 
-PyBytes_FromStringAndSize = ctypes.pythonapi.PyBytes_FromStringAndSize
-PyBytes_FromStringAndSize.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t)
-PyBytes_FromStringAndSize.restype = ctypes.py_object
+try:
+    PyBytes_FromStringAndSize = ctypes.pythonapi.PyBytes_FromStringAndSize
+    PyBytes_FromStringAndSize.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t)
+    PyBytes_FromStringAndSize.restype = ctypes.py_object
 
-PyBytes_AsString = ctypes.pythonapi.PyBytes_AsString
-PyBytes_AsString.argtypes = (ctypes.py_object,)
-PyBytes_AsString.restype = ctypes.c_void_p
+    PyBytes_AsString = ctypes.pythonapi.PyBytes_AsString
+    PyBytes_AsString.argtypes = (ctypes.py_object,)
+    PyBytes_AsString.restype = ctypes.c_void_p
+    HAS_CPYTHON_API = True
+except Exception:
+    PyBytes_FromStringAndSize = None
+    PyBytes_AsString = None
+    HAS_CPYTHON_API = False
 
 
 async def init_mrd(grpc_client, bucket_name, object_name, generation=None):
@@ -344,10 +350,16 @@ class DirectMemmoveBuffer:
                         fut.set_result(None)
                         self._total_bytes_written += size
                         return fut
-                    self._result_bytes = PyBytes_FromStringAndSize(
-                        None, self.expected_size
-                    )
-                    self._start_address = PyBytes_AsString(self._result_bytes)
+                    if HAS_CPYTHON_API:
+                        self._result_bytes = PyBytes_FromStringAndSize(
+                            None, self.expected_size
+                        )
+                        self._start_address = PyBytes_AsString(self._result_bytes)
+                    else:
+                        self._result_bytes = bytearray(self.expected_size)
+                        self._start_address = (
+                            -1
+                        )  # Dummy value to pass the defensive check below
 
                 # Defensive programming: gracefully catch internal overwrite attempts
                 if self._start_address is None:
@@ -355,7 +367,6 @@ class DirectMemmoveBuffer:
                         "Attempted to execute standard write over a Zero-Copied payload."
                     )
 
-                dest = self._start_address + dest_offset
                 if self._pending_count == 0:
                     self._done_event.clear()
                 self._pending_count += 1
@@ -367,7 +378,7 @@ class DirectMemmoveBuffer:
         if size <= self.THRESHOLD_BYTES_FOR_SCHEDULING:
             # Fast path, no need to send it to executor
             try:
-                self._do_memmove(dest, data_bytes, size)
+                self._do_memmove(dest_offset, data_bytes, size)
             except BaseException:
                 # The exception is already captured in self._error by _do_memmove
                 pass
@@ -382,20 +393,31 @@ class DirectMemmoveBuffer:
         else:
             try:
                 # Slow path, schedule it on executor.
-                return self.executor.submit(self._do_memmove, dest, data_bytes, size)
+                return self.executor.submit(
+                    self._do_memmove, dest_offset, data_bytes, size
+                )
             except BaseException as e:
                 with self._lock:
                     self._error = e
                 self._decrement_pending()
                 raise e
 
-    def _do_memmove(self, dest, data_bytes, size):
+    def _do_memmove(self, dest_offset, data_bytes, size):
         try:
             with self._lock:
                 if self._error:
                     return
 
-            ctypes.memmove(dest, data_bytes, size)
+            # Isolate pointer math to CPython only.
+            # PyPy uses memory-safe native slice assignment.
+            if HAS_CPYTHON_API:
+                dest = self._start_address + dest_offset
+                ctypes.memmove(dest, data_bytes, size)
+            else:
+                memoryview(self._result_bytes)[
+                    dest_offset : dest_offset + size
+                ] = data_bytes
+
             with self._lock:
                 self._total_bytes_written += size
 
@@ -421,6 +443,10 @@ class DirectMemmoveBuffer:
                     f"only populated {self._total_bytes_written}. Returning this "
                     f"payload would leak uninitialized memory."
                 )
+
+            if not isinstance(self._result_bytes, bytes):
+                return bytes(self._result_bytes)
+
             return self._result_bytes
 
     def close(self):
