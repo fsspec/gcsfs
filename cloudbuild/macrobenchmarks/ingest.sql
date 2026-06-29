@@ -46,7 +46,7 @@ BEGIN
     "INSERT INTO `@PROJECT_ID@.@DATASET_NAME@.history` (run_date, build_id, run_timestamp, source_uri, branch_name, ",
     columns_list,
     ") SELECT PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_FILE_NAME, r'/(\\d{8})/')) as run_date, ",
-    "REGEXP_EXTRACT(_FILE_NAME, r'/buildid-([0-9a-fA-F-]{36})/') as build_id, ",
+    "REGEXP_EXTRACT(_FILE_NAME, r'/buildid-([^/]+)/') as build_id, ",
     "PARSE_TIMESTAMP('%Y%m%d-%H%M%S', REGEXP_EXTRACT(_FILE_NAME, r'/(\\d{8}-\\d{6})\\.csv')) as run_timestamp, ",
     "_FILE_NAME as source_uri, ",
     "REGEXP_EXTRACT(_FILE_NAME, r'/branch=([^/]+)/') as branch_name, ",

@@ -29,19 +29,14 @@ CHART="gcsfs/tests/perf/macrobenchmarks/workloads/${_WORKLOAD}/helm_chart"
 # eagerly-materialized AdamW state are serialized the same as in a long run.
 # simulatedStepComputeSeconds=0 makes the single step instant.
 echo "Installing seed release $SEED_RUN_ID to write one checkpoint to $SEED_CKPT_DIR ..."
+shared_workload_helm_args
 helm install "$SEED_RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
-  --set gcsfs.datasetPath="${_DATASET_PATH}" \
+  "${SHARED_HELM_ARGS[@]}" \
   --set gcsfs.ckptWritePath="$SEED_CKPT_DIR" \
   --set-string gcsfs.ckptLoadPath="" \
-  --set workload.modelId="${_MODEL_ID}" \
-  --set workload.hfToken="${_HF_TOKEN}" \
   --set workload.steps="1" \
   --set workload.ckptWriterInterval="1" \
-  --set workload.nodes="${_NODES}" \
-  --set workload.requirements="${_REQUIREMENTS}" \
-  --set workload.trainingStrategy="${_TRAINING_STRATEGY}" \
-  --set workload.simulatedStepComputeSeconds="0" \
-  --set serviceAccount=default
+  --set workload.simulatedStepComputeSeconds="0"
 
 if ! wait_for_jobset "$SEED_RUN_ID" seed-checkpoint; then
   helm uninstall "$SEED_RUN_ID" || true
