@@ -30,6 +30,21 @@ skip_if_failed() {
   fi
 }
 
+shared_workload_helm_args() {
+  SHARED_HELM_ARGS=(
+    --set gcsfs.datasetPath="${_DATASET_PATH}"
+    --set workload.modelId="${_MODEL_ID}"
+    --set-string workload.image="${_IMAGE}"
+    --set workload.hfToken="${_HF_TOKEN}"
+    --set workload.nodes="${_NODES}"
+    --set workload.ranksPerNode="${_RANKS_PER_NODE}"
+    --set workload.requirements="${_REQUIREMENTS}"
+    --set workload.trainingStrategy="${_TRAINING_STRATEGY}"
+    --set "nodeSelector.cloud\.google\.com/gke-nodepool=${_MACHINE_TYPE}"
+    --set serviceAccount=default
+  )
+}
+
 # Poll a JobSet until it reports Completed (return 0) or Failed/timeout (record
 # the failure in the ledger, dump diagnostics, return 1). Shared by the
 # seed-checkpoint and run-workload steps so the 240x30s poll lives in one place.
