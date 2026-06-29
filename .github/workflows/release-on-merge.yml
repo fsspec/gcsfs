@@ -1,0 +1,67 @@
+name: Release on Merge
+
+# Monthly release orchestrator (Publishing Phase):
+#   1. Triggers when a Pull Request is closed and merged into main.
+#   2. If it is a release PR (has 'autorelease' label), it extracts the version.
+#   3. Creates and pushes the Git tag for that version.
+#   4. Calls the reusable release.yml workflow to build and publish to PyPI.
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  tag:
+    # Run only if the PR was merged, and it has the 'autorelease' label,
+    # and the title matches our release convention.
+    if: |
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'autorelease') &&
+      startsWith(github.event.pull_request.title, 'chore: release ')
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.tagger.outputs.version }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and Push Tag
+        id: tagger
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Extract version from "chore: release YYYY.M.PATCH"
+          VERSION=$(echo "$PR_TITLE" | sed 's/chore: release //')
+          if [[ ! "$VERSION" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+            echo "Error: Extracted version '$VERSION' is invalid."
+            exit 1
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+          echo "Creating and pushing tag for version: $VERSION"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+          echo "Successfully pushed tag $VERSION"
+
+  publish:
+    needs: tag
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      ref: ${{ needs.tag.outputs.version }}
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
