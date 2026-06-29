@@ -166,7 +166,7 @@ def main():
         entries = get_changelog_entries(latest_tag)
         print(f"Found {len(entries)} changelog entries.")
 
-        # 4. Update the changelog file in place with the new release section
+        # 4a. Update the changelog file in place with the new release section
         update_changelog_file(changelog_path, next_version, entries)
 
         # 4b. Update the fsspec dependency in pyproject.toml to match the current month's release
