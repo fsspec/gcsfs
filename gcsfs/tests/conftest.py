@@ -643,6 +643,7 @@ def pytest_ignore_collect(collection_path, config):
             "pipe",
             "open",
             "glob",
+            "put",
         }
 
         # If only --run-benchmarks-infra is passed, ignore the actual benchmark subfolders.
