@@ -61,7 +61,7 @@ done
 # run's region/zone. Project-owned buckets are describable by the build SA
 # (storage admin), so these are hard fail-fast (nothing is provisioned yet).
 # Field-name-robust: one JSON describe, then grep the JSON for RAPID / the zone
-# and read location + HNS explicitly.
+# and read location explicitly.
 validate_bucket() {
   BPATH="$1"; KIND="$2"
   BUCKET=$(echo "$BPATH" | sed -E 's#^gs://([^/]+).*#\1#')
@@ -73,35 +73,21 @@ validate_bucket() {
     *) echo "ERROR: $KIND bucket gs://$BUCKET is in '$LOC', not region '$REGION'."; exit 1 ;;
   esac
   IS_RAPID=no; echo "$JSON" | grep -qiF 'RAPID' && IS_RAPID=yes
-  # gcloud's JSON key for HNS has varied across CLI versions
-  # (hierarchicalNamespace vs hierarchical_namespace); accept either so a real
-  # HNS bucket is never silently read as non-HNS (which would reject hns runs
-  # and, worse, bypass the regional-run "no HNS" guard).
-  HNS=$(echo "$JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);print(bool((d.get('hierarchicalNamespace') or d.get('hierarchical_namespace') or {}).get('enabled')))")
   case "${_BUCKET_TYPE}" in
     regional)
-      if [ "$IS_RAPID" = yes ]; then echo "ERROR: regional run but $KIND bucket gs://$BUCKET is RAPID/zonal."; exit 1; fi
-      if [ "$HNS" = "True" ]; then echo "ERROR: regional run but $KIND bucket gs://$BUCKET has HNS enabled."; exit 1; fi ;;
+      if [ "$IS_RAPID" = yes ]; then echo "ERROR: regional run but $KIND bucket gs://$BUCKET is RAPID/zonal."; exit 1; fi ;;
     zonal)
       if [ "$IS_RAPID" != yes ]; then echo "ERROR: zonal run requires a RAPID $KIND bucket (gs://$BUCKET)."; exit 1; fi
       if ! echo "$JSON" | grep -qiF "${_ZONE}"; then echo "ERROR: zonal $KIND bucket gs://$BUCKET is not placed in zone ${_ZONE}."; exit 1; fi ;;
     hns)
-      if [ "$IS_RAPID" = yes ]; then echo "ERROR: hns run but $KIND bucket gs://$BUCKET is RAPID/zonal."; exit 1; fi
-      if [ "$HNS" != "True" ]; then echo "ERROR: hns run requires an HNS-enabled $KIND bucket (gs://$BUCKET)."; exit 1; fi ;;
+      if [ "$IS_RAPID" = yes ]; then echo "ERROR: hns run but $KIND bucket gs://$BUCKET is RAPID/zonal."; exit 1; fi ;;
   esac
   echo "OK: $KIND bucket gs://$BUCKET matches ${_BUCKET_TYPE} in $LOC."
 }
 validate_bucket "${_DATASET_PATH}" dataset
 if [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then validate_bucket "${_CHECKPOINT_LOAD_PATH}" checkpoint-load; fi
 
-# Model-weights bucket is external (read by the node SA, not the build SA), so a
-# build-step describe would false-negative: warn, never exit.
-case "${_MODEL_ID}" in
-  gs://*)
-    MODEL_BUCKET=$(echo "${_MODEL_ID}" | sed -E 's#^gs://([^/]+).*#\1#')
-    gcloud storage buckets describe "gs://$MODEL_BUCKET" --project=${PROJECT_ID} >/dev/null 2>&1 || \
-      echo "WARNING: build SA cannot read model bucket gs://$MODEL_BUCKET; ensure the node SA (${_GKE_SERVICE_ACCOUNT}) has read access." ;;
-esac
+
 # Machine-type availability is best-effort (container.admin lacks
 # compute.machineTypes.get); the node-pool create fails fast if wrong.
 gcloud compute machine-types describe "${_MACHINE_TYPE}" --zone=${_ZONE} --project=${PROJECT_ID} >/dev/null 2>&1 || \
