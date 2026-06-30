@@ -1,7 +1,7 @@
 name: Release on Merge
 
 # Monthly release orchestrator (Publishing Phase):
-#   1. Triggers when a Pull Request is closed and merged into main.
+#   1. Triggers when a Pull Request modifying changelog.rst is closed and merged into main.
 #   2. If it is a release PR (has 'autorelease' label), it extracts the version.
 #   3. Creates and pushes the Git tag for that version.
 #   4. Calls the reusable release.yml workflow to build and publish to PyPI.
@@ -10,6 +10,8 @@ on:
     types: [closed]
     branches:
       - main
+    paths:
+      - "docs/source/changelog.rst"
 
 jobs:
   tag:
@@ -60,6 +62,8 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      checks: read
+      statuses: read
     uses: ./.github/workflows/release.yml
     with:
       ref: ${{ needs.tag.outputs.version }}
