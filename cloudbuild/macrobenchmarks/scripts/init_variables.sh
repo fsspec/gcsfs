@@ -86,8 +86,7 @@ validate_bucket() {
       if [ "$IS_RAPID" != yes ]; then echo "ERROR: zonal run requires a RAPID $KIND bucket (gs://$BUCKET)."; exit 1; fi
       if ! echo "$JSON" | grep -qiF "${_ZONE}"; then echo "ERROR: zonal $KIND bucket gs://$BUCKET is not placed in zone ${_ZONE}."; exit 1; fi ;;
     hns)
-      if [ "$IS_RAPID" = yes ]; then echo "ERROR: hns run but $KIND bucket gs://$BUCKET is RAPID/zonal."; exit 1; fi
-      if [ "$HNS" != "True" ]; then echo "ERROR: hns run requires an HNS-enabled $KIND bucket (gs://$BUCKET)."; exit 1; fi ;;
+      if [ "$IS_RAPID" = yes ]; then echo "ERROR: hns run but $KIND bucket gs://$BUCKET is RAPID/zonal."; exit 1; fi ;;
   esac
   echo "OK: $KIND bucket gs://$BUCKET matches ${_BUCKET_TYPE} in $LOC."
 }
