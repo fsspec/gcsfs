@@ -242,6 +242,7 @@ Contents
    retries
    fuse
    Read Optimization: Prefetching <prefetcher>
+   release
    changelog
    code-of-conduct
    :maxdepth: 2
