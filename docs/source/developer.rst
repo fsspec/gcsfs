@@ -61,26 +61,7 @@ tab in the pull request.
 Release Process
 ---------------
 
-This project uses CalVer for versioning.
-Releases are generally kept in sync with the ``fsspec`` release cycle.
-
-**Pre-release steps:**
-
-1. Verify that the CI pipeline is passing on the ``main`` branch.
-2. Update ``docs/source/changelog.rst`` manually with the changes for the new version.
-   Follow the existing format in that file.
-3. Commit the changelog updates and merge them to the ``main`` branch before creating the tag.
-   Ensure your local ``main`` branch is up-to-date.
-
-**Execution:**
-
-Create and push a git tag matching the version pattern.
-This will trigger the "Release" GitHub Actions workflow, which will automatically create a GitHub release and publish the package to PyPI.
-
-**Verification:**
-
-1. Monitor the "Release" workflow in the GitHub Actions tab.
-2. Verify the new version is available on PyPI.
+For details on the release process, see :doc:`release`.
 
 .. _fake-gcs-server: https://github.com/fsouza/fake-gcs-server
 
