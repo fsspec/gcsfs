@@ -31,6 +31,11 @@ case "${_SEED_CHECKPOINT:-true}" in
   true|false) ;;
   *) echo "ERROR: _SEED_CHECKPOINT must be true|false (got '${_SEED_CHECKPOINT}')."; exit 1 ;;
 esac
+# Reject an unknown TIER_1-networking toggle before provisioning anything.
+case "${_ENABLE_TIER1_NETWORKING:-true}" in
+  true|false) ;;
+  *) echo "ERROR: _ENABLE_TIER1_NETWORKING must be true|false (got '${_ENABLE_TIER1_NETWORKING}')."; exit 1 ;;
+esac
 # An external checkpoint, if supplied, takes precedence and the seed step
 # no-ops; note it so a run that set both does not look mis-wired.
 if [ "${_SEED_CHECKPOINT:-true}" = "true" ] && [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then
