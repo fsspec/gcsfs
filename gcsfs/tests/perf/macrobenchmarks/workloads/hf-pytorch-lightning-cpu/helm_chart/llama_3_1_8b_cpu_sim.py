@@ -252,15 +252,20 @@ class LlamaLitModel(pl.LightningModule):
                 state = optimizer.state[p]
                 if state:
                     continue
+                # Random, not zero: an all-zero buffer is trivially compressible/
+                # dedupable (page merging, a future transport compression layer,
+                # etc.), which would let this ~2/3 of the checkpoint transfer
+                # faster than the real, non-degenerate floats a trained
+                # optimizer actually produces -- skewing the IO benchmark.
                 state["step"] = torch.zeros((), dtype=torch.float32)
-                state["exp_avg"] = torch.zeros_like(
+                state["exp_avg"] = torch.randn_like(
                     p, memory_format=torch.preserve_format
                 )
-                state["exp_avg_sq"] = torch.zeros_like(
+                state["exp_avg_sq"] = torch.rand_like(
                     p, memory_format=torch.preserve_format
                 )
                 if group["amsgrad"]:
-                    state["max_exp_avg_sq"] = torch.zeros_like(
+                    state["max_exp_avg_sq"] = torch.rand_like(
                         p, memory_format=torch.preserve_format
                     )
 
