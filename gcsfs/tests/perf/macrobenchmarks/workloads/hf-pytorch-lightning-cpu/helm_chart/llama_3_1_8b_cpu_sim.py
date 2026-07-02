@@ -29,7 +29,6 @@ import logging
 import os
 import sys
 import time
-from datetime import timedelta
 
 import torch.multiprocessing
 
@@ -429,17 +428,13 @@ class LoggedDDPStrategy(DDPStrategy):
 def build_strategy(name):
     """Construct the parallel-training strategy for ``name`` (currently ddp).
 
-    Uses the gloo CPU backend and a 600s collective timeout so a stuck rank
-    surfaces a Gloo timeout (which names the missing rank) within ~10 min
-    instead of hanging. (The ``fsdp`` branch is added by fsdp-cpu-macrobench.)
+    Uses the gloo CPU backend.
     """
-    timeout = timedelta(seconds=600)
     if name == "ddp":
         # find_unused_parameters=False: the frozen Llama params have
         # requires_grad=False, so only self.trainable participates in DDP
         # autograd, and it is fully used -- no unused parameters.
         return LoggedDDPStrategy(
-            timeout=timeout,
             process_group_backend="gloo",
             find_unused_parameters=False,
         )
