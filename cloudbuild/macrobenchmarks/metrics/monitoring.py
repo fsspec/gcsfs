@@ -55,7 +55,7 @@ SERIES = [
 
 def _to_epoch(rfc3339: str) -> int:
     """Parse RFC3339 to epoch seconds."""
-    dt = datetime.datetime.fromisoformat(rfc3339.replace("Z", "+00:00"))
+    dt = datetime.datetime.fromisoformat(rfc3339.upper().replace("Z", "+00:00"))
     return int(dt.timestamp())
 
 
