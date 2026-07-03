@@ -55,6 +55,11 @@ for attempt in $(seq 1 5); do
     sleep 60
     continue
   fi
+  # Best-effort system metrics. Failure is ignored.
+  python3 -m metrics.monitoring \
+    --project "${PROJECT_ID}" --run-id "$RUN_ID" \
+    --start-time "$START_TIME" --end-time "$END_TIME" \
+    --out-dir "$RAW_DIR" || true
   if python3 -m metrics.calculate \
       --run-id "$RUN_ID" --workload-name "${_WORKLOAD}" \
       --requirements "${_REQUIREMENTS}" --in-dir "$RAW_DIR" --out-file "$SUMMARY" \

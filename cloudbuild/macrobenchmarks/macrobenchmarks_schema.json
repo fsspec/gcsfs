@@ -63,7 +63,14 @@
       {"name": "checkpoint_delete_time_p100", "type": "FLOAT", "description": "Maximum (p100) checkpoint-delete duration in seconds."},
       {"name": "num_checkpoint_delete_datapoints", "type": "INTEGER", "description": "Count of distinct checkpoint-delete datapoints."},
       {"name": "accelerator_blocked_time", "type": "FLOAT", "description": "Seconds the accelerator was blocked waiting on data loading (bottleneck rank, run-wide)."},
-      {"name": "accelerator_blocked_percent", "type": "FLOAT", "description": "Percent of wall-clock time the accelerator was blocked on data loading (bottleneck rank, run-wide)."}
+      {"name": "accelerator_blocked_percent", "type": "FLOAT", "description": "Percent of wall-clock time the accelerator was blocked on data loading (bottleneck rank, run-wide)."},
+      {"name": "cpu_usage_peak_cores", "type": "FLOAT", "description": "Peak CPU usage in cores over the run window; max across worker pods (bottleneck pod)."},
+      {"name": "cpu_usage_mean_cores", "type": "FLOAT", "description": "Mean CPU usage in cores over the run window; max of per-pod means across worker pods (bottleneck pod)."},
+      {"name": "memory_usage_peak_bytes", "type": "INTEGER", "description": "Peak container memory usage in bytes over the run window; max across worker pods (bottleneck pod)."},
+      {"name": "network_received_peak_bytes_per_sec", "type": "FLOAT", "description": "Peak pod network receive rate in bytes/s over the run window; max across worker pods (bottleneck pod)."},
+      {"name": "network_received_mean_bytes_per_sec", "type": "FLOAT", "description": "Mean pod network receive rate in bytes/s over the run window; max of per-pod means across worker pods (bottleneck pod)."},
+      {"name": "network_sent_peak_bytes_per_sec", "type": "FLOAT", "description": "Peak pod network send rate in bytes/s over the run window; max across worker pods (bottleneck pod)."},
+      {"name": "network_sent_mean_bytes_per_sec", "type": "FLOAT", "description": "Mean pod network send rate in bytes/s over the run window; max of per-pod means across worker pods (bottleneck pod)."}
     ]
   }
 }

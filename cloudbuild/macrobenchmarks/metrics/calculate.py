@@ -168,6 +168,40 @@ def calc_data_loading_metrics(dl_rows: list) -> dict:
     }
 
 
+# Maps series to schema columns. Memory has no mean column.
+_SYSTEM_SERIES_COLUMNS = {
+    "cpu": ("cpu_usage_peak_cores", "cpu_usage_mean_cores"),
+    "memory": ("memory_usage_peak_bytes", None),
+    "network_received": (
+        "network_received_peak_bytes_per_sec",
+        "network_received_mean_bytes_per_sec",
+    ),
+    "network_sent": (
+        "network_sent_peak_bytes_per_sec",
+        "network_sent_mean_bytes_per_sec",
+    ),
+}
+
+
+def calc_system_metrics(system_rows: list) -> dict:
+    """Reduce per-pod metrics to the bottleneck pod (max peak/mean)."""
+    out = {}
+    by_metric = defaultdict(list)
+    for r in system_rows:
+        by_metric[r.get("metric")].append(r)
+    for series, (peak_col, mean_col) in _SYSTEM_SERIES_COLUMNS.items():
+        rows = by_metric.get(series, [])
+        peaks = [r["peak"] for r in rows if r.get("peak") is not None]
+        if peaks:
+            val = max(peaks)
+            out[peak_col] = int(val) if peak_col == "memory_usage_peak_bytes" else val
+        if mean_col:
+            means = [r["mean"] for r in rows if r.get("mean") is not None]
+            if means:
+                out[mean_col] = max(means)
+    return out
+
+
 def build_summary_row(
     *,
     run_id: str,
@@ -178,6 +212,7 @@ def build_summary_row(
     restore_rows: list,
     delete_rows: list,
     dl_rows: list,
+    system_rows: list = None,
     dimensions: dict = None,
 ) -> dict:
     row = {
@@ -192,6 +227,7 @@ def build_summary_row(
     row.update(calc_restore_metrics(restore_rows))
     row.update(calc_delete_metrics(delete_rows))
     row.update(calc_data_loading_metrics(dl_rows))
+    row.update(calc_system_metrics(system_rows or []))
     return row
 
 
@@ -335,6 +371,7 @@ def main(argv=None) -> None:
     restore_rows = tables.restore_rows
     delete_rows = tables.delete_rows
     dl_rows = tables.dl_rows
+    system_rows = tables.system_rows
 
     validate_required_metrics(
         step_rows=step_rows,
@@ -394,6 +431,7 @@ def main(argv=None) -> None:
         restore_rows=restore_rows,
         delete_rows=delete_rows,
         dl_rows=dl_rows,
+        system_rows=system_rows,
         dimensions=dimensions,
     )
 
