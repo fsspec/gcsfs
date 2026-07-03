@@ -37,14 +37,18 @@ gcloud container clusters create "$CLUSTER_NAME" \
   --network="${NETWORK_NAME}" --subnetwork="${SUBNET_NAME}" \
   --no-enable-autoupgrade --quiet
 NODE_POOL_ARGS=(
-  --cluster="$CLUSTER_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}"
-  --machine-type="${_MACHINE_TYPE}" --num-nodes="${_NODES}"
+  --cluster="$CLUSTER_NAME"
+  --project="${PROJECT_ID}"
+  --zone="${_ZONE}"
+  --machine-type="${_MACHINE_TYPE}"
+  --num-nodes="${_NODES}"
   --disk-size="200"
   --disk-type="hyperdisk-balanced"
   --enable-gvnic
   --service-account="${_GKE_SERVICE_ACCOUNT}"
   --scopes="https://www.googleapis.com/auth/cloud-platform"
-  --no-enable-autoupgrade --quiet
+  --no-enable-autoupgrade
+  --quiet
 )
 if [ "${_ENABLE_TIER1_NETWORKING:-true}" = "true" ]; then
   NODE_POOL_ARGS+=(--network-performance-configs="total-egress-bandwidth-tier=TIER_1")
