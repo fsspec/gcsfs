@@ -22,7 +22,14 @@ Required env vars: ``DATASET_PATH``, ``RUN_ID`` (always); ``HF_TOKEN`` only
 when ``MODEL_ID`` points at the HuggingFace gated repo (i.e. not gs://).
 Optional env vars: ``MODEL_ID`` (default ``meta-llama/Llama-3.1-8B``; may be
 ``gs://bucket/path`` for a launcher pre-downloaded copy), ``CKPT_WRITE_PATH``,
-``MAX_STEPS``, ``CHECKPOINT_WRITE_INTERVAL``, etc.
+``MAX_STEPS``, ``CHECKPOINT_WRITE_INTERVAL``, ``TRAINING_STRATEGY``, etc.
+
+``TRAINING_STRATEGY`` (default ``ddp``; ``fsdp_sharded`` shards the model and
+writes a per-rank sharded/distributed checkpoint; ``fsdp_full`` shards the
+model but consolidates to a single rank-0-written checkpoint at save time,
+like ``ddp``) selects the parallel-training strategy. A resume
+(``CKPT_LOAD_PATH``) must point at a checkpoint produced by the same strategy
+-- cross-strategy restore is unsupported.
 """
 
 import logging
@@ -48,8 +55,9 @@ import transformers
 from lightning.pytorch.callbacks import Callback, DeviceStatsMonitor, ModelCheckpoint
 from lightning.pytorch.loops.fetchers import _PrefetchDataFetcher
 from lightning.pytorch.loops.fit_loop import _FitLoop as FitLoop
-from lightning.pytorch.strategies import DDPStrategy
+from lightning.pytorch.strategies import DDPStrategy, FSDPStrategy
 from torch.utils.data import DataLoader
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 # ---- Logging --------------------------------------------------------------
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -97,12 +105,18 @@ checkpoints_to_keep = int(os.getenv("CKPT_TO_KEEP", "1"))
 model_id = os.getenv("MODEL_ID", "meta-llama/Llama-3.1-8B")
 
 # Parallel training strategy. ``ddp`` (default) replicates the frozen model on
-# every rank and rank 0 writes the full checkpoint. Validate eagerly -- before
-# the 16 GB model load -- so a typo fails fast instead of after a long download.
-# (The ``fsdp`` strategy is added by the fsdp-cpu-macrobench branch.)
+# every rank and rank 0 writes the full checkpoint; ``fsdp_sharded`` shards the
+# model and writes a sharded (distributed) checkpoint where every rank writes
+# its own shard concurrently; ``fsdp_full`` shards the model but consolidates
+# to a single rank-0-written checkpoint at save time, like ``ddp``. Validate
+# eagerly -- before the 16 GB model load -- so a typo fails fast instead of
+# after a long download.
 training_strategy = os.getenv("TRAINING_STRATEGY", "ddp").lower()
-if training_strategy not in ("ddp",):
-    raise SystemExit(f"TRAINING_STRATEGY must be 'ddp' (got {training_strategy!r}).")
+if training_strategy not in ("ddp", "fsdp_sharded", "fsdp_full"):
+    raise SystemExit(
+        "TRAINING_STRATEGY must be 'ddp', 'fsdp_sharded', or 'fsdp_full' "
+        f"(got {training_strategy!r})."
+    )
 # Parity with the model_id: line -- a single grep-able config marker per knob.
 logging.info("training_strategy: %s", training_strategy)
 
@@ -208,24 +222,28 @@ def collate_fn(examples):
 # ---- LightningModule ------------------------------------------------------
 class LlamaLitModel(pl.LightningModule):
     """Holds the real Llama 8B model (frozen) for realistic checkpoint size;
-    runs a fake forward via a tiny trainable Linear so DDP all-reduce has
-    something to sync without paying 8B-param collective costs.
+    runs a fake forward via a tiny trainable Linear so DDP all-reduce (or FSDP's
+    per-shard gradient sync) has something to sync without paying 8B-param
+    collective costs.
 
     ``training_step`` sleeps for ``SIMULATED_STEP_COMPUTE_SECONDS`` to mimic the time
     a GPU step would take. ``self.model``'s parameters end up in the
-    Lightning state_dict, and AdamW is configured over ``self.model`` with
-    materialized optimizer state. When ``ModelCheckpoint`` writes via fsspec
-    to ``gs://...`` the uploaded blob is approximately the size of a real
-    bf16 Llama 8B checkpoint with optimizer state.
+    Lightning state_dict, and AdamW is configured over ``self.model`` (ddp) or
+    all parameters post-FSDP-wrap (fsdp_sharded/fsdp_full) with materialized
+    optimizer state.
+    When ``ModelCheckpoint`` writes via fsspec to ``gs://...`` the uploaded
+    blob is approximately the size of a real bf16 Llama 8B checkpoint with
+    optimizer state.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, training_strategy="ddp"):
         super().__init__()
         self.model = model
+        self._fsdp = training_strategy in ("fsdp_sharded", "fsdp_full")
         for p in self.model.parameters():
             p.requires_grad = False
-        # Tiny DDP-trainable params; the only thing all-reduce touches.
-        self.trainable = torch.nn.Linear(8, 8)
+        trainable_dtype = model.dtype if self._fsdp else torch.float32
+        self.trainable = torch.nn.Linear(8, 8).to(trainable_dtype)
 
     def training_step(self, batch, batch_idx):
         # Pull the batch out of the dataloader -- this is what drives the
@@ -233,6 +251,7 @@ class LlamaLitModel(pl.LightningModule):
         # ignored; we sleep to simulate GPU compute.
         del batch
         time.sleep(SIMULATED_STEP_COMPUTE_SECONDS)
+        zeros = torch.zeros(1, 8, dtype=self.trainable.weight.dtype)
         # Real loss with a real grad path so backward + DDP all-reduce run.
         # Squared so the loss is always non-negative: the metrics pipeline's
         # step-metrics regex matches "Loss: [0-9.]+" (no leading '-'), so a
@@ -241,7 +260,7 @@ class LlamaLitModel(pl.LightningModule):
         # over the frozen self.model), so without the square the loss is a
         # constant whose sign is random per run -- ~50% of runs would emit a
         # negative loss and capture zero step metrics.
-        return (self.trainable(torch.zeros(1, 8)) ** 2).sum()
+        return (self.trainable(zeros) ** 2).sum()
 
     @staticmethod
     def _materialize_adamw_state(optimizer):
@@ -269,8 +288,9 @@ class LlamaLitModel(pl.LightningModule):
                     )
 
     def configure_optimizers(self):
+        params = self.parameters() if self._fsdp else self.model.parameters()
         optimizer = torch.optim.AdamW(
-            self.model.parameters(),
+            params,
             lr=float(os.getenv("LEARNING_RATE", "2e-5")),
             weight_decay=float(os.getenv("WEIGHT_DECAY", "1e-6")),
         )
@@ -430,10 +450,35 @@ class LoggedDDPStrategy(DDPStrategy):
         return checkpoint
 
 
-def build_strategy(name):
-    """Construct the parallel-training strategy for ``name`` (currently ddp).
+class LoggedFSDPStrategy(FSDPStrategy):
+    """FSDPStrategy with checkpoint restore logging."""
 
-    Uses the gloo CPU backend.
+    def load_checkpoint(self, checkpoint_path, *args, **kwargs):
+        logging.info(
+            "Checkpoint Restore Start : Rank : %d : Start time: %f seconds : Path: %s",
+            self.global_rank,
+            time.time(),
+            checkpoint_path,
+        )
+        start_time = time.perf_counter()
+        checkpoint = super().load_checkpoint(checkpoint_path, *args, **kwargs)
+        duration = time.perf_counter() - start_time
+        logging.info(
+            "Finished restoring checkpoint : Rank : %d : Duration: %.2f seconds : End Time: %.2f seconds : Path: %s",
+            self.global_rank,
+            duration,
+            time.time(),
+            checkpoint_path,
+        )
+        return checkpoint
+
+
+def build_strategy(name):
+    """Construct the parallel-training strategy for ``name``
+    (ddp|fsdp_sharded|fsdp_full).
+
+    Uses the gloo CPU backend with the library-default process-group timeout
+    (no explicit ``timeout=`` override -- see #947).
     """
     if name == "ddp":
         # find_unused_parameters=False: the frozen Llama params have
@@ -443,7 +488,19 @@ def build_strategy(name):
             process_group_backend="gloo",
             find_unused_parameters=False,
         )
-    raise SystemExit(f"Unsupported TRAINING_STRATEGY: {name!r} (use ddp).")
+    if name in ("fsdp_sharded", "fsdp_full"):
+        # fsdp_sharded writes sharded checkpoints; fsdp_full writes consolidated.
+        # use_orig_params=True allows mixed requires_grad in the root FSDP unit.
+        state_dict_type = "sharded" if name == "fsdp_sharded" else "full"
+        return LoggedFSDPStrategy(
+            process_group_backend="gloo",
+            state_dict_type=state_dict_type,
+            auto_wrap_policy={LlamaDecoderLayer},
+            use_orig_params=True,
+        )
+    raise SystemExit(
+        f"Unsupported TRAINING_STRATEGY: {name!r} (use ddp|fsdp_sharded|fsdp_full)."
+    )
 
 
 if __name__ == "__main__":
@@ -518,11 +575,7 @@ if __name__ == "__main__":
         )
     callbacks.append(StepTimeCallback())
 
-    # ---- Strategy: DDP on CPU via gloo --------------------------------------
-    # Selected by TRAINING_STRATEGY (default ddp). The 600s collective timeout
-    # surfaces a stuck rank (which Gloo names) within ~10 min instead of
-    # hanging; it is comfortably above the worst-case first-batch latency
-    # (DataLoader worker cold start + initial GCS streaming reads).
+    # ---- Strategy: DDP or FSDP on CPU via gloo ------------------------------
     strategy = build_strategy(training_strategy)
 
     # ---- Trainer ------------------------------------------------------------
@@ -553,6 +606,9 @@ if __name__ == "__main__":
         logging.info("[INFO] Resuming from checkpoint: %s", checkpoint_load_path)
     else:
         checkpoint_load_path = None
+
+    # Pass the strategy so the module can adapt under FSDP.
+    lit_model = LlamaLitModel(model, training_strategy=training_strategy)
 
     # TODO: These are underscore private APIs, which may break during a Lightning upgrade.
     # We should consider contributing what we need into Lightning.
@@ -597,5 +653,5 @@ if __name__ == "__main__":
 
     logging.info("[INFO] Training Started.")
 
-    trainer.fit(LlamaLitModel(model), train_loader, ckpt_path=checkpoint_load_path)
+    trainer.fit(lit_model, train_loader, ckpt_path=checkpoint_load_path)
     logging.info("[INFO] Training Completed.")

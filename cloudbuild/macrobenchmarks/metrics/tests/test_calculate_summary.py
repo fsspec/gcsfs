@@ -431,12 +431,12 @@ def test_main_emits_training_strategy_column(tmp_path):
             str(out_file),
             "--require-data-loading-metrics",
             "--training-strategy",
-            "ddp",
+            "fsdp_full",
         ]
     )
     with open(out_file) as f:
         rows = list(csv.DictReader(f))
-    assert rows[0]["training_strategy"] == "ddp"
+    assert rows[0]["training_strategy"] == "fsdp_full"
     assert "training_strategy" in calculate.SUMMARY_FIELDNAMES
 
 

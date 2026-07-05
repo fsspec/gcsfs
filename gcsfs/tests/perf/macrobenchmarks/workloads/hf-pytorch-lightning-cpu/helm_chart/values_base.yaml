@@ -20,7 +20,7 @@ workload_launcher: launcher.sh
 workload:
   configFile: llama_3_1_8b_cpu_sim.py
   configPath: /workload/configs/
-  image: nvcr.io/nvidia/pytorch:25.01-py3
+  image: nvcr.io/nvidia/pytorch:26.05-py3
   nodes: 2
   ranksPerNode: 4
   singlePodPerNode: true
@@ -35,7 +35,7 @@ workload:
   gradAccum: 1
   dataloaderWorkers: 16
   modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
-  # Parallel training strategy: ddp (fsdp is enabled by the FSDP branch).
+  # Parallel training strategy: ddp (default), fsdp_sharded, or fsdp_full.
   trainingStrategy: ddp
   # Per-step simulated compute time in seconds (stands in for GPU compute).
   simulatedStepComputeSeconds: 1.0
