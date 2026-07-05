@@ -4,6 +4,55 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.7.0
+--------
+
+* fix(macrobenchmarks): fix cloud build machine type networkPerformanceConfig error (#951)
+* fix(macrobenchmarks): use random optimizer moments, not zeros, in CPU sim (#949)
+* test(macrobench): use default DDP timeout in llama CPU simulation (#947)
+* Update release process documentation (#945)
+* Add permissions and path filters to release-on-merge workflow (#944)
+* fix(cleanup): retry GKE cluster deletion on failure (#943)
+* fix(macrobenchmarks): remove HNS validation and external model bucket check (#942)
+* fix: seed timer at training start to avoid AttributeError (#941)
+* Automate monthly release process (#916)
+* refactor(macrobench): share helm args and update cloudbuild config (#940)
+* test(perf): add microbenchmarks for put operations (#939)
+* Update benchmarking tables schema and values under ReadAhead Cache (#934)
+* support environment where ctypes.pythonapi is not available (#938)
+* Enhance CPU simulator logging and throughput metrics (#937)
+* ci: isolate macrobenchmark GKE cluster in a dedicated VPC network (#933)
+* macrobenchmarks: parameterize macrobenchmarks (#936)
+* macrobenchmarks: add checkpoint seeding and reduce emulator ranks to 4 (#935)
+* Implement zero-cost local backward seeks in PrefetchConsumer (#930)
+* Add cache_type in user-agent fo http client  (#908)
+* Fix root cache invalidation (#931)
+* Use memoryview to enable zero-copy in _pipe_file (#928)
+* Fix ValueError message for invalid access in GCSFileSystem (#932)
+* feat(macrobench): add BigQuery ingestion pipeline with dynamic schema evolution (#915)
+* Fix silent truncation on short reads in zonal bucket downloads (#920)
+* Fix generation threading in gcsfs url and concurrent fetches (#921)
+* macrobenchmarks: Parameterize training strategy and simulated step compute; generalize requirements (#927)
+* Implement makedirs for HNS buckets (#906)
+* docs: update benchmarking sections with single-threaded data (#925)
+* Optimize concurrent downloads by capping task count based on minimum chunk size (#926)
+* ci: add macrobenchmark infrastructure unit tests (#924)
+* prefetcher docs: update no cache benchmark tables for Standard buckets (#922)
+* perf(benchmarks): increase pipe benchmark size and exclude setup overhead from write benchmark (#917)
+* feat(macrobench): add metrics calculation and summary assembly engine (#913)
+* feat(macrobench): add metrics extraction and storage engine (#912)
+* feat(macrobench): add GKE orchestration scripts and Cloud Build pipeline (#914)
+* feat(macrobench): add Llama 3.1 8B CPU simulator workload (hf-pytorch-lightning-cpu) (#911)
+* Update prefetcher.rst with Rapid Buckets performance numbers (#909)
+* fix: force schema recreation for staging external table in ingestion pipeline (#910)
+* Implement zero-copy in write path of standard bucket (#907)
+* updated latest fsspec version in pyproject.toml (#903)
+* chore: update build configurations and database schema (#904)
+* Remove GCE_METADATA_MTLS_MODE export from e2e pipeline (#905)
+* chore(benchmarks): make create-vm wait for cleanup-leaked-resources (#902)
+* Remove 48 process rapid read benchmark (#901)
+* Fix order-independent assertion in test_read_block_zb (#897)
+
 2026.6.0
 --------
 
