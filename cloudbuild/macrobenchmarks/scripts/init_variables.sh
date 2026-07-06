@@ -24,7 +24,7 @@ esac
 # Reject an unknown parallel strategy before provisioning anything.
 case "${_TRAINING_STRATEGY:-ddp}" in
   ddp|fsdp_sharded|fsdp_full) ;;
-  *) echo "ERROR: _TRAINING_STRATEGY must be ddp|fsdp_sharded|fsdp_full (got '${_TRAINING_STRATEGY}')."; exit 1 ;;
+  *) echo "ERROR: _TRAINING_STRATEGY must be ddp, fsdp_sharded, or fsdp_full (got '${_TRAINING_STRATEGY}')."; exit 1 ;;
 esac
 # Reject an unknown seed-checkpoint toggle before provisioning anything.
 case "${_SEED_CHECKPOINT:-true}" in
