@@ -70,7 +70,19 @@
       {"name": "network_received_peak_bytes_per_sec", "type": "FLOAT", "description": "Peak pod network receive rate in bytes/s over the run window; max across worker pods (bottleneck pod)."},
       {"name": "network_received_mean_bytes_per_sec", "type": "FLOAT", "description": "Mean pod network receive rate in bytes/s over the run window; max of per-pod means across worker pods (bottleneck pod)."},
       {"name": "network_sent_peak_bytes_per_sec", "type": "FLOAT", "description": "Peak pod network send rate in bytes/s over the run window; max across worker pods (bottleneck pod)."},
-      {"name": "network_sent_mean_bytes_per_sec", "type": "FLOAT", "description": "Mean pod network send rate in bytes/s over the run window; max of per-pod means across worker pods (bottleneck pod)."}
+      {"name": "network_sent_mean_bytes_per_sec", "type": "FLOAT", "description": "Mean pod network send rate in bytes/s over the run window; max of per-pod means across worker pods (bottleneck pod)."},
+      {"name": "checkpoint_read_bytes", "type": "INTEGER", "description": "Total bytes served (egress) from the per-run checkpoint bucket over the run window; downloaded during restore."},
+      {"name": "checkpoint_read_request_count", "type": "INTEGER", "description": "Count of object-read requests against the checkpoint bucket over the run window."},
+      {"name": "checkpoint_restored_bytes", "type": "INTEGER", "description": "Size in bytes (du) of the restored checkpoint; denominator of the checkpoint read-amplification ratio."},
+      {"name": "checkpoint_read_amplification_ratio", "type": "FLOAT", "description": "checkpoint_read_bytes / checkpoint_restored_bytes. DDP ~= world_size (every rank pulls the full checkpoint); FSDP ~= 1 (each pulls its shard)."},
+      {"name": "dataset_read_bytes", "type": "INTEGER", "description": "Total bytes served (egress) from the per-run dataset bucket over the run window."},
+      {"name": "dataset_read_request_count", "type": "INTEGER", "description": "Count of object-read requests against the dataset bucket over the run window."},
+      {"name": "dataset_size_bytes", "type": "INTEGER", "description": "Size in bytes (du) of the per-run dataset bucket (a full unique copy)."},
+      {"name": "dataset_read_amplification_ratio", "type": "FLOAT", "description": "dataset_read_bytes / (executed_steps * global_batch_size * dataset_size_bytes / dataset_sample_count). Egress per byte a perfectly sharded single pass over the consumed samples would need: ~1 = each needed byte fetched once, ~world_size = every rank re-read the same data. Normalized by samples consumed, so it is independent of dataset size, step count, and epoch count."},
+      {"name": "memory_usage_mean_bytes", "type": "INTEGER", "description": "Mean container memory usage in bytes over the run window; max of per-pod means across worker pods (bottleneck pod)."},
+      {"name": "memory_limit_utilization_peak", "type": "FLOAT", "description": "Peak fraction of the container memory limit over the run window (bottleneck pod); how close restore got to OOM."},
+      {"name": "cpu_limit_utilization_peak", "type": "FLOAT", "description": "Peak fraction of the container CPU limit over the run window (bottleneck pod); whether the workload is pegged (compute-bound) vs I/O idle."},
+      {"name": "dataset_sample_count", "type": "INTEGER", "description": "Estimated total rows in the dataset: dataset_size_bytes / per-sample stored bytes, where per-sample bytes are measured from the largest shard via the datasets library (format-agnostic, streamed). Used to derive per-sample bytes for the read-amplification ratio."}
     ]
   }
 }

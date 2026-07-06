@@ -30,9 +30,25 @@ skip_if_failed() {
   fi
 }
 
+# Create a per-run bucket per _BUCKET_TYPE (regional | zonal-RAPID | hns).
+create_typed_bucket() {
+  local bucket="$1"
+  case "${_BUCKET_TYPE}" in
+    regional)
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" ;;
+    zonal)
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --placement="${_ZONE}" --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access ;;
+    hns)
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --enable-hierarchical-namespace --uniform-bucket-level-access ;;
+    *)
+      echo "ERROR: unknown _BUCKET_TYPE='${_BUCKET_TYPE}' (expected regional|zonal|hns)" >&2
+      return 1 ;;
+  esac
+}
+
 shared_workload_helm_args() {
   SHARED_HELM_ARGS=(
-    --set gcsfs.datasetPath="${_DATASET_PATH}"
+    --set gcsfs.datasetPath="${RUN_DATASET_PATH:-${_DATASET_PATH}}"
     --set workload.modelId="${_MODEL_ID}"
     --set-string workload.image="${_IMAGE}"
     --set workload.hfToken="${_HF_TOKEN}"

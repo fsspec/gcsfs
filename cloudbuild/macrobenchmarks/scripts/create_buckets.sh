@@ -7,13 +7,23 @@ source "$(dirname "$0")/lib.sh"
 trap 'record_failure create-buckets' ERR
 skip_if_failed
 source "${BUILD_VARS_FILE}"
-if [[ "${_BUCKET_TYPE}" == "regional" ]]; then
-  gcloud storage buckets create gs://$CHECKPOINT_BUCKET --project=${PROJECT_ID} --location=$REGION
-elif [[ "${_BUCKET_TYPE}" == "zonal" ]]; then
-  gcloud storage buckets create gs://$CHECKPOINT_BUCKET --project=${PROJECT_ID} --location=$REGION --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access
-elif [[ "${_BUCKET_TYPE}" == "hns" ]]; then
-  gcloud storage buckets create gs://$CHECKPOINT_BUCKET --project=${PROJECT_ID} --location=$REGION --enable-hierarchical-namespace --uniform-bucket-level-access
-fi
+create_typed_bucket "$CHECKPOINT_BUCKET"
+
+# Per-run dataset bucket (same config as CHECKPOINT_BUCKET), populated by an
+# in-region copy, so its egress is attributable to one run for the dataset
+# read-amplification metric.
+create_typed_bucket "$DATASET_BUCKET"
+SRC_OBJECT_PATH=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
+# --daisy-chain (download+reupload) because RAPID (zonal) objects don't
+# support the rewrite/copy API a plain rsync/cp needs.
+#
+# `cp --recursive` appends the source's leaf dir to the destination (rsync
+# mirrors instead), so the destination must be the leaf's PARENT or the path
+# double-nests (.../parquet/parquet/...) and the workload glob matches nothing.
+DEST_PARENT="${SRC_OBJECT_PATH%/*}"                          # dirname
+[ "$DEST_PARENT" = "$SRC_OBJECT_PATH" ] && DEST_PARENT=""    # leaf has no slash -> bucket root
+gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH}" "gs://${DATASET_BUCKET}${DEST_PARENT:+/$DEST_PARENT}"
+echo "export RUN_DATASET_PATH=gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}" >> "${BUILD_VARS_FILE}"
 if gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
   # Reuse only if co-located with this build's LOCATION. The ingestion pipeline
   # builds the BigQuery dataset (and external table) in LOCATION; a results

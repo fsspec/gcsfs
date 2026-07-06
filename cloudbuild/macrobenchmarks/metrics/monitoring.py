@@ -1,8 +1,9 @@
-"""Fetch per-pod system metrics from Cloud Monitoring.
+"""Fetch per-pod and per-bucket system metrics from Cloud Monitoring.
 
 Usage:
     python3 -m metrics.monitoring --project P --run-id R \
-        --start-time RFC3339 --end-time RFC3339 --out-dir DIR
+        --start-time RFC3339 --end-time RFC3339 --out-dir DIR \
+        [--checkpoint-bucket B] [--dataset-bucket B]
 """
 
 import argparse
@@ -18,13 +19,16 @@ from metrics import raw_store, schema
 class Series:
     """One monitoring series mapped to our internal metric name."""
 
-    name: str  # internal series name: cpu | memory | network_received | network_sent
+    name: str  # internal series name
     metric_type: str  # Cloud Monitoring metric.type
-    resource_type: str  # k8s_container | k8s_pod
+    resource_type: str  # k8s_container | k8s_pod | gcs_bucket
     aligner: str  # per-series aligner name
+    filter_kind: str = "pod"  # "pod" (pod_name prefix) | "bucket" (bucket_name)
+    method: str = None  # optional metric.labels.method filter (bucket series)
 
 
-# CPU: cores (RATE), Memory: peak bytes (MAX), Network: bytes/s (RATE).
+# CPU: cores (RATE), Memory: peak bytes (MAX), Network: bytes/s (RATE),
+# limit utilizations: fraction of the container limit (MAX).
 SERIES = [
     Series(
         "cpu",
@@ -50,6 +54,38 @@ SERIES = [
         "k8s_pod",
         "ALIGN_RATE",
     ),
+    Series(
+        "cpu_limit_utilization",
+        "kubernetes.io/container/cpu/limit_utilization",
+        "k8s_container",
+        "ALIGN_MAX",
+    ),
+    Series(
+        "memory_limit_utilization",
+        "kubernetes.io/container/memory/limit_utilization",
+        "k8s_container",
+        "ALIGN_MAX",
+    ),
+]
+
+# Per-bucket totals summed over the window; `name` is prefixed with
+# "checkpoint"/"dataset" to form the metric/column name.
+GCS_BUCKET_SERIES = [
+    Series(
+        "read_bytes",
+        "storage.googleapis.com/network/sent_bytes_count",
+        "gcs_bucket",
+        "ALIGN_DELTA",
+        filter_kind="bucket",
+    ),
+    Series(
+        "read_request_count",
+        "storage.googleapis.com/api/request_count",
+        "gcs_bucket",
+        "ALIGN_DELTA",
+        filter_kind="bucket",
+        method="ReadObject",
+    ),
 ]
 
 
@@ -74,13 +110,22 @@ def reduce_points(values: list) -> tuple:
     return max(values), statistics.mean(values)
 
 
-def _build_request(project, run_id, series, start_epoch, end_epoch, period):
-    """Build list_time_series request."""
-    filter_ = (
-        f'metric.type = "{series.metric_type}" '
-        f'AND resource.type = "{series.resource_type}" '
-        f'AND resource.labels.pod_name = starts_with("{run_id}-workload-0-")'
-    )
+def _build_request(project, series, target, start_epoch, end_epoch, period):
+    """Build a list_time_series request; ``target`` is the run id or bucket name."""
+    if series.filter_kind == "bucket":
+        filter_ = (
+            f'metric.type = "{series.metric_type}" '
+            f'AND resource.type = "{series.resource_type}" '
+            f'AND resource.labels.bucket_name = "{target}"'
+        )
+        if series.method:
+            filter_ += f' AND metric.labels.method = "{series.method}"'
+    else:
+        filter_ = (
+            f'metric.type = "{series.metric_type}" '
+            f'AND resource.type = "{series.resource_type}" '
+            f'AND resource.labels.pod_name = starts_with("{target}-workload-0-")'
+        )
     return {
         "name": f"projects/{project}",
         "filter": filter_,
@@ -96,23 +141,117 @@ def _build_request(project, run_id, series, start_epoch, end_epoch, period):
 
 
 def collect(client, *, project, run_id, start_epoch, end_epoch, period=60) -> list:
-    """Collect SystemMetric rows for all SERIES."""
+    """Collect SystemMetric rows for all per-pod SERIES; a failed series is skipped."""
     rows = []
     for series in SERIES:
-        request = _build_request(
-            project, run_id, series, start_epoch, end_epoch, period
-        )
-        for ts in client.list_time_series(request):
-            pod_name = ts.resource.labels.get("pod_name", "")
-            values = [_point_value(p) for p in ts.points]
-            peak, mean = reduce_points(values)
-            if peak is None:
-                continue
-            rows.append(
-                schema.SystemMetric(
-                    pod_name=pod_name, metric=series.name, peak=peak, mean=mean
-                )
+        try:
+            request = _build_request(
+                project, series, run_id, start_epoch, end_epoch, period
             )
+            for ts in client.list_time_series(request):
+                pod_name = ts.resource.labels.get("pod_name", "")
+                values = [_point_value(p) for p in ts.points]
+                peak, mean = reduce_points(values)
+                if peak is None:
+                    continue
+                rows.append(
+                    schema.SystemMetric(
+                        pod_name=pod_name, metric=series.name, peak=peak, mean=mean
+                    )
+                )
+        except Exception as e:  # best-effort: keep the other series
+            print(
+                f"Warning: system series '{series.name}' failed, its columns N/A: {e}"
+            )
+    return rows
+
+
+def collect_bucket_totals(
+    client, *, project, bucket, prefix, start_epoch, end_epoch, period=60
+) -> list:
+    """Sum each GCS bucket series over the window into one SystemMetric row each."""
+    rows = []
+    for series in GCS_BUCKET_SERIES:
+        try:
+            request = _build_request(
+                project, series, bucket, start_epoch, end_epoch, period
+            )
+            total = 0.0
+            found = False
+            for ts in client.list_time_series(request):
+                for p in ts.points:
+                    total += _point_value(p)
+                    found = True
+            if found:
+                rows.append(
+                    schema.SystemMetric(
+                        pod_name=bucket,
+                        metric=f"{prefix}_{series.name}",
+                        peak=total,
+                        mean=None,
+                    )
+                )
+        except Exception as e:  # best-effort: keep the other series
+            print(
+                f"Warning: bucket series '{prefix}_{series.name}' failed, "
+                f"its column N/A: {e}"
+            )
+    return rows
+
+
+def assemble_rows(
+    client,
+    storage_client,
+    *,
+    project,
+    run_id,
+    checkpoint_bucket,
+    dataset_bucket,
+    restore_rows,
+    start_epoch,
+    end_epoch,
+    period=60,
+) -> list:
+    """Pod gauges + per-bucket totals + du sizes, as one row list."""
+    rows = collect(
+        client,
+        project=project,
+        run_id=run_id,
+        start_epoch=start_epoch,
+        end_epoch=end_epoch,
+        period=period,
+    )
+    if checkpoint_bucket:
+        rows += collect_bucket_totals(
+            client,
+            project=project,
+            bucket=checkpoint_bucket,
+            prefix="checkpoint",
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            period=period,
+        )
+    if dataset_bucket:
+        rows += collect_bucket_totals(
+            client,
+            project=project,
+            bucket=dataset_bucket,
+            prefix="dataset",
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            period=period,
+        )
+    if storage_client is not None:
+        from metrics import sizes
+
+        # Best-effort; must not discard the rows already collected above.
+        try:
+            loc = sizes.restored_checkpoint_location(restore_rows or [])
+            rows += sizes.size_rows(
+                storage_client, dataset_bucket=dataset_bucket, restored_location=loc
+            )
+        except Exception as e:
+            print(f"Warning: du sizes failed, size columns N/A: {e}")
     return rows
 
 
@@ -125,6 +264,8 @@ def main(argv=None) -> None:
     parser.add_argument("--start-time", required=True, help="RFC3339")
     parser.add_argument("--end-time", required=True, help="RFC3339")
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--checkpoint-bucket")
+    parser.add_argument("--dataset-bucket")
     parser.add_argument("--period", type=int, default=60)
     args = parser.parse_args(argv)
 
@@ -137,10 +278,26 @@ def main(argv=None) -> None:
 
     try:
         client = monitoring_v3.MetricServiceClient()
-        rows = collect(
+        storage_client = None
+        try:
+            from google.cloud import storage
+
+            storage_client = storage.Client(project=args.project)
+        except Exception as e:  # sizes become N/A, run continues
+            print(f"Warning: storage client unavailable, size columns N/A: {e}")
+        restore_rows = []
+        try:
+            restore_rows = raw_store.read_raw_metrics(args.out_dir).restore_rows
+        except Exception as e:
+            print(f"Warning: could not read restore rows for checkpoint du: {e}")
+        rows = assemble_rows(
             client,
+            storage_client,
             project=args.project,
             run_id=args.run_id,
+            checkpoint_bucket=args.checkpoint_bucket,
+            dataset_bucket=args.dataset_bucket,
+            restore_rows=restore_rows,
             start_epoch=_to_epoch(args.start_time),
             end_epoch=_to_epoch(args.end_time),
             period=args.period,

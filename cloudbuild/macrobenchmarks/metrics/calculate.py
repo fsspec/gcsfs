@@ -168,10 +168,10 @@ def calc_data_loading_metrics(dl_rows: list) -> dict:
     }
 
 
-# Maps series to schema columns. Memory has no mean column.
+# Maps series to schema columns. `None` mean-column means the series has no mean.
 _SYSTEM_SERIES_COLUMNS = {
     "cpu": ("cpu_usage_peak_cores", "cpu_usage_mean_cores"),
-    "memory": ("memory_usage_peak_bytes", None),
+    "memory": ("memory_usage_peak_bytes", "memory_usage_mean_bytes"),
     "network_received": (
         "network_received_peak_bytes_per_sec",
         "network_received_mean_bytes_per_sec",
@@ -180,11 +180,90 @@ _SYSTEM_SERIES_COLUMNS = {
         "network_sent_peak_bytes_per_sec",
         "network_sent_mean_bytes_per_sec",
     ),
+    "cpu_limit_utilization": ("cpu_limit_utilization_peak", None),
+    "memory_limit_utilization": ("memory_limit_utilization_peak", None),
+    "checkpoint_read_bytes": ("checkpoint_read_bytes", None),
+    "checkpoint_read_request_count": ("checkpoint_read_request_count", None),
+    "checkpoint_restored_bytes": ("checkpoint_restored_bytes", None),
+    "dataset_read_bytes": ("dataset_read_bytes", None),
+    "dataset_read_request_count": ("dataset_read_request_count", None),
+    "dataset_size_bytes": ("dataset_size_bytes", None),
+    "dataset_sample_count": ("dataset_sample_count", None),
+}
+
+# Columns reported as whole numbers (bytes / counts) rather than floats.
+_INT_COLUMNS = {
+    "memory_usage_peak_bytes",
+    "memory_usage_mean_bytes",
+    "checkpoint_read_bytes",
+    "checkpoint_read_request_count",
+    "checkpoint_restored_bytes",
+    "dataset_read_bytes",
+    "dataset_read_request_count",
+    "dataset_size_bytes",
+    "dataset_sample_count",
 }
 
 
+def _amplification(numerator, denominator):
+    """numerator / denominator, or None when either is absent/zero."""
+    if numerator is not None and denominator:
+        return numerator / denominator
+    return None
+
+
+def executed_step_count(step_rows: list) -> int:
+    """Number of distinct optimizer steps observed (deduped across ranks).
+
+    Each rank emits one row per optimizer step, so the count of unique step
+    numbers -- not rows -- is how many steps the run actually executed.
+    """
+    return len(
+        {
+            r["step"]
+            for r in step_rows
+            if r.get("step") is not None and r.get("step_duration") is not None
+        }
+    )
+
+
+def dataset_read_amplification_ratio(
+    *,
+    dataset_read_bytes,
+    dataset_size_bytes,
+    dataset_sample_count,
+    executed_steps,
+    global_batch_size,
+):
+    """dataset_read_bytes / ideal_bytes, or None if any input is absent/zero.
+
+    ``ideal_bytes`` is the egress a perfectly sharded single pass over the
+    samples actually consumed (``executed_steps * global_batch_size *
+    dataset_size_bytes / dataset_sample_count``) would incur. Normalizing by
+    samples consumed, not the full dataset, makes the ratio independent of
+    dataset size and step count: ~1.0 means each byte was fetched once,
+    ~world_size means every rank re-read the same data.
+    """
+    if None in (
+        dataset_read_bytes,
+        dataset_size_bytes,
+        dataset_sample_count,
+        executed_steps,
+        global_batch_size,
+    ):
+        return None
+    ideal_bytes = (
+        executed_steps * global_batch_size * dataset_size_bytes / dataset_sample_count
+        if dataset_sample_count
+        else 0
+    )
+    if not ideal_bytes:
+        return None
+    return dataset_read_bytes / ideal_bytes
+
+
 def calc_system_metrics(system_rows: list) -> dict:
-    """Reduce per-pod metrics to the bottleneck pod (max peak/mean)."""
+    """Reduce per-pod/per-bucket metrics to the bottleneck value and derive ratios."""
     out = {}
     by_metric = defaultdict(list)
     for r in system_rows:
@@ -194,11 +273,19 @@ def calc_system_metrics(system_rows: list) -> dict:
         peaks = [r["peak"] for r in rows if r.get("peak") is not None]
         if peaks:
             val = max(peaks)
-            out[peak_col] = int(val) if peak_col == "memory_usage_peak_bytes" else val
+            out[peak_col] = int(val) if peak_col in _INT_COLUMNS else val
         if mean_col:
             means = [r["mean"] for r in rows if r.get("mean") is not None]
             if means:
-                out[mean_col] = max(means)
+                val = max(means)
+                out[mean_col] = int(val) if mean_col in _INT_COLUMNS else val
+    ratio = _amplification(
+        out.get("checkpoint_read_bytes"), out.get("checkpoint_restored_bytes")
+    )
+    if ratio is not None:
+        out["checkpoint_read_amplification_ratio"] = ratio
+    # Dataset ratio is derived in build_summary_row; it needs step/batch-size
+    # inputs this reducer doesn't have.
     return out
 
 
@@ -228,6 +315,17 @@ def build_summary_row(
     row.update(calc_delete_metrics(delete_rows))
     row.update(calc_data_loading_metrics(dl_rows))
     row.update(calc_system_metrics(system_rows or []))
+    # Derived here, not in calc_system_metrics, since it needs executed_steps
+    # and global_batch_size alongside the raw dataset columns just produced.
+    ratio = dataset_read_amplification_ratio(
+        dataset_read_bytes=row.get("dataset_read_bytes"),
+        dataset_size_bytes=row.get("dataset_size_bytes"),
+        dataset_sample_count=row.get("dataset_sample_count"),
+        executed_steps=executed_step_count(step_rows),
+        global_batch_size=row.get("global_batch_size"),
+    )
+    if ratio is not None:
+        row["dataset_read_amplification_ratio"] = ratio
     return row
 
 

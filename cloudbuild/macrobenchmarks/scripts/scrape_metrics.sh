@@ -29,15 +29,36 @@ if [ -n "${_CHECKPOINT_LOAD_PATH}" ] || [ "${_SEED_CHECKPOINT}" = "true" ]; then
   MIN_RESTORE_DATAPOINTS=1
   RESUME_ARGS=(--resume-run)
 fi
+# Run the calculator over the current raw metrics into the summary file $1.
+run_calculate() {
+  python3 -m metrics.calculate \
+      --run-id "$RUN_ID" --workload-name "${_WORKLOAD}" \
+      --requirements "${_REQUIREMENTS}" --in-dir "$RAW_DIR" --out-file "$1" \
+      --expected-steps "${_STEPS}" \
+      --min-write-datapoints "$MIN_WRITE_DATAPOINTS" \
+      --min-restore-datapoints "$MIN_RESTORE_DATAPOINTS" \
+      "${RESUME_ARGS[@]}" \
+      --require-data-loading-metrics \
+      --bucket-type "${_BUCKET_TYPE}" --zone "${_ZONE}" --region "$REGION" \
+      --machine-type "${_MACHINE_TYPE}" \
+      --nodes "${_NODES}" --ranks-per-node "${_RANKS_PER_NODE}" \
+      --steps "${_STEPS}" --checkpoint-interval "${_CHECKPOINT_INTERVAL}" \
+      --checkpoints-to-keep "${_CKPT_TO_KEEP}" \
+      --dataset-path "${_DATASET_PATH}" --model-id "${_MODEL_ID}" \
+      --image "${_IMAGE}" \
+      --training-strategy "${_TRAINING_STRATEGY}" \
+      --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}" \
+      --per-device-batch "${_PER_DEVICE_BATCH}" --grad-accum "${_GRAD_ACCUM}" \
+      --dataloader-workers "${_DATALOADER_WORKERS}"
+}
 # Cloud Logging ingestion lags pod termination by seconds-to-minutes, and the
 # last logs emitted (the final checkpoint write and the profiler summary that
 # carries the data-loading metric) are the most likely to still be in flight
 # when the JobSet reports Completed. Settle once, then re-scrape at a fixed 60s
 # interval until the required metrics validate (or attempts are exhausted).
-# calculate
-# exits non-zero when metrics are incomplete; running it as an `if` condition
-# keeps `set -e`/the ERR trap from aborting the step on a not-yet-complete
-# attempt.
+# run_calculate exits non-zero when metrics are incomplete; running it as an
+# `if` condition keeps `set -e`/the ERR trap from aborting the step on a
+# not-yet-complete attempt.
 sleep 60
 SCRAPE_OK=false
 for attempt in $(seq 1 5); do
@@ -55,30 +76,7 @@ for attempt in $(seq 1 5); do
     sleep 60
     continue
   fi
-  # Best-effort system metrics. Failure is ignored.
-  python3 -m metrics.monitoring \
-    --project "${PROJECT_ID}" --run-id "$RUN_ID" \
-    --start-time "$START_TIME" --end-time "$END_TIME" \
-    --out-dir "$RAW_DIR" || true
-  if python3 -m metrics.calculate \
-      --run-id "$RUN_ID" --workload-name "${_WORKLOAD}" \
-      --requirements "${_REQUIREMENTS}" --in-dir "$RAW_DIR" --out-file "$SUMMARY" \
-      --expected-steps "${_STEPS}" \
-      --min-write-datapoints "$MIN_WRITE_DATAPOINTS" \
-      --min-restore-datapoints "$MIN_RESTORE_DATAPOINTS" \
-      "${RESUME_ARGS[@]}" \
-      --require-data-loading-metrics \
-      --bucket-type "${_BUCKET_TYPE}" --zone "${_ZONE}" --region "$REGION" \
-      --machine-type "${_MACHINE_TYPE}" \
-      --nodes "${_NODES}" --ranks-per-node "${_RANKS_PER_NODE}" \
-      --steps "${_STEPS}" --checkpoint-interval "${_CHECKPOINT_INTERVAL}" \
-      --checkpoints-to-keep "${_CKPT_TO_KEEP}" \
-      --dataset-path "${_DATASET_PATH}" --model-id "${_MODEL_ID}" \
-      --image "${_IMAGE}" \
-      --training-strategy "${_TRAINING_STRATEGY}" \
-      --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}" \
-      --per-device-batch "${_PER_DEVICE_BATCH}" --grad-accum "${_GRAD_ACCUM}" \
-      --dataloader-workers "${_DATALOADER_WORKERS}"; then
+  if run_calculate "$SUMMARY"; then
     SCRAPE_OK=true
     break
   fi
@@ -93,4 +91,16 @@ if [ "$SCRAPE_OK" != "true" ]; then
   record_failure scrape-metrics
   exit 1
 fi
+# Best-effort system metrics: fetched once after the required metrics validate
+# (not per attempt, to avoid re-du'ing the dataset bucket). Settle for GCS
+# metric lag, then fold into the summary; a failure here must not lose the
+# metrics-complete summary already written above, so it's `|| true`/warn-only.
+sleep "${SYSTEM_METRICS_SETTLE_SECONDS:-180}"
+python3 -m metrics.monitoring \
+  --project "${PROJECT_ID}" --run-id "$RUN_ID" \
+  --start-time "$START_TIME" --end-time "$END_TIME" \
+  --checkpoint-bucket "$CHECKPOINT_BUCKET" --dataset-bucket "$DATASET_BUCKET" \
+  --out-dir "$RAW_DIR" || true
+run_calculate "$SUMMARY" \
+  || echo "Warning: recompute with system metrics failed; uploading summary without them."
 gcloud storage cp "$SUMMARY" "gs://$RESULTS_BUCKET/branch=$BRANCH_NAME/$DATE_DIR/$RUN_ID/${TS_DIR}.csv"
