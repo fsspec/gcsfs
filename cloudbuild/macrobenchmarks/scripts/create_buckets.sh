@@ -25,6 +25,7 @@ if [ "${_BUCKET_TYPE}" = "zonal" ]; then
   # "gs://bucket" would land at "gs://DATASET_BUCKET/bucket/..."); "/*" makes
   # it copy the source's contents instead.
   CLOUDSDK_STORAGE_PROCESS_COUNT=4 CLOUDSDK_STORAGE_THREAD_COUNT=16 \
+  CLOUDSDK_STORAGE_ATTEMPT_GRPC_DIRECT_PATH=False \
     gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH%/}/*" "gs://${DATASET_BUCKET}${DEST_PARENT:+/$DEST_PARENT}"
 else
   # Regional/HNS support server-side copy; rsync mirrors the source into the dest.
