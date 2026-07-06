@@ -14,15 +14,18 @@ create_typed_bucket "$CHECKPOINT_BUCKET"
 # read-amplification metric.
 create_typed_bucket "$DATASET_BUCKET"
 SRC_OBJECT_PATH=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
-# --daisy-chain (download+reupload) because RAPID (zonal) objects don't
-# support the rewrite/copy API a plain rsync/cp needs.
-#
-# `cp --recursive` appends the source's leaf dir to the destination (rsync
-# mirrors instead), so the destination must be the leaf's PARENT or the path
-# double-nests (.../parquet/parquet/...) and the workload glob matches nothing.
-DEST_PARENT="${SRC_OBJECT_PATH%/*}"                          # dirname
-[ "$DEST_PARENT" = "$SRC_OBJECT_PATH" ] && DEST_PARENT=""    # leaf has no slash -> bucket root
-gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH}" "gs://${DATASET_BUCKET}${DEST_PARENT:+/$DEST_PARENT}"
+if [ "${_BUCKET_TYPE}" = "zonal" ]; then
+  # RAPID (zonal) objects lack the server-side rewrite rsync uses, so daisy-chain
+  # (download+reupload)
+  ulimit -n 65536
+  DEST_PARENT="${SRC_OBJECT_PATH%/*}"
+  [ "$DEST_PARENT" = "$SRC_OBJECT_PATH" ] && DEST_PARENT=""
+  CLOUDSDK_STORAGE_PROCESS_COUNT=4 CLOUDSDK_STORAGE_THREAD_COUNT=16 \
+    gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH}" "gs://${DATASET_BUCKET}${DEST_PARENT:+/$DEST_PARENT}"
+else
+  # Regional/HNS support server-side copy; rsync mirrors the source into the dest.
+  gcloud storage rsync --recursive "${_DATASET_PATH}" "gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}"
+fi
 echo "export RUN_DATASET_PATH=gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}" >> "${BUILD_VARS_FILE}"
 if gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
   # Reuse only if co-located with this build's LOCATION. The ingestion pipeline
