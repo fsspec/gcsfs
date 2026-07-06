@@ -90,7 +90,7 @@ def _prepare_files(gcs, file_paths, file_size=0):
     pool_size = 16
 
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
-    ctx = multiprocessing.get_context("spawn")
+    ctx = multiprocessing.get_context("forkserver")
     with ctx.Pool(pool_size, initializer=_init_pool_worker) as pool:
         try:
             pool.starmap(_write_file, args)

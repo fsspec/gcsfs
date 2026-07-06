@@ -152,7 +152,7 @@ def run_multi_process(
     """
     publish_benchmark_extra_info(benchmark, params, benchmark_group)
 
-    ctx = multiprocessing.get_context("spawn")
+    ctx = multiprocessing.get_context("forkserver")
     process_data_shared = ctx.Array("d", params.processes)
 
     # Create GCS instances for workers

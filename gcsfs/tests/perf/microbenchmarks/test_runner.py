@@ -163,7 +163,7 @@ def test_run_multi_process(mock_mp, mock_benchmark, mock_monitor):
     assert mock_benchmark.extra_info["processes"] == 2
     assert mock_benchmark.group == "listing"
 
-    mock_mp.get_context.assert_called_with("spawn")
+    mock_mp.get_context.assert_called_with("forkserver")
     assert extended_gcs_factory.call_count == 2
 
     # Check process creation and start
