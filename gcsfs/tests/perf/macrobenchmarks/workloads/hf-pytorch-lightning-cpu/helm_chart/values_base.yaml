@@ -29,8 +29,8 @@ workload:
   ckptWriterInterval: 25
   ckptToKeep: 1
   # Per-rank micro-batch, optimizer-step gradient accumulation, and dataloader
-  # workers. gradAccum is 1 to match the launcher's effective value and the GPU
-  # a4_v1 run; global_batch_size = perDeviceBatch * gradAccum * nodes * ranksPerNode.
+  # workers. gradAccum is 1 to match the launcher's effective value;
+  # global_batch_size = perDeviceBatch * gradAccum * nodes * ranksPerNode.
   perDeviceBatch: 8
   gradAccum: 1
   dataloaderWorkers: 16

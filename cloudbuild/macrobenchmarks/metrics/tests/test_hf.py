@@ -128,3 +128,12 @@ def test_checkpoint_size_parsed():
     assert row.size_bytes == 17179869184
     assert row.checkpoint_location == "gs://b/ckpt/r/llama-00-25.ckpt"
     assert row.global_rank == 0
+
+
+def test_build_filter_includes_all_patterns():
+    filter_str = hf.build_filter(
+        project="p", run_id="r", start_time="2026-01-01T00:00:00Z", end_time="2026-01-01T01:00:00Z"
+    )
+    for pattern in hf.ALL_PATTERNS:
+        assert pattern in filter_str
+    assert hf.CHECKPOINT_SIZE_PATTERN in hf.ALL_PATTERNS

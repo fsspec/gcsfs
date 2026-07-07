@@ -1,14 +1,12 @@
 """Self-contained metric dataclasses + raw-metric path constants.
 
-Trimmed copies of the tessellations raw-metric schemas so the parser and
-calculator carry no dependency on the tessellations package. Field order is
-significant: CSV column order derives from it via ``fieldnames``.
+Field order is significant: CSV column order derives from it via
+``fieldnames``.
 """
 
 from dataclasses import dataclass
 
-# Raw-metric layout (mirrors tessellations directory/file names so the parser
-# and calculator agree on paths).
+# Raw-metric layout (directory/file names the parser and calculator agree on).
 STEP_METRICS_DIRECTORY = "training_time"
 STEP_METRICS_FILE = "step_time.csv"
 WRITE_DURATION_DIRECTORY = "checkpoint_write_time"

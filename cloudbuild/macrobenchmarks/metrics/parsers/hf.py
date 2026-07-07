@@ -1,9 +1,9 @@
 """HF Llama benchmark log parser.
 
-The 7 regex constants below are byte-identical to tessellations
-metrics/raw_metrics_extraction/hf.py (lines 32-38). parse_entries reproduces
-hf.py's matching/pairing logic over an injectable iterable of LogEntry, so it is
-unit-testable without a Cloud Logging client.
+The 8 regex constants below match the log lines emitted by
+``llama_3_1_8b_cpu_sim.py``. parse_entries matches/pairs them over an
+injectable iterable of LogEntry, so it is unit-testable without a Cloud
+Logging client.
 """
 
 import argparse
@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List
 
 from metrics import raw_store, schema
 
-# --- regexes (verbatim from tessellations hf.py) ---------------------------
+# --- regexes -----------------------------------------------------------
 STEP_METRICS_PATTERN = (
     r"Global Rank: 0 \| Step: ([0-9]+) \| Loss: [0-9.]+ \| "
     r"Step Time: ([0-9.]+)s \| Throughput: ([0-9.]+) samples/s"
@@ -58,6 +58,7 @@ ALL_PATTERNS = [
     CHECKPOINT_RESTORE_END_PATTERN,
     CHECKPOINT_DELETE_PATTERN,
     ACCELERATOR_BLOCKED_TIME_PATTERN,
+    CHECKPOINT_SIZE_PATTERN,
 ]
 
 
@@ -86,7 +87,7 @@ class ParsedRawMetrics:
 def parse_entries(
     entries: Iterable[LogEntry], *, run_id: str, checkpoint_location: str
 ) -> ParsedRawMetrics:
-    """Scrape raw metrics from log entries (mirrors hf.py._scrape_raw_metrics)."""
+    """Scrape raw metrics from log entries."""
     out = ParsedRawMetrics()
     checkpoint_starts = {}  # (step, rank) -> {start_time, path}
     restore_starts = {}  # rank -> {start_time, path}
@@ -231,10 +232,8 @@ def parse_entries(
 
 
 def build_filter(*, project: str, run_id: str, start_time: str, end_time: str) -> str:
-    """Cloud Logging filter mirroring hf.py._scrape_raw_metrics."""
-    regex_or = " OR ".join(
-        f'textPayload =~ "{p}"' for p in ALL_PATTERNS + [CHECKPOINT_SIZE_PATTERN]
-    )
+    """Cloud Logging filter matching the patterns in ``ALL_PATTERNS``."""
+    regex_or = " OR ".join(f'textPayload =~ "{p}"' for p in ALL_PATTERNS)
     return (
         'resource.type="k8s_container" '
         f'resource.labels.project_id="{project}" '
