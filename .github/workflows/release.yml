@@ -1,97 +1,24 @@
 name: Release
 
 # Creates a GitHub release, and publishes to PyPI.
-# Runs in one of two ways:
-#   * push of a release tag.
-#   * workflow_call from release-preparation.yml, which passes the tag to build via the `ref` input.
+# Runs on push of a release tag.
 on:
   push:
     tags:
       - "2[0-9][0-9][0-9].[0-9].[0-9]*"
       - "2[0-9][0-9][0-9].[0-9][0-9].[0-9]*"
-  workflow_call:
-    inputs:
-      ref:
-        required: true
-        type: string
-    secrets:
-      CODECOV_TOKEN:
-        required: false
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-    secrets:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  e2e-tests:
-    name: Wait for E2E Integration Tests (Cloud Build)
-    needs: ci
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      statuses: read
-      checks: read
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-      - name: Resolve release commit SHA
-        id: sha
-        # On the workflow_call path github.sha points at the caller's commit,
-        # not the tag, so resolve the SHA from the checked-out ref instead.
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Wait for Google Cloud Build check to pass
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_SHA: ${{ steps.sha.outputs.sha }}
-        run: bash .github/workflows/wait_for_cloud_build.sh
-
-  build:
-    name: Build artifacts
-    needs: [ci, e2e-tests]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install build
-      - name: Build
-        run: python -m build
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
   release:
-    name: Create Release
-    needs: build
-    if: "!contains(inputs.ref || github.ref_name, 'dev')"
-    runs-on: ubuntu-latest
     permissions:
       contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.ref || github.ref_name }}
-          generate_release_notes: true
-          files: dist/*
+      checks: read
+      statuses: read
+    uses: ./.github/workflows/build-and-release.yml
+    with:
+      ref: ${{ github.ref_name }}
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   publish:
     name: Upload release to PyPI
