@@ -95,7 +95,7 @@ fi
 # (not per attempt, to avoid re-du'ing the dataset bucket). Settle for GCS
 # metric lag, then fold into the summary; a failure here must not lose the
 # metrics-complete summary already written above, so it's `|| true`/warn-only.
-sleep "${SYSTEM_METRICS_SETTLE_SECONDS:-180}"
+sleep "${SYSTEM_METRICS_SETTLE_SECONDS:-600}"
 python3 -m metrics.monitoring \
   --project "${PROJECT_ID}" --run-id "$RUN_ID" \
   --start-time "$START_TIME" --end-time "$END_TIME" \
