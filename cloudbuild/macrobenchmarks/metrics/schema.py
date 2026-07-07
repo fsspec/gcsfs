@@ -18,6 +18,8 @@ PERSISTENT_STORAGE_DIRECTORY = "persistent_storage"
 PER_ACCELERATOR_DIRECTORY = "per_accelerator"
 CALCULATED_METRICS_DIRECTORY = "calculated_metrics"
 DATA_LOADING_METRICS_FILE = "data_loading_metrics.csv"
+SYSTEM_METRICS_DIRECTORY = "system_metrics"
+SYSTEM_METRICS_FILE = "system_metrics.csv"
 
 
 def fieldnames(dataclass_type) -> list:
@@ -76,3 +78,11 @@ class DataLoadingMetrics:
     accelerator_blocked_time: float = None
     accelerator_blocked_percent: float = None
     update_timestamp: str = None
+
+
+@dataclass(kw_only=True)
+class SystemMetric:
+    pod_name: str
+    metric: str
+    peak: float
+    mean: float = None

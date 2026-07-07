@@ -26,6 +26,7 @@ class RawMetricTables:
     restore_rows: List[dict] = field(default_factory=list)
     delete_rows: List[dict] = field(default_factory=list)
     dl_rows: List[dict] = field(default_factory=list)
+    system_rows: List[dict] = field(default_factory=list)
 
 
 def write_raw_metrics(
@@ -93,6 +94,18 @@ def write_raw_metrics(
         )
 
 
+def write_system_metrics(system_rows, out_dir: str) -> None:
+    """Write SystemMetric rows to the system-metrics CSV (owned here like the rest)."""
+    if system_rows:
+        _write_csv(
+            os.path.join(
+                out_dir, schema.SYSTEM_METRICS_DIRECTORY, schema.SYSTEM_METRICS_FILE
+            ),
+            schema.SystemMetric,
+            system_rows,
+        )
+
+
 def read_raw_metrics(
     in_dir: str, *, run_type: str = "perf_optimization"
 ) -> RawMetricTables:
@@ -127,6 +140,11 @@ def read_raw_metrics(
                 in_dir,
                 schema.CALCULATED_METRICS_DIRECTORY,
                 schema.DATA_LOADING_METRICS_FILE,
+            )
+        ),
+        system_rows=_read_csv(
+            os.path.join(
+                in_dir, schema.SYSTEM_METRICS_DIRECTORY, schema.SYSTEM_METRICS_FILE
             )
         ),
     )

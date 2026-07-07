@@ -258,6 +258,101 @@ def _write_restore_csv(in_dir):
         w.writerow([0, "gs://b/ckpt", 10.0, 18.0, 0, ""])
 
 
+def _write_system_metrics_csv(in_dir):
+    (in_dir / "system_metrics").mkdir(parents=True)
+    path = in_dir / "system_metrics" / "system_metrics.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["pod_name", "metric", "peak", "mean"])
+        w.writerow(["p0", "cpu", 3.0, 1.0])
+        w.writerow(["p1", "cpu", 5.0, 4.0])
+        w.writerow(["p0", "memory", 2048.0, ""])
+        w.writerow(["p0", "network_received", 10.0, 2.0])
+
+
+def test_main_emits_system_metric_columns(tmp_path):
+    # Verify system metrics are reduced to bottleneck pod and typed correctly.
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_system_metrics_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["cpu_usage_peak_cores"] == "5.0"
+    assert rows[0]["cpu_usage_mean_cores"] == "4.0"  # max of per-pod means
+    assert rows[0]["memory_usage_peak_bytes"] == "2048"  # int-typed
+    assert rows[0]["network_received_peak_bytes_per_sec"] == "10.0"
+    assert rows[0]["network_received_mean_bytes_per_sec"] == "2.0"
+    assert rows[0]["network_sent_peak_bytes_per_sec"] == "N/A"
+
+
+def _write_dataset_system_metrics_csv(in_dir):
+    (in_dir / "system_metrics").mkdir(parents=True)
+    path = in_dir / "system_metrics" / "system_metrics.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["pod_name", "metric", "peak", "mean"])
+        w.writerow(["ds", "dataset_read_bytes", 80.0, ""])
+        w.writerow(["ds", "dataset_size_bytes", 1000.0, ""])
+        w.writerow(["ds", "dataset_sample_count", 100.0, ""])
+
+
+def test_main_emits_dataset_read_amplification_ratio(tmp_path):
+    # Two executed steps (0, 1) * global_batch_size 2 = 4 samples consumed;
+    # per-sample bytes = 1000/100 = 10, so an ideal single sharded pass reads
+    # 40 bytes. Actual egress 80 -> ratio 2.0, end to end through the CSV.
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)  # steps 0 and 1
+    _write_data_loading_csv(in_dir)
+    _write_dataset_system_metrics_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--per-device-batch",
+            "2",
+            "--grad-accum",
+            "1",
+            "--nodes",
+            "1",
+            "--ranks-per-node",
+            "1",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["global_batch_size"] == "2"
+    assert rows[0]["dataset_sample_count"] == "100"
+    assert rows[0]["dataset_read_amplification_ratio"] == "2.0"
+    assert "dataset_read_amplification_ratio" in calculate.SUMMARY_FIELDNAMES
+
+
 def test_main_fails_when_required_data_loading_metrics_are_missing(tmp_path):
     # step metrics present, but no data_loading_metrics.csv -> must fail when
     # --require-data-loading-metrics is set (the profiler summary is required).

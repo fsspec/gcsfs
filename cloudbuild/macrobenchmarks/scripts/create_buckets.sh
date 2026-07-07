@@ -7,13 +7,31 @@ source "$(dirname "$0")/lib.sh"
 trap 'record_failure create-buckets' ERR
 skip_if_failed
 source "${BUILD_VARS_FILE}"
-if [[ "${_BUCKET_TYPE}" == "regional" ]]; then
-  gcloud storage buckets create gs://$CHECKPOINT_BUCKET --project=${PROJECT_ID} --location=$REGION
-elif [[ "${_BUCKET_TYPE}" == "zonal" ]]; then
-  gcloud storage buckets create gs://$CHECKPOINT_BUCKET --project=${PROJECT_ID} --location=$REGION --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access
-elif [[ "${_BUCKET_TYPE}" == "hns" ]]; then
-  gcloud storage buckets create gs://$CHECKPOINT_BUCKET --project=${PROJECT_ID} --location=$REGION --enable-hierarchical-namespace --uniform-bucket-level-access
+create_typed_bucket "$CHECKPOINT_BUCKET"
+
+# Per-run dataset bucket (same config as CHECKPOINT_BUCKET), populated by an
+# in-region copy, so its egress is attributable to one run for the dataset
+# read-amplification metric.
+create_typed_bucket "$DATASET_BUCKET"
+SRC_OBJECT_PATH=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
+if [ "${_BUCKET_TYPE}" = "zonal" ]; then
+  # RAPID (zonal) objects lack the server-side rewrite rsync uses, so daisy-chain
+  # (download+reupload)
+  ulimit -n 65536
+  DEST_PARENT="${SRC_OBJECT_PATH%/*}"
+  [ "$DEST_PARENT" = "$SRC_OBJECT_PATH" ] && DEST_PARENT=""
+  # `cp --recursive` on a directory/bucket source without a trailing wildcard
+  # copies the source's own name into the destination (e.g. _DATASET_PATH
+  # "gs://bucket" would land at "gs://DATASET_BUCKET/bucket/..."); "/*" makes
+  # it copy the source's contents instead.
+  CLOUDSDK_STORAGE_PROCESS_COUNT=16 CLOUDSDK_STORAGE_THREAD_COUNT=16 \
+  CLOUDSDK_STORAGE_ATTEMPT_GRPC_DIRECT_PATH=False \
+    gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH%/}/*" "gs://${DATASET_BUCKET}${DEST_PARENT:+/$DEST_PARENT}"
+else
+  # Regional/HNS support server-side copy; rsync mirrors the source into the dest.
+  gcloud storage rsync --recursive "${_DATASET_PATH}" "gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}"
 fi
+echo "export RUN_DATASET_PATH=gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}" >> "${BUILD_VARS_FILE}"
 if gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
   # Reuse only if co-located with this build's LOCATION. The ingestion pipeline
   # builds the BigQuery dataset (and external table) in LOCATION; a results
