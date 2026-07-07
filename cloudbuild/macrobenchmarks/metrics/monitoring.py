@@ -25,7 +25,7 @@ class Series:
     aligner: str  # per-series aligner name
     # "pod" (pod_name prefix) | "bucket" (bucket_name) | "node" (cluster_name)
     filter_kind: str = "pod"
-    method: str = None  # optional metric.labels.method filter (bucket series)
+    methods: tuple = ()  # optional metric.labels.method values (bucket series), ORed
 
 
 # CPU: cores (RATE), Memory: peak bytes (MAX), Network: bytes/s (RATE),
@@ -93,7 +93,7 @@ GCS_BUCKET_SERIES = [
         "gcs_bucket",
         "ALIGN_DELTA",
         filter_kind="bucket",
-        method="ReadObject",
+        methods=("ReadObject", "BidiReadObject"),  # gRPC vs JSON read labels
     ),
 ]
 
@@ -102,6 +102,14 @@ def _to_epoch(rfc3339: str) -> int:
     """Parse RFC3339 to epoch seconds."""
     dt = datetime.datetime.fromisoformat(rfc3339.upper().replace("Z", "+00:00"))
     return int(dt.timestamp())
+
+
+def _align_interval(start_epoch: int, end_epoch: int, period: int) -> tuple:
+    # Bucket deltas are stamped at period-end, so a mid-period window drops the
+    # boundary sample; floor/ceil to the period grid to keep it in range.
+    start = (start_epoch // period) * period
+    end = ((end_epoch + period - 1) // period) * period
+    return start, end
 
 
 def _point_value(point) -> float:
@@ -130,8 +138,11 @@ def _build_request(project, series, target, start_epoch, end_epoch, period):
             f'AND resource.type = "{series.resource_type}" '
             f'AND resource.labels.bucket_name = "{target}"'
         )
-        if series.method:
-            filter_ += f' AND metric.labels.method = "{series.method}"'
+        if series.methods:
+            method_clause = " OR ".join(
+                f'metric.labels.method = "{m}"' for m in series.methods
+            )
+            filter_ += f" AND ({method_clause})"
     elif series.filter_kind == "node":
         # Scope to this run's cluster so a concurrent build's nodes aren't read.
         filter_ = (
@@ -355,6 +366,9 @@ def main(argv=None) -> None:
             restore_rows = raw_store.read_raw_metrics(args.out_dir).restore_rows
         except Exception as e:
             print(f"Warning: could not read restore rows for checkpoint du: {e}")
+        start_epoch, end_epoch = _align_interval(
+            _to_epoch(args.start_time), _to_epoch(args.end_time), args.period
+        )
         rows = assemble_rows(
             client,
             storage_client,
@@ -363,8 +377,8 @@ def main(argv=None) -> None:
             checkpoint_bucket=args.checkpoint_bucket,
             dataset_bucket=args.dataset_bucket,
             restore_rows=restore_rows,
-            start_epoch=_to_epoch(args.start_time),
-            end_epoch=_to_epoch(args.end_time),
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
             cluster=args.cluster,
             period=args.period,
         )

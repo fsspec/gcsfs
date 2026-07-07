@@ -65,12 +65,25 @@ def test_build_request_shape():
 
 
 def test_build_request_bucket_filter_and_method():
-    req_count = [s for s in monitoring.GCS_BUCKET_SERIES if s.method][0]
+    req_count = [s for s in monitoring.GCS_BUCKET_SERIES if s.methods][0]
     req = monitoring._build_request("proj", req_count, "my-bucket", 0, 600, 60)
     assert 'resource.type = "gcs_bucket"' in req["filter"]
     assert 'resource.labels.bucket_name = "my-bucket"' in req["filter"]
-    assert f'metric.labels.method = "{req_count.method}"' in req["filter"]
+    for m in req_count.methods:
+        assert f'metric.labels.method = "{m}"' in req["filter"]
     assert req["aggregation"]["per_series_aligner"] == "ALIGN_DELTA"
+
+
+def test_build_request_bucket_matches_both_read_methods():
+    req_count = [
+        s
+        for s in monitoring.GCS_BUCKET_SERIES
+        if s.metric_type.endswith("api/request_count")
+    ][0]
+    f = monitoring._build_request("proj", req_count, "my-bucket", 0, 600, 60)["filter"]
+    assert 'metric.labels.method = "ReadObject"' in f
+    assert 'metric.labels.method = "BidiReadObject"' in f
+    assert " OR " in f
 
 
 def _bucket_series(values):
@@ -225,6 +238,18 @@ def test_collect_bucket_totals_omits_empty_series():
 def test_to_epoch_handles_zulu():
 
     assert monitoring._to_epoch("1970-01-01T00:01:00Z") == 60
+
+
+def test_align_interval_snaps_a_mid_period_window_outward():
+    assert monitoring._align_interval(100, 700, 60) == (60, 720)
+
+
+def test_align_interval_leaves_grid_aligned_bounds_unchanged():
+    assert monitoring._align_interval(60, 600, 60) == (60, 600)
+
+
+def test_align_interval_widens_sub_period_window_to_a_full_period():
+    assert monitoring._align_interval(130, 140, 60) == (120, 180)
 
 
 def test_collect_emits_one_row_per_pod_and_series():
