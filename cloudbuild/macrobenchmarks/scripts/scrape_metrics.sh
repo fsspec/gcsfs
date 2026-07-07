@@ -100,6 +100,7 @@ python3 -m metrics.monitoring \
   --project "${PROJECT_ID}" --run-id "$RUN_ID" \
   --start-time "$START_TIME" --end-time "$END_TIME" \
   --checkpoint-bucket "$CHECKPOINT_BUCKET" --dataset-bucket "$DATASET_BUCKET" \
+  --cluster "$CLUSTER_NAME" \
   --out-dir "$RAW_DIR" || true
 run_calculate "$SUMMARY" \
   || echo "Warning: recompute with system metrics failed; uploading summary without them."

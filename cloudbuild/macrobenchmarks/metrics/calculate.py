@@ -180,8 +180,6 @@ _SYSTEM_SERIES_COLUMNS = {
         "network_sent_peak_bytes_per_sec",
         "network_sent_mean_bytes_per_sec",
     ),
-    "cpu_limit_utilization": ("cpu_limit_utilization_peak", None),
-    "memory_limit_utilization": ("memory_limit_utilization_peak", None),
     "checkpoint_read_bytes": ("checkpoint_read_bytes", None),
     "checkpoint_read_request_count": ("checkpoint_read_request_count", None),
     "checkpoint_restored_bytes": ("checkpoint_restored_bytes", None),
@@ -210,6 +208,12 @@ def _amplification(numerator, denominator):
     if numerator is not None and denominator:
         return numerator / denominator
     return None
+
+
+def _max_peak(by_metric: dict, name: str):
+    """Max non-null ``peak`` among the rows for series ``name``, or None."""
+    peaks = [r["peak"] for r in by_metric.get(name, []) if r.get("peak") is not None]
+    return max(peaks) if peaks else None
 
 
 def executed_step_count(step_rows: list) -> int:
@@ -284,6 +288,19 @@ def calc_system_metrics(system_rows: list) -> dict:
     )
     if ratio is not None:
         out["checkpoint_read_amplification_ratio"] = ratio
+    # Stands in for GKE's `*/limit_utilization` metrics, which need a container
+    # limit we don't set: bottleneck-pod peak usage / node allocatable capacity.
+    cpu_util = _amplification(
+        out.get("cpu_usage_peak_cores"), _max_peak(by_metric, "node_allocatable_cores")
+    )
+    if cpu_util is not None:
+        out["cpu_limit_utilization_peak"] = cpu_util
+    mem_util = _amplification(
+        out.get("memory_usage_peak_bytes"),
+        _max_peak(by_metric, "node_allocatable_bytes"),
+    )
+    if mem_util is not None:
+        out["memory_limit_utilization_peak"] = mem_util
     # Dataset ratio is derived in build_summary_row; it needs step/batch-size
     # inputs this reducer doesn't have.
     return out

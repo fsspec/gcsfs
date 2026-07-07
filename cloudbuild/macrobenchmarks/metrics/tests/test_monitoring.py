@@ -80,6 +80,111 @@ def _bucket_series(values):
     )
 
 
+def test_build_request_node_filter():
+    cores = [s for s in monitoring.NODE_SERIES if s.name == "node_allocatable_cores"][0]
+    req = monitoring._build_request("proj", cores, "my-cluster", 0, 600, 60)
+    assert 'metric.type = "kubernetes.io/node/cpu/allocatable_cores"' in req["filter"]
+    assert 'resource.type = "k8s_node"' in req["filter"]
+    assert 'resource.labels.cluster_name = "my-cluster"' in req["filter"]
+    # No pod_name prefix on node queries.
+    assert "pod_name" not in req["filter"]
+    assert req["aggregation"]["per_series_aligner"] == "ALIGN_MAX"
+
+
+def test_collect_node_capacity_reduces_to_max_per_series():
+    # Homogeneous pool: several nodes report the same allocatable, plus a smaller
+    # system node; the max is the benchmark node's capacity.
+    client = _FakeClient(
+        {
+            "kubernetes.io/node/cpu/allocatable_cores": [
+                _bucket_series([191.9, 191.9]),
+                _bucket_series([1.9]),  # small system node
+            ],
+            "kubernetes.io/node/memory/allocatable_bytes": [
+                _bucket_series([700.0]),
+                _bucket_series([4.0]),
+            ],
+        }
+    )
+    rows = monitoring.collect_node_capacity(
+        client, project="proj", cluster="c", start_epoch=0, end_epoch=600
+    )
+    by_metric = {r.metric: r for r in rows}
+    assert by_metric["node_allocatable_cores"].peak == 191.9
+    assert by_metric["node_allocatable_cores"].pod_name == "c"
+    assert by_metric["node_allocatable_bytes"].peak == 700.0
+
+
+def test_collect_node_capacity_omits_empty_series():
+    rows = monitoring.collect_node_capacity(
+        _FakeClient({}), project="proj", cluster="c", start_epoch=0, end_epoch=600
+    )
+    assert rows == []
+
+
+def test_collect_node_capacity_isolates_a_failing_series():
+    client = _RaisingClient(
+        raise_on="kubernetes.io/node/cpu/allocatable_cores",
+        return_for="kubernetes.io/node/memory/allocatable_bytes",
+        series=[_bucket_series([700.0])],
+    )
+    rows = monitoring.collect_node_capacity(
+        client, project="proj", cluster="c", start_epoch=0, end_epoch=600
+    )
+    by_metric = {r.metric: r for r in rows}
+    assert by_metric["node_allocatable_bytes"].peak == 700.0
+    assert "node_allocatable_cores" not in by_metric
+
+
+def test_assemble_rows_includes_node_capacity_when_cluster_given():
+    client = _FakeClient(
+        {
+            "kubernetes.io/container/cpu/core_usage_time": [
+                _series("run-workload-0-a", [2.0, 4.0])
+            ],
+            "kubernetes.io/node/cpu/allocatable_cores": [_bucket_series([191.9])],
+        }
+    )
+    rows = monitoring.assemble_rows(
+        client,
+        None,
+        project="p",
+        run_id="run",
+        cluster="my-cluster",
+        checkpoint_bucket=None,
+        dataset_bucket=None,
+        restore_rows=[],
+        start_epoch=0,
+        end_epoch=600,
+    )
+    metrics = {r.metric for r in rows}
+    assert "cpu" in metrics
+    assert "node_allocatable_cores" in metrics
+
+
+def test_assemble_rows_skips_node_capacity_without_cluster():
+    client = _FakeClient(
+        {
+            "kubernetes.io/container/cpu/core_usage_time": [
+                _series("run-workload-0-a", [1.0])
+            ],
+            "kubernetes.io/node/cpu/allocatable_cores": [_bucket_series([191.9])],
+        }
+    )
+    rows = monitoring.assemble_rows(
+        client,
+        None,
+        project="p",
+        run_id="run",
+        checkpoint_bucket=None,
+        dataset_bucket=None,
+        restore_rows=[],
+        start_epoch=0,
+        end_epoch=600,
+    )
+    assert {r.metric for r in rows} == {"cpu"}
+
+
 def test_collect_bucket_totals_sums_all_points():
     client = _FakeClient(
         {

@@ -35,24 +35,48 @@ def test_missing_series_omits_its_columns():
     assert "network_received_peak_bytes_per_sec" not in m
 
 
-def test_maps_limit_utilization_and_mean_memory():
+def test_derives_limit_utilization_from_node_allocatable():
+    # No container resource limits are set, so utilization is derived as
+    # bottleneck-pod peak usage / node allocatable capacity (the denominator
+    # fetched from the k8s_node allocatable metric, constant per machine type).
     rows = [
+        {"pod_name": "p0", "metric": "cpu", "peak": 96.0, "mean": 40.0},
+        {"pod_name": "p1", "metric": "cpu", "peak": 120.0, "mean": 50.0},
         {"pod_name": "p0", "metric": "memory", "peak": 4096.0, "mean": 2048.0},
         {"pod_name": "p1", "metric": "memory", "peak": 8192.0, "mean": 1024.0},
-        {"pod_name": "p0", "metric": "cpu_limit_utilization", "peak": 0.7, "mean": 0.3},
-        {"pod_name": "p1", "metric": "cpu_limit_utilization", "peak": 0.9, "mean": 0.4},
         {
-            "pod_name": "p0",
-            "metric": "memory_limit_utilization",
-            "peak": 0.5,
+            "pod_name": "cluster",
+            "metric": "node_allocatable_cores",
+            "peak": 192.0,
+            "mean": None,
+        },
+        {
+            "pod_name": "cluster",
+            "metric": "node_allocatable_bytes",
+            "peak": 16384.0,
             "mean": None,
         },
     ]
     m = calculate.calc_system_metrics(rows)
     assert m["memory_usage_mean_bytes"] == 2048  # max of per-pod means, int
     assert isinstance(m["memory_usage_mean_bytes"], int)
-    assert m["cpu_limit_utilization_peak"] == 0.9
-    assert m["memory_limit_utilization_peak"] == 0.5
+    assert m["cpu_limit_utilization_peak"] == 120.0 / 192.0  # bottleneck peak
+    assert m["memory_limit_utilization_peak"] == 8192 / 16384.0  # 0.5
+    # The intermediate capacity metrics are not surfaced as summary columns.
+    assert "node_allocatable_cores" not in m
+    assert "node_allocatable_bytes" not in m
+
+
+def test_limit_utilization_omitted_without_node_capacity():
+    # No node allocatable rows (e.g. cluster not passed) -> no denominator, so
+    # the utilization columns stay N/A rather than dividing by nothing.
+    rows = [
+        {"pod_name": "p0", "metric": "cpu", "peak": 10.0, "mean": 5.0},
+        {"pod_name": "p0", "metric": "memory", "peak": 2048.0, "mean": None},
+    ]
+    m = calculate.calc_system_metrics(rows)
+    assert "cpu_limit_utilization_peak" not in m
+    assert "memory_limit_utilization_peak" not in m
 
 
 def test_checkpoint_amplification_ratio_and_raw_dataset_columns():

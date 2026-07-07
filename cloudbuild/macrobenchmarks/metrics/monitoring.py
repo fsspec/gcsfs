@@ -21,9 +21,10 @@ class Series:
 
     name: str  # internal series name
     metric_type: str  # Cloud Monitoring metric.type
-    resource_type: str  # k8s_container | k8s_pod | gcs_bucket
+    resource_type: str  # k8s_container | k8s_pod | gcs_bucket | k8s_node
     aligner: str  # per-series aligner name
-    filter_kind: str = "pod"  # "pod" (pod_name prefix) | "bucket" (bucket_name)
+    # "pod" (pod_name prefix) | "bucket" (bucket_name) | "node" (cluster_name)
+    filter_kind: str = "pod"
     method: str = None  # optional metric.labels.method filter (bucket series)
 
 
@@ -54,17 +55,25 @@ SERIES = [
         "k8s_pod",
         "ALIGN_RATE",
     ),
+]
+
+# Node allocatable CPU/memory (GAUGE); stands in for the container resource
+# limit we don't set, so calculate.py can derive utilization as peak usage /
+# node allocatable.
+NODE_SERIES = [
     Series(
-        "cpu_limit_utilization",
-        "kubernetes.io/container/cpu/limit_utilization",
-        "k8s_container",
+        "node_allocatable_cores",
+        "kubernetes.io/node/cpu/allocatable_cores",
+        "k8s_node",
         "ALIGN_MAX",
+        filter_kind="node",
     ),
     Series(
-        "memory_limit_utilization",
-        "kubernetes.io/container/memory/limit_utilization",
-        "k8s_container",
+        "node_allocatable_bytes",
+        "kubernetes.io/node/memory/allocatable_bytes",
+        "k8s_node",
         "ALIGN_MAX",
+        filter_kind="node",
     ),
 ]
 
@@ -111,7 +120,10 @@ def reduce_points(values: list) -> tuple:
 
 
 def _build_request(project, series, target, start_epoch, end_epoch, period):
-    """Build a list_time_series request; ``target`` is the run id or bucket name."""
+    """Build a list_time_series request.
+
+    ``target`` is the run id (pod), bucket name (bucket), or cluster name (node).
+    """
     if series.filter_kind == "bucket":
         filter_ = (
             f'metric.type = "{series.metric_type}" '
@@ -120,6 +132,13 @@ def _build_request(project, series, target, start_epoch, end_epoch, period):
         )
         if series.method:
             filter_ += f' AND metric.labels.method = "{series.method}"'
+    elif series.filter_kind == "node":
+        # Scope to this run's cluster so a concurrent build's nodes aren't read.
+        filter_ = (
+            f'metric.type = "{series.metric_type}" '
+            f'AND resource.type = "{series.resource_type}" '
+            f'AND resource.labels.cluster_name = "{target}"'
+        )
     else:
         filter_ = (
             f'metric.type = "{series.metric_type}" '
@@ -199,6 +218,39 @@ def collect_bucket_totals(
     return rows
 
 
+def collect_node_capacity(
+    client, *, project, cluster, start_epoch, end_epoch, period=60
+) -> list:
+    """Peak node allocatable CPU/memory for the cluster, one SystemMetric each.
+
+    Max over the cluster's nodes, so the (larger) benchmark pool wins over
+    any small system node pool.
+    """
+    rows = []
+    for series in NODE_SERIES:
+        try:
+            request = _build_request(
+                project, series, cluster, start_epoch, end_epoch, period
+            )
+            peak = None
+            for ts in client.list_time_series(request):
+                for p in ts.points:
+                    v = _point_value(p)
+                    if peak is None or v > peak:
+                        peak = v
+            if peak is not None:
+                rows.append(
+                    schema.SystemMetric(
+                        pod_name=cluster, metric=series.name, peak=peak, mean=None
+                    )
+                )
+        except Exception as e:  # best-effort: keep the other series
+            print(
+                f"Warning: node series '{series.name}' failed, its column N/A: {e}"
+            )
+    return rows
+
+
 def assemble_rows(
     client,
     storage_client,
@@ -210,9 +262,10 @@ def assemble_rows(
     restore_rows,
     start_epoch,
     end_epoch,
+    cluster=None,
     period=60,
 ) -> list:
-    """Pod gauges + per-bucket totals + du sizes, as one row list."""
+    """Pod gauges + node capacity + per-bucket totals + du sizes, as one row list."""
     rows = collect(
         client,
         project=project,
@@ -221,6 +274,15 @@ def assemble_rows(
         end_epoch=end_epoch,
         period=period,
     )
+    if cluster:
+        rows += collect_node_capacity(
+            client,
+            project=project,
+            cluster=cluster,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            period=period,
+        )
     if checkpoint_bucket:
         rows += collect_bucket_totals(
             client,
@@ -266,6 +328,11 @@ def main(argv=None) -> None:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--checkpoint-bucket")
     parser.add_argument("--dataset-bucket")
+    parser.add_argument(
+        "--cluster",
+        help="GKE cluster name; scopes node allocatable-capacity queries. "
+        "Omit to skip capacity (utilization columns stay N/A).",
+    )
     parser.add_argument("--period", type=int, default=60)
     args = parser.parse_args(argv)
 
@@ -300,6 +367,7 @@ def main(argv=None) -> None:
             restore_rows=restore_rows,
             start_epoch=_to_epoch(args.start_time),
             end_epoch=_to_epoch(args.end_time),
+            cluster=args.cluster,
             period=args.period,
         )
         raw_store.write_system_metrics(rows, args.out_dir)
