@@ -245,9 +245,7 @@ def collect_node_capacity(
                     )
                 )
         except Exception as e:  # best-effort: keep the other series
-            print(
-                f"Warning: node series '{series.name}' failed, its column N/A: {e}"
-            )
+            print(f"Warning: node series '{series.name}' failed, its column N/A: {e}")
     return rows
 
 
