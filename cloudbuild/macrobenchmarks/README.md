@@ -111,7 +111,7 @@ Before creating the triggers, set up the following in your GCP project.
 
 | Substitution | Description |
 | :----------- | :---------- |
-| `_INFRA_PREFIX` | Prefix for all created resources (cluster, network, buckets, BigQuery dataset). Also selects the shared results bucket `gs://<prefix>-macrobench-results`. |
+| `_INFRA_PREFIX` | Prefix for all created resources (cluster, network, buckets, BigQuery dataset). Also selects the shared results bucket `gs://<_INFRA_PREFIX>-macrobench-results`. |
 | `_ZONE` | GCP zone for the cluster and zonal buckets (e.g. `us-central1-a`). The region is derived from it. |
 | `_GKE_SERVICE_ACCOUNT` | Email of the node service account (see prerequisites). |
 | `_DATASET_PATH` | `gs://` directory of `*.parquet` shards (with a `text` column) to train on. Must match the run's region and bucket type. |
