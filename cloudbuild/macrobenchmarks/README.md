@@ -122,7 +122,7 @@ Before creating the triggers, set up the following in your GCP project.
 
 | Substitution | Default | Description |
 | :----------- | :------ | :---------- |
-| `_WORKLOAD` | `hf-pytorch-lightning-cpu` | Workload directory under `workloads/`. |
+| `_WORKLOAD` | `hf-pytorch-lightning-cpu` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`. |
 | `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, or `hns`. Must match the dataset bucket. |
 | `_MACHINE_TYPE` | `c4-standard-192` | Node machine type for the workload pool. |
 | `_ENABLE_TIER1_NETWORKING` | `true` | Enable TIER_1 high-bandwidth egress (requires gVNIC / C-series). |
