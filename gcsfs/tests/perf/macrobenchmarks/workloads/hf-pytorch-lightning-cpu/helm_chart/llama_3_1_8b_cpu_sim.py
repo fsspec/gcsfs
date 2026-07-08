@@ -12,7 +12,7 @@ Single-node launch (smoke test):
 Multi-node launch (the production emulator: 2 c4-standard-192 VMs, each
 running 4 processes that stand in for GPU chips -- capped at 4/node, down from
 8, so a checkpoint-restoring run fits the 720GB host RAM). The Helm chart in
-``emulated/templates/`` wires up the K8s JobSet and the per-pod launcher;
+``helm_chart/templates/`` wires up the K8s JobSet and the per-pod launcher;
 on each pod it ultimately runs:
     torchrun --nproc_per_node=4 --nnodes=$NNODES --node_rank=$NODE_RANK \\
              --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \\
@@ -39,8 +39,7 @@ import time
 
 import torch.multiprocessing
 
-# Match the original training script: forkserver before any other torch import
-# that could spawn workers.
+# forkserver before any other torch import that could spawn workers.
 try:
     torch.multiprocessing.set_start_method("forkserver", force=True)
 except RuntimeError:
@@ -89,12 +88,12 @@ SIMULATED_STEP_COMPUTE_SECONDS = float(
 # Single grep-able config marker per knob (parity with the model_id: line).
 logging.info("simulated_step_compute_seconds: %s", SIMULATED_STEP_COMPUTE_SECONDS)
 
-# ---- Config (env-overridable, mirrors original script's pattern) ----------
+# ---- Config (env-overridable) ---------------------------------------------
 preset_max_steps = int(os.getenv("MAX_STEPS", "1000"))
 # Default 1 (not the launcher-overridden 4 this once carried): the launcher and
-# the Helm template both set GRADIENT_ACCUMULATION_STEPS=1 to match the GPU
-# a4_v1 run, so 1 is the effective value -- the standalone smoke test should
-# agree rather than silently use a different accumulation.
+# the Helm template both set GRADIENT_ACCUMULATION_STEPS=1, so 1 is the
+# effective value -- the standalone smoke test should agree rather than
+# silently use a different accumulation.
 gradient_accumulation_steps = int(os.getenv("GRADIENT_ACCUMULATION_STEPS", "1"))
 per_device_train_batch_size = int(os.getenv("PER_DEVICE_TRAIN_BATCH_SIZE", "8"))
 dataloader_num_workers = int(os.getenv("DATALOADER_NUM_WORKERS", "16"))
@@ -123,13 +122,10 @@ logging.info("training_strategy: %s", training_strategy)
 # Map model_id to the canonical id and log it as ``model_id: <id>``.
 # NOTE: this macrobenchmarks pipeline does NOT consume this line -- it derives
 # the summary's model_id from calculate.py's ``--model-id`` flag. The line is
-# emitted purely for parity with the GPU benchmark (a4_v1/llama_3_1_8b.py) and
-# the tessellations HF metadata generator that scrapes it (regex
-# ``model_id: ([a-zA-Z0-9-]+)``), so GPU and CPU run logs stay identical.
-# The benchmark class sets model_id=None on purpose. Computed from the original
-# model_id (before the gs:// -> /tmp remap below, which would otherwise log a
-# path the regex can't parse); kept in sync with a4_v1/llama_3_1_8b.py so the
-# GPU and CPU-emulated benchmarks report the same model_id.
+# emitted so an HF metadata generator can scrape it via regex
+# (``model_id: ([a-zA-Z0-9-]+)``). Computed from the original model_id
+# (before the gs:// -> /tmp remap below, which would otherwise log a path
+# the regex can't parse).
 if "Llama-3.1-8B" in model_id:
     metadata_model_id = "llama3-1-8b"  # Default
 else:
@@ -139,9 +135,8 @@ logging.info("model_id: %s", metadata_model_id)
 # If ``MODEL_ID`` is a GCS path, the launcher pre-downloads the weights to
 # ``/tmp/<basename>`` (gcloud storage cp -r). Remap ``model_id`` to the local
 # directory and force ``local_files_only`` so transformers does not phone home.
-# Matches a4_v1/llama_3_1_8b.py exactly so behavior is consistent across the
-# GPU and CPU-emulated benchmarks. Without this, 8 ranks (2 nodes x 4 procs)
-# would concurrently pull the 16 GB Llama-3.1-8B weights from HuggingFace.
+# Without this, 8 ranks (2 nodes x 4 procs) would concurrently pull the
+# 16 GB Llama-3.1-8B weights from HuggingFace.
 use_local_files_only = False
 if model_id.startswith("gs://"):
     use_local_files_only = True
@@ -170,8 +165,8 @@ if not use_local_files_only and not os.environ.get("HF_TOKEN"):
     )
 
 # Optional: checkpoint write path. If unset, the checkpoint callback is
-# omitted entirely (matches the original behavior). Strip trailing slash for
-# the same reason as ``dataset_path``.
+# omitted entirely. Strip trailing slash for the same reason as
+# ``dataset_path``.
 checkpoint_write_path = os.getenv("CKPT_WRITE_PATH")
 if checkpoint_write_path:
     checkpoint_write_path = checkpoint_write_path.rstrip("/")
@@ -202,9 +197,7 @@ if tokenizer.pad_token is None:
 
 
 def collate_fn(examples):
-    """Identical to the original training script's collate_fn.
-
-    Runs in DataLoader worker processes, so tokenization CPU work overlaps
+    """Runs in DataLoader worker processes, so tokenization CPU work overlaps
     with the next batch's GCS reads -- this is the IO-overlap behavior we
     care about preserving.
     """
@@ -299,8 +292,6 @@ class LlamaLitModel(pl.LightningModule):
 
 
 # ---- Callbacks ------------------------------------------------------------
-# Kept in sync with a4_v1/llama_3_1_8b.py so log lines and metric names stay
-# identical to the production benchmark.
 class StepTimeCallback(Callback):
     """Logs ``step_time`` and ``throughput`` every optimizer step."""
 
@@ -523,8 +514,6 @@ def build_strategy(name):
 
 if __name__ == "__main__":
     # ---- Verify gcsfs is the active fsspec backend for "gs" ----------------
-    # Matches the original benchmark's startup self-check; keeps the same log
-    # lines so downstream log parsing isn't disturbed.
     try:
         fs = fsspec.filesystem("gs")
         logging.info("[SYSTEM CHECK] fsspec 'gs' backend class: %s", type(fs))
@@ -535,8 +524,7 @@ if __name__ == "__main__":
         logging.info("[SYSTEM CHECK] Failed to load GS filesystem: %s", e)
 
     # ---- Dataset: HuggingFace streaming parquet -----------------------------
-    # Identical to the original's HF reader branch -- this is the GCS read
-    # pattern under test.
+    # This is the GCS read pattern under test.
     logging.info("[INFO] Loading %s dataset", dataset_path)
     logging.info("[INFO] Using HF dataloader")
     load_start = time.perf_counter()
@@ -570,7 +558,7 @@ if __name__ == "__main__":
 
     # ---- Model: real Llama 8B in bf16, frozen -------------------------------
     # Each rank holds its own copy (DDP replicates). Real weights so the
-    # state_dict serialized at checkpoint time matches production size.
+    # state_dict serialized at checkpoint time is a realistic size.
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.bfloat16,
@@ -599,8 +587,8 @@ if __name__ == "__main__":
     # ---- Trainer ------------------------------------------------------------
     # accelerator="cpu" + devices=local_world_size dynamically matches the
     # local rank count (e.g., 4 devices with torchrun --nproc_per_node=4).
-    # ``precision="bf16-mixed"`` is the closest CPU equivalent of the original
-    # "bf16" setting; since training_step doesn't actually forward through
+    # ``precision="bf16-mixed"`` is the closest CPU equivalent of a GPU "bf16"
+    # setting; since training_step doesn't actually forward through
     # the Llama model, CPU bf16 op limitations don't affect correctness.
     trainer = pl.Trainer(
         max_epochs=1,

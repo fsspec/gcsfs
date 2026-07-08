@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# CPU emulator launcher. Mirrors a4_v1/launcher.sh but drops the GPU-specific
-# bits (NCCL plugin, nvidia.com/gpu, RDMA NICs). Each pod on c4-standard-192
+# CPU emulator launcher. Each pod on c4-standard-192
 # runs this; torchrun then forks GPUS_PER_NODE worker processes per pod (4 by
 # default), so 2 nodes x 4 = 8 ranks total. Per-node ranks are capped at 4 (not
 # 8) so a checkpoint-restoring run fits the 720GB c4-standard-192 host RAM; see
@@ -99,8 +98,7 @@ export TOKENIZERS_PARALLELISM=false
 # Parallel training strategy: ddp (default), fsdp_sharded, or fsdp_full.
 export TRAINING_STRATEGY=${TRAINING_STRATEGY:-ddp}
 
-# Training parameters -- same defaults as a4_v1/launcher.sh so step time and
-# checkpoint cadence are directly comparable between the GPU and CPU runs.
+# Training parameters.
 export NUM_TRAIN_EPOCHS=1
 export PER_DEVICE_TRAIN_BATCH_SIZE=${PER_DEVICE_TRAIN_BATCH_SIZE:-8}
 export GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}

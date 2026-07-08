@@ -2,8 +2,8 @@
 
 The parser (``parsers/hf.py``) emits in-memory metrics and the calculator
 (``calculate.py``) consumes flat row dicts; both used to assemble the
-tessellations-compatible directory tree themselves from the path constants in
-``schema.py``. That layout is now a concept with a home: ``write_raw_metrics``
+directory tree themselves from the path constants in ``schema.py``. That
+layout is now a concept with a home: ``write_raw_metrics``
 lays the tree down, ``read_raw_metrics`` reads it back, and nothing else needs
 to know where a metric's CSV lives. Change the layout here and both sides
 follow.
@@ -33,7 +33,7 @@ class RawMetricTables:
 def write_raw_metrics(
     parsed, out_dir: str, *, run_type: str = "perf_optimization"
 ) -> None:
-    """Write parsed metrics to the tessellations-compatible relative layout.
+    """Write parsed metrics to the on-disk relative layout.
 
     ``parsed`` is any object exposing the ``ParsedRawMetrics`` attributes
     (``step_metrics``, ``write_metrics`` and so on); it is duck-typed so this

@@ -1,8 +1,8 @@
 """Aggregate raw-metric CSVs into one flat summary row.
 
-Mirrors the reference metric calculators
-(metrics/results_generation/metrics_calculators/) for the metrics the HF
-emulated workload produces. MFU/TFLOPs intentionally excluded.
+Computes step-time, checkpoint write/restore/delete, data-loading, and
+system-resource metrics for the HF emulated workload. MFU/TFLOPs
+intentionally excluded.
 """
 
 import argparse
@@ -18,7 +18,7 @@ STABLE_WINDOW_STABILIZATION_STEPS = 10
 
 
 def calc_step_time_metrics(step_rows: list) -> dict:
-    """Step-time metrics (mirrors TrainingMetricsCalculator)."""
+    """Step-time metrics: mean, plus stable/training window durations."""
     rows = [
         r
         for r in step_rows

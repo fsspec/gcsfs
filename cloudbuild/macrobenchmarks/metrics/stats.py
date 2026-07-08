@@ -1,7 +1,7 @@
-"""Percentile/stat helpers mirroring tessellations metric calculators.
+"""Percentile/stat helpers for aggregating benchmark durations.
 
-Uses numpy.percentile + statistics so results match tessellations exactly:
-metrics_calculators/common_metrics/checkpointing_metrics.py and utils.py.
+Uses numpy.percentile + statistics for the standard duration summary
+(min/max/avg/stddev/percentiles).
 """
 
 import statistics
@@ -20,8 +20,8 @@ def mean(values: List[float]) -> Optional[float]:
 def duration_stats(durations: List[float]) -> dict:
     """min/max/avg/stddev/p50/p90/p99/p100 for a list of durations.
 
-    stddev is statistics.stdev (sample), 0 when fewer than two datapoints --
-    matching tessellations _set_checkpoint_duration_metrics. Empty input -> {}.
+    stddev is statistics.stdev (sample), 0 when fewer than two datapoints.
+    Empty input -> {}.
     """
     n = len(durations)
     if n == 0:
