@@ -132,7 +132,10 @@ def test_checkpoint_size_parsed():
 
 def test_build_filter_includes_all_patterns():
     filter_str = hf.build_filter(
-        project="p", run_id="r", start_time="2026-01-01T00:00:00Z", end_time="2026-01-01T01:00:00Z"
+        project="p",
+        run_id="r",
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-01T01:00:00Z",
     )
     for pattern in hf.ALL_PATTERNS:
         assert pattern in filter_str
