@@ -4,7 +4,8 @@ name: Release on Merge
 #   1. Triggers when a Pull Request modifying changelog.rst is closed and merged into main.
 #   2. If it is a release PR (has 'autorelease' label), it extracts the version.
 #   3. Creates and pushes the Git tag for that version.
-#   4. Calls the reusable release.yml workflow to build and publish to PyPI.
+#   4. Calls the reusable build-and-release.yml workflow to build and create GitHub Release.
+#   5. Publishes to PyPI.
 on:
   pull_request:
     types: [closed]
@@ -57,15 +58,30 @@ jobs:
           git push origin "$VERSION"
           echo "Successfully pushed tag $VERSION"
 
-  publish:
+  release:
     needs: tag
     permissions:
       contents: write
-      id-token: write
       checks: read
       statuses: read
-    uses: ./.github/workflows/release.yml
+    uses: ./.github/workflows/build-and-release.yml
     with:
       ref: ${{ needs.tag.outputs.version }}
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  publish:
+    name: Upload release to PyPI
+    needs: [tag, release]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
