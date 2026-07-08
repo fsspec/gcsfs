@@ -26,6 +26,7 @@ class RawMetricTables:
     restore_rows: List[dict] = field(default_factory=list)
     delete_rows: List[dict] = field(default_factory=list)
     dl_rows: List[dict] = field(default_factory=list)
+    size_rows: List[dict] = field(default_factory=list)
     system_rows: List[dict] = field(default_factory=list)
 
 
@@ -93,6 +94,15 @@ def write_raw_metrics(
             parsed.data_loading_metrics,
         )
 
+    if getattr(parsed, "checkpoint_sizes", None):
+        _write_csv(
+            os.path.join(
+                out_dir, schema.CHECKPOINT_SIZE_DIRECTORY, schema.CHECKPOINT_SIZE_FILE
+            ),
+            schema.CheckpointSizeMetrics,
+            parsed.checkpoint_sizes,
+        )
+
 
 def write_system_metrics(system_rows, out_dir: str) -> None:
     """Write SystemMetric rows to the system-metrics CSV (owned here like the rest)."""
@@ -140,6 +150,11 @@ def read_raw_metrics(
                 in_dir,
                 schema.CALCULATED_METRICS_DIRECTORY,
                 schema.DATA_LOADING_METRICS_FILE,
+            )
+        ),
+        size_rows=_read_csv(
+            os.path.join(
+                in_dir, schema.CHECKPOINT_SIZE_DIRECTORY, schema.CHECKPOINT_SIZE_FILE
             )
         ),
         system_rows=_read_csv(

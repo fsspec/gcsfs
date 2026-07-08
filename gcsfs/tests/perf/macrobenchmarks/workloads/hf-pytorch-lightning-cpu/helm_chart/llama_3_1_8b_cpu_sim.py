@@ -396,6 +396,24 @@ class LoggedModelCheckpoint(ModelCheckpoint):
             trainer.global_rank,
         )
 
+        if trainer.global_rank == 0:
+            try:
+                size_bytes = self._measure_checkpoint_bytes(filepath)
+                logging.info(
+                    "Checkpoint Size : Rank : %d : Step : %d : Bytes : %d : Path: %s",
+                    trainer.global_rank,
+                    trainer.global_step,
+                    size_bytes,
+                    filepath,
+                )
+            except Exception as e:
+                logging.warning("Could not measure checkpoint size: %s", e)
+
+    @staticmethod
+    def _measure_checkpoint_bytes(filepath):
+        fs, path = fsspec.core.url_to_fs(filepath)
+        return int(fs.du(path))
+
     def _remove_checkpoint(self, trainer, filepath):
         logging.info(
             "Checkpoint Delete Start : Rank: %d : Step: %d : Path: %s",

@@ -82,7 +82,12 @@
       {"name": "memory_usage_mean_bytes", "type": "INTEGER", "description": "Mean container memory usage in bytes over the run window; max of per-pod means across worker pods (bottleneck pod)."},
       {"name": "memory_limit_utilization_peak", "type": "FLOAT", "description": "Peak bottleneck-pod memory usage as a fraction of node allocatable memory over the run window; how close restore got to filling the node (no container limit is set, so this is derived from node allocatable capacity)."},
       {"name": "cpu_limit_utilization_peak", "type": "FLOAT", "description": "Peak bottleneck-pod CPU usage as a fraction of node allocatable cores over the run window; whether the workload is pegged (compute-bound) vs I/O idle (no container limit is set, so this is derived from node allocatable capacity)."},
-      {"name": "dataset_sample_count", "type": "INTEGER", "description": "Estimated total rows in the dataset: dataset_size_bytes / per-sample stored bytes, where per-sample bytes are measured from the largest shard via the datasets library (format-agnostic, streamed). Used to derive per-sample bytes for the read-amplification ratio."}
+      {"name": "dataset_sample_count", "type": "INTEGER", "description": "Estimated total rows in the dataset: dataset_size_bytes / per-sample stored bytes, where per-sample bytes are measured from the largest shard via the datasets library (format-agnostic, streamed). Used to derive per-sample bytes for the read-amplification ratio."},
+      {"name": "mean_samples_per_second", "type": "FLOAT", "description": "Mean training throughput in samples/s over all measured steps (from the rank-0 step log)."},
+      {"name": "stable_window_avg_samples_per_second", "type": "FLOAT", "description": "Mean training throughput in samples/s over the stable window (after warmup steps)."},
+      {"name": "checkpoint_size_bytes", "type": "INTEGER", "description": "Total size in bytes of one written distributed checkpoint (max across observed checkpoints; constant per config)."},
+      {"name": "checkpoint_write_throughput_avg_bytes_per_sec", "type": "FLOAT", "description": "Mean checkpoint-write throughput in bytes/s across distributed checkpoint writes (checkpoint size / write duration)."},
+      {"name": "checkpoint_restore_throughput_avg_bytes_per_sec", "type": "FLOAT", "description": "Checkpoint-restore throughput in bytes/s: checkpoint_restored_bytes / the resume restore duration (checkpoint_restore_time_initial). Derived from the du-based restored size, so it is populated for DDP and FSDP alike."}
     ]
   }
 }
