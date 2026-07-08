@@ -107,3 +107,24 @@ def test_accelerator_blocked_time():
     dl = parsed.data_loading_metrics[0]
     assert dl.accelerator_blocked_time == 12.5
     assert dl.accelerator_blocked_percent == 4.2
+
+
+SIZE_LINE = (
+    "Checkpoint Size : Rank : 0 : Step : 25 : Bytes : 17179869184 : "
+    "Path: gs://b/ckpt/r/llama-00-25.ckpt"
+)
+
+
+def test_step_line_captures_samples_per_second():
+    parsed = _parse([STEP_LINE])
+    assert parsed.step_metrics[0].samples_per_second == 42.67
+
+
+def test_checkpoint_size_parsed():
+    parsed = _parse([SIZE_LINE])
+    assert len(parsed.checkpoint_sizes) == 1
+    row = parsed.checkpoint_sizes[0]
+    assert row.checkpoint_step == 25
+    assert row.size_bytes == 17179869184
+    assert row.checkpoint_location == "gs://b/ckpt/r/llama-00-25.ckpt"
+    assert row.global_rank == 0

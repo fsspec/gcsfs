@@ -18,6 +18,8 @@ PERSISTENT_STORAGE_DIRECTORY = "persistent_storage"
 PER_ACCELERATOR_DIRECTORY = "per_accelerator"
 CALCULATED_METRICS_DIRECTORY = "calculated_metrics"
 DATA_LOADING_METRICS_FILE = "data_loading_metrics.csv"
+CHECKPOINT_SIZE_DIRECTORY = "checkpoint_size"
+CHECKPOINT_SIZE_FILE = "checkpoint_size.csv"
 SYSTEM_METRICS_DIRECTORY = "system_metrics"
 SYSTEM_METRICS_FILE = "system_metrics.csv"
 
@@ -32,6 +34,7 @@ class StepMetrics:
     step: int
     step_duration: float
     step_end_time: float = None
+    samples_per_second: float = None
 
 
 # The per-event durations are intentionally NOT stored: the calculators derive
@@ -86,3 +89,11 @@ class SystemMetric:
     metric: str
     peak: float
     mean: float = None
+
+
+@dataclass(kw_only=True)
+class CheckpointSizeMetrics:
+    checkpoint_step: int
+    checkpoint_location: str
+    size_bytes: int
+    global_rank: int = None

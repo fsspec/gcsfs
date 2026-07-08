@@ -683,3 +683,153 @@ def test_main_succeeds_with_required_data_loading_metrics(tmp_path):
     assert len(rows) == 1
     assert rows[0]["accelerator_blocked_time"] == "12.5"
     assert rows[0]["accelerator_blocked_percent"] == "4.2"
+
+
+def _write_write_duration_csv(in_dir, step=25, start=0.0, end=10.0):
+    d = in_dir / "checkpoint_write_time" / "persistent_storage" / "per_accelerator"
+    d.mkdir(parents=True)
+    with open(d / "0.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(
+            [
+                "checkpoint_step",
+                "checkpoint_location",
+                "start_time",
+                "end_time",
+                "global_rank",
+                "local_rank",
+            ]
+        )
+        w.writerow([step, "gs://b/ckpt", start, end, 0, ""])
+
+
+def _write_checkpoint_size_csv(in_dir, step=25, size=1000):
+    d = in_dir / "checkpoint_size"
+    d.mkdir(parents=True)
+    with open(d / "checkpoint_size.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(
+            ["checkpoint_step", "checkpoint_location", "size_bytes", "global_rank"]
+        )
+        w.writerow([step, "gs://b/ckpt/r/llama.ckpt", size, 0])
+
+
+def test_summary_includes_throughput_columns(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_write_duration_csv(in_dir)
+    _write_checkpoint_size_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    row = rows[0]
+    assert row["checkpoint_size_bytes"] == "1000"
+    assert row["checkpoint_write_throughput_avg_bytes_per_sec"] == "100.0"
+
+
+def test_summary_throughput_columns_na_when_inputs_absent(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    for col in (
+        "mean_samples_per_second",
+        "stable_window_avg_samples_per_second",
+        "checkpoint_size_bytes",
+        "checkpoint_write_throughput_avg_bytes_per_sec",
+        "checkpoint_restore_throughput_avg_bytes_per_sec",
+    ):
+        assert rows[0][col] == "N/A"
+
+
+def _write_restored_bytes_system_metrics_csv(in_dir, restored_bytes=1600):
+    (in_dir / "system_metrics").mkdir(parents=True)
+    path = in_dir / "system_metrics" / "system_metrics.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["pod_name", "metric", "peak", "mean"])
+        w.writerow(["gs://b/ckpt", "checkpoint_restored_bytes", restored_bytes, ""])
+
+
+def test_summary_restore_throughput_from_restored_bytes(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_restore_csv(in_dir)
+    _write_restored_bytes_system_metrics_csv(in_dir, restored_bytes=1600)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["checkpoint_restore_time_initial"] == "8.0"
+    assert rows[0]["checkpoint_restored_bytes"] == "1600"
+    assert rows[0]["checkpoint_restore_throughput_avg_bytes_per_sec"] == "200.0"
+
+
+def test_summary_restore_throughput_na_without_restored_bytes(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_restore_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["checkpoint_restore_throughput_avg_bytes_per_sec"] == "N/A"

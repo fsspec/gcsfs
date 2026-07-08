@@ -17,7 +17,7 @@ from metrics import raw_store, schema
 # --- regexes (verbatim from tessellations hf.py) ---------------------------
 STEP_METRICS_PATTERN = (
     r"Global Rank: 0 \| Step: ([0-9]+) \| Loss: [0-9.]+ \| "
-    r"Step Time: ([0-9.]+)s \| Throughput: [0-9.]+ samples/s"
+    r"Step Time: ([0-9.]+)s \| Throughput: ([0-9.]+) samples/s"
 )
 CHECKPOINT_START_PATTERN = (
     r"Checkpoint Save : Rank: ([0-9]+) : Step: ([0-9]+) : "
@@ -43,6 +43,11 @@ CHECKPOINT_DELETE_PATTERN = (
 ACCELERATOR_BLOCKED_TIME_PATTERN = (
     r"\[_TrainingEpochLoop\]\.train_dataloader_next\s+"
     r"(?:\|\s+[\d\.]+\s+){2}\|\s+([\d\.]+)\s+\|\s+([\d\.]+)\s+\|"
+)
+
+CHECKPOINT_SIZE_PATTERN = (
+    r"Checkpoint Size : Rank : ([0-9]+) : Step : ([0-9]+) : "
+    r"Bytes : ([0-9]+) : Path: (.*)"
 )
 
 ALL_PATTERNS = [
@@ -75,6 +80,7 @@ class ParsedRawMetrics:
         default_factory=lambda: defaultdict(list)
     )
     data_loading_metrics: List[schema.DataLoadingMetrics] = field(default_factory=list)
+    checkpoint_sizes: List[schema.CheckpointSizeMetrics] = field(default_factory=list)
 
 
 def parse_entries(
@@ -99,6 +105,7 @@ def parse_entries(
                         step=int(m.group(1)),
                         step_duration=float(m.group(2)),
                         step_end_time=ts,
+                        samples_per_second=float(m.group(3)),
                     )
                 )
             except (ValueError, IndexError):
@@ -206,12 +213,28 @@ def parse_entries(
                     f"metrics from: {message}"
                 )
 
+        m = re.search(CHECKPOINT_SIZE_PATTERN, message)
+        if m:
+            try:
+                out.checkpoint_sizes.append(
+                    schema.CheckpointSizeMetrics(
+                        global_rank=int(m.group(1)),
+                        checkpoint_step=int(m.group(2)),
+                        size_bytes=int(m.group(3)),
+                        checkpoint_location=m.group(4),
+                    )
+                )
+            except (ValueError, IndexError):
+                print(f"Warning: Could not parse checkpoint size from: {message}")
+
     return out
 
 
 def build_filter(*, project: str, run_id: str, start_time: str, end_time: str) -> str:
     """Cloud Logging filter mirroring hf.py._scrape_raw_metrics."""
-    regex_or = " OR ".join(f'textPayload =~ "{p}"' for p in ALL_PATTERNS)
+    regex_or = " OR ".join(
+        f'textPayload =~ "{p}"' for p in ALL_PATTERNS + [CHECKPOINT_SIZE_PATTERN]
+    )
     return (
         'resource.type="k8s_container" '
         f'resource.labels.project_id="{project}" '

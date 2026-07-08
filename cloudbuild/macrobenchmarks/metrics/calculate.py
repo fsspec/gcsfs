@@ -39,6 +39,24 @@ def calc_step_time_metrics(step_rows: list) -> dict:
     if per_step_durations:
         out["mean_step_time"] = stats.mean(per_step_durations)
 
+    per_step_sps = [
+        r["samples_per_second"]
+        for r in rows
+        if r["step"] >= first_step + PER_STEP_STABILIZATION_STEPS
+        and r.get("samples_per_second") is not None
+    ]
+    if per_step_sps:
+        out["mean_samples_per_second"] = stats.mean(per_step_sps)
+
+    stable_sps = [
+        r["samples_per_second"]
+        for r in rows
+        if r["step"] >= first_step + STABLE_WINDOW_STABILIZATION_STEPS
+        and r.get("samples_per_second") is not None
+    ]
+    if stable_sps:
+        out["stable_window_avg_samples_per_second"] = stats.mean(stable_sps)
+
     # window metrics need step_end_time.
     end_rows = [r for r in rows if r.get("step_end_time") is not None]
     for label, skip in (
@@ -166,6 +184,40 @@ def calc_data_loading_metrics(dl_rows: list) -> dict:
         "accelerator_blocked_time": row["accelerator_blocked_time"],
         "accelerator_blocked_percent": row["accelerator_blocked_percent"],
     }
+
+
+def calc_throughput_metrics(write_rows: list, size_rows: list) -> dict:
+    out = {}
+
+    written_sizes = [
+        r["size_bytes"] for r in size_rows if r.get("size_bytes") is not None
+    ]
+    if written_sizes:
+        out["checkpoint_size_bytes"] = max(written_sizes)
+
+    size_by_step = {
+        r["checkpoint_step"]: r["size_bytes"]
+        for r in size_rows
+        if r.get("checkpoint_step") is not None and r.get("size_bytes") is not None
+    }
+    write_groups = _durations_by_group(
+        write_rows, ("checkpoint_step", "checkpoint_location")
+    )
+    write_tps = [
+        size_by_step[step] / g["duration"]
+        for (step, _loc), g in write_groups.items()
+        if step in size_by_step and g["duration"] > 0
+    ]
+    if write_tps:
+        out["checkpoint_write_throughput_avg_bytes_per_sec"] = stats.mean(write_tps)
+
+    return out
+
+
+def _restore_throughput(restored_bytes, restore_duration):
+    if restored_bytes is not None and restore_duration:
+        return restored_bytes / restore_duration
+    return None
 
 
 # Maps series to schema columns. `None` mean-column means the series has no mean.
@@ -316,6 +368,7 @@ def build_summary_row(
     restore_rows: list,
     delete_rows: list,
     dl_rows: list,
+    size_rows: list = None,
     system_rows: list = None,
     dimensions: dict = None,
 ) -> dict:
@@ -331,7 +384,14 @@ def build_summary_row(
     row.update(calc_restore_metrics(restore_rows))
     row.update(calc_delete_metrics(delete_rows))
     row.update(calc_data_loading_metrics(dl_rows))
+    row.update(calc_throughput_metrics(write_rows, size_rows or []))
     row.update(calc_system_metrics(system_rows or []))
+    restore_throughput = _restore_throughput(
+        row.get("checkpoint_restored_bytes"),
+        row.get("checkpoint_restore_time_initial"),
+    )
+    if restore_throughput is not None:
+        row["checkpoint_restore_throughput_avg_bytes_per_sec"] = restore_throughput
     # Derived here, not in calc_system_metrics, since it needs executed_steps
     # and global_batch_size alongside the raw dataset columns just produced.
     ratio = dataset_read_amplification_ratio(
@@ -486,6 +546,7 @@ def main(argv=None) -> None:
     restore_rows = tables.restore_rows
     delete_rows = tables.delete_rows
     dl_rows = tables.dl_rows
+    size_rows = tables.size_rows
     system_rows = tables.system_rows
 
     validate_required_metrics(
@@ -546,6 +607,7 @@ def main(argv=None) -> None:
         restore_rows=restore_rows,
         delete_rows=delete_rows,
         dl_rows=dl_rows,
+        size_rows=size_rows,
         system_rows=system_rows,
         dimensions=dimensions,
     )
