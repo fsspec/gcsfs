@@ -12,7 +12,11 @@ set -e
 # at the suite's worker count. These MUST match the per-suite PYTEST_XDIST_WORKERS
 # passed to the test steps, or workers will reference buckets that don't exist.
 #
-# Note: Variables like $PROJECT_ID, $REGION, $ZONE are passed via 'env' in cloudbuild.yaml
+# Initialize gcloud configuration sequentially.
+# This prevents a race condition (SQLite DB locking) where multiple parallel
+# background tasks attempt to initialize ~/.config/gcloud/ simultaneously,
+# which leads to "You do not currently have an active account selected." errors.
+gcloud config list > /dev/null
 
 WORKERS_STANDARD="${WORKERS_STANDARD:-1}"
 WORKERS_HNS="${WORKERS_HNS:-1}"
