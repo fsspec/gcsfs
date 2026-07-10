@@ -14,7 +14,7 @@ create_typed_bucket "$CHECKPOINT_BUCKET"
 # read-amplification metric.
 create_typed_bucket "$DATASET_BUCKET"
 SRC_OBJECT_PATH=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
-if [ "${_BUCKET_TYPE}" = "zonal" ]; then
+if [ "${_BUCKET_TYPE}" = "zonal" ] || [ "${DATASET_SRC_IS_RAPID:-no}" = "yes" ]; then
   # RAPID (zonal) objects lack the server-side rewrite rsync uses, so daisy-chain
   # (download+reupload)
   ulimit -n 65536

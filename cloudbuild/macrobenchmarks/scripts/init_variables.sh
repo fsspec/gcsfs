@@ -73,11 +73,16 @@ validate_bucket() {
   JSON=$(gcloud storage buckets describe "gs://$BUCKET" --project=${PROJECT_ID} --format=json 2>/dev/null) || {
     echo "ERROR: cannot describe $KIND bucket gs://$BUCKET (missing or no read access)."; exit 1; }
   LOC=$(echo "$JSON" | python3 -c "import sys,json;print((json.load(sys.stdin).get('location') or '').lower())")
+  IS_RAPID=no; echo "$JSON" | grep -qiF 'RAPID' && IS_RAPID=yes
+  if [ "$KIND" = dataset ]; then
+    echo "export DATASET_SRC_IS_RAPID=${IS_RAPID}" >> "${BUILD_VARS_FILE}"
+    echo "OK: dataset source gs://$BUCKET ($LOC, rapid=$IS_RAPID) will be copied into a fresh ${_BUCKET_TYPE} bucket in ${REGION}."
+    return 0
+  fi
   case "$LOC" in
     $REGION|$REGION-*) : ;;
     *) echo "ERROR: $KIND bucket gs://$BUCKET is in '$LOC', not region '$REGION'."; exit 1 ;;
   esac
-  IS_RAPID=no; echo "$JSON" | grep -qiF 'RAPID' && IS_RAPID=yes
   case "${_BUCKET_TYPE}" in
     regional)
       if [ "$IS_RAPID" = yes ]; then echo "ERROR: regional run but $KIND bucket gs://$BUCKET is RAPID/zonal."; exit 1; fi ;;
