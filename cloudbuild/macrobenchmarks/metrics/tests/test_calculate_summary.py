@@ -212,6 +212,21 @@ def test_resume_validation_rejects_missing_observed_checkpoint_write():
     assert exc.value.code == 1
 
 
+def test_full_pass_expected_steps_requires_at_least_one_step():
+    step_rows = [
+        {"step": s, "step_duration": 1.0, "step_end_time": float(s)} for s in range(3)
+    ]
+    calculate.validate_required_metrics(
+        step_rows=step_rows, write_rows=[], expected_steps=-1
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        calculate.validate_required_metrics(
+            step_rows=[], write_rows=[], expected_steps=-1
+        )
+    assert exc.value.code == 1
+
+
 def _write_step_csv(in_dir):
     (in_dir / "training_time").mkdir(parents=True)
     with open(in_dir / "training_time" / "step_time.csv", "w", newline="") as f:
@@ -505,6 +520,35 @@ def test_main_emits_run_dimension_columns(tmp_path):
     assert rows[0]["checkpoint_interval"] == "25"
     assert rows[0]["dataset_path"] == "gs://ds/parquet"
     assert rows[0]["model_id"] == "gs://huggingface-model-weights/Llama-3.1-8B"
+
+
+def test_main_full_pass_records_observed_step_count(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--expected-steps",
+            "-1",
+            "--steps",
+            "-1",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["steps"] == "2"
 
 
 def test_main_emits_training_strategy_column(tmp_path):
