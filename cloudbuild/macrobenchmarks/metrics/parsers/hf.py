@@ -269,24 +269,24 @@ def iter_log_entries(
 ) -> Iterable[LogEntry]:
     if retry is None:
         retry = _default_read_retry()
+
+    def _fetch(token):
+        request = {
+            "resource_names": [f"projects/{project}"],
+            "filter": filter_string,
+            "order_by": "timestamp asc",
+            "page_size": page_size,
+            "page_token": token,
+        }
+        pager = client.list_log_entries(request=request)
+        page = next(pager.pages, None)
+        if page is None:
+            return None, None
+        return page.entries, page.next_page_token
+
     page_token = None
     while True:
-
-        def _fetch(token=page_token):
-            request = {
-                "resource_names": [f"projects/{project}"],
-                "filter": filter_string,
-                "order_by": "timestamp asc",
-                "page_size": page_size,
-                "page_token": token,
-            }
-            pager = client.list_log_entries(request=request)
-            page = next(pager.pages, None)
-            if page is None:
-                return None, None
-            return page.entries, page.next_page_token
-
-        page, page_token = retry(_fetch)()
+        page, page_token = retry(_fetch)(page_token)
         if page is None:
             return
         for entry in page:
