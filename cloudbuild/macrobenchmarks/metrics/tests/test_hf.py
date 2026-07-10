@@ -1,3 +1,4 @@
+import pytest
 from metrics.parsers import hf
 
 # Log lines exactly as llama_3_1_8b_cpu_sim.py emits them (the strings whose
@@ -128,6 +129,85 @@ def test_checkpoint_size_parsed():
     assert row.size_bytes == 17179869184
     assert row.checkpoint_location == "gs://b/ckpt/r/llama-00-25.ckpt"
     assert row.global_rank == 0
+
+
+class _FakeGapicPage:
+    def __init__(self, entries, next_page_token):
+        self.entries = entries
+        self.next_page_token = next_page_token
+
+
+class _FakeGapicPager:
+    def __init__(self, pages, fail=False):
+        self._pages = pages
+        self._fail = fail
+
+    @property
+    def pages(self):
+        if self._fail:
+            from google.api_core import exceptions as gexc
+
+            raise gexc.ResourceExhausted("quota exceeded")
+        yield from self._pages
+
+
+class _FakeClient:
+    def __init__(self):
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        self.project = "test-proj"
+        self.calls = 0
+        self.logging_api = MagicMock()
+        ts1 = datetime.fromtimestamp(1.0, tz=timezone.utc)
+        ts2 = datetime.fromtimestamp(2.0, tz=timezone.utc)
+
+        page1 = _FakeGapicPage(
+            [
+                MagicMock(
+                    text_payload="hello",
+                    json_payload=None,
+                    timestamp=ts1,
+                    spec=["text_payload", "json_payload", "timestamp"],
+                ),
+                MagicMock(
+                    text_payload="world",
+                    json_payload=None,
+                    timestamp=ts2,
+                    spec=["text_payload", "json_payload", "timestamp"],
+                ),
+            ],
+            next_page_token="",
+        )
+
+        def _list_log_entries(request):
+            assert request["page_size"] == hf._MAX_PAGE_SIZE
+            fail = self.calls == 0
+            self.calls += 1
+            return _FakeGapicPager([page1], fail=fail)
+
+        self.list_log_entries = _list_log_entries
+
+
+def test_iter_log_entries_retries_on_quota_error():
+    retries = pytest.importorskip("google.api_core.retry")
+    gexc = pytest.importorskip("google.api_core.exceptions")
+
+    fast_retry = retries.Retry(
+        predicate=retries.if_exception_type(gexc.ResourceExhausted),
+        initial=0.0,
+        maximum=0.0,
+        multiplier=1.0,
+        deadline=30.0,
+    )
+    client = _FakeClient()
+    entries = list(
+        hf.iter_log_entries(client, "test-proj", "some-filter", retry=fast_retry)
+    )
+
+    assert client.calls == 2
+    assert [e.message for e in entries] == ["hello", "world"]
+    assert [e.timestamp for e in entries] == [1.0, 2.0]
 
 
 def test_build_filter_includes_all_patterns():

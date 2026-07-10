@@ -90,6 +90,7 @@ logging.info("simulated_step_compute_seconds: %s", SIMULATED_STEP_COMPUTE_SECOND
 
 # ---- Config (env-overridable) ---------------------------------------------
 preset_max_steps = int(os.getenv("MAX_STEPS", "1000"))
+full_pass = preset_max_steps < 0
 # Default 1 (not the launcher-overridden 4 this once carried): the launcher and
 # the Helm template both set GRADIENT_ACCUMULATION_STEPS=1, so 1 is the
 # effective value -- the standalone smoke test should agree rather than
@@ -99,7 +100,8 @@ per_device_train_batch_size = int(os.getenv("PER_DEVICE_TRAIN_BATCH_SIZE", "8"))
 dataloader_num_workers = int(os.getenv("DATALOADER_NUM_WORKERS", "16"))
 checkpoint_load_path = os.getenv("CKPT_LOAD_PATH", None)
 checkpoint_write_interval = int(os.getenv("CHECKPOINT_WRITE_INTERVAL", "25"))
-checkpoint_write_interval = min(checkpoint_write_interval, preset_max_steps)
+if not full_pass:
+    checkpoint_write_interval = min(checkpoint_write_interval, preset_max_steps)
 checkpoints_to_keep = int(os.getenv("CKPT_TO_KEEP", "1"))
 model_id = os.getenv("MODEL_ID", "meta-llama/Llama-3.1-8B")
 
@@ -587,7 +589,7 @@ if __name__ == "__main__":
     trainer = pl.Trainer(
         max_epochs=1,
         num_nodes=num_nodes,
-        max_steps=preset_max_steps,
+        max_steps=-1 if full_pass else preset_max_steps,
         accumulate_grad_batches=gradient_accumulation_steps,
         precision="bf16-mixed",
         enable_checkpointing=bool(checkpoint_write_path),

@@ -426,16 +426,17 @@ def validate_required_metrics(
         if r.get("step") is not None and r.get("step_duration") is not None
     }
     if expected_steps:
+        required_steps = 1 if expected_steps < 0 else expected_steps
         if resume_run:
-            if not observed_steps or max(observed_steps) < expected_steps:
+            if not observed_steps or max(observed_steps) < required_steps:
                 found = max(observed_steps) if observed_steps else "none"
                 _fail_validation(
-                    f"expected resumed run to reach step {expected_steps}, "
+                    f"expected resumed run to reach step {required_steps}, "
                     f"found {found}"
                 )
-        elif len(observed_steps) < expected_steps:
+        elif len(observed_steps) < required_steps:
             _fail_validation(
-                f"expected at least {expected_steps} step metrics, found "
+                f"expected at least {required_steps} step metrics, found "
                 f"{len(observed_steps)}"
             )
 
@@ -578,6 +579,10 @@ def main(argv=None) -> None:
             args.per_device_batch * args.grad_accum * args.nodes * args.ranks_per_node
         )
 
+    recorded_steps = args.steps
+    if args.steps is not None and args.steps < 0:
+        recorded_steps = executed_step_count(step_rows)
+
     dimensions = {
         "bucket_type": args.bucket_type,
         "zone": args.zone,
@@ -585,7 +590,7 @@ def main(argv=None) -> None:
         "machine_type": args.machine_type,
         "nodes": args.nodes,
         "ranks_per_node": args.ranks_per_node,
-        "steps": args.steps,
+        "steps": recorded_steps,
         "checkpoint_interval": args.checkpoint_interval,
         "checkpoints_to_keep": args.checkpoints_to_keep,
         "dataset_path": args.dataset_path,
