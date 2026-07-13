@@ -35,8 +35,13 @@ workload:
   gradAccum: 1
   dataloaderWorkers: 16
   modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
-  # Parallel training strategy: ddp (default), fsdp_sharded, or fsdp_full.
+  # ddp (default), fsdp_sharded, fsdp_full, model_parallel_sharded, or
+  # model_parallel_full. model_parallel_* uses the TP/DP knobs below.
   trainingStrategy: ddp
+  # ModelParallelStrategy mesh (model_parallel_* only). TP x DP must equal
+  # nodes x ranksPerNode. Default: TP=4 intra-node, DP=2.
+  tensorParallelSize: 4
+  dataParallelSize: 2
   # Per-step simulated compute time in seconds (stands in for GPU compute).
   simulatedStepComputeSeconds: 1.0
   # Packages installed/overridden for the run (gcsfs under test and/or a custom

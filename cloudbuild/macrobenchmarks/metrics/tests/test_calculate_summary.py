@@ -579,6 +579,75 @@ def test_main_emits_training_strategy_column(tmp_path):
     assert "training_strategy" in calculate.SUMMARY_FIELDNAMES
 
 
+def test_main_emits_model_parallel_training_strategy(tmp_path):
+    # model_parallel_* round-trips through training_strategy, with TP/DP in the numeric columns.
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--training-strategy",
+            "model_parallel_sharded",
+            "--tensor-parallel-size",
+            "4",
+            "--data-parallel-size",
+            "2",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["training_strategy"] == "model_parallel_sharded"
+    assert rows[0]["tensor_parallel_size"] == "4"
+    assert rows[0]["data_parallel_size"] == "2"
+    assert "tensor_parallel_size" in calculate.SUMMARY_FIELDNAMES
+    assert "data_parallel_size" in calculate.SUMMARY_FIELDNAMES
+
+
+def test_tp_dp_are_na_for_non_model_parallel_run(tmp_path):
+    # ddp run must not be labeled TP=4.
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--training-strategy",
+            "ddp",
+            "--tensor-parallel-size",
+            "4",
+            "--data-parallel-size",
+            "2",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["tensor_parallel_size"] == "N/A"
+    assert rows[0]["data_parallel_size"] == "N/A"
+
+
 def test_main_emits_simulated_step_compute_seconds_column(tmp_path):
     in_dir = tmp_path / "raw"
     _write_step_csv(in_dir)

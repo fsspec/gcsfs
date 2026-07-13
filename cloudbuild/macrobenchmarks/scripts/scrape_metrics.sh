@@ -47,6 +47,8 @@ run_calculate() {
       --dataset-path "${_DATASET_PATH}" --model-id "${_MODEL_ID}" \
       --image "${_IMAGE}" \
       --training-strategy "${_TRAINING_STRATEGY}" \
+      --tensor-parallel-size "${_TENSOR_PARALLEL_SIZE}" \
+      --data-parallel-size "${_DATA_PARALLEL_SIZE}" \
       --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}" \
       --per-device-batch "${_PER_DEVICE_BATCH}" --grad-accum "${_GRAD_ACCUM}" \
       --dataloader-workers "${_DATALOADER_WORKERS}"

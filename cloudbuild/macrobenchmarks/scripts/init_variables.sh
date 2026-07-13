@@ -24,7 +24,8 @@ esac
 # Reject an unknown parallel strategy before provisioning anything.
 case "${_TRAINING_STRATEGY:-ddp}" in
   ddp|fsdp_sharded|fsdp_full) ;;
-  *) echo "ERROR: _TRAINING_STRATEGY must be ddp, fsdp_sharded, or fsdp_full (got '${_TRAINING_STRATEGY}')."; exit 1 ;;
+  model_parallel_sharded|model_parallel_full) ;;
+  *) echo "ERROR: _TRAINING_STRATEGY must be ddp, fsdp_sharded, fsdp_full, or a model_parallel_* value (got '${_TRAINING_STRATEGY}')."; exit 1 ;;
 esac
 # Reject an unknown seed-checkpoint toggle before provisioning anything.
 case "${_SEED_CHECKPOINT:-true}" in
@@ -56,12 +57,26 @@ REGION="${ZONE%-*}"
 for pair in "_NODES=${_NODES}" "_RANKS_PER_NODE=${_RANKS_PER_NODE}" \
   "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}" "_CKPT_TO_KEEP=${_CKPT_TO_KEEP}" \
   "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}" "_GRAD_ACCUM=${_GRAD_ACCUM}" \
-  "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"; do
+  "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}" \
+  "_TENSOR_PARALLEL_SIZE=${_TENSOR_PARALLEL_SIZE}" \
+  "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}"; do
   key=${pair%%=*}; val=${pair#*=}
   if ! echo "$val" | grep -Eq '^[1-9][0-9]*$'; then
     echo "ERROR: $key must be a positive integer (got '$val')."; exit 1
   fi
 done
+# model_parallel mesh must tile the world (TP * DP == nodes * ranks_per_node);
+# fail fast before provisioning.
+case "${_TRAINING_STRATEGY:-ddp}" in
+  model_parallel_*)
+    WORLD=$(( _NODES * _RANKS_PER_NODE ))
+    MESH=$(( _TENSOR_PARALLEL_SIZE * _DATA_PARALLEL_SIZE ))
+    if [ "${MESH}" -ne "${WORLD}" ]; then
+      echo "ERROR: _TENSOR_PARALLEL_SIZE * _DATA_PARALLEL_SIZE (${_TENSOR_PARALLEL_SIZE} * ${_DATA_PARALLEL_SIZE} = ${MESH}) must equal _NODES * _RANKS_PER_NODE (${_NODES} * ${_RANKS_PER_NODE} = ${WORLD})."
+      exit 1
+    fi
+    ;;
+esac
 # Validate that operator-supplied buckets actually match _BUCKET_TYPE and the
 # run's region/zone. Project-owned buckets are describable by the build SA
 # (storage admin), so these are hard fail-fast (nothing is provisioned yet).
