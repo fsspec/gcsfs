@@ -587,6 +587,10 @@ class LoggedModelParallelStrategy(ModelParallelStrategy):
             time.time(),
             checkpoint_path,
         )
+        # Restore drops AdamW state for frozen params; refill so later
+        # checkpoints include moments, not just weights.
+        for optimizer in self.optimizers:
+            LlamaLitModel._materialize_adamw_state(optimizer)
         return checkpoint
 
 
