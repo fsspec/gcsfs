@@ -90,6 +90,8 @@ spec:
                 value: "{{ $ranksPerNode }}"
               - name: MAX_STEPS
                 value: "{{ $root.Values.workload.steps }}"
+              - name: NUM_TRAIN_EPOCHS
+                value: "{{ $root.Values.workload.epochs }}"
               {{- if $root.Values.workload.hfToken }}
               - name: HF_TOKEN
                 value: "{{ $root.Values.workload.hfToken }}"
@@ -120,6 +122,10 @@ spec:
                 value: "{{ $root.Values.workload.gradAccum }}"
               - name: DATALOADER_NUM_WORKERS
                 value: "{{ $root.Values.workload.dataloaderWorkers }}"
+              - name: SHUFFLE_BUFFER_SIZE
+                value: "{{ $root.Values.workload.shuffleBufferSize }}"
+              - name: DATALOADER_PREFETCH_FACTOR
+                value: "{{ $root.Values.workload.dataloaderPrefetchFactor }}"
               - name: REQUIREMENTS
                 value: "{{ $root.Values.workload.requirements }}"
               {{- if $root.Values.workload.envs }}

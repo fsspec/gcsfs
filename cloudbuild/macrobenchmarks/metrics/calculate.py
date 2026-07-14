@@ -540,6 +540,9 @@ def main(argv=None) -> None:
     parser.add_argument("--per-device-batch", type=int)
     parser.add_argument("--grad-accum", type=int)
     parser.add_argument("--dataloader-workers", type=int)
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--shuffle-buffer-size", type=int)
+    parser.add_argument("--dataloader-prefetch-factor", type=int)
     parser.add_argument("--image")
     args = parser.parse_args(argv)
 
@@ -603,6 +606,9 @@ def main(argv=None) -> None:
         "gradient_accumulation_steps": args.grad_accum,
         "global_batch_size": global_batch_size,
         "dataloader_num_workers": args.dataloader_workers,
+        "num_train_epochs": args.epochs,
+        "shuffle_buffer_size": args.shuffle_buffer_size,
+        "dataloader_prefetch_factor": args.dataloader_prefetch_factor,
         "image": args.image,
     }
     # TP/DP apply to model_parallel only; omitting them for ddp/fsdp lets

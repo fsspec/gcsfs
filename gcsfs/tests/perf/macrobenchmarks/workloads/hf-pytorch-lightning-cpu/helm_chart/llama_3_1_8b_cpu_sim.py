@@ -24,6 +24,9 @@ Optional env vars: ``MODEL_ID`` (default ``meta-llama/Llama-3.1-8B``; may be
 ``gs://bucket/path`` for a launcher pre-downloaded copy), ``CKPT_WRITE_PATH``,
 ``MAX_STEPS``, ``CHECKPOINT_WRITE_INTERVAL``, ``TRAINING_STRATEGY``, etc.
 
+``NUM_TRAIN_EPOCHS`` (default 3) bounds the run if ``MAX_STEPS=-1``.
+``SHUFFLE_BUFFER_SIZE`` (default 10000) and ``DATALOADER_PREFETCH_FACTOR`` (default 2) are Helm-injected; defaults are for standalone runs.
+
 ``TRAINING_STRATEGY`` (default ``ddp``; ``fsdp_sharded`` shards the model and
 writes a per-rank sharded/distributed checkpoint; ``fsdp_full`` shards the
 model but consolidates to a single rank-0-written checkpoint at save time,
@@ -66,6 +69,8 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 from torch.utils.data import DataLoader
+from lightning.pytorch.strategies import DDPStrategy, FSDPStrategy
+from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 # ---- Logging --------------------------------------------------------------
@@ -101,6 +106,9 @@ logging.info("simulated_step_compute_seconds: %s", SIMULATED_STEP_COMPUTE_SECOND
 # ---- Config (env-overridable) ---------------------------------------------
 preset_max_steps = int(os.getenv("MAX_STEPS", "1000"))
 full_pass = preset_max_steps < 0
+# Binds if MAX_STEPS=-1.
+num_train_epochs = int(os.getenv("NUM_TRAIN_EPOCHS", "3"))
+logging.info("num_train_epochs: %d", num_train_epochs)
 # Default 1 (not the launcher-overridden 4 this once carried): the launcher and
 # the Helm template both set GRADIENT_ACCUMULATION_STEPS=1, so 1 is the
 # effective value -- the standalone smoke test should agree rather than
@@ -114,6 +122,14 @@ if not full_pass:
     checkpoint_write_interval = min(checkpoint_write_interval, preset_max_steps)
 checkpoints_to_keep = int(os.getenv("CKPT_TO_KEEP", "1"))
 model_id = os.getenv("MODEL_ID", "meta-llama/Llama-3.1-8B")
+
+shuffle_buffer_size = int(os.getenv("SHUFFLE_BUFFER_SIZE", "10000"))
+logging.info("shuffle_buffer_size: %d", shuffle_buffer_size)
+
+SHUFFLE_SEED = 42
+
+dataloader_prefetch_factor = int(os.getenv("DATALOADER_PREFETCH_FACTOR", "2"))
+logging.info("dataloader_prefetch_factor: %d", dataloader_prefetch_factor)
 
 # Parallel training strategy. ``ddp`` (default) replicates the frozen model on
 # every rank and rank 0 writes the full checkpoint; ``fsdp_sharded`` shards the
@@ -237,6 +253,49 @@ def collate_fn(examples):
     )
     tokens["labels"] = tokens["input_ids"].clone()
     return tokens
+
+
+def build_train_dataset(path, *, shuffle_buffer_size, shuffle_seed, rank, world_size):
+    """Build the streaming dataset, sharded by node.
+
+    - Projection is pushed to GCS via columns=["text"].
+    - Shuffling permutes shard list before split_dataset_by_node.
+    - max_buffer_input_shards=1 prevents shard collapse (keeps num_shards > 1).
+    - Requires num_shards % world_size == 0 to avoid full dataset reads on all nodes.
+    """
+    ds = datasets.load_dataset(
+        "parquet",
+        data_files=f"{path}/*.parquet",
+        split="train",
+        streaming=True,
+        columns=["text"],
+    )
+    if shuffle_buffer_size > 0:
+        ds = ds.shuffle(
+            seed=shuffle_seed,
+            buffer_size=shuffle_buffer_size,
+            max_buffer_input_shards=1,
+        )
+    if world_size > 1:
+        ds = datasets.distributed.split_dataset_by_node(
+            ds, rank=rank, world_size=world_size
+        )
+    return ds
+
+
+def build_train_dataloader(ds, *, batch_size, num_workers, prefetch_factor):
+    """Stateful loader to resume stream from checkpoint instead of rewinding.
+
+    persistent_workers keeps GCS clients alive across epochs.
+    """
+    return StatefulDataLoader(
+        ds,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+    )
 
 
 # ---- LightningModule ------------------------------------------------------
@@ -383,6 +442,17 @@ class LlamaLitModel(pl.LightningModule):
 
 
 # ---- Callbacks ------------------------------------------------------------
+class DatasetEpochCallback(Callback):
+    """Advances HF dataset shuffle seed per epoch (workaround for Lightning + IterableDataset)."""
+
+    def __init__(self, dataset):
+        super().__init__()
+        self._dataset = dataset
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self._dataset.set_epoch(trainer.current_epoch)
+
+
 class StepTimeCallback(Callback):
     """Logs ``step_time`` and ``throughput`` every optimizer step."""
 
@@ -655,32 +725,21 @@ if __name__ == "__main__":
     logging.info("[INFO] Loading %s dataset", dataset_path)
     logging.info("[INFO] Using HF dataloader")
     load_start = time.perf_counter()
-    ds = datasets.load_dataset(
-        "parquet",
-        data_files=f"{dataset_path}/*.parquet",
-        split="train",
-        streaming=True,
+    ds = build_train_dataset(
+        dataset_path,
+        shuffle_buffer_size=shuffle_buffer_size,
+        shuffle_seed=SHUFFLE_SEED,
+        rank=int(os.environ.get("RANK", "0")),
+        world_size=world_size,
     )
     logging.info(
         f"[INFO] HF dataloader prepared in {time.perf_counter() - load_start:.4f}s"
     )
-    # Shard the streaming dataset across DDP ranks. torchrun sets RANK and
-    # WORLD_SIZE before Python starts, so reading from env works at this point
-    # (torch.distributed isn't initialized until trainer.fit). Without this,
-    # every rank iterates the same parquet files -- 8x the GCS read traffic
-    # and duplicate training samples.
-    if world_size > 1:
-        ds = datasets.distributed.split_dataset_by_node(
-            ds,
-            rank=int(os.environ["RANK"]),
-            world_size=world_size,
-        )
-    train_loader = DataLoader(
+    train_loader = build_train_dataloader(
         ds,
         batch_size=per_device_train_batch_size,
-        collate_fn=collate_fn,
         num_workers=dataloader_num_workers,
-        persistent_workers=dataloader_num_workers > 0,
+        prefetch_factor=dataloader_prefetch_factor,
     )
 
     # ---- Model: real Llama 8B in bf16, frozen -------------------------------
@@ -693,7 +752,7 @@ if __name__ == "__main__":
     )
 
     # ---- Callbacks ----------------------------------------------------------
-    callbacks = [DeviceStatsMonitor(cpu_stats=True)]
+    callbacks = [DeviceStatsMonitor(cpu_stats=True), DatasetEpochCallback(ds)]
     if checkpoint_write_path:
         callbacks.append(
             LoggedModelCheckpoint(
@@ -718,7 +777,7 @@ if __name__ == "__main__":
     # setting; since training_step doesn't actually forward through
     # the Llama model, CPU bf16 op limitations don't affect correctness.
     trainer = pl.Trainer(
-        max_epochs=1,
+        max_epochs=num_train_epochs,
         num_nodes=num_nodes,
         max_steps=-1 if full_pass else preset_max_steps,
         accumulate_grad_batches=gradient_accumulation_steps,

@@ -51,7 +51,10 @@ run_calculate() {
       --data-parallel-size "${_DATA_PARALLEL_SIZE}" \
       --simulated-step-compute-seconds "${_SIMULATED_STEP_COMPUTE_SECONDS}" \
       --per-device-batch "${_PER_DEVICE_BATCH}" --grad-accum "${_GRAD_ACCUM}" \
-      --dataloader-workers "${_DATALOADER_WORKERS}"
+      --dataloader-workers "${_DATALOADER_WORKERS}" \
+      --epochs "${_EPOCHS}" \
+      --shuffle-buffer-size "${_SHUFFLE_BUFFER_SIZE}" \
+      --dataloader-prefetch-factor "${_DATALOADER_PREFETCH_FACTOR}"
 }
 # Cloud Logging ingestion lags pod termination by seconds-to-minutes, and the
 # last logs emitted (the final checkpoint write and the profiler summary that
