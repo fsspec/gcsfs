@@ -25,7 +25,8 @@ Optional env vars: ``MODEL_ID`` (default ``meta-llama/Llama-3.1-8B``; may be
 ``MAX_STEPS``, ``CHECKPOINT_WRITE_INTERVAL``, ``TRAINING_STRATEGY``, etc.
 
 ``NUM_TRAIN_EPOCHS`` (default 3) bounds the run if ``MAX_STEPS=-1``.
-``SHUFFLE_BUFFER_SIZE`` (default 10000) and ``DATALOADER_PREFETCH_FACTOR`` (default 2) are Helm-injected; defaults are for standalone runs.
+``SHUFFLE_BUFFER_SIZE`` (default 10000) and ``DATALOADER_PREFETCH_FACTOR``
+(default 2) are Helm-injected; defaults are for standalone runs.
 
 ``TRAINING_STRATEGY`` (default ``ddp``; ``fsdp_sharded`` shards the model and
 writes a per-rank sharded/distributed checkpoint; ``fsdp_full`` shards the
@@ -68,8 +69,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     parallelize_module,
 )
-from torch.utils.data import DataLoader
-from lightning.pytorch.strategies import DDPStrategy, FSDPStrategy
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
@@ -125,6 +124,11 @@ model_id = os.getenv("MODEL_ID", "meta-llama/Llama-3.1-8B")
 
 shuffle_buffer_size = int(os.getenv("SHUFFLE_BUFFER_SIZE", "10000"))
 logging.info("shuffle_buffer_size: %d", shuffle_buffer_size)
+
+shuffle_max_buffer_input_shards = int(
+    os.getenv("SHUFFLE_MAX_BUFFER_INPUT_SHARDS", "10")
+)
+logging.info("shuffle_max_buffer_input_shards: %d", shuffle_max_buffer_input_shards)
 
 SHUFFLE_SEED = 42
 
@@ -255,13 +259,23 @@ def collate_fn(examples):
     return tokens
 
 
-def build_train_dataset(path, *, shuffle_buffer_size, shuffle_seed, rank, world_size):
+def build_train_dataset(
+    path,
+    *,
+    shuffle_buffer_size,
+    shuffle_seed,
+    max_buffer_input_shards,
+    rank,
+    world_size,
+):
     """Build the streaming dataset, sharded by node.
 
     - Projection is pushed to GCS via columns=["text"].
     - Shuffling permutes shard list before split_dataset_by_node.
-    - max_buffer_input_shards=1 prevents shard collapse (keeps num_shards > 1).
-    - Requires num_shards % world_size == 0 to avoid full dataset reads on all nodes.
+    - max_buffer_input_shards improves shuffle quality but divides num_shards.
+      Unless the result is a multiple of world_size, split_dataset_by_node
+      falls back to per-sample round-robin and every rank reads the whole
+      dataset (world_size x read amplification); warned about below.
     """
     ds = datasets.load_dataset(
         "parquet",
@@ -274,8 +288,9 @@ def build_train_dataset(path, *, shuffle_buffer_size, shuffle_seed, rank, world_
         ds = ds.shuffle(
             seed=shuffle_seed,
             buffer_size=shuffle_buffer_size,
-            max_buffer_input_shards=1,
+            max_buffer_input_shards=max_buffer_input_shards,
         )
+    logging.info("dataset_num_shards: %d", ds.num_shards)
     if world_size > 1:
         ds = datasets.distributed.split_dataset_by_node(
             ds, rank=rank, world_size=world_size
@@ -287,6 +302,11 @@ def build_train_dataloader(ds, *, batch_size, num_workers, prefetch_factor):
     """Stateful loader to resume stream from checkpoint instead of rewinding.
 
     persistent_workers keeps GCS clients alive across epochs.
+
+    HF checkpoints the shuffle buffer's position but not its contents, so a
+    resumed run skips shuffle_buffer_size * num_workers samples per rank. That
+    is invisible in fixed-step mode; in full-pass mode the epoch ends early, so
+    don't compare a resumed full pass against a clean one.
     """
     return StatefulDataLoader(
         ds,
@@ -729,6 +749,7 @@ if __name__ == "__main__":
         dataset_path,
         shuffle_buffer_size=shuffle_buffer_size,
         shuffle_seed=SHUFFLE_SEED,
+        max_buffer_input_shards=shuffle_max_buffer_input_shards,
         rank=int(os.environ.get("RANK", "0")),
         world_size=world_size,
     )

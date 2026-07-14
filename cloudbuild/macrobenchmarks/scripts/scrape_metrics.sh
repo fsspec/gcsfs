@@ -54,6 +54,7 @@ run_calculate() {
       --dataloader-workers "${_DATALOADER_WORKERS}" \
       --epochs "${_EPOCHS}" \
       --shuffle-buffer-size "${_SHUFFLE_BUFFER_SIZE}" \
+      --shuffle-max-buffer-input-shards "${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}" \
       --dataloader-prefetch-factor "${_DATALOADER_PREFETCH_FACTOR}"
 }
 # Cloud Logging ingestion lags pod termination by seconds-to-minutes, and the

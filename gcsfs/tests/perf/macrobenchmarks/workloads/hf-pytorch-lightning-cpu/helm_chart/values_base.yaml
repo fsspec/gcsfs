@@ -38,6 +38,10 @@ workload:
   dataloaderWorkers: 16
   # HF streaming shuffle buffer size (0 to disable). Seed is fixed at 42.
   shuffleBufferSize: 10000
+  # Shards the shuffle buffer interleaves. Higher = better mixing, but it divides
+  # the shard count; keep the result a multiple of nodes x ranksPerNode or every
+  # rank re-reads the whole dataset.
+  shuffleMaxBufferInputShards: 10
   # Batches to prefetch per dataloader worker.
   dataloaderPrefetchFactor: 2
   modelId: "gs://huggingface-model-weights/Llama-3.1-8B"

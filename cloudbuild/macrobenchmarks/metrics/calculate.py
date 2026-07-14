@@ -542,6 +542,7 @@ def main(argv=None) -> None:
     parser.add_argument("--dataloader-workers", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--shuffle-buffer-size", type=int)
+    parser.add_argument("--shuffle-max-buffer-input-shards", type=int)
     parser.add_argument("--dataloader-prefetch-factor", type=int)
     parser.add_argument("--image")
     args = parser.parse_args(argv)
@@ -608,6 +609,7 @@ def main(argv=None) -> None:
         "dataloader_num_workers": args.dataloader_workers,
         "num_train_epochs": args.epochs,
         "shuffle_buffer_size": args.shuffle_buffer_size,
+        "shuffle_max_buffer_input_shards": args.shuffle_max_buffer_input_shards,
         "dataloader_prefetch_factor": args.dataloader_prefetch_factor,
         "image": args.image,
     }

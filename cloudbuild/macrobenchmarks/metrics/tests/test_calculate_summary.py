@@ -648,6 +648,37 @@ def test_tp_dp_are_na_for_non_model_parallel_run(tmp_path):
     assert rows[0]["data_parallel_size"] == "N/A"
 
 
+def test_main_emits_shuffle_max_buffer_input_shards_column(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--shuffle-buffer-size",
+            "10000",
+            "--shuffle-max-buffer-input-shards",
+            "4",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["shuffle_buffer_size"] == "10000"
+    assert rows[0]["shuffle_max_buffer_input_shards"] == "4"
+    assert "shuffle_max_buffer_input_shards" in calculate.SUMMARY_FIELDNAMES
+
+
 def test_main_emits_simulated_step_compute_seconds_column(tmp_path):
     in_dir = tmp_path / "raw"
     _write_step_csv(in_dir)
