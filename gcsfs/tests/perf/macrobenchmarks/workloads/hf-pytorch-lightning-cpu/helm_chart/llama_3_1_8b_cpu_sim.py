@@ -54,7 +54,17 @@ import transformers
 from lightning.pytorch.callbacks import Callback, DeviceStatsMonitor, ModelCheckpoint
 from lightning.pytorch.loops.fetchers import _PrefetchDataFetcher
 from lightning.pytorch.loops.fit_loop import _FitLoop as FitLoop
-from lightning.pytorch.strategies import DDPStrategy, FSDPStrategy
+from lightning.pytorch.strategies import (
+    DDPStrategy,
+    FSDPStrategy,
+    ModelParallelStrategy,
+)
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    RowwiseParallel,
+    parallelize_module,
+)
 from torch.utils.data import DataLoader
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
@@ -109,14 +119,29 @@ model_id = os.getenv("MODEL_ID", "meta-llama/Llama-3.1-8B")
 # every rank and rank 0 writes the full checkpoint; ``fsdp_sharded`` shards the
 # model and writes a sharded (distributed) checkpoint where every rank writes
 # its own shard concurrently; ``fsdp_full`` shards the model but consolidates
-# to a single rank-0-written checkpoint at save time, like ``ddp``. Validate
-# eagerly -- before the 16 GB model load -- so a typo fails fast instead of
-# after a long download.
+# to a single rank-0-written checkpoint at save time, like ``ddp``.
+# ``model_parallel_*`` selects ModelParallelStrategy (FSDP2 + optional 2D TP);
+# *_sharded/*_full encode only the checkpoint format, same as fsdp_*. The mesh
+# (TP x DP) comes from the TENSOR_PARALLEL_SIZE/DATA_PARALLEL_SIZE knobs, not
+# the name; TP=1 is pure FSDP2. init_variables.sh already enforces
+# TP*DP == world_size before provisioning; the assert here is a backstop.
+# Validate eagerly -- before the 16 GB model load -- so a typo fails fast.
+MODEL_PARALLEL_STRATEGIES = (
+    "model_parallel_sharded",
+    "model_parallel_full",
+)
+tensor_parallel_size = int(os.getenv("TENSOR_PARALLEL_SIZE", "4"))
+data_parallel_size = int(os.getenv("DATA_PARALLEL_SIZE", "2"))
 training_strategy = os.getenv("TRAINING_STRATEGY", "ddp").lower()
-if training_strategy not in ("ddp", "fsdp_sharded", "fsdp_full"):
+if training_strategy not in (
+    "ddp",
+    "fsdp_sharded",
+    "fsdp_full",
+    *MODEL_PARALLEL_STRATEGIES,
+):
     raise SystemExit(
-        "TRAINING_STRATEGY must be 'ddp', 'fsdp_sharded', or 'fsdp_full' "
-        f"(got {training_strategy!r})."
+        "TRAINING_STRATEGY must be 'ddp', 'fsdp_sharded', 'fsdp_full', or one of "
+        f"{MODEL_PARALLEL_STRATEGIES} (got {training_strategy!r})."
     )
 # Parity with the model_id: line -- a single grep-able config marker per knob.
 logging.info("training_strategy: %s", training_strategy)
@@ -215,6 +240,45 @@ def collate_fn(examples):
 
 
 # ---- LightningModule ------------------------------------------------------
+def _validate_tp_divisibility(config, tp):
+    """Fail fast if tensor_parallel_size does not evenly divide the dims TP
+    shards. DTensor requires exact divisibility to construct the sharded
+    parameters; an indivisible dim otherwise crashes deep inside
+    ``parallelize_module``. KV heads are the tightest constraint under GQA.
+    """
+    checks = {
+        "num_attention_heads": config.num_attention_heads,
+        "num_key_value_heads": config.num_key_value_heads,
+        "intermediate_size": config.intermediate_size,
+        "hidden_size": config.hidden_size,
+    }
+    bad = {name: val for name, val in checks.items() if val % tp != 0}
+    if bad:
+        raise SystemExit(
+            f"TENSOR_PARALLEL_SIZE={tp} does not evenly divide {bad} for "
+            f"model_id={model_id!r}; choose a TP that divides all of them."
+        )
+
+
+def _llama_tp_plan():
+    """Tensor-parallel plan for one LlamaDecoderLayer.
+
+    Attention q/k/v and MLP gate/up are column-parallel; the output o_proj and
+    MLP down_proj are row-parallel. tensor_parallel_size must divide the model's
+    head/dim counts; _validate_tp_divisibility enforces that before this plan is
+    applied (Llama 3.1 8B has 32 heads / 8 KV heads, divisible by the default 4).
+    """
+    return {
+        "self_attn.q_proj": ColwiseParallel(),
+        "self_attn.k_proj": ColwiseParallel(),
+        "self_attn.v_proj": ColwiseParallel(),
+        "self_attn.o_proj": RowwiseParallel(),
+        "mlp.gate_proj": ColwiseParallel(),
+        "mlp.up_proj": ColwiseParallel(),
+        "mlp.down_proj": RowwiseParallel(),
+    }
+
+
 class LlamaLitModel(pl.LightningModule):
     """Holds the real Llama 8B model (frozen) for realistic checkpoint size;
     runs a fake forward via a tiny trainable Linear so DDP all-reduce (or FSDP's
@@ -224,8 +288,8 @@ class LlamaLitModel(pl.LightningModule):
     ``training_step`` sleeps for ``SIMULATED_STEP_COMPUTE_SECONDS`` to mimic the time
     a GPU step would take. ``self.model``'s parameters end up in the
     Lightning state_dict, and AdamW is configured over ``self.model`` (ddp) or
-    all parameters post-FSDP-wrap (fsdp_sharded/fsdp_full) with materialized
-    optimizer state.
+    all parameters post-shard-wrap (fsdp_sharded/fsdp_full/model_parallel_*)
+    with materialized optimizer state.
     When ``ModelCheckpoint`` writes via fsspec to ``gs://...`` the uploaded
     blob is approximately the size of a real bf16 Llama 8B checkpoint with
     optimizer state.
@@ -235,10 +299,31 @@ class LlamaLitModel(pl.LightningModule):
         super().__init__()
         self.model = model
         self._fsdp = training_strategy in ("fsdp_sharded", "fsdp_full")
+        self._model_parallel = training_strategy in MODEL_PARALLEL_STRATEGIES
+        self._tensor_parallel = self._model_parallel and tensor_parallel_size > 1
         for p in self.model.parameters():
             p.requires_grad = False
-        trainable_dtype = model.dtype if self._fsdp else torch.float32
+        # Sharded strategies (FSDP1/FSDP2) keep bf16 to match a real checkpoint;
+        # DDP replicates in fp32.
+        sharded = self._fsdp or self._model_parallel
+        trainable_dtype = model.dtype if sharded else torch.float32
         self.trainable = torch.nn.Linear(8, 8).to(trainable_dtype)
+
+    def configure_model(self):
+        # Required by ModelParallelStrategy; no-op for ddp/fsdp_* (they set the
+        # model up in __init__). Decoder layers live at self.model.model.layers.
+        if not self._model_parallel:
+            return
+        mesh = self.device_mesh
+        if self._tensor_parallel and mesh["tensor_parallel"].size() > 1:
+            _validate_tp_divisibility(self.model.config, tensor_parallel_size)
+            tp_mesh = mesh["tensor_parallel"]
+            for layer in self.model.model.layers:
+                parallelize_module(layer, tp_mesh, _llama_tp_plan())
+        dp_mesh = mesh["data_parallel"]
+        for layer in self.model.model.layers:
+            fully_shard(layer, mesh=dp_mesh)
+        fully_shard(self.model, mesh=dp_mesh)
 
     def training_step(self, batch, batch_idx):
         # Pull the batch out of the dataloader -- this is what drives the
@@ -283,7 +368,11 @@ class LlamaLitModel(pl.LightningModule):
                     )
 
     def configure_optimizers(self):
-        params = self.parameters() if self._fsdp else self.model.parameters()
+        params = (
+            self.parameters()
+            if (self._fsdp or self._model_parallel)
+            else self.model.parameters()
+        )
         optimizer = torch.optim.AdamW(
             params,
             lr=float(os.getenv("LEARNING_RATE", "2e-5")),
@@ -478,9 +567,36 @@ class LoggedFSDPStrategy(FSDPStrategy):
         return checkpoint
 
 
+class LoggedModelParallelStrategy(ModelParallelStrategy):
+    """ModelParallelStrategy (FSDP2 / 2D) with checkpoint restore logging."""
+
+    def load_checkpoint(self, checkpoint_path, *args, **kwargs):
+        logging.info(
+            "Checkpoint Restore Start : Rank : %d : Start time: %f seconds : Path: %s",
+            self.global_rank,
+            time.time(),
+            checkpoint_path,
+        )
+        start_time = time.perf_counter()
+        checkpoint = super().load_checkpoint(checkpoint_path, *args, **kwargs)
+        duration = time.perf_counter() - start_time
+        logging.info(
+            "Finished restoring checkpoint : Rank : %d : Duration: %.2f seconds : End Time: %.2f seconds : Path: %s",
+            self.global_rank,
+            duration,
+            time.time(),
+            checkpoint_path,
+        )
+        # Restore drops AdamW state for frozen params; refill so later
+        # checkpoints include moments, not just weights.
+        for optimizer in self.optimizers:
+            LlamaLitModel._materialize_adamw_state(optimizer)
+        return checkpoint
+
+
 def build_strategy(name):
     """Construct the parallel-training strategy for ``name``
-    (ddp|fsdp_sharded|fsdp_full).
+    (ddp|fsdp_sharded|fsdp_full|model_parallel_*).
 
     Uses the gloo CPU backend with the library-default process-group timeout
     (no explicit ``timeout=`` override -- see #947).
@@ -503,8 +619,23 @@ def build_strategy(name):
             auto_wrap_policy={LlamaDecoderLayer},
             use_orig_params=True,
         )
+    if name in MODEL_PARALLEL_STRATEGIES:
+        # Mesh comes from the TENSOR_PARALLEL_SIZE / DATA_PARALLEL_SIZE knobs;
+        # the name encodes only the checkpoint format. TP=1 is pure FSDP2.
+        assert tensor_parallel_size * data_parallel_size == world_size, (
+            f"TP({tensor_parallel_size}) * DP({data_parallel_size}) must equal "
+            f"world_size({world_size}); check _TENSOR_PARALLEL_SIZE/"
+            "_DATA_PARALLEL_SIZE vs _NODES x _RANKS_PER_NODE."
+        )
+        return LoggedModelParallelStrategy(
+            data_parallel_size=data_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
+            save_distributed_checkpoint=name.endswith("_sharded"),
+            process_group_backend="gloo",
+        )
     raise SystemExit(
-        f"Unsupported TRAINING_STRATEGY: {name!r} (use ddp|fsdp_sharded|fsdp_full)."
+        f"Unsupported TRAINING_STRATEGY: {name!r} "
+        "(use ddp|fsdp_sharded|fsdp_full|model_parallel_*)."
     )
 
 

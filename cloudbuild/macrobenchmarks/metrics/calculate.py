@@ -534,6 +534,8 @@ def main(argv=None) -> None:
     parser.add_argument("--dataset-path")
     parser.add_argument("--model-id")
     parser.add_argument("--training-strategy")
+    parser.add_argument("--tensor-parallel-size", type=int)
+    parser.add_argument("--data-parallel-size", type=int)
     parser.add_argument("--simulated-step-compute-seconds", type=float)
     parser.add_argument("--per-device-batch", type=int)
     parser.add_argument("--grad-accum", type=int)
@@ -603,6 +605,11 @@ def main(argv=None) -> None:
         "dataloader_num_workers": args.dataloader_workers,
         "image": args.image,
     }
+    # TP/DP apply to model_parallel only; omitting them for ddp/fsdp lets
+    # DictWriter's restval="N/A" mark them not-applicable.
+    if (args.training_strategy or "").startswith("model_parallel"):
+        dimensions["tensor_parallel_size"] = args.tensor_parallel_size
+        dimensions["data_parallel_size"] = args.data_parallel_size
     row = build_summary_row(
         run_id=args.run_id,
         workload_name=args.workload_name,

@@ -27,6 +27,10 @@ substitutions:
   _REQUIREMENTS: ""
   _IMAGE: "nvcr.io/nvidia/pytorch:26.05-py3"
   _TRAINING_STRATEGY: "ddp"
+  # ModelParallelStrategy mesh (model_parallel_* only). TP x DP must equal
+  # _NODES x _RANKS_PER_NODE. Default: TP=4 intra-node, DP=2 across nodes.
+  _TENSOR_PARALLEL_SIZE: "4"
+  _DATA_PARALLEL_SIZE: "2"
   # Auto-generate a per-run seed checkpoint and restore from it (measures the
   # restore IO path) when no external _CHECKPOINT_LOAD_PATH is supplied. Set to
   # "false" for a fresh-run baseline with no restore.
@@ -67,6 +71,8 @@ steps:
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
+      - "_TENSOR_PARALLEL_SIZE=${_TENSOR_PARALLEL_SIZE}"
+      - "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}"
       - "_SEED_CHECKPOINT=${_SEED_CHECKPOINT}"
       - "_ENABLE_TIER1_NETWORKING=${_ENABLE_TIER1_NETWORKING}"
       - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
@@ -126,6 +132,8 @@ steps:
       - "_MODEL_ID=${_MODEL_ID}"
       - "_IMAGE=${_IMAGE}"
       - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
+      - "_TENSOR_PARALLEL_SIZE=${_TENSOR_PARALLEL_SIZE}"
+      - "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}"
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_NODES=${_NODES}"
       - "_RANKS_PER_NODE=${_RANKS_PER_NODE}"
@@ -148,6 +156,8 @@ steps:
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
+      - "_TENSOR_PARALLEL_SIZE=${_TENSOR_PARALLEL_SIZE}"
+      - "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}"
       - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_STEPS=${_STEPS}"
@@ -187,6 +197,8 @@ steps:
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_TRAINING_STRATEGY=${_TRAINING_STRATEGY}"
+      - "_TENSOR_PARALLEL_SIZE=${_TENSOR_PARALLEL_SIZE}"
+      - "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}"
       - "_SIMULATED_STEP_COMPUTE_SECONDS=${_SIMULATED_STEP_COMPUTE_SECONDS}"
       - "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}"
       - "_GRAD_ACCUM=${_GRAD_ACCUM}"

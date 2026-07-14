@@ -95,8 +95,12 @@ echo "Launching Torch distributed as node rank $NODE_RANK out of $NNODES nodes"
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
 export TOKENIZERS_PARALLELISM=false
 
-# Parallel training strategy: ddp (default), fsdp_sharded, or fsdp_full.
+# Parallel training strategy: ddp (default), fsdp_sharded, fsdp_full,
+# model_parallel_sharded, or model_parallel_full.
 export TRAINING_STRATEGY=${TRAINING_STRATEGY:-ddp}
+# ModelParallelStrategy mesh (model_parallel_* only); TP x DP must equal world.
+export TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-4}
+export DATA_PARALLEL_SIZE=${DATA_PARALLEL_SIZE:-2}
 
 # Training parameters.
 export NUM_TRAIN_EPOCHS=1

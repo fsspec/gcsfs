@@ -56,6 +56,8 @@ shared_workload_helm_args() {
     --set workload.ranksPerNode="${_RANKS_PER_NODE}"
     --set workload.requirements="${_REQUIREMENTS}"
     --set workload.trainingStrategy="${_TRAINING_STRATEGY}"
+    --set workload.tensorParallelSize="${_TENSOR_PARALLEL_SIZE}"
+    --set workload.dataParallelSize="${_DATA_PARALLEL_SIZE}"
     --set "nodeSelector.cloud\.google\.com/gke-nodepool=${_MACHINE_TYPE}"
     --set serviceAccount=default
   )
