@@ -134,7 +134,9 @@ Before creating the triggers, set up the following in your GCP project.
 | `_MODEL_ID` | `gs://huggingface-model-weights/Llama-3.1-8B` | HF repo id or `gs://` pre-staged weights. |
 | `_CHECKPOINT_LOAD_PATH` | `""` | External `gs://` checkpoint to resume from (exercises restore). |
 | `_SEED_CHECKPOINT` | `true` | Auto-generate a per-run seed checkpoint and restore from it. |
-| `_TRAINING_STRATEGY` | `ddp` | `ddp`, `fsdp_sharded`, or `fsdp_full`. |
+| `_TRAINING_STRATEGY` | `ddp` | `ddp`, `fsdp_sharded`, `fsdp_full`, `model_parallel_sharded`, or `model_parallel_full`. |
+| `_TENSOR_PARALLEL_SIZE` | `4` | Tensor parallel size (used only for `model_parallel_*` strategies). |
+| `_DATA_PARALLEL_SIZE` | `2` | Data parallel size (used only for `model_parallel_*` strategies). |
 | `_SIMULATED_STEP_COMPUTE_SECONDS` | `1.0` | Per-step sleep standing in for GPU compute. |
 | `_PER_DEVICE_BATCH` | `8` | Per-rank micro-batch size. |
 | `_GRAD_ACCUM` | `1` | Gradient-accumulation steps. |

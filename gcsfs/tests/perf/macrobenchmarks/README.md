@@ -53,6 +53,8 @@ strategy -- cross-strategy restore is unsupported.
 | `ddp`          | Replicated on every rank | Single consolidated checkpoint written by rank 0. |
 | `fsdp_sharded` | Sharded across ranks | Per-rank sharded/distributed checkpoint (every rank writes its shard). |
 | `fsdp_full`    | Sharded across ranks | Consolidated to a single rank-0-written checkpoint at save time, like `ddp`. |
+| `model_parallel_sharded` | Sharded across ranks (2D mesh) | Per-rank sharded/distributed checkpoint (every rank writes its shard). |
+| `model_parallel_full` | Sharded across ranks (2D mesh) | Consolidated to a single rank-0-written checkpoint at save time. |
 
 ## What this benchmark measures
 
