@@ -160,6 +160,7 @@ steps:
       - "_SHUFFLE_BUFFER_SIZE=${_SHUFFLE_BUFFER_SIZE}"
       - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
       - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
+      - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
     args: ["cloudbuild/macrobenchmarks/scripts/seed_checkpoint.sh"]
     waitFor: ["create-cluster", "create-buckets"]
 
