@@ -1,6 +1,6 @@
 """HF Llama benchmark log parser.
 
-The 8 regex constants below match the log lines emitted by
+The 10 regex constants below match the log lines emitted by
 ``llama_3_1_8b_cpu_sim.py``. parse_entries matches/pairs them over an
 injectable iterable of LogEntry, so it is unit-testable without a Cloud
 Logging client.
@@ -50,6 +50,22 @@ CHECKPOINT_SIZE_PATTERN = (
     r"Bytes : ([0-9]+) : Path: (.*)"
 )
 
+# DataWaitProfiler's real-time per-span lines: every moment the fit loop blocks
+# on the dataloader, from every rank, with a running per-rank total -- unlike
+# ACCELERATOR_BLOCKED_TIME_PATTERN's end-of-fit report row, which only local
+# rank 0 prints, omits the setup spans, and is lost when a pod is preempted.
+DATA_WAIT_PATTERN = (
+    r"Data Wait : Rank : ([0-9]+) : Fetch : ([0-9]+) : Action : (\S+) : "
+    r"Duration : ([0-9.]+) seconds : Total : ([0-9.]+) seconds"
+)
+
+# Per-rank ``build_train_dataset`` duration -- the Parquet glob + shuffle-buffer
+# wiring that runs once before ``trainer.fit``, outside DATA_WAIT_PATTERN's
+# span (see schema.DatasetBuildMetrics).
+DATASET_BUILD_PATTERN = (
+    r"Dataset Build : Rank : ([0-9]+) : Duration : ([0-9.]+) seconds : Path: (.*)"
+)
+
 ALL_PATTERNS = [
     STEP_METRICS_PATTERN,
     CHECKPOINT_START_PATTERN,
@@ -59,6 +75,8 @@ ALL_PATTERNS = [
     CHECKPOINT_DELETE_PATTERN,
     ACCELERATOR_BLOCKED_TIME_PATTERN,
     CHECKPOINT_SIZE_PATTERN,
+    DATA_WAIT_PATTERN,
+    DATASET_BUILD_PATTERN,
 ]
 
 
@@ -82,6 +100,10 @@ class ParsedRawMetrics:
     )
     data_loading_metrics: List[schema.DataLoadingMetrics] = field(default_factory=list)
     checkpoint_sizes: List[schema.CheckpointSizeMetrics] = field(default_factory=list)
+    data_wait_metrics: List[schema.DataWaitMetrics] = field(default_factory=list)
+    dataset_build_metrics: List[schema.DatasetBuildMetrics] = field(
+        default_factory=list
+    )
 
 
 def parse_entries(
@@ -227,6 +249,34 @@ def parse_entries(
                 )
             except (ValueError, IndexError):
                 print(f"Warning: Could not parse checkpoint size from: {message}")
+
+        m = re.search(DATA_WAIT_PATTERN, message)
+        if m:
+            try:
+                out.data_wait_metrics.append(
+                    schema.DataWaitMetrics(
+                        global_rank=int(m.group(1)),
+                        fetch_index=int(m.group(2)),
+                        action=m.group(3),
+                        duration=float(m.group(4)),
+                        cumulative_total=float(m.group(5)),
+                    )
+                )
+            except (ValueError, IndexError):
+                print(f"Warning: Could not parse data wait metrics from: {message}")
+
+        m = re.search(DATASET_BUILD_PATTERN, message)
+        if m:
+            try:
+                out.dataset_build_metrics.append(
+                    schema.DatasetBuildMetrics(
+                        global_rank=int(m.group(1)),
+                        duration=float(m.group(2)),
+                        dataset_path=m.group(3),
+                    )
+                )
+            except (ValueError, IndexError):
+                print(f"Warning: Could not parse dataset build metrics from: {message}")
 
     return out
 

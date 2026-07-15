@@ -56,8 +56,7 @@ import lightning.pytorch as pl
 import torch
 import transformers
 from lightning.pytorch.callbacks import Callback, DeviceStatsMonitor, ModelCheckpoint
-from lightning.pytorch.loops.fetchers import _PrefetchDataFetcher
-from lightning.pytorch.loops.fit_loop import _FitLoop as FitLoop
+from lightning.pytorch.profilers import SimpleProfiler
 from lightning.pytorch.strategies import (
     DDPStrategy,
     FSDPStrategy,
@@ -741,6 +740,61 @@ def build_strategy(name):
     )
 
 
+# ---- Profiler ---------------------------------------------------------------
+# Lightning brackets every span where the fit loop blocks on the train
+# dataloader with exactly two profiler actions, disjoint by construction:
+#   - setup_train_dataloader: each iterator (re-)creation -- worker spawn,
+#     StatefulDataLoader resume fast-forward, and the first-batch prefetch --
+#     at fit start, on resume, and (with the fork fix, see below) at every
+#     epoch boundary.
+#   - [_TrainingEpochLoop].train_dataloader_next: every other blocking
+#     next(iterator) fetch, including the epoch-end StopIteration probe.
+# Their sum is the total time the dataloader blocked this rank. Requires the
+# zhixiangli/pytorch-lightning fork past the epoch-boundary iter() fix; on
+# stock lightning <= 2.6.2 the sum misses only the epoch >= 1 iterator
+# re-creation handshake (the epoch >= 1 prefetch then lands in
+# train_dataloader_next instead, so nothing is double counted either way).
+DATA_WAIT_ACTIONS = (
+    "setup_train_dataloader",
+    "[_TrainingEpochLoop].train_dataloader_next",
+)
+
+
+class DataWaitProfiler(SimpleProfiler):
+    """SimpleProfiler that also logs each dataloader-blocking span in real time.
+
+    The end-of-fit SimpleProfiler report only prints from local-rank-0 pods and
+    is lost entirely when a pod is preempted mid-run; these per-fetch lines make
+    every rank's running total recoverable from its log tail at any point. The
+    ``Fetch`` counter lets the metrics pipeline align fetch k across ranks and
+    take the max -- the per-step stall that actually gates the job under DDP's
+    every-step gradient sync. (The fetch for batch N+1 happens inside step N's
+    window, so per-step attribution is off by one; totals are exact.)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.data_wait_total = 0.0
+        self.data_wait_count = 0
+
+    def stop(self, action_name):
+        super().stop(action_name)
+        if action_name not in DATA_WAIT_ACTIONS:
+            return
+        duration = self.recorded_durations[action_name][-1]
+        self.data_wait_total += duration
+        self.data_wait_count += 1
+        logging.info(
+            "Data Wait : Rank : %s : Fetch : %d : Action : %s : "
+            "Duration : %.6f seconds : Total : %.6f seconds",
+            os.environ.get("RANK", "0"),
+            self.data_wait_count,
+            action_name,
+            duration,
+            self.data_wait_total,
+        )
+
+
 if __name__ == "__main__":
     # ---- Verify gcsfs is the active fsspec backend for "gs" ----------------
     try:
@@ -766,7 +820,10 @@ if __name__ == "__main__":
         world_size=world_size,
     )
     logging.info(
-        f"[INFO] HF dataloader prepared in {time.perf_counter() - load_start:.4f}s"
+        "Dataset Build : Rank : %s : Duration : %.6f seconds : Path: %s",
+        os.environ.get("RANK", "0"),
+        time.perf_counter() - load_start,
+        dataset_path,
     )
     train_loader = build_train_dataloader(
         ds,
@@ -823,7 +880,7 @@ if __name__ == "__main__":
         limit_val_batches=32,
         log_every_n_steps=1,
         strategy=strategy,
-        profiler="simple",
+        profiler=DataWaitProfiler(),
         enable_progress_bar=False,
     )
 
@@ -834,47 +891,6 @@ if __name__ == "__main__":
 
     # Pass the strategy so the module can adapt under FSDP.
     lit_model = LlamaLitModel(model, training_strategy=training_strategy)
-
-    # TODO: These are underscore private APIs, which may break during a Lightning upgrade.
-    # We should consider contributing what we need into Lightning.
-    # Tracked in: https://github.com/Lightning-AI/pytorch-lightning/pull/21776
-    # ==============================================================================
-    # PROFILER HOOK 1: Profile the entire setup_data() phase
-    # ==============================================================================
-    original_setup_data = FitLoop.setup_data
-
-    def profiled_setup_data(self, *args, **kwargs):
-        rank = self.trainer.global_rank
-        logging.info(f"[RANK {rank}] [PROFILER] FitLoop.setup_data started")
-        # We use the PL Profiler so this appears directly in the FIT Profiler Report
-        with self.trainer.profiler.profile("FitLoop.setup_data (Data loading)"):
-            return original_setup_data(self, *args, **kwargs)
-
-    FitLoop.setup_data = profiled_setup_data
-
-    # ==============================================================================
-    # PROFILER HOOK 2: Isolate the iter() call that spawns the workers
-    # ==============================================================================
-    original_fetcher_iter = _PrefetchDataFetcher.__iter__
-
-    def profiled_fetcher_iter(self):
-        start_time = time.perf_counter()
-
-        # This triggers the actual worker forks, gRPC init, and initial file opens
-        result = original_fetcher_iter(self)
-
-        duration = time.perf_counter() - start_time
-        # We log this to the console immediately for real-time visibility
-        rank = os.environ.get("RANK", "0")
-        logging.info(
-            f"[RANK {rank}] [PROFILER] _PrefetchDataFetcher.__iter__ "
-            f"(Worker Spawn and Data Loading) took {duration:.4f} seconds."
-        )
-
-        return result
-
-    _PrefetchDataFetcher.__iter__ = profiled_fetcher_iter
-    # ==============================================================================
 
     logging.info("[INFO] Training Started.")
 

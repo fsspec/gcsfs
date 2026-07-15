@@ -110,10 +110,49 @@ def test_accelerator_blocked_time():
     assert dl.accelerator_blocked_percent == 4.2
 
 
+DATA_WAIT_SETUP_LINE = (
+    "Data Wait : Rank : 3 : Fetch : 1 : Action : setup_train_dataloader : "
+    "Duration : 12.500000 seconds : Total : 12.500000 seconds"
+)
+DATA_WAIT_FETCH_LINE = (
+    "Data Wait : Rank : 3 : Fetch : 2 : Action : "
+    "[_TrainingEpochLoop].train_dataloader_next : "
+    "Duration : 0.250000 seconds : Total : 12.750000 seconds"
+)
+
+
+def test_data_wait_spans_parsed():
+    parsed = _parse([DATA_WAIT_SETUP_LINE, DATA_WAIT_FETCH_LINE])
+    assert len(parsed.data_wait_metrics) == 2
+    setup, fetch = parsed.data_wait_metrics
+    assert setup.global_rank == 3
+    assert setup.fetch_index == 1
+    assert setup.action == "setup_train_dataloader"
+    assert setup.duration == 12.5
+    assert setup.cumulative_total == 12.5
+    assert fetch.action == "[_TrainingEpochLoop].train_dataloader_next"
+    assert fetch.duration == 0.25
+    assert fetch.cumulative_total == 12.75
+
+
 SIZE_LINE = (
     "Checkpoint Size : Rank : 0 : Step : 25 : Bytes : 17179869184 : "
     "Path: gs://b/ckpt/r/llama-00-25.ckpt"
 )
+
+DATASET_BUILD_LINE = (
+    "Dataset Build : Rank : 2 : Duration : 3.456789 seconds : "
+    "Path: gs://ds/parquet-dir"
+)
+
+
+def test_dataset_build_parsed():
+    parsed = _parse([DATASET_BUILD_LINE])
+    assert len(parsed.dataset_build_metrics) == 1
+    row = parsed.dataset_build_metrics[0]
+    assert row.global_rank == 2
+    assert row.duration == 3.456789
+    assert row.dataset_path == "gs://ds/parquet-dir"
 
 
 def test_step_line_captures_samples_per_second():
