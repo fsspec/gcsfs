@@ -216,8 +216,16 @@ def calc_data_wait_metrics(data_wait_rows: list) -> dict:
     }
     bottleneck = max(totals, key=lambda rank: totals[rank])
     rows = by_rank[bottleneck]
-    setup = [r["duration"] for r in rows if r.get("action") == _DATA_WAIT_SETUP_ACTION]
-    fetch = [r["duration"] for r in rows if r.get("action") == _DATA_WAIT_FETCH_ACTION]
+    setup = [
+        r["duration"]
+        for r in rows
+        if r.get("action") == _DATA_WAIT_SETUP_ACTION and r.get("duration") is not None
+    ]
+    fetch = [
+        r["duration"]
+        for r in rows
+        if r.get("action") == _DATA_WAIT_FETCH_ACTION and r.get("duration") is not None
+    ]
     out = {
         "data_wait_total_time": totals[bottleneck],
         "num_data_wait_spans": len(rows),
