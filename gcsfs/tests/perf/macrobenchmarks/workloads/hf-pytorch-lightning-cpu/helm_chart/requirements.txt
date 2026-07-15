@@ -10,10 +10,12 @@
 #     before installing -r requirements.txt.
 #   - transformers pinned so tokenizer/model loading behavior is deterministic
 #     across runs.
-datasets
+#   - torchdata supplies StatefulDataLoader to resume stream from checkpoint.
+datasets>=5.0.0
 fsspec
 gcsfs
 lightning>=2.0
 psutil
 pyarrow
+torchdata
 transformers==4.46.3

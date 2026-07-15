@@ -58,6 +58,11 @@ shared_workload_helm_args() {
     --set workload.trainingStrategy="${_TRAINING_STRATEGY}"
     --set workload.tensorParallelSize="${_TENSOR_PARALLEL_SIZE}"
     --set workload.dataParallelSize="${_DATA_PARALLEL_SIZE}"
+    --set workload.epochs="${_EPOCHS}"
+    --set workload.shuffleBufferSize="${_SHUFFLE_BUFFER_SIZE}"
+    --set workload.shuffleMaxBufferInputShards="${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
+    --set workload.dataloaderPrefetchFactor="${_DATALOADER_PREFETCH_FACTOR}"
+    --set workload.dataloaderWorkers="${_DATALOADER_WORKERS}"
     --set "nodeSelector.cloud\.google\.com/gke-nodepool=${_MACHINE_TYPE}"
     --set serviceAccount=default
   )

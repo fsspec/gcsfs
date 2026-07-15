@@ -516,10 +516,64 @@ def test_main_emits_run_dimension_columns(tmp_path):
     assert rows[0]["zone"] == "us-central1-a"
     assert rows[0]["region"] == "us-central1"
     assert rows[0]["nodes"] == "2"
-    assert rows[0]["steps"] == "100"
+    assert rows[0]["steps"] == "2"
     assert rows[0]["checkpoint_interval"] == "25"
     assert rows[0]["dataset_path"] == "gs://ds/parquet"
     assert rows[0]["model_id"] == "gs://huggingface-model-weights/Llama-3.1-8B"
+
+
+def test_main_records_observed_steps_when_run_ends_early(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--steps",
+            "100",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["steps"] == "2"
+
+
+def test_main_records_requested_steps_when_run_completes(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--steps",
+            "2",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["steps"] == "2"
 
 
 def test_main_full_pass_records_observed_step_count(tmp_path):
@@ -646,6 +700,45 @@ def test_tp_dp_are_na_for_non_model_parallel_run(tmp_path):
         rows = list(csv.DictReader(f))
     assert rows[0]["tensor_parallel_size"] == "N/A"
     assert rows[0]["data_parallel_size"] == "N/A"
+
+
+def test_main_emits_dataloading_knob_columns(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--epochs",
+            "3",
+            "--shuffle-buffer-size",
+            "10000",
+            "--shuffle-max-buffer-input-shards",
+            "4",
+            "--dataloader-prefetch-factor",
+            "2",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["num_train_epochs"] == "3"
+    assert rows[0]["shuffle_buffer_size"] == "10000"
+    assert rows[0]["shuffle_max_buffer_input_shards"] == "4"
+    assert rows[0]["dataloader_prefetch_factor"] == "2"
+    assert "num_train_epochs" in calculate.SUMMARY_FIELDNAMES
+    assert "shuffle_max_buffer_input_shards" in calculate.SUMMARY_FIELDNAMES
+    assert "dataloader_prefetch_factor" in calculate.SUMMARY_FIELDNAMES
 
 
 def test_main_emits_simulated_step_compute_seconds_column(tmp_path):

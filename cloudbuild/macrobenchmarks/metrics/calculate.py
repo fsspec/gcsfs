@@ -540,6 +540,10 @@ def main(argv=None) -> None:
     parser.add_argument("--per-device-batch", type=int)
     parser.add_argument("--grad-accum", type=int)
     parser.add_argument("--dataloader-workers", type=int)
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--shuffle-buffer-size", type=int)
+    parser.add_argument("--shuffle-max-buffer-input-shards", type=int)
+    parser.add_argument("--dataloader-prefetch-factor", type=int)
     parser.add_argument("--image")
     args = parser.parse_args(argv)
 
@@ -581,9 +585,12 @@ def main(argv=None) -> None:
             args.per_device_batch * args.grad_accum * args.nodes * args.ranks_per_node
         )
 
+    # max_epochs can end a run before --steps is reached; report what ran.
     recorded_steps = args.steps
-    if args.steps is not None and args.steps < 0:
-        recorded_steps = executed_step_count(step_rows)
+    if step_rows:
+        observed_steps = executed_step_count(step_rows)
+        if args.steps is None or args.steps < 0 or observed_steps < args.steps:
+            recorded_steps = observed_steps
 
     dimensions = {
         "bucket_type": args.bucket_type,
@@ -603,6 +610,10 @@ def main(argv=None) -> None:
         "gradient_accumulation_steps": args.grad_accum,
         "global_batch_size": global_batch_size,
         "dataloader_num_workers": args.dataloader_workers,
+        "num_train_epochs": args.epochs,
+        "shuffle_buffer_size": args.shuffle_buffer_size,
+        "shuffle_max_buffer_input_shards": args.shuffle_max_buffer_input_shards,
+        "dataloader_prefetch_factor": args.dataloader_prefetch_factor,
         "image": args.image,
     }
     # TP/DP apply to model_parallel only; omitting them for ddp/fsdp lets

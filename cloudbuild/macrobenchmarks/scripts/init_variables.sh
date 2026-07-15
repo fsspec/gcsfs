@@ -57,9 +57,11 @@ REGION="${ZONE%-*}"
 for pair in "_NODES=${_NODES}" "_RANKS_PER_NODE=${_RANKS_PER_NODE}" \
   "_CHECKPOINT_INTERVAL=${_CHECKPOINT_INTERVAL}" "_CKPT_TO_KEEP=${_CKPT_TO_KEEP}" \
   "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}" "_GRAD_ACCUM=${_GRAD_ACCUM}" \
-  "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}" \
   "_TENSOR_PARALLEL_SIZE=${_TENSOR_PARALLEL_SIZE}" \
-  "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}"; do
+  "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}" \
+  "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}" "_EPOCHS=${_EPOCHS}" \
+  "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}" \
+  "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"; do
   key=${pair%%=*}; val=${pair#*=}
   if ! echo "$val" | grep -Eq '^[1-9][0-9]*$'; then
     echo "ERROR: $key must be a positive integer (got '$val')."; exit 1
@@ -77,6 +79,10 @@ case "${_TRAINING_STRATEGY:-ddp}" in
     fi
     ;;
 esac
+# Validated non-negative (0 disables shuffling).
+if ! echo "${_SHUFFLE_BUFFER_SIZE}" | grep -Eq '^(0|[1-9][0-9]*)$'; then
+  echo "ERROR: _SHUFFLE_BUFFER_SIZE must be a non-negative integer (got '${_SHUFFLE_BUFFER_SIZE}')."; exit 1
+fi
 # Validate that operator-supplied buckets actually match _BUCKET_TYPE and the
 # run's region/zone. Project-owned buckets are describable by the build SA
 # (storage admin), so these are hard fail-fast (nothing is provisioned yet).

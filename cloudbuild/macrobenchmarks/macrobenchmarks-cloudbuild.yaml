@@ -42,6 +42,16 @@ substitutions:
   _PER_DEVICE_BATCH: "8"
   _GRAD_ACCUM: "1"
   _DATALOADER_WORKERS: "16"
+  # Passes over the dataset. Binds only if _STEPS: "-1".
+  _EPOCHS: "3"
+  # HF streaming shuffle buffer size (0 to disable). Seed is fixed at 42.
+  _SHUFFLE_BUFFER_SIZE: "10000"
+  # Shards the shuffle buffer interleaves. Higher = better mixing, but it divides
+  # the shard count; keep the result a multiple of _NODES x _RANKS_PER_NODE or
+  # every rank re-reads the whole dataset.
+  _SHUFFLE_MAX_BUFFER_INPUT_SHARDS: "10"
+  # Batches to prefetch per dataloader worker.
+  _DATALOADER_PREFETCH_FACTOR: "2"
   _JOBSET_VERSION: "v0.12.0"
   _SKIP_CLEANUP: "false"
 
@@ -79,6 +89,10 @@ steps:
       - "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}"
       - "_GRAD_ACCUM=${_GRAD_ACCUM}"
       - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
+      - "_EPOCHS=${_EPOCHS}"
+      - "_SHUFFLE_BUFFER_SIZE=${_SHUFFLE_BUFFER_SIZE}"
+      - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
+      - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
     args: ["cloudbuild/macrobenchmarks/scripts/init_variables.sh"]
     waitFor: ["-"]
 
@@ -141,6 +155,12 @@ steps:
       - "_REQUIREMENTS=${_REQUIREMENTS}"
       - "_SEED_CHECKPOINT=${_SEED_CHECKPOINT}"
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
+      # Seed and measured runs must use identical shard order for restore.
+      - "_EPOCHS=${_EPOCHS}"
+      - "_SHUFFLE_BUFFER_SIZE=${_SHUFFLE_BUFFER_SIZE}"
+      - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
+      - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
+      - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
     args: ["cloudbuild/macrobenchmarks/scripts/seed_checkpoint.sh"]
     waitFor: ["create-cluster", "create-buckets"]
 
@@ -172,6 +192,10 @@ steps:
       - "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}"
       - "_GRAD_ACCUM=${_GRAD_ACCUM}"
       - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
+      - "_EPOCHS=${_EPOCHS}"
+      - "_SHUFFLE_BUFFER_SIZE=${_SHUFFLE_BUFFER_SIZE}"
+      - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
+      - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
     args: ["cloudbuild/macrobenchmarks/scripts/run_workload.sh"]
     waitFor: ["seed-checkpoint"]
 
@@ -203,6 +227,10 @@ steps:
       - "_PER_DEVICE_BATCH=${_PER_DEVICE_BATCH}"
       - "_GRAD_ACCUM=${_GRAD_ACCUM}"
       - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
+      - "_EPOCHS=${_EPOCHS}"
+      - "_SHUFFLE_BUFFER_SIZE=${_SHUFFLE_BUFFER_SIZE}"
+      - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
+      - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
     args: ["cloudbuild/macrobenchmarks/scripts/scrape_metrics.sh"]
     waitFor: ["run-workload"]
 
