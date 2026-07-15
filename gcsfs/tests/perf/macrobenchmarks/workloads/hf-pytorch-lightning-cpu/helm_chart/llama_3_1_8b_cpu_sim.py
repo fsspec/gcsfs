@@ -292,6 +292,18 @@ def build_train_dataset(
         )
     logging.info("dataset_num_shards: %d", ds.num_shards)
     if world_size > 1:
+        if ds.num_shards % world_size != 0:
+            # Not a multiple of world_size: split_dataset_by_node falls back
+            # to per-sample round-robin, so every rank reads the full dataset.
+            logging.warning(
+                "dataset_num_shards=%d is not a multiple of world_size=%d; "
+                "every rank will read the entire dataset (%dx read "
+                "amplification). Adjust max_buffer_input_shards or the "
+                "dataset's shard count.",
+                ds.num_shards,
+                world_size,
+                world_size,
+            )
         ds = datasets.distributed.split_dataset_by_node(
             ds, rank=rank, world_size=world_size
         )

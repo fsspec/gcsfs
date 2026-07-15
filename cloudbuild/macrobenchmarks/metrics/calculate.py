@@ -585,9 +585,12 @@ def main(argv=None) -> None:
             args.per_device_batch * args.grad_accum * args.nodes * args.ranks_per_node
         )
 
+    # max_epochs can end a run before --steps is reached; report what ran.
     recorded_steps = args.steps
-    if args.steps is not None and args.steps < 0:
-        recorded_steps = executed_step_count(step_rows)
+    if step_rows:
+        observed_steps = executed_step_count(step_rows)
+        if args.steps is None or args.steps < 0 or observed_steps < args.steps:
+            recorded_steps = observed_steps
 
     dimensions = {
         "bucket_type": args.bucket_type,
