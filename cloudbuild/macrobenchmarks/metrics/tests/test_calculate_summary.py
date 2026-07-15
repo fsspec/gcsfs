@@ -253,6 +253,192 @@ def _write_data_loading_csv(in_dir, time="12.5", percent="4.2"):
         w.writerow(["r", -1, time, percent, ""])
 
 
+def _write_dataset_build_csv(in_dir):
+    (in_dir / "dataset_build").mkdir(parents=True)
+    path = in_dir / "dataset_build" / "dataset_build_metrics.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["global_rank", "duration", "dataset_path"])
+        w.writerow([0, 1.5, "gs://ds/parquet-dir"])
+        w.writerow([1, 3.2, "gs://ds/parquet-dir"])
+
+
+def test_summary_includes_dataset_build_time(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_dataset_build_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["dataset_build_time"] == "3.2"
+    assert "dataset_build_time" in calculate.SUMMARY_FIELDNAMES
+
+
+DATA_WAIT_SETUP = "setup_train_dataloader"
+DATA_WAIT_FETCH = "[_TrainingEpochLoop].train_dataloader_next"
+
+
+def _write_data_wait_csv(in_dir, rows):
+    (in_dir / "data_wait").mkdir(parents=True)
+    path = in_dir / "data_wait" / "data_wait_metrics.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(
+            ["global_rank", "fetch_index", "action", "duration", "cumulative_total"]
+        )
+        for row in rows:
+            w.writerow(row)
+
+
+def test_summary_includes_data_wait_metrics(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_data_wait_csv(
+        in_dir,
+        [
+            # rank 0's running total (1.5) is lower than rank 1's (3.0), so
+            # rank 1 is the bottleneck and its setup/fetch split is reported.
+            (0, 1, DATA_WAIT_SETUP, 1.0, 1.0),
+            (0, 2, DATA_WAIT_FETCH, 0.5, 1.5),
+            (1, 1, DATA_WAIT_SETUP, 2.0, 2.0),
+            (1, 2, DATA_WAIT_FETCH, 1.0, 3.0),
+        ],
+    )
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["data_wait_total_time"] == "3.0"
+    assert rows[0]["data_wait_iterator_setup_time"] == "2.0"
+    assert rows[0]["data_wait_batch_fetch_time"] == "1.0"
+    assert rows[0]["num_data_wait_spans"] == "2"
+    for col in (
+        "data_wait_total_time",
+        "data_wait_iterator_setup_time",
+        "data_wait_batch_fetch_time",
+        "num_data_wait_spans",
+    ):
+        assert col in calculate.SUMMARY_FIELDNAMES
+
+
+def test_main_succeeds_with_required_data_wait_metrics(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_data_wait_csv(
+        in_dir,
+        [
+            (0, 1, DATA_WAIT_SETUP, 1.0, 1.0),
+            (0, 2, DATA_WAIT_FETCH, 0.5, 1.5),
+        ],
+    )
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "hf-pytorch-lightning-cpu",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-wait-metrics",
+        ]
+    )
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["data_wait_total_time"] == "1.5"
+
+
+def test_main_fails_when_required_data_wait_metrics_are_missing(tmp_path):
+    # step metrics present, but no data_wait_metrics.csv -> must fail when
+    # --require-data-wait-metrics is set, through the actual CLI/argparse
+    # wiring (not by calling validate_required_metrics directly).
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    with pytest.raises(SystemExit) as exc:
+        calculate.main(
+            [
+                "--run-id",
+                "r",
+                "--workload-name",
+                "hf-pytorch-lightning-cpu",
+                "--requirements",
+                "gcsfs==1.0",
+                "--in-dir",
+                str(in_dir),
+                "--out-file",
+                str(out_file),
+                "--require-data-wait-metrics",
+            ]
+        )
+    assert exc.value.code == 1
+    assert not out_file.exists()
+
+
+def test_main_fails_when_required_data_wait_metrics_are_fetch_only(tmp_path):
+    # Only train_dataloader_next spans present (e.g. an image built with
+    # stock, unforked lightning that never emits setup_train_dataloader) ->
+    # must still fail rather than silently undercount data_wait_total_time.
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    _write_data_wait_csv(in_dir, [(0, 1, DATA_WAIT_FETCH, 0.5, 0.5)])
+    out_file = tmp_path / "summary.csv"
+    with pytest.raises(SystemExit) as exc:
+        calculate.main(
+            [
+                "--run-id",
+                "r",
+                "--workload-name",
+                "hf-pytorch-lightning-cpu",
+                "--requirements",
+                "gcsfs==1.0",
+                "--in-dir",
+                str(in_dir),
+                "--out-file",
+                str(out_file),
+                "--require-data-wait-metrics",
+            ]
+        )
+    assert exc.value.code == 1
+    assert not out_file.exists()
+
+
 def _write_restore_csv(in_dir):
     restore_dir = (
         in_dir / "checkpoint_restore_time" / "persistent_storage" / "per_accelerator"
@@ -702,7 +888,7 @@ def test_tp_dp_are_na_for_non_model_parallel_run(tmp_path):
     assert rows[0]["data_parallel_size"] == "N/A"
 
 
-def test_main_emits_dataloading_knob_columns(tmp_path):
+def test_main_emits_shuffle_max_buffer_input_shards_column(tmp_path):
     in_dir = tmp_path / "raw"
     _write_step_csv(in_dir)
     _write_data_loading_csv(in_dir)

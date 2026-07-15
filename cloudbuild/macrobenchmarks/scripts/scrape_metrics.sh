@@ -39,6 +39,7 @@ run_calculate() {
       --min-restore-datapoints "$MIN_RESTORE_DATAPOINTS" \
       "${RESUME_ARGS[@]}" \
       --require-data-loading-metrics \
+      --require-data-wait-metrics \
       --bucket-type "${_BUCKET_TYPE}" --zone "${_ZONE}" --region "$REGION" \
       --machine-type "${_MACHINE_TYPE}" \
       --nodes "${_NODES}" --ranks-per-node "${_RANKS_PER_NODE}" \

@@ -18,6 +18,10 @@ CALCULATED_METRICS_DIRECTORY = "calculated_metrics"
 DATA_LOADING_METRICS_FILE = "data_loading_metrics.csv"
 CHECKPOINT_SIZE_DIRECTORY = "checkpoint_size"
 CHECKPOINT_SIZE_FILE = "checkpoint_size.csv"
+DATA_WAIT_DIRECTORY = "data_wait"
+DATA_WAIT_METRICS_FILE = "data_wait_metrics.csv"
+DATASET_BUILD_DIRECTORY = "dataset_build"
+DATASET_BUILD_METRICS_FILE = "dataset_build_metrics.csv"
 SYSTEM_METRICS_DIRECTORY = "system_metrics"
 SYSTEM_METRICS_FILE = "system_metrics.csv"
 
@@ -79,6 +83,37 @@ class DataLoadingMetrics:
     accelerator_blocked_time: float = None
     accelerator_blocked_percent: float = None
     update_timestamp: str = None
+
+
+@dataclass(kw_only=True)
+class DataWaitMetrics:
+    """One dataloader-blocking span from a real-time ``Data Wait`` log line.
+
+    ``cumulative_total`` is the emitting rank's running total, monotonically
+    increasing across its lines; the max observed value is the rank's total
+    blocked time as of its last surviving line, robust to lost tail lines
+    (unlike summing ``duration``).
+    """
+
+    global_rank: int
+    fetch_index: int
+    action: str
+    duration: float
+    cumulative_total: float
+
+
+@dataclass(kw_only=True)
+class DatasetBuildMetrics:
+    """One rank's ``build_train_dataset`` duration.
+
+    Covers the Parquet glob resolution and shuffle-buffer/node-sharding setup
+    that runs once before ``trainer.fit`` starts -- outside DataWaitProfiler's
+    ``data_wait_total_time`` span, which only begins once the fit loop is running.
+    """
+
+    global_rank: int
+    duration: float
+    dataset_path: str = None
 
 
 @dataclass(kw_only=True)

@@ -28,6 +28,8 @@ class RawMetricTables:
     dl_rows: List[dict] = field(default_factory=list)
     size_rows: List[dict] = field(default_factory=list)
     system_rows: List[dict] = field(default_factory=list)
+    data_wait_rows: List[dict] = field(default_factory=list)
+    dataset_build_rows: List[dict] = field(default_factory=list)
 
 
 def write_raw_metrics(
@@ -103,6 +105,26 @@ def write_raw_metrics(
             parsed.checkpoint_sizes,
         )
 
+    if getattr(parsed, "data_wait_metrics", None):
+        _write_csv(
+            os.path.join(
+                out_dir, schema.DATA_WAIT_DIRECTORY, schema.DATA_WAIT_METRICS_FILE
+            ),
+            schema.DataWaitMetrics,
+            parsed.data_wait_metrics,
+        )
+
+    if getattr(parsed, "dataset_build_metrics", None):
+        _write_csv(
+            os.path.join(
+                out_dir,
+                schema.DATASET_BUILD_DIRECTORY,
+                schema.DATASET_BUILD_METRICS_FILE,
+            ),
+            schema.DatasetBuildMetrics,
+            parsed.dataset_build_metrics,
+        )
+
 
 def write_system_metrics(system_rows, out_dir: str) -> None:
     """Write SystemMetric rows to the system-metrics CSV (owned here like the rest)."""
@@ -160,6 +182,18 @@ def read_raw_metrics(
         system_rows=_read_csv(
             os.path.join(
                 in_dir, schema.SYSTEM_METRICS_DIRECTORY, schema.SYSTEM_METRICS_FILE
+            )
+        ),
+        data_wait_rows=_read_csv(
+            os.path.join(
+                in_dir, schema.DATA_WAIT_DIRECTORY, schema.DATA_WAIT_METRICS_FILE
+            )
+        ),
+        dataset_build_rows=_read_csv(
+            os.path.join(
+                in_dir,
+                schema.DATASET_BUILD_DIRECTORY,
+                schema.DATASET_BUILD_METRICS_FILE,
             )
         ),
     )

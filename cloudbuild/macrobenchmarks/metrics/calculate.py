@@ -186,6 +186,65 @@ def calc_data_loading_metrics(dl_rows: list) -> dict:
     }
 
 
+# The two Lightning profiler actions DataWaitProfiler watches; disjoint and
+# jointly exhaustive of the time the fit loop blocks on the train dataloader
+# (see the workload's DATA_WAIT_ACTIONS).
+_DATA_WAIT_SETUP_ACTION = "setup_train_dataloader"
+_DATA_WAIT_FETCH_ACTION = "[_TrainingEpochLoop].train_dataloader_next"
+
+
+def calc_data_wait_metrics(data_wait_rows: list) -> dict:
+    """Total dataloader-blocked time, taken from the bottleneck rank.
+
+    Every rank logs one ``Data Wait`` line per blocking span with a
+    monotonically increasing running total, so a rank's blocked time is the
+    max ``cumulative_total`` it logged -- accurate as of its last surviving
+    line even when tail lines are lost to Cloud Logging lag, unlike a sum of
+    ``duration``. The distributed step is gated by the slowest rank, so report
+    the rank with the greatest total, passing its setup/fetch split (summed
+    from the same rank's per-span durations) through together. The split can
+    undercount when that rank's lines were lost; the headline total cannot.
+    """
+    by_rank = defaultdict(list)
+    for r in data_wait_rows:
+        if r.get("global_rank") is not None and r.get("cumulative_total") is not None:
+            by_rank[r["global_rank"]].append(r)
+    if not by_rank:
+        return {}
+    totals = {
+        rank: max(r["cumulative_total"] for r in rows) for rank, rows in by_rank.items()
+    }
+    bottleneck = max(totals, key=lambda rank: totals[rank])
+    rows = by_rank[bottleneck]
+    setup = [r["duration"] for r in rows if r.get("action") == _DATA_WAIT_SETUP_ACTION]
+    fetch = [r["duration"] for r in rows if r.get("action") == _DATA_WAIT_FETCH_ACTION]
+    out = {
+        "data_wait_total_time": totals[bottleneck],
+        "num_data_wait_spans": len(rows),
+    }
+    if setup:
+        out["data_wait_iterator_setup_time"] = sum(setup)
+    if fetch:
+        out["data_wait_batch_fetch_time"] = sum(fetch)
+    return out
+
+
+def calc_dataset_build_metrics(dataset_build_rows: list) -> dict:
+    """Dataset-build duration (Parquet glob + shuffle-buffer wiring), bottleneck rank.
+
+    Every rank builds its own streaming dataset once before ``trainer.fit``
+    starts, so report the slowest rank's duration -- the metadata-listing call
+    that gates the first batch fetch, deterministic regardless of log/ingestion
+    order.
+    """
+    durations = [
+        r["duration"] for r in dataset_build_rows if r.get("duration") is not None
+    ]
+    if not durations:
+        return {}
+    return {"dataset_build_time": max(durations)}
+
+
 def calc_throughput_metrics(write_rows: list, size_rows: list) -> dict:
     out = {}
 
@@ -370,6 +429,8 @@ def build_summary_row(
     dl_rows: list,
     size_rows: list = None,
     system_rows: list = None,
+    data_wait_rows: list = None,
+    dataset_build_rows: list = None,
     dimensions: dict = None,
 ) -> dict:
     row = {
@@ -384,6 +445,8 @@ def build_summary_row(
     row.update(calc_restore_metrics(restore_rows))
     row.update(calc_delete_metrics(delete_rows))
     row.update(calc_data_loading_metrics(dl_rows))
+    row.update(calc_data_wait_metrics(data_wait_rows or []))
+    row.update(calc_dataset_build_metrics(dataset_build_rows or []))
     row.update(calc_throughput_metrics(write_rows, size_rows or []))
     row.update(calc_system_metrics(system_rows or []))
     restore_throughput = _restore_throughput(
@@ -412,10 +475,12 @@ def validate_required_metrics(
     write_rows: list,
     restore_rows: list = None,
     dl_rows: list = None,
+    data_wait_rows: list = None,
     expected_steps: int = 0,
     min_write_datapoints: int = 0,
     min_restore_datapoints: int = 0,
     require_data_loading: bool = False,
+    require_data_wait: bool = False,
     resume_run: bool = False,
     checkpoint_interval: int = 0,
 ) -> None:
@@ -492,6 +557,32 @@ def validate_required_metrics(
                 "accelerator_blocked_percent"
             )
 
+    if require_data_wait:
+        # Data Wait lines are emitted throughout the run, but the setup span
+        # exists only when the image runs the zhixiangli/pytorch-lightning fork
+        # (the `setup_train_dataloader` profiler action + epoch-boundary fix).
+        # Requiring both span kinds fails loudly when an image was built with
+        # stock lightning, which would otherwise silently undercount
+        # data_wait_total_time by every worker-spawn/first-prefetch span.
+        rows = data_wait_rows or []
+        has_setup = any(
+            r.get("action") == _DATA_WAIT_SETUP_ACTION
+            and r.get("cumulative_total") is not None
+            for r in rows
+        )
+        has_fetch = any(
+            r.get("action") == _DATA_WAIT_FETCH_ACTION
+            and r.get("cumulative_total") is not None
+            for r in rows
+        )
+        if not (has_setup and has_fetch):
+            _fail_validation(
+                "required data-wait metrics missing: need at least one "
+                f"'{_DATA_WAIT_SETUP_ACTION}' and one '{_DATA_WAIT_FETCH_ACTION}' "
+                "Data Wait span (is the image running the patched lightning "
+                "fork and the DataWaitProfiler workload?)"
+            )
+
 
 def _fail_validation(message: str) -> None:
     print(f"ERROR: {message}", file=sys.stderr)
@@ -515,6 +606,11 @@ def main(argv=None) -> None:
         "--require-data-loading-metrics",
         action="store_true",
         help="Fail unless a run-wide accelerator-blocked " "datapoint is present.",
+    )
+    parser.add_argument(
+        "--require-data-wait-metrics",
+        action="store_true",
+        help="Fail unless both Data Wait span kinds (setup + fetch) are present.",
     )
     parser.add_argument(
         "--resume-run",
@@ -560,11 +656,13 @@ def main(argv=None) -> None:
         step_rows=step_rows,
         write_rows=write_rows,
         dl_rows=dl_rows,
+        data_wait_rows=tables.data_wait_rows,
         restore_rows=restore_rows,
         expected_steps=args.expected_steps,
         min_write_datapoints=args.min_write_datapoints,
         min_restore_datapoints=args.min_restore_datapoints,
         require_data_loading=args.require_data_loading_metrics,
+        require_data_wait=args.require_data_wait_metrics,
         resume_run=args.resume_run,
         checkpoint_interval=args.checkpoint_interval,
     )
@@ -632,6 +730,8 @@ def main(argv=None) -> None:
         dl_rows=dl_rows,
         size_rows=size_rows,
         system_rows=system_rows,
+        data_wait_rows=tables.data_wait_rows,
+        dataset_build_rows=tables.dataset_build_rows,
         dimensions=dimensions,
     )
 
