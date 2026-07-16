@@ -1,10 +1,16 @@
-"""CPU-only IO simulator for the Llama 3.1 8B Lightning training benchmark.
+"""Llama 3.1 8B Lightning training benchmark: CPU IO simulator, or real GPU
+training when GPUs are visible.
 
-Reproduces the GCS IO pattern (N_NODES x 4 ranks x 16 dataloader workers,
-periodic checkpoint writes of the full bf16 8B state dict) without GPUs. The
-real Llama model is loaded and held frozen so checkpoint file sizes match
-production; GPU compute is replaced by ``time.sleep(SIMULATED_STEP_COMPUTE_SECONDS)``
-in ``training_step``.
+On CPU, reproduces the GCS IO pattern (N_NODES x 4 ranks x 16 dataloader
+workers, periodic checkpoint writes of the full bf16 8B state dict) without
+GPUs. The real Llama model is loaded and held frozen so checkpoint file
+sizes match production; GPU compute is replaced by
+``time.sleep(SIMULATED_STEP_COMPUTE_SECONDS)`` in ``training_step``.
+
+On GPU (detected via ``torch.cuda.is_available()``), the script runs real
+end-to-end training instead: the model is trainable, ``training_step`` does
+a real forward/backward pass, and AdamW state builds up from real
+``.step()`` calls. Everything else is shared between both modes.
 
 Single-node launch (smoke test):
     torchrun --nproc_per_node=4 --nnodes=1 llama_3_1_8b_cpu_sim.py
@@ -36,6 +42,7 @@ like ``ddp``) selects the parallel-training strategy. A resume
 -- cross-strategy restore is unsupported.
 """
 
+import datetime
 import logging
 import os
 import sys
@@ -230,6 +237,13 @@ global_batch_size = (
 )
 logging.info("global_batch_size: %d", global_batch_size)
 
+# ---- Device: real GPU training vs CPU IO simulation ------------------------
+# See module docstring. Read as a bare module-level global everywhere below,
+# same as model_id, checkpoints_to_keep, etc.
+use_gpu = torch.cuda.is_available()
+logging.info("use_gpu: %s", use_gpu)
+process_group_backend = "nccl" if use_gpu else "gloo"
+
 # ---- Tokenizer ------------------------------------------------------------
 # Real Llama tokenizer. Requires HF_TOKEN env var when downloading from the
 # HuggingFace gated repo; when ``MODEL_ID=gs://...`` the launcher has already
@@ -255,6 +269,10 @@ def collate_fn(examples):
         max_length=512,
     )
     tokens["labels"] = tokens["input_ids"].clone()
+    # Mask padding out of the loss: pad_token == eos_token, so unmasked pad
+    # positions would train the GPU path to emit EOS runs and skew the logged
+    # loss by each batch's padding ratio. The CPU sim ignores labels entirely.
+    tokens["labels"][tokens["attention_mask"] == 0] = -100
     return tokens
 
 
@@ -312,7 +330,8 @@ def build_train_dataset(
 def build_train_dataloader(ds, *, batch_size, num_workers, prefetch_factor):
     """Stateful loader to resume stream from checkpoint instead of rewinding.
 
-    persistent_workers keeps GCS clients alive across epochs.
+    persistent_workers keeps GCS clients alive across epochs; pin_memory speeds
+    host->device copies on GPU.
 
     HF checkpoints the shuffle buffer's position but not its contents, so a
     resumed run skips shuffle_buffer_size * num_workers samples per rank. That
@@ -326,6 +345,7 @@ def build_train_dataloader(ds, *, batch_size, num_workers, prefetch_factor):
         num_workers=num_workers,
         persistent_workers=num_workers > 0,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=use_gpu,
     )
 
 
@@ -370,16 +390,22 @@ def _llama_tp_plan():
 
 
 class LlamaLitModel(pl.LightningModule):
-    """Holds the real Llama 8B model (frozen) for realistic checkpoint size;
-    runs a fake forward via a tiny trainable Linear so DDP all-reduce (or FSDP's
-    per-shard gradient sync) has something to sync without paying 8B-param
-    collective costs.
+    """On CPU (``use_gpu=False``), holds the real Llama 8B model (frozen)
+    for realistic checkpoint size and runs a fake forward via a tiny
+    trainable Linear so DDP all-reduce (or FSDP's per-shard gradient sync)
+    has something to sync without paying 8B-param collective costs.
+    ``training_step`` sleeps for ``SIMULATED_STEP_COMPUTE_SECONDS`` to mimic
+    the time a GPU step would take, and AdamW optimizer state is
+    artificially materialized so checkpoint sizes stay realistic despite no
+    real training happening.
 
-    ``training_step`` sleeps for ``SIMULATED_STEP_COMPUTE_SECONDS`` to mimic the time
-    a GPU step would take. ``self.model``'s parameters end up in the
-    Lightning state_dict, and AdamW is configured over ``self.model`` (ddp) or
-    all parameters post-shard-wrap (fsdp_sharded/fsdp_full/model_parallel_*)
-    with materialized optimizer state.
+    On GPU (``use_gpu=True``), ``self.model`` is trainable and
+    ``training_step`` runs a real forward/backward pass -- nothing is
+    mocked, and AdamW state builds up from real ``.step()`` calls.
+
+    Either way, ``self.model``'s parameters end up in the Lightning
+    state_dict, and AdamW is configured over ``self.model`` (ddp) or all
+    parameters post-shard-wrap (fsdp_sharded/fsdp_full/model_parallel_*).
     When ``ModelCheckpoint`` writes via fsspec to ``gs://...`` the uploaded
     blob is approximately the size of a real bf16 Llama 8B checkpoint with
     optimizer state.
@@ -391,13 +417,16 @@ class LlamaLitModel(pl.LightningModule):
         self._fsdp = training_strategy in ("fsdp_sharded", "fsdp_full")
         self._model_parallel = training_strategy in MODEL_PARALLEL_STRATEGIES
         self._tensor_parallel = self._model_parallel and tensor_parallel_size > 1
+        # GPU trains real Llama params; CPU keeps them frozen and trains a
+        # stand-in Linear instead (below).
         for p in self.model.parameters():
-            p.requires_grad = False
-        # Sharded strategies (FSDP1/FSDP2) keep bf16 to match a real checkpoint;
-        # DDP replicates in fp32.
-        sharded = self._fsdp or self._model_parallel
-        trainable_dtype = model.dtype if sharded else torch.float32
-        self.trainable = torch.nn.Linear(8, 8).to(trainable_dtype)
+            p.requires_grad = use_gpu
+        if not use_gpu:
+            # Sharded strategies (FSDP1/FSDP2) keep bf16 to match a real
+            # checkpoint; DDP replicates in fp32.
+            sharded = self._fsdp or self._model_parallel
+            trainable_dtype = model.dtype if sharded else torch.float32
+            self.trainable = torch.nn.Linear(8, 8).to(trainable_dtype)
 
     def configure_model(self):
         # Required by ModelParallelStrategy; no-op for ddp/fsdp_* (they set the
@@ -416,6 +445,10 @@ class LlamaLitModel(pl.LightningModule):
         fully_shard(self.model, mesh=dp_mesh)
 
     def training_step(self, batch, batch_idx):
+        if use_gpu:
+            # Real forward/backward through Llama, driving both the GCS
+            # read traffic and the training compute being benchmarked.
+            return self.model(**batch).loss
         # Pull the batch out of the dataloader -- this is what drives the
         # GCS read traffic we are benchmarking. The batch contents are then
         # ignored; we sleep to simulate GPU compute.
@@ -468,7 +501,10 @@ class LlamaLitModel(pl.LightningModule):
             lr=float(os.getenv("LEARNING_RATE", "2e-5")),
             weight_decay=float(os.getenv("WEIGHT_DECAY", "1e-6")),
         )
-        self._materialize_adamw_state(optimizer)
+        if not use_gpu:
+            # GPU builds real AdamW state from real .step() calls; this is
+            # CPU-sim-only realism.
+            self._materialize_adamw_state(optimizer)
         return optimizer
 
 
@@ -504,6 +540,15 @@ class StepTimeCallback(Callback):
         if (batch_idx + 1) % trainer.accumulate_grad_batches != 0:
             return
 
+        # Materialize the loss BEFORE reading the clock: on GPU, loss.item()
+        # is the device->host sync that blocks until the enqueued
+        # forward/backward/optimizer actually finish, so measuring after it
+        # makes step_time include real GPU compute (measuring first would
+        # collapse step_time to data-wait + kernel-launch overhead). Cheap
+        # and harmless on CPU.
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs
+        loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
+
         # Calculate step time excluding the checkpointing time
         step_time = time.perf_counter() - self.start_time - self.ckpt_time
 
@@ -517,8 +562,6 @@ class StepTimeCallback(Callback):
         pl_module.log("local_throughput", local_throughput)
         pl_module.log("global_throughput", global_throughput)
 
-        loss = outputs["loss"] if isinstance(outputs, dict) else outputs
-        loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
         logging.info(
             "Global Rank: %d | Step: %d | Loss: %.4f | Step Time: %.4fs | "
             "Throughput: %.2f samples/s | Local Throughput: %.2f samples/s",
@@ -546,9 +589,10 @@ class LoggedModelCheckpoint(ModelCheckpoint):
     def _save_checkpoint(self, trainer, filepath):
         # Log wall-clock time.time() (not perf_counter) for the "Start time"
         # absolute timestamp the metrics parser pairs across log lines:
-        # perf_counter's origin is per-process and meaningless outside it. Writes
-        # are rank-0 only so this is less load-bearing than the restore path
-        # below, but keeps every checkpoint timestamp on one comparable clock.
+        # perf_counter's origin is per-process and meaningless outside it.
+        # Writes are rank-0-only under ddp/fsdp_full/model_parallel_full but
+        # multi-rank under *_sharded (every rank writes its own shard);
+        # either way this keeps timestamps on one comparable clock.
         logging.info(
             "Checkpoint Save : Rank: %d : Step: %d : Start time: %f seconds: Path: %s",
             trainer.global_rank,
@@ -688,10 +732,12 @@ class LoggedModelParallelStrategy(ModelParallelStrategy):
             time.time(),
             checkpoint_path,
         )
-        # Restore drops AdamW state for frozen params; refill so later
-        # checkpoints include moments, not just weights.
-        for optimizer in self.optimizers:
-            LlamaLitModel._materialize_adamw_state(optimizer)
+        if not use_gpu:
+            # Restore drops AdamW state for the CPU sim's frozen params;
+            # refill so later checkpoints include moments, not just weights.
+            # GPU saved real state, which restores normally.
+            for optimizer in self.optimizers:
+                LlamaLitModel._materialize_adamw_state(optimizer)
         return checkpoint
 
 
@@ -699,15 +745,19 @@ def build_strategy(name):
     """Construct the parallel-training strategy for ``name``
     (ddp|fsdp_sharded|fsdp_full|model_parallel_*).
 
-    Uses the gloo CPU backend with the library-default process-group timeout
-    (no explicit ``timeout=`` override -- see #947).
+    Backend is nccl on GPU, gloo on CPU. The 7200s process-group timeout (vs the
+    30-min default) covers long checkpoint save/restore collective barriers.
     """
+    pg_kwargs = {
+        "process_group_backend": process_group_backend,
+        "timeout": datetime.timedelta(seconds=7200),
+    }
     if name == "ddp":
-        # find_unused_parameters=False: the frozen Llama params have
-        # requires_grad=False, so only self.trainable participates in DDP
-        # autograd, and it is fully used -- no unused parameters.
+        # find_unused_parameters=False: on GPU every real Llama param
+        # participates in the forward/backward; on CPU only self.trainable
+        # does (Llama params are frozen). Either way nothing is unused.
         return LoggedDDPStrategy(
-            process_group_backend="gloo",
+            **pg_kwargs,
             find_unused_parameters=False,
         )
     if name in ("fsdp_sharded", "fsdp_full"):
@@ -715,7 +765,7 @@ def build_strategy(name):
         # use_orig_params=True allows mixed requires_grad in the root FSDP unit.
         state_dict_type = "sharded" if name == "fsdp_sharded" else "full"
         return LoggedFSDPStrategy(
-            process_group_backend="gloo",
+            **pg_kwargs,
             state_dict_type=state_dict_type,
             auto_wrap_policy={LlamaDecoderLayer},
             use_orig_params=True,
@@ -732,7 +782,7 @@ def build_strategy(name):
             data_parallel_size=data_parallel_size,
             tensor_parallel_size=tensor_parallel_size,
             save_distributed_checkpoint=name.endswith("_sharded"),
-            process_group_backend="gloo",
+            **pg_kwargs,
         )
     raise SystemExit(
         f"Unsupported TRAINING_STRATEGY: {name!r} "
@@ -767,9 +817,9 @@ class DataWaitProfiler(SimpleProfiler):
     is lost entirely when a pod is preempted mid-run; these per-fetch lines make
     every rank's running total recoverable from its log tail at any point. The
     ``Fetch`` counter lets the metrics pipeline align fetch k across ranks and
-    take the max -- the per-step stall that actually gates the job under DDP's
-    every-step gradient sync. (The fetch for batch N+1 happens inside step N's
-    window, so per-step attribution is off by one; totals are exact.)
+    take the max -- the per-step stall that actually gates the job under
+    the strategy's every-step gradient sync. (Off by one per-step since the
+    N+1 fetch happens inside step N's window; totals are exact.)
     """
 
     def __init__(self, **kwargs):
@@ -832,17 +882,30 @@ if __name__ == "__main__":
         prefetch_factor=dataloader_prefetch_factor,
     )
 
-    # ---- Model: real Llama 8B in bf16, frozen -------------------------------
-    # Each rank holds its own copy (DDP replicates). Real weights so the
-    # state_dict serialized at checkpoint time is a realistic size.
+    # ---- Model: real Llama 8B in bf16 ---------------------------------------
+    # Every rank loads its own full copy here; sharded strategies shard it
+    # later in configure_model/build_strategy. Real weights so the
+    # state_dict serialized at checkpoint time is a realistic size. Frozen on
+    # CPU (IO sim), trainable on GPU (real training) -- see LlamaLitModel.
+    # use_cache=False: a KV cache is pointless for training and just wastes
+    # GPU memory; harmless on CPU, where the model never forwards.
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.bfloat16,
         local_files_only=use_local_files_only,
+        use_cache=False,
     )
 
     # ---- Callbacks ----------------------------------------------------------
-    callbacks = [DeviceStatsMonitor(cpu_stats=True), DatasetEpochCallback(ds)]
+    # cpu_stats=True: on the CPU accelerator this matches the default; on GPU
+    # it logs host CPU stats ALONGSIDE the GPU stats, which the default
+    # (cpu_stats=None) would drop. Dataloader tokenization is host-side work,
+    # so host CPU saturation stays a first-class diagnostic for this IO
+    # benchmark in both modes.
+    callbacks = [
+        DeviceStatsMonitor(cpu_stats=True),
+        DatasetEpochCallback(ds),
+    ]
     if checkpoint_write_path:
         callbacks.append(
             LoggedModelCheckpoint(
@@ -857,15 +920,14 @@ if __name__ == "__main__":
         )
     callbacks.append(StepTimeCallback())
 
-    # ---- Strategy: DDP or FSDP on CPU via gloo ------------------------------
+    # ---- Strategy: ddp / fsdp_* / model_parallel_* --------------------------
     strategy = build_strategy(training_strategy)
 
     # ---- Trainer ------------------------------------------------------------
-    # accelerator="cpu" + devices=local_world_size dynamically matches the
-    # local rank count (e.g., 4 devices with torchrun --nproc_per_node=4).
-    # ``precision="bf16-mixed"`` is the closest CPU equivalent of a GPU "bf16"
-    # setting; since training_step doesn't actually forward through
-    # the Llama model, CPU bf16 op limitations don't affect correctness.
+    # devices=local_world_size dynamically matches the local rank count
+    # (e.g., 4 devices with torchrun --nproc_per_node=4).
+    # ``precision="bf16-mixed"`` drives real mixed-precision training on
+    # GPU; on CPU it's inert since training_step never forwards the model.
     trainer = pl.Trainer(
         max_epochs=num_train_epochs,
         num_nodes=num_nodes,
@@ -874,7 +936,7 @@ if __name__ == "__main__":
         precision="bf16-mixed",
         enable_checkpointing=bool(checkpoint_write_path),
         callbacks=callbacks,
-        accelerator="cpu",
+        accelerator="gpu" if use_gpu else "cpu",
         devices=local_world_size,
         limit_test_batches=50,
         limit_val_batches=32,
