@@ -517,7 +517,15 @@ class DatasetEpochCallback(Callback):
         self._dataset = dataset
 
     def on_train_epoch_start(self, trainer, pl_module):
+        logging.info(
+            "Rank %d: Epoch %d started", trainer.global_rank, trainer.current_epoch
+        )
         self._dataset.set_epoch(trainer.current_epoch)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        logging.info(
+            "Rank %d: Epoch %d completed", trainer.global_rank, trainer.current_epoch
+        )
 
 
 class StepTimeCallback(Callback):
@@ -564,13 +572,14 @@ class StepTimeCallback(Callback):
 
         logging.info(
             "Global Rank: %d | Step: %d | Loss: %.4f | Step Time: %.4fs | "
-            "Throughput: %.2f samples/s | Local Throughput: %.2f samples/s",
+            "Throughput: %.2f samples/s | Local Throughput: %.2f samples/s | Epoch: %d",
             trainer.global_rank,
             trainer.global_step,
             loss_val,
             step_time,
             global_throughput,
             local_throughput,
+            trainer.current_epoch,
         )
 
         # Reset the timer for the next step, capturing its data loading time.
