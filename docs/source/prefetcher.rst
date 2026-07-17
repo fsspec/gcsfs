@@ -93,7 +93,7 @@ Under the Hood Lifecycle
 * Calling ``file.close()`` triggers ``_prefetch_engine.close()``, safely canceling pending network tasks and clearing memory buffers to prevent memory leaks.
 
 Standard Buckets Benchmarking with No Cache
---------------------------
+-------------------------------------------
 
 Single Stream Performance (1 Process)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -141,7 +141,7 @@ Multi Stream Performance (48 Process)
 | rand    | 100.00       | 8932.10         | 12550.82        | 12968.84                 | 15041.77         | 18421.29         | 18508.52                 |
 +---------+--------------+-----------------+-----------------+--------------------------+------------------+------------------+--------------------------+
 
-Standard Buckets Benchmarking with ReadAhead Cache
+Standard Buckets Benchmarking with Default ReadAhead Cache
 ---------------------------------
 
 Single Stream Performance (1 Process)
