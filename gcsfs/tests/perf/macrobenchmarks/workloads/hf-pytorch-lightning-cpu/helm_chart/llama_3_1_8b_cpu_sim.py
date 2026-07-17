@@ -517,11 +517,11 @@ class DatasetEpochCallback(Callback):
         self._dataset = dataset
 
     def on_train_epoch_start(self, trainer, pl_module):
-        logging.info("Epoch %d started", trainer.current_epoch)
+        logging.info("Rank %d: Epoch %d started", trainer.global_rank, trainer.current_epoch)
         self._dataset.set_epoch(trainer.current_epoch)
 
     def on_train_epoch_end(self, trainer, pl_module):
-        logging.info("Epoch %d completed", trainer.current_epoch)
+        logging.info("Rank %d: Epoch %d completed", trainer.global_rank, trainer.current_epoch)
 
 
 class StepTimeCallback(Callback):
