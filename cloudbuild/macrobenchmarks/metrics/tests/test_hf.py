@@ -6,7 +6,7 @@ from metrics.parsers import hf
 # compatibility guard.
 STEP_LINE = (
     "Global Rank: 0 | Step: 5 | Loss: 0.1234 | Step Time: 1.5000s | "
-    "Throughput: 42.67 samples/s"
+    "Throughput: 42.67 samples/s | Local Throughput: 10.67 samples/s | Epoch: 0"
 )
 SAVE_START = (
     "Checkpoint Save : Rank: 0 : Step: 25 : Start time: 100.0 "
