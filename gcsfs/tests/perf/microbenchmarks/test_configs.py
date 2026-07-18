@@ -307,3 +307,15 @@ def test_validate_actual_yaml_configs():
         # Glob
         cases = get_glob_benchmark_cases()
         assert len(cases) > 0, "Glob config produced no cases"
+
+
+def test_delete_benchmark_cases_includes_fsdp_scenarios(mock_config_dependencies):
+    """Test that delete benchmark cases correctly load FSDP scenarios with low count files."""
+    cases = get_delete_benchmark_cases()
+    case_names = [case.name for case in cases]
+    assert any("delete_fsdp_checkpoint_flat" in name for name in case_names)
+    assert any("delete_fsdp_checkpoint_rank_folders" in name for name in case_names)
+
+    # Verify low file count cases exist
+    fsdp_files = {case.files for case in cases if "delete_fsdp_checkpoint" in case.name}
+    assert {100, 1000, 10000}.issubset(fsdp_files)

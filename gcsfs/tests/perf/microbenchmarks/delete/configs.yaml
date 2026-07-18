@@ -8,6 +8,15 @@ scenarios:
     folders: [1024, 2048, 4096]
     files: [65536, 131072]
 
+  - name: "delete_fsdp_checkpoint_flat"
+    folders: [1]
+    files: [100, 1000, 10000]
+
+  - name: "delete_fsdp_checkpoint_rank_folders"
+    depth: 2
+    folders: [8, 32, 128, 512]
+    files: [100, 1000, 10000]
+
   - name: "delete_recursive"
     depth: 8
     folders: [1024, 2048, 4096]
