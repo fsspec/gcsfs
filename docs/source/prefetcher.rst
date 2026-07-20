@@ -2,7 +2,7 @@
 GCSFS Adaptive Concurrent Prefetching: Architecture & Usage Guide
 =================================================================
 
-This feature is entirely experimental! To activate, you need to pass the environment variable
+Prefetcher is not enabled by default. To enable, you need to pass the environment variable
 `USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='true'` and `DEFAULT_GCSFS_CONCURRENCY`=4. As currently written, this implementation is
 separate from the fsspec-style caching layer, but the intent is to eventually make this available to all
 asynchronous filesystems using the standard `cache_type=` argument. How it interacts with the
