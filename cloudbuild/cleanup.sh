@@ -49,15 +49,19 @@ delete_bucket_variants() {
     shift 2
 
     while IFS= read -r suffix; do
-        gcloud storage rm --recursive "gs://${bucket_base}${suffix}" --project="${PROJECT_ID}" "$@" &
-        BACKGROUND_PIDS+=("$!")
+        if gcloud storage buckets describe "gs://${bucket_base}${suffix}" --project="${PROJECT_ID}" "$@" &>/dev/null; then
+            gcloud storage rm --recursive "gs://${bucket_base}${suffix}" --project="${PROJECT_ID}" "$@" &
+            BACKGROUND_PIDS+=("$!")
+        fi
     done < <(worker_suffixes "${workers}")
 }
 
 echo "--- Deleting VM ---"
 # The delete operation is run in the background so we don't block bucket cleanup on it.
-gcloud compute instances delete "gcsfs-test-vm-${SHORT_BUILD_ID}" --project="${PROJECT_ID}" --zone="${ZONE}" --quiet &
-BACKGROUND_PIDS+=("$!")
+if gcloud compute instances describe "gcsfs-test-vm-${SHORT_BUILD_ID}" --project="${PROJECT_ID}" --zone="${ZONE}" &>/dev/null; then
+    gcloud compute instances delete "gcsfs-test-vm-${SHORT_BUILD_ID}" --project="${PROJECT_ID}" --zone="${ZONE}" --quiet &
+    BACKGROUND_PIDS+=("$!")
+fi
 
 echo "--- Removing SSH key from OS Login ---"
 if [[ -f /workspace/.ssh/google_compute_engine.pub ]]; then
