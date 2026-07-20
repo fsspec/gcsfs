@@ -625,7 +625,7 @@ def pytest_addoption(parser):
 def pytest_ignore_collect(collection_path, config):
     path_str = str(collection_path)
 
-    if "gcsfs/tests/perf/microbenchmarks" in path_str:
+    if "gcsfs/tests/perf" in path_str:
         # If no benchmark flags are passed, ignore the entire directory immediately.
         if not (
             config.getoption("--run-benchmarks")

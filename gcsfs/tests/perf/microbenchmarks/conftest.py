@@ -9,7 +9,8 @@ import uuid
 from typing import Any, List
 
 import pytest
-from resource_monitor import ResourceMonitor
+
+from gcsfs.tests.perf._common.resource_monitor import ResourceMonitor
 
 MB = 1024 * 1024
 
