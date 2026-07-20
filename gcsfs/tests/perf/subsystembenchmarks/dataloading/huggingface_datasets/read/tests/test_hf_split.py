@@ -35,10 +35,10 @@ def test_divisible_shards_are_disjoint(tmp_path):
     assert all(x == man["sample_count"] // 4 for x in per)
 
 
-def test_indivisible_every_rank_reads_all(tmp_path):
+def test_indivisible_every_rank_reads_some(tmp_path):
     prefix, man = _ingest(tmp_path, files=7)  # 7 % 4 != 0
-    per = [_hf_read.rank_rows(prefix, "pretok_parquet", r, 4) for r in range(4)]
-    assert sum(per) == man["sample_count"]
+    per = [_hf_read.rank_rows(prefix, 'pretok_parquet', r, 4) for r in range(4)]
+    assert sum(per) == man['sample_count']
     assert all(x > 0 for x in per)
 
 
