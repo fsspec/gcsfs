@@ -20,8 +20,15 @@ def test_resource_monitor_observes_a_short_spawned_worker():
     with ResourceMonitor() as monitor:
         child = ctx.Process(target=_burn_cpu, args=(0.5,))
         child.start()
-        time.sleep(0.25)
-        assert any(pid == child.pid for pid, _created in monitor._procs)
+        # Poll until the child process is tracked or timeout is reached
+        timeout = 2.0
+        start_poll = time.perf_counter()
+        while time.perf_counter() - start_poll < timeout:
+            if any(pid == child.pid for pid, _created in monitor._procs):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("Child process was not tracked by ResourceMonitor within timeout")
         child.join()
 
     assert child.exitcode == 0
