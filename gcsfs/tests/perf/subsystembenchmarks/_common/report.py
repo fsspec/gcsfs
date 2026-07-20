@@ -1,0 +1,75 @@
+import csv
+import json
+import logging
+import os
+
+import numpy as np
+
+# CSV/BQ column name per pytest-benchmark stat. Named macrobenchmarks-style
+# (<metric>_<stat>, cf. checkpoint_write_time_p90): a round is the timed unit —
+# one full-corpus epoch for the read benchmarks.
+STATS_HEADERS = {
+    "min": "round_time_min",
+    "max": "round_time_max",
+    "mean": "round_time_avg",
+    "median": "round_time_p50",
+    "stddev": "round_time_stddev",
+}
+PERCENTILE_HEADERS = {90: "round_time_p90", 95: "round_time_p95", 99: "round_time_p99"}
+
+
+def _process_benchmark_result(bench, extra_info_headers):
+    row = {}
+    row["name"] = bench["name"]
+    row["group"] = bench.get("group", "")
+    extra_info = bench.get("extra_info", {})
+    for key in extra_info_headers:
+        row[key] = extra_info.get(key)
+    for stat, header in STATS_HEADERS.items():
+        row[header] = bench["stats"].get(stat)
+    rounds_data = bench["stats"].get("data")
+    if rounds_data:
+        for pct, header in PERCENTILE_HEADERS.items():
+            row[header] = np.percentile(rounds_data, pct)
+    return row
+
+
+def generate_csv(json_path: str, results_dir: str):
+    """Convert a pytest-benchmark JSON file into a CSV with dynamic extra_info columns.
+
+    Returns None when the file holds no benchmark results -- including the empty file
+    pytest-benchmark 5.x leaves behind for --benchmark-json when every case was skipped.
+    That None is the signal run.py's no-results guard consumes; crashing here would bury
+    the real problem (a run that produced no data) under a JSONDecodeError.
+    """
+    with open(json_path, "r") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            data = None
+    if not data or not data.get("benchmarks"):
+        logging.error("No benchmarks found in %s", json_path)
+        return None
+
+    report_path = os.path.join(results_dir, "results.csv")
+    # Union across ALL benchmarks, not just the first: loaders (and, later, the checkpoint
+    # family) publish different extra_info keys, and taking the first row's keys would
+    # silently drop every column the first case happens not to emit.
+    extra_info_headers = sorted(
+        {key for bench in data["benchmarks"] for key in bench.get("extra_info", {})}
+    )
+    headers = (
+        ["name", "group"]
+        + extra_info_headers
+        + list(STATS_HEADERS.values())
+        + list(PERCENTILE_HEADERS.values())
+    )
+
+    with open(report_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for bench in data["benchmarks"]:
+            row = _process_benchmark_result(bench, extra_info_headers)
+            writer.writerow([row.get(h, "") for h in headers])
+    logging.info("CSV report generated at %s", report_path)
+    return report_path
