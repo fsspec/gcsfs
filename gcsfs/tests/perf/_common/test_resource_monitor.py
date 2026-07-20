@@ -28,7 +28,9 @@ def test_resource_monitor_observes_a_short_spawned_worker():
                 break
             time.sleep(0.05)
         else:
-            raise AssertionError("Child process was not tracked by ResourceMonitor within timeout")
+            raise AssertionError(
+                "Child process was not tracked by ResourceMonitor within timeout"
+            )
         child.join()
 
     assert child.exitcode == 0
