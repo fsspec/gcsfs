@@ -78,4 +78,7 @@ delete_bucket_variants "${WORKERS_ZONAL_CORE}" "gcsfs-test-zonal-core-${SHORT_BU
 delete_bucket_variants "${WORKERS_HNS}" "gcsfs-test-hns-req-pay-${SHORT_BUILD_ID}" --billing-project="${PROJECT_ID}"
 delete_bucket_variants "${WORKERS_STANDARD}" "gcsfs-test-standard-req-pay-${SHORT_BUILD_ID}" --billing-project="${PROJECT_ID}"
 
-wait_for_background_jobs || exit 1
+if ! wait_for_background_jobs; then
+    echo "⚠️ ALERT: GCSFS E2E Cleanup Failed. Some testing resources may have leaked."
+    exit 0
+fi
