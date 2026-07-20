@@ -41,7 +41,7 @@ class ResourceMonitor:
         live_procs = {}
         try:
             all_procs = [proc] + proc.children(recursive=True)
-        except psutil.NoSuchProcess:
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             all_procs = [proc]
         for p in all_procs:
             try:
