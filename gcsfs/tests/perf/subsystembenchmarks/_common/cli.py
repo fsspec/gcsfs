@@ -4,16 +4,7 @@ import sys
 
 
 def tests_globs(suite_dir):
-    """Every `tests/` dir inside the suite, at any depth.
-
-    A suite keeps its unit tests next to the code they cover (`<group>/tests/`,
-    `<group>/read/tests/`, ...). None of them are benchmarks, and a failure in one would be
-    read by CI as a performance regression -- but naming the directories one by one misses the
-    nested ones. These must stay ANCHORED to suite_dir: the whole benchmark tree already lives
-    under `gcsfs/tests/`, so a bare `*/tests/*` matches the benchmarks themselves and collects
-    nothing at all. pytest fnmatches these against the full path, and `*` spans `/`, so the
-    second glob covers any nesting depth.
-    """
+    """Return anchored glob patterns for nested unit test directories to exclude from benchmark execution."""
     root = suite_dir.rstrip("/")
     return [f"{root}/tests/*", f"{root}/*/tests/*"]
 
@@ -22,6 +13,7 @@ def build_pytest_args(suite_dir, json_path):
     """Construct the pytest-benchmark measurement invocation."""
     args = [
         suite_dir,
+        "--run-benchmarks",
         f"--benchmark-json={json_path}",
     ]
     args += [f"--ignore-glob={g}" for g in tests_globs(suite_dir)]

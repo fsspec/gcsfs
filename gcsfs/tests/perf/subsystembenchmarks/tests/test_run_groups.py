@@ -9,17 +9,19 @@ _REQUIRED = [
 ]
 
 
-def test_parse_args_accepts_a_discovered_group(monkeypatch):
-    monkeypatch.setattr(run, "discover_groups", lambda: ["dataloading/example"])
-    args = run.parse_args(["--group=dataloading/example"] + _REQUIRED)
-    assert args.group == "dataloading/example"
+def test_parse_args_accepts_a_discovered_group():
+    args = run.parse_args(["--group=dataloading/huggingface_datasets"] + _REQUIRED)
+    assert args.group == "dataloading/huggingface_datasets"
 
 
-def test_parse_args_rejects_negative_amplification_wait(capsys, monkeypatch):
-    monkeypatch.setattr(run, "discover_groups", lambda: ["dataloading/example"])
+def test_parse_args_rejects_negative_amplification_wait(capsys):
     with pytest.raises(SystemExit):
         run.parse_args(
-            ["--group=dataloading/example", "--amplification-wait=-1"] + _REQUIRED
+            [
+                "--group=dataloading/huggingface_datasets",
+                "--amplification-wait=-1",
+            ]
+            + _REQUIRED
         )
     assert "--amplification-wait must be >= 0" in capsys.readouterr().err
 
@@ -52,3 +54,10 @@ def test_amplification_retry_waits_once_for_missing_buckets(monkeypatch):
 
     assert result.missing_buckets == ()
     assert sleeps == [30]
+
+
+def test_build_pytest_args_includes_run_benchmarks():
+    from gcsfs.tests.perf.subsystembenchmarks._common.cli import build_pytest_args
+
+    args = build_pytest_args("/path/to/suite", "/path/to/results.json")
+    assert "--run-benchmarks" in args

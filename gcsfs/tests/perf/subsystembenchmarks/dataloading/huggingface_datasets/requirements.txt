@@ -1,0 +1,21 @@
+# Self-contained HF read benchmark deps (installed JIT by CI, on top of the `pip install -e .`
+# of gcsfs itself -- do NOT list gcsfs here, or pip may pull a release over the checkout under
+# test). torch drives the DataLoader (num_workers, mp.spawn ranks); pyarrow writes the
+# per-case Parquet corpus; google-cloud-monitoring powers the read-amplification scrape.
+# pytest/pytest-benchmark/pytest-timeout/pytest-asyncio/PyYAML run the harness itself --
+# `pip install -e .` only installs gcsfs's runtime deps, not test tooling, and gcsfs's own
+# conftest.py imports pytest_asyncio at collection time even for these non-async tests.
+#
+# PINNED on purpose. `datasets` is the library being benchmarked and torch/pyarrow set the
+# cost of the read path, so an unpinned install would make repeated measurements incomparable.
+datasets==5.0.0
+google-cloud-monitoring==2.28.0
+numpy==2.4.4
+psutil==7.2.2
+pyarrow==24.0.0
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-benchmark==5.2.3
+pytest-timeout==2.4.0
+PyYAML==6.0.3
+torch==2.12.1
