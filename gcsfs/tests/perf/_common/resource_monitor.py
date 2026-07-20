@@ -47,7 +47,7 @@ class ResourceMonitor:
             try:
                 proc_key = (p.pid, p.create_time())
                 live_procs[proc_key] = self._procs.get(proc_key, p)
-            except psutil.NoSuchProcess:
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         self._procs = live_procs
         return list(self._procs.values())
