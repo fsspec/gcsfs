@@ -69,14 +69,14 @@ from lightning.pytorch.strategies import (
     FSDPStrategy,
     ModelParallelStrategy,
 )
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FullyShardedDataParallel, fully_shard
+from torch.distributed.fsdp.wrap import wrap
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     RowwiseParallel,
     parallelize_module,
 )
 from torchdata.stateful_dataloader import StatefulDataLoader
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 # ---- Logging --------------------------------------------------------------
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -429,8 +429,18 @@ class LlamaLitModel(pl.LightningModule):
             self.trainable = torch.nn.Linear(8, 8).to(trainable_dtype)
 
     def configure_model(self):
-        # Required by ModelParallelStrategy; no-op for ddp/fsdp_* (they set the
-        # model up in __init__). Decoder layers live at self.model.model.layers.
+        if self._fsdp:
+            # Explicit FSDP1 units keep the CPU fake step from gathering unused
+            # frozen model parameters through a LightningModule root wrapper.
+            if not isinstance(self.model, FullyShardedDataParallel):
+                for index, layer in enumerate(self.model.model.layers):
+                    self.model.model.layers[index] = wrap(layer)
+                self.model = wrap(self.model)
+            if not use_gpu and not isinstance(self.trainable, FullyShardedDataParallel):
+                self.trainable = wrap(self.trainable)
+            return
+
+        # ModelParallelStrategy applies FSDP2 to the model below.
         if not self._model_parallel:
             return
         mesh = self.device_mesh
@@ -771,12 +781,11 @@ def build_strategy(name):
         )
     if name in ("fsdp_sharded", "fsdp_full"):
         # fsdp_sharded writes sharded checkpoints; fsdp_full writes consolidated.
-        # use_orig_params=True allows mixed requires_grad in the root FSDP unit.
+        # configure_model creates the FSDP1 units explicitly.
         state_dict_type = "sharded" if name == "fsdp_sharded" else "full"
         return LoggedFSDPStrategy(
             **pg_kwargs,
             state_dict_type=state_dict_type,
-            auto_wrap_policy={LlamaDecoderLayer},
             use_orig_params=True,
         )
     if name in MODEL_PARALLEL_STRATEGIES:
