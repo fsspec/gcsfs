@@ -70,12 +70,12 @@ shared_workload_helm_args() {
 
 # Poll a JobSet until it reports Completed (return 0) or Failed/timeout (record
 # the failure in the ledger, dump diagnostics, return 1). Shared by the
-# seed-checkpoint and run-workload steps so the 240x30s poll lives in one place.
+# seed-checkpoint and run-workload steps so the 480x30s poll lives in one place.
 # Usage: wait_for_jobset <jobset-name> <step-id>
 wait_for_jobset() {
   local jobset="$1" step="$2" complete failed
   echo "Waiting for JobSet $jobset to complete..."
-  for _ in $(seq 1 240); do
+  for _ in $(seq 1 480); do
     complete=$(kubectl get jobset "$jobset" -o jsonpath='{.status.conditions[?(@.type=="Completed")].status}' 2>/dev/null || echo "")
     failed=$(kubectl get jobset "$jobset" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
     if [ "$complete" = "True" ]; then echo "JobSet $jobset completed."; return 0; fi
