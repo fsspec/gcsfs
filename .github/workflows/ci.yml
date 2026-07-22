@@ -91,6 +91,28 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
 
+  subsystembenchmark-unit-tests:
+    name: Subsystem benchmark unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      STORAGE_EMULATOR_HOST: http://localhost:4443
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt
+      - name: Install subsystem benchmark dependencies
+        run: |
+          python -m pip install -e .
+          python -m pip install -r gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt
+      - name: Run subsystem benchmark unit tests
+        run: pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
+
   lint:
     name: lint
     runs-on: ubuntu-latest

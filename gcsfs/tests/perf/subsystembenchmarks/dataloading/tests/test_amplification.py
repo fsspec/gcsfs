@@ -37,6 +37,15 @@ class _SequencedClient:
         return response
 
 
+class _RecordingClient:
+    def __init__(self):
+        self.requests = []
+
+    def list_time_series(self, request):
+        self.requests.append(request)
+        return []
+
+
 def _write_csv(path, rows, fieldnames):
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -53,6 +62,16 @@ _FIELDS = [
     "dataset_size_bytes",
     "measurement_round_count",
 ]
+
+
+def test_bucket_egress_bytes_filters_to_object_reads():
+    client = _RecordingClient()
+
+    amplification.bucket_egress_bytes(client, "proj", "bucket", 100, 160)
+
+    filter_ = client.requests[0]["filter"]
+    assert 'metric.labels.method = "ReadObject"' in filter_
+    assert 'metric.labels.method = "BidiReadObject"' in filter_
 
 
 def test_enrich_csv_does_not_count_a_row_with_no_monitoring_data(tmp_path):

@@ -79,6 +79,7 @@ NODE_SERIES = [
 
 # Per-bucket totals summed over the window; `name` is prefixed with
 # "checkpoint"/"dataset" to form the metric/column name.
+_GCS_READ_METHODS = ("ReadObject", "BidiReadObject")
 GCS_BUCKET_SERIES = [
     Series(
         "read_bytes",
@@ -86,6 +87,7 @@ GCS_BUCKET_SERIES = [
         "gcs_bucket",
         "ALIGN_DELTA",
         filter_kind="bucket",
+        methods=_GCS_READ_METHODS,
     ),
     Series(
         "read_request_count",
@@ -93,7 +95,7 @@ GCS_BUCKET_SERIES = [
         "gcs_bucket",
         "ALIGN_DELTA",
         filter_kind="bucket",
-        methods=("ReadObject", "BidiReadObject"),  # gRPC vs JSON read labels
+        methods=_GCS_READ_METHODS,  # gRPC vs JSON read labels
     ),
 ]
 

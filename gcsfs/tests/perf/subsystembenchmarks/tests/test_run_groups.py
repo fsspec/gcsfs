@@ -16,6 +16,13 @@ def test_parse_args_accepts_a_discovered_group():
     assert args.group == "dataloading/huggingface_datasets"
 
 
+def test_setup_environment_sets_storage_emulator_host(monkeypatch):
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    args = run.parse_args(["--group=dataloading/huggingface_datasets"] + _REQUIRED)
+    run._setup_environment(args)
+    assert os.environ.get("STORAGE_EMULATOR_HOST") == "https://storage.googleapis.com"
+
+
 def test_setup_environment_exports_sweep_axes(monkeypatch):
     monkeypatch.delenv("GCSFS_SUBSYSTEM_SWEEP_AXES", raising=False)
     args = run.parse_args(

@@ -65,9 +65,10 @@ def _sum_series(client, project, filter_, start_epoch, end_epoch, period):
 
 
 def bucket_egress_bytes(client, project, bucket, start_epoch, end_epoch, period=60):
+    methods = " OR ".join(f'metric.labels.method = "{m}"' for m in _READ_METHODS)
     filter_ = (
         f'metric.type = "{_SENT}" AND resource.type = "gcs_bucket" '
-        f'AND resource.labels.bucket_name = "{bucket}"'
+        f'AND resource.labels.bucket_name = "{bucket}" AND ({methods})'
     )
     return _sum_series(client, project, filter_, start_epoch, end_epoch, period)
 

@@ -25,6 +25,7 @@ def _setup_environment(args):
     os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
     os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
+    os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
 
 
 def _build_parser():
