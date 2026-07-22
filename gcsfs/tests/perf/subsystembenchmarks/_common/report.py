@@ -99,7 +99,9 @@ def print_csv_to_shell(report_path: str):
         logging.info("No data to display.")
         return
     if len(headers) != len(set(headers)):
-        logging.error("Failed to render report at %s: duplicate CSV headers", report_path)
+        logging.error(
+            "Failed to render report at %s: duplicate CSV headers", report_path
+        )
         return
 
     table = PrettyTable()
