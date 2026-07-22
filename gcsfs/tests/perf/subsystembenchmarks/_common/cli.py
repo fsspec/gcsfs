@@ -14,6 +14,8 @@ def build_pytest_args(suite_dir, json_path):
     args = [
         suite_dir,
         "--run-benchmarks",
+        "-vv",
+        "-s",
         f"--benchmark-json={json_path}",
     ]
     args += [f"--ignore-glob={g}" for g in tests_globs(suite_dir)]
