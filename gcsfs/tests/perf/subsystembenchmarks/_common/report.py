@@ -5,23 +5,26 @@ import os
 
 import numpy as np
 
-# CSV/BQ column name per pytest-benchmark stat. Named macrobenchmarks-style
-# (<metric>_<stat>, cf. checkpoint_write_time_p90): a round is the timed unit —
-# one full-corpus epoch for the read benchmarks.
+# CSV/BQ column name per pytest-benchmark stat. A round is the timed unit: one
+# full-corpus iteration for the read benchmarks.
 STATS_HEADERS = {
-    "min": "round_time_min",
-    "max": "round_time_max",
-    "mean": "round_time_avg",
-    "median": "round_time_p50",
-    "stddev": "round_time_stddev",
+    "min": "round_duration_min_seconds",
+    "max": "round_duration_max_seconds",
+    "mean": "round_duration_mean_seconds",
+    "median": "round_duration_p50_seconds",
+    "stddev": "round_duration_stddev_seconds",
 }
-PERCENTILE_HEADERS = {90: "round_time_p90", 95: "round_time_p95", 99: "round_time_p99"}
+PERCENTILE_HEADERS = {
+    90: "round_duration_p90_seconds",
+    95: "round_duration_p95_seconds",
+    99: "round_duration_p99_seconds",
+}
 
 
 def _process_benchmark_result(bench, extra_info_headers):
     row = {}
-    row["name"] = bench["name"]
-    row["group"] = bench.get("group", "")
+    row["benchmark_case_id"] = bench["name"]
+    row["benchmark_group"] = bench.get("group", "")
     extra_info = bench.get("extra_info", {})
     for key in extra_info_headers:
         row[key] = extra_info.get(key)
@@ -59,7 +62,7 @@ def generate_csv(json_path: str, results_dir: str):
         {key for bench in data["benchmarks"] for key in bench.get("extra_info", {})}
     )
     headers = (
-        ["name", "group"]
+        ["benchmark_case_id", "benchmark_group"]
         + extra_info_headers
         + list(STATS_HEADERS.values())
         + list(PERCENTILE_HEADERS.values())

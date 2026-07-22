@@ -9,7 +9,7 @@ def test_timestamp_is_monotonic():
     assert b >= a
 
 
-def test_reduce_split_sums_rows_and_spans_wall_across_ranks():
+def test_reduce_split_spans_rank_wall_time_and_global_first_batch_readiness():
     results = [
         ([(0.0, 2.0, 10)], 0.5),
         ([(1.0, 4.0, 5)], 0.9),
@@ -17,7 +17,7 @@ def test_reduce_split_sums_rows_and_spans_wall_across_ranks():
     durations, rows, ttfb = driver.reduce_split(results, rounds=1)
     assert durations == [4.0]
     assert rows == [15]
-    assert ttfb == 0.9
+    assert ttfb == 1.9
 
 
 def test_assert_fsspec_gcsfs_ignores_non_gs_prefix():

@@ -37,6 +37,15 @@ class _SequencedClient:
         return response
 
 
+class _RecordingClient:
+    def __init__(self):
+        self.requests = []
+
+    def list_time_series(self, request):
+        self.requests.append(request)
+        return []
+
+
 def _write_csv(path, rows, fieldnames):
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -46,13 +55,23 @@ def _write_csv(path, rows, fieldnames):
 
 
 _FIELDS = [
-    "name",
-    "bucket_name",
-    "window_start",
-    "window_end",
-    "corpus_bytes",
-    "rounds",
+    "benchmark_case_id",
+    "gcs_bucket_name",
+    "measurement_window_start_unix_seconds",
+    "measurement_window_end_unix_seconds",
+    "dataset_size_bytes",
+    "measurement_round_count",
 ]
+
+
+def test_bucket_egress_bytes_filters_to_object_reads():
+    client = _RecordingClient()
+
+    amplification.bucket_egress_bytes(client, "proj", "bucket", 100, 160)
+
+    filter_ = client.requests[0]["filter"]
+    assert 'metric.labels.method = "ReadObject"' in filter_
+    assert 'metric.labels.method = "BidiReadObject"' in filter_
 
 
 def test_enrich_csv_does_not_count_a_row_with_no_monitoring_data(tmp_path):
@@ -62,12 +81,12 @@ def test_enrich_csv_does_not_count_a_row_with_no_monitoring_data(tmp_path):
         csv_path,
         [
             {
-                "name": "case-a",
-                "bucket_name": "b1",
-                "window_start": "1000",
-                "window_end": "1060",
-                "corpus_bytes": "500",
-                "rounds": "1",
+                "benchmark_case_id": "case-a",
+                "gcs_bucket_name": "b1",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "dataset_size_bytes": "500",
+                "measurement_round_count": "1",
             }
         ],
         _FIELDS,
@@ -88,12 +107,12 @@ def test_enrich_csv_counts_a_row_with_monitoring_data(tmp_path):
         csv_path,
         [
             {
-                "name": "case-a",
-                "bucket_name": "b1",
-                "window_start": "1000",
-                "window_end": "1060",
-                "corpus_bytes": "500",
-                "rounds": "1",
+                "benchmark_case_id": "case-a",
+                "gcs_bucket_name": "b1",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "dataset_size_bytes": "500",
+                "measurement_round_count": "1",
             }
         ],
         _FIELDS,
@@ -115,12 +134,12 @@ def test_enrich_csv_logs_instead_of_printing_on_row_failure(tmp_path, caplog):
         csv_path,
         [
             {
-                "name": "case-a",
-                "bucket_name": "b1",
-                "window_start": "not-a-number",
-                "window_end": "1060",
-                "corpus_bytes": "500",
-                "rounds": "1",
+                "benchmark_case_id": "case-a",
+                "gcs_bucket_name": "b1",
+                "measurement_window_start_unix_seconds": "not-a-number",
+                "measurement_window_end_unix_seconds": "1060",
+                "dataset_size_bytes": "500",
+                "measurement_round_count": "1",
             }
         ],
         _FIELDS,
@@ -140,12 +159,12 @@ def test_enrich_csv_retry_completes_only_the_missing_row(tmp_path):
         csv_path,
         [
             {
-                "name": "case-a",
-                "bucket_name": "b1",
-                "window_start": "1000",
-                "window_end": "1060",
-                "corpus_bytes": "500",
-                "rounds": "1",
+                "benchmark_case_id": "case-a",
+                "gcs_bucket_name": "b1",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "dataset_size_bytes": "500",
+                "measurement_round_count": "1",
             }
         ],
         _FIELDS,

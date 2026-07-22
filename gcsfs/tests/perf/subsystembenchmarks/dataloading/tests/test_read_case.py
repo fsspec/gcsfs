@@ -93,6 +93,15 @@ def _local_bucket_ctx(tmp_path):
 def test_run_read_case_publishes_throughput_and_passes_guard(tmp_path, monkeypatch):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen
 
+    monkeypatch.setenv("MACHINE_TYPE", "c4-standard-192")
+    monkeypatch.delenv("GCE_MACHINE_TYPE", raising=False)
+    monkeypatch.setenv("COMMIT_SHA", "source123")
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_REQUIREMENTS_OVERRIDE", "gcsfs==1.0")
+    monkeypatch.setenv(
+        "GCSFS_SUBSYSTEM_REQUIREMENTS_RESOLVED",
+        '[{"name":"gcsfs","version":"1.0"}]',
+    )
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_SWEEP_AXES", "workers workers prefetch")
     man = {
         "file_count": 2,
         "corpus_bytes": 1000,
@@ -114,17 +123,35 @@ def test_run_read_case_publishes_throughput_and_passes_guard(tmp_path, monkeypat
     )
     assert bench.group == "read"
     assert bench.extra_info["fake_driver_col"] == 7
-    assert bench.extra_info["sample_count"] == 10
-    assert bench.extra_info["framework"] == "fake"
-    assert bench.extra_info["sweep_axis"] == "baseline"
+    assert bench.extra_info["dataset_sample_count"] == 10
+    assert bench.extra_info["workload_implementation"] == "fake"
+    assert bench.extra_info["config_sweep_axis"] == "baseline"
     assert bench.extra_info["mean_samples_per_second"] == statistics.mean(
         [10 / 1.0, 10 / 2.0]
     )
     assert bench.extra_info["dataloader_num_workers"] == 2
+    assert bench.extra_info["measurement_round_count"] == 2
+    assert bench.extra_info["machine_type"] == "c4-standard-192"
+    assert bench.extra_info["benchmark_source_commit_sha"] == "source123"
+    assert bench.extra_info["requirements_override"] == "gcsfs==1.0"
+    assert (
+        bench.extra_info["requirements_resolved"]
+        == '[{"name":"gcsfs","version":"1.0"}]'
+    )
+    assert bench.extra_info["config_sweep_axes_requested"] == "workers prefetch"
+    assert "gcsfs_commit_sha" not in bench.extra_info
+    assert {
+        "framework",
+        "sweep_axis",
+        "sample_count",
+        "dataset_read_throughput_mean_samples_per_second",
+        "data_loader_worker_count",
+        "rounds",
+    }.isdisjoint(bench.extra_info)
 
 
-def test_run_read_case_publishes_build_seconds(tmp_path, monkeypatch):
-    """Verify that dataset build latency is published in dataset_build_seconds."""
+def test_run_read_case_publishes_dataset_build_time(tmp_path, monkeypatch):
+    """Dataset initialization latency uses the macrobenchmark field name."""
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen
 
     man = {
@@ -145,7 +172,7 @@ def test_run_read_case_publishes_build_seconds(tmp_path, monkeypatch):
         _FakeDriver(rows=10, build_seconds=1.75),
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
-    assert bench.extra_info["dataset_build_seconds"] == 1.75
+    assert bench.extra_info["dataset_build_time"] == 1.75
 
 
 def test_run_read_case_fails_partial_read(tmp_path, monkeypatch):

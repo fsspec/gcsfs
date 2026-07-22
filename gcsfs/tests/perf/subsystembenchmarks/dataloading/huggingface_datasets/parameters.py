@@ -22,6 +22,6 @@ class HFReadParameters(ReadParameters):
 
     def extra_columns(self):
         return {
-            "persistent_workers": self.num_workers > 0,
-            "max_buffer_input_shards": self.max_buffer_input_shards,
+            "persistent_data_loader_workers_enabled": self.num_workers > 0,
+            "shuffle_max_buffer_input_shards": self.max_buffer_input_shards,
         }

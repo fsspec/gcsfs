@@ -1,5 +1,6 @@
 """Per-case benchmark lifecycle runner: bucket management, corpus ingestion, driver timing, and metric publishing."""
 
+import os
 import statistics
 import time
 
@@ -9,37 +10,48 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspe
 def publish_common(benchmark, params, manifest, ttfb, window, build_seconds):
     """Publish shared loader parameters, system metadata, and timing metrics onto benchmark extra_info."""
     from gcsfs.tests.perf.subsystembenchmarks._common import env
+    from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
+        requested_sweep_axes,
+    )
 
+    sweep_axes = " ".join(requested_sweep_axes()) or "all"
     benchmark.group = params.scenario
     benchmark.extra_info.update(
         {
-            "framework": params.framework,
-            "workload_kind": "data_loading",
-            "bucket_name": params.bucket_name,
+            "workload_implementation": params.framework,
+            "workload_family": "data_loading",
+            "gcs_bucket_name": params.bucket_name,
             "bucket_type": params.bucket_type,
-            "rounds": params.rounds,
-            "scenario": params.scenario,
-            "sweep_axis": params.sweep_axis,
-            "fmt": params.fmt,
-            "seq_len": params.seq_len,
-            "file_count": manifest["file_count"],
-            "corpus_bytes": manifest["corpus_bytes"],
-            "sample_count": manifest["sample_count"],
-            "batch_size": params.batch_size,
+            "measurement_round_count": params.rounds,
+            "workload_scenario": params.scenario,
+            "config_sweep_axis": params.sweep_axis,
+            "dataset_format": params.fmt,
+            "sample_sequence_length_tokens": params.seq_len,
+            "dataset_file_count": manifest["file_count"],
+            "dataset_size_bytes": manifest["corpus_bytes"],
+            "dataset_sample_count": manifest["sample_count"],
+            "batch_size_samples": params.batch_size,
             "dataloader_num_workers": params.num_workers,
-            "prefetch_factor": params.prefetch_factor,
-            "access": params.access,
-            "split_by_node": params.split_by_node,
+            "dataloader_prefetch_factor": params.prefetch_factor,
+            "read_access_pattern": params.access,
+            "dataset_split_by_node_enabled": params.split_by_node,
             "world_size": params.world_size,
-            "row_group_size": params.row_group_size,
-            "time_to_first_batch": ttfb,
-            "dataset_build_seconds": build_seconds,
-            "window_start": int(window[0]),
-            "window_end": int(window[1]),
-            "backend": env.detect_backend(),
-            "accelerator": env.detect_accelerator(),
-            "machine_type": env.gce_machine_type(),
-            "commit_sha": env.git_commit_sha(),
+            "parquet_row_group_size_rows": params.row_group_size,
+            "time_to_first_batch_seconds": ttfb,
+            "dataset_build_time": build_seconds,
+            "measurement_window_start_unix_seconds": int(window[0]),
+            "measurement_window_end_unix_seconds": int(window[1]),
+            "distributed_backend": env.detect_backend(),
+            "compute_accelerator_type": env.detect_accelerator(),
+            "machine_type": env.machine_type(),
+            "benchmark_source_commit_sha": env.benchmark_source_commit_sha(),
+            "requirements_override": os.environ.get(
+                "GCSFS_SUBSYSTEM_REQUIREMENTS_OVERRIDE", ""
+            ),
+            "requirements_resolved": os.environ.get(
+                "GCSFS_SUBSYSTEM_REQUIREMENTS_RESOLVED", "[]"
+            ),
+            "config_sweep_axes_requested": sweep_axes,
         }
     )
     benchmark.extra_info.update(params.extra_columns())
@@ -98,7 +110,7 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         )
         benchmark.extra_info.update(result.extra_columns)
         durations = result.durations
-        benchmark.extra_info["dataset_read_throughput_avg_bytes_per_sec"] = (
+        benchmark.extra_info["dataset_read_throughput_mean_bytes_per_second"] = (
             statistics.mean(manifest["corpus_bytes"] / d for d in durations)
             if all(durations)
             else 0.0

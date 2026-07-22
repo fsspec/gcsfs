@@ -86,6 +86,19 @@ def test_build_request_bucket_matches_both_read_methods():
     assert " OR " in f
 
 
+def test_build_request_bucket_read_bytes_matches_both_read_methods():
+    read_bytes = next(
+        series for series in monitoring.GCS_BUCKET_SERIES if series.name == "read_bytes"
+    )
+
+    filter_ = monitoring._build_request("proj", read_bytes, "my-bucket", 0, 600, 60)[
+        "filter"
+    ]
+
+    assert 'metric.labels.method = "ReadObject"' in filter_
+    assert 'metric.labels.method = "BidiReadObject"' in filter_
+
+
 def _bucket_series(values):
     # A gcs_bucket series carries no pod_name label; only points matter here.
     return SimpleNamespace(

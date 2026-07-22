@@ -1,0 +1,250 @@
+substitutions:
+  _ZONE: ""
+  _INFRA_PREFIX: ""
+  _VM_SERVICE_ACCOUNT: ""
+  _GROUP: "dataloading/huggingface_datasets"
+  _BUCKET_TYPE: "regional"  # regional | zonal | hns (one type per run, like macrobenchmarks)
+  _MACHINE_TYPE: "c4-standard-192"  # CPU now; point at a GPU type later (auto-detect handles backend)
+  _REQUIREMENTS: ""
+  _SWEEP_AXES: ""
+
+steps:
+  # 1. Generate a persistent SSH key for this build run.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "generate-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        mkdir -p /workspace/.ssh
+        ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
+        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h
+    waitFor: ["-"]
+
+  # 2. Initialize shared variables.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "init-variables"
+    entrypoint: "bash"
+    env:
+      - "BUILD_ID=${BUILD_ID}"
+      - "BRANCH_NAME=${BRANCH_NAME}"
+      - "COMMIT_SHA=${COMMIT_SHA}"
+      - "_INFRA_PREFIX=${_INFRA_PREFIX}"
+      - "_ZONE=${_ZONE}"
+      - "_GROUP=${_GROUP}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_SWEEP_AXES=${_SWEEP_AXES}"
+      - "PROJECT_ID=${PROJECT_ID}"
+    args:
+      - "-c"
+      - |
+        SHORT_BUILD_ID=$${BUILD_ID:0:8}
+        SAFE_BRANCH=$(echo -n "$${BRANCH_NAME:-unknown}" | tr -c 'a-zA-Z0-9_.-' '-')
+
+        if [ "$${SAFE_BRANCH}" = "unknown" ]; then
+          echo "ERROR: BRANCH_NAME is not set or evaluates to unknown. Failing the build."
+          exit 1
+        fi
+        if [ -z "$${_INFRA_PREFIX}" ] || [ -z "$${_ZONE}" ] || [ -z "$${_MACHINE_TYPE}" ]; then
+          echo "ERROR: required variables (_INFRA_PREFIX, _ZONE, _MACHINE_TYPE) are not set."
+          exit 1
+        fi
+
+        case "$${_BUCKET_TYPE}" in
+          regional|zonal|hns) ;;
+          *) echo "ERROR: unknown _BUCKET_TYPE '$${_BUCKET_TYPE}'"; exit 1;;
+        esac
+
+        ZONE="$${_ZONE}"
+        REGION="$${ZONE%-*}"
+
+        # The benchmark creates a bucket PER CASE (read amplification is only attributable
+        # that way -- see dataloading/bucket.py), so cloudbuild hands it a name prefix
+        # instead of a bucket, and sweeps anything the run leaks at the end.
+        BUCKET_PREFIX=$${_INFRA_PREFIX}-$${_BUCKET_TYPE}-$${SHORT_BUILD_ID}
+        RESULTS_BUCKET=$${_INFRA_PREFIX}-run-results
+        VM_NAME=$${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}
+        {
+          printf 'export BRANCH_NAME=%q\n' "$${SAFE_BRANCH}"
+          printf 'export RUN_ID=%q\n' "$${BUILD_ID}"
+          printf 'export COMMIT_SHA=%q\n' "$${COMMIT_SHA}"
+          printf 'export MACHINE_TYPE=%q\n' "$${_MACHINE_TYPE}"
+          printf 'export GROUP=%q\n' "$${_GROUP}"
+          printf 'export BUCKET_TYPE=%q\n' "$${_BUCKET_TYPE}"
+          printf 'export PROJECT_ID=%q\n' "$${PROJECT_ID}"
+          printf 'export REGION=%q\n' "$${REGION}"
+          printf 'export ZONE=%q\n' "$${ZONE}"
+          printf 'export BUCKET_PREFIX=%q\n' "$${BUCKET_PREFIX}"
+          printf 'export RESULTS_BUCKET=%q\n' "$${RESULTS_BUCKET}"
+          printf 'export VM_NAME=%q\n' "$${VM_NAME}"
+          printf 'export REQUIREMENTS_OVERRIDE=%q\n' "$${_REQUIREMENTS}"
+          printf 'export SWEEP_AXES=%q\n' "$${_SWEEP_AXES}"
+        } > /workspace/build_vars.env
+    waitFor: ["-"]
+
+  # 3. Ensure the persistent results bucket exists (the benchmark buckets are the run's own).
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        trap 'echo "create-buckets" >> /workspace/FAILED' ERR
+        if [[ -f /workspace/FAILED ]]; then echo "Skipping: previous step failed"; exit 0; fi
+        source /workspace/build_vars.env
+
+        # Serial, not backgrounded: bare `wait` returns 0 even when a child failed, so a
+        # backgrounded create that errored would sail past `set -e` unnoticed.
+        if gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
+          echo "Results bucket gs://$${RESULTS_BUCKET} already exists"
+        else
+          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${PROJECT_ID} \
+            --location=$$REGION --enable-hierarchical-namespace --uniform-bucket-level-access
+        fi
+    waitFor: ["init-variables"]
+    allowFailure: true
+
+  # 4. Create the benchmark VM (CPU now; auto-detect makes the benchmark GPU-ready).
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        trap 'echo "create-vm" >> /workspace/FAILED' ERR
+        if [[ -f /workspace/FAILED ]]; then echo "Skipping: previous step failed"; exit 0; fi
+        source /workspace/build_vars.env
+
+        echo "Creating VM: $${VM_NAME} ($${MACHINE_TYPE}) in zone: $${ZONE}"
+        gcloud compute instances create "$$VM_NAME" \
+            --project="${PROJECT_ID}" \
+            --zone="$$ZONE" \
+            --machine-type="$$MACHINE_TYPE" \
+            --image-family="ubuntu-2404-lts-amd64" \
+            --image-project="ubuntu-os-cloud" \
+            --boot-disk-size="50GB" \
+            --boot-disk-type="hyperdisk-balanced" \
+            --network-interface=network-tier=PREMIUM,nic-type=GVNIC \
+            --network-performance-configs=total-egress-bandwidth-tier=TIER_1 \
+            --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
+            --metadata="enable-oslogin=TRUE" \
+            --service-account="${_VM_SERVICE_ACCOUNT}" \
+            --tags="allow-ssh" \
+            --labels="build-id=$$RUN_ID" \
+            --quiet
+    waitFor: ["init-variables"]
+    allowFailure: true
+
+  # 5. Run the subsystem benchmark group and upload its results.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-subsystembenchmarks"
+    allowFailure: true
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        if [[ -f /workspace/FAILED ]]; then echo "Skipping: previous step failed"; exit 0; fi
+        source /workspace/build_vars.env
+        record_failure() { echo "run-subsystembenchmarks" >> /workspace/FAILED; }
+        trap 'record_failure' ERR
+
+        SSH="gcloud compute ssh $$VM_NAME --project=${PROJECT_ID} --zone=$$ZONE --internal-ip --ssh-key-file=/workspace/.ssh/google_compute_engine"
+
+        # --- wait for SSH ---
+        VM_READY=false
+        for i in {1..5}; do
+          if $$SSH --command="echo VM ready"; then
+            VM_READY=true
+            break
+          fi
+          echo "waiting for VM ($$i/5)"
+          sleep 15
+        done
+        if [ "$$VM_READY" != true ]; then
+          echo "VM never became reachable after 5 attempts"
+          exit 1
+        fi
+
+        # --- copy source and the shell-quoted build environment ---
+        $$SSH --command="mkdir -p ~/gcsfs"
+        gcloud compute scp --recurse . "$${VM_NAME}:~/gcsfs" \
+          --project="${PROJECT_ID}" --zone=$$ZONE --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine
+        gcloud compute scp /workspace/build_vars.env "$${VM_NAME}:~/ssb_cloudbuild.env" \
+          --project="${PROJECT_ID}" --zone=$$ZONE --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine
+
+        $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/setup.sh"
+        # A case failure makes run.py exit nonzero here. Don't let that skip the upload below
+        # via `set -e` -- the run that most needs diagnosing would
+        # leave its CSV/JSON stranded on the VM that cleanup-vm deletes minutes later.
+        # Capture the status, upload unconditionally, then re-raise it at the end.
+        RUN_RC=0
+        $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/run-benchmarks.sh" \
+          || { RUN_RC=$$?; record_failure; }
+        $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/upload-results.sh"
+        exit $$RUN_RC
+    waitFor: ["create-vm", "create-buckets", "generate-ssh-key"]
+
+  # --- Cleanup ---
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        gcloud compute os-login ssh-keys remove --key-file=/workspace/gcb_ssh_key.pub || true
+    waitFor: ["run-subsystembenchmarks"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        source /workspace/build_vars.env
+        gcloud compute instances delete "$$VM_NAME" --project="${PROJECT_ID}" --zone="$$ZONE" --quiet || true
+    waitFor: ["run-subsystembenchmarks"]
+
+  # Safety net: each case deletes its own bucket, so this normally finds nothing. It exists
+  # for the run that crashed (or was cancelled) between creating a bucket and dropping it.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        source /workspace/build_vars.env
+        LEAKED=$(gcloud storage ls --project=${PROJECT_ID} \
+          | grep "^gs://$${BUCKET_PREFIX}-" || true)
+        for b in $$LEAKED; do
+          echo "sweeping leaked benchmark bucket $$b"
+          gcloud storage rm --recursive "$$b" || true
+        done
+    waitFor: ["run-subsystembenchmarks"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-failure"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [[ -f /workspace/FAILED ]]; then
+          echo "Build failed. Steps that reported failures:"
+          sort -u /workspace/FAILED | sed 's/^/ - /'
+          exit 1
+        fi
+        echo "Build successful."
+    waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key"]
+
+timeout: "14400s"
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${LOCATION}/workerPools/cloud-build-worker-pool"

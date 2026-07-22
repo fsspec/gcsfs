@@ -34,14 +34,16 @@ def timestamp():
 
 
 def reduce_split(results, rounds):
-    """Reduce per-rank results into per-epoch duration, rows, and max TTFB across ranks."""
+    """Reduce per-rank results into wall duration, rows, and global TTFB."""
     durations, rows_list = [], []
     for e in range(rounds):
         begins = [res[0][e][0] for res in results]
         ends = [res[0][e][1] for res in results]
         durations.append(max(ends) - min(begins))
         rows_list.append(sum(res[0][e][2] for res in results))
-    ttfb = max(res[1] for res in results)
+    first_begins = [res[0][0][0] for res in results]
+    first_batches = [res[0][0][0] + res[1] for res in results]
+    ttfb = max(first_batches) - min(first_begins)
     return durations, rows_list, ttfb
 
 

@@ -62,6 +62,22 @@ def test_generate_csv_unions_extra_columns_and_computes_percentiles(tmp_path):
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))
 
+    assert list(rows[0]) == [
+        "benchmark_case_id",
+        "benchmark_group",
+        "alpha",
+        "beta",
+        "round_duration_min_seconds",
+        "round_duration_max_seconds",
+        "round_duration_mean_seconds",
+        "round_duration_p50_seconds",
+        "round_duration_stddev_seconds",
+        "round_duration_p90_seconds",
+        "round_duration_p95_seconds",
+        "round_duration_p99_seconds",
+    ]
+    assert rows[0]["benchmark_case_id"] == "a"
+    assert rows[0]["benchmark_group"] == "read"
     assert rows[0]["alpha"] == "1" and rows[0]["beta"] == ""
     assert rows[1]["alpha"] == "" and rows[1]["beta"] == "2"
-    assert float(rows[0]["round_time_p90"]) == pytest.approx(3.7)
+    assert float(rows[0]["round_duration_p90_seconds"]) == pytest.approx(3.7)
