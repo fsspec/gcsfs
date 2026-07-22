@@ -85,6 +85,36 @@ steps:
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
+  # Reap VMs leaked by failed or cancelled builds before requesting new capacity.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-leaked-resources"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        source /workspace/build_vars.env
+        echo "Cleaning up leaked resources with prefix: ${_INFRA_PREFIX}"
+
+        CURRENT_TIME=$$(date +%s)
+        # 10 hours, safely beyond this pipeline's 4-hour timeout.
+        THRESHOLD=36000
+
+        gcloud compute instances list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-vm-'" --format="value(name,zone.basename(),creationTimestamp)" | while read -r name zone creation_time; do
+          if [ -z "$$name" ]; then continue; fi
+
+          CREATION_SECONDS=$$(date -d "$$creation_time" +%s)
+          AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
+
+          if [ $$AGE -gt $$THRESHOLD ]; then
+            echo "Deleting leaked VM: $$name in zone $$zone (Age: $$AGE seconds)"
+            gcloud compute instances delete "$$name" --project="${PROJECT_ID}" --zone="$$zone" --quiet || true
+          else
+            echo "Skipping VM: $$name (Age: $$AGE seconds)"
+          fi
+        done
+    waitFor: ["init-variables"]
+    allowFailure: true
+
   # 3. Ensure the persistent results bucket exists (the benchmark buckets are the run's own).
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create-buckets"
@@ -137,7 +167,7 @@ steps:
             --tags="allow-ssh" \
             --labels="build-id=$$RUN_ID" \
             --quiet
-    waitFor: ["init-variables"]
+    waitFor: ["cleanup-leaked-resources"]
     allowFailure: true
 
   # 5. Run the subsystem benchmark group and upload its results.
