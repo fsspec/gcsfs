@@ -43,6 +43,11 @@ scenarios:
       - {axis: "color", color: "blue"}
 """
 
+_YAML_TWO_AXES = _YAML.replace(
+    '- {axis: "color", color: "blue"}',
+    '- {axis: "color", color: "blue"}\n      - {axis: "shade", color: "green"}',
+)
+
 
 def _configurator(tmp_path, text=_YAML):
     (tmp_path / "configs.yaml").write_text(text)
@@ -92,3 +97,40 @@ def test_baseline_clashing_with_shared_keys_is_rejected(tmp_path):
     text = _YAML.replace('color: "red"', 'color: "red"\n    size: 5')
     with pytest.raises(ValueError, match="size"):
         _configurator(tmp_path, text).generate_cases()
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ("baseline", [("case-red-3", "baseline")]),
+        ("color", [("case-red-3", "baseline"), ("case-blue-3", "color")]),
+        (
+            "shade color shade",
+            [
+                ("case-red-3", "baseline"),
+                ("case-blue-3", "color"),
+                ("case-green-3", "shade"),
+            ],
+        ),
+    ],
+)
+def test_sweep_axis_filter_includes_baseline_and_preserves_case_order(
+    tmp_path, monkeypatch, requested, expected
+):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_SWEEP_AXES", requested)
+    cases = _configurator(tmp_path, _YAML_TWO_AXES).generate_cases()
+    assert [(case.name, case.sweep_axis) for case in cases] == expected
+
+
+def test_empty_sweep_axis_filter_runs_all_cases(tmp_path, monkeypatch):
+    monkeypatch.delenv("GCSFS_SUBSYSTEM_SWEEP_AXES", raising=False)
+    cases = _configurator(tmp_path, _YAML_TWO_AXES).generate_cases()
+    assert [case.sweep_axis for case in cases] == ["baseline", "color", "shade"]
+
+
+def test_unknown_sweep_axis_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_SWEEP_AXES", "workers")
+    with pytest.raises(
+        ValueError, match=r"unknown sweep axis.*workers.*baseline.*color"
+    ):
+        _configurator(tmp_path).generate_cases()

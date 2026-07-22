@@ -11,6 +11,26 @@ import os
 import yaml
 
 
+def requested_sweep_axes():
+    value = os.environ.get("GCSFS_SUBSYSTEM_SWEEP_AXES", "")
+    return tuple(dict.fromkeys(value.split()))
+
+
+def filter_cases_by_sweep_axis(cases):
+    axes = requested_sweep_axes()
+    if not axes:
+        return cases
+    valid = {"baseline", *(case.sweep_axis for case in cases)}
+    unknown = sorted(set(axes) - valid)
+    if unknown:
+        raise ValueError(
+            "unknown sweep axis name(s) "
+            f"{', '.join(unknown)}; valid axes: {', '.join(sorted(valid))}"
+        )
+    selected = {"baseline", *axes}
+    return [case for case in cases if case.sweep_axis in selected]
+
+
 class BaseBenchmarkConfigurator:
     def __init__(self, module_file):
         self.config_path = os.path.join(os.path.dirname(module_file), "configs.yaml")
@@ -39,9 +59,11 @@ class BaseBenchmarkConfigurator:
             cases = self.build_cases(scenario, common_config)
             all_cases.extend(cases)
 
+        all_cases = filter_cases_by_sweep_axis(all_cases)
         if all_cases:
             logging.info(
-                f"Benchmark cases to be triggered: {', '.join([case.name for case in all_cases])}"
+                "Benchmark cases to be triggered: %s",
+                ", ".join(case.name for case in all_cases),
             )
         return all_cases
 

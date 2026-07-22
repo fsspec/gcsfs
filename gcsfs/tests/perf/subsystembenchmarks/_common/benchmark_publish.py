@@ -13,10 +13,10 @@ from gcsfs.tests.perf.subsystembenchmarks._common import env
 
 def pytest_benchmark_update_machine_info(config, machine_info):
     """Stamp the general environment facts attached to benchmark output."""
-    machine_info["accelerator"] = env.detect_accelerator()
-    machine_info["backend"] = env.detect_backend()
+    machine_info["compute_accelerator_type"] = env.detect_accelerator()
+    machine_info["distributed_backend"] = env.detect_backend()
     machine_info["gpu_model"] = env.gpu_model()
-    machine_info["gce_machine_type"] = env.gce_machine_type()
+    machine_info["machine_type"] = env.machine_type()
     machine_info["python_version"] = env.python_version()
     machine_info["group"] = os.environ.get("GCSFS_SUBSYSTEM_GROUP", "")
 
@@ -32,7 +32,7 @@ def publish_round_stats(benchmark, round_durations):
     benchmark.extra_info["stddev_run"] = (
         statistics.stdev(round_durations) if len(round_durations) > 1 else 0.0
     )
-    benchmark.extra_info["rounds"] = len(round_durations)
+    benchmark.extra_info["measurement_round_count"] = len(round_durations)
 
 
 def publish_resource_metrics(benchmark, monitor):
@@ -40,8 +40,8 @@ def publish_resource_metrics(benchmark, monitor):
     duration = getattr(monitor, "duration", 0.0)
     benchmark.extra_info.update(
         {
-            # max_cpu is percent normalized by vCPUs -> back to cores for the macrobench name.
-            "cpu_usage_peak_cores": monitor.max_cpu * monitor.vcpus / 100.0,
+            # max_cpu is percent normalized by vCPUs; convert it back to cores.
+            "cpu_usage_peak_cores": (monitor.max_cpu * monitor.vcpus / 100.0),
             "memory_usage_peak_bytes": int(monitor.max_mem),
             "network_received_mean_bytes_per_sec": (
                 monitor.net_recv / duration if duration > 0 else 0.0
@@ -49,7 +49,7 @@ def publish_resource_metrics(benchmark, monitor):
             "network_sent_mean_bytes_per_sec": (
                 monitor.net_sent / duration if duration > 0 else 0.0
             ),
-            "vcpus": monitor.vcpus,
+            "host_vcpu_count": monitor.vcpus,
         }
     )
 
@@ -64,7 +64,7 @@ def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info
             bench.stats.mean = bench.extra_info["mean_run"]
             bench.stats.median = bench.extra_info["median_run"]
             bench.stats.stddev = bench.extra_info["stddev_run"]
-            bench.stats.rounds = bench.extra_info["rounds"]
+            bench.stats.rounds = bench.extra_info["measurement_round_count"]
             for k in (
                 "runs",
                 "min_run",

@@ -16,13 +16,14 @@ def discover_groups():
     )
 
 
-def _setup_buckets(args):
+def _setup_environment(args):
     """Export the per-case bucket configuration consumed by dataloading."""
     os.environ["GCSFS_SUBSYSTEM_BUCKET_PREFIX"] = args.bucket_prefix
     os.environ["GCSFS_SUBSYSTEM_BUCKET_TYPE"] = args.bucket_type
     os.environ["GCSFS_SUBSYSTEM_PROJECT"] = args.project
     os.environ["GCSFS_SUBSYSTEM_LOCATION"] = args.location
     os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
+    os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
 
 
@@ -30,6 +31,11 @@ def _build_parser():
     parser = argparse.ArgumentParser(description="Run gcsfs subsystem benchmarks.")
     parser.add_argument(
         "--group", required=True, help="e.g. dataloading/huggingface_datasets"
+    )
+    parser.add_argument(
+        "--sweep-axes",
+        default="",
+        help="whitespace-separated config sweep axes; baseline is always included",
     )
     parser.add_argument(
         "--bucket-prefix",
@@ -86,7 +92,12 @@ def parse_args(argv=None):
     return args
 
 
-_AMPLIFICATION_COLS = ("bucket_name", "window_start", "window_end", "corpus_bytes")
+_AMPLIFICATION_COLS = (
+    "gcs_bucket_name",
+    "measurement_window_start_unix_seconds",
+    "measurement_window_end_unix_seconds",
+    "dataset_size_bytes",
+)
 
 
 def _csv_has_amplification_inputs(csv_path):
@@ -160,7 +171,7 @@ def _scrape_amplification(csv_path, args):
 
 def main(argv=None):
     args = parse_args(argv)
-    _setup_buckets(args)
+    _setup_environment(args)
     os.environ["GCSFS_SUBSYSTEM_GROUP"] = args.group
     suite_dir = os.path.join(os.path.dirname(__file__), args.group)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

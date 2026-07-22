@@ -1,0 +1,66 @@
+substitutions:
+  _DATASET_NAME: ""
+  _INFRA_PREFIX: ""
+
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'ensure-dataset'
+    entrypoint: 'bash'
+    waitFor: ['-']
+    args:
+      - '-c'
+      - |
+        if [ -z "${_DATASET_NAME}" ] || [ -z "${_INFRA_PREFIX}" ]; then
+          echo "ERROR: _DATASET_NAME and _INFRA_PREFIX are required."; exit 1; fi
+        bq show ${PROJECT_ID}:${_DATASET_NAME} || \
+          bq mk --dataset --location=${LOCATION} ${PROJECT_ID}:${_DATASET_NAME}
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'update-staging-table'
+    entrypoint: 'bash'
+    waitFor: ['ensure-dataset']
+    args:
+      - '-c'
+      - |
+        set -e
+        # Render the @INFRA_PREFIX@ placeholder into a /workspace copy rather than editing
+        # the checked-in schema in place (keeps the tracked file pristine and the build
+        # idempotent/re-runnable).
+        sed "s/@INFRA_PREFIX@/${_INFRA_PREFIX}/g" \
+          cloudbuild/subsystembenchmarks/subsystembenchmarks_schema.json \
+          > /workspace/subsystembenchmarks_schema.json
+        # Fail loudly if the placeholder survived (e.g. the value was empty) rather than
+        # creating a table over a bad URI.
+        if grep -q '@INFRA_PREFIX@' /workspace/subsystembenchmarks_schema.json; then
+          echo "ERROR: _INFRA_PREFIX was not applied to the staging schema."; exit 1
+        fi
+        # `bq mk --force` is a no-op when the table already exists -- it does NOT update the
+        # schema, so a later edit to subsystembenchmarks_schema.json would silently never
+        # reach BigQuery. Drop and recreate instead, like the macrobenchmarks pipeline does.
+        bq --project_id=${PROJECT_ID} rm -f ${_DATASET_NAME}.staging_subsystem
+        bq --project_id=${PROJECT_ID} mk \
+          --external_table_definition=/workspace/subsystembenchmarks_schema.json \
+          ${_DATASET_NAME}.staging_subsystem
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'run-ingestion'
+    entrypoint: 'bash'
+    waitFor: ['update-staging-table']
+    args:
+      - '-c'
+      - |
+        set -e
+        # Render placeholders into a /workspace copy; BigQuery cannot bind table identifiers
+        # as query parameters, so they are substituted textually, but never into the tracked
+        # source file.
+        sed -e "s/@PROJECT_ID@/${PROJECT_ID}/g" \
+            -e "s/@DATASET_NAME@/${_DATASET_NAME}/g" \
+            cloudbuild/subsystembenchmarks/ingest.sql > /workspace/ingest.sql
+        bq query --use_legacy_sql=false --project_id=${PROJECT_ID} \
+          < /workspace/ingest.sql
+
+timeout: "14400s"
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${LOCATION}/workerPools/cloud-build-worker-pool"

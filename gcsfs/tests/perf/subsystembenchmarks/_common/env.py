@@ -1,6 +1,5 @@
 import os
 import platform
-import subprocess
 
 
 def _cuda_available() -> bool:
@@ -36,13 +35,11 @@ def gpu_model() -> str:
     return "none"
 
 
-def gce_machine_type() -> str:
+def machine_type() -> str:
     """Best-effort GCE machine type; empty string off-GCE."""
-    return os.environ.get("GCE_MACHINE_TYPE", "")
+    return os.environ.get("MACHINE_TYPE", "")
 
 
-def git_commit_sha() -> str:
-    try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        return os.environ.get("COMMIT_SHA", "unknown")
+def benchmark_source_commit_sha() -> str:
+    """Commit containing the benchmark harness and configuration."""
+    return os.environ.get("COMMIT_SHA", "unknown")

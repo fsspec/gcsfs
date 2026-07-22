@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from gcsfs.tests.perf.subsystembenchmarks import run
@@ -12,6 +14,19 @@ _REQUIRED = [
 def test_parse_args_accepts_a_discovered_group():
     args = run.parse_args(["--group=dataloading/huggingface_datasets"] + _REQUIRED)
     assert args.group == "dataloading/huggingface_datasets"
+
+
+def test_setup_environment_exports_sweep_axes(monkeypatch):
+    monkeypatch.delenv("GCSFS_SUBSYSTEM_SWEEP_AXES", raising=False)
+    args = run.parse_args(
+        [
+            "--group=dataloading/huggingface_datasets",
+            "--sweep-axes=workers prefetch",
+        ]
+        + _REQUIRED
+    )
+    run._setup_environment(args)
+    assert os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] == "workers prefetch"
 
 
 def test_parse_args_rejects_negative_amplification_wait(capsys):
@@ -54,6 +69,18 @@ def test_amplification_retry_waits_once_for_missing_buckets(monkeypatch):
 
     assert result.missing_buckets == ()
     assert sleeps == [30]
+
+
+def test_csv_with_renamed_amplification_columns_is_eligible(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    csv_path.write_text(
+        "benchmark_case_id,gcs_bucket_name,"
+        "measurement_window_start_unix_seconds,"
+        "measurement_window_end_unix_seconds,dataset_size_bytes\n"
+        "case-a,bucket-a,1000,1060,500\n"
+    )
+
+    assert run._csv_has_amplification_inputs(csv_path)
 
 
 def test_build_pytest_args_includes_run_benchmarks():

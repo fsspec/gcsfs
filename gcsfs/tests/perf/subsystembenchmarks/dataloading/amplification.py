@@ -1,4 +1,4 @@
-"""Post-run dataset read-amplification scrape.
+"""Post-run GCS read-amplification scrape.
 
 Reads GCS server-side egress and request metrics per bucket epoch window from Cloud Monitoring.
 Buckets are strictly per-case to align with Cloud Monitoring's 60s bucket-level grid.
@@ -94,23 +94,23 @@ def enrich_csv(csv_path, project, *, client):
     eligible = 0
     missing = []
     for row in rows:
-        bucket = row.get("bucket_name")
+        bucket = row.get("gcs_bucket_name")
         if not bucket:
             continue
         eligible += 1
         if all(row.get(column) not in (None, "") for column in _NEW_COLS):
             continue
         try:
-            ws = int(float(row["window_start"]))
-            we = int(float(row["window_end"]))
-            corpus = float(row["corpus_bytes"])
-            # Normalize egress by (corpus * rounds) to calculate over-read ratio per pass.
-            rounds = int(float(row.get("rounds") or 1))
+            ws = int(float(row["measurement_window_start_unix_seconds"]))
+            we = int(float(row["measurement_window_end_unix_seconds"]))
+            dataset_size = float(row["dataset_size_bytes"])
+            # Normalize GCS bytes sent by stored dataset bytes times measured rounds.
+            rounds = int(float(row.get("measurement_round_count") or 1))
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
             reqs = bucket_read_requests(client, project, bucket, ws, we)
             if egress is not None:
                 row["dataset_read_bytes"] = str(int(egress))
-                ideal = corpus * rounds
+                ideal = dataset_size * rounds
                 if ideal:
                     row["dataset_read_amplification_ratio"] = str(egress / ideal)
             if reqs is not None:
