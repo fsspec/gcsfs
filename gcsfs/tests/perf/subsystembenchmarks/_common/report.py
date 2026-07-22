@@ -4,6 +4,7 @@ import logging
 import os
 
 import numpy as np
+from prettytable import PrettyTable, TableStyle
 
 # CSV/BQ column name per pytest-benchmark stat. A round is the timed unit: one
 # full-corpus iteration for the read benchmarks.
@@ -76,3 +77,26 @@ def generate_csv(json_path: str, results_dir: str):
             writer.writerow([row.get(h, "") for h in headers])
     logging.info("CSV report generated at %s", report_path)
     return report_path
+
+
+def print_csv_to_shell(report_path: str):
+    """Print every column of a generated CSV report as a Markdown table."""
+    try:
+        with open(report_path, newline="") as file:
+            reader = csv.DictReader(file)
+            rows = list(reader)
+            headers = reader.fieldnames or []
+    except FileNotFoundError:
+        logging.error("Report file not found at: %s", report_path)
+        return
+
+    if not rows:
+        logging.info("No data to display.")
+        return
+
+    table = PrettyTable()
+    table.set_style(TableStyle.MARKDOWN)
+    table.field_names = headers
+    for row in rows:
+        table.add_row([row[header] for header in headers])
+    print(table)

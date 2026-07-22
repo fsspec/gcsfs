@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import datetime
 
-from gcsfs.tests.perf.subsystembenchmarks._common import cli
+from gcsfs.tests.perf.subsystembenchmarks._common import cli, report
 
 
 def discover_groups():
@@ -184,6 +184,7 @@ def main(argv=None):
         logging.error("no benchmark results produced by group %s", args.group)
         raise SystemExit(rc or 1)
     _scrape_amplification(csv_path, args)
+    report.print_csv_to_shell(csv_path)
     logging.info("subsystembenchmarks run rc=%s csv=%s", rc, csv_path)
     raise SystemExit(rc)
 
