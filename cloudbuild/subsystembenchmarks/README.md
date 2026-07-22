@@ -179,12 +179,12 @@ The remote upload script copies the complete local `__run__` directory to:
 
 ```text
 gs://<_INFRA_PREFIX>-run-results/subsystembenchmarks/
-`-- branch=<branch>/
-    `-- <YYYYMMDD>/
-        `-- <build_id>/
-            `-- <YYYYMMDD-HHMMSS>/
-                |-- results.json
-                `-- results.csv
+└── branch=<branch>/
+    └── <YYYYMMDD>/
+        └── <build_id>/
+            └── <YYYYMMDD-HHMMSS>/
+                ├── results.json
+                └── results.csv
 ```
 
 If benchmark execution returns nonzero but produced artifacts, the pipeline

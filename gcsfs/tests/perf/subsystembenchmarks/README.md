@@ -121,8 +121,8 @@ Direct runs write timestamped artifacts under:
 
 ```text
 gcsfs/tests/perf/subsystembenchmarks/__run__/<YYYYMMDD-HHMMSS>/
-|-- results.json
-`-- results.csv
+├── results.json
+└── results.csv
 ```
 
 The runner also prints the generated CSV as a Markdown table when the run
@@ -161,7 +161,7 @@ the case buckets. Monitoring read permission is also needed for amplification
 enrichment. Then run:
 
 ```bash
-python gcsfs/tests/perf/subsystembenchmarks/run.py \
+python -m gcsfs.tests.perf.subsystembenchmarks.run \
   --group=dataloading/huggingface_datasets \
   --bucket-prefix=<UNIQUE_LOWERCASE_PREFIX> \
   --project=<PROJECT_ID> \
@@ -192,21 +192,21 @@ pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
 
 ```text
 subsystembenchmarks/
-|-- README.md
-|-- run.py                         # CLI, group discovery, report enrichment.
-|-- conftest.py                    # Benchmark hooks and resource fixture.
-|-- _common/                       # Config loading, reporting, provenance, metrics.
-|-- dataloading/
-|   |-- amplification.py           # Cloud Monitoring read-metric enrichment.
-|   |-- bucket.py                  # Per-case GCS bucket lifecycle.
-|   |-- datagen.py                 # Synthetic Parquet/JSONL corpus generation.
-|   |-- driver.py                  # Read-driver contract and rank reduction.
-|   |-- read_case.py               # Shared timed case lifecycle.
-|   `-- huggingface_datasets/
-|       |-- configs.yaml           # Current baseline and one-factor variants.
-|       |-- configs.py
-|       |-- parameters.py
-|       |-- requirements.txt
-|       `-- read/                  # Hugging Face streaming read driver and case.
-`-- tests/                         # Package-level infrastructure tests.
+├── README.md
+├── run.py                         # CLI, group discovery, report enrichment.
+├── conftest.py                    # Benchmark hooks and resource fixture.
+├── _common/                       # Config loading, reporting, provenance, metrics.
+├── dataloading/
+│   ├── amplification.py           # Cloud Monitoring read-metric enrichment.
+│   ├── bucket.py                  # Per-case GCS bucket lifecycle.
+│   ├── datagen.py                 # Synthetic Parquet/JSONL corpus generation.
+│   ├── driver.py                  # Read-driver contract and rank reduction.
+│   ├── read_case.py               # Shared timed case lifecycle.
+│   └── huggingface_datasets/
+│       ├── configs.yaml           # Current baseline and one-factor variants.
+│       ├── configs.py
+│       ├── parameters.py
+│       ├── requirements.txt
+│       └── read/                  # Hugging Face streaming read driver and case.
+└── tests/                         # Package-level infrastructure tests.
 ```
