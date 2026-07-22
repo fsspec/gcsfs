@@ -102,7 +102,7 @@ steps:
         gcloud compute instances list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-vm-'" --format="value(name,zone.basename(),creationTimestamp)" | while read -r name zone creation_time; do
           if [ -z "$$name" ]; then continue; fi
 
-          CREATION_SECONDS=$$(date -d "$$creation_time" +%s)
+          CREATION_SECONDS=$$(date -d "$$creation_time" +%s 2>/dev/null) || continue
           AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
 
           if [ $$AGE -gt $$THRESHOLD ]; then
