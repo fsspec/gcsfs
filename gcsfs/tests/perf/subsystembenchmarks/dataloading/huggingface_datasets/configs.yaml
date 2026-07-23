@@ -6,26 +6,26 @@ common:
     fmt: "text_parquet"
     file_count: 64
     rows_per_file: 10920
-    row_group_size: 10920
+    # Keeps uncompressed pretokenized Parquet row groups below about 30 MB.
+    row_group_size: 1800
     access: "shuffled"
-    num_workers: 16
+    num_workers: 4
     prefetch_factor: 2
     split_by_node: true
     world_size: 8
     shuffle_buffer_size: 10000
+    # Match Hugging Face Datasets' default input-shard grouping.
     max_buffer_input_shards: 10
 
 scenarios:
   - name: "read"
     scenario: "read"
     variants:
-      - {axis: "shuffle", access: "sequential"}
+      - {axis: "access", access: "sequential"}
+
       - {axis: "shuffle_split", max_buffer_input_shards: 8}
-      - {axis: "shuffle", max_buffer_input_shards: 64}
 
       - {axis: "workers", num_workers: 0}
-      - {axis: "workers", num_workers: 1}
-      - {axis: "workers", num_workers: 8}
 
       - {axis: "format", fmt: "pretok_parquet"}
       - {axis: "format", fmt: "pretok_jsonl"}
@@ -35,4 +35,3 @@ scenarios:
       - {axis: "scale", file_count: 512, rows_per_file: 1365}
 
       - {axis: "prefetch", prefetch_factor: 4}
-      - {axis: "prefetch", prefetch_factor: 8}
