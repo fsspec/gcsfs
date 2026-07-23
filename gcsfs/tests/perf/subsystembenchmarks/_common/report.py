@@ -76,3 +76,37 @@ def generate_csv(json_path: str, results_dir: str):
             writer.writerow([row.get(h, "") for h in headers])
     logging.info("CSV report generated at %s", report_path)
     return report_path
+
+
+def print_csv_to_shell(report_path: str):
+    """Print every column of a generated CSV report as a Markdown table."""
+    try:
+        from prettytable import PrettyTable, TableStyle
+    except ImportError:
+        logging.warning("prettytable is unavailable; skipping markdown table output")
+        return
+
+    try:
+        with open(report_path, newline="") as file:
+            reader = csv.DictReader(file)
+            rows = list(reader)
+            headers = reader.fieldnames or []
+    except (OSError, csv.Error, UnicodeError) as exc:
+        logging.error("Failed to read or parse report at %s: %s", report_path, exc)
+        return
+
+    if not rows:
+        logging.info("No data to display.")
+        return
+    if len(headers) != len(set(headers)):
+        logging.error(
+            "Failed to render report at %s: duplicate CSV headers", report_path
+        )
+        return
+
+    table = PrettyTable()
+    table.set_style(TableStyle.MARKDOWN)
+    table.field_names = headers
+    for row in rows:
+        table.add_row([row.get(header) or "" for header in headers])
+    print(table)
