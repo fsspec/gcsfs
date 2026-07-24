@@ -76,7 +76,7 @@ wait_for_jobset() {
   local jobset="$1" step="$2" complete failed
 
   local max_iterations=240
-  if [[ "${_TRAINING_STRATEGY}" == "fsdp_full" || "${_TRAINING_STRATEGY}" == "fsdp_sharded" ]]; then
+  if [[ "$step" == "run-workload" ]] && [[ "${_TRAINING_STRATEGY}" == "fsdp_full" || "${_TRAINING_STRATEGY}" == "fsdp_sharded" ]]; then
     max_iterations=480
   fi
 
