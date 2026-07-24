@@ -74,12 +74,12 @@ shared_workload_helm_args() {
 # Usage: wait_for_jobset <jobset-name> <step-id>
 wait_for_jobset() {
   local jobset="$1" step="$2" complete failed
-  
+
   local max_iterations=240
   if [[ "${_TRAINING_STRATEGY}" == "fsdp_full" || "${_TRAINING_STRATEGY}" == "fsdp_sharded" ]]; then
     max_iterations=480
   fi
-  
+
   echo "Waiting for JobSet $jobset to complete (max_iterations=${max_iterations})..."
   for _ in $(seq 1 $max_iterations); do
     complete=$(kubectl get jobset "$jobset" -o jsonpath='{.status.conditions[?(@.type=="Completed")].status}' 2>/dev/null || echo "")
