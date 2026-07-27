@@ -14,12 +14,14 @@ from gcsfs.tests.perf.microbenchmarks.runner import (
 
 BENCHMARK_GROUP = "open"
 
+import fsspec
+
 
 def _open_op(gcs, path):
     start_time = time.perf_counter()
     try:
-        f = gcs.open(path, mode="rb")
-        f.close()
+        with fsspec.open(path, mode="rb"):
+            pass
     except FileNotFoundError:
         pass
     duration_ms = (time.perf_counter() - start_time) * 1000
