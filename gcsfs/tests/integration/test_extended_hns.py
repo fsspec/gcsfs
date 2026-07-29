@@ -1328,6 +1328,21 @@ class TestExtendedGcsFileSystemFindIntegration:
         assert test_structure["nested_dir"] in dir_with_files_listing
 
         # Check content of the 'nested_dir' cache
+
+    @pytest.mark.parametrize("withdirs_param", [True, False])
+    def test_find_updates_dircache_for_root_bucket(
+        self, gcs_hns, test_structure, withdirs_param
+    ):
+        """Test that find() populates the dircache for the root bucket itself."""
+        root_bucket = TEST_HNS_BUCKET
+        gcs_hns.invalidate_cache()
+        assert not gcs_hns.dircache
+
+        # Run find on the root bucket to populate the cache
+        gcs_hns.find(root_bucket, withdirs=withdirs_param)
+
+        # Verify that the cache is now populated for the root bucket
+        assert root_bucket in gcs_hns.dircache
         nested_dir_listing = {
             d["name"] for d in gcs_hns.dircache[test_structure["nested_dir"]]
         }

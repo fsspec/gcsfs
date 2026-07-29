@@ -1946,10 +1946,10 @@ def test_attrs(gcs):
     assert gcs.getxattr(a, "something") == "not"
 
 
-def test_request_user_project(gcs_factory):
-    gcs = gcs_factory(requester_pays=True, project=TEST_PROJECT)
+def test_request_user_project(gcs, gcs_factory):
+    gcs_inst = gcs_factory(requester_pays=True, project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
-    r = gcs.call(
+    r = gcs_inst.call(
         "GET",
         "b/{}/o",
         TEST_BUCKET,
@@ -1963,11 +1963,11 @@ def test_request_user_project(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_request_user_project_string(gcs_factory):
-    gcs = gcs_factory(requester_pays=TEST_PROJECT)
-    assert gcs.requester_pays == TEST_PROJECT
+def test_request_user_project_string(gcs, gcs_factory):
+    gcs_inst = gcs_factory(requester_pays=TEST_PROJECT)
+    assert gcs_inst.requester_pays == TEST_PROJECT
     # test directly against `_call` to inspect the result
-    r = gcs.call(
+    r = gcs_inst.call(
         "GET",
         "b/{}/o",
         TEST_BUCKET,
@@ -1981,10 +1981,10 @@ def test_request_user_project_string(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
-def test_request_header(gcs_factory):
-    gcs = gcs_factory(requester_pays=True)
+def test_request_header(gcs, gcs_factory):
+    gcs_inst = gcs_factory(requester_pays=True)
     # test directly against `_call` to inspect the result
-    r = gcs.call(
+    r = gcs_inst.call(
         "GET",
         "b/{}/o",
         TEST_BUCKET,
@@ -2025,7 +2025,7 @@ def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_fa
         fs.ls(requester_pays_bucket)
 
 
-def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
+def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""
     fs = gcs_factory(requester_pays=True)
