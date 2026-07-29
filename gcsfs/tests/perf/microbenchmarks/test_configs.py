@@ -194,7 +194,32 @@ def test_listing_configurator(mock_config_dependencies):
         "depth": 2,
         "folders": [5],
         "files": [100],
-        "pattern": "prefix",
+        "pattern": "ls",
+    }
+
+    configurator = ListingConfigurator("dummy")
+    cases = configurator.build_cases(scenario, common)
+
+    assert len(cases) == 1
+    case = cases[0]
+    assert case.name == "list_test_1procs_1threads_100files_2depth_5folders_ls_regional"
+    assert case.files == 100
+    assert case.depth == 2
+    assert case.folders == 5
+    assert case.pattern == "ls"
+
+
+def test_listing_configurator_walk_pattern(mock_config_dependencies):
+    """Test that ListingConfigurator preserves walk pattern in parameters and id."""
+    common = {"bucket_types": ["regional"], "rounds": 1}
+    scenario = {
+        "name": "walk_test",
+        "processes": [1],
+        "threads": [1],
+        "depth": 8,
+        "folders": [16],
+        "files": [256],
+        "pattern": "walk",
     }
 
     configurator = ListingConfigurator("dummy")
@@ -203,13 +228,9 @@ def test_listing_configurator(mock_config_dependencies):
     assert len(cases) == 1
     case = cases[0]
     assert (
-        case.name
-        == "list_test_1procs_1threads_100files_2depth_5folders_prefix_regional"
+        case.name == "walk_test_1procs_1threads_256files_8depth_16folders_walk_regional"
     )
-    assert case.files == 100
-    assert case.depth == 2
-    assert case.folders == 5
-    assert case.pattern == "prefix"
+    assert case.pattern == "walk"
 
 
 def test_info_configurator(mock_config_dependencies):
