@@ -202,10 +202,7 @@ def test_listing_configurator(mock_config_dependencies):
 
     assert len(cases) == 1
     case = cases[0]
-    assert (
-        case.name
-        == "list_test_1procs_1threads_100files_2depth_5folders_ls_regional"
-    )
+    assert case.name == "list_test_1procs_1threads_100files_2depth_5folders_ls_regional"
     assert case.files == 100
     assert case.depth == 2
     assert case.folders == 5
@@ -231,8 +228,7 @@ def test_listing_configurator_walk_pattern(mock_config_dependencies):
     assert len(cases) == 1
     case = cases[0]
     assert (
-        case.name
-        == "walk_test_1procs_1threads_256files_8depth_16folders_walk_regional"
+        case.name == "walk_test_1procs_1threads_256files_8depth_16folders_walk_regional"
     )
     assert case.pattern == "walk"
 
