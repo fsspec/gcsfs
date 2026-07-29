@@ -19,8 +19,15 @@ def _list_op(gcs, path, pattern="ls"):
     start_time = time.perf_counter()
     if pattern == "find":
         items = gcs.find(path)
-    else:
+    elif pattern == "walk":
+        items = []
+        for _, dirs, files in gcs.walk(path):
+            items.extend(dirs)
+            items.extend(files)
+    elif pattern == "ls":
         items = gcs.ls(path)
+    else:
+        raise ValueError(f"Unknown listing pattern: {pattern!r}")
     duration_ms = (time.perf_counter() - start_time) * 1000
     logging.info(
         f"{pattern.upper()} : {path} - {len(items)} items - {duration_ms:.2f} ms."
@@ -52,8 +59,8 @@ single_threaded_cases, multi_threaded_cases, multi_process_cases = filter_test_c
 def test_listing_single_threaded(benchmark, gcsfs_benchmark_listing, monitor):
     gcs, target_dirs, prefix, params = gcsfs_benchmark_listing
 
-    if params.pattern == "find":
-        # For 'find', we want to measure a single recursive operation from the root.
+    if params.pattern in {"find", "walk"}:
+        # For recursive patterns, measure a single traversal from the root.
         run_single_threaded(
             benchmark,
             monitor,

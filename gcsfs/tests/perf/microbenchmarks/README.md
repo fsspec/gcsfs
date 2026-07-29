@@ -2,7 +2,7 @@
 
 ## Introduction
 
-GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, put, listing, delete, rename, open, and glob.
+GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, put, listing, walk, delete, rename, open, and glob.
 
 These benchmarks are built using the `pytest` and `pytest-benchmark` frameworks. Each benchmark test is a parameterized pytest case, where the parameters are dynamically configured at runtime from YAML configuration files. This allows for flexible and extensive testing scenarios without modifying the code.
 
@@ -43,7 +43,7 @@ The benchmarks use a set of parameter classes to define the configuration for ea
 *   **Listing Parameters**: Specific to Listing, Delete, Rename, and Info operations.
     *   `depth`: Directory depth.
     *   `folders`: Number of folders.
-    *   `pattern`: Listing pattern (e.g., "ls", "find").
+    *   `pattern`: Listing pattern (e.g., "ls", "find", "walk").
 
 *   **Info Parameters**: Specific to Info operations (extends Listing Parameters).
     *    `target_type`: The type of target to query: "bucket", "folder", or "file".

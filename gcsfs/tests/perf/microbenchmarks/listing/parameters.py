@@ -15,5 +15,5 @@ class ListingBenchmarkParameters(BaseBenchmarkParameters):
     # The number of folders to create.
     folders: int
 
-    # The listing pattern to use: "ls" or "find".
+    # The listing pattern to use: "ls", "find", or "walk".
     pattern: str
