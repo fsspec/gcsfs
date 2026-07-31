@@ -1353,6 +1353,10 @@ class TestExtendedGcsFileSystemFindIntegration:
 
         # Verify that the cache is now populated for the root bucket
         assert root_bucket in gcs_hns.dircache
+        root_bucket_listing = {
+            d["name"].rstrip("/") for d in gcs_hns.dircache[root_bucket]
+        }
+        assert test_structure["base_dir"] in root_bucket_listing
 
     def test_find_maxdepth_updates_cache(self, gcs_hns, test_structure):
         """Test that find with maxdepth updates cache for deeper objects."""
