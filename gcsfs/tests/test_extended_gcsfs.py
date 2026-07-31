@@ -1109,10 +1109,6 @@ async def test_cp_file_not_implemented_error(
 
 
 def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
-    file_size = len(
-        json_data
-    )  # We need the file size to predict if readahead will trigger
-
     for param in read_block_params:
         with subtests.test(id=param.id):
             offset, length, delimiter, expected_data = param.values
