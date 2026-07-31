@@ -985,7 +985,7 @@ def test_get_list_from_zonal_bucket(extended_gcsfs):
             with open(l2, "rb") as f:
                 assert f.read() == files[file2]
 
-    assert mock_create_mrd.call_count == 2
+    assert mock_create_mrd.call_count == 4
 
 
 def test_get_directory_from_zonal_bucket(extended_gcsfs):
@@ -1033,7 +1033,7 @@ def test_get_directory_from_zonal_bucket(extended_gcsfs):
             with open(os.path.join(local_dir, "accounts.2.json"), "rb") as f:
                 assert f.read() == files[file2]
 
-    assert mock_create_mrd.call_count == 2
+    assert mock_create_mrd.call_count == 4
 
 
 @pytest.mark.asyncio

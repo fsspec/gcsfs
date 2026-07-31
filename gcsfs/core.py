@@ -2382,7 +2382,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         # them as explicit keyword arguments to ensure existing user workloads are not
         # disrupted. This will be refactored once the upstream `fsspec` changes are merged.
         if "use_experimental_adaptive_prefetching" in kwargs:
-            use_prefetch_reader = bool(kwargs["use_experimental_adaptive_prefetching"])
+            val = kwargs["use_experimental_adaptive_prefetching"]
+            use_prefetch_reader = (
+                val.lower() in ("true", "1") if isinstance(val, str) else bool(val)
+            )
         else:
             use_prefetch_reader = os.environ.get(
                 "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
