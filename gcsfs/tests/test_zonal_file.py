@@ -635,7 +635,7 @@ def test_zonal_file_fetch_range_without_prefetch_engine(mock_gcsfs):
         assert result == [b"split_data"]
         mock_gcsfs._fetch_range_split.assert_awaited_once_with(
             zf.path,
-            concurrency=1,
+            concurrency=4,
             start=10,
             chunk_lengths=[5],
             size=zf.size,
@@ -711,7 +711,7 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
         mode="rb",
         use_experimental_adaptive_prefetching=True,
     )
-    assert zf2.pool_size == 1
+    assert zf2.pool_size == 4
     assert zf2._prefetch_engine is not None
     zf2.close()
 
@@ -721,7 +721,7 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
         mode="rb",
         use_experimental_adaptive_prefetching=False,
     )
-    assert zf3.pool_size == 1
+    assert zf3.pool_size == 4
     assert zf3._prefetch_engine is None
     zf3.close()
 

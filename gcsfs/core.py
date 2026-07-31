@@ -2313,7 +2313,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         mode="rb",
         block_size=DEFAULT_BLOCK_SIZE,
         autocommit=True,
-        cache_type="readahead",
+        cache_type=None,
         cache_options=None,
         acl=None,
         consistency="md5",
@@ -2376,6 +2376,24 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
+        # Ideally, all of these fields should be part of `cache_options`. Because current
+        # `fsspec` caches do not accept arbitrary `*args` and `**kwargs`, passing them
+        # there currently causes instantiation errors. We are holding off on introducing
+        # them as explicit keyword arguments to ensure existing user workloads are not
+        # disrupted. This will be refactored once the upstream `fsspec` changes are merged.
+        if "use_experimental_adaptive_prefetching" in kwargs:
+            use_prefetch_reader = bool(kwargs["use_experimental_adaptive_prefetching"])
+        else:
+            use_prefetch_reader = os.environ.get(
+                "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
+            ).lower() in (
+                "true",
+                "1",
+            )
+
+        if cache_type is None:
+            cache_type = "none" if use_prefetch_reader else "readahead"
+
         super().__init__(
             gcsfs,
             path,
@@ -2393,20 +2411,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.acl = acl
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
-
-        # Ideally, all of these fields should be part of `cache_options`. Because current
-        # `fsspec` caches do not accept arbitrary `*args` and `**kwargs`, passing them
-        # there currently causes instantiation errors. We are holding off on introducing
-        # them as explicit keyword arguments to ensure existing user workloads are not
-        # disrupted. This will be refactored once the upstream `fsspec` changes are merged.
-        use_prefetch_reader = kwargs.get(
-            "use_experimental_adaptive_prefetching", False
-        ) or os.environ.get(
-            "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false"
-        ).lower() in (
-            "true",
-            "1",
-        )
 
         if "r" in mode and use_prefetch_reader:
             max_prefetch_size = kwargs.get("max_prefetch_size", MAX_PREFETCH_SIZE)

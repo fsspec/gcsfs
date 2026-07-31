@@ -1598,7 +1598,7 @@ def test_errors(gcs):
 
 def test_read_small(gcs):
     fn = TEST_BUCKET + "/2014-01-01.csv"
-    with gcs.open(fn, "rb", block_size=10) as f:
+    with gcs.open(fn, "rb", block_size=10, cache_type="readahead") as f:
         out = []
         while True:
             data = f.read(3)
@@ -1725,7 +1725,7 @@ def test_readline_from_cache(gcs):
     with gcs.open(a, "wb") as f:
         f.write(data)
 
-    with gcs.open(a, "rb") as f:
+    with gcs.open(a, "rb", cache_type="readahead") as f:
         result = f.readline()
         assert result == b"a,b\n"
         assert f.loc == 4
@@ -2814,12 +2814,22 @@ def test_cat_file_concurrent_exception_cancellation(gcs):
 
 
 def test_gcsfile_prefetch_disabled_fallback(gcs):
-    """Verify that omitting the flag entirely skips the prefetcher initialization."""
+    """Verify that disabling prefetcher defaults to readahead cache unless cache_type="none" is explicitly specified."""
     fn = f"{TEST_BUCKET}/no_prefetch.txt"
     gcs.pipe(fn, b"HelloWorld")
 
+    # When prefetcher disabled and no cache_type specified, defaults to readahead
     with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
         assert getattr(f, "_prefetch_engine", None) is None
+        assert f.cache_type == "readahead"
+        assert f.read() == b"HelloWorld"
+
+    # When prefetcher disabled and cache_type="none" explicitly specified, remains "none"
+    with gcs.open(
+        fn, "rb", cache_type="none", use_experimental_adaptive_prefetching=False
+    ) as f:
+        assert getattr(f, "_prefetch_engine", None) is None
+        assert f.cache_type == "none"
         assert f.read() == b"HelloWorld"
 
 
