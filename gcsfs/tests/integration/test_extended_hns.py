@@ -1328,6 +1328,16 @@ class TestExtendedGcsFileSystemFindIntegration:
         assert test_structure["nested_dir"] in dir_with_files_listing
 
         # Check content of the 'nested_dir' cache
+        nested_dir_listing = {
+            d["name"] for d in gcs_hns.dircache[test_structure["nested_dir"]]
+        }
+        assert test_structure["nested_file"] in nested_dir_listing
+
+        # Check content of the 'empty_dir' cache
+        empty_dir_listing = {
+            d["name"] for d in gcs_hns.dircache[test_structure["empty_dir"]]
+        }
+        assert not empty_dir_listing
 
     @pytest.mark.parametrize("withdirs_param", [True, False])
     def test_find_updates_dircache_for_root_bucket(
@@ -1343,16 +1353,6 @@ class TestExtendedGcsFileSystemFindIntegration:
 
         # Verify that the cache is now populated for the root bucket
         assert root_bucket in gcs_hns.dircache
-        nested_dir_listing = {
-            d["name"] for d in gcs_hns.dircache[test_structure["nested_dir"]]
-        }
-        assert test_structure["nested_file"] in nested_dir_listing
-
-        # Check content of the 'empty_dir' cache
-        empty_dir_listing = {
-            d["name"] for d in gcs_hns.dircache[test_structure["empty_dir"]]
-        }
-        assert not empty_dir_listing
 
     def test_find_maxdepth_updates_cache(self, gcs_hns, test_structure):
         """Test that find with maxdepth updates cache for deeper objects."""
