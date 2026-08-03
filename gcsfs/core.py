@@ -1902,21 +1902,22 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
             while parent:
                 dir_key = self.split_path(parent)[1]
-                if not dir_key or len(parent) < len(path.rstrip("/")):
+                if len(parent) < len(path.rstrip("/")):
                     break
 
                 if prefix and not parent.startswith(full_prefix):
                     # If this parent doesn't match the prefix, neither will its parents.
                     break
 
-                dirs[parent] = {
-                    "Key": dir_key,
-                    "Size": 0,
-                    "name": parent,
-                    "StorageClass": "DIRECTORY",
-                    "type": "directory",
-                    "size": 0,
-                }
+                if dir_key:
+                    dirs[parent] = {
+                        "Key": dir_key,
+                        "Size": 0,
+                        "name": parent,
+                        "StorageClass": "DIRECTORY",
+                        "type": "directory",
+                        "size": 0,
+                    }
 
                 if not prefix and update_cache:
                     listing = cache_entries.setdefault(parent, {})
@@ -1924,7 +1925,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     if name not in listing:
                         listing[name] = previous
 
-                previous = dirs[parent]
+                if parent in dirs:
+                    previous = dirs[parent]
                 parent = self._parent(parent)
         if not prefix and update_cache:
             cache_entries_list = {k: list(v.values()) for k, v in cache_entries.items()}
