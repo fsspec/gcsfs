@@ -34,7 +34,7 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
-from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
+from .zb_hns_utils import DEFAULT_CONCURRENCY
 
 logger = logging.getLogger("gcsfs")
 
@@ -2051,7 +2051,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
             fetcher_fn = default_fetcher
 
-        from .prefetcher import BackgroundPrefetcher
+        from fsspec.prefetch import BackgroundPrefetcher
 
         prefetcher = BackgroundPrefetcher(
             fetcher=fetcher_fn,
@@ -2315,7 +2315,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         mode="rb",
         block_size=DEFAULT_BLOCK_SIZE,
         autocommit=True,
-        cache_type="readahead",
+        cache_type="adaptive_readahead",
         cache_options=None,
         acl=None,
         consistency="md5",
@@ -2378,6 +2378,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
+
+        if "r" in mode and cache_type == "adaptive_readahead":
+            if cache_type not in fsspec.core.caches:
+                warnings.warn(
+                    "fsspec adaptive_readahead cache is unavailable in this environment; "
+                    "falling back to readahead"
+                )
+                cache_type = "readahead"
+
         super().__init__(
             gcsfs,
             path,
@@ -2395,34 +2404,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.acl = acl
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
-
-        # Ideally, all of these fields should be part of `cache_options`. Because current
-        # `fsspec` caches do not accept arbitrary `*args` and `**kwargs`, passing them
-        # there currently causes instantiation errors. We are holding off on introducing
-        # them as explicit keyword arguments to ensure existing user workloads are not
-        # disrupted. This will be refactored once the upstream `fsspec` changes are merged.
-        use_prefetch_reader = kwargs.get(
-            "use_experimental_adaptive_prefetching", False
-        ) or os.environ.get(
-            "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false"
-        ).lower() in (
-            "true",
-            "1",
-        )
-
-        if "r" in mode and use_prefetch_reader:
-            max_prefetch_size = kwargs.get("max_prefetch_size", MAX_PREFETCH_SIZE)
-            from .prefetcher import BackgroundPrefetcher
-
-            self._prefetch_engine = BackgroundPrefetcher(
-                self._async_fetch_range,
-                self.size,
-                max_prefetch_size=max_prefetch_size,
-                concurrency=self.concurrency,
-                loop=self.gcsfs.loop,
-            )
-        else:
-            self._prefetch_engine = None
 
         # _supports_append is an internal argument not meant to be used directly.
         # If True, allows opening file in append mode. This is generally not supported
@@ -2614,8 +2595,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if not both None, fetch only given range
         """
         try:
-            if hasattr(self, "_prefetch_engine") and self._prefetch_engine:
-                return self._prefetch_engine.fetch(start=start, end=end)
             return self.fs.cat_file(
                 self.path,
                 start=start,
@@ -2627,21 +2606,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if "not satisfiable" in str(e):
                 return b""
             raise
-
-    async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
-        """Async fetcher mapped to the Prefetcher engine for regional buckets."""
-        return await self.gcsfs._cat_file_concurrent(
-            self.path,
-            start=start_offset,
-            end=start_offset + total_size,
-            concurrency=split_factor,
-            cache_type=self.cache_type,
-        )
-
-    def close(self):
-        super().close()
-        if hasattr(self, "_prefetch_engine") and self._prefetch_engine:
-            self._prefetch_engine.close()
 
 
 def _convert_fixed_key_metadata(metadata, *, from_google=False):
