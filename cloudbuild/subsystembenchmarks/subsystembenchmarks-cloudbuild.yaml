@@ -7,6 +7,7 @@ substitutions:
   _MACHINE_TYPE: "c4-standard-192"  # CPU now; point at a GPU type later (auto-detect handles backend)
   _REQUIREMENTS: ""
   _SWEEP_AXES: ""
+  _STRATEGY: ""
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -37,6 +38,7 @@ steps:
       - "_MACHINE_TYPE=${_MACHINE_TYPE}"
       - "_REQUIREMENTS=${_REQUIREMENTS}"
       - "_SWEEP_AXES=${_SWEEP_AXES}"
+      - "_STRATEGY=${_STRATEGY}"
       - "PROJECT_ID=${PROJECT_ID}"
     args:
       - "-c"
@@ -82,6 +84,7 @@ steps:
           printf 'export VM_NAME=%q\n' "$${VM_NAME}"
           printf 'export REQUIREMENTS_OVERRIDE=%q\n' "$${_REQUIREMENTS}"
           printf 'export SWEEP_AXES=%q\n' "$${_SWEEP_AXES}"
+          printf 'export STRATEGY=%q\n' "$${_STRATEGY}"
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
