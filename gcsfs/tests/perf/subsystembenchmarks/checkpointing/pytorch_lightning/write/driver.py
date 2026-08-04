@@ -40,7 +40,9 @@ class DummyModel(L.LightningModule):
             out_features = ((out_features // tp_size) + 1) * tp_size
         self.out_features = out_features
 
-        self.layer = nn.Linear(self.in_features, self.out_features, bias=False)
+        self.layer = nn.Linear(
+            self.in_features, self.out_features, bias=False, dtype=torch.bfloat16
+        )
         self.layer.weight.requires_grad = True
 
     def forward(self, x):

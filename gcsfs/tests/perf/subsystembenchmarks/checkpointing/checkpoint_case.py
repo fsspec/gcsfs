@@ -79,7 +79,7 @@ def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         )
         benchmark.extra_info["checkpoint_write_throughput_mean_bytes_per_second"] = (
             sum(size_for_throughput / d for d in durations) / len(durations)
-            if all(durations)
+            if durations and all(durations)
             else 0.0
         )
         publish_round_stats(benchmark, durations)
