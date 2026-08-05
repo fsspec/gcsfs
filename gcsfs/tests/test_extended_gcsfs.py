@@ -161,7 +161,9 @@ def test_read_small_zb(extended_gcsfs, gcs_bucket_mocks):
     with gcs_bucket_mocks(
         csv_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
     ) as mocks:
-        with extended_gcsfs.open(csv_file_path, "rb", block_size=10) as f:
+        with extended_gcsfs.open(
+            csv_file_path, "rb", block_size=10, cache_type="readahead_chunked"
+        ) as f:
             out = []
             i = 1
             while True:
@@ -194,7 +196,7 @@ def test_readline_zb(extended_gcsfs, gcs_bucket_mocks):
 def test_readline_from_cache_zb(extended_gcsfs, gcs_bucket_mocks):
     data = text_files["zonal/test/a"]
     with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
-        with extended_gcsfs.open(a, "rb") as f:
+        with extended_gcsfs.open(a, "rb", cache_type="readahead_chunked") as f:
             result = f.readline()
             assert result == b"a,b\n"
             assert f.loc == 4
@@ -376,11 +378,27 @@ def test_multithreaded_read_overlapping_ranges_zb(
             assert mocks["pool"].close.call_count == len(read_tasks)
 
 
-def test_default_cache_is_readahead_chunked(extended_gcsfs, gcs_bucket_mocks):
+def test_default_cache_is_none_with_prefetcher(extended_gcsfs, gcs_bucket_mocks):
     data = text_files["zonal/test/b"]
     with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        # 1. Default: cache_type not set -> prefetcher enabled, cache is BaseCache ("none")
         with extended_gcsfs.open(b, "rb") as f:
+            assert isinstance(f.cache, caching.BaseCache)
+            assert f._prefetch_engine is not None
+
+        # 2. Prefetcher disabled, cache_type not set -> no prefetcher, cache falls back to ReadAhead
+        with extended_gcsfs.open(
+            b, "rb", use_experimental_adaptive_prefetching=False
+        ) as f:
+            import fsspec
+
+            assert isinstance(f.cache, fsspec.caching.ReadAheadCache)
+            assert f._prefetch_engine is None
+
+        # 3. Explicit cache_type="readahead_chunked" -> no prefetcher, cache is ReadAheadChunked
+        with extended_gcsfs.open(b, "rb", cache_type="readahead_chunked") as f:
             assert isinstance(f.cache, caching.ReadAheadChunked)
+            assert f._prefetch_engine is None
 
 
 def test_multithreaded_read_chunk_boundary_zb(
@@ -932,7 +950,7 @@ def test_get_file_from_zonal_bucket(extended_gcsfs, gcs_bucket_mocks):
                 assert f.read() == json_data
         if mocks:
             mocks["downloader"].download_ranges.assert_awaited()
-            mocks["downloader"].close.assert_awaited_once()
+            mocks["downloader"].close.assert_awaited()
 
 
 async def create_mrd_side_effect(client, bucket, object_name, generation):
@@ -985,7 +1003,7 @@ def test_get_list_from_zonal_bucket(extended_gcsfs):
             with open(l2, "rb") as f:
                 assert f.read() == files[file2]
 
-    assert mock_create_mrd.call_count == 2
+    assert mock_create_mrd.call_count == 4
 
 
 def test_get_directory_from_zonal_bucket(extended_gcsfs):
@@ -1033,7 +1051,7 @@ def test_get_directory_from_zonal_bucket(extended_gcsfs):
             with open(os.path.join(local_dir, "accounts.2.json"), "rb") as f:
                 assert f.read() == files[file2]
 
-    assert mock_create_mrd.call_count == 2
+    assert mock_create_mrd.call_count == 4
 
 
 @pytest.mark.asyncio
@@ -1102,10 +1120,6 @@ async def test_cp_file_not_implemented_error(
 
 
 def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
-    file_size = len(
-        json_data
-    )  # We need the file size to predict if readahead will trigger
-
     for param in read_block_params:
         with subtests.test(id=param.id):
             offset, length, delimiter, expected_data = param.values
@@ -1139,15 +1153,7 @@ def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
                             # for delimiters. We just assert that it requested ranges.
                             assert len(actual_ranges) >= 1
                         else:
-                            req_end = offset + length
-                            if req_end >= file_size:
-                                expected_chunks = 1
-                            else:
-                                expected_chunks = 2
-
-                            assert (
-                                len(actual_ranges) == expected_chunks
-                            ), f"Expected {expected_chunks} chunks (Request + Readahead), got {len(actual_ranges)}"
+                            assert len(actual_ranges) >= 1
                             actual_offsets = sorted(
                                 range_[0] for range_ in actual_ranges
                             )

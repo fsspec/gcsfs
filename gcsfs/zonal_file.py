@@ -28,7 +28,7 @@ class ZonalFile(GCSFile):
         mode="rb",
         block_size=DEFAULT_BLOCK_SIZE,
         autocommit=True,
-        cache_type="readahead_chunked",
+        cache_type=None,
         cache_options=None,
         acl=None,
         consistency="md5",
