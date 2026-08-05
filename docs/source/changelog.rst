@@ -4,6 +4,45 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.8.0
+--------
+
+* fix(hns): cache root bucket properly in _get_dirs_and_update_cache (#990)
+* test(microbenchmarking): adding walk operation to the microbenchmarking list suite (#989)
+* docs(subsystembenchmarks): add benchmark guides (#985)
+* fix(benchmark): use fsspec.open instead of shared IPC instance to avoid multiprocessing timeout (#988)
+* perf: Update subsystem benchmark baseline num_workers to 4 (#986)
+* feat(subsystembenchmarks): print markdown result table (#984)
+* ci(subsystembenchmarks): harden stale VM cleanup (#983)
+* perf(subsystembenchmarks): tune Hugging Face read benchmark cases (#982)
+* Update delete microbenchmarks config for PyTorch Lightning FSDP checkpoint workloads (#971)
+* ci(subsystembenchmarks): add Cloud Build execution pipeline and BigQuery ingestion (#976)
+* fix(macrobenchmarks) Explicitly wrap FSDP1 units in Lightning macrobenchmark (#981)
+* feat(subsystembenchmarks): add HuggingFace Datasets read subsystem benchmarks (#978)
+* Update prefetcher.rst (#977)
+* feat(perf): add dataloading subsystem benchmark suite and read-amplification scraping (#975)
+* feat(subsystembenchmarks): add benchmark measurement framework (#974)
+* Fix VM and bucket deletion logic in Cloud Build cleanup (#973)
+* refactor(perf-tests): share process-tree resource monitor (#972)
+* Updates prefetcher numbers for Standard Buckets (#970)
+* Add epoch logging to StepTimeCallback and DatasetEpochCallback (#969)
+* feat(macrobenchmarks): make llama_3_1_8b_cpu_sim a real-GPU drop-in (#968)
+* feat(macrobenchmarks): add real-time data wait and dataset build metrics (#967)
+* feat(macrobench): add dataloading knobs to HF workload (#966)
+* docs(macrobenchmarks): add READMEs for cloudbuild and perf macrobenchmarks (#957)
+* feat(macrobenchmarks): add support for ModelParallelStrategy (FSDP2) (#965)
+* feat(macrobenchmarks): allow one canonical dataset for any bucket type (#963)
+* fix(macrobenchmarks): honor full-pass mode in step validation and checkpoint interval (#962)
+* Fix SQLite DB locking race condition in create_buckets.sh (#960)
+* fix(macrobenchmarks): support empty string null marker in BigQuery schema (#959)
+* Fix timer initialization in StepTimeCallback for LLaMA 3.1 8B training (#946)
+* chore(macrobenchmarks): tidy up comments and docstrings (#956)
+* feat(macrobenchmarks): add throughput and checkpoint size metrics (#958)
+* ci: move build and release logic to reusable build-and-release workflow (#955)
+* feat(macrobenchmarks): collect and report system metrics (#952)
+* uses forkserver instead spawn in microbenchmarks (#950)
+* feat(macrobenchmarks): add FSDP support for Llama 3.1 8B CPU simulation (#954)
+
 2026.7.0
 --------
 
