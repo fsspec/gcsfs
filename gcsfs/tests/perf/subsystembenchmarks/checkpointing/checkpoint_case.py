@@ -47,7 +47,8 @@ def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
             )
             logging.info("Physical checkpoint size: %d bytes", physical_size_bytes)
         except Exception as e:
-            logging.warning("Could not measure physical checkpoint size: %s", e)
+            logging.error("Could not measure physical checkpoint size: %s", e)
+            raise
 
         # Publish metrics to pytest-benchmark extra_info
         benchmark.group = params.scenario
@@ -60,7 +61,7 @@ def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
                 "measurement_round_count": params.rounds,
                 "workload_scenario": params.scenario,
                 "config_sweep_axis": params.sweep_axis,
-                "model_size_mb": params.model_size_mb,
+                "model_id": params.model_id,
                 "checkpoint_physical_size_bytes": physical_size_bytes,
                 "checkpoint_strategy": params.strategy,
                 "measurement_window_start_unix_seconds": int(window_start),
@@ -72,14 +73,9 @@ def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
 
         durations = result.durations
         # Calculate write throughput
-        size_for_throughput = (
-            physical_size_bytes
-            if physical_size_bytes > 0
-            else (params.model_size_mb * 1024 * 1024)
-        )
         benchmark.extra_info["checkpoint_write_throughput_mean_bytes_per_second"] = (
-            sum(size_for_throughput / d for d in durations) / len(durations)
-            if durations and all(durations)
+            sum(physical_size_bytes / d for d in durations) / len(durations)
+            if physical_size_bytes > 0 and durations and all(durations)
             else 0.0
         )
         publish_round_stats(benchmark, durations)

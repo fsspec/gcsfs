@@ -39,6 +39,11 @@ def _build_parser():
         help="whitespace-separated config sweep axes; baseline is always included",
     )
     parser.add_argument(
+        "--filter",
+        default="",
+        help="pytest -k filter expression to limit case execution",
+    )
+    parser.add_argument(
         "--bucket-prefix",
         required=True,
         help="name prefix for the per-case buckets this run creates",
@@ -179,7 +184,7 @@ def main(argv=None):
     results_dir = os.path.join(os.path.dirname(__file__), "__run__", timestamp)
     os.makedirs(results_dir, exist_ok=True)
 
-    rc, csv_path = cli.run_suite(suite_dir, results_dir)
+    rc, csv_path = cli.run_suite(suite_dir, results_dir, filter_expr=args.filter)
     if csv_path is None:
         logging.error("no benchmark results produced by group %s", args.group)
         raise SystemExit(rc or 1)

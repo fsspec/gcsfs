@@ -60,7 +60,7 @@ def _params(**over):
         rounds=2,
         scenario="checkpoint_write",
         framework="fake",
-        model_size_mb=100,
+        model_id="fake-model",
         strategy="single",
     )
     kw.update(over)

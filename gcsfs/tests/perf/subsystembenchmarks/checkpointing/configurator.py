@@ -18,6 +18,11 @@ _STRATEGY = {
 _RUN_LEVEL_KEYS = ("bucket_type",)
 
 
+def _model_id_slug(model_id: str) -> str:
+    name = os.path.basename(model_id.rstrip("/"))
+    return name.lower().replace("-", "_").replace(".", "_")
+
+
 @dataclasses.dataclass
 class CheckpointParameters:
     """Parameters for a checkpoint save benchmark case."""
@@ -29,7 +34,7 @@ class CheckpointParameters:
     scenario: str
     framework: str
 
-    model_size_mb: int
+    model_id: str
     strategy: str  # single, ddp, fsdp, model_parallel_*
     world_size: int = 2
     tensor_parallel_size: int = 1
@@ -44,7 +49,7 @@ class CheckpointParameters:
         """Stable, param-encoding pytest-benchmark id using swept values."""
         parts = [
             "save",
-            f"sz{self.model_size_mb}M",
+            _model_id_slug(self.model_id),
             _STRATEGY[self.strategy],
         ]
         if self.strategy in ("model_parallel_full", "model_parallel_sharded"):
@@ -57,21 +62,6 @@ class OneFactorCheckpointConfigurator(OneFactorConfigurator):
     """Checkpointing-family pins for generic one-factor config mechanics."""
 
     RUN_LEVEL_KEYS = _RUN_LEVEL_KEYS
-
-    def generate_cases(self):
-        cases = super().generate_cases()
-        strategy_env = os.environ.get("STRATEGY")
-        if strategy_env:
-            cases = [c for c in cases if c.strategy == strategy_env]
-            if not cases:
-                import logging
-
-                logging.warning(
-                    "No checkpoint cases matched STRATEGY=%r; available strategies: %s",
-                    strategy_env,
-                    {c.strategy for c in super().generate_cases()},
-                )
-        return cases
 
     def shared_keys(self, scenario, common_config):
         return dict(

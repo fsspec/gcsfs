@@ -6,6 +6,7 @@ import lightning.pytorch as L
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import transformers
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -23,67 +24,120 @@ class DummyDataset(Dataset):
         return torch.randn(self.in_features)
 
 
+def _llama_tp_plan():
+    from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
+
+    return {
+        "self_attn.q_proj": ColwiseParallel(),
+        "self_attn.k_proj": ColwiseParallel(),
+        "self_attn.v_proj": ColwiseParallel(),
+        "self_attn.o_proj": RowwiseParallel(),
+        "mlp.gate_proj": ColwiseParallel(),
+        "mlp.up_proj": ColwiseParallel(),
+        "mlp.down_proj": RowwiseParallel(),
+    }
+
+
 class DummyModel(L.LightningModule):
-    """A dummy LightningModule of a configurable size in Megabytes using a Linear layer."""
+    """A dummy LightningModule."""
 
     def __init__(self, params):
         super().__init__()
         self.params = params
-        size_mb = params.model_size_mb
-        tp_size = getattr(params, "tensor_parallel_size", 1)
 
-        total_params = (size_mb * 1024 * 1024) // 2
-        self.in_features = 4096
-        out_features = max(1, total_params // self.in_features)
-        # Ensure out_features is divisible by tp_size
-        if out_features % tp_size != 0:
-            out_features = ((out_features // tp_size) + 1) * tp_size
-        self.out_features = out_features
+        model_id = os.getenv("MODEL_ID", params.model_id)
+        use_local_files_only = False
+        if model_id.startswith("gs://"):
+            use_local_files_only = True
+            dir_name = os.path.basename(model_id.rstrip("/"))
+            model_id = os.path.join("/tmp", dir_name)
 
-        self.layer = nn.Linear(
-            self.in_features, self.out_features, bias=False, dtype=torch.bfloat16
+        self.llama = transformers.AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+            local_files_only=use_local_files_only,
+            use_cache=False,
         )
-        self.layer.weight.requires_grad = True
+
+        # Freeze the giant model's parameters to avoid CPU compute and OOMs.
+        for p in self.llama.parameters():
+            p.requires_grad = False
+
+        # A tiny trainable layer to satisfy Lightning/PyTorch optimizer and backward requirements.
+        self.trainable = nn.Linear(8, 8, dtype=torch.bfloat16)
+        self.trainable.weight.requires_grad = True
 
     def forward(self, x):
-        return self.layer(x)
+        # We don't forward the giant model on CPU.
+        return x
 
     def training_step(self, batch, batch_idx):
-        loss = self(batch).sum()
-        return loss
+        # Discard batch to avoid CPU compute.
+        del batch
+        # Real loss with a real grad path so backward + DDP all-reduce run on the trainable layer.
+        zeros = torch.zeros(1, 8, dtype=self.trainable.weight.dtype)
+        return (self.trainable(zeros) ** 2).sum()
+
+    @staticmethod
+    def _materialize_adamw_state(optimizer):
+        """Eagerly allocate AdamW moments so checkpoint size is realistic."""
+        for group in optimizer.param_groups:
+            for p in group["params"]:
+                state = optimizer.state[p]
+                if state:
+                    continue
+                state["step"] = torch.zeros((), dtype=torch.float32)
+                state["exp_avg"] = torch.randn_like(
+                    p, memory_format=torch.preserve_format
+                )
+                state["exp_avg_sq"] = torch.rand_like(
+                    p, memory_format=torch.preserve_format
+                )
+                if group["amsgrad"]:
+                    state["max_exp_avg_sq"] = torch.rand_like(
+                        p, memory_format=torch.preserve_format
+                    )
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=1e-3)
+        # Pass all parameters (including the frozen giant model) to the optimizer
+        # so that it generates states for all of them, making the checkpoint realistic.
+        optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
+        # Eagerly materialize states on CPU
+        self._materialize_adamw_state(optimizer)
+        return optimizer
 
     def configure_model(self):
-        from lightning.pytorch.strategies import ModelParallelStrategy
+        # Apply FSDP1 wrapping block-by-block
+        if self.params.strategy in ("fsdp_sharded", "fsdp_full"):
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            from torch.distributed.fsdp.wrap import wrap
 
-        if isinstance(self.trainer.strategy, ModelParallelStrategy):
+            if not isinstance(self.llama.model, FSDP):
+                for index, layer in enumerate(self.llama.model.layers):
+                    self.llama.model.layers[index] = wrap(layer)
+                self.llama = wrap(self.llama)
+            if not isinstance(self.trainable, FSDP):
+                self.trainable = wrap(self.trainable)
+
+        # Apply FSDP2 (ModelParallelStrategy) wrapping block-by-block + TP
+        elif self.params.strategy in ("model_parallel_sharded", "model_parallel_full"):
+            from torch.distributed.fsdp import fully_shard
+            from torch.distributed.tensor.parallel import parallelize_module
+
             mesh = self.trainer.strategy.device_mesh
+            tp_size = self.params.tensor_parallel_size
 
-            # Apply TP if tensor_parallel_size > 1
-            if (
-                "tensor_parallel" in mesh.mesh_dim_names
-                and mesh["tensor_parallel"].size() > 1
-            ):
-                from torch.distributed.tensor.parallel import (
-                    ColwiseParallel,
-                    parallelize_module,
-                )
-
+            # Apply TP to layers
+            if tp_size > 1 and mesh["tensor_parallel"].size() > 1:
                 tp_mesh = mesh["tensor_parallel"]
-                parallelize_module(self.layer, tp_mesh, ColwiseParallel())
+                for layer in self.llama.model.layers:
+                    parallelize_module(layer, tp_mesh, _llama_tp_plan())
 
-            # Apply FSDP2 (DP) to the sharded module
-            if (
-                "data_parallel" in mesh.mesh_dim_names
-                and mesh["data_parallel"].size() > 1
-            ):
-                from torch.distributed.fsdp import fully_shard
-
-                dp_mesh = mesh["data_parallel"]
-                fully_shard(self.layer, mesh=dp_mesh)
-                fully_shard(self, mesh=dp_mesh)
+            # Apply FSDP2 (DP)
+            dp_mesh = mesh["data_parallel"]
+            for layer in self.llama.model.layers:
+                fully_shard(layer, mesh=dp_mesh)
+            fully_shard(self.llama, mesh=dp_mesh)
 
 
 @dataclasses.dataclass
@@ -163,6 +217,7 @@ def _rank_save(rank, world_size, port, prefix, params, q):
         "strategy": strategy,
         "max_steps": 1,
         "precision": "bf16-mixed",
+        "enable_checkpointing": False,
     }
 
     trainer = L.Trainer(**trainer_args)
@@ -172,26 +227,24 @@ def _rank_save(rank, world_size, port, prefix, params, q):
     model = DummyModel(params)
     model = model.to(torch.bfloat16)
 
-    # Trigger save checkpoint
     trainer.fit(model, train_dataloaders=dataloader)
 
-    # Save checkpoint manually
-    # We want to measure the save_checkpoint time.
-    # In distributed strategies, we must save on all ranks (it is a collective call).
     ckpt_path = os.path.join(prefix, "model.ckpt")
-
-    # Ensure all ranks are synchronized before starting the timer
-    dist.barrier()
-    t_start = time.perf_counter()
-    trainer.save_checkpoint(ckpt_path)
-    # Ensure all ranks finished writing before stopping the timer
-    dist.barrier()
-    t_end = time.perf_counter()
+    durations = []
+    for _ in range(params.rounds):
+        # Ensure all ranks are synchronized before starting the timer
+        dist.barrier()
+        t_start = time.perf_counter()
+        trainer.save_checkpoint(ckpt_path)
+        # Ensure all ranks finished writing before stopping the timer
+        dist.barrier()
+        t_end = time.perf_counter()
+        durations.append((t_start, t_end))
 
     dist.destroy_process_group()
 
     # Report durations from all ranks to aggregate
-    q.put([(t_start, t_end)])
+    q.put(durations)
 
 
 def run_split_save(prefix, params):
@@ -213,11 +266,12 @@ def run_split_save(prefix, params):
         )
         results = [q.get() for _ in range(world_size)]
 
-    # We reduce across ranks.
-    # durations = max(end) - min(begin) per epoch.
-    begins = [res[0][0] for res in results]
-    ends = [res[0][1] for res in results]
-    durations = [max(ends) - min(begins)]
+    # We reduce across ranks for each round.
+    durations = []
+    for r in range(params.rounds):
+        begins = [results[rank][r][0] for rank in range(world_size)]
+        ends = [results[rank][r][1] for rank in range(world_size)]
+        durations.append(max(ends) - min(begins))
     return durations
 
 
@@ -245,6 +299,7 @@ class PLCheckpointDriver:
             "devices": 1,
             "max_steps": 1,
             "precision": "bf16-mixed",
+            "enable_checkpointing": False,
         }
 
         trainer = L.Trainer(**trainer_args)
@@ -254,9 +309,11 @@ class PLCheckpointDriver:
         trainer.fit(model, train_dataloaders=dataloader)
 
         filepath = os.path.join(prefix, "model.ckpt")
-        begin = time.perf_counter()
-        trainer.save_checkpoint(filepath)
-        end = time.perf_counter()
-        durations = [end - begin]
+        durations = []
+        for _ in range(params.rounds):
+            begin = time.perf_counter()
+            trainer.save_checkpoint(filepath)
+            end = time.perf_counter()
+            durations.append(end - begin)
 
         return WriteResult(durations=durations)
