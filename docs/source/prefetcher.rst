@@ -77,7 +77,7 @@ Adaptive prefetching is enabled by default when ``cache_type`` is not explicitly
 
 Prefetching can be disabled in three ways:
 
-1. Explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or any other cache_type):
+1. Explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or ``cache_type="none"`` or any other cache_type):
 
 .. code-block:: python
 
