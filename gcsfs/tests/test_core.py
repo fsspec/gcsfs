@@ -2813,21 +2813,39 @@ def test_cat_file_concurrent_exception_cancellation(gcs):
             )
 
 
-def test_gcsfile_prefetch_disabled_fallback(gcs):
-    """Verify that disabling prefetcher defaults to readahead cache unless cache_type="none" is explicitly specified."""
-    fn = f"{TEST_BUCKET}/no_prefetch.txt"
+def test_gcsfile_prefetch_and_cache_type_rules(gcs):
+    """Verify that prefetcher is only used when cache_type is not set by user, and default cache_type is 'none'."""
+    fn = f"{TEST_BUCKET}/cache_rules.txt"
     gcs.pipe(fn, b"HelloWorld")
 
-    # When prefetcher disabled and no cache_type specified, defaults to readahead
+    # 1. Default: cache_type is not set -> prefetcher active, cache_type is "none"
+    with gcs.open(fn, "rb") as f:
+        assert getattr(f, "_prefetch_engine", None) is not None
+        assert f.cache_type == "none"
+        assert f.read() == b"HelloWorld"
+
+    # 2. Prefetcher disabled, no cache_type set -> no prefetcher, cache_type is "none"
     with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+        assert getattr(f, "_prefetch_engine", None) is None
+        assert f.cache_type == "none"
+        assert f.read() == b"HelloWorld"
+
+    # 3. User sets cache_type="readahead" -> prefetcher NOT used, cache_type is "readahead"
+    with gcs.open(fn, "rb", cache_type="readahead") as f:
         assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "readahead"
         assert f.read() == b"HelloWorld"
 
-    # When prefetcher disabled and cache_type="none" explicitly specified, remains "none"
+    # 4. User sets cache_type="readahead" even with prefetcher=True -> prefetcher NOT used
     with gcs.open(
-        fn, "rb", cache_type="none", use_experimental_adaptive_prefetching=False
+        fn, "rb", cache_type="readahead", use_experimental_adaptive_prefetching=True
     ) as f:
+        assert getattr(f, "_prefetch_engine", None) is None
+        assert f.cache_type == "readahead"
+        assert f.read() == b"HelloWorld"
+
+    # 5. User explicitly sets cache_type="none" -> prefetcher NOT used
+    with gcs.open(fn, "rb", cache_type="none") as f:
         assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "none"
         assert f.read() == b"HelloWorld"

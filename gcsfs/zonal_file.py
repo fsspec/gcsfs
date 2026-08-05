@@ -1,5 +1,4 @@
 import logging
-import os
 
 from fsspec import asyn
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
@@ -94,18 +93,6 @@ class ZonalFile(GCSFile):
             raise NotImplementedError(
                 "Only read, write and append operations are currently supported for Zonal buckets."
             )
-
-        if cache_type is None:
-            val = kwargs.get("use_experimental_adaptive_prefetching")
-            if val is not None:
-                use_prefetch = (
-                    val.lower() in ("true", "1") if isinstance(val, str) else bool(val)
-                )
-            else:
-                use_prefetch = os.environ.get(
-                    "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
-                ).lower() in ("true", "1")
-            cache_type = "none" if use_prefetch else "readahead_chunked"
 
         super().__init__(
             gcsfs,

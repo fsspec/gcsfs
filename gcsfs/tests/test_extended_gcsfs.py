@@ -381,13 +381,22 @@ def test_multithreaded_read_overlapping_ranges_zb(
 def test_default_cache_is_none_with_prefetcher(extended_gcsfs, gcs_bucket_mocks):
     data = text_files["zonal/test/b"]
     with gcs_bucket_mocks(data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        # 1. Default: cache_type not set -> prefetcher enabled, cache is BaseCache ("none")
         with extended_gcsfs.open(b, "rb") as f:
             assert isinstance(f.cache, caching.BaseCache)
             assert f._prefetch_engine is not None
+
+        # 2. Prefetcher disabled, cache_type not set -> no prefetcher, cache is BaseCache ("none")
         with extended_gcsfs.open(
             b, "rb", use_experimental_adaptive_prefetching=False
         ) as f:
+            assert isinstance(f.cache, caching.BaseCache)
+            assert f._prefetch_engine is None
+
+        # 3. Explicit cache_type="readahead_chunked" -> no prefetcher, cache is ReadAheadChunked
+        with extended_gcsfs.open(b, "rb", cache_type="readahead_chunked") as f:
             assert isinstance(f.cache, caching.ReadAheadChunked)
+            assert f._prefetch_engine is None
 
 
 def test_multithreaded_read_chunk_boundary_zb(
