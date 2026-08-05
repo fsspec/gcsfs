@@ -2302,6 +2302,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         )
 
 
+GoogleCredentials.load_tokens()
+
+
 def _get_prefetcher_and_cache_value(cache_type, kwargs):
     """
     Resolves effective cache_type and whether prefetch reader should be enabled.
