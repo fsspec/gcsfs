@@ -872,16 +872,4 @@ class BackgroundPrefetcher:
 
     def close(self):
         """Safely shuts down the prefetcher from a synchronous context."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            loop.create_task(self._async_close())
-        else:
-            try:
-                fsspec.asyn.sync(self.loop, self._async_close)
-            except NotImplementedError:
-                if self.loop and self.loop.is_running():
-                    self.loop.create_task(self._async_close())
+        fsspec.asyn.sync(self.loop, self._async_close)
