@@ -737,14 +737,14 @@ def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
     assert zf_default._prefetch_engine is not None
     zf_default.close()
 
-    # 2. Prefetcher disabled (opt-out), no cache_type set -> cache_type="none", no prefetcher
+    # 2. Prefetcher disabled (opt-out), no cache_type set -> cache_type="readahead", no prefetcher
     zf_no_prefetch = ZonalFile(
         gcsfs=mock_gcsfs,
         path="gs://test-bucket/test-key",
         mode="rb",
         use_experimental_adaptive_prefetching=False,
     )
-    assert zf_no_prefetch.cache_type == "none"
+    assert zf_no_prefetch.cache_type == "readahead"
     assert zf_no_prefetch._prefetch_engine is None
     zf_no_prefetch.close()
 

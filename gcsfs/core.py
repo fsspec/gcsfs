@@ -2305,19 +2305,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_value(cache_type, kwargs):
+def _get_prefetcher_and_cache_config(cache_type, kwargs):
     """
     Resolves effective cache_type and whether prefetch reader should be enabled.
 
     Rules:
-    - Prefetcher is only used when cache_type is not explicitly set by the user (cache_type is None).
-    - If user sets any cache_type (cache_type is not None), prefetcher is always disabled.
-    - By default when cache_type is not set, cache_type is "none".
+    - If user explicitly sets cache_type (cache_type is not None), prefetcher is disabled and cache_type is used.
+    - If cache_type is None and prefetcher is enabled (default), cache_type is "none" and prefetcher is active.
+    - If cache_type is None and prefetcher is disabled, fallback to default_cache_type.
     """
     if cache_type is not None:
         use_prefetch_reader = False
     else:
-        cache_type = "none"
         if "use_experimental_adaptive_prefetching" in kwargs:
             val = kwargs["use_experimental_adaptive_prefetching"]
             use_prefetch_reader = (
@@ -2330,6 +2329,7 @@ def _get_prefetcher_and_cache_value(cache_type, kwargs):
                 "true",
                 "1",
             )
+        cache_type = "none" if use_prefetch_reader else "readahead"
     return cache_type, use_prefetch_reader
 
 
@@ -2404,7 +2404,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
-        cache_type, use_prefetch_reader = _get_prefetcher_and_cache_value(
+        cache_type, use_prefetch_reader = _get_prefetcher_and_cache_config(
             cache_type, kwargs
         )
 

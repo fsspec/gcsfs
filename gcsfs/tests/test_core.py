@@ -2824,10 +2824,10 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.cache_type == "none"
         assert f.read() == b"HelloWorld"
 
-    # 2. Prefetcher disabled, no cache_type set -> no prefetcher, cache_type is "none"
+    # 2. Prefetcher disabled, no cache_type set -> no prefetcher, cache_type falls back to "readahead"
     with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
         assert getattr(f, "_prefetch_engine", None) is None
-        assert f.cache_type == "none"
+        assert f.cache_type == "readahead"
         assert f.read() == b"HelloWorld"
 
     # 3. User sets cache_type="readahead" -> prefetcher NOT used, cache_type is "readahead"
