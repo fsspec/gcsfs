@@ -2339,7 +2339,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type, kwargs):
+def _get_prefetcher_and_cache_config(cache_type, kwargs=None):
     """
     Resolves effective cache_type, whether prefetch reader should be enabled,
     and cache_source ("explicit" vs "default").
@@ -2352,36 +2352,17 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs):
     """
     if cache_type is not None:
         cache_source = "explicit"
-        use_prefetch_reader = False
     else:
         cache_source = "default"
-        use_prefetch_reader = False
-        use_adaptive = True
-        if "use_experimental_adaptive_prefetching" in kwargs:
-            val = kwargs["use_experimental_adaptive_prefetching"]
-            use_adaptive = (
-                val.lower() in ("true", "1") if isinstance(val, str) else bool(val)
-            )
-        elif "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING" in os.environ:
-            use_adaptive = os.environ[
-                "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING"
-            ].lower() in (
-                "true",
-                "1",
-            )
-
-        if use_adaptive:
-            if "adaptive" in fsspec.core.caches:
-                cache_type = "adaptive"
-            else:
-                warnings.warn(
-                    "fsspec adaptive cache is unavailable in this environment; "
-                    "falling back to readahead"
-                )
-                cache_type = "readahead"
+        if "adaptive" in fsspec.core.caches:
+            cache_type = "adaptive"
         else:
+            warnings.warn(
+                "fsspec adaptive cache is unavailable in this environment; "
+                "falling back to readahead"
+            )
             cache_type = "readahead"
-    return cache_type, use_prefetch_reader, cache_source
+    return cache_type, False, cache_source
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2517,10 +2498,14 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             _get_prefetcher_and_cache_config(cache_type, kwargs)
         )
         cache_options = dict(cache_options or {})
-        if "concurrency" not in cache_options:
-            cache_options["concurrency"] = self.concurrency
-        if "max_prefetch_size" not in cache_options and "max_prefetch_size" in kwargs:
-            cache_options["max_prefetch_size"] = kwargs.pop("max_prefetch_size")
+        if cache_type == "adaptive":
+            if "concurrency" not in cache_options:
+                cache_options["concurrency"] = self.concurrency
+            if (
+                "max_prefetch_size" not in cache_options
+                and "max_prefetch_size" in kwargs
+            ):
+                cache_options["max_prefetch_size"] = kwargs.pop("max_prefetch_size")
 
         super().__init__(
             gcsfs,
@@ -2573,8 +2558,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
-
-        self._prefetch_engine = None
 
     @property
     def details(self):
@@ -2776,8 +2759,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def _close_impl(self):
         super().close()
-        if getattr(self, "_prefetch_engine", None):
-            self._prefetch_engine.close()
+
 
 def _convert_fixed_key_metadata(metadata, *, from_google=False):
     """
