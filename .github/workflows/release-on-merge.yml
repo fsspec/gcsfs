@@ -46,7 +46,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           # Extract version from "chore: release YYYY.M.PATCH"
-          VERSION=$(echo "$PR_TITLE" | sed 's/chore: release //')
+          VERSION="${PR_TITLE#chore: release }"
           if [[ ! "$VERSION" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
             echo "Error: Extracted version '$VERSION' is invalid."
             exit 1
