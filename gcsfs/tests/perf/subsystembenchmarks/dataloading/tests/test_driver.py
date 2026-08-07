@@ -25,6 +25,7 @@ def test_assert_fsspec_gcsfs_ignores_non_gs_prefix():
 
 
 def test_assert_gcsfs_backed_rejects_non_pyfilesystem():
+    pytest.importorskip("pyarrow")
     with pytest.raises(AssertionError, match="PyFileSystem"):
         driver.assert_gcsfs_backed(object())
 

@@ -112,12 +112,12 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         durations = result.durations
         benchmark.extra_info["dataset_read_throughput_mean_bytes_per_second"] = (
             statistics.mean(manifest["corpus_bytes"] / d for d in durations)
-            if all(durations)
+            if durations and all(durations)
             else 0.0
         )
         benchmark.extra_info["mean_samples_per_second"] = (
             statistics.mean(r / d for r, d in zip(result.rows_per_epoch, durations))
-            if all(durations)
+            if durations and all(durations)
             else 0.0
         )
         publish_round_stats(benchmark, durations)
