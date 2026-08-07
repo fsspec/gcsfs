@@ -2049,7 +2049,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
             fetcher_fn = default_fetcher
 
-        from fsspec.prefetch import BackgroundPrefetcher
+        from fsspec.prefetcher import BackgroundPrefetcher
 
         prefetcher = BackgroundPrefetcher(
             fetcher=fetcher_fn,
@@ -2313,7 +2313,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         mode="rb",
         block_size=DEFAULT_BLOCK_SIZE,
         autocommit=True,
-        cache_type="adaptive_readahead",
+        cache_type="adaptive",
         cache_options=None,
         acl=None,
         consistency="md5",
@@ -2377,10 +2377,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
 
-        if "r" in mode and cache_type == "adaptive_readahead":
+        if cache_type is None:
+            cache_type = "adaptive"
+
+        if "r" in mode and cache_type == "adaptive":
             if cache_type not in fsspec.core.caches:
                 warnings.warn(
-                    "fsspec adaptive_readahead cache is unavailable in this environment; "
+                    "fsspec adaptive cache is unavailable in this environment; "
                     "falling back to readahead"
                 )
                 cache_type = "readahead"

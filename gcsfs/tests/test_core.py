@@ -3401,7 +3401,7 @@ def test_get_file_concurrent_early_eof(gcs):
                 return_value=-1,
             ),
             mock.patch(
-                "gcsfs.prefetcher.BackgroundPrefetcher.afetch",
+                "fsspec.prefetcher.BackgroundPrefetcher.afetch",
                 new_callable=mock.AsyncMock,
             ) as mock_afetch,
         ):
