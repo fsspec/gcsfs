@@ -2818,36 +2818,42 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
     fn = f"{TEST_BUCKET}/cache_rules.txt"
     gcs.pipe(fn, b"HelloWorld")
 
-    # 1. Default: cache_type is not set -> prefetcher active, cache_type is "none"
+    # 1. Default: cache_type is not set -> prefetcher active, cache_type is "none", cache_source is "default"
     with gcs.open(fn, "rb") as f:
         assert getattr(f, "_prefetch_engine", None) is not None
         assert f.cache_type == "none"
+        assert f.cache_source == "default"
         assert f.read() == b"HelloWorld"
 
-    # 2. Prefetcher disabled, no cache_type set -> no prefetcher, cache_type falls back to "readahead"
+    # 2. Prefetcher disabled, no cache_type set -> no prefetcher, cache_type falls back to "readahead",
+    # cache_source is "default"
     with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
         assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "readahead"
+        assert f.cache_source == "default"
         assert f.read() == b"HelloWorld"
 
-    # 3. User sets cache_type="readahead" -> prefetcher NOT used, cache_type is "readahead"
+    # 3. User sets cache_type="readahead" -> prefetcher NOT used, cache_type is "readahead", cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="readahead") as f:
         assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "readahead"
+        assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
-    # 4. User sets cache_type="readahead" even with prefetcher=True -> prefetcher NOT used
+    # 4. User sets cache_type="readahead" even with prefetcher=True -> prefetcher NOT used, cache_source is "explicit"
     with gcs.open(
         fn, "rb", cache_type="readahead", use_experimental_adaptive_prefetching=True
     ) as f:
         assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "readahead"
+        assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
-    # 5. User explicitly sets cache_type="none" -> prefetcher NOT used
+    # 5. User explicitly sets cache_type="none" -> prefetcher NOT used, cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="none") as f:
         assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "none"
+        assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
 
@@ -3580,9 +3586,23 @@ def test_file_url_generation():
 
 def test_get_headers_includes_cache_type(gcs):
     # Test that _get_headers correctly appends cache_type to User-Agent
-    headers = gcs._get_headers(None, cache_type="test_cache")
-    assert "cache_type/test_cache" in headers["User-Agent"]
-    assert "python-gcsfs/" in headers["User-Agent"]
+    headers_explicit = gcs._get_headers(
+        None, cache_type="test_cache", cache_source="explicit"
+    )
+    assert "cache_type/test_cache:e" in headers_explicit["User-Agent"]
+    assert "python-gcsfs/" in headers_explicit["User-Agent"]
+
+    headers_default = gcs._get_headers(
+        None, cache_type="test_cache", cache_source="default"
+    )
+    assert "cache_type/test_cache:d" in headers_default["User-Agent"]
+
+    headers_plain = gcs._get_headers(None, cache_type="test_cache")
+    assert "cache_type/test_cache" in headers_plain["User-Agent"]
+    assert (
+        ":e" not in headers_plain["User-Agent"]
+        and ":d" not in headers_plain["User-Agent"]
+    )
 
     # Test that it doesn't append if cache_type is None
     headers_none = gcs._get_headers(None, cache_type=None)
@@ -3591,12 +3611,12 @@ def test_get_headers_includes_cache_type(gcs):
 
     # Test that it doesn't override if User-Agent is already present
     headers_preset = gcs._get_headers(
-        {"User-Agent": "custom-ua"}, cache_type="test_cache"
+        {"User-Agent": "custom-ua"}, cache_type="test_cache", cache_source="explicit"
     )
     assert headers_preset["User-Agent"] == "custom-ua"
 
 
-def test_user_agent_includes_cache_type_in_read(gcs):
+def test_user_agent_includes_cache_type_and_source_in_read(gcs):
     # TODO(lankita): Remove this skip when User-Agent is updated to include cache_type for gRPC/rapid buckets.
     # Zonal buckets currently use the gRPC path which does not use the HTTP client.
     if hasattr(gcs, "_is_zonal_bucket") and sync(
@@ -3606,6 +3626,7 @@ def test_user_agent_includes_cache_type_in_read(gcs):
 
     fn = TEST_BUCKET + "/2014-01-01.csv"
 
+    # 1. Explicit cache_type="mmap" -> User-Agent contains cache_type/mmap:e
     with mock.patch.object(
         gcs.session, "request", wraps=gcs.session.request
     ) as mock_session_request:
@@ -3618,10 +3639,48 @@ def test_user_agent_includes_cache_type_in_read(gcs):
                 out.append(data)
             assert gcs.cat(fn) == b"".join(out)
 
-        # Verify that the user-agent header has cache_type
         user_agents = [
             call.kwargs.get("headers", {}).get("User-Agent")
             for call in mock_session_request.call_args_list
         ]
-        expected_ua = f"python-gcsfs/{version} cache_type/mmap"
+        expected_ua = f"python-gcsfs/{version} cache_type/mmap:e"
         assert expected_ua in user_agents
+
+    # 2. Default open (prefetcher active) -> User-Agent contains cache_type/none:d
+    with mock.patch.object(
+        gcs.session, "request", wraps=gcs.session.request
+    ) as mock_session_request:
+        with gcs.open(fn, "rb") as f:
+            _ = f.read(10)
+
+        user_agents = [
+            call.kwargs.get("headers", {}).get("User-Agent", "")
+            for call in mock_session_request.call_args_list
+        ]
+        assert any("cache_type/none:d" in ua for ua in user_agents)
+
+    # 3. Explicit cache_type="none" -> User-Agent contains cache_type/none:e
+    with mock.patch.object(
+        gcs.session, "request", wraps=gcs.session.request
+    ) as mock_session_request:
+        with gcs.open(fn, "rb", cache_type="none") as f:
+            _ = f.read(10)
+
+        user_agents = [
+            call.kwargs.get("headers", {}).get("User-Agent", "")
+            for call in mock_session_request.call_args_list
+        ]
+        assert any("cache_type/none:e" in ua for ua in user_agents)
+
+    # 4. Prefetcher disabled fallback -> User-Agent contains cache_type/readahead:d
+    with mock.patch.object(
+        gcs.session, "request", wraps=gcs.session.request
+    ) as mock_session_request:
+        with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+            _ = f.read(10)
+
+        user_agents = [
+            call.kwargs.get("headers", {}).get("User-Agent", "")
+            for call in mock_session_request.call_args_list
+        ]
+        assert any("cache_type/readahead:d" in ua for ua in user_agents)
