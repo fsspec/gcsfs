@@ -63,7 +63,9 @@
       {"name": "checkpoint_physical_size_bytes", "type": "INTEGER", "description": "Total physical size in bytes of the saved checkpoint files."},
       {"name": "checkpoint_strategy", "type": "STRING", "description": "Checkpointing strategy used (single, ddp, fsdp, etc.)."},
       {"name": "checkpoint_write_throughput_mean_bytes_per_second", "type": "FLOAT", "description": "Mean write throughput in bytes per second for the checkpoint save operation."},
-      {"name": "model_id", "type": "STRING", "description": "Hugging Face model ID or path used for the benchmark."}
+      {"name": "model_id", "type": "STRING", "description": "Hugging Face model ID or path used for the benchmark."},
+      {"name": "tensor_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy tensor-parallel degree (TP). N/A for non-model_parallel runs."},
+      {"name": "data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree (DP). N/A for non-model_parallel runs."}
     ]
   }
 }

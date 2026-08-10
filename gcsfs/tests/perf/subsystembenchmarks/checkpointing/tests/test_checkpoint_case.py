@@ -110,3 +110,6 @@ def test_run_checkpoint_case(tmp_path, monkeypatch):
     assert bench.extra_info["workload_implementation"] == "fake"
     assert bench.extra_info["checkpoint_physical_size_bytes"] == 500
     assert bench.extra_info["checkpoint_write_throughput_mean_bytes_per_second"] > 0
+    assert bench.extra_info["world_size"] == 1
+    assert bench.extra_info["tensor_parallel_size"] == 1
+    assert bench.extra_info["data_parallel_size"] == 1

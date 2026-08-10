@@ -9,6 +9,7 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspe
 def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
     """Full per-case lifecycle for CheckpointDriver."""
     from gcsfs.tests.perf.subsystembenchmarks._common.benchmark_publish import (
+        publish_case_metadata,
         publish_resource_metrics,
         publish_round_stats,
     )
@@ -51,23 +52,16 @@ def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
             raise
 
         # Publish metrics to pytest-benchmark extra_info
-        benchmark.group = params.scenario
+        publish_case_metadata(benchmark, params, window_start, window_end)
         benchmark.extra_info.update(
             {
-                "workload_implementation": params.framework,
                 "workload_family": "checkpointing",
-                "gcs_bucket_name": params.bucket_name,
-                "bucket_type": params.bucket_type,
-                "measurement_round_count": params.rounds,
-                "workload_scenario": params.scenario,
-                "config_sweep_axis": params.sweep_axis,
-                "model_id": params.model_id,
                 "checkpoint_physical_size_bytes": physical_size_bytes,
                 "checkpoint_strategy": params.strategy,
-                "measurement_window_start_unix_seconds": int(window_start),
-                "measurement_window_end_unix_seconds": int(window_end),
+                "model_id": params.model_id,
             }
         )
+        benchmark.extra_info.update(params.extra_columns())
         if result.extra_columns:
             benchmark.extra_info.update(result.extra_columns)
 

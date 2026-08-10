@@ -36,14 +36,18 @@ class CheckpointParameters:
 
     model_id: str
     strategy: str  # single, ddp, fsdp, model_parallel_*
-    world_size: int = 2
+    world_size: int = 1
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1
     sweep_axis: str = "baseline"
 
     def extra_columns(self):
         """Loader-specific CSV columns."""
-        return {}
+        return {
+            "world_size": self.world_size,
+            "tensor_parallel_size": self.tensor_parallel_size,
+            "data_parallel_size": self.data_parallel_size,
+        }
 
     def benchmark_name(self):
         """Stable, param-encoding pytest-benchmark id using swept values."""

@@ -45,7 +45,7 @@ class DummyModel(L.LightningModule):
         super().__init__()
         self.params = params
 
-        model_id = os.getenv("MODEL_ID", params.model_id)
+        model_id = params.model_id
         use_local_files_only = False
         if model_id.startswith("gs://"):
             use_local_files_only = True
