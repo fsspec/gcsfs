@@ -3584,6 +3584,32 @@ def test_file_url_generation():
         f.closed = True
 
 
+def test_get_cache_type_header_value():
+    from gcsfs.core import _get_cache_type_header_value
+
+    # Explicit source
+    assert _get_cache_type_header_value("none", "explicit") == "cache_type/none:e"
+    assert (
+        _get_cache_type_header_value("readahead", "explicit")
+        == "cache_type/readahead:e"
+    )
+    assert _get_cache_type_header_value("mmap", "explicit") == "cache_type/mmap:e"
+
+    # Default source
+    assert _get_cache_type_header_value("none", "default") == "cache_type/none:d"
+    assert (
+        _get_cache_type_header_value("readahead", "default") == "cache_type/readahead:d"
+    )
+
+    # Unspecified / None source (backward compatibility)
+    assert _get_cache_type_header_value("mmap", None) == "cache_type/mmap"
+
+    # None or empty cache_type
+    assert _get_cache_type_header_value(None, "explicit") == ""
+    assert _get_cache_type_header_value("", "explicit") == ""
+    assert _get_cache_type_header_value(None) == ""
+
+
 def test_get_headers_includes_cache_type(gcs):
     # Test that _get_headers correctly appends cache_type to User-Agent
     headers_explicit = gcs._get_headers(

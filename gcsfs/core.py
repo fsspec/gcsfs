@@ -181,6 +181,18 @@ def _is_directory_marker(entry):
     return entry["size"] == 0 and entry["name"].endswith("/")
 
 
+def _get_cache_type_header_value(cache_type, cache_source=None):
+    """Format cache_type and cache_source into a User-Agent header value."""
+    if not cache_type:
+        return ""
+    suffix = ""
+    if cache_source == "explicit":
+        suffix = ":e"
+    elif cache_source == "default":
+        suffix = ":d"
+    return f"cache_type/{cache_type}{suffix}"
+
+
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -475,13 +487,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             out.update(headers)
         if "User-Agent" not in out:
             ua = "python-gcsfs/" + version
-            if cache_type:
-                suffix = ""
-                if cache_source == "explicit":
-                    suffix = ":e"
-                elif cache_source == "default":
-                    suffix = ":d"
-                ua += f" cache_type/{cache_type}{suffix}"
+            cache_val = _get_cache_type_header_value(cache_type, cache_source)
+            if cache_val:
+                ua += f" {cache_val}"
             out["User-Agent"] = ua
         self.credentials.apply(out)
         return out
