@@ -35,7 +35,7 @@ gcloud container clusters create "$CLUSTER_NAME" \
   --scopes="https://www.googleapis.com/auth/cloud-platform" \
   --private-ipv6-google-access-type=outbound-only \
   --network="${NETWORK_NAME}" --subnetwork="${SUBNET_NAME}" \
-  --no-enable-autoupgrade --quiet
+  --enable-autoupgrade --quiet
 NODE_POOL_ARGS=(
   --cluster="$CLUSTER_NAME"
   --project="${PROJECT_ID}"
@@ -47,7 +47,7 @@ NODE_POOL_ARGS=(
   --enable-gvnic
   --service-account="${_GKE_SERVICE_ACCOUNT}"
   --scopes="https://www.googleapis.com/auth/cloud-platform"
-  --no-enable-autoupgrade
+  --enable-autoupgrade
   --quiet
 )
 if [ "${_ENABLE_TIER1_NETWORKING:-true}" = "true" ]; then
