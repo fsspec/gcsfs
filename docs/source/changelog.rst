@@ -7,41 +7,36 @@ releasing in step with fsspec.
 2026.8.0
 --------
 
-* fix(hns): cache root bucket properly in _get_dirs_and_update_cache (#990)
-* test(microbenchmarking): adding walk operation to the microbenchmarking list suite (#989)
-* docs(subsystembenchmarks): add benchmark guides (#985)
-* fix(benchmark): use fsspec.open instead of shared IPC instance to avoid multiprocessing timeout (#988)
-* perf: Update subsystem benchmark baseline num_workers to 4 (#986)
-* feat(subsystembenchmarks): print markdown result table (#984)
-* ci(subsystembenchmarks): harden stale VM cleanup (#983)
-* perf(subsystembenchmarks): tune Hugging Face read benchmark cases (#982)
-* Update delete microbenchmarks config for PyTorch Lightning FSDP checkpoint workloads (#971)
-* ci(subsystembenchmarks): add Cloud Build execution pipeline and BigQuery ingestion (#976)
-* fix(macrobenchmarks) Explicitly wrap FSDP1 units in Lightning macrobenchmark (#981)
-* feat(subsystembenchmarks): add HuggingFace Datasets read subsystem benchmarks (#978)
-* Update prefetcher.rst (#977)
-* feat(perf): add dataloading subsystem benchmark suite and read-amplification scraping (#975)
-* feat(subsystembenchmarks): add benchmark measurement framework (#974)
-* Fix VM and bucket deletion logic in Cloud Build cleanup (#973)
-* refactor(perf-tests): share process-tree resource monitor (#972)
-* Updates prefetcher numbers for Standard Buckets (#970)
-* Add epoch logging to StepTimeCallback and DatasetEpochCallback (#969)
-* feat(macrobenchmarks): make llama_3_1_8b_cpu_sim a real-GPU drop-in (#968)
-* feat(macrobenchmarks): add real-time data wait and dataset build metrics (#967)
-* feat(macrobench): add dataloading knobs to HF workload (#966)
-* docs(macrobenchmarks): add READMEs for cloudbuild and perf macrobenchmarks (#957)
-* feat(macrobenchmarks): add support for ModelParallelStrategy (FSDP2) (#965)
-* feat(macrobenchmarks): allow one canonical dataset for any bucket type (#963)
-* fix(macrobenchmarks): honor full-pass mode in step validation and checkpoint interval (#962)
-* Fix SQLite DB locking race condition in create_buckets.sh (#960)
-* fix(macrobenchmarks): support empty string null marker in BigQuery schema (#959)
-* Fix timer initialization in StepTimeCallback for LLaMA 3.1 8B training (#946)
-* chore(macrobenchmarks): tidy up comments and docstrings (#956)
-* feat(macrobenchmarks): add throughput and checkpoint size metrics (#958)
-* ci: move build and release logic to reusable build-and-release workflow (#955)
-* feat(macrobenchmarks): collect and report system metrics (#952)
-* uses forkserver instead spawn in microbenchmarks (#950)
-* feat(macrobenchmarks): add FSDP support for Llama 3.1 8B CPU simulation (#954)
+**Adaptive Concurrent Prefetching is now the default read path**
+
+GCSFS now predicts the next range an application will read, fetches it in the background across several concurrent HTTP requests, and has the bytes in memory before read() is called. Network round-trips overlap with application compute instead of blocking it. Native read concurrency ships alongside it, so a single reader is no longer capped by the bandwidth of one HTTP connection.
+
+**The engine sizes itself to the workload:** it tracks a rolling average of recent read sizes and scales the prefetch window linearly with the detected sequential streak, rather than using a fixed block size or exponential doubling. When the pattern turns random, it drains the buffer to zero - random-access workloads pay no bandwidth or memory penalty for the feature being on.
+
+**Why this matters for AI/ML workloads**
+
+* **Model loading and checkpoint restore are large sequential reads** exactly the pattern the engine targets. Single-stream sequential throughput improves from 23.69 MB/s to 658.71 MB/s at 1 MB I/O, and from 156 MB/s to 736 MB/s at 16 MB I/O.
+* Training data pipelines stay fed: Parquet and sharded dataset reads issue small-to-medium sequential ranges that were previously latency-bound; at 64 KB I/O throughput rises from 1.66 MB/s to 208 MB/s. Less time blocked on GCS means higher accelerator utilisation.
+* Multi-worker DataLoader scaling: The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
+* Rapid (zonal) buckets are covered too, reaching upto 21 GiB/s on 16-process sequential reads at 16 MiB I/O.
+
+**Enabled by default when cache_type is not explicitly set (DEFAULT_GCSFS_CONCURRENCY=4), on both Standard and Rapid buckets.** Disable by setting an explicit cache_type, or exporting `USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'`, or passing `use_experimental_adaptive_prefetching=False` to open().
+
+**Memory note:** prefetching trades memory for throughput. Peak RSS rises from ~150 MB to 540–750 MB on single-stream reads, and materially more under high process counts. SPlease size the container limits accordingly to use prefetcher without any OOMs.
+
+More details on architecture, tuning, full benchmark tables, along with known limitations can be found here: https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
+
+(#795, #805, #818, #877)
+
+**Bug Fixes & Improvements**
+
+* Zero-cost local backward seeks in PrefetchConsumer - Parquet footer and ZIP directory reads are served from the existing buffer instead of re-issuing a network request. (#930)
+* Concurrent downloads cap task count against a minimum chunk size, removing per-task overhead on small ranges. (#926)
+* Generation consistency across parallel fetches, guaranteeing every chunk comes from the same object version. (#921)
+* Fixed silent truncation on short reads in zonal bucket downloads. (#920)
+* Zero-copy read and write paths via memoryview, cutting CPU and transient memory in the hot path. (#840, #907, #928)
+* Graceful fallback where ctypes.pythonapi is unavailable. (#938)
+
 
 2026.7.0
 --------
