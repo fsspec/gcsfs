@@ -18,7 +18,7 @@ fi
 pip install -e . >/dev/null
 pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null
 
-if [[ "${MODEL_ID:-}" == gs://* ]]; then
+if [[ "${GROUP}" == checkpointing/* ]] && [[ "${MODEL_ID:-}" == gs://* ]]; then
   echo "MODEL_ID is a GCS path: $MODEL_ID"
   DIR_NAME=$(basename "${MODEL_ID%/}")
   LOCAL_MODEL_PATH="/tmp/$DIR_NAME"
