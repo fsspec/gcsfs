@@ -16,4 +16,5 @@ python gcsfs/tests/perf/subsystembenchmarks/run.py \
   "--project=$PROJECT_ID" \
   "--location=$REGION" \
   "--zone=$ZONE" \
+  "--model-id=${MODEL_ID:-}" \
   --require-amplification

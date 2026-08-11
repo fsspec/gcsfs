@@ -72,6 +72,9 @@ class OneFactorCheckpointConfigurator(OneFactorConfigurator):
             rounds=common_config.get("rounds", 1),
             scenario=scenario["scenario"],
             bucket_type=os.environ.get("GCSFS_SUBSYSTEM_BUCKET_TYPE", "regional"),
+            model_id=os.environ.get(
+                "GCSFS_SUBSYSTEM_MODEL_ID", common_config.get("model_id")
+            ),
         )
 
     def validate_case(self, p):
