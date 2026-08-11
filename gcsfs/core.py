@@ -181,6 +181,18 @@ def _is_directory_marker(entry):
     return entry["size"] == 0 and entry["name"].endswith("/")
 
 
+def _get_cache_type_header_value(cache_type, cache_source=None):
+    """Format cache_type and cache_source into a User-Agent header value."""
+    if not cache_type:
+        return ""
+    suffix = ""
+    if cache_source == "explicit":
+        suffix = ":e"
+    elif cache_source == "default":
+        suffix = ":d"
+    return f"cache_type/{cache_type}{suffix}"
+
+
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -469,14 +481,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             params["userProject"] = user_project
         return params
 
-    def _get_headers(self, headers, cache_type=None):
+    def _get_headers(self, headers, cache_type=None, cache_source=None):
         out = {}
         if headers is not None:
             out.update(headers)
         if "User-Agent" not in out:
             ua = "python-gcsfs/" + version
-            if cache_type:
-                ua += f" cache_type/{cache_type}"
+            cache_val = _get_cache_type_header_value(cache_type, cache_source)
+            if cache_val:
+                ua += f" {cache_val}"
             out["User-Agent"] = ua
         self.credentials.apply(out)
         return out
@@ -499,6 +512,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         json=None,
         data=None,
         cache_type=None,
+        cache_source=None,
         **kwargs,
     ):
         await self._set_session()
@@ -509,7 +523,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             url=self._format_path(path, args),
             params=self._get_params(kwargs),
             json=json,
-            headers=self._get_headers(headers, cache_type=cache_type),
+            headers=self._get_headers(
+                headers, cache_type=cache_type, cache_source=cache_source
+            ),
             data=data,
             timeout=self.requests_timeout,
         ) as r:
@@ -1214,7 +1230,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             head = {}
 
         cache_type = kwargs.get("cache_type")
-        headers, out = await self._call("GET", u2, headers=head, cache_type=cache_type)
+        cache_source = kwargs.get("cache_source")
+        headers, out = await self._call(
+            "GET", u2, headers=head, cache_type=cache_type, cache_source=cache_source
+        )
         return out
 
     async def _cat_file_concurrent(
@@ -2309,16 +2328,22 @@ GoogleCredentials.load_tokens()
 
 def _get_prefetcher_and_cache_config(cache_type, kwargs):
     """
-    Resolves effective cache_type and whether prefetch reader should be enabled.
+    Resolves effective cache_type, whether prefetch reader should be enabled,
+    and cache_source ("explicit" vs "default").
 
     Rules:
-    - If user explicitly sets cache_type (cache_type is not None), prefetcher is disabled and cache_type is used.
-    - If cache_type is None and prefetcher is enabled (default), cache_type is "none" and prefetcher is active.
-    - If cache_type is None and prefetcher is disabled, fallback to default_cache_type.
+    - If user explicitly sets cache_type (cache_type is not None), prefetcher is disabled,
+      cache_type is used, and cache_source is "explicit".
+    - If cache_type is None and prefetcher is enabled (default), cache_type is "none",
+      prefetcher is active, and cache_source is "default".
+    - If cache_type is None and prefetcher is disabled, fallback to default_cache_type ("readahead"),
+      and cache_source is "default".
     """
     if cache_type is not None:
         use_prefetch_reader = False
+        cache_source = "explicit"
     else:
+        cache_source = "default"
         if "use_experimental_adaptive_prefetching" in kwargs:
             val = kwargs["use_experimental_adaptive_prefetching"]
             use_prefetch_reader = (
@@ -2332,7 +2357,7 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs):
                 "1",
             )
         cache_type = "none" if use_prefetch_reader else "readahead"
-    return cache_type, use_prefetch_reader
+    return cache_type, use_prefetch_reader, cache_source
 
 
 class GCSFile(fsspec.spec.AbstractBufferedFile):
@@ -2406,8 +2431,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
-        cache_type, use_prefetch_reader = _get_prefetcher_and_cache_config(
-            cache_type, kwargs
+        cache_type, use_prefetch_reader, self.cache_source = (
+            _get_prefetcher_and_cache_config(cache_type, kwargs)
         )
 
         super().__init__(
@@ -2640,6 +2665,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 end=end,
                 concurrency=self.concurrency,
                 cache_type=self.cache_type,
+                cache_source=self.cache_source,
             )
         except RuntimeError as e:
             if "not satisfiable" in str(e):
@@ -2654,6 +2680,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             end=start_offset + total_size,
             concurrency=split_factor,
             cache_type=self.cache_type,
+            cache_source=self.cache_source,
         )
 
     def close(self):
