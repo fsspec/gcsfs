@@ -79,6 +79,10 @@ if [[ -n "${REQUIREMENTS:-}" ]]; then
   # Word-split intentional.
   # shellcheck disable=SC2086
   pip3 install $REQUIREMENTS
+  # Reinstall only the requested packages so their dependency graph is not
+  # unnecessarily reinstalled after the normal resolution pass above.
+  # shellcheck disable=SC2086
+  pip3 install --no-deps --force-reinstall $REQUIREMENTS
 fi
 
 # JOB_COMPLETION_INDEX is set by the K8s Indexed Job (one value per pod,
