@@ -1,6 +1,5 @@
 """Per-case benchmark lifecycle runner: bucket management, corpus ingestion, driver timing, and metric publishing."""
 
-import os
 import statistics
 import time
 
@@ -9,22 +8,14 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspe
 
 def publish_common(benchmark, params, manifest, ttfb, window, build_seconds):
     """Publish shared loader parameters, system metadata, and timing metrics onto benchmark extra_info."""
-    from gcsfs.tests.perf.subsystembenchmarks._common import env
-    from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
-        requested_sweep_axes,
+    from gcsfs.tests.perf.subsystembenchmarks._common.benchmark_publish import (
+        publish_case_metadata,
     )
 
-    sweep_axes = " ".join(requested_sweep_axes()) or "all"
-    benchmark.group = params.scenario
+    publish_case_metadata(benchmark, params, window[0], window[1])
     benchmark.extra_info.update(
         {
-            "workload_implementation": params.framework,
             "workload_family": "data_loading",
-            "gcs_bucket_name": params.bucket_name,
-            "bucket_type": params.bucket_type,
-            "measurement_round_count": params.rounds,
-            "workload_scenario": params.scenario,
-            "config_sweep_axis": params.sweep_axis,
             "dataset_format": params.fmt,
             "sample_sequence_length_tokens": params.seq_len,
             "dataset_file_count": manifest["file_count"],
@@ -39,19 +30,6 @@ def publish_common(benchmark, params, manifest, ttfb, window, build_seconds):
             "parquet_row_group_size_rows": params.row_group_size,
             "time_to_first_batch_seconds": ttfb,
             "dataset_build_time": build_seconds,
-            "measurement_window_start_unix_seconds": int(window[0]),
-            "measurement_window_end_unix_seconds": int(window[1]),
-            "distributed_backend": env.detect_backend(),
-            "compute_accelerator_type": env.detect_accelerator(),
-            "machine_type": env.machine_type(),
-            "benchmark_source_commit_sha": env.benchmark_source_commit_sha(),
-            "requirements_override": os.environ.get(
-                "GCSFS_SUBSYSTEM_REQUIREMENTS_OVERRIDE", ""
-            ),
-            "requirements_resolved": os.environ.get(
-                "GCSFS_SUBSYSTEM_REQUIREMENTS_RESOLVED", "[]"
-            ),
-            "config_sweep_axes_requested": sweep_axes,
         }
     )
     benchmark.extra_info.update(params.extra_columns())
@@ -112,12 +90,12 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         durations = result.durations
         benchmark.extra_info["dataset_read_throughput_mean_bytes_per_second"] = (
             statistics.mean(manifest["corpus_bytes"] / d for d in durations)
-            if all(durations)
+            if durations and all(durations)
             else 0.0
         )
         benchmark.extra_info["mean_samples_per_second"] = (
             statistics.mean(r / d for r, d in zip(result.rows_per_epoch, durations))
-            if all(durations)
+            if durations and all(durations)
             else 0.0
         )
         publish_round_stats(benchmark, durations)
