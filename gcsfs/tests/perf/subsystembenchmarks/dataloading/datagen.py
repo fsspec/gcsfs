@@ -15,7 +15,7 @@ _CHARS_PER_TOKEN = 6  # ~6 chars per token matches token-row byte scale.
 _MAX_INGEST_THREADS = 64
 
 
-def _ingest_workers(file_count):
+def ingest_workers(file_count):
     """Write-pool worker count capped at min(max_threads, file_count), >= 1."""
     cap = int(os.environ.get("GCSFS_SUBSYSTEM_INGEST_THREADS", _MAX_INGEST_THREADS))
     return max(1, min(cap, file_count))
@@ -137,7 +137,7 @@ def ingest_dataset(prefix, *, fmt, seq_len, file_count, rows_per_file, row_group
         path = writer(fs, root, idx, seq_len, rows_per_file, row_group_size)
         return int(fs.info(path)["size"])
 
-    with ThreadPoolExecutor(max_workers=_ingest_workers(file_count)) as pool:
+    with ThreadPoolExecutor(max_workers=ingest_workers(file_count)) as pool:
         total_bytes = sum(pool.map(_write, range(file_count)))
 
     return {

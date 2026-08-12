@@ -11,8 +11,10 @@ from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
     OneFactorConfigurator,
 )
 
-_FMT = {"pretok_parquet": "ptpq", "text_parquet": "txpq", "pretok_jsonl": "ptjsonl"}
 _BUCKET = {"regional": "reg", "zonal": "zon", "hns": "hns"}
+
+# Traversal patterns published in the read_access_pattern column.
+ACCESS_PATTERNS = ("sequential", "shuffled")
 
 # Run-level environment keys; YAML variants must not override them.
 _RUN_LEVEL_KEYS = ("bucket_type",)
@@ -23,6 +25,8 @@ class ReadParameters:
     """One self-contained streaming read case (fresh per-case bucket ingested at runtime)."""
 
     LOADER_TAG = "base"
+    # Format to case ID token mapping for loader-supported formats.
+    FMT_TAGS = {}
 
     name: str
     bucket_name: str
@@ -32,10 +36,8 @@ class ReadParameters:
     framework: str
 
     fmt: str
-    seq_len: int
     file_count: int
     rows_per_file: int
-    row_group_size: int  # parquet only
 
     access: str
     num_workers: int
@@ -45,6 +47,24 @@ class ReadParameters:
     world_size: int = 1
     # YAML axis that produced this case ("baseline" or factor name).
     sweep_axis: str = "baseline"
+
+    @property
+    def dataset_format(self):
+        """Published corpus format representation."""
+        return self.fmt
+
+    @property
+    def read_access_pattern(self):
+        """Published dataset traversal pattern."""
+        return self.access
+
+    def ingest(self, prefix):
+        """Write corpus under prefix and return its manifest."""
+        raise NotImplementedError
+
+    def _id_corpus_tokens(self):
+        """Corpus-shape case ID tokens."""
+        return [f"fc{self.file_count}x{self.rows_per_file}"]
 
     def _id_extra_tokens(self):
         """Loader-specific id tokens inserted between split and bucket tokens."""
@@ -59,12 +79,11 @@ class ReadParameters:
         acc = "shuf" if self.access == "shuffled" else "seq"
         parts = [
             f"read-{self.LOADER_TAG}",
-            _FMT[self.fmt],
+            self.FMT_TAGS[self.fmt],
             acc,
             f"nw{self.num_workers}",
-            f"rg{self.row_group_size}",
-            f"fc{self.file_count}x{self.rows_per_file}",
         ]
+        parts += self._id_corpus_tokens()
         if self.split_by_node:
             div = "div" if self.file_count % self.world_size == 0 else "indiv"
             parts.append(f"splitws{self.world_size}{div}")
@@ -84,7 +103,6 @@ class OneFactorReadConfigurator(OneFactorConfigurator):
         return dict(
             rounds=common_config.get("rounds", 3),
             scenario=scenario["scenario"],
-            seq_len=common_config.get("seq_len", 2048),
             batch_size=common_config.get("batch_size", 64),
             bucket_type=os.environ.get("GCSFS_SUBSYSTEM_BUCKET_TYPE", "regional"),
         )

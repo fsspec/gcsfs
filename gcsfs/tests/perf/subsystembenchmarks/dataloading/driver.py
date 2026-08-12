@@ -23,14 +23,64 @@ class ReadResult:
 class ReadDriver(Protocol):
     formats: tuple
 
-    def run_read(self, prefix, params) -> ReadResult:
-        """Read per-case corpus for params.rounds epochs."""
+    def run_read(self, prefix, params, manifest) -> ReadResult:
+        """Read corpus at prefix for params.rounds epochs using ingestion manifest."""
         ...
 
 
 def timestamp():
     """Monotonic clock specified system-wide for cross-process timestamp comparisons."""
     return time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
+# Timeout in seconds for rank synchronization at the round barrier.
+ROUND_BARRIER_TIMEOUT_SECONDS = 3600
+
+
+def round_barrier(ctx, world_size):
+    """Return a Barrier for multi-rank synchronization, or None if single-rank."""
+    return ctx.Barrier(world_size) if world_size > 1 else None
+
+
+def await_round(barrier):
+    """Synchronize ranks at the barrier before starting a round."""
+    if barrier is not None:
+        barrier.wait(timeout=ROUND_BARRIER_TIMEOUT_SECONDS)
+
+
+def measure_epochs(
+    loader,
+    rounds,
+    rows_in_batch,
+    *,
+    barrier=None,
+    on_epoch=None,
+    target=None,
+):
+    """Return per-epoch timestamps, row counts, and first-epoch TTFB."""
+    per_epoch = []
+    ttfb = None
+    for epoch in range(rounds):
+        if on_epoch is not None:
+            on_epoch(epoch)
+        await_round(barrier)
+        begin = timestamp()
+        rows = 0
+        if target is not None and target <= 0:
+            # Skip reading if target budget is zero to avoid uncounted batches.
+            per_epoch.append((begin, timestamp(), 0))
+            continue
+        for batch in loader:
+            if epoch == 0 and ttfb is None:
+                ttfb = timestamp() - begin
+            batch_rows = rows_in_batch(batch)
+            if target is not None:
+                batch_rows = min(batch_rows, target - rows)
+            rows += batch_rows
+            if target is not None and rows >= target:
+                break
+        per_epoch.append((begin, timestamp(), rows))
+    return per_epoch, ttfb if ttfb is not None else float("inf")
 
 
 def reduce_split(results, rounds):
@@ -45,6 +95,31 @@ def reduce_split(results, rounds):
     first_batches = [res[0][0][0] + res[1] for res in results]
     ttfb = max(first_batches) - min(first_begins)
     return durations, rows_list, ttfb
+
+
+def spawn_rank_epochs(rank_entry, prefix, params, *rank_args):
+    """Spawn rank processes and reduce epoch metrics and dataset build time."""
+    import torch.multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    with ctx.Manager() as manager:
+        queue = manager.Queue()
+        mp.spawn(
+            rank_entry,
+            args=(
+                params.world_size,
+                prefix,
+                params,
+                round_barrier(ctx, params.world_size),
+                queue,
+                *rank_args,
+            ),
+            nprocs=params.world_size,
+            join=True,
+        )
+        results = [queue.get() for _ in range(params.world_size)]
+    durations, rows, ttfb = reduce_split(results, params.rounds)
+    return durations, rows, ttfb, max(result[2] for result in results)
 
 
 def assert_fsspec_gcsfs(prefix):

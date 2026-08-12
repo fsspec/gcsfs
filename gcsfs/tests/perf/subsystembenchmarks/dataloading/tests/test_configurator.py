@@ -11,6 +11,7 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.configurator import (
 @dataclass
 class _FakeParams(ReadParameters):
     LOADER_TAG = "fk"
+    FMT_TAGS = {"pretok_parquet": "ptpq"}
 
 
 class _FakeConfigurator(OneFactorReadConfigurator):
@@ -21,13 +22,11 @@ class _FakeConfigurator(OneFactorReadConfigurator):
 _YAML = """
 common:
   rounds: 3
-  seq_len: 2048
   batch_size: 64
   baseline:
     fmt: "pretok_parquet"
     file_count: 8
     rows_per_file: 4096
-    row_group_size: 1024
     access: "sequential"
     num_workers: 8
     prefetch_factor: 2
@@ -54,8 +53,8 @@ def test_baseline_and_variant_expand_with_stable_ids(tmp_path):
     )
     cases = _write(tmp_path, text).generate_cases()
     assert [c.name for c in cases] == [
-        "read-fk-ptpq-seq-nw8-rg1024-fc8x4096-reg",
-        "read-fk-ptpq-seq-nw1-rg1024-fc8x4096-reg",
+        "read-fk-ptpq-seq-nw8-fc8x4096-reg",
+        "read-fk-ptpq-seq-nw1-fc8x4096-reg",
     ]
     assert all(c.framework == "fake" for c in cases)
     assert [c.sweep_axis for c in cases] == ["baseline", "workers"]

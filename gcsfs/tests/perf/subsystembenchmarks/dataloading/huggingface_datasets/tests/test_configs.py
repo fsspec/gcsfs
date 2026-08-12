@@ -71,6 +71,15 @@ def test_macrobenchmark_baseline_present():
     assert baseline.max_buffer_input_shards == 10
 
 
+def test_shuffle_buffer_size_is_published_with_webdataset_semantics():
+    """Verify shuffle_buffer_size is 0 when access is sequential."""
+    shuffled = next(c for c in _cases() if c.sweep_axis == "baseline")
+    sequential = next(c for c in _cases() if c.access == "sequential")
+
+    assert shuffled.extra_columns()["shuffle_buffer_size"] == 10000
+    assert sequential.extra_columns()["shuffle_buffer_size"] == 0
+
+
 def test_bucket_type_uniform_from_run_env(monkeypatch):
     monkeypatch.delenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", raising=False)
     assert {c.bucket_type for c in _cases()} == {"regional"}
