@@ -29,7 +29,9 @@ def publish_common(benchmark, params, manifest, ttfb, window, build_seconds):
             "dataset_split_by_node_enabled": params.split_by_node,
             "world_size": params.world_size,
             # Publish None instead of inf so BigQuery CSV load treats it as null.
-            "time_to_first_batch_seconds": ttfb if ttfb is not None and math.isfinite(ttfb) else None,
+            "time_to_first_batch_seconds": (
+                ttfb if ttfb is not None and math.isfinite(ttfb) else None
+            ),
             "dataset_build_time": build_seconds,
         }
     )
