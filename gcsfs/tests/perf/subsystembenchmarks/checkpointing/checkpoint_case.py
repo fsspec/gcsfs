@@ -3,10 +3,13 @@ import time
 
 import fsspec
 
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointDriver
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
 
-def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
+def run_checkpoint_case(
+    benchmark, monitor, params, driver: CheckpointDriver, *, bucket_ctx=None
+):
     """Full per-case lifecycle for CheckpointDriver."""
     from gcsfs.tests.perf.subsystembenchmarks._common.benchmark_publish import (
         publish_case_metadata,
@@ -25,9 +28,16 @@ def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         prefix = f"gs://{bucket}/checkpoint/"
         assert_fsspec_gcsfs(prefix)
 
+        driver.setup(prefix, params)
+
         window_start = time.time()
         with monitor() as m:
-            result = driver.run_save(prefix, params)
+            if hasattr(driver, "run"):
+                result = driver.run(prefix, params)
+            else:
+                raise ValueError(
+                    f"Driver {driver!r} must implement run(prefix, params)"
+                )
         window_end = time.time()
 
         # Measure actual GCS files
@@ -66,12 +76,22 @@ def run_checkpoint_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
             benchmark.extra_info.update(result.extra_columns)
 
         durations = result.durations
-        # Calculate write throughput
-        benchmark.extra_info["checkpoint_write_throughput_mean_bytes_per_second"] = (
-            sum(physical_size_bytes / d for d in durations) / len(durations)
-            if physical_size_bytes > 0 and durations and all(durations)
+        size_for_throughput = physical_size_bytes
+        throughput = (
+            sum(size_for_throughput / d for d in durations) / len(durations)
+            if size_for_throughput > 0 and durations and all(durations)
             else 0.0
         )
+        if "read" in params.scenario:
+            benchmark.extra_info["checkpoint_read_throughput_mean_bytes_per_second"] = (
+                throughput
+            )
+        elif "write" in params.scenario:
+            benchmark.extra_info[
+                "checkpoint_write_throughput_mean_bytes_per_second"
+            ] = throughput
+        else:
+            raise ValueError(f"Unknown scenario {params.scenario}")
         publish_round_stats(benchmark, durations)
         publish_resource_metrics(benchmark, m)
         benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)

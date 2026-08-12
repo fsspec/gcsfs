@@ -60,12 +60,16 @@
       {"name": "round_duration_p90_seconds", "type": "FLOAT", "description": "90th-percentile measured round duration in seconds."},
       {"name": "round_duration_p95_seconds", "type": "FLOAT", "description": "95th-percentile measured round duration in seconds."},
       {"name": "round_duration_p99_seconds", "type": "FLOAT", "description": "99th-percentile measured round duration in seconds."},
-      {"name": "checkpoint_physical_size_bytes", "type": "INTEGER", "description": "Total physical size in bytes of the saved checkpoint files."},
+      {"name": "checkpoint_physical_size_bytes", "type": "INTEGER", "description": "Total physical size in bytes of the checkpoint files."},
       {"name": "checkpoint_strategy", "type": "STRING", "description": "Checkpointing strategy used (single, ddp, fsdp, etc.)."},
       {"name": "checkpoint_write_throughput_mean_bytes_per_second", "type": "FLOAT", "description": "Mean write throughput in bytes per second for the checkpoint save operation."},
+      {"name": "checkpoint_read_throughput_mean_bytes_per_second", "type": "FLOAT", "description": "Mean read throughput in bytes per second for the checkpoint load operation."},
       {"name": "model_id", "type": "STRING", "description": "Hugging Face model ID or path used for the benchmark."},
       {"name": "tensor_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy tensor-parallel degree (TP). N/A for non-model_parallel runs."},
-      {"name": "data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree (DP). N/A for non-model_parallel runs."}
+      {"name": "data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree (DP). N/A for non-model_parallel runs."},
+      {"name": "setup_world_size", "type": "INTEGER", "description": "Number of distributed ranks used to save the checkpoint initially. Defaults to world_size."},
+      {"name": "setup_tensor_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy tensor-parallel degree used to save the checkpoint initially. Defaults to tensor_parallel_size."},
+      {"name": "setup_data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree used to save the checkpoint initially. Defaults to data_parallel_size."}
     ]
   }
 }

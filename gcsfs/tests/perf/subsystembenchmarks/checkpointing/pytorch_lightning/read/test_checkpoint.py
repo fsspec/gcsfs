@@ -18,18 +18,18 @@ pytestmark = pytest.mark.skipif(
 CASES = [
     c
     for c in PyTorchLightningCheckpointConfigurator(configs.__file__).generate_cases()
-    if c.scenario == "checkpoint_write"
+    if c.scenario == "checkpoint_read"
 ]
 
 
 @pytest.mark.timeout(7200)
 @pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
-def test_checkpoint_save(benchmark, params, monitor):
+def test_checkpoint_load(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.checkpoint_case import (
         run_checkpoint_case,
     )
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.write.driver import (
-        PLCheckpointWriteDriver,
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.read.driver import (
+        PLCheckpointReadDriver,
     )
 
-    run_checkpoint_case(benchmark, monitor, params, PLCheckpointWriteDriver())
+    run_checkpoint_case(benchmark, monitor, params, PLCheckpointReadDriver())
