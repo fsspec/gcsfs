@@ -24,6 +24,8 @@ def _setup_environment(args):
     os.environ["GCSFS_SUBSYSTEM_LOCATION"] = args.location
     os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
     os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
+    if args.model_id:
+        os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
 
@@ -62,6 +64,11 @@ def _build_parser():
     )
     parser.add_argument(
         "--zone", help="placement zone; required when --bucket-type=zonal"
+    )
+    parser.add_argument(
+        "--model-id",
+        default="",
+        help="model id override (e.g. gs://path/to/model or hf-repo-id)",
     )
     parser.add_argument(
         "--amplification-wait",

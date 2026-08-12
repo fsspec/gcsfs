@@ -18,6 +18,7 @@ pytestmark = pytest.mark.skipif(
 CASES = PyTorchLightningCheckpointConfigurator(configs.__file__).generate_cases()
 
 
+@pytest.mark.timeout(7200)
 @pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
 def test_checkpoint_save(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.checkpoint_case import (

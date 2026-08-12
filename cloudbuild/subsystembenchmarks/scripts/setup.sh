@@ -18,6 +18,33 @@ fi
 pip install -e . >/dev/null
 pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null
 
+if [[ "${GROUP}" == checkpointing/* ]] && [[ "${MODEL_ID:-}" == gs://* ]]; then
+  echo "MODEL_ID is a GCS path: $MODEL_ID"
+  DIR_NAME=$(basename "${MODEL_ID%/}")
+  LOCAL_MODEL_PATH="/tmp/$DIR_NAME"
+  if [[ ! -d "$LOCAL_MODEL_PATH" ]]; then
+    echo "Installing standalone gcloud CLI..."
+    # Install in /tmp/gcloud-install
+    mkdir -p /tmp/gcloud-install
+    (
+      cd /tmp/gcloud-install
+      curl -sSO https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz
+      tar -xf google-cloud-cli-linux-x86_64.tar.gz
+    )
+    GCLOUD="/tmp/gcloud-install/google-cloud-sdk/bin/gcloud"
+
+    echo "Downloading model from GCS to $LOCAL_MODEL_PATH..."
+    # gcloud storage cp -r gs://bucket/dir /tmp/ will create /tmp/dir/
+    $GCLOUD storage cp -r "${MODEL_ID%/}" /tmp/
+    echo "Download complete."
+
+    # Clean up gcloud installation to free space
+    rm -rf /tmp/gcloud-install
+  else
+    echo "Model already exists at $LOCAL_MODEL_PATH, skipping download."
+  fi
+fi
+
 read -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"
 if ((${#REQUIREMENT_SPECS[@]})); then
   # Resolve any dependencies needed by the override, then reinstall only the
