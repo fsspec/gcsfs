@@ -121,6 +121,32 @@ def build_loader(dataset, params):
     return DataLoader(dataset, **kwargs)
 
 
+@contextlib.contextmanager
+def case_read_env(params):
+    """Publish this case's read settings to the opener, then put the env back.
+
+    The environment is the opener's only configuration channel, and a single-rank
+    case runs in the caller's process rather than a child -- so left in place these
+    would outlive the case and silently reconfigure whatever ran next. DataLoader
+    workers are spawned inside the block and keep their own copy.
+    """
+    settings = {
+        gcsfs_opener.READ_MODE_ENV: params.gcs_read_mode,
+        gcsfs_opener.READ_CONCURRENCY_ENV: str(params.gcs_read_concurrency),
+        gcsfs_opener.READ_BUFFER_ENV: str(params.read_buffer_bytes),
+    }
+    previous = {key: os.environ.get(key) for key in settings}
+    os.environ.update(settings)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _set_distributed_env(rank, world_size):
     """Sets RANK and WORLD_SIZE environment variables for WebDataset rank discovery."""
     os.environ["RANK"] = str(rank)
@@ -142,32 +168,29 @@ def run_rank_epochs(
             "resampled reads need the corpus sample_count to size each rank's "
             f"budget, got {sample_count!r}; run_read passes it from the manifest"
         )
-    os.environ[gcsfs_opener.READ_MODE_ENV] = params.gcs_read_mode
-    os.environ[gcsfs_opener.READ_CONCURRENCY_ENV] = str(params.gcs_read_concurrency)
-    os.environ[gcsfs_opener.READ_BUFFER_ENV] = str(params.read_buffer_bytes)
+    with case_read_env(params):
+        build_start = time.perf_counter()
+        dataset = build_dataset(
+            prefix,
+            params,
+            split_by_node=params.split_by_node,
+            cache_dir=rank_cache_dir(cache_root, rank),
+        )
+        loader = build_loader(dataset, params)
+        build_seconds = time.perf_counter() - build_start
 
-    build_start = time.perf_counter()
-    dataset = build_dataset(
-        prefix,
-        params,
-        split_by_node=params.split_by_node,
-        cache_dir=rank_cache_dir(cache_root, rank),
-    )
-    loader = build_loader(dataset, params)
-    build_seconds = time.perf_counter() - build_start
+        target = None
+        if params.resampled:
+            target = rank_targets(sample_count, world_size)[rank]
 
-    target = None
-    if params.resampled:
-        target = rank_targets(sample_count, world_size)[rank]
-
-    # Barrier synchronizes rank start times across rounds.
-    per_epoch, ttfb = measure_epochs(
-        loader,
-        params.rounds,
-        len,
-        barrier=barrier,
-        target=target,
-    )
+        # Barrier synchronizes rank start times across rounds.
+        per_epoch, ttfb = measure_epochs(
+            loader,
+            params.rounds,
+            len,
+            barrier=barrier,
+            target=target,
+        )
     return per_epoch, ttfb, build_seconds
 
 

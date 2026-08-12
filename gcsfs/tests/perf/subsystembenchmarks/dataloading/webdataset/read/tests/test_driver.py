@@ -4,6 +4,7 @@ import pytest
 
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset import (
     configs,
+    gcsfs_opener,
     imagegen,
 )
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset.read import driver
@@ -166,6 +167,84 @@ def test_case_cache_root_is_absent_when_caching_is_disabled():
     with driver.case_cache_root(_case()) as root:  # Baseline without cache
         assert root is None
     assert driver.rank_cache_dir(None, 0) is None
+
+
+def _read_env_case():
+    """Tiny single-rank case reading a local corpus in the caller's process."""
+    params = _case()
+    params.file_count = 2
+    params.rows_per_file = 2
+    params.pixel_budget = _TINY_PIXEL_BUDGET
+    params.decode = False
+    params.cache_dir_enabled = False
+    params.split_by_node = False
+    params.world_size = 1
+    params.num_workers = 0
+    params.rounds = 1
+    params.gcs_read_mode = "whole_object"
+    params.gcs_read_concurrency = 16
+    params.read_buffer_bytes = 0
+    return params
+
+
+def test_read_settings_reach_the_opener_and_leave_the_environment_as_they_found_it(
+    tmp_path, monkeypatch
+):
+    """A single-rank case runs in-process, so its settings must not outlive it.
+
+    They are still the opener's only configuration channel while the case runs,
+    so this pins both halves: visible during, gone after.
+    """
+    monkeypatch.setenv(gcsfs_opener.READ_MODE_ENV, "pre-existing")
+    monkeypatch.delenv(gcsfs_opener.READ_CONCURRENCY_ENV, raising=False)
+    monkeypatch.delenv(gcsfs_opener.READ_BUFFER_ENV, raising=False)
+
+    prefix = str(tmp_path) + "/data/"
+    params = _read_env_case()
+    imagegen.ingest_tar_shards(
+        prefix,
+        fmt=params.fmt,
+        file_count=params.file_count,
+        rows_per_file=params.rows_per_file,
+        pixel_budget=params.pixel_budget,
+        image_encoding=params.image_encoding,
+        jpeg_quality=params.jpeg_quality,
+        sample_shape=params.sample_shape,
+    )
+
+    seen = []
+    collect_sample = driver.collect_sample
+
+    def _record_settings(sample):
+        seen.append(
+            (
+                gcsfs_opener.current_read_mode(),
+                gcsfs_opener.current_read_concurrency(),
+                gcsfs_opener.current_read_buffer_bytes(),
+            )
+        )
+        return collect_sample(sample)
+
+    monkeypatch.setattr(driver, "collect_sample", _record_settings)
+    driver.run_rank_epochs(0, 1, prefix, params)
+
+    assert seen and set(seen) == {("whole_object", 16, 0)}
+    assert os.environ[gcsfs_opener.READ_MODE_ENV] == "pre-existing"
+    assert gcsfs_opener.READ_CONCURRENCY_ENV not in os.environ
+    assert gcsfs_opener.READ_BUFFER_ENV not in os.environ
+
+
+def test_read_settings_are_restored_even_when_the_case_raises(monkeypatch):
+    monkeypatch.delenv(gcsfs_opener.READ_MODE_ENV, raising=False)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(driver, "measure_epochs", _boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        driver.run_rank_epochs(0, 1, "gs://unused/data/", _read_env_case())
+
+    assert gcsfs_opener.READ_MODE_ENV not in os.environ
 
 
 def test_rank_cache_dirs_are_isolated_inside_one_case_root():
