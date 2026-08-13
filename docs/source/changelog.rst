@@ -16,10 +16,10 @@ GCSFS prefetcher adapts to workload read IO patterns. It tracks the rolling aver
 
 **Why this matters for AI/ML workloads**
 
-* **Model loading and checkpoint restore are typically large sequential reads - and prefetcher shines there. . In our benchmarking, a single-stream sequential throughput improved from 23.69 MB/s to 658.71 MB/s for 1 MB I/O, and from 156 MB/s to 736 MB/s for 16 MB I/O.
-* Training data pipelines stay fed. Parquet and sharded dataset reads issue small-to-medium sequential ranges that previously suffered from low throughput, but now achieve significantly more; at 16 MB I/O throughput rises from 150 MB/s to 730 MB/s. Reducing the wait time for data loading improves accelerator goodput(amount of time accelerator is utilised for training than waiting).
-* Multi-worker dataloader scaling. The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
-* Accelerate the throughput even further with Rapid Buckets With Rapid Buckets single node throughput reaches  21 GiB/s with  16-process sequentially reading at 16 MiB I/O compared to standard buckets with 48processes.
+* **Model loading and checkpoint restore are typically large sequential reads - and prefetcher shines there.** In our benchmarking, a single-stream sequential throughput improved from 23.69 MB/s to 658.71 MB/s for 1 MB I/O, and from 156 MB/s to 736 MB/s for 16 MB I/O.
+* **Training data pipelines stay fed.** Parquet and sharded dataset reads issue small-to-medium sequential ranges that previously suffered from low throughput, but now achieve significantly more; at 16 MB I/O throughput rises from 150 MB/s to 730 MB/s. Reducing the wait time for data loading improves accelerator goodput(amount of time accelerator is utilised for training than waiting).
+* **Multi-worker dataloader scaling.** The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
+* **Accelerate the throughput even further with Rapid Buckets.** With Rapid Buckets single node throughput reaches 21 GiB/s with  16-process sequentially reading at 16 MiB I/O compared to standard buckets with 48processes.
 
 **Adaptive prefetcher is enabled by default** when cache_type is not explicitly set and concurrency value is set at 4(DEFAULT_GCSFS_CONCURRENCY=4) for both Standard and Rapid buckets. You can disable adaptive prefetcher by setting an explicit cache_type, or by setting  USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false', or by passing use_experimental_adaptive_prefetching=False to open() call. 
 
