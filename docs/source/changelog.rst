@@ -9,22 +9,23 @@ releasing in step with fsspec.
 
 **Adaptive Concurrent Prefetching is now the default read path**
 
-GCSFS now predicts the next range an application will read, fetches it in the background across several concurrent HTTP requests, and has the bytes in memory before read() is called. Network round-trips overlap with application compute instead of blocking it. Native read concurrency ships alongside it, so a single reader is no longer capped by the bandwidth of one HTTP connection.
+**Enhanced read path via adaptive concurrent prefetching is now the default  in GCSFS.** 
+Starting with this version, GCSFS predicts the next byte range an application will read, fetches it in the background across several concurrent HTTP requests, and keeps the bytes in memory before next read() is called. Network round-trips overlap with application compute instead of blocking calls where compute has to wait for data to be fetched. We are also enabling read concurrency, so a single reader is no longer limited by the bandwidth of a single HTTP connection.
 
-**The engine sizes itself to the workload:** it tracks a rolling average of recent read sizes and scales the prefetch window linearly with the detected sequential streak, rather than using a fixed block size or exponential doubling. When the pattern turns random, it drains the buffer to zero - random-access workloads pay no bandwidth or memory penalty for the feature being on.
+GCSFS prefetcher adapts to workload read IO patterns. It tracks the rolling average of recent read sizes and scales the prefetch window linearly with the detected sequential streak, rather than using a fixed block size or exponential doubling. This is inline to what modern Linux kernels will do to balance prefetch and memory footprint. When the pattern turns random read i.e. we are not able to leverage the prefetched buffer to answer the next read() call, it drains the buffer to zero, so that random-access workloads pay no bandwidth or memory penalty.
 
 **Why this matters for AI/ML workloads**
 
-* **Model loading and checkpoint restore are large sequential reads** exactly the pattern the engine targets. Single-stream sequential throughput improves from 23.69 MB/s to 658.71 MB/s at 1 MB I/O, and from 156 MB/s to 736 MB/s at 16 MB I/O.
-* Training data pipelines stay fed: Parquet and sharded dataset reads issue small-to-medium sequential ranges that were previously latency-bound; at 64 KB I/O throughput rises from 1.66 MB/s to 208 MB/s. Less time blocked on GCS means higher accelerator utilisation.
-* Multi-worker DataLoader scaling: The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
-* Rapid (zonal) buckets are covered too, reaching upto 21 GiB/s on 16-process sequential reads at 16 MiB I/O.
+* **Model loading and checkpoint restore are typically large sequential reads - and prefetcher shines there. . In our benchmarking, a single-stream sequential throughput improved from 23.69 MB/s to 658.71 MB/s for 1 MB I/O, and from 156 MB/s to 736 MB/s for 16 MB I/O.
+* Training data pipelines stay fed. Parquet and sharded dataset reads issue small-to-medium sequential ranges that previously suffered from low throughput, but now achieve significantly more; at 16 MB I/O throughput rises from 150 MB/s to 730 MB/s. Reducing the wait time for data loading improves accelerator goodput(amount of time accelerator is utilised for training than waiting).
+* Multi-worker dataloader scaling. The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
+* Accelerate the throughput even further with Rapid Buckets With Rapid Buckets single node throughput reaches  21 GiB/s with  16-process sequentially reading at 16 MiB I/O compared to standard buckets with 48processes.
 
-**Enabled by default when cache_type is not explicitly set (DEFAULT_GCSFS_CONCURRENCY=4), on both Standard and Rapid buckets.** Disable by setting an explicit cache_type, or exporting `USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'`, or passing `use_experimental_adaptive_prefetching=False` to open().
+**Adaptive prefetcher is enabled by default** when cache_type is not explicitly set and concurrency value is set at 4(DEFAULT_GCSFS_CONCURRENCY=4) for both Standard and Rapid buckets. You can disable adaptive prefetcher by setting an explicit cache_type, or by setting  USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false', or by passing use_experimental_adaptive_prefetching=False to open() call. 
 
-**Memory note:** prefetching trades memory for throughput. Peak RSS rises from ~150 MB to 540–750 MB on single-stream reads, and materially more under high process counts. SPlease size the container limits accordingly to use prefetcher without any OOMs.
+**(Warning) Impact on memory:** Prefetching trades memory for throughput. Peak memory rises from ~170 MB to 600 MB on single-stream reads for 16 MB IO size and varies with requested IO sizes, and would be materially more under high process counts. Please ensure that   application memory  limits accordingly to use prefetcher without any Out of Memory(OOM) issues. To put hard limit, you can also use [user_max_prefetch_size](https://github.com/fsspec/gcsfs/blob/main/gcsfs/prefetcher.py#L154)
 
-More details on architecture, tuning, full benchmark tables, along with known limitations can be found here: https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
+For  details on architecture, tuning, full benchmark tables, along with known limitations please refer to : https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
 
 (#795, #805, #818, #877)
 
