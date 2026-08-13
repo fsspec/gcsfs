@@ -4,8 +4,8 @@ import time
 
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
-    reduce_split,
-    timestamp,
+    measure_epochs,
+    spawn_rank_epochs,
 )
 
 _EXT = {"pretok_parquet": "parquet", "text_parquet": "parquet", "pretok_jsonl": "jsonl"}
@@ -94,25 +94,16 @@ def run_epochs(
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
     )
-    durations, rows_list = [], []
-    ttfb = None
-    for epoch in range(rounds):
-        # Reseed shuffle buffer per epoch so persistent workers iterate different orders.
-        ds.set_epoch(epoch)
-        rows = 0
-        begin = time.perf_counter()
-        for batch in loader:
-            if ttfb is None:
-                ttfb = time.perf_counter() - begin
-            rows += _rows_in_batch(batch)
-        durations.append(time.perf_counter() - begin)
-        rows_list.append(rows)
-    return (
-        durations,
-        rows_list,
-        (ttfb if ttfb is not None else durations[0]),
-        build_seconds,
+    # Reseed shuffle buffer per epoch so workers iterate different orders.
+    per_epoch, ttfb = measure_epochs(
+        loader,
+        rounds,
+        _rows_in_batch,
+        on_epoch=ds.set_epoch,
     )
+    durations = [end - begin for begin, end, _ in per_epoch]
+    rows = [count for _, _, count in per_epoch]
+    return durations, rows, ttfb, build_seconds
 
 
 def _split(ds, rank, world_size):
@@ -121,29 +112,7 @@ def _split(ds, rank, world_size):
     return split_dataset_by_node(ds, rank=rank, world_size=world_size)
 
 
-def rank_rows(
-    prefix,
-    fmt,
-    rank,
-    world_size,
-    seed=0,
-    *,
-    access="sequential",
-    max_buffer_input_shards=0,
-):
-    """Rows one rank yields after split_dataset_by_node."""
-    ds = _build_dataset(
-        prefix,
-        fmt,
-        access,
-        seed,
-        max_buffer_input_shards=max_buffer_input_shards,
-    )
-    ds = _split(ds, rank, world_size).with_format("torch")
-    return sum(1 for _ in ds)
-
-
-def run_rank_epochs(rank, world_size, prefix, params):
+def run_rank_epochs(rank, world_size, prefix, params, barrier=None):
     """Run persistent split DataLoader for a single rank across `rounds` epochs.
 
     Returns (per_epoch_timestamps, ttfb, build_seconds).
@@ -167,44 +136,24 @@ def run_rank_epochs(rank, world_size, prefix, params):
         num_workers=params.num_workers,
         prefetch_factor=params.prefetch_factor,
     )
-    per_epoch, ttfb = [], None
-    for epoch in range(params.rounds):
-        ds.set_epoch(epoch)
-        rows = 0
-        begin = timestamp()
-        for batch in loader:
-            if ttfb is None:
-                ttfb = timestamp() - begin
-            rows += _rows_in_batch(batch)
-        end = timestamp()
-        per_epoch.append((begin, end, rows))
-    default_ttfb = per_epoch[0][1] - per_epoch[0][0]
-    return per_epoch, (ttfb if ttfb is not None else default_ttfb), build_seconds
+    # Barrier absorbs dataset construction skew before round 1.
+    per_epoch, ttfb = measure_epochs(
+        loader,
+        params.rounds,
+        _rows_in_batch,
+        barrier=barrier,
+        on_epoch=ds.set_epoch,
+    )
+    return per_epoch, ttfb, build_seconds
 
 
-def _rank_entry(rank, world_size, prefix, params, q):
-    per_epoch, ttfb, build_seconds = run_rank_epochs(rank, world_size, prefix, params)
-    q.put((per_epoch, ttfb, build_seconds))
+def _rank_entry(rank, world_size, prefix, params, barrier, queue):
+    queue.put(run_rank_epochs(rank, world_size, prefix, params, barrier))
 
 
 def run_split_epochs(prefix, params):
     """Spawn `world_size` ranks running `run_rank_epochs` and reduce results across ranks."""
-    import torch.multiprocessing as mp
-
-    ctx = mp.get_context("spawn")
-    with ctx.Manager() as manager:
-        q = manager.Queue()
-        mp.spawn(
-            _rank_entry,
-            args=(params.world_size, prefix, params, q),
-            nprocs=params.world_size,
-            join=True,
-        )
-        results = [q.get() for _ in range(params.world_size)]
-    durations, rows_list, ttfb = reduce_split(results, params.rounds)
-    # Build time is bounded by the slowest rank.
-    build_seconds = max(r[2] for r in results)
-    return durations, rows_list, ttfb, build_seconds
+    return spawn_rank_epochs(_rank_entry, prefix, params)
 
 
 class HFReadDriver:
@@ -212,7 +161,8 @@ class HFReadDriver:
 
     formats = ("pretok_parquet", "text_parquet", "pretok_jsonl")
 
-    def run_read(self, prefix, params):
+    def run_read(self, prefix, params, manifest):
+        del manifest  # HuggingFace reads full shards rather than a sample budget.
         if params.split_by_node:
             durations, rows_list, ttfb, build_seconds = run_split_epochs(prefix, params)
         else:

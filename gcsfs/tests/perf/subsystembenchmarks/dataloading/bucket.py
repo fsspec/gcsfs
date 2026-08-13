@@ -16,6 +16,13 @@ _MAX_BUCKET_NAME = 63
 _SUFFIX_LEN = 8
 
 
+def bucket_name_of(prefix):
+    """Extract GCS bucket name from a gs:// prefix, or "" if non-GCS."""
+    if not prefix.startswith("gs://"):
+        return ""
+    return prefix[len("gs://") :].split("/", 1)[0]
+
+
 @dataclass(frozen=True)
 class BucketSpec:
     """How to create this run's per-case buckets (exported by run.py from its CLI args)."""
@@ -106,7 +113,7 @@ def _delete(fs, name):
 
 @contextlib.contextmanager
 def case_bucket(spec, case_id, *, fs=None):
-    """Create this case's bucket, yield its name, delete it (and its objects) on the way out."""
+    """Create this case's bucket, yield its corpus prefix, delete it on the way out."""
     if fs is None:
         import gcsfs
 
@@ -114,6 +121,16 @@ def case_bucket(spec, case_id, *, fs=None):
     name = case_bucket_name(spec.prefix, case_id)
     fs.mkdir(name, location=spec.location, **bucket_kwargs(spec))
     try:
-        yield name
+        yield f"gs://{name}/data/"
     finally:
         _delete(fs, name)
+
+
+def local_case_bucket(root):
+    """Local-directory stand-in for case_bucket for runs without GCS."""
+
+    @contextlib.contextmanager
+    def ctx(case_id):
+        yield os.path.join(str(root).rstrip("/"), case_id) + "/data/"
+
+    return ctx
