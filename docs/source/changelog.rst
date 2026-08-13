@@ -4,6 +4,41 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.8.0
+--------
+
+**Adaptive Concurrent Prefetching is now the default read path**
+
+**Enhanced read path via adaptive concurrent prefetching is now the default  in GCSFS.**
+Starting with this version, GCSFS predicts the next byte range an application will read, fetches it in the background across several concurrent HTTP requests, and keeps the bytes in memory before next read() is called. Network round-trips overlap with application compute instead of blocking calls where compute has to wait for data to be fetched. We are also enabling read concurrency, so a single reader is no longer limited by the bandwidth of a single HTTP connection.
+
+GCSFS prefetcher adapts to workload read IO patterns. It tracks the rolling average of recent read sizes and scales the prefetch window linearly with the detected sequential streak, rather than using a fixed block size or exponential doubling. This is inline to what modern Linux kernels will do to balance prefetch and memory footprint. When the pattern turns random read i.e. we are not able to leverage the prefetched buffer to answer the next read() call, it drains the buffer to zero, so that random-access workloads pay no bandwidth or memory penalty.
+
+**Why this matters for AI/ML workloads**
+
+* **Model loading and checkpoint restore are typically large sequential reads - and prefetcher shines there.** In our benchmarking, a single-stream sequential throughput improved from 23.69 MB/s to 658.71 MB/s for 1 MB I/O, and from 156 MB/s to 736 MB/s for 16 MB I/O.
+* **Training data pipelines stay fed.** Parquet and sharded dataset reads issue small-to-medium sequential ranges that previously suffered from low throughput, but now achieve significantly more; at 16 MB I/O throughput rises from 150 MB/s to 730 MB/s. Reducing the wait time for data loading improves accelerator goodput(amount of time accelerator is utilised for training than waiting).
+* **Multi-worker dataloader scaling.** The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
+* **Accelerate the throughput even further with Rapid Buckets.** With Rapid Buckets single node throughput reaches 21 GiB/s with  16-process sequentially reading at 16 MiB I/O compared to standard buckets with 48processes.
+
+**Adaptive prefetcher is enabled by default** when cache_type is not explicitly set and concurrency value is set at 4(DEFAULT_GCSFS_CONCURRENCY=4) for both Standard and Rapid buckets. You can disable adaptive prefetcher by setting an explicit cache_type, or by setting  USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false', or by passing use_experimental_adaptive_prefetching=False to open() call.
+
+**(Warning) Impact on memory:** Prefetching trades memory for throughput. Peak memory rises from ~170 MB to 600 MB on single-stream reads for 16 MB IO size and varies with requested IO sizes, and would be materially more under high process counts. Please ensure that   application memory  limits accordingly to use prefetcher without any Out of Memory(OOM) issues. To put hard limit, you can also use [user_max_prefetch_size](https://github.com/fsspec/gcsfs/blob/main/gcsfs/prefetcher.py#L154)
+
+For  details on architecture, tuning, full benchmark tables, along with known limitations please refer to : https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
+
+(#795, #805, #818, #877)
+
+**Bug Fixes & Improvements**
+
+* Zero-cost local backward seeks in PrefetchConsumer - Parquet footer and ZIP directory reads are served from the existing buffer instead of re-issuing a network request. (#930)
+* Concurrent downloads cap task count against a minimum chunk size, removing per-task overhead on small ranges. (#926)
+* Generation consistency across parallel fetches, guaranteeing every chunk comes from the same object version. (#921)
+* Fixed silent truncation on short reads in zonal bucket downloads. (#920)
+* Zero-copy read and write paths via memoryview, cutting CPU and transient memory in the hot path. (#840, #907, #928)
+* Graceful fallback where ctypes.pythonapi is unavailable. (#938)
+
+
 2026.7.0
 --------
 
