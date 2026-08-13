@@ -150,12 +150,12 @@ def test_jsonl_shard_is_streamed_not_buffered_whole():
 def test_ingest_workers_scales_and_caps(monkeypatch):
     """Verify ingest worker count calculation and cap behavior."""
     monkeypatch.delenv("GCSFS_SUBSYSTEM_INGEST_THREADS", raising=False)
-    assert datagen._ingest_workers(4) == 4
-    assert datagen._ingest_workers(10_000) == datagen._MAX_INGEST_THREADS
+    assert datagen.ingest_workers(4) == 4
+    assert datagen.ingest_workers(10_000) == datagen._MAX_INGEST_THREADS
     assert datagen._MAX_INGEST_THREADS >= 64
     monkeypatch.setenv("GCSFS_SUBSYSTEM_INGEST_THREADS", "128")
-    assert datagen._ingest_workers(10_000) == 128
-    assert datagen._ingest_workers(0) == 1
+    assert datagen.ingest_workers(10_000) == 128
+    assert datagen.ingest_workers(0) == 1
 
 
 def test_shards_are_written_concurrently():

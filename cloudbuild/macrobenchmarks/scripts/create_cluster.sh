@@ -35,7 +35,7 @@ gcloud container clusters create "$CLUSTER_NAME" \
   --scopes="https://www.googleapis.com/auth/cloud-platform" \
   --private-ipv6-google-access-type=outbound-only \
   --network="${NETWORK_NAME}" --subnetwork="${SUBNET_NAME}" \
-  --no-enable-autoupgrade --quiet
+  --enable-autoupgrade --quiet
 NODE_POOL_ARGS=(
   --cluster="$CLUSTER_NAME"
   --project="${PROJECT_ID}"
@@ -47,7 +47,7 @@ NODE_POOL_ARGS=(
   --enable-gvnic
   --service-account="${_GKE_SERVICE_ACCOUNT}"
   --scopes="https://www.googleapis.com/auth/cloud-platform"
-  --no-enable-autoupgrade
+  --enable-autoupgrade
   --quiet
 )
 if [ "${_ENABLE_TIER1_NETWORKING:-true}" = "true" ]; then
@@ -57,3 +57,27 @@ gcloud container node-pools create "${_MACHINE_TYPE}" "${NODE_POOL_ARGS[@]}"
 gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${_ZONE}" --project="${PROJECT_ID}"
 kubectl apply --server-side -f "https://github.com/kubernetes-sigs/jobset/releases/download/${_JOBSET_VERSION}/manifests.yaml"
 kubectl rollout status deployment/jobset-controller-manager -n jobset-system --timeout=300s
+
+echo "Waiting for JobSet mutating webhook to accept connections..."
+for i in $(seq 1 30); do
+  if WEBHOOK_PROBE_OUTPUT=$(kubectl create --dry-run=server -f - 2>&1 <<EOF
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: webhook-probe
+  namespace: default
+spec:
+  replicatedJobs: []
+EOF
+  ); then
+    echo "JobSet webhook is ready and accepting requests."
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "ERROR: Timed out waiting for JobSet webhook readiness" >&2
+    printf 'Last probe error:\n%s\n' "$WEBHOOK_PROBE_OUTPUT" >&2
+    record_failure create-cluster
+    exit 1
+  fi
+  sleep 2
+done

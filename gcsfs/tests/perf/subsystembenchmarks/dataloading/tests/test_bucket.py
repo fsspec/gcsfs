@@ -89,9 +89,19 @@ def test_case_bucket_name_truncates_to_the_gcs_limit():
     assert not name.startswith("-") and "--" not in name.strip("-")
 
 
+def test_bucket_name_of_reads_the_bucket_back_out_of_a_prefix():
+    assert bucket.bucket_name_of("gs://pfx-read-hf-x-abcd1234/data/") == (
+        "pfx-read-hf-x-abcd1234"
+    )
+    # Local runs have no bucket name.
+    assert bucket.bucket_name_of("/tmp/case/data/") == ""
+
+
 def test_case_bucket_creates_then_deletes():
     fs = _FakeFS()
-    with bucket.case_bucket(_spec(bucket_type="hns"), "read-hf-x", fs=fs) as name:
+    with bucket.case_bucket(_spec(bucket_type="hns"), "read-hf-x", fs=fs) as prefix:
+        name = bucket.bucket_name_of(prefix)
+        assert prefix == f"gs://{name}/data/"
         assert fs.made == [
             (
                 name,
@@ -116,6 +126,6 @@ def test_case_bucket_deletes_even_when_the_case_raises():
 
 def test_empty_bucket_still_gets_dropped():
     fs = _FakeFS(fail_rm=True)
-    with bucket.case_bucket(_spec(), "read-hf-x", fs=fs) as name:
+    with bucket.case_bucket(_spec(), "read-hf-x", fs=fs) as prefix:
         pass
-    assert fs.rmdirs == [name]
+    assert fs.rmdirs == [bucket.bucket_name_of(prefix)]

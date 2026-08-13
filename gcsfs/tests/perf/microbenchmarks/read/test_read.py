@@ -21,7 +21,7 @@ def _read_op_seq(gcs, file_paths, chunk_size, runtime, block_size, mrd_pool_size
     total_bytes_read = 0
     start_time = time.perf_counter()
     files_it = itertools.cycle(file_paths)
-    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    open_kwargs = {"block_size": block_size}
     if mrd_pool_size is not None:
         open_kwargs["pool_size"] = mrd_pool_size
 
@@ -43,7 +43,7 @@ def _read_op_rand(
     total_bytes_read = 0
     start_time = time.perf_counter()
     files_it = itertools.cycle(file_paths)
-    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    open_kwargs = {"block_size": block_size}
     if mrd_pool_size is not None:
         open_kwargs["pool_size"] = mrd_pool_size
 
@@ -75,7 +75,7 @@ def _read_op_mixed(
 
     while time.perf_counter() - start_time < runtime:
         path = next(files_it)
-        with gcs.open(path, "rb", cache_type="none") as f:
+        with gcs.open(path, "rb") as f:
             while time.perf_counter() - start_time < runtime:
                 chunk_size = random.randint(min_chunk_size, max_chunk_size)
                 if random.random() >= seq_probability:
@@ -98,7 +98,7 @@ def _read_op_reopen(
     total_bytes_read = 0
     start_time = time.perf_counter()
     files_it = itertools.cycle(file_paths)
-    open_kwargs = {"block_size": block_size, "cache_type": "none"}
+    open_kwargs = {"block_size": block_size}
     if mrd_pool_size is not None:
         open_kwargs["pool_size"] = mrd_pool_size
 

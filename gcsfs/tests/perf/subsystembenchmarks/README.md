@@ -9,10 +9,10 @@ end-to-end [macrobenchmark](../macrobenchmarks/README.md). They preserve the
 framework behavior around `gcsfs` while separating one subsystem from the rest
 of a training workload.
 
-The only currently runnable group is
-`dataloading/huggingface_datasets`. It measures full-corpus streaming reads of a
-synthetic dataset through Hugging Face Datasets, `fsspec`, and `gcsfs`, with a
-PyTorch `DataLoader` consuming the stream.
+The currently runnable groups are:
+
+- `dataloading/huggingface_datasets`: Measures full-corpus streaming reads of a synthetic dataset through Hugging Face Datasets, `fsspec`, and `gcsfs`, with a PyTorch `DataLoader` consuming the stream.
+- `checkpointing/pytorch_lightning`: Measures checkpoint write performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
 
 > **This README describes the workload: what it runs, what is timed, and how to
 > debug it directly.** The normal way to provision the benchmark VM, run the
@@ -160,6 +160,8 @@ Authenticate with Application Default Credentials that can create and delete
 the case buckets. Monitoring read permission is also needed for amplification
 enrichment. Then run:
 
+For dataloading:
+
 ```bash
 python -m gcsfs.tests.perf.subsystembenchmarks.run \
   --group=dataloading/huggingface_datasets \
@@ -167,6 +169,18 @@ python -m gcsfs.tests.perf.subsystembenchmarks.run \
   --project=<PROJECT_ID> \
   --location=us-central1 \
   --bucket-type=regional
+```
+
+For checkpointing:
+
+```bash
+python -m gcsfs.tests.perf.subsystembenchmarks.run \
+  --group=checkpointing/pytorch_lightning \
+  --bucket-prefix=<UNIQUE_LOWERCASE_PREFIX> \
+  --project=<PROJECT_ID> \
+  --location=us-central1 \
+  --bucket-type=zonal \
+  --zone=us-central1-b
 ```
 
 Useful optional arguments:
@@ -208,5 +222,16 @@ subsystembenchmarks/
 │       ├── parameters.py
 │       ├── requirements.txt
 │       └── read/                  # Hugging Face streaming read driver and case.
+├── checkpointing/
+│   ├── checkpoint_case.py         # Shared timed checkpoint write case lifecycle.
+│   ├── configurator.py            # Checkpointing config loader.
+│   └── pytorch_lightning/
+│       ├── configs.yaml           # Current baseline and strategy variants.
+│       ├── configs.py
+│       ├── parameters.py
+│       ├── requirements.txt
+│       └── write/
+│           ├── driver.py          # PyTorch Lightning write driver (processes launcher).
+│           └── test_checkpoint.py # PyTorch Lightning checkpoint write benchmark case.
 └── tests/                         # Package-level infrastructure tests.
 ```

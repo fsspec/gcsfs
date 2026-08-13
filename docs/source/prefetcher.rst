@@ -2,8 +2,7 @@
 GCSFS Adaptive Concurrent Prefetching: Architecture & Usage Guide
 =================================================================
 
-Prefetcher is not enabled by default. To enable, you need to pass the environment variable
-`USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='true'` and `DEFAULT_GCSFS_CONCURRENCY`=4. As currently written, this implementation is
+Prefetcher is enabled by default when cache_type is not set explicitly with `DEFAULT_GCSFS_CONCURRENCY=4`. To disable, you can pass the environment variable `USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'` or pass `use_experimental_adaptive_prefetching=False` when opening a file. As currently written, this implementation is
 separate from the fsspec-style caching layer, but the intent is to eventually make this available to all
 asynchronous filesystems using the standard `cache_type=` argument. How it interacts with the
 existing cache types ("readahead", "first", etc.) remains to be decided, and in the meantime, use at your own risk.
@@ -71,17 +70,30 @@ Interaction with GCSFile
 
 The prefetcher is integrated into the ``GCSFile`` and replaces the standard sequential fetching mechanism when enabled.
 
-Enabling the Feature
---------------------
+Feature Configuration & Disabling
+---------------------------------
 
-To use this architecture, set the following environment variables:
+Adaptive prefetching is enabled by default when ``cache_type`` is not explicitly set by the user, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
+
+Prefetching can be disabled in three ways:
+
+1. Explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or ``cache_type="none"`` or any other cache_type):
+
+.. code-block:: python
+
+    gcs.open("bucket/file.txt", "rb", cache_type="readahead")
+
+2. Set the environment variable:
 
 .. code-block:: bash
 
-    export DEFAULT_GCSFS_CONCURRENCY=4
-    export USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='true'
+    export USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'
 
-We recommend setting ``cache_type="none"`` for optimal results. The engine avoids prefetching for random workloads, and other cache types create unnecessary memory copies that degrade performance.
+3. Pass ``use_experimental_adaptive_prefetching=False`` directly when opening a file:
+
+.. code-block:: python
+
+    gcs.open("bucket/file.txt", "rb", use_experimental_adaptive_prefetching=False)
 
 Under the Hood Lifecycle
 ------------------------

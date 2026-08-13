@@ -24,6 +24,8 @@ def _setup_environment(args):
     os.environ["GCSFS_SUBSYSTEM_LOCATION"] = args.location
     os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
     os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
+    if args.model_id:
+        os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
 
@@ -37,6 +39,11 @@ def _build_parser():
         "--sweep-axes",
         default="",
         help="whitespace-separated config sweep axes; baseline is always included",
+    )
+    parser.add_argument(
+        "--filter",
+        default="",
+        help="pytest -k filter expression to limit case execution",
     )
     parser.add_argument(
         "--bucket-prefix",
@@ -57,6 +64,11 @@ def _build_parser():
     )
     parser.add_argument(
         "--zone", help="placement zone; required when --bucket-type=zonal"
+    )
+    parser.add_argument(
+        "--model-id",
+        default="",
+        help="model id override (e.g. gs://path/to/model or hf-repo-id)",
     )
     parser.add_argument(
         "--amplification-wait",
@@ -179,7 +191,7 @@ def main(argv=None):
     results_dir = os.path.join(os.path.dirname(__file__), "__run__", timestamp)
     os.makedirs(results_dir, exist_ok=True)
 
-    rc, csv_path = cli.run_suite(suite_dir, results_dir)
+    rc, csv_path = cli.run_suite(suite_dir, results_dir, filter_expr=args.filter)
     if csv_path is None:
         logging.error("no benchmark results produced by group %s", args.group)
         raise SystemExit(rc or 1)

@@ -635,7 +635,7 @@ def test_zonal_file_fetch_range_without_prefetch_engine(mock_gcsfs):
         assert result == [b"split_data"]
         mock_gcsfs._fetch_range_split.assert_awaited_once_with(
             zf.path,
-            concurrency=1,
+            concurrency=4,
             start=10,
             chunk_lengths=[5],
             size=zf.size,
@@ -711,7 +711,7 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
         mode="rb",
         use_experimental_adaptive_prefetching=True,
     )
-    assert zf2.pool_size == 1
+    assert zf2.pool_size == 4
     assert zf2._prefetch_engine is not None
     zf2.close()
 
@@ -721,9 +721,65 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
         mode="rb",
         use_experimental_adaptive_prefetching=False,
     )
-    assert zf3.pool_size == 1
+    assert zf3.pool_size == 4
     assert zf3._prefetch_engine is None
     zf3.close()
+
+
+@mock.patch("gcsfs.zonal_file.asyn.sync")
+def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
+    """Tests dynamic cache_type resolution for ZonalFile."""
+    # 1. Default prefetcher enabled -> cache_type="none"
+    zf_default = ZonalFile(
+        gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb"
+    )
+    assert zf_default.cache_type == "none"
+    assert zf_default._prefetch_engine is not None
+    zf_default.close()
+
+    # 2. Prefetcher disabled (opt-out), no cache_type set -> cache_type="readahead", no prefetcher
+    zf_no_prefetch = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        use_experimental_adaptive_prefetching=False,
+    )
+    assert zf_no_prefetch.cache_type == "readahead"
+    assert zf_no_prefetch._prefetch_engine is None
+    zf_no_prefetch.close()
+
+    # 3. Explicit cache_type="readahead_chunked" -> cache_type="readahead_chunked", no prefetcher
+    zf_readahead = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        cache_type="readahead_chunked",
+    )
+    assert zf_readahead.cache_type == "readahead_chunked"
+    assert zf_readahead._prefetch_engine is None
+    zf_readahead.close()
+
+    # 4. Explicit cache_type="none" -> cache_type="none", no prefetcher
+    zf_explicit_none = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        cache_type="none",
+    )
+    assert zf_explicit_none.cache_type == "none"
+    assert zf_explicit_none._prefetch_engine is None
+    zf_explicit_none.close()
+
+    # 5. Explicit cache_type="bytes" -> cache_type="bytes", no prefetcher
+    zf_bytes = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        cache_type="bytes",
+    )
+    assert zf_bytes.cache_type == "bytes"
+    assert zf_bytes._prefetch_engine is None
+    zf_bytes.close()
 
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
