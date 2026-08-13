@@ -1,0 +1,111 @@
+import asyncio
+import gc
+import sys
+import threading
+import time
+from unittest import mock
+
+import fsspec.asyn
+import pytest
+
+from gcsfs.zonal_file import ZonalFile
+
+
+def wait_until(predicate, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
+
+
+@pytest.fixture
+def io_loop():
+    return fsspec.asyn.get_loop()
+
+
+@pytest.fixture
+def fake_fs(io_loop):
+    fs = mock.Mock()
+    fs.split_path.return_value = ("b", "test-key", "1")
+    fs.info.return_value = {"size": 1000, "generation": "1", "name": "test-key"}
+    fs.loop = io_loop
+    return fs
+
+
+def make_read_file(fake_fs, pool_close):
+    pool = mock.Mock(persisted_size=1000, details=None, close=pool_close)
+    fake_fs._mrd_pool_cache.get = mock.AsyncMock(return_value=pool)
+    return ZonalFile(gcsfs=fake_fs, path="gs://b/test-key", mode="rb")
+
+
+def finalize_on_loop(io_loop, holder):
+    async def _drop_and_collect():
+        holder.clear()
+        gc.collect()
+
+    fsspec.asyn.sync(io_loop, _drop_and_collect)
+
+
+def test_read_file_finalized_on_loop_thread_releases_mrd_pool(
+    fake_fs, io_loop, monkeypatch
+):
+    seen = []
+    monkeypatch.setattr(sys, "unraisablehook", seen.append)
+    closed = threading.Event()
+    zf = make_read_file(fake_fs, lambda: closed.set() or asyncio.sleep(0))
+    holder = [zf]
+    del zf
+    finalize_on_loop(io_loop, holder)
+    assert wait_until(closed.is_set), "mrd_pool.close() was never awaited"
+    assert seen == [], f"exception escaped the finalizer: {seen}"
+
+
+def test_write_file_finalized_on_loop_thread_flushes_and_finalizes(fake_fs, io_loop):
+    zf = ZonalFile(
+        gcsfs=fake_fs, path="gs://b/test-key", mode="wb", finalize_on_close=True
+    )
+    aaow = mock.Mock()
+    aaow.flush = mock.AsyncMock()
+    aaow.close = mock.AsyncMock()
+    zf.aaow = aaow
+    zf.buffer.write(b"important data")
+    zf.loc = 14
+    holder = [zf]
+    del zf
+    finalize_on_loop(io_loop, holder)
+    assert wait_until(lambda: aaow.flush.called), "buffered data was never flushed"
+    assert wait_until(lambda: aaow.close.called), "writer was never finalized"
+    assert aaow.close.call_args.kwargs.get("finalize_on_close") is True
+
+
+def test_close_on_loop_thread_is_idempotent(fake_fs, io_loop):
+    calls = []
+
+    async def pool_close():
+        calls.append(1)
+
+    zf = make_read_file(fake_fs, pool_close)
+
+    async def close_twice():
+        zf.close()
+        zf.close()
+
+    fsspec.asyn.sync(io_loop, close_twice)
+    assert wait_until(lambda: len(calls) == 1), "teardown did not run exactly once"
+    time.sleep(0.2)
+    assert calls == [1], f"mrd_pool.close() ran {len(calls)} times"
+
+
+def test_off_loop_close_still_blocks_and_propagates_errors(fake_fs):
+    started = threading.Event()
+
+    async def failing_close():
+        started.set()
+        raise RuntimeError("MRD pool teardown failed")
+
+    zf = make_read_file(fake_fs, failing_close)
+    with pytest.raises(RuntimeError, match="MRD pool teardown failed"):
+        zf.close()
+    assert started.is_set(), "close() must run the teardown synchronously"

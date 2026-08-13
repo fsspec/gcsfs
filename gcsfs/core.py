@@ -11,6 +11,7 @@ import os
 import posixpath
 import re
 import sys
+import threading
 import uuid
 import warnings
 import weakref
@@ -2360,7 +2361,31 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs):
     return cache_type, use_prefetch_reader, cache_source
 
 
+_DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
+
+
+def _on_loop_thread(loop):
+    if loop is None:
+        return False
+    try:
+        return asyncio.get_running_loop() is loop
+    except RuntimeError:
+        return False
+
+
+def _defer_close(file):
+    def _run():
+        try:
+            file._close_impl()
+        except Exception:
+            logger.exception("deferred close of %s failed", file.path)
+
+    threading.Thread(target=_run, name=_DEFERRED_CLOSE_THREAD_NAME, daemon=True).start()
+
+
 class GCSFile(fsspec.spec.AbstractBufferedFile):
+    _close_deferred = False
+
     def __init__(
         self,
         gcsfs,
@@ -2657,7 +2682,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             if not both None, fetch only given range
         """
         try:
-            if hasattr(self, "_prefetch_engine") and self._prefetch_engine:
+            if getattr(self, "_prefetch_engine", None):
                 return self._prefetch_engine.fetch(start=start, end=end)
             return self.fs.cat_file(
                 self.path,
@@ -2684,8 +2709,23 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
 
     def close(self):
+        if self.closed or self._close_deferred:
+            return
+
+        if sys.is_finalizing():
+            self.closed = True
+            return
+
+        if _on_loop_thread(getattr(getattr(self, "gcsfs", None), "loop", None)):
+            self._close_deferred = True
+            _defer_close(self)
+            return
+
+        self._close_impl()
+
+    def _close_impl(self):
         super().close()
-        if hasattr(self, "_prefetch_engine") and self._prefetch_engine:
+        if getattr(self, "_prefetch_engine", None):
             self._prefetch_engine.close()
 
 
