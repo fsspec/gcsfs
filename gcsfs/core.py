@@ -15,6 +15,7 @@ import threading
 import uuid
 import warnings
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from glob import has_magic
 from urllib.parse import parse_qs
@@ -2361,9 +2362,6 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs):
     return cache_type, use_prefetch_reader, cache_source
 
 
-_DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
-
-
 def _on_loop_thread(loop):
     if loop is None:
         return False
@@ -2373,6 +2371,21 @@ def _on_loop_thread(loop):
         return False
 
 
+_DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
+_deferred_close_executor = None
+_deferred_close_executor_lock = threading.Lock()
+
+
+def _get_deferred_close_executor():
+    global _deferred_close_executor
+    with _deferred_close_executor_lock:
+        if _deferred_close_executor is None:
+            _deferred_close_executor = ThreadPoolExecutor(
+                thread_name_prefix=_DEFERRED_CLOSE_THREAD_NAME
+            )
+        return _deferred_close_executor
+
+
 def _defer_close(file):
     def _run():
         try:
@@ -2380,7 +2393,10 @@ def _defer_close(file):
         except Exception:
             logger.exception("deferred close of %s failed", file.path)
 
-    threading.Thread(target=_run, name=_DEFERRED_CLOSE_THREAD_NAME, daemon=True).start()
+    try:
+        _get_deferred_close_executor().submit(_run)
+    except RuntimeError:  # pragma: no cover
+        logger.debug("could not defer close of %s at shutdown", file.path)
 
 
 class GCSFile(fsspec.spec.AbstractBufferedFile):

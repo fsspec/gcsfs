@@ -8,6 +8,7 @@ from unittest import mock
 import fsspec.asyn
 import pytest
 
+from gcsfs import core
 from gcsfs.zonal_file import ZonalFile
 
 
@@ -96,6 +97,49 @@ def test_close_on_loop_thread_is_idempotent(fake_fs, io_loop):
     assert wait_until(lambda: len(calls) == 1), "teardown did not run exactly once"
     time.sleep(0.2)
     assert calls == [1], f"mrd_pool.close() ran {len(calls)} times"
+
+
+def test_deferred_closes_share_a_bounded_thread_pool(fake_fs, io_loop):
+    n_files = 64
+    workers = []
+    lock = threading.Lock()
+
+    class RecordingZonalFile(ZonalFile):
+        def _close_impl(self):
+            current = threading.current_thread()
+            with lock:
+                workers.append((current.ident, current.name))
+            super()._close_impl()
+
+    async def pool_close():
+        pass
+
+    files = []
+    for _ in range(n_files):
+        pool = mock.Mock(persisted_size=1000, details=None, close=pool_close)
+        fake_fs._mrd_pool_cache.get = mock.AsyncMock(return_value=pool)
+        zf = RecordingZonalFile(gcsfs=fake_fs, path="gs://b/test-key", mode="rb")
+        zf.mrd_pool = pool
+        files.append(zf)
+
+    async def close_all():
+        for zf in files:
+            zf.close()
+
+    fsspec.asyn.sync(io_loop, close_all)
+
+    assert wait_until(
+        lambda: len(workers) == n_files
+    ), f"only {len(workers)}/{n_files} deferred closes ran"
+    idents = {ident for ident, _ in workers}
+    max_workers = core._get_deferred_close_executor()._max_workers
+    assert len(idents) <= max_workers, (
+        f"{len(idents)} threads used for {n_files} closes, "
+        f"pool is capped at {max_workers}"
+    )
+    assert all(
+        name.startswith(core._DEFERRED_CLOSE_THREAD_NAME) for _, name in workers
+    ), f"closes ran on unexpected threads: {sorted({n for _, n in workers})}"
 
 
 def test_off_loop_close_still_blocks_and_propagates_errors(fake_fs):
