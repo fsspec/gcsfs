@@ -32,12 +32,7 @@ def run_checkpoint_case(
 
         window_start = time.time()
         with monitor() as m:
-            if hasattr(driver, "run"):
-                result = driver.run(prefix, params)
-            else:
-                raise ValueError(
-                    f"Driver {driver!r} must implement run(prefix, params)"
-                )
+            result = driver.run(prefix, params)
         window_end = time.time()
 
         # Measure actual GCS files
@@ -77,6 +72,16 @@ def run_checkpoint_case(
 
         durations = result.durations
         size_for_throughput = physical_size_bytes
+
+        # In DDP, FSDP full and Model Parallel full, all ranks read the monolithic checkpoint independently.
+        # The effective data transferred from storage is multiplied by the world size.
+        if "read" in params.scenario and params.strategy in (
+            "ddp",
+            "fsdp_full",
+            "model_parallel_full",
+        ):
+            size_for_throughput *= params.world_size
+
         throughput = (
             sum(size_for_throughput / d for d in durations) / len(durations)
             if size_for_throughput > 0 and durations and all(durations)

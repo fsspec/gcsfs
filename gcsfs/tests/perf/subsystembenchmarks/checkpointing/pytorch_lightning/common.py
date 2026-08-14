@@ -211,7 +211,7 @@ def run_split(prefix, params, target_fn, world_size_override=None):
     import torch.multiprocessing as mp
 
     ctx = mp.get_context("spawn")
-    world_size = 2 if not hasattr(params, "world_size") else params.world_size
+    world_size = params.world_size
     if world_size_override is not None:
         world_size = world_size_override
     world_size = min(world_size, 8)  # Increased cap to 8 to support TP=4, DP=2
