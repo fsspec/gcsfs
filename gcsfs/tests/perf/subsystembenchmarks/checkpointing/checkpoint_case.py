@@ -28,7 +28,19 @@ def run_checkpoint_case(
         prefix = f"gs://{bucket}/checkpoint/"
         assert_fsspec_gcsfs(prefix)
 
-        driver.setup(prefix, params)
+        # We run the setup phase (which generates the checkpoint) in an isolated OS process.
+        # Checkpoint generation uses ~400 GB of RAM. PyTorch's allocators and the gloo
+        # multiprocessing backend leak memory and semaphores back to the parent process.
+        # If we ran setup() natively, the leaked memory combined with the ~400 GB needed
+        # for the subsequent read benchmark (driver.run) would exceed the VM's 732 GB limit
+        # and cause an OOM crash. The OS forcefully reclaims all memory when this process joins.
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        p = ctx.Process(target=driver.setup, args=(prefix, params))
+        p.start()
+        p.join()
+        if p.exitcode != 0:
+            raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
 
         window_start = time.time()
         with monitor() as m:
