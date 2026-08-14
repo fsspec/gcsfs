@@ -35,6 +35,7 @@ def run_checkpoint_case(
         # for the subsequent read benchmark (driver.run) would exceed the VM's 732 GB limit
         # and cause an OOM crash. The OS forcefully reclaims all memory when this process joins.
         import multiprocessing as mp
+
         ctx = mp.get_context("spawn")
         p = ctx.Process(target=driver.setup, args=(prefix, params))
         p.start()
