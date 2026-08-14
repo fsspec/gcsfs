@@ -95,3 +95,8 @@ def test_build_pytest_args_includes_run_benchmarks():
 
     args = build_pytest_args("/path/to/suite", "/path/to/results.json")
     assert "--run-benchmarks" in args
+
+
+def test_webdataset_group_is_discoverable():
+    """Verifies dataloading/webdataset is discovered from its requirements.txt."""
+    assert "dataloading/webdataset" in run.discover_groups()

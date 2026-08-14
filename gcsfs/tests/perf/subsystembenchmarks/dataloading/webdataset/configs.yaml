@@ -1,0 +1,80 @@
+common:
+  rounds: 3
+  batch_size: 8
+  baseline:
+    fmt: "image_tar"
+    # file_count * rows_per_file = image count.
+    file_count: 64
+    rows_per_file: 784
+    # Qwen2-VL default max_pixels (28 * 28 * 1280).
+    pixel_budget: 1003520
+    image_encoding: "jpeg"
+    jpeg_quality: 75
+    sample_shape: "pairs"
+    access: "shuffled"
+    shard_shuffle: true
+    shuffle_buffer_size: 1000
+    num_workers: 4
+    prefetch_factor: 2
+    split_by_node: true
+    world_size: 8
+    resampled: false
+    # Decode disabled in baseline to isolate storage performance.
+    decode: false
+    cache_dir_enabled: false
+    gcs_read_mode: "default"
+    gcs_read_concurrency: 4
+    read_buffer_bytes: 0
+
+scenarios:
+  - name: "read"
+    scenario: "read"
+    variants:
+      # Image preparation.
+      - {axis: "pixel_budget", pixel_budget: 50176}
+      - {axis: "pixel_budget", pixel_budget: 4014080}
+      - {axis: "encoding", jpeg_quality: 95}
+      - {axis: "encoding", image_encoding: "png"}
+      - {axis: "compression", fmt: "image_tar_gz"}
+
+      # Single-image pairs vs. multi-image interleaved documents.
+      - {axis: "sample_shape", sample_shape: "interleaved"}
+
+      # Shard size variations at constant total image count.
+      - {axis: "shard_size", file_count: 32, rows_per_file: 1568}
+      - {axis: "shard_size", file_count: 256, rows_per_file: 196}
+      - {axis: "shard_size", file_count: 1024, rows_per_file: 49}
+      - {axis: "shard_divisibility", file_count: 40, rows_per_file: 1254}
+
+      # PyTorch DataLoader settings.
+      - {axis: "workers", num_workers: 2}
+      - {axis: "workers", num_workers: 8}
+      - {axis: "prefetch", prefetch_factor: 4}
+
+      # Shuffle and local caching.
+      - {axis: "access", access: "sequential"}
+      # Evaluated at 1024 shards (32/split) because baseline (2/split) is too small
+      # to measure shard shuffle. Compare against the 1024-shard shard_size variant.
+      - {axis: "shard_shuffle", file_count: 1024, rows_per_file: 49, shard_shuffle: false}
+      - {axis: "shuffle_buffer", shuffle_buffer_size: 10000}
+      - {axis: "cache", cache_dir_enabled: true}
+
+      # Exact epochs vs. resampled streaming.
+      - {axis: "resampled", resampled: true}
+
+      # gcsfs read strategy.
+      - {axis: "gcs_read_mode", gcs_read_mode: "readahead_32mb"}
+      - {axis: "gcs_read_mode", gcs_read_mode: "whole_object"}
+
+      # Client-side buffering for WebDataset's 10 KiB tar reads.
+      - {axis: "read_buffer", read_buffer_bytes: 1048576}
+      - {axis: "read_buffer", read_buffer_bytes: 8388608}
+      - {axis: "read_buffer", read_buffer_bytes: 33554432}
+
+      # Swept with a 32 MiB buffer to exceed gcsfs's 5 MiB chunk splitting threshold.
+      # Compare against the 32 MiB read_buffer variant.
+      - {axis: "gcs_read_concurrency", read_buffer_bytes: 33554432, gcs_read_concurrency: 8}
+      - {axis: "gcs_read_concurrency", read_buffer_bytes: 33554432, gcs_read_concurrency: 16}
+
+      # Image decode overhead.
+      - {axis: "decode", decode: true}

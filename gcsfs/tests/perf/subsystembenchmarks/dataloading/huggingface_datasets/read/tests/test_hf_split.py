@@ -1,4 +1,5 @@
 import dataclasses
+import math
 
 import pytest
 
@@ -28,16 +29,23 @@ def _ingest(tmp_path, files, rows=20):
     return prefix, man
 
 
+def _rank_rows(prefix, fmt, rank, world_size):
+    """Rows one rank yields after split_dataset_by_node."""
+    ds = _hf_read._build_dataset(prefix, fmt, "sequential", seed=0)
+    ds = _hf_read._split(ds, rank, world_size).with_format("torch")
+    return sum(1 for _ in ds)
+
+
 def test_divisible_shards_are_disjoint(tmp_path):
     prefix, man = _ingest(tmp_path, files=8)  # 8 % 4 == 0
-    per = [_hf_read.rank_rows(prefix, "pretok_parquet", r, 4) for r in range(4)]
+    per = [_rank_rows(prefix, "pretok_parquet", r, 4) for r in range(4)]
     assert sum(per) == man["sample_count"]
     assert all(x == man["sample_count"] // 4 for x in per)
 
 
 def test_indivisible_every_rank_reads_some(tmp_path):
     prefix, man = _ingest(tmp_path, files=7)  # 7 % 4 != 0
-    per = [_hf_read.rank_rows(prefix, "pretok_parquet", r, 4) for r in range(4)]
+    per = [_rank_rows(prefix, "pretok_parquet", r, 4) for r in range(4)]
     assert sum(per) == man["sample_count"]
     assert all(x > 0 for x in per)
 
@@ -92,6 +100,32 @@ def test_run_epochs_reports_build_seconds(tmp_path):
     assert rows_list[0] == man["sample_count"]
     assert isinstance(build_seconds, float)
     assert build_seconds > 0.0
+
+
+def test_run_epochs_reports_infinite_ttfb_when_no_batch_is_yielded(monkeypatch):
+    class EmptyDataset:
+        def with_format(self, _format):
+            return self
+
+        def set_epoch(self, epoch):
+            pass
+
+    monkeypatch.setattr(
+        _hf_read, "_build_dataset", lambda *args, **kwargs: EmptyDataset()
+    )
+    monkeypatch.setattr(_hf_read, "_build_loader", lambda *args, **kwargs: [])
+
+    _, rows, ttfb, _ = _hf_read.run_epochs(
+        prefix="unused",
+        fmt="pretok_parquet",
+        access="sequential",
+        num_workers=0,
+        batch_size=8,
+        rounds=1,
+    )
+
+    assert rows == [0]
+    assert math.isinf(ttfb)
 
 
 def test_run_split_epochs_totals(tmp_path):

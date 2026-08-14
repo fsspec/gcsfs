@@ -374,21 +374,12 @@ class ZonalFile(GCSFile):
             "_upload_chunk is not implemented yet for ZonalFile. Please use write() instead."
         )
 
-    def close(self):
-        """
-        Closes the ZonalFile and the underlying AsyncMultiRangeDownloader and AsyncAppendableObjectWriter.
-        If in write mode, finalizes the write if finalize_on_close is True.
-        """
-        if self.closed:
-            return
-
-        # super is closed before aaow since flush may need aaow
-        super().close()
+    def _close_impl(self):
+        super()._close_impl()
 
         if hasattr(self, "mrd_pool") and self.mrd_pool:
             asyn.sync(self.gcsfs.loop, self.mrd_pool.close)
 
-        # Only close aaow if the stream is open
         if self.aaow and self.aaow._is_stream_open:
             asyn.sync(
                 self.gcsfs.loop,

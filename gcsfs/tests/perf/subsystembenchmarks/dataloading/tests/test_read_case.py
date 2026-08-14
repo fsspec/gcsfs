@@ -15,9 +15,22 @@ def _bucket_env(monkeypatch):
     monkeypatch.setenv("GCSFS_SUBSYSTEM_LOCATION", "us-central1")
 
 
+_DEFAULT_MANIFEST = {
+    "file_count": 2,
+    "corpus_bytes": 1000,
+    "sample_count": 10,
+    "fmt": "pretok_parquet",
+    "rows_per_file": 5,
+}
+
+
 @dataclass
 class _P(ReadParameters):
     LOADER_TAG = "fk"
+    FMT_TAGS = {"pretok_parquet": "ptpq"}
+
+    def ingest(self, prefix):
+        return self._manifest
 
 
 class _FakeDriver:
@@ -28,7 +41,7 @@ class _FakeDriver:
         self._build = build_seconds
         self._extra = extra_columns or {}
 
-    def run_read(self, prefix, params):
+    def run_read(self, prefix, params, manifest):
         from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import ReadResult
 
         return ReadResult(
@@ -61,7 +74,7 @@ class _Monitor:
         return contextlib.nullcontext(self)
 
 
-def _params(**over):
+def _params(manifest=None, **over):
     kw = dict(
         name="c",
         bucket_name="",
@@ -70,29 +83,27 @@ def _params(**over):
         scenario="read",
         framework="fake",
         fmt="pretok_parquet",
-        seq_len=8,
         file_count=2,
         rows_per_file=5,
-        row_group_size=5,
         access="sequential",
         num_workers=2,
         batch_size=4,
     )
     kw.update(over)
-    return _P(**kw)
+    p = _P(**kw)
+    p._manifest = manifest if manifest is not None else _DEFAULT_MANIFEST
+    return p
 
 
 def _local_bucket_ctx(tmp_path):
-    @contextlib.contextmanager
-    def ctx(spec, case_id, **kw):
-        yield str(tmp_path)
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import (
+        local_case_bucket,
+    )
 
-    return ctx
+    return local_case_bucket(tmp_path)
 
 
 def test_run_read_case_publishes_throughput_and_passes_guard(tmp_path, monkeypatch):
-    from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen
-
     monkeypatch.setenv("MACHINE_TYPE", "c4-standard-192")
     monkeypatch.delenv("GCE_MACHINE_TYPE", raising=False)
     monkeypatch.setenv("COMMIT_SHA", "source123")
@@ -102,14 +113,6 @@ def test_run_read_case_publishes_throughput_and_passes_guard(tmp_path, monkeypat
         '[{"name":"gcsfs","version":"1.0"}]',
     )
     monkeypatch.setenv("GCSFS_SUBSYSTEM_SWEEP_AXES", "workers workers prefetch")
-    man = {
-        "file_count": 2,
-        "corpus_bytes": 1000,
-        "sample_count": 10,
-        "fmt": "pretok_parquet",
-        "rows_per_file": 5,
-    }
-    monkeypatch.setattr(datagen, "ingest_dataset", lambda *a, **k: man)
     monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
 
     bench = _Bench()
@@ -152,16 +155,6 @@ def test_run_read_case_publishes_throughput_and_passes_guard(tmp_path, monkeypat
 
 def test_run_read_case_publishes_dataset_build_time(tmp_path, monkeypatch):
     """Dataset initialization latency uses the macrobenchmark field name."""
-    from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen
-
-    man = {
-        "file_count": 2,
-        "corpus_bytes": 1000,
-        "sample_count": 10,
-        "fmt": "pretok_parquet",
-        "rows_per_file": 5,
-    }
-    monkeypatch.setattr(datagen, "ingest_dataset", lambda *a, **k: man)
     monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
 
     bench = _Bench()
@@ -176,23 +169,15 @@ def test_run_read_case_publishes_dataset_build_time(tmp_path, monkeypatch):
 
 
 def test_run_read_case_fails_partial_read(tmp_path, monkeypatch):
-    from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen
-
-    man = {
-        "file_count": 2,
-        "corpus_bytes": 1000,
-        "sample_count": 99,
-        "fmt": "pretok_parquet",
-        "rows_per_file": 5,
-    }
-    monkeypatch.setattr(datagen, "ingest_dataset", lambda *a, **k: man)
     monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
+
+    man = {**_DEFAULT_MANIFEST, "sample_count": 99}
 
     with pytest.raises(ValueError, match="partial read"):
         read_case.run_read_case(
             _Bench(),
             _Monitor(),
-            _params(),
+            _params(manifest=man),
             _FakeDriver(rows=10),
             bucket_ctx=_local_bucket_ctx(tmp_path),
         )
