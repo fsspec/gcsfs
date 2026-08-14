@@ -130,7 +130,7 @@ class _RecordingFS:
     def __init__(self):
         self.file = _RecordingFile()
 
-    def open(self, path, mode):
+    def open(self, path, mode, **kwargs):
         return self.file
 
 
