@@ -1,5 +1,4 @@
 import json
-import uuid
 
 import pytest
 
@@ -10,14 +9,15 @@ import fsspec  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen  # noqa: E402
 
 
-def _prefix():
-    return f"memory://{uuid.uuid4().hex}/data/"
+def _prefix(tmp_path):
+    """On-disk prefix: shards are written by worker processes, which share no in-memory fs."""
+    return f"{tmp_path}/data/"
 
 
-def test_pretok_parquet_shapes_and_rowgroups():
+def test_pretok_parquet_shapes_and_rowgroups(tmp_path):
     import pyarrow.parquet as pq
 
-    prefix = _prefix()
+    prefix = _prefix(tmp_path)
     man = datagen.ingest_dataset(
         prefix,
         fmt="pretok_parquet",
@@ -39,10 +39,10 @@ def test_pretok_parquet_shapes_and_rowgroups():
     assert set(pf.schema_arrow.names) == {"tokens", "label"}
 
 
-def test_text_parquet_has_text_column():
+def test_text_parquet_has_text_column(tmp_path):
     import pyarrow.parquet as pq
 
-    prefix = _prefix()
+    prefix = _prefix(tmp_path)
     datagen.ingest_dataset(
         prefix,
         fmt="text_parquet",
@@ -59,8 +59,8 @@ def test_text_parquet_has_text_column():
     assert "string" in str(pf.schema_arrow.field("text").type)
 
 
-def test_pretok_jsonl_lines_parse():
-    prefix = _prefix()
+def test_pretok_jsonl_lines_parse(tmp_path):
+    prefix = _prefix(tmp_path)
     man = datagen.ingest_dataset(
         prefix,
         fmt="pretok_jsonl",
@@ -78,10 +78,10 @@ def test_pretok_jsonl_lines_parse():
     assert set(obj) == {"tokens", "label"} and len(obj["tokens"]) == 8
 
 
-def test_unknown_format_raises():
+def test_unknown_format_raises(tmp_path):
     with pytest.raises(ValueError):
         datagen.ingest_dataset(
-            _prefix(),
+            _prefix(tmp_path),
             fmt="bogus",
             seq_len=4,
             file_count=1,
@@ -90,12 +90,12 @@ def test_unknown_format_raises():
         )
 
 
-def test_row_groups_are_streamed_not_buffered_whole():
+def test_row_groups_are_streamed_not_buffered_whole(tmp_path):
     """Shards reach gigabytes and are written concurrently; a chunked writer caps RAM at one
     row group. The row-group layout the axis asks for must survive the chunking."""
     import pyarrow.parquet as pq
 
-    prefix = _prefix()
+    prefix = _prefix(tmp_path)
     datagen.ingest_dataset(
         prefix,
         fmt="pretok_parquet",
@@ -158,27 +158,28 @@ def test_ingest_workers_scales_and_caps(monkeypatch):
     assert datagen.ingest_workers(0) == 1
 
 
-def test_shards_are_written_concurrently():
-    """Verify shard writing occurs concurrently across thread pool workers."""
-    import threading
+def test_shards_are_written_across_worker_processes(tmp_path):
+    """Shard synthesis is CPU-bound under the GIL, so the pool must be processes, not threads."""
+    man = datagen.ingest_dataset(
+        _prefix(tmp_path),
+        fmt="pretok_parquet",
+        seq_len=4,
+        file_count=8,
+        rows_per_file=2,
+        row_group_size=2,
+    )
+    assert man["writer_process_count"] > 1
 
-    seen = set()
-    real = datagen._WRITERS["pretok_parquet"]
 
-    def spy(fs, root, idx, seq_len, rows, row_group_size):
-        seen.add(threading.current_thread().name)
-        return real(fs, root, idx, seq_len, rows, row_group_size)
-
-    datagen._WRITERS["_spy"] = spy
-    try:
-        datagen.ingest_dataset(
-            _prefix(),
-            fmt="_spy",
-            seq_len=4,
-            file_count=8,
-            rows_per_file=2,
-            row_group_size=2,
-        )
-    finally:
-        del datagen._WRITERS["_spy"]
-    assert len(seen) > 1
+def test_corpus_bytes_are_deterministic_across_runs(tmp_path):
+    """Shard content is seeded by index alone, so a rerun reproduces the corpus byte for byte."""
+    kwargs = dict(
+        fmt="text_parquet", seq_len=8, file_count=3, rows_per_file=10, row_group_size=5
+    )
+    first = datagen.ingest_dataset(_prefix(tmp_path / "a"), **kwargs)
+    second = datagen.ingest_dataset(_prefix(tmp_path / "b"), **kwargs)
+    assert first["corpus_bytes"] == second["corpus_bytes"]
+    fs, _ = fsspec.core.url_to_fs(str(tmp_path))
+    assert fs.cat(f"{tmp_path}/a/data/shard_00000.parquet") == fs.cat(
+        f"{tmp_path}/b/data/shard_00000.parquet"
+    )

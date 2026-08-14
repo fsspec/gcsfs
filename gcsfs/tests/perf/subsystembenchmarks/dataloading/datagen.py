@@ -6,12 +6,12 @@ Shard writing is seeded deterministically and uploaded concurrently.
 
 import io
 import json
+import multiprocessing
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 
 VOCAB_SIZE = 32000
-_CHARS_PER_TOKEN = 6  # ~6 chars per token matches token-row byte scale.
-# Max ingest threads for parallel upload of latency-bound GCS shards (overridable via GCSFS_SUBSYSTEM_INGEST_THREADS).
+_CHARS_PER_TOKEN = 6
 _MAX_INGEST_THREADS = 64
 
 
@@ -124,26 +124,41 @@ _WRITERS = {
 FORMATS = tuple(_WRITERS)
 
 
+def _write_shard_task(args):
+    """Writes one shard in a worker process, resolving its own filesystem handle."""
+    prefix, fmt, idx, seq_len, rows_per_file, row_group_size = args
+    fs, root = _fs_and_root(prefix)
+    path = _WRITERS[fmt](
+        fs, root.rstrip("/"), idx, seq_len, rows_per_file, row_group_size
+    )
+    return {
+        "bytes": int(fs.info(path)["size"]),
+        "pid": os.getpid(),
+    }
+
+
 def ingest_dataset(prefix, *, fmt, seq_len, file_count, rows_per_file, row_group_size):
     """Write file_count shards of rows_per_file rows under prefix concurrently and return corpus manifest."""
     if fmt not in _WRITERS:
         raise ValueError(f"unknown fmt {fmt!r}; expected one of {sorted(_WRITERS)}")
     fs, root = _fs_and_root(prefix)
-    root = root.rstrip("/")
-    fs.makedirs(root, exist_ok=True)
-    writer = _WRITERS[fmt]
+    fs.makedirs(root.rstrip("/"), exist_ok=True)
+    tasks = [
+        (prefix, fmt, idx, seq_len, rows_per_file, row_group_size)
+        for idx in range(file_count)
+    ]
 
-    def _write(idx):
-        path = writer(fs, root, idx, seq_len, rows_per_file, row_group_size)
-        return int(fs.info(path)["size"])
-
-    with ThreadPoolExecutor(max_workers=ingest_workers(file_count)) as pool:
-        total_bytes = sum(pool.map(_write, range(file_count)))
+    with ProcessPoolExecutor(
+        max_workers=ingest_workers(file_count),
+        mp_context=multiprocessing.get_context("spawn"),
+    ) as pool:
+        results = list(pool.map(_write_shard_task, tasks))
 
     return {
         "fmt": fmt,
         "file_count": file_count,
         "rows_per_file": rows_per_file,
         "sample_count": file_count * rows_per_file,
-        "corpus_bytes": total_bytes,
+        "corpus_bytes": sum(r["bytes"] for r in results),
+        "writer_process_count": len({r["pid"] for r in results}),
     }
