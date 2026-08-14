@@ -40,7 +40,7 @@ def _write_parquet_shard(fs, root, idx, rows, row_group_size, schema, make_chunk
     import pyarrow.parquet as pq
 
     path = f"{root}/shard_{idx:05d}.parquet"
-    with fs.open(path, "wb") as f:
+    with fs.open(path, "wb", finalize_on_close=True) as f:
         with pq.ParquetWriter(f, schema, compression="none") as writer:
             for n in _chunks(rows, row_group_size):
                 writer.write_table(make_chunk(n))
@@ -100,7 +100,7 @@ def _write_pretok_jsonl(fs, root, idx, seq_len, rows, row_group_size):
 
     rng = np.random.default_rng(idx)
     path = f"{root}/shard_{idx:05d}.jsonl"
-    with fs.open(path, "wb") as f:
+    with fs.open(path, "wb", finalize_on_close=True) as f:
         for n in _chunks(rows, row_group_size):
             buf = io.StringIO()
             for _ in range(n):

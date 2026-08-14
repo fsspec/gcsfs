@@ -155,7 +155,7 @@ def _write_shard(
     rng = np.random.default_rng([seed, idx])
     path = f"{root}/shard_{idx:05d}{SHARD_EXT[fmt]}"
     images = 0
-    with fs.open(path, "wb") as handle:
+    with fs.open(path, "wb", finalize_on_close=True) as handle:
         with wds.TarWriter(handle, compress=(fmt == "image_tar_gz")) as sink:
             for doc_idx, doc_images in enumerate(document_plan):
                 sample = {
