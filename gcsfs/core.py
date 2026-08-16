@@ -1226,10 +1226,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             return b""
 
         u2 = self.url(path, generation=kwargs.get("generation"))
+        head = dict(kwargs.get("headers") or {})
         if start is not None or end is not None:
-            head = {"Range": await self._process_limits(path, start, end)}
-        else:
-            head = {}
+            head = {key: value for key, value in head.items() if key.lower() != "range"}
+            head["Range"] = await self._process_limits(path, start, end)
 
         cache_type = kwargs.get("cache_type")
         cache_source = kwargs.get("cache_source")
@@ -2181,8 +2181,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         )
 
         try:
-            # The concurrent path uses `_cat_file` to interact with gcsfs which doesn't take headers as argument.
-            if concurrency > 1 and "headers" not in kwargs:
+            if concurrency > 1:
                 await self._get_file_concurrent(
                     rpath,
                     lpath,
