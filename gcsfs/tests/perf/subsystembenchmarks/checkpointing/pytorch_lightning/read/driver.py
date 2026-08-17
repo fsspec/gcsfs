@@ -87,7 +87,7 @@ def _rank_load(rank, world_size, port, prefix, params, q):
     trainer2 = L.Trainer(strategy=get_strategy(params), **trainer_args)
     trainer2.strategy.connect(model2)
     model2.trainer = trainer2
-    trainer2.state.fn = TrainerFn.TESTING
+    trainer2.state.fn = TrainerFn.FITTING
     trainer2.strategy.setup_environment()
     _call_configure_model(trainer2)
     trainer2.strategy.setup(trainer2)
@@ -164,7 +164,7 @@ class PLCheckpointReadDriver(CheckpointDriver):
         trainer2 = L.Trainer(**trainer_args)
         trainer2.strategy.connect(model2)
         model2.trainer = trainer2
-        trainer2.state.fn = TrainerFn.TESTING
+        trainer2.state.fn = TrainerFn.FITTING
         trainer2.strategy.setup_environment()
         _call_configure_model(trainer2)
         trainer2.strategy.setup(trainer2)

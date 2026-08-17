@@ -214,7 +214,6 @@ def run_split(prefix, params, target_fn, world_size_override=None):
     world_size = params.world_size
     if world_size_override is not None:
         world_size = world_size_override
-    world_size = min(world_size, 8)  # Increased cap to 8 to support TP=4, DP=2
     port = find_free_port()
 
     with ctx.Manager() as manager:

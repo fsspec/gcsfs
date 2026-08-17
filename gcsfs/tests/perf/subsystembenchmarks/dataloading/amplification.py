@@ -18,6 +18,9 @@ _NEW_COLS = [
     "dataset_read_bytes",
     "dataset_read_request_count",
     "dataset_read_amplification_ratio",
+    "checkpoint_read_bytes",
+    "checkpoint_read_request_count",
+    "checkpoint_read_amplification_ratio",
 ]
 
 
@@ -98,27 +101,41 @@ def enrich_csv(csv_path, project, *, client):
         bucket = row.get("gcs_bucket_name")
         if not bucket:
             continue
-        eligible += 1
-        if all(row.get(column) not in (None, "") for column in _NEW_COLS):
+        
+        # Check if this row is for dataset or checkpoint
+        prefix = None
+        if "dataset_size_bytes" in row and row["dataset_size_bytes"]:
+            prefix = "dataset"
+        elif "checkpoint_physical_size_bytes" in row and row["checkpoint_physical_size_bytes"]:
+            prefix = "checkpoint"
+            
+        if not prefix:
             continue
+            
+        eligible += 1
+        cols_to_check = [f"{prefix}_read_bytes", f"{prefix}_read_request_count", f"{prefix}_read_amplification_ratio"]
+        if all(row.get(column) not in (None, "") for column in cols_to_check):
+            continue
+            
         try:
             ws = int(float(row["measurement_window_start_unix_seconds"]))
             we = int(float(row["measurement_window_end_unix_seconds"]))
-            dataset_size = float(row["dataset_size_bytes"])
-            # Normalize GCS bytes sent by stored dataset bytes times measured rounds.
+            physical_size = float(row[f"{prefix}_size_bytes"] if prefix == "dataset" else row["checkpoint_physical_size_bytes"])
+            # Normalize GCS bytes sent by stored bytes times measured rounds.
             rounds = int(float(row.get("measurement_round_count") or 1))
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
             reqs = bucket_read_requests(client, project, bucket, ws, we)
             if egress is not None:
-                row["dataset_read_bytes"] = str(int(egress))
-                ideal = dataset_size * rounds
+                row[f"{prefix}_read_bytes"] = str(int(egress))
+                ideal = physical_size * rounds
                 if ideal:
-                    row["dataset_read_amplification_ratio"] = str(egress / ideal)
+                    row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
             if reqs is not None:
-                row["dataset_read_request_count"] = str(int(reqs))
+                row[f"{prefix}_read_request_count"] = str(int(reqs))
         except Exception as exc:
             logging.warning("amplification scrape failed for %s: %s", bucket, exc)
-        if not all(row.get(column) not in (None, "") for column in _NEW_COLS):
+            
+        if not all(row.get(column) not in (None, "") for column in cols_to_check):
             missing.append(bucket)
 
     with open(csv_path, "w", newline="") as f:
