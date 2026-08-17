@@ -214,6 +214,7 @@ def run_split(prefix, params, target_fn, world_size_override=None):
     world_size = params.world_size
     if world_size_override is not None:
         world_size = world_size_override
+    world_size = min(world_size, 8)  # Cap to 8 to prevent OOM on test-c4-highmem
     port = find_free_port()
 
     with ctx.Manager() as manager:

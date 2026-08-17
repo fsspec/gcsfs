@@ -93,7 +93,7 @@ def run_checkpoint_case(
             "fsdp_full",
             "model_parallel_full",
         ):
-            size_for_throughput *= params.world_size
+            size_for_throughput *= min(params.world_size, 8)
 
         throughput = (
             sum(size_for_throughput / d for d in durations) / len(durations)
