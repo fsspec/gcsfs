@@ -123,7 +123,9 @@ def _csv_has_amplification_inputs(csv_path):
             header = next(csv.reader(file), [])
         if not all(column in header for column in _AMPLIFICATION_COLS):
             return False
-        return any(column in header for column in _AMPLIFICATION_COLS_DATASET) or any(column in header for column in _AMPLIFICATION_COLS_CHECKPOINT)
+        return any(column in header for column in _AMPLIFICATION_COLS_DATASET) or any(
+            column in header for column in _AMPLIFICATION_COLS_CHECKPOINT
+        )
     except Exception:
         return False
 

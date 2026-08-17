@@ -101,26 +101,37 @@ def enrich_csv(csv_path, project, *, client):
         bucket = row.get("gcs_bucket_name")
         if not bucket:
             continue
-        
+
         # Check if this row is for dataset or checkpoint
         prefix = None
         if "dataset_size_bytes" in row and row["dataset_size_bytes"]:
             prefix = "dataset"
-        elif "checkpoint_physical_size_bytes" in row and row["checkpoint_physical_size_bytes"]:
+        elif (
+            "checkpoint_physical_size_bytes" in row
+            and row["checkpoint_physical_size_bytes"]
+        ):
             prefix = "checkpoint"
-            
+
         if not prefix:
             continue
-            
+
         eligible += 1
-        cols_to_check = [f"{prefix}_read_bytes", f"{prefix}_read_request_count", f"{prefix}_read_amplification_ratio"]
+        cols_to_check = [
+            f"{prefix}_read_bytes",
+            f"{prefix}_read_request_count",
+            f"{prefix}_read_amplification_ratio",
+        ]
         if all(row.get(column) not in (None, "") for column in cols_to_check):
             continue
-            
+
         try:
             ws = int(float(row["measurement_window_start_unix_seconds"]))
             we = int(float(row["measurement_window_end_unix_seconds"]))
-            physical_size = float(row[f"{prefix}_size_bytes"] if prefix == "dataset" else row["checkpoint_physical_size_bytes"])
+            physical_size = float(
+                row[f"{prefix}_size_bytes"]
+                if prefix == "dataset"
+                else row["checkpoint_physical_size_bytes"]
+            )
             # Normalize GCS bytes sent by stored bytes times measured rounds.
             rounds = int(float(row.get("measurement_round_count") or 1))
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
@@ -134,7 +145,7 @@ def enrich_csv(csv_path, project, *, client):
                 row[f"{prefix}_read_request_count"] = str(int(reqs))
         except Exception as exc:
             logging.warning("amplification scrape failed for %s: %s", bucket, exc)
-            
+
         if not all(row.get(column) not in (None, "") for column in cols_to_check):
             missing.append(bucket)
 
