@@ -1,3 +1,5 @@
+import pytest
+
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning import configs
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.configs import (
     PyTorchLightningCheckpointConfigurator,
@@ -67,3 +69,17 @@ def test_cross_topology_cases():
     assert mp_case.world_size == 4
     assert mp_case.tensor_parallel_size == 2
     assert mp_case.data_parallel_size == 2
+
+
+def test_is_distributed_strategy():
+    pytest.importorskip("lightning")
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.common import (
+        is_distributed_strategy,
+    )
+
+    assert not is_distributed_strategy("single")
+    assert is_distributed_strategy("ddp")
+    assert is_distributed_strategy("fsdp_sharded")
+    assert is_distributed_strategy("fsdp_full")
+    assert is_distributed_strategy("model_parallel_full")
+    assert is_distributed_strategy("model_parallel_sharded")

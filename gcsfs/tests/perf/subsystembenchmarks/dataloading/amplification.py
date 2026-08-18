@@ -21,9 +21,6 @@ _NEW_COLS = [
     "checkpoint_read_bytes",
     "checkpoint_read_request_count",
     "checkpoint_read_amplification_ratio",
-    "checkpoint_read_bytes",
-    "checkpoint_read_request_count",
-    "checkpoint_read_amplification_ratio",
 ]
 
 

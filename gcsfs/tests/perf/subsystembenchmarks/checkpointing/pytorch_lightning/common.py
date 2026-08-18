@@ -164,6 +164,10 @@ class CPUFSDPStrategy(FSDPStrategy):
         return super().root_device
 
 
+def is_distributed_strategy(strategy: str) -> bool:
+    return strategy != "single"
+
+
 def get_strategy(params, setup=False):
     import torch
 

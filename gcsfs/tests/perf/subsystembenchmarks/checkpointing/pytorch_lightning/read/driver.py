@@ -17,6 +17,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.common
     DummyDataset,
     DummyModel,
     get_strategy,
+    is_distributed_strategy,
     run_split,
     setup_distributed_env,
 )
@@ -108,13 +109,7 @@ def _rank_load(rank, world_size, port, prefix, params, q):
 
 class PLCheckpointReadDriver(CheckpointDriver):
     def setup(self, prefix, params):
-        if params.strategy in (
-            "ddp",
-            "fsdp_sharded",
-            "fsdp_full",
-            "model_parallel_full",
-            "model_parallel_sharded",
-        ):
+        if is_distributed_strategy(params.strategy):
             setup_world_size = (
                 getattr(params, "setup_world_size", None) or params.world_size
             )
@@ -138,13 +133,7 @@ class PLCheckpointReadDriver(CheckpointDriver):
             )
 
     def run(self, prefix, params):
-        if params.strategy in (
-            "ddp",
-            "fsdp_sharded",
-            "fsdp_full",
-            "model_parallel_full",
-            "model_parallel_sharded",
-        ):
+        if is_distributed_strategy(params.strategy):
             durations = run_split(prefix, params, _rank_load)
             return CheckpointResult(durations=durations)
 

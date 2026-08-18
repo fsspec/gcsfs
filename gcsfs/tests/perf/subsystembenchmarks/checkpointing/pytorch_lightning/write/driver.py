@@ -14,6 +14,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.common
     DummyDataset,
     DummyModel,
     get_strategy,
+    is_distributed_strategy,
     run_split,
     setup_distributed_env,
 )
@@ -68,13 +69,7 @@ class PLCheckpointWriteDriver(CheckpointDriver):
         pass
 
     def run(self, prefix, params):
-        if params.strategy in (
-            "ddp",
-            "fsdp_sharded",
-            "fsdp_full",
-            "model_parallel_full",
-            "model_parallel_sharded",
-        ):
+        if is_distributed_strategy(params.strategy):
             durations = run_split(prefix, params, _rank_save)
             return CheckpointResult(durations=durations)
 
