@@ -24,8 +24,11 @@ def run_checkpoint_case(
     bucket_ctx = bucket_ctx or case_bucket
 
     with bucket_ctx(BucketSpec.from_env(), params.name) as bucket:
-        params.bucket_name = bucket
-        prefix = f"gs://{bucket}/checkpoint/"
+        # bucket_ctx may yield a raw name or a full URI depending on the branch/version.
+        # Extract just the bucket name so we can safely construct our own prefix.
+        bucket_name = bucket[len("gs://"):].split("/", 1)[0] if bucket.startswith("gs://") else bucket
+        params.bucket_name = bucket_name
+        prefix = f"gs://{bucket_name}/checkpoint/"
         assert_fsspec_gcsfs(prefix)
 
         # We run the setup phase (which generates the checkpoint) in an isolated OS process.
