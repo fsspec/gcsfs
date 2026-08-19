@@ -67,10 +67,7 @@ def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
     q.put(None)
 
 
-def _rank_load(rank, world_size, port, prefix, params, q):
-    # This runs in a subprocess. We use "gloo" for CPU distributed run.
-    setup_distributed_env(rank, world_size, port)
-
+def _setup_read_trainer(prefix, params, world_size=1, strategy=None):
     trainer_args = {
         "default_root_dir": prefix,
         "accelerator": "cpu",
@@ -79,26 +76,45 @@ def _rank_load(rank, world_size, port, prefix, params, q):
         "precision": "bf16-mixed",
         "enable_checkpointing": False,
     }
+    if strategy is not None:
+        trainer_args["strategy"] = strategy
+
+    model = DummyModel(params)
+    model = model.to(torch.bfloat16)
+    trainer = L.Trainer(**trainer_args)
+    trainer.strategy.connect(model)
+    model.trainer = trainer
+    trainer.state.fn = TrainerFn.FITTING
+    trainer.strategy.setup_environment()
+    _call_configure_model(trainer)
+    trainer.strategy.setup(trainer)
+    trainer.optimizers = [model.configure_optimizers()]
+    return trainer
+
+
+def _load_step(trainer, ckpt_path):
+    ckpt = trainer.strategy.load_checkpoint(ckpt_path)
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        trainer.strategy.load_model_state_dict(ckpt)
+        if trainer.optimizers and "optimizer_states" in ckpt:
+            trainer.strategy.load_optimizer_state_dict(ckpt)
+
+
+def _rank_load(rank, world_size, port, prefix, params, q):
+    # This runs in a subprocess. We use "gloo" for CPU distributed run.
+    setup_distributed_env(rank, world_size, port)
 
     # The checkpoint path is deterministic based on ModelCheckpoint config
     ckpt_path = os.path.join(prefix, "model.ckpt")
-
-    model2 = DummyModel(params)
-    model2 = model2.to(torch.bfloat16)
-    trainer2 = L.Trainer(strategy=get_strategy(params), **trainer_args)
-    trainer2.strategy.connect(model2)
-    model2.trainer = trainer2
-    trainer2.state.fn = TrainerFn.FITTING
-    trainer2.strategy.setup_environment()
-    _call_configure_model(trainer2)
-    trainer2.strategy.setup(trainer2)
-    trainer2.optimizers = [model2.configure_optimizers()]
+    trainer = _setup_read_trainer(
+        prefix, params, world_size=world_size, strategy=get_strategy(params)
+    )
 
     durations = []
     for _ in range(params.rounds):
         dist.barrier()
         t_start = time.perf_counter()
-        trainer2.strategy.load_checkpoint(ckpt_path)
+        _load_step(trainer, ckpt_path)
         dist.barrier()
         t_end = time.perf_counter()
         durations.append((t_start, t_end))
@@ -137,32 +153,13 @@ class PLCheckpointReadDriver(CheckpointDriver):
             durations = run_split(prefix, params, _rank_load)
             return CheckpointResult(durations=durations)
 
-        trainer_args = {
-            "default_root_dir": prefix,
-            "accelerator": "cpu",
-            "devices": 1,
-            "max_steps": 1,
-            "precision": "bf16-mixed",
-            "enable_checkpointing": False,
-        }
-
         ckpt_path = os.path.join(prefix, "model.ckpt")
-
-        model2 = DummyModel(params)
-        model2 = model2.to(torch.bfloat16)
-        trainer2 = L.Trainer(**trainer_args)
-        trainer2.strategy.connect(model2)
-        model2.trainer = trainer2
-        trainer2.state.fn = TrainerFn.FITTING
-        trainer2.strategy.setup_environment()
-        _call_configure_model(trainer2)
-        trainer2.strategy.setup(trainer2)
-        trainer2.optimizers = [model2.configure_optimizers()]
+        trainer = _setup_read_trainer(prefix, params, world_size=1)
 
         durations = []
         for _ in range(params.rounds):
             begin = time.perf_counter()
-            trainer2.strategy.load_checkpoint(ckpt_path)
+            _load_step(trainer, ckpt_path)
             end = time.perf_counter()
             durations.append(end - begin)
 

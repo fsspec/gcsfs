@@ -179,3 +179,56 @@ def test_enrich_csv_retry_completes_only_the_missing_row(tmp_path):
     assert second.missing_buckets == ()
     assert second.enriched == 1
     assert client.calls == 4
+
+
+def test_enrich_csv_checkpoint_read_and_write(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    fields = [
+        "benchmark_case_id",
+        "workload_scenario",
+        "gcs_bucket_name",
+        "measurement_window_start_unix_seconds",
+        "measurement_window_end_unix_seconds",
+        "checkpoint_physical_size_bytes",
+        "checkpoint_read_throughput_mean_bytes_per_second",
+        "checkpoint_write_throughput_mean_bytes_per_second",
+        "measurement_round_count",
+    ]
+    _write_csv(
+        csv_path,
+        [
+            {
+                "benchmark_case_id": "read-case",
+                "workload_scenario": "checkpoint_read",
+                "gcs_bucket_name": "b-read",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "checkpoint_physical_size_bytes": "500",
+                "checkpoint_read_throughput_mean_bytes_per_second": "250",
+                "checkpoint_write_throughput_mean_bytes_per_second": "",
+                "measurement_round_count": "1",
+            },
+            {
+                "benchmark_case_id": "write-case",
+                "workload_scenario": "checkpoint_write",
+                "gcs_bucket_name": "b-write",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "checkpoint_physical_size_bytes": "500",
+                "checkpoint_read_throughput_mean_bytes_per_second": "",
+                "checkpoint_write_throughput_mean_bytes_per_second": "250",
+                "measurement_round_count": "1",
+            },
+        ],
+        fields,
+    )
+    client = _FakeClient([_TimeSeries([_point(1000.0)])])
+    result = amplification.enrich_csv(str(csv_path), "proj", client=client)
+    assert result.eligible == 1
+    assert result.enriched == 1
+    assert result.missing_buckets == ()
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["checkpoint_read_bytes"] == "1000"
+    assert float(rows[0]["checkpoint_read_amplification_ratio"]) == 2.0
+    assert rows[1]["checkpoint_read_bytes"] == ""

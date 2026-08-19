@@ -102,13 +102,16 @@ def enrich_csv(csv_path, project, *, client):
         if not bucket:
             continue
 
-        # Check if this row is for dataset or checkpoint
+        # Check if this row is for dataset or checkpoint read
         prefix = None
         if "dataset_size_bytes" in row and row["dataset_size_bytes"]:
             prefix = "dataset"
         elif (
-            "checkpoint_physical_size_bytes" in row
-            and row["checkpoint_physical_size_bytes"]
+            (
+                row.get("workload_scenario") == "checkpoint_read"
+                or row.get("checkpoint_read_throughput_mean_bytes_per_second")
+            )
+            and row.get("checkpoint_physical_size_bytes")
         ):
             prefix = "checkpoint"
 
