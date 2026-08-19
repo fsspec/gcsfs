@@ -88,7 +88,6 @@ def _setup_read_trainer(prefix, params, world_size=1, strategy=None):
     trainer.strategy.setup_environment()
     _call_configure_model(trainer)
     trainer.strategy.setup(trainer)
-    trainer.optimizers = [model.configure_optimizers()]
     return trainer
 
 

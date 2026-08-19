@@ -107,12 +107,9 @@ def enrich_csv(csv_path, project, *, client):
         if "dataset_size_bytes" in row and row["dataset_size_bytes"]:
             prefix = "dataset"
         elif (
-            (
-                row.get("workload_scenario") == "checkpoint_read"
-                or row.get("checkpoint_read_throughput_mean_bytes_per_second")
-            )
-            and row.get("checkpoint_physical_size_bytes")
-        ):
+            row.get("workload_scenario") == "checkpoint_read"
+            or row.get("checkpoint_read_throughput_mean_bytes_per_second")
+        ) and row.get("checkpoint_physical_size_bytes"):
             prefix = "checkpoint"
 
         if not prefix:
