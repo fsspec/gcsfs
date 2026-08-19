@@ -168,10 +168,12 @@ def test_run_checkpoint_read_case(tmp_path, monkeypatch):
     assert bench.extra_info["checkpoint_physical_size_bytes"] == 500
     assert bench.extra_info["checkpoint_read_throughput_mean_bytes_per_second"] > 0
 
+
 def test_checkpoint_case_prefix_generation(monkeypatch):
     monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
 
     original_url_to_fs = fsspec.core.url_to_fs
+
     def mock_url_to_fs(url, **kwargs):
         if url.startswith("gs://"):
             mem_url = url.replace("gs://", "memory://")
@@ -188,9 +190,10 @@ def test_checkpoint_case_prefix_generation(monkeypatch):
 
     bench = _Bench()
     params = _params()
-    
+
     # Test with full URI returned by bucket_ctx
     driver_uri = _FakeWriteDriver()
+
     @contextlib.contextmanager
     def uri_bucket_ctx(spec, case_id, **kw):
         yield "gs://my-bucket/data/"
@@ -207,6 +210,7 @@ def test_checkpoint_case_prefix_generation(monkeypatch):
 
     # Test with plain bucket name returned by bucket_ctx
     driver_name = _FakeWriteDriver()
+
     @contextlib.contextmanager
     def name_bucket_ctx(spec, case_id, **kw):
         yield "my-bucket-name"
