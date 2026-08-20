@@ -5,6 +5,25 @@ Proof-of-concept evaluating the official Rust `google-cloud-storage` SDK
 gcsfs, exposed to Python via a PyO3 extension (`gcsfs-rust-backend`,
 [rust/gcsfs_rust](gcsfs_rust)).
 
+## Executive summary
+
+- Built a working, opt-in Rust read backend for gcsfs (`read_backend="rust"`
+  / `GCSFS_READ_BACKEND=rust`) using the official Rust `google-cloud-storage`
+  SDK via a PyO3 extension. Correctness verified byte-for-byte against the
+  existing aiohttp path.
+- At the best-tested config (concurrency=16, 256 MiB readahead, 10 GiB
+  object), the rust backend was **~70% faster** than the current path
+  (~1166 MB/s vs ~685 MB/s average), but used **~33% more peak memory**
+  (~498 MB vs ~374 MB) and far more CPU (562-763% vs 74-92%), since the
+  Tokio runtime genuinely parallelizes across cores.
+- A standalone, Python-free benchmark of the same Rust SDK reached 2-4x
+  higher throughput than the same reads driven through gcsfs/Python,
+  indicating the Python layer (asyncio, per-call thread dispatch) is the
+  main bottleneck limiting the gains actually seen through gcsfs today.
+- Both backends ultimately use the same JSON REST API (`storage.googleapis.com`)
+  — the crate's gRPC path exists but is unstable and requires Google
+  account-team allowlisting per project/bucket, so it wasn't evaluated here.
+
 ## Environment
 
 - **VM machine type:** `c4-standard-192` (192 vCPUs, ~708 GiB RAM)
