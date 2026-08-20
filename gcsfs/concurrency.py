@@ -9,17 +9,13 @@ def split_range(size, concurrency, min_chunk_size):
 
     min_chunk_size = max(1, min_chunk_size)
     if concurrency <= 1 or size < min_chunk_size:
-        chunk_count = 1
-    else:
-        chunk_count = min(concurrency, size // min_chunk_size)
+        return [(0, size)]
 
-    part_size = size // chunk_count
+    num_chunks = min(concurrency, size // min_chunk_size)
+    chunk_size, remainder = divmod(size, num_chunks)
     return [
-        (
-            i * part_size,
-            part_size if i < chunk_count - 1 else size - (i * part_size),
-        )
-        for i in range(chunk_count)
+        (i * chunk_size, chunk_size if i < num_chunks - 1 else chunk_size + remainder)
+        for i in range(num_chunks)
     ]
 
 

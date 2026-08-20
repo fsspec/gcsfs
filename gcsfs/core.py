@@ -1255,27 +1255,24 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if len(ranges) == 1:
             return await self._cat_file_sequential(path, start=start, end=end, **kwargs)
 
-        tasks = []
-
-        for relative_offset, size in ranges:
-            offset = start + relative_offset
-            tasks.append(
-                asyncio.create_task(
-                    self._cat_file_sequential(
-                        path, start=offset, end=offset + size, **kwargs
-                    )
+        tasks = [
+            asyncio.create_task(
+                self._cat_file_sequential(
+                    path, start=start + offset, end=start + offset + size, **kwargs
                 )
             )
+            for offset, size in ranges
+        ]
 
         try:
             results = await asyncio.gather(*tasks)
             return b"".join(results)
-        except BaseException as e:
+        except BaseException:
             for t in tasks:
                 if not t.done():
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            raise e
+            raise
 
     async def _cat_file(
         self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
