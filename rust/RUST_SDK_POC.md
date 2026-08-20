@@ -16,6 +16,37 @@ gcsfs, exposed to Python via a PyO3 extension (`gcsfs-rust-backend`,
 - **Test object:** `10gfile.bin`, 10,737,418,240 bytes (10 GiB)
 - **Rust toolchain:** stable 1.97.1, `pyo3` 0.29.2, `google-cloud-storage` 1.17.0
 - **Python:** CPython 3.14 (test venv), `gcsfs` from this branch (`with_rust_sdk`)
+- **Wire protocol:** confirmed via live trace (`RUST_LOG=reqwest=trace,hyper=debug`)
+  that `Storage::read_object()` goes over the **JSON REST API** via `reqwest`
+  to `storage.googleapis.com:443` (HTTPS). `tonic`/gRPC is also a dependency
+  of the crate but is only used by `StorageControl` (IAM, long-running ops),
+  not the object read path — so both the rust and existing aiohttp backends
+  ultimately hit the same JSON API.
+
+## Build & run the rust backend
+
+```bash
+# 1. Install a Rust toolchain (if not already present)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+
+# 2. Build the PyO3 extension into your Python env (needs `maturin`)
+pip install maturin
+cd rust/gcsfs_rust
+maturin develop --release   # or: maturin build --release && pip install <wheel>
+
+# 3. Enable it in gcsfs — either per-instance or globally via env var
+python -c "import gcsfs; fs = gcsfs.GCSFileSystem(read_backend='rust')"
+# or
+export GCSFS_READ_BACKEND=rust
+
+# 4. Try the benchmark script with it
+python data/read_gcs_file.py --url gs://<bucket>/<object> --backend rust
+```
+
+`maturin develop` requires an active virtualenv (`VIRTUAL_ENV` set, or a
+`.venv` in/above the cwd) — otherwise it errors with "Couldn't find a
+virtualenv or conda environment".
 
 ## Benchmark applications
 
@@ -44,16 +75,41 @@ gcsfs, exposed to Python via a PyO3 extension (`gcsfs-rust-backend`,
 
 ## Results
 
-### Python path (gcsfs), 10gfile.bin, io-size=8MiB, cache_type=none, prefetcher enabled
+### Final result: concurrency=16, max-prefetch-size=256MiB, 10gfile.bin
 
-| Backend | Concurrency | Run 1 | Run 2 | Run 3 | Avg |
-|---|---|---|---|---|---|
-| rust  | 4  | 932.08 MB/s  | -            | -            | 932 MB/s |
-| fsspec | 4  | 801.13 MB/s  | -            | -            | 801 MB/s |
-| rust  | 16 | 953.27 MB/s  | 1051.57 MB/s | 873.42 MB/s  | ~959 MB/s |
-| fsspec | 16 | 822.70 MB/s  | 851.33 MB/s  | 765.36 MB/s  | ~813 MB/s |
-| rust  | 16, max-prefetch-size=256MiB (explicit; gcsfs default) | 1108.26 MB/s | 1075.59 MB/s | 1140.51 MB/s | ~1108 MB/s |
-| fsspec | 16, max-prefetch-size=256MiB (explicit; gcsfs default) | 800.39 MB/s  | 778.08 MB/s  | 545.26 MB/s  | ~708 MB/s |
+This is gcsfs's default readahead ceiling combined with 16-way concurrency —
+the configuration that gave the clearest, most reproducible comparison.
+Every run below reads `gs://princer-bucket/10gfile.bin` (10 GiB) end-to-end.
+Measured with plain `/usr/bin/time` (no `-v`; its default output includes
+`maxresident`); throughput and memory are from the same process invocation
+in each row.
+
+| Backend | Run | Throughput | Peak RSS | CPU% |
+|---|---|---|---|---|
+| rust | 1 | 903.45 MB/s | 510,716 KB (~499 MB) | 562% |
+| rust | 2 | 1299.72 MB/s | 512,804 KB (~501 MB) | 741% |
+| rust | 3 | 1295.94 MB/s | 504,992 KB (~493 MB) | 763% |
+| **rust** | **avg** | **~1166 MB/s** | **~498 MB** | |
+| fsspec | 1 | 660.92 MB/s | 375,304 KB (~367 MB) | 76% |
+| fsspec | 2 | 622.16 MB/s | 379,504 KB (~371 MB) | 74% |
+| fsspec | 3 | 772.38 MB/s | 381,780 KB (~373 MB) | 92% |
+| **fsspec** | **avg** | **~685 MB/s** | **~374 MB** | |
+
+Notes:
+- Rust is **~70% faster** on average throughput here, but uses **~33% more
+  peak memory** and far more CPU (562-763% vs 74-92%) — the Tokio runtime
+  genuinely parallelizes across cores, while gcsfs's aiohttp path is mostly
+  I/O-wait bound on a single-threaded event loop.
+- Cross-checked against runs without `/usr/bin/time` at all (throughput only,
+  3 runs each): rust ~1151 MB/s avg, fsspec ~753 MB/s avg — consistent with
+  the numbers above, confirming the `time` wrapper isn't adding meaningful
+  overhead.
+- Run-to-run variance is still present (e.g. rust run 1 at 903 MB/s vs runs
+  2-3 near 1300 MB/s) and is most likely network-path noise — each process
+  run opens fresh TCP/TLS connections, so results are sensitive to
+  per-connection GCS backend routing and TCP slow-start rather than anything
+  in this code. Peak RSS, by contrast, was stable and consistent across all
+  runs for both backends.
 
 ### Pure Rust path (no Python), 10gfile.bin, direct range reads
 
@@ -81,11 +137,27 @@ gcsfs, exposed to Python via a PyO3 extension (`gcsfs-rust-backend`,
   rather than something in this code. Numbers here should be treated as
   directional, not final — a rigorous benchmark would use distinct objects
   per run, multiple trials, and averaging/percentiles.
-- Explicitly setting `--max-prefetch-size 256MiB` didn't materially change
-  results, since 256 MiB is already gcsfs's default `MAX_PREFETCH_SIZE`
-  ([zb_hns_utils.py](gcsfs/zb_hns_utils.py)) — the rust path trended slightly
-  higher (~1108 MB/s) but fsspec run-to-run variance (545-800 MB/s) makes it
-  hard to draw a strong conclusion from these sample sizes.
+- Across 3 repeated runs of the concurrency=16/max-prefetch-size=256MiB
+  config on `10gfile.bin`, the rust backend averaged **~1166 MB/s vs
+  fsspec's ~685 MB/s** (~70% faster), despite both showing run-to-run
+  variance (see below).
+- The rust backend uses **more peak memory** (~498 MB average RSS vs
+  ~374 MB for fsspec, ~33% more) and far more CPU (562-763% vs 74-92%),
+  since the Tokio multi-threaded runtime genuinely parallelizes across cores
+  (192 worker threads by default on this VM) plus Python's
+  `asyncio.to_thread` pool, versus gcsfs's mostly I/O-wait-bound
+  single-threaded aiohttp event loop. Worth revisiting with a bounded worker
+  count if memory/CPU footprint matters more than raw throughput.
+- **Wire protocol:** confirmed via a live trace (`RUST_LOG=reqwest=trace,hyper=debug`)
+  that `read_object()` uses the JSON REST API over `reqwest`
+  (`storage.googleapis.com:443`), not gRPC. The crate does build an internal
+  gRPC client (`with_grpc_subchannel_count()`), but it's only used by the
+  unstable, allowlist-gated bidi streaming APIs (`open_object()`/
+  `send_and_read()`, behind the `unstable-stream` feature and a
+  `google_cloud_unstable_storage_bidi` cfg flag) — not the stable
+  `read_object()` path this integration uses, and Google notes those bidi
+  APIs require account-team allowlisting per project/bucket. Enabling a
+  gRPC data path is a possible future avenue but out of scope here.
 
 ## Not yet covered
 
