@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gcsfs-rust-backend"
+version = "0.1.0"
+description = "Rust (google-cloud-storage SDK) read backend for gcsfs, exposed via PyO3"
+requires-python = ">=3.10"
+
+[tool.maturin]
+module-name = "gcsfs_rust_backend"
+features = ["pyo3/extension-module"]
