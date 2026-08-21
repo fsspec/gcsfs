@@ -87,16 +87,14 @@ def _setup_read_trainer(prefix, params, world_size=1, strategy=None):
     trainer.state.fn = TrainerFn.FITTING
     trainer.strategy.setup_environment()
     _call_configure_model(trainer)
-    trainer.strategy.setup(trainer)
+    if trainer.strategy.restore_checkpoint_after_setup:
+        trainer.strategy.setup(trainer)
+
     return trainer
 
 
 def _load_step(trainer, ckpt_path):
-    ckpt = trainer.strategy.load_checkpoint(ckpt_path)
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        trainer.strategy.load_model_state_dict(ckpt)
-        if trainer.optimizers and "optimizer_states" in ckpt:
-            trainer.strategy.load_optimizer_state_dict(ckpt)
+    trainer.strategy.load_checkpoint(ckpt_path)
 
 
 def _rank_load(rank, world_size, port, prefix, params, q):
