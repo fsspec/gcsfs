@@ -256,6 +256,41 @@ async def test_cat_file_warning_on_missing_persisted_size(
 
 
 @pytest.mark.asyncio
+async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
+    """
+    Tests that cache_type and cache_source are propagated to _mrd_pool_cache.get.
+    """
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        with mock.patch.object(
+            extended_gcsfs._mrd_pool_cache, "get", new_callable=mock.AsyncMock
+        ) as mock_get:
+            mock_mrd = mock.AsyncMock()
+            mock_mrd.persisted_size = len(json_data)
+            mock_get.return_value = mock_mrd
+
+            with mock.patch.object(
+                extended_gcsfs, "_concurrent_mrd_fetch", new_callable=mock.AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = json_data[:10]
+                await extended_gcsfs._cat_file(
+                    file_path,
+                    start=0,
+                    end=10,
+                    cache_type="readahead",
+                    cache_source="explicit",
+                )
+
+            mock_get.assert_awaited_once_with(
+                "test-bucket",
+                "test-object",
+                mock.ANY,
+                pool_size=mock.ANY,
+                cache_type="readahead",
+                cache_source="explicit",
+            )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "unsupported_kwarg",
     [

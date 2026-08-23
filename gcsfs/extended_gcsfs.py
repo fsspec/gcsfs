@@ -442,10 +442,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket, object_name, generation = self.split_path(path)
 
         if mrd is None:
+            cache_type = kwargs.get("cache_type", getattr(self, "cache_type", None))
+            cache_source = kwargs.get(
+                "cache_source", getattr(self, "cache_source", None)
+            )
+
             # If no mrd is provided, we create one with pool size equal to passed concurrency.
             pool_size = min(len(chunk_lengths), concurrency)
             mrd = await self._mrd_pool_cache.get(
-                bucket, object_name, generation, pool_size=pool_size
+                bucket,
+                object_name,
+                generation,
+                pool_size=pool_size,
+                cache_type=cache_type,
+                cache_source=cache_source,
             )
             pool_created_here = True
 
@@ -592,9 +602,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     path, start=start, end=end, concurrency=concurrency, **kwargs
                 )
 
+            cache_type = kwargs.get("cache_type", getattr(self, "cache_type", None))
+            cache_source = kwargs.get(
+                "cache_source", getattr(self, "cache_source", None)
+            )
+
             # Instantiate an MRDPool locally for this call
             mrd = await self._mrd_pool_cache.get(
-                bucket, object_name, generation, pool_size=concurrency
+                bucket,
+                object_name,
+                generation,
+                pool_size=concurrency,
+                cache_type=cache_type,
+                cache_source=cache_source,
             )
             pool_created_here = True
 

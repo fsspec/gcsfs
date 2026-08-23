@@ -42,14 +42,28 @@ except Exception:
     HAS_CPYTHON_API = False
 
 
-async def init_mrd(grpc_client, bucket_name, object_name, generation=None):
+async def init_mrd(
+    grpc_client,
+    bucket_name,
+    object_name,
+    generation=None,
+    cache_type=None,
+    cache_source=None,
+):
     """
     Creates the AsyncMultiRangeDownloader using an existing client.
     Wraps Google API errors into standard Python exceptions.
     """
+    from gcsfs.core import _get_cache_type_header_value
+
+    metadata = None
+    cache_val = _get_cache_type_header_value(cache_type, cache_source)
+    if cache_val:
+        metadata = [("x-goog-api-client", cache_val)]
+
     try:
         return await AsyncMultiRangeDownloader.create_mrd(
-            grpc_client, bucket_name, object_name, generation
+            grpc_client, bucket_name, object_name, generation, metadata=metadata
         )
     except NotFound:
         # We wrap the error here to match standard Python error handling
@@ -497,12 +511,16 @@ class MRDPool:
         finalized,
         pool_size,
         cache=None,
+        cache_type=None,
+        cache_source=None,
     ):
         self.gcsfs = gcsfs
         self.bucket_name = bucket_name
         self.object_name = object_name
         self.generation = generation
         self._cache = cache
+        self.cache_type = cache_type
+        self.cache_source = cache_source
         self._key = (bucket_name, object_name, generation)
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
@@ -545,7 +563,12 @@ class MRDPool:
     async def _create_mrd(self):
         await self.gcsfs._get_grpc_client()
         mrd = await init_mrd(
-            self.gcsfs.grpc_client, self.bucket_name, self.object_name, self.generation
+            self.gcsfs.grpc_client,
+            self.bucket_name,
+            self.object_name,
+            self.generation,
+            cache_type=self.cache_type,
+            cache_source=self.cache_source,
         )
         return mrd
 
@@ -743,7 +766,15 @@ class MRDPoolCache:
             mrds_to_close.extend(_drain_queue(self._mrd_queues.pop(evict_key, None)))
         return mrds_to_close
 
-    async def get(self, bucket_name, object_name, generation, pool_size):
+    async def get(
+        self,
+        bucket_name,
+        object_name,
+        generation,
+        pool_size,
+        cache_type=None,
+        cache_source=None,
+    ):
         """
         Gets an MRDPool for the specified object.
 
@@ -752,6 +783,8 @@ class MRDPoolCache:
             object_name (str): Name of the object.
             generation (int): Object generation.
             pool_size (int): Requested pool size.
+            cache_type (str, optional): The cache type string.
+            cache_source (str, optional): The cache source string.
 
         Returns:
             MRDPool: An initialized MRDPool instance.
@@ -777,6 +810,8 @@ class MRDPoolCache:
             finalized,
             pool_size,
             cache=self,
+            cache_type=cache_type,
+            cache_source=cache_source,
         )
         if info is not None:
             mrd_pool.details = info

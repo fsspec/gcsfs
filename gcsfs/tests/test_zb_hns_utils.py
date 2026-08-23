@@ -143,7 +143,35 @@ async def test_init_mrd_success():
         )
 
         mock_create_mrd.assert_awaited_once_with(
-            mock_grpc_client, bucket_name, object_name, generation
+            mock_grpc_client, bucket_name, object_name, generation, metadata=None
+        )
+        assert result is mock_mrd_instance
+
+
+@pytest.mark.asyncio
+async def test_init_mrd_with_cache_type():
+    """Tests that init_mrd passes cache_type as metadata."""
+    mock_mrd_instance = mock.Mock()
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        new_callable=mock.AsyncMock,
+        return_value=mock_mrd_instance,
+    ) as mock_create_mrd:
+        result = await zb_hns_utils.init_mrd(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            generation,
+            cache_type="readahead",
+            cache_source="explicit",
+        )
+
+        mock_create_mrd.assert_awaited_once_with(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            generation,
+            metadata=[("x-goog-api-client", "cache_type/readahead:e")],
         )
         assert result is mock_mrd_instance
 
@@ -913,6 +941,38 @@ async def test_mrd_pool_cache_get_creates_mrd_queue(init_mrd_mock, mock_gcsfs):
     assert mrd_pool.pool_size == 2
     assert mrd_pool._cache is cache
     assert cache._refcounts[("bucket", "obj", "123")] == 1
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_cache_type(init_mrd_mock, mock_gcsfs):
+    mock_mrd = mock.AsyncMock()
+    mock_mrd.persisted_size = 8
+    init_mrd_mock.return_value = mock_mrd
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+    mrd_pool = await cache.get(
+        "bucket",
+        "obj",
+        "123",
+        pool_size=2,
+        cache_type="readahead",
+        cache_source="explicit",
+    )
+
+    assert mrd_pool.cache_type == "readahead"
+    assert mrd_pool.cache_source == "explicit"
+
+    await mrd_pool.initialize()
+
+    init_mrd_mock.assert_awaited_once_with(
+        mock_gcsfs.grpc_client,
+        "bucket",
+        "obj",
+        "123",
+        cache_type="readahead",
+        cache_source="explicit",
+    )
 
 
 @pytest.mark.asyncio
