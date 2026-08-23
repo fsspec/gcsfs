@@ -521,7 +521,7 @@ class MRDPool:
         self._cache = cache
         self.cache_type = cache_type
         self.cache_source = cache_source
-        self._key = (bucket_name, object_name, generation)
+        self._key = (bucket_name, object_name, generation, cache_type, cache_source)
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
@@ -798,7 +798,7 @@ class MRDPoolCache:
         info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
         if generation is None:
             generation = info.get("generation")
-        key = (bucket_name, object_name, generation)
+        key = (bucket_name, object_name, generation, cache_type, cache_source)
         finalized = info.get("timeFinalized") is not None
 
         self._incref(key)
