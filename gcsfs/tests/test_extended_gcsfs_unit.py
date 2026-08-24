@@ -265,8 +265,11 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
             extended_gcsfs._mrd_pool_cache, "get", new_callable=mock.AsyncMock
         ) as mock_get:
             from gcsfs.zb_hns_utils import MRDPool
+
             mock_mrd = mock.AsyncMock(spec=MRDPool)
-            mock_mrd.get_mrd.return_value.__aenter__.return_value.persisted_size = len(json_data)
+            mock_mrd.get_mrd.return_value.__aenter__.return_value.persisted_size = len(
+                json_data
+            )
             mock_get.return_value = mock_mrd
 
             with mock.patch.object(
