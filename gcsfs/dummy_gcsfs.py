@@ -9,12 +9,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-from gcsfs.zb_hns_utils import (
-    MRDPool,
-    MRDPoolCache,
-    _close_mrds,
-    _drain_queue,
-)
+from gcsfs.zb_hns_utils import MRDPool, MRDPoolCache, _close_mrds, _drain_queue
 
 logger = logging.getLogger("gcsfs.dummy_io")
 
@@ -78,10 +73,10 @@ class DummyMRD(AsyncMultiRangeDownloader):
         self._delay_simulator = delay_simulator
 
     async def download_ranges(self, ranges):
-        for idx, (offset, length, buf) in enumerate(ranges):
+        for offset, length, buf in ranges:
             if self._delay_simulator:
                 await self._delay_simulator.async_delay(
-                    size=length, is_first_chunk=(idx == 0)
+                    size=length, is_first_chunk=False
                 )
             buf.write(bytes(length))
 
@@ -93,6 +88,8 @@ class DummyMRDPool(MRDPool):
     """Subclasses production MRDPool to create DummyMRD without gRPC connections."""
 
     async def _create_mrd(self):
+        if self.gcsfs.delay_simulator:
+            await self.gcsfs.delay_simulator.async_delay(is_first_chunk=True)
         info = self.details or await self.gcsfs._info(
             f"{self.bucket_name}/{self.object_name}", generation=self.generation
         )

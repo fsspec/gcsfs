@@ -47,10 +47,19 @@ def test_dummy_zonal_read():
     """Verify DummyMRD read path through production MRDPool, MRDPoolCache, and ZonalFile."""
     fs = DummyGcsFileSystem()
     dummy_info = {"size": 10000, "name": "my-zonal-bucket/file.dat", "type": "file"}
-    with mock.patch.object(fs, "_sync_lookup_bucket_type", return_value=BucketType.ZONAL_HIERARCHICAL):
-        with mock.patch.object(GCSFileSystem, "_info", new_callable=mock.AsyncMock, return_value=dummy_info):
+    with mock.patch.object(
+        fs, "_sync_lookup_bucket_type", return_value=BucketType.ZONAL_HIERARCHICAL
+    ):
+        with mock.patch.object(
+            GCSFileSystem, "_info", new_callable=mock.AsyncMock, return_value=dummy_info
+        ):
             with mock.patch.object(fs, "info", return_value=dummy_info):
-                with mock.patch.object(fs, "_is_zonal_bucket", new_callable=mock.AsyncMock, return_value=True):
+                with mock.patch.object(
+                    fs,
+                    "_is_zonal_bucket",
+                    new_callable=mock.AsyncMock,
+                    return_value=True,
+                ):
                     with fs.open("my-zonal-bucket/file.dat", "rb") as f:
                         assert isinstance(f, ZonalFile)
                         data = f.read(2048)
@@ -62,8 +71,12 @@ def test_dummy_sequential_read():
     """Verify standard (non-zonal) dummy read path through GCSFile and _cat_file_sequential."""
     fs = DummyGcsFileSystem()
     dummy_info = {"size": 5000, "name": "my-bucket/file.dat", "type": "file"}
-    with mock.patch.object(fs, "_sync_lookup_bucket_type", return_value=BucketType.NON_HIERARCHICAL):
-        with mock.patch.object(GCSFileSystem, "_info", new_callable=mock.AsyncMock, return_value=dummy_info):
+    with mock.patch.object(
+        fs, "_sync_lookup_bucket_type", return_value=BucketType.NON_HIERARCHICAL
+    ):
+        with mock.patch.object(
+            GCSFileSystem, "_info", new_callable=mock.AsyncMock, return_value=dummy_info
+        ):
             with mock.patch.object(fs, "info", return_value=dummy_info):
                 with fs.open("my-bucket/file.dat", "rb") as f:
                     assert isinstance(f, GCSFile)
