@@ -281,8 +281,8 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
                 )
 
             mock_get.assert_awaited_once_with(
-                "test-bucket",
-                "test-object",
+                TEST_ZONAL_BUCKET,
+                file,
                 mock.ANY,
                 pool_size=mock.ANY,
                 cache_type="readahead",
