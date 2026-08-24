@@ -17,14 +17,18 @@ except ImportError:
     _rust = None
     available = False
 
+# Older builds of the extension only expose the blocking entry point.
+_has_async = available and hasattr(_rust, "read_range_async")
+
 logger = logging.getLogger("gcsfs.rust_backend")
 
 
 async def cat_file_range(bucket, object, start=None, end=None, generation=None):
     """Read a byte range of a GCS object using the Rust SDK backend.
 
-    Runs the (blocking) Rust call in a thread so it doesn't block the event
-    loop that gcsfs's async filesystem relies on.
+    Prefers the extension's native awaitable, which lets the running asyncio
+    loop drive the Rust future directly. Falls back to dispatching the
+    blocking call to a worker thread.
     """
     if not available:
         raise ImportError(
@@ -32,6 +36,8 @@ async def cat_file_range(bucket, object, start=None, end=None, generation=None):
             "package (see rust/gcsfs_rust in the gcsfs source tree)."
         )
     logger.debug("rust backend read: %s/%s %s-%s", bucket, object, start, end)
+    if _has_async:
+        return await _rust.read_range_async(bucket, object, start, end, generation)
     return await asyncio.to_thread(
         _rust.read_range, bucket, object, start, end, generation
     )
