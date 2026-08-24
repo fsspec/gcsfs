@@ -953,7 +953,7 @@ def test_get_file_from_zonal_bucket(extended_gcsfs, gcs_bucket_mocks):
             mocks["downloader"].close.assert_awaited()
 
 
-async def create_mrd_side_effect(client, bucket, object_name, generation):
+async def create_mrd_side_effect(client, bucket, object_name, generation, **kwargs):
     """Side effect function to create a mocked AsyncMultiRangeDownloader."""
     file_data = files[object_name]
 
