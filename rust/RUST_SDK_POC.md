@@ -11,14 +11,19 @@ gcsfs, exposed to Python via a PyO3 extension (`gcsfs-rust-backend`,
   (`read_backend="rust"` / `GCSFS_READ_BACKEND=rust`). Correctness verified
   byte-for-byte against the existing aiohttp path.
 - At the best-tested config (concurrency=16, 256 MiB readahead, 10 GiB
-  object) it reads at **~1400 MB/s vs ~685 MB/s** for the current path
-  (**~2x**), at **comparable peak memory** (~346 MB vs ~374 MB). CPU is
-  ~363% vs ~81%; because it also finishes ~2x sooner, that is ~2.2x the CPU
-  *per byte*.
-- Getting there required three things in the binding layer, not in the SDK:
+  object), measured with runs interleaved against the current path so both
+  see the same network: **~1676 MB/s vs ~802 MB/s (~2x)**, at **~40% less
+  peak memory** (~232 MB vs ~391 MB). CPU is ~300% vs ~81%; because it also
+  finishes ~2x sooner, that is ~1.8x the CPU *per byte*.
+- Rust throughput is **much noisier** than fsspec's (coefficient of variation
+  14.5% vs 3.2%) because fsspec is pinned by its own single-threaded event
+  loop while rust is fast enough to inherit the network's variability. Quote
+  it as a range, not a point value; the memory figures are the stable ones.
+- Getting there required four things in the binding layer, not in the SDK:
   a **native Python awaitable** (via `pyo3-async-runtimes`) instead of an
-  `asyncio.to_thread` hop, **bounded Tokio worker threads**, and a
-  **preallocated read buffer**.
+  `asyncio.to_thread` hop, **bounded Tokio worker threads**, a
+  **preallocated read buffer**, and **streaming straight into the destination
+  `bytes`** so no intermediate `Vec` copy is needed.
 - A standalone, Python-free benchmark of the same Rust SDK still reaches
   2-4x higher throughput than the same reads driven through gcsfs, so the
   Python layer remains the limiting factor on what this integration can
@@ -46,6 +51,7 @@ gcsfs, exposed to Python via a PyO3 extension (`gcsfs-rust-backend`,
   reads — so both backends hit the same JSON API.
 
 ## Build & run the rust backend
+## Build and run the Rust backend
 
 ```bash
 # 1. Install a Rust toolchain (if not already present)
@@ -109,34 +115,77 @@ virtualenv or conda environment".
 
 Every run reads `gs://princer-bucket/10gfile.bin` (10 GiB) end-to-end.
 Throughput, peak RSS and CPU% all come from the same process invocation,
-measured with `/usr/bin/time`. The `rust` rows use the shipped defaults plus
+measured with `/usr/bin/time`, with the shipped defaults plus
 `MALLOC_ARENA_MAX=4`.
+
+The `rust (zero-copy)` and `fsspec` runs are **interleaved** — alternating
+backends so both see the same network conditions. Sequential batches are not
+comparable, because GCS throughput drifts and the first run of a batch is
+consistently slower. Reproduce with
+[rust/bench/compare_backends.sh](bench/compare_backends.sh).
 
 | Backend | Run | Throughput | Peak RSS | CPU% |
 |---|---|---|---|---|
-| rust | 1 | 1361.0 MB/s | 360,968 KB (~353 MB) | 384% |
-| rust | 2 | 1443.5 MB/s | 346,004 KB (~338 MB) | 363% |
-| rust | 3 | 1423.3 MB/s | 356,496 KB (~348 MB) | 342% |
-| **rust** | **avg** | **~1409 MB/s** | **~346 MB** | **~363%** |
-| fsspec | 1 | 660.92 MB/s | 375,304 KB (~367 MB) | 76% |
-| fsspec | 2 | 622.16 MB/s | 379,504 KB (~371 MB) | 74% |
-| fsspec | 3 | 772.38 MB/s | 381,780 KB (~373 MB) | 92% |
-| **fsspec** | **avg** | **~685 MB/s** | **~374 MB** | **~81%** |
+| rust (zero-copy) | 1 | 1282.1 MB/s | 234,500 KB (~229 MB) | 282% |
+| rust (zero-copy) | 2 | 1531.1 MB/s | 234,556 KB (~229 MB) | 307% |
+| rust (zero-copy) | 3 | 1694.5 MB/s | 240,792 KB (~235 MB) | 365% |
+| rust (zero-copy) | 4 | 1962.7 MB/s | 230,052 KB (~225 MB) | 410% |
+| rust (zero-copy) | 5 | 1745.3 MB/s | 237,628 KB (~232 MB) | 356% |
+| **rust (zero-copy)** | **mean** | **~1643 MB/s** | **~230 MB** | **~344%** |
+| rust (Vec + copy) | 1 | 1361.0 MB/s | 360,968 KB (~353 MB) | 384% |
+| rust (Vec + copy) | 2 | 1443.5 MB/s | 346,004 KB (~338 MB) | 363% |
+| rust (Vec + copy) | 3 | 1423.3 MB/s | 356,496 KB (~348 MB) | 342% |
+| **rust (Vec + copy)** | **mean** | **~1409 MB/s** | **~346 MB** | **~363%** |
+| fsspec | 1 | 870.9 MB/s | 389,232 KB (~380 MB) | 94% |
+| fsspec | 2 | 918.7 MB/s | 380,668 KB (~372 MB) | 97% |
+| fsspec | 3 | 922.3 MB/s | 389,928 KB (~381 MB) | 96% |
+| fsspec | 4 | 897.9 MB/s | 394,824 KB (~386 MB) | 97% |
+| fsspec | 5 | 912.3 MB/s | 396,656 KB (~387 MB) | 94% |
+| **fsspec** | **mean** | **~904 MB/s** | **~381 MB** | **~96%** |
+
+So the rust backend delivers roughly **1.8x the throughput at ~40% less peak
+memory**. `rust (Vec + copy)` is the earlier implementation that assembled
+data in a Rust `Vec` before copying it into Python; it was measured
+separately (not interleaved), so compare its **memory** against zero-copy
+(~346 MB vs ~230 MB) rather than its throughput, which sits inside the noise.
 
 CPU% is `(user + system) / elapsed`, so it is time-normalised: a faster run
 shows a higher percentage for the same total work. Since the rust path
-finishes ~2x sooner, its **CPU per byte** is ~2.2x fsspec's, not the ~4.5x
+finishes ~1.8x sooner, its **CPU per byte** is ~2x fsspec's, not the ~3.6x
 the raw percentages suggest.
 
 Correctness was verified against the `http` backend — byte-identical across
-zero-length, inverted, 1-byte, unaligned, tail-of-object and 64 MiB ranges.
+zero-length, inverted, 1-byte, unaligned, tail-of-object, past-EOF short
+reads, 64 MiB and over-cap ranges, plus 60 randomized offset/length pairs.
 
-**On variance:** throughput swings noticeably run to run (fsspec 622-772
-MB/s here; wider spreads elsewhere in testing). Each process run opens fresh
-TCP/TLS connections, so results are sensitive to per-connection GCS backend
-routing and TCP slow-start. Peak RSS, by contrast, was stable across runs.
+**On variance:** the two backends are *not* equally reproducible. Running
+them interleaved back-to-back under identical conditions:
+
+| | rust (zero-copy) | fsspec |
+|---|---|---|
+| runs | 1326.5 / 1951.3 / 1953.1 / 1577.9 / 1569.3 MB/s | 796.7 / 777.1 / 850.7 / 787.5 / 799.9 MB/s |
+| mean | ~1676 MB/s | ~802 MB/s |
+| coefficient of variation | **14.5%** | **3.2%** |
+
+Rust is ~4.5x more variable. Since interleaving exposes both to the same
+network conditions, this is not shared noise. The likely explanation is that
+**fsspec is its own bottleneck and rust is not**: fsspec runs at ~81% CPU on
+a single-threaded event loop, pinned near a self-imposed ceiling, so it
+returns ~800 MB/s almost regardless of available bandwidth. Rust spreads
+across ~300% CPU, is not CPU-bound, and therefore takes whatever the
+connection offers — inheriting the network's variability instead of masking
+it. A warm-up effect is also consistently visible: the first run of a batch
+is the slowest.
+
+Practical consequence: quote the rust throughput as a **range or mean over
+many runs**, never a single number, and prefer the memory figures when a
+precise claim is needed — peak RSS held to ~5% spread (231-244 MB) across
+every run. A rigorous benchmark would use distinct objects per run, discard
+a warm-up run, and report percentiles.
 Treat throughput figures as directional; a rigorous benchmark would use
 distinct objects per run and report percentiles over many trials.
+every run. Treat throughput figures as directional; a rigorous benchmark would
+use distinct objects per run, discard a warm-up run, and report percentiles over many trials.
 
 ### Pure Rust ceiling (no Python), direct range reads
 
@@ -280,9 +329,49 @@ simultaneously instead of ramping. The gain here comes from the
 long-lived, network-paced growth pattern, not from `with_capacity` being
 inherently cheaper.
 
-The final copy from the Rust `Vec` into Python `bytes` remains.
-`PyBytes::new_with` would avoid it but requires holding the GIL while
-streaming chunks, which defeats the async design.
+### 4. Streaming straight into the destination `bytes` — no intermediate copy
+
+**In plain terms.** Data was being assembled in a Rust buffer and then copied
+wholesale into a Python one, so every byte was handled twice and both buffers
+were alive at once. Now the Python buffer is created first and the network
+data is written directly into it.
+
+**The detail.** When the exact length is known (both `start` and `end` given,
+range ≤ 64 MiB — which covers **1280 of 1280 calls** in a typical gcsfs read),
+`read_range_async` allocates the destination `bytes` up front via
+`PyBytes_FromStringAndSize(NULL, len)`, hands the raw buffer pointer to the
+read task, and streams chunks into Python-owned memory with
+`copy_nonoverlapping`. Otherwise it falls back to the `Vec` path.
+
+Measured against the previous copying implementation:
+
+| Implementation | Throughput | Peak RSS | CPU% |
+|---|---|---|---|
+| `Vec` + copy into `bytes` | ~1409 MB/s | ~346 MB | ~363% |
+| stream directly into `bytes` | ~1424 MB/s | **~232 MB** | ~300% |
+
+The **memory saving (~114 MB, ~33%) is the real result** — it reproduced on
+every run. The throughput and CPU differences fall inside the run-to-run
+variance and should not be read as a speedup. That matches expectations: a
+memcpy runs at ~29.6 GB/s here, so the copy itself was only ~0.36s of CPU per
+10 GiB. The win is from no longer holding two buffers per in-flight read.
+
+Three safety obligations, all handled:
+
+- **Bounds.** Each chunk is checked against the remaining capacity; a
+  response larger than requested is rejected rather than overrunning the
+  Python allocation.
+- **Short reads.** If the server returns fewer bytes than requested (range
+  past EOF), returning the original buffer would expose its uninitialized
+  tail to Python — a heap-disclosure bug. That case instead returns a
+  correctly-sized copy of only the bytes actually written.
+- **Send-ness.** The raw pointer is wrapped in a `BufPtr` newtype with
+  `unsafe impl Send`, sound because exactly one task writes to it and the
+  object is never visible to Python until the write completes.
+
+Verified byte-identical to the `http` backend across zero-length, inverted,
+1-byte, unaligned, tail-of-object, past-EOF short read, 64 MiB and over-cap
+ranges, plus 60 randomized offset/length pairs.
 
 ## Measurement tooling
 
@@ -309,16 +398,18 @@ only the allocator, and `block_size` to vary call count at fixed byte count.
 ## Takeaways
 
 - The Rust SDK backend is a **drop-in, correctness-verified** alternative
-  read path, ~2x the throughput of the current aiohttp path at comparable
-  peak memory and ~2.2x the CPU per byte.
+  read path, ~2x the throughput of the current aiohttp path at ~40% lower
+  peak memory and ~1.8x the CPU per byte.
 - The performance characteristics are dominated by **how Rust is bound to
   Python**, not by the SDK: the thread-hop and allocator effects above were
   each worth more than anything in the I/O code itself.
 - The Python layer is still the ceiling — the same SDK runs 2-4x faster
   without it. Reducing per-chunk Python involvement is where further gains
   are.
-- Throughput numbers carry real run-to-run variance and should be treated as
-  directional rather than as benchmark guarantees.
+- Throughput numbers carry real run-to-run variance — and notably *more* for
+  rust than for fsspec (CV 14.5% vs 3.2%) — so they should be treated as
+  directional rather than as benchmark guarantees. Peak RSS is the stable,
+  quotable metric here.
 - **Wire protocol:** `read_object()` uses the JSON REST API over `reqwest`,
   not gRPC. The crate builds an internal gRPC client
   (`with_grpc_subchannel_count()`), but it serves only the unstable,
