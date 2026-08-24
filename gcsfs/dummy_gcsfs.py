@@ -9,7 +9,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-from gcsfs.zb_hns_utils import MRDPool, MRDPoolCache, _close_mrds, _drain_queue
+from gcsfs.zb_hns_utils import MRDPool
 
 logger = logging.getLogger("gcsfs.dummy_io")
 
@@ -99,49 +99,6 @@ class DummyMRDPool(MRDPool):
         )
 
 
-class DummyMRDPoolCache(MRDPoolCache):
-    """Subclasses production MRDPoolCache to construct DummyMRDPool instances."""
-
-    async def get(self, bucket_name, object_name, generation=None, pool_size=1):
-        if self._closed:
-            raise RuntimeError("MRDPoolCache is closed.")
-        fs = self._gcsfs()
-        if fs is None:
-            raise RuntimeError("ExtendedGcsFileSystem has been garbage collected.")
-
-        info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
-        if generation is None:
-            generation = info.get("generation")
-        key = (bucket_name, object_name, generation)
-        finalized = info.get("timeFinalized") is not None
-
-        self._incref(key)
-        mrd_pool = DummyMRDPool(
-            fs,
-            bucket_name,
-            object_name,
-            generation,
-            finalized,
-            pool_size,
-            cache=self,
-        )
-        if info is not None:
-            mrd_pool.details = info
-
-        try:
-            await mrd_pool.initialize()
-        except BaseException:
-            await mrd_pool.close()
-            mrds_to_close = []
-            if key not in self._refcounts:
-                self._evictable_keys.pop(key, None)
-                mrds_to_close = _drain_queue(self._mrd_queues.pop(key, None))
-            await _close_mrds(mrds_to_close, raise_exception=False)
-            raise
-
-        return mrd_pool
-
-
 class DummyGcsFileSystem(ExtendedGcsFileSystem):
     """
     Subclass of ExtendedGcsFileSystem that bypasses network data transfer only on the read path.
@@ -160,11 +117,7 @@ class DummyGcsFileSystem(ExtendedGcsFileSystem):
             ttfb_ms=dummy_io_ttfb_ms,
             bandwidth_mbps=dummy_io_bandwidth_mbps,
         )
-        self._mrd_pool_cache = DummyMRDPoolCache(
-            self,
-            max_idle_pools=kwargs.get("max_mrd_pool_cache_idle_pools", 16),
-            max_queue_size=kwargs.get("max_mrd_pool_cache_queue_size", 8),
-        )
+        self._mrd_pool_cache.pool_class = DummyMRDPool
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simulate sequential cat file without network data transfer."""
