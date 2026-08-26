@@ -1587,3 +1587,122 @@ def test_extended_gcsfs_garbage_collection():
     gc.collect()
 
     assert ref() is None
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_non_zonal_delegation():
+    fs = ExtendedGcsFileSystem(token="anon")
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=False):
+        with mock.patch(
+            "gcsfs.core.GCSFileSystem._cat_ranges",
+            return_value=[b"chunk1", b"chunk2"],
+        ) as mock_super:
+            res = await fs._cat_ranges(
+                ["reg-bucket/f1", "reg-bucket/f2"],
+                starts=[0, 10],
+                ends=[5, 15],
+                max_gap=5,
+            )
+            assert res == [b"chunk1", b"chunk2"]
+            assert mock_super.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_zonal_coalescing():
+    fs = ExtendedGcsFileSystem(token="anon")
+    zonal_data = b"0123456789abcdefghijklmnopqrstuvwxyz"
+
+    # Mock MRD client
+    class MockMRD:
+        async def download_ranges(self, mrd_spec):
+            # mrd_spec is a list of (start, length, BytesIO_buffer)
+            for s, length, buf in mrd_spec:
+                buf.write(zonal_data[s : s + length])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_mrd_instance = MockMRD()
+
+    # Mock pool cache get
+    mock_pool = mock.AsyncMock()
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_size", return_value=len(zonal_data)
+        ):
+            with mock.patch(
+                "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+                return_value=mock_mrd_instance,
+            ):
+                paths = [
+                    "zonal-bucket/model.distcp",
+                    "zonal-bucket/model.distcp",
+                    "zonal-bucket/model.distcp",
+                ]
+                starts = [0, 10, 20]
+                ends = [5, 15, 25]
+
+                # max_gap=5 coalesces into a single range [0, 25)
+                res = await fs._cat_ranges(paths, starts, ends, max_gap=5)
+
+                assert len(res) == 3
+                assert bytes(res[0]) == b"01234"
+                assert bytes(res[1]) == b"abcde"
+                assert bytes(res[2]) == b"klmno"
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_zonal_error_handling():
+    fs = ExtendedGcsFileSystem(token="anon")
+
+    class FailingMRD:
+        async def download_ranges(self, mrd_spec):
+            raise RuntimeError("Zonal MRD Connection Error")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_pool = mock.AsyncMock()
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_size", return_value=100
+        ):
+            with mock.patch(
+                "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+                return_value=FailingMRD(),
+            ):
+                paths = ["zonal-bucket/f1", "zonal-bucket/f1"]
+                starts = [0, 10]
+                ends = [5, 15]
+
+                # on_error="return"
+                res = await fs._cat_ranges(
+                    paths, starts, ends, max_gap=5, on_error="return"
+                )
+                assert len(res) == 2
+                assert isinstance(res[0], RuntimeError)
+                assert isinstance(res[1], RuntimeError)
+
+                # on_error="raise"
+                with pytest.raises(
+                    RuntimeError, match="Zonal MRD Connection Error"
+                ):
+                    await fs._cat_ranges(
+                        paths, starts, ends, max_gap=5, on_error="raise"
+                    )
+
