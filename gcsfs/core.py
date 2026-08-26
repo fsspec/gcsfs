@@ -197,7 +197,6 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
-
 def _coalesce_ranges(items, max_gap, file_size=None):
     """
     Helper to coalesce contiguous or near-contiguous ranges for a single file.
@@ -257,6 +256,7 @@ def _coalesce_ranges(items, max_gap, file_size=None):
     if cur_slices is not None:
         merged_ranges.append((cur_s, cur_e, cur_slices))
     return merged_ranges
+
 
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""

@@ -3712,7 +3712,6 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
 
 
-
 from gcsfs.core import _coalesce_ranges
 
 
@@ -3728,19 +3727,44 @@ from gcsfs.core import _coalesce_ranges
         # Within max_gap
         ([(0, 10, 0), (15, 25, 1)], 5, None, [(0, 25, [(0, 0, 10), (1, 15, 25)])]),
         # Exceeding max_gap
-        ([(0, 10, 0), (16, 25, 1)], 5, None, [(0, 10, [(0, 0, 10)]), (16, 25, [(1, 0, 9)])]),
+        (
+            [(0, 10, 0), (16, 25, 1)],
+            5,
+            None,
+            [(0, 10, [(0, 0, 10)]), (16, 25, [(1, 0, 9)])],
+        ),
         # Overlapping ranges
         ([(0, 15, 0), (5, 20, 1)], 0, None, [(0, 20, [(0, 0, 15), (1, 5, 20)])]),
         # Unordered inputs with preserved caller indices
-        ([(20, 30, 0), (0, 10, 2), (10, 20, 1)], 0, None, [(0, 30, [(2, 0, 10), (1, 10, 20), (0, 20, 30)])]),
+        (
+            [(20, 30, 0), (0, 10, 2), (10, 20, 1)],
+            0,
+            None,
+            [(0, 30, [(2, 0, 10), (1, 10, 20), (0, 20, 30)])],
+        ),
         # Unbounded range with known file size
         ([(0, 50, 0), (60, None, 1)], 10, 100, [(0, 100, [(0, 0, 50), (1, 60, 100)])]),
         # Unbounded range without known file size at start
-        ([(0, None, 0), (10, 20, 1)], 10, None, [(0, None, [(0, 0, None)]), (10, 20, [(1, 0, 10)])]),
+        (
+            [(0, None, 0), (10, 20, 1)],
+            10,
+            None,
+            [(0, None, [(0, 0, None)]), (10, 20, [(1, 0, 10)])],
+        ),
         # Unbounded range in the middle without known file size
-        ([(0, 10, 0), (15, None, 1), (20, 30, 2)], 5, None, [(0, 10, [(0, 0, 10)]), (15, None, [(1, 0, None)]), (20, 30, [(2, 0, 10)])]),
+        (
+            [(0, 10, 0), (15, None, 1), (20, 30, 2)],
+            5,
+            None,
+            [(0, 10, [(0, 0, 10)]), (15, None, [(1, 0, None)]), (20, 30, [(2, 0, 10)])],
+        ),
         # Multiple separated clusters
-        ([(0, 5, 0), (6, 11, 1), (20, 21, 2), (22, 30, 3)], 5, None, [(0, 11, [(0, 0, 5), (1, 6, 11)]), (20, 30, [(2, 0, 1), (3, 2, 10)])]),
+        (
+            [(0, 5, 0), (6, 11, 1), (20, 21, 2), (22, 30, 3)],
+            5,
+            None,
+            [(0, 11, [(0, 0, 5), (1, 6, 11)]), (20, 30, [(2, 0, 1), (3, 2, 10)])],
+        ),
     ],
     ids=[
         "empty",
@@ -3801,13 +3825,17 @@ async def test_gcsfs_cat_ranges_coalesced():
 
     with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
         # 1. Test scalar broadcast (uncoalesced)
-        res_scalar = await fs._cat_ranges(["b/f1", "b/f2"], starts=2, ends=7, max_gap=None)
+        res_scalar = await fs._cat_ranges(
+            ["b/f1", "b/f2"], starts=2, ends=7, max_gap=None
+        )
         assert [bytes(r) for r in res_scalar] == [b"23456", b"CDEFG"]
 
         mock_cat.reset_mock()
 
         # 2. Test contiguous coalescing with max_gap=0
-        res_zero_gap = await fs._cat_ranges(["b/f1", "b/f1"], starts=[0, 5], ends=[5, 10], max_gap=0)
+        res_zero_gap = await fs._cat_ranges(
+            ["b/f1", "b/f1"], starts=[0, 5], ends=[5, 10], max_gap=0
+        )
         assert [bytes(r) for r in res_zero_gap] == [b"01234", b"56789"]
         assert mock_cat.call_count == 1
 
@@ -3819,7 +3847,13 @@ async def test_gcsfs_cat_ranges_coalesced():
         ends = [5, 4, 10, 9, 35]
 
         res_coalesced = await fs._cat_ranges(paths, starts, ends, max_gap=5)
-        assert [bytes(r) for r in res_coalesced] == [b"01234", b"ABCD", b"6789", b"FGHI", b"uvwxy"]
+        assert [bytes(r) for r in res_coalesced] == [
+            b"01234",
+            b"ABCD",
+            b"6789",
+            b"FGHI",
+            b"uvwxy",
+        ]
         # 3 merged calls: f1 [0, 10), f1 [30, 35), f2 [0, 9)
         assert mock_cat.call_count == 3
 
@@ -3888,4 +3922,3 @@ def test_cat_ranges_coalesce_logic(gcs):
     assert bytes(res[1]) == b"6789a"
     assert bytes(res[2]) == b"k"
     assert bytes(res[3]) == b"mnopqrst"
-

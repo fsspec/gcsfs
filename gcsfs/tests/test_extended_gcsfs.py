@@ -1679,9 +1679,7 @@ async def test_extended_gcsfs_cat_ranges_zonal_error_handling():
     fs._mrd_pool_cache = mock_pool_cache
 
     with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
-        with mock.patch(
-            "gcsfs.extended_gcsfs._get_mrd_size", return_value=100
-        ):
+        with mock.patch("gcsfs.extended_gcsfs._get_mrd_size", return_value=100):
             with mock.patch(
                 "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
                 return_value=FailingMRD(),
@@ -1699,9 +1697,7 @@ async def test_extended_gcsfs_cat_ranges_zonal_error_handling():
                 assert isinstance(res[1], RuntimeError)
 
                 # on_error="raise"
-                with pytest.raises(
-                    RuntimeError, match="Zonal MRD Connection Error"
-                ):
+                with pytest.raises(RuntimeError, match="Zonal MRD Connection Error"):
                     await fs._cat_ranges(
                         paths, starts, ends, max_gap=5, on_error="raise"
                     )
@@ -1833,4 +1829,3 @@ async def test_extended_gcsfs_cat_ranges_zonal_lazy_info():
                 res = await fs._cat_ranges(paths, starts, ends, max_gap=5)
                 assert len(res) == 2
                 assert mock_info.call_count == 0
-

@@ -694,7 +694,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 bucket_zonal_map[bucket] = await self._is_zonal_bucket(bucket)
 
         results = [None] * n
-        non_zonal_paths, non_zonal_starts, non_zonal_ends, non_zonal_indices = [], [], [], []
+        non_zonal_paths, non_zonal_starts, non_zonal_ends, non_zonal_indices = (
+            [],
+            [],
+            [],
+            [],
+        )
         zonal_files = []
         for path, items in file_groups.items():
             bucket, object_name, generation = self.split_path(path)
@@ -738,7 +743,25 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 merged_ranges = _coalesce_ranges(items, max_gap, file_size=file_size)
             else:
                 merged_ranges = [
-                    (s, e, [(idx, 0, (e - s) if e is not None else ((file_size - s) if file_size is not None else None))])
+                    (
+                        s,
+                        e,
+                        [
+                            (
+                                idx,
+                                0,
+                                (
+                                    (e - s)
+                                    if e is not None
+                                    else (
+                                        (file_size - s)
+                                        if file_size is not None
+                                        else None
+                                    )
+                                ),
+                            )
+                        ],
+                    )
                     for s, e, idx in items
                 ]
 
@@ -786,8 +809,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 results[idx] = res
 
         tasks = [
-            _fetch_zonal_file(p, it, b, obj, gen)
-            for p, it, b, obj, gen in zonal_files
+            _fetch_zonal_file(p, it, b, obj, gen) for p, it, b, obj, gen in zonal_files
         ]
         if non_zonal_paths:
             tasks.append(_run_non_zonal())
