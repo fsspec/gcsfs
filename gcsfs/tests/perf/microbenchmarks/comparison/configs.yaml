@@ -1,0 +1,36 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+  file_sizes_mb:
+    - 1024 # 1 GB
+    - 10240 # 10 GB
+    - 51200 # 50 GB
+    - 102400 # 100 GB
+    - 204800 # 200 GB
+  chunk_sizes_mb:
+    - 32
+  threads:
+    - 4
+  processes:
+    - 1
+  rounds: 1
+
+scenarios:
+  # 1. Download Single Large File
+  - name: "download_large_file"
+
+  # 2. Download Multiple Small Files
+  - name: "download_small_files"
+    files: [10, 100]
+    file_sizes_mb: [10, 100]
+
+  # 3. Upload Single Large File
+  - name: "upload_large_file"
+    chunk_sizes_mb: [50]
+
+  # 4. Upload Multiple Small Files
+  - name: "upload_small_files"
+    files: [10, 100]
+    file_sizes_mb: [10, 100]
+    chunk_sizes_mb: [50]
