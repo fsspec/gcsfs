@@ -15,6 +15,8 @@ import threading
 import uuid
 import warnings
 import weakref
+from collections import defaultdict
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from glob import has_magic
@@ -1287,6 +1289,147 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         # to keep it separate because concurrency code path is still in an experimental phase.
         # Once concurrency code path is stabilized, we can remove this if-else condition.
         return await self._cat_file_sequential(path, start=start, end=end, **kwargs)
+
+    async def _cat_ranges(
+        self,
+        paths,
+        starts,
+        ends,
+        max_gap=None,
+        batch_size=None,
+        on_error="return",
+        **kwargs,
+    ):
+        """Get the contents of byte ranges from one or more files.
+
+        Parameters
+        ----------
+        paths: list of str
+            A list of filepaths on this filesystem.
+        starts, ends: int or list of int
+            Byte limits of the read. If using a single int, the same value will be
+            used for all files.
+        max_gap: int, optional
+            If specified and > 0, adjacent byte ranges on the same file with a gap
+            <= max_gap will be coalesced into a single larger read request.
+        batch_size: int, optional
+            Number of concurrent range fetches. Defaults to self.batch_size.
+        on_error: "return" or "raise"
+            If "return" (default), any per-range exception is placed in the output
+            list at the corresponding position. Otherwise the first such exception
+            is raised.
+        """
+        if not isinstance(paths, list):
+            raise TypeError("paths must be a list")
+        if not isinstance(starts, Iterable):
+            starts = [starts] * len(paths)
+        if not isinstance(ends, Iterable):
+            ends = [ends] * len(paths)
+        if len(starts) != len(paths) or len(ends) != len(paths):
+            raise ValueError("paths, starts, and ends must have the same length")
+
+        n = len(paths)
+        if n == 0:
+            return []
+
+        # If coalescing is not enabled, fall back to standard uncoalesced per-range coroutines
+        if max_gap is None or max_gap <= 0:
+            coros = [
+                self._cat_file(p, start=s, end=e, **kwargs)
+                for p, s, e in zip(paths, starts, ends)
+            ]
+            batch_size = batch_size or self.batch_size
+            out = await asyn._run_coros_in_chunks(
+                coros, batch_size=batch_size, nofiles=True, return_exceptions=True
+            )
+            if on_error != "return":
+                ex = next(filter(asyn.is_exception, out), None)
+                if ex is not None:
+                    raise ex
+            return out
+
+        # 1. Group requests by file path, tracking original caller indices
+        file_groups = defaultdict(list)
+        for orig_idx, (p, s, e) in enumerate(zip(paths, starts, ends)):
+            s_val = s or 0
+            file_groups[p].append((s_val, e, orig_idx))
+
+        merged_paths = []
+        merged_starts = []
+        merged_ends = []
+        merged_slice_maps = []  # list of [(orig_idx, rel_start, rel_end), ...]
+
+        # 2. Coalesce adjacent/near-adjacent ranges per file
+        for p, items in file_groups.items():
+            items.sort(key=lambda x: x[0])
+            cur_s, cur_e, cur_idx = items[0]
+            if cur_e is None:
+                merged_paths.append(p)
+                merged_starts.append(cur_s)
+                merged_ends.append(None)
+                merged_slice_maps.append([(cur_idx, 0, None)])
+                for s, e, idx in items[1:]:
+                    merged_paths.append(p)
+                    merged_starts.append(s)
+                    merged_ends.append(e)
+                    merged_slice_maps.append([(idx, 0, (e - s) if e is not None else None)])
+                continue
+
+            cur_slices = [(cur_idx, 0, cur_e - cur_s)]
+
+            for s, e, idx in items[1:]:
+                if e is not None and s <= cur_e + max_gap:
+                    rel_s = s - cur_s
+                    rel_e = rel_s + (e - s)
+                    cur_slices.append((idx, rel_s, rel_e))
+                    cur_e = max(cur_e, e)
+                else:
+                    merged_paths.append(p)
+                    merged_starts.append(cur_s)
+                    merged_ends.append(cur_e)
+                    merged_slice_maps.append(cur_slices)
+
+                    cur_s = s
+                    cur_e = e
+                    if cur_e is not None:
+                        cur_slices = [(idx, 0, cur_e - cur_s)]
+                    else:
+                        cur_slices = [(idx, 0, None)]
+
+            merged_paths.append(p)
+            merged_starts.append(cur_s)
+            merged_ends.append(cur_e)
+            merged_slice_maps.append(cur_slices)
+
+        # 3. Fetch coalesced ranges
+        merged_coros = [
+            self._cat_file(p, start=s, end=e, **kwargs)
+            for p, s, e in zip(merged_paths, merged_starts, merged_ends)
+        ]
+        batch_size = batch_size or self.batch_size
+        merged_chunks = await asyn._run_coros_in_chunks(
+            merged_coros, batch_size=batch_size, nofiles=True, return_exceptions=True
+        )
+
+        # 4. Unpack merged chunks back into original caller positions
+        results = [None] * n
+        for chunk, slice_list in zip(merged_chunks, merged_slice_maps):
+            if asyn.is_exception(chunk):
+                if on_error != "return":
+                    raise chunk
+                for orig_idx, _, _ in slice_list:
+                    results[orig_idx] = chunk
+                continue
+
+            for orig_idx, rel_s, rel_e in slice_list:
+                if rel_e is None:
+                    results[orig_idx] = memoryview(chunk)[rel_s:]
+                else:
+                    results[orig_idx] = memoryview(chunk)[rel_s:rel_e]
+
+        return results
+
+    cat_ranges = asyn.sync_wrapper(_cat_ranges)
 
     async def _getxattr(self, path, attr):
         """Get user-defined metadata attribute"""

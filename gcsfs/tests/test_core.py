@@ -3710,3 +3710,44 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
+
+
+
+def test_cat_ranges_coalesce_logic(gcs):
+    """Test that cat_ranges appropriately coalesces inputs and zero-copy splices the return values."""
+    fn = f"{TEST_BUCKET}/cat_ranges_coalesce.txt"
+    data = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    gcs.pipe(fn, data)
+
+    # Test without coalescing
+    paths = [fn, fn, fn]
+    starts = [0, 10, 20]
+    ends = [5, 15, 25]
+    
+    # max_gap = 0
+    res = gcs.cat_ranges(paths, starts, ends, max_gap=0)
+    assert len(res) == 3
+    assert bytes(res[0]) == b"01234"
+    assert bytes(res[1]) == b"abcde"
+    assert bytes(res[2]) == b"klmno"
+    
+    # Test coalescing
+    # 0-5, 10-15, 20-25 -> coalesces to 0-25 
+    res = gcs.cat_ranges(paths, starts, ends, max_gap=5)
+    assert len(res) == 3
+    assert bytes(res[0]) == b"01234"
+    assert bytes(res[1]) == b"abcde"
+    assert bytes(res[2]) == b"klmno"
+    
+    # Check mixed gap sizes where it splits
+    paths = [fn, fn, fn, fn]
+    starts = [0, 6, 20, 22]
+    ends = [5, 11, 21, 30]
+    
+    res = gcs.cat_ranges(paths, starts, ends, max_gap=5)
+    
+    assert len(res) == 4
+    assert bytes(res[0]) == b"01234"
+    assert bytes(res[1]) == b"6789a"
+    assert bytes(res[2]) == b"k"
+    assert bytes(res[3]) == b"mnopqrst"

@@ -1,9 +1,12 @@
 import asyncio
 import contextlib
+import io
 import logging
 import os
 import uuid
 import weakref
+from collections import defaultdict
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from glob import has_magic
@@ -626,6 +629,163 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # If we created a temporary pool specifically for this _cat_file call, clean it up
             if pool_created_here:
                 await mrd.close()
+
+    async def _cat_ranges(
+        self,
+        paths,
+        starts,
+        ends,
+        max_gap=None,
+        batch_size=None,
+        on_error="return",
+        **kwargs,
+    ):
+        """Get the contents of byte ranges, leveraging bulk AsyncMultiRangeDownloader for Zonal buckets.
+
+        Parameters
+        ----------
+        paths: list of str
+            A list of filepaths on this filesystem.
+        starts, ends: int or list of int
+            Byte limits of the read. If using a single int, the same value will be
+            used for all files.
+        max_gap: int, optional
+            If specified and > 0, adjacent byte ranges on the same file with a gap
+            <= max_gap will be coalesced into a single larger read request.
+        batch_size: int, optional
+            Number of concurrent range fetches. Defaults to self.batch_size.
+        on_error: "return" or "raise"
+            If "return" (default), any per-range exception is placed in the output
+            list at the corresponding position. Otherwise the first such exception
+            is raised.
+        """
+        if not isinstance(paths, list):
+            raise TypeError("paths must be a list")
+        if not isinstance(starts, Iterable):
+            starts = [starts] * len(paths)
+        if not isinstance(ends, Iterable):
+            ends = [ends] * len(paths)
+        if len(starts) != len(paths) or len(ends) != len(paths):
+            raise ValueError("paths, starts, and ends must have the same length")
+
+        n = len(paths)
+        if n == 0:
+            return []
+
+        # 1. Group requests by file path, tracking original caller indices
+        file_groups = defaultdict(list)
+        for orig_idx, (p, s, e) in enumerate(zip(paths, starts, ends)):
+            s_val = s or 0
+            file_groups[p].append((s_val, e, orig_idx))
+
+        results = [None] * n
+        non_zonal_paths, non_zonal_starts, non_zonal_ends, non_zonal_indices = [], [], [], []
+        zonal_files = []
+        for path, items in file_groups.items():
+            bucket, object_name, generation = self.split_path(path)
+            if not await self._is_zonal_bucket(bucket):
+                for s, e, idx in items:
+                    non_zonal_paths.append(path)
+                    non_zonal_starts.append(s)
+                    non_zonal_ends.append(e)
+                    non_zonal_indices.append(idx)
+            else:
+                zonal_files.append((path, items, bucket, object_name, generation))
+
+        async def _fetch_zonal_file(path, items, bucket, object_name, generation):
+            # 2. Zonal Bucket: Acquire MRD from pool cache
+            try:
+                mrd_pool = await self._mrd_pool_cache.get(
+                    bucket, object_name, generation, pool_size=1
+                )
+                file_size = await _get_mrd_size(mrd_pool)
+                if file_size is None:
+                    file_size = (await self._info(path))["size"]
+
+                # 3. Construct multi-range request for this file
+                if max_gap is not None and max_gap > 0:
+                    items.sort(key=lambda x: x[0])
+                    merged_ranges = []
+                    cur_s, cur_e, cur_idx = items[0]
+                    if cur_e is None:
+                        cur_e = file_size
+                    cur_slices = [(cur_idx, 0, cur_e - cur_s)]
+
+                    for s, e, idx in items[1:]:
+                        if e is None:
+                            e = file_size
+                        if s <= cur_e + max_gap:
+                            rel_s = s - cur_s
+                            rel_len = e - s
+                            cur_slices.append((idx, rel_s, rel_len))
+                            cur_e = max(cur_e, e)
+                        else:
+                            merged_ranges.append((cur_s, cur_e - cur_s, cur_slices))
+                            cur_s, cur_e = s, e
+                            cur_slices = [(idx, 0, e - s)]
+                    merged_ranges.append((cur_s, cur_e - cur_s, cur_slices))
+
+                    effective_batch_size = batch_size or self.batch_size or 64
+                    for i in range(0, len(merged_ranges), effective_batch_size):
+                        batch_merged = merged_ranges[i : i + effective_batch_size]
+                        buffers = [io.BytesIO() for _ in range(len(batch_merged))]
+                        mrd_spec = [(s, l, buf) for (s, l, _), buf in zip(batch_merged, buffers)]
+
+                        async with _get_mrd_from_pool_or_mrd(mrd_pool) as m_client:
+                            await m_client.download_ranges(mrd_spec)
+
+                        for buf, (_, _, slice_list) in zip(buffers, batch_merged):
+                            merged_chunk = buf.getvalue()
+                            view = memoryview(merged_chunk)
+                            for idx, rel_s, rel_len in slice_list:
+                                results[idx] = view[rel_s : rel_s + rel_len]
+                else:
+                    effective_batch_size = batch_size or self.batch_size or 64
+                    for i in range(0, len(items), effective_batch_size):
+                        batch_items = items[i : i + effective_batch_size]
+                        buffers = [io.BytesIO() for _ in range(len(batch_items))]
+                        mrd_spec = [
+                            (s, (e - s) if e is not None else (file_size - s), buf)
+                            for (s, e, _), buf in zip(batch_items, buffers)
+                        ]
+
+                        async with _get_mrd_from_pool_or_mrd(mrd_pool) as m_client:
+                            await m_client.download_ranges(mrd_spec)
+
+                        for (_, _, idx), buf in zip(batch_items, buffers):
+                            results[idx] = buf.getvalue()
+
+            except Exception as exc:
+                if on_error != "return":
+                    raise exc
+                for _, _, idx in items:
+                    results[idx] = exc
+
+        if zonal_files:
+            await asyncio.gather(
+                *[
+                    _fetch_zonal_file(p, it, b, obj, gen)
+                    for p, it, b, obj, gen in zonal_files
+                ]
+            )
+
+        # 4. Delegate any non-zonal paths to super()._cat_ranges
+        if non_zonal_paths:
+            nz_results = await super()._cat_ranges(
+                non_zonal_paths,
+                non_zonal_starts,
+                non_zonal_ends,
+                max_gap=max_gap,
+                batch_size=batch_size,
+                on_error=on_error,
+                **kwargs,
+            )
+            for idx, res in zip(non_zonal_indices, nz_results):
+                results[idx] = res
+
+        return results
+
+    cat_ranges = asyn.sync_wrapper(_cat_ranges)
 
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
