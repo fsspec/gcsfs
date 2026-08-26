@@ -147,12 +147,15 @@ steps:
           MACHINE_TYPE="${_IO_VM_TYPE}"
           EXTRA_ARGS=(
             "--boot-disk-type=hyperdisk-balanced"
+            "--boot-disk-size=50GB"
             "--network-interface=network-tier=PREMIUM,nic-type=GVNIC"
             "--network-performance-configs=total-egress-bandwidth-tier=TIER_1"
           )
         else
           MACHINE_TYPE="${_METADATA_VM_TYPE}"
-          EXTRA_ARGS=()
+          EXTRA_ARGS=(
+            "--boot-disk-size=30GB"
+          )
         fi
 
         echo "Creating VM: $${VM_NAME} in zone: ${_ZONE}"
@@ -162,7 +165,6 @@ steps:
             --machine-type="$$MACHINE_TYPE" \
             --image-family="ubuntu-2404-lts-amd64" \
             --image-project="ubuntu-os-cloud" \
-            --boot-disk-size="30GB" \
             --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
             --metadata="enable-oslogin=TRUE" \
             --service-account="${_VM_SERVICE_ACCOUNT}" \
@@ -243,6 +245,14 @@ steps:
 
         SETUP_SCRIPT="
           set -e
+          # Setup dedicated high-capacity RAM disk (tmpfs) on /mnt/ramdisk
+          total_mem_gb=\$(awk '/MemTotal:/ {print int(\$2 / 1024 / 1024)}' /proc/meminfo)
+          ramdisk_size_gb=\$(( total_mem_gb * 70 / 100 ))
+          echo \"--- Setting up high-capacity RAM disk (tmpfs) of \$ramdisk_size_gb G on /mnt/ramdisk ---\"
+          sudo mkdir -p /mnt/ramdisk
+          sudo mount -t tmpfs -o size=\"\$ramdisk_size_gb\"G tmpfs /mnt/ramdisk
+          sudo chmod 1777 /mnt/ramdisk
+
           sudo apt-get update > /dev/null
           echo '--- Installing python and other dependencies on VM ---'
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3-venv git > /dev/null
@@ -310,6 +320,7 @@ steps:
             cd gcsfs
             source env/bin/activate
             export GCSFS_BENCHMARK_CPU_AFFINITY=true
+            export TMPDIR=/mnt/ramdisk
 
             echo \"Running Command: python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO\"
             python gcsfs/tests/perf/microbenchmarks/run.py --group=$$group $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
