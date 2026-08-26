@@ -32,7 +32,7 @@ from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
-from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.core import GCSFile, GCSFileSystem, _coalesce_ranges
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -704,32 +704,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
                 # 3. Construct multi-range request for this file
                 if max_gap is not None and max_gap > 0:
-                    items.sort(key=lambda x: x[0])
-                    merged_ranges = []
-                    cur_s, cur_e, cur_idx = items[0]
-                    if cur_e is None:
-                        cur_e = file_size
-                    cur_slices = [(cur_idx, 0, cur_e - cur_s)]
-
-                    for s, e, idx in items[1:]:
-                        if e is None:
-                            e = file_size
-                        if s <= cur_e + max_gap:
-                            rel_s = s - cur_s
-                            rel_len = e - s
-                            cur_slices.append((idx, rel_s, rel_len))
-                            cur_e = max(cur_e, e)
-                        else:
-                            merged_ranges.append((cur_s, cur_e - cur_s, cur_slices))
-                            cur_s, cur_e = s, e
-                            cur_slices = [(idx, 0, e - s)]
-                    merged_ranges.append((cur_s, cur_e - cur_s, cur_slices))
-
+                    merged_ranges = _coalesce_ranges(items, max_gap, file_size=file_size)
+                    
                     effective_batch_size = batch_size or self.batch_size or 64
                     for i in range(0, len(merged_ranges), effective_batch_size):
                         batch_merged = merged_ranges[i : i + effective_batch_size]
                         buffers = [io.BytesIO() for _ in range(len(batch_merged))]
-                        mrd_spec = [(s, l, buf) for (s, l, _), buf in zip(batch_merged, buffers)]
+                        mrd_spec = [(s, (e - s) if e is not None else (file_size - s), buf) for (s, e, _), buf in zip(batch_merged, buffers)]
 
                         async with _get_mrd_from_pool_or_mrd(mrd_pool) as m_client:
                             await m_client.download_ranges(mrd_spec)
@@ -737,8 +718,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         for buf, (_, _, slice_list) in zip(buffers, batch_merged):
                             merged_chunk = buf.getvalue()
                             view = memoryview(merged_chunk)
-                            for idx, rel_s, rel_len in slice_list:
-                                results[idx] = view[rel_s : rel_s + rel_len]
+                            for idx, rel_s, rel_e in slice_list:
+                                if rel_e is None:
+                                    results[idx] = view[rel_s:]
+                                else:
+                                    results[idx] = view[rel_s:rel_e]
                 else:
                     effective_batch_size = batch_size or self.batch_size or 64
                     for i in range(0, len(items), effective_batch_size):

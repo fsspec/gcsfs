@@ -197,6 +197,63 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
+
+def _coalesce_ranges(items, max_gap, file_size=None):
+    """
+    Helper to coalesce contiguous or near-contiguous ranges for a single file.
+
+    Parameters
+    ----------
+    items: list of (start, end, orig_idx)
+    max_gap: int
+        Maximum allowed gap between ranges to be coalesced.
+    file_size: int, optional
+        If known, used to resolve end=None.
+
+    Returns
+    -------
+    list of (merged_start, merged_end, slice_list) where
+    slice_list is a list of (orig_idx, rel_start, rel_end).
+    If rel_end is None, it means the slice extends to the end of the merged chunk.
+    """
+    items.sort(key=lambda x: x[0])
+    merged_ranges = []
+
+    cur_s, cur_e, cur_idx = items[0]
+    if cur_e is None and file_size is not None:
+        cur_e = file_size
+
+    if cur_e is None:
+        # Without knowing file size, we cannot coalesce past an unbounded range safely
+        merged_ranges.append((cur_s, None, [(cur_idx, 0, None)]))
+        for s, e, idx in items[1:]:
+            merged_ranges.append((s, e, [(idx, 0, (e - s) if e is not None else None)]))
+        return merged_ranges
+
+    cur_slices = [(cur_idx, 0, cur_e - cur_s)]
+
+    for s, e, idx in items[1:]:
+        if e is None and file_size is not None:
+            e = file_size
+
+        if e is not None and s <= cur_e + max_gap:
+            rel_s = s - cur_s
+            rel_e = rel_s + (e - s)
+            cur_slices.append((idx, rel_s, rel_e))
+            cur_e = max(cur_e, e)
+        else:
+            merged_ranges.append((cur_s, cur_e, cur_slices))
+            cur_s = s
+            cur_e = e
+
+            if cur_e is not None:
+                cur_slices = [(idx, 0, cur_e - cur_s)]
+            else:
+                cur_slices = [(idx, 0, None)]
+
+    merged_ranges.append((cur_s, cur_e, cur_slices))
+    return merged_ranges
+
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -1361,45 +1418,11 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         # 2. Coalesce adjacent/near-adjacent ranges per file
         for p, items in file_groups.items():
-            items.sort(key=lambda x: x[0])
-            cur_s, cur_e, cur_idx = items[0]
-            if cur_e is None:
+            for m_s, m_e, slice_list in _coalesce_ranges(items, max_gap):
                 merged_paths.append(p)
-                merged_starts.append(cur_s)
-                merged_ends.append(None)
-                merged_slice_maps.append([(cur_idx, 0, None)])
-                for s, e, idx in items[1:]:
-                    merged_paths.append(p)
-                    merged_starts.append(s)
-                    merged_ends.append(e)
-                    merged_slice_maps.append([(idx, 0, (e - s) if e is not None else None)])
-                continue
-
-            cur_slices = [(cur_idx, 0, cur_e - cur_s)]
-
-            for s, e, idx in items[1:]:
-                if e is not None and s <= cur_e + max_gap:
-                    rel_s = s - cur_s
-                    rel_e = rel_s + (e - s)
-                    cur_slices.append((idx, rel_s, rel_e))
-                    cur_e = max(cur_e, e)
-                else:
-                    merged_paths.append(p)
-                    merged_starts.append(cur_s)
-                    merged_ends.append(cur_e)
-                    merged_slice_maps.append(cur_slices)
-
-                    cur_s = s
-                    cur_e = e
-                    if cur_e is not None:
-                        cur_slices = [(idx, 0, cur_e - cur_s)]
-                    else:
-                        cur_slices = [(idx, 0, None)]
-
-            merged_paths.append(p)
-            merged_starts.append(cur_s)
-            merged_ends.append(cur_e)
-            merged_slice_maps.append(cur_slices)
+                merged_starts.append(m_s)
+                merged_ends.append(m_e)
+                merged_slice_maps.append(slice_list)
 
         # 3. Fetch coalesced ranges
         merged_coros = [
