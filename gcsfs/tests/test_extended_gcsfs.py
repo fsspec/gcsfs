@@ -1643,9 +1643,9 @@ async def test_extended_gcsfs_cat_ranges_zonal_coalescing():
                 return_value=mock_mrd_instance,
             ):
                 paths = [
-                    "zonal-bucket/model.distcp",
-                    "zonal-bucket/model.distcp",
-                    "zonal-bucket/model.distcp",
+                    "zonal-bucket/test_file.bin",
+                    "zonal-bucket/test_file.bin",
+                    "zonal-bucket/test_file.bin",
                 ]
                 starts = [0, 10, 20]
                 ends = [5, 15, 25]

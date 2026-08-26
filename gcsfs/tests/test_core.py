@@ -3716,189 +3716,84 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
 from gcsfs.core import _coalesce_ranges
 
 
-def test_coalesce_ranges_single_item():
-    items = [(0, 10, 0)]
-    merged = _coalesce_ranges(items, max_gap=5)
-    assert len(merged) == 1
-    m_s, m_e, slices = merged[0]
-    assert m_s == 0
-    assert m_e == 10
-    assert slices == [(0, 0, 10)]
-
-
-def test_coalesce_ranges_contiguous():
-    # Gap is 0: [0, 10) and [10, 20)
-    items = [(0, 10, 0), (10, 20, 1)]
-    merged = _coalesce_ranges(items, max_gap=0)
-    assert len(merged) == 1
-    m_s, m_e, slices = merged[0]
-    assert m_s == 0
-    assert m_e == 20
-    assert slices == [(0, 0, 10), (1, 10, 20)]
-
-
-def test_coalesce_ranges_within_max_gap():
-    # Gap is 5: [0, 10) and [15, 25) with max_gap=5 -> coalesced into [0, 25)
-    items = [(0, 10, 0), (15, 25, 1)]
-    merged = _coalesce_ranges(items, max_gap=5)
-    assert len(merged) == 1
-    m_s, m_e, slices = merged[0]
-    assert m_s == 0
-    assert m_e == 25
-    assert slices == [(0, 0, 10), (1, 15, 25)]
-
-
-def test_coalesce_ranges_exceeding_max_gap():
-    # Gap is 6: [0, 10) and [16, 25) with max_gap=5 -> NOT coalesced
-    items = [(0, 10, 0), (16, 25, 1)]
-    merged = _coalesce_ranges(items, max_gap=5)
-    assert len(merged) == 2
-    assert merged[0] == (0, 10, [(0, 0, 10)])
-    assert merged[1] == (16, 25, [(1, 0, 9)])
-
-
-def test_coalesce_ranges_overlapping():
-    # Overlapping: [0, 15) and [5, 20)
-    items = [(0, 15, 0), (5, 20, 1)]
-    merged = _coalesce_ranges(items, max_gap=0)
-    assert len(merged) == 1
-    m_s, m_e, slices = merged[0]
-    assert m_s == 0
-    assert m_e == 20
-    assert slices == [(0, 0, 15), (1, 5, 20)]
-
-
-def test_coalesce_ranges_unordered_inputs():
-    # Unordered indices: index 2 at start 0, index 0 at start 20, index 1 at start 10
-    items = [(20, 30, 0), (0, 10, 2), (10, 20, 1)]
-    merged = _coalesce_ranges(items, max_gap=0)
-    assert len(merged) == 1
-    m_s, m_e, slices = merged[0]
-    assert m_s == 0
-    assert m_e == 30
-    # Original indices are retained in slices
-    assert slices == [(2, 0, 10), (1, 10, 20), (0, 20, 30)]
-
-
-def test_coalesce_ranges_with_file_size_unbounded():
-    # end=None with known file_size=100
-    items = [(0, 50, 0), (60, None, 1)]
-    merged = _coalesce_ranges(items, max_gap=10, file_size=100)
-    assert len(merged) == 1
-    assert merged[0] == (0, 100, [(0, 0, 50), (1, 60, 100)])
-
-
-def test_coalesce_ranges_without_file_size_unbounded():
-    # end=None without known file_size cannot coalesce past unbounded range
-    items = [(0, None, 0), (10, 20, 1)]
-    merged = _coalesce_ranges(items, max_gap=10, file_size=None)
-    assert len(merged) == 2
-    assert merged[0] == (0, None, [(0, 0, None)])
-    assert merged[1] == (10, 20, [(1, 0, 10)])
-
-
-def test_coalesce_ranges_multiple_clusters():
-    # [0, 5) & [6, 11) -> cluster 1 [0, 11)
-    # [20, 21) & [22, 30) -> cluster 2 [20, 30)
-    items = [(0, 5, 0), (6, 11, 1), (20, 21, 2), (22, 30, 3)]
-    merged = _coalesce_ranges(items, max_gap=5)
-    assert len(merged) == 2
-    assert merged[0] == (0, 11, [(0, 0, 5), (1, 6, 11)])
-    assert merged[1] == (20, 30, [(2, 0, 1), (3, 2, 10)])
+@pytest.mark.parametrize(
+    "items, max_gap, file_size, expected",
+    [
+        # Single item
+        ([(0, 10, 0)], 5, None, [(0, 10, [(0, 0, 10)])]),
+        # Contiguous ranges (gap == 0)
+        ([(0, 10, 0), (10, 20, 1)], 0, None, [(0, 20, [(0, 0, 10), (1, 10, 20)])]),
+        # Within max_gap
+        ([(0, 10, 0), (15, 25, 1)], 5, None, [(0, 25, [(0, 0, 10), (1, 15, 25)])]),
+        # Exceeding max_gap
+        ([(0, 10, 0), (16, 25, 1)], 5, None, [(0, 10, [(0, 0, 10)]), (16, 25, [(1, 0, 9)])]),
+        # Overlapping ranges
+        ([(0, 15, 0), (5, 20, 1)], 0, None, [(0, 20, [(0, 0, 15), (1, 5, 20)])]),
+        # Unordered inputs with preserved caller indices
+        ([(20, 30, 0), (0, 10, 2), (10, 20, 1)], 0, None, [(0, 30, [(2, 0, 10), (1, 10, 20), (0, 20, 30)])]),
+        # Unbounded range with known file size
+        ([(0, 50, 0), (60, None, 1)], 10, 100, [(0, 100, [(0, 0, 50), (1, 60, 100)])]),
+        # Unbounded range without known file size
+        ([(0, None, 0), (10, 20, 1)], 10, None, [(0, None, [(0, 0, None)]), (10, 20, [(1, 0, 10)])]),
+        # Multiple separated clusters
+        ([(0, 5, 0), (6, 11, 1), (20, 21, 2), (22, 30, 3)], 5, None, [(0, 11, [(0, 0, 5), (1, 6, 11)]), (20, 30, [(2, 0, 1), (3, 2, 10)])]),
+    ],
+    ids=[
+        "single",
+        "contiguous",
+        "within_gap",
+        "exceeding_gap",
+        "overlapping",
+        "unordered",
+        "unbounded_with_size",
+        "unbounded_without_size",
+        "multiple_clusters",
+    ],
+)
+def test_coalesce_ranges(items, max_gap, file_size, expected):
+    merged = _coalesce_ranges(items, max_gap=max_gap, file_size=file_size)
+    assert merged == expected
 
 
 @pytest.mark.asyncio
 async def test_gcsfs_cat_ranges_validation():
     fs = GCSFileSystem(token="anon")
 
-    # Invalid paths type
     with pytest.raises(TypeError, match="paths must be a list"):
         await fs._cat_ranges("bucket/file.txt", starts=[0], ends=[10])
 
-    # Length mismatch
     with pytest.raises(ValueError, match="same length"):
         await fs._cat_ranges(["bucket/file.txt"], starts=[0, 10], ends=[5])
 
-    # Empty paths
     assert await fs._cat_ranges([], starts=[], ends=[]) == []
 
 
 @pytest.mark.asyncio
-async def test_gcsfs_cat_ranges_scalar_broadcast():
+async def test_gcsfs_cat_ranges_coalesced():
     fs = GCSFileSystem(token="anon")
-    data = b"0123456789"
+    f1_data = b"0123456789abcdefghijklmnopqrstuvwxyz"
+    f2_data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
     async def mock_cat_file(path, start=None, end=None, **kwargs):
+        data = f1_data if path == "b/f1" else f2_data
         s = start or 0
         e = end if end is not None else len(data)
         return data[s:e]
 
     with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
-        # Scalar starts=2 and ends=7 broadcasted across 2 paths
-        res = await fs._cat_ranges(["b/f1", "b/f2"], starts=2, ends=7, max_gap=None)
-        assert len(res) == 2
-        assert bytes(res[0]) == b"23456"
-        assert bytes(res[1]) == b"23456"
-        assert mock_cat.call_count == 2
+        # 1. Test scalar broadcast (uncoalesced)
+        res_scalar = await fs._cat_ranges(["b/f1", "b/f2"], starts=2, ends=7, max_gap=None)
+        assert [bytes(r) for r in res_scalar] == [b"23456", b"CDEFG"]
 
+        mock_cat.reset_mock()
 
-@pytest.mark.asyncio
-async def test_gcsfs_cat_ranges_coalesced_single_file():
-    fs = GCSFileSystem(token="anon")
-    full_content = b"0123456789abcdefghijklmnopqrstuvwxyz"
-
-    async def mock_cat_file(path, start=None, end=None, **kwargs):
-        s = start or 0
-        e = end if end is not None else len(full_content)
-        return full_content[s:e]
-
-    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
-        paths = ["bucket/file.txt", "bucket/file.txt", "bucket/file.txt"]
-        starts = [0, 10, 20]
-        ends = [5, 15, 25]
-
-        # max_gap=5 merges [0, 5), [10, 15), [20, 25) into a single read [0, 25)
-        res = await fs._cat_ranges(paths, starts, ends, max_gap=5)
-
-        assert len(res) == 3
-        assert bytes(res[0]) == b"01234"
-        assert bytes(res[1]) == b"abcde"
-        assert bytes(res[2]) == b"klmno"
-        # Only 1 merged _cat_file call for the single coalesced range [0, 25)
-        assert mock_cat.call_count == 1
-        mock_cat.assert_called_once_with("bucket/file.txt", start=0, end=25)
-
-
-@pytest.mark.asyncio
-async def test_gcsfs_cat_ranges_coalesced_multi_files_and_gaps():
-    fs = GCSFileSystem(token="anon")
-    file1_content = b"0123456789abcdefghijklmnopqrstuvwxyz"
-    file2_content = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-    async def mock_cat_file(path, start=None, end=None, **kwargs):
-        data = file1_content if path == "b/f1" else file2_content
-        s = start or 0
-        e = end if end is not None else len(data)
-        return data[s:e]
-
-    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
-        # Interleaved requests between f1 and f2
+        # 2. Test multi-file coalescing with gaps
         paths = ["b/f1", "b/f2", "b/f1", "b/f2", "b/f1"]
         starts = [0, 0, 6, 5, 30]
         ends = [5, 4, 10, 9, 35]
 
-        # max_gap=5:
-        # b/f1 ranges: [0, 5) & [6, 10) merged into [0, 10); [30, 35) separate
-        # b/f2 ranges: [0, 4) & [5, 9) merged into [0, 9)
-        res = await fs._cat_ranges(paths, starts, ends, max_gap=5)
-
-        assert len(res) == 5
-        assert bytes(res[0]) == b"01234"  # f1 [0, 5)
-        assert bytes(res[1]) == b"ABCD"  # f2 [0, 4)
-        assert bytes(res[2]) == b"6789"  # f1 [6, 10)
-        assert bytes(res[3]) == b"FGHI"  # f2 [5, 9)
-        assert bytes(res[4]) == b"uvwxy"  # f1 [30, 35)
-
+        res_coalesced = await fs._cat_ranges(paths, starts, ends, max_gap=5)
+        assert [bytes(r) for r in res_coalesced] == [b"01234", b"ABCD", b"6789", b"FGHI", b"uvwxy"]
         # 3 merged calls: f1 [0, 10), f1 [30, 35), f2 [0, 9)
         assert mock_cat.call_count == 3
 
