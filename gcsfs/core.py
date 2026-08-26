@@ -216,6 +216,9 @@ def _coalesce_ranges(items, max_gap, file_size=None):
     slice_list is a list of (orig_idx, rel_start, rel_end).
     If rel_end is None, it means the slice extends to the end of the merged chunk.
     """
+    if not items:
+        return []
+
     items.sort(key=lambda x: x[0])
     merged_ranges = []
 
@@ -226,32 +229,33 @@ def _coalesce_ranges(items, max_gap, file_size=None):
     if cur_e is None:
         # Without knowing file size, we cannot coalesce past an unbounded range safely
         merged_ranges.append((cur_s, None, [(cur_idx, 0, None)]))
-        for s, e, idx in items[1:]:
-            merged_ranges.append((s, e, [(idx, 0, (e - s) if e is not None else None)]))
-        return merged_ranges
-
-    cur_slices = [(cur_idx, 0, cur_e - cur_s)]
+        cur_slices = None
+    else:
+        cur_slices = [(cur_idx, 0, cur_e - cur_s)]
 
     for s, e, idx in items[1:]:
         if e is None and file_size is not None:
             e = file_size
 
-        if e is not None and s <= cur_e + max_gap:
+        if cur_e is not None and e is not None and s <= cur_e + max_gap:
             rel_s = s - cur_s
             rel_e = rel_s + (e - s)
             cur_slices.append((idx, rel_s, rel_e))
             cur_e = max(cur_e, e)
         else:
-            merged_ranges.append((cur_s, cur_e, cur_slices))
+            if cur_slices is not None:
+                merged_ranges.append((cur_s, cur_e, cur_slices))
             cur_s = s
             cur_e = e
 
             if cur_e is not None:
                 cur_slices = [(idx, 0, cur_e - cur_s)]
             else:
-                cur_slices = [(idx, 0, None)]
+                merged_ranges.append((cur_s, None, [(idx, 0, None)]))
+                cur_slices = None
 
-    merged_ranges.append((cur_s, cur_e, cur_slices))
+    if cur_slices is not None:
+        merged_ranges.append((cur_s, cur_e, cur_slices))
     return merged_ranges
 
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
@@ -1367,7 +1371,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             Byte limits of the read. If using a single int, the same value will be
             used for all files.
         max_gap: int, optional
-            If specified and > 0, adjacent byte ranges on the same file with a gap
+            If specified and >= 0, adjacent byte ranges on the same file with a gap
             <= max_gap will be coalesced into a single larger read request.
         batch_size: int, optional
             Number of concurrent range fetches. Defaults to self.batch_size.
@@ -1375,13 +1379,21 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             If "return" (default), any per-range exception is placed in the output
             list at the corresponding position. Otherwise the first such exception
             is raised.
+
+        Returns
+        -------
+        list of bytes or memoryview (when coalescing is active)
         """
         if not isinstance(paths, list):
             raise TypeError("paths must be a list")
-        if not isinstance(starts, Iterable):
+        if not isinstance(starts, Iterable) or isinstance(starts, (str, bytes)):
             starts = [starts] * len(paths)
-        if not isinstance(ends, Iterable):
+        else:
+            starts = list(starts)
+        if not isinstance(ends, Iterable) or isinstance(ends, (str, bytes)):
             ends = [ends] * len(paths)
+        else:
+            ends = list(ends)
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError("paths, starts, and ends must have the same length")
 
@@ -1390,7 +1402,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             return []
 
         # If coalescing is not enabled, fall back to standard uncoalesced per-range coroutines
-        if max_gap is None or max_gap <= 0:
+        if max_gap is None or max_gap < 0:
             coros = [
                 self._cat_file(p, start=s, end=e, **kwargs)
                 for p, s, e in zip(paths, starts, ends)

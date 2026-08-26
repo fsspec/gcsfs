@@ -3719,6 +3719,8 @@ from gcsfs.core import _coalesce_ranges
 @pytest.mark.parametrize(
     "items, max_gap, file_size, expected",
     [
+        # Empty list
+        ([], 5, None, []),
         # Single item
         ([(0, 10, 0)], 5, None, [(0, 10, [(0, 0, 10)])]),
         # Contiguous ranges (gap == 0)
@@ -3733,12 +3735,15 @@ from gcsfs.core import _coalesce_ranges
         ([(20, 30, 0), (0, 10, 2), (10, 20, 1)], 0, None, [(0, 30, [(2, 0, 10), (1, 10, 20), (0, 20, 30)])]),
         # Unbounded range with known file size
         ([(0, 50, 0), (60, None, 1)], 10, 100, [(0, 100, [(0, 0, 50), (1, 60, 100)])]),
-        # Unbounded range without known file size
+        # Unbounded range without known file size at start
         ([(0, None, 0), (10, 20, 1)], 10, None, [(0, None, [(0, 0, None)]), (10, 20, [(1, 0, 10)])]),
+        # Unbounded range in the middle without known file size
+        ([(0, 10, 0), (15, None, 1), (20, 30, 2)], 5, None, [(0, 10, [(0, 0, 10)]), (15, None, [(1, 0, None)]), (20, 30, [(2, 0, 10)])]),
         # Multiple separated clusters
         ([(0, 5, 0), (6, 11, 1), (20, 21, 2), (22, 30, 3)], 5, None, [(0, 11, [(0, 0, 5), (1, 6, 11)]), (20, 30, [(2, 0, 1), (3, 2, 10)])]),
     ],
     ids=[
+        "empty",
         "single",
         "contiguous",
         "within_gap",
@@ -3746,7 +3751,8 @@ from gcsfs.core import _coalesce_ranges
         "overlapping",
         "unordered",
         "unbounded_with_size",
-        "unbounded_without_size",
+        "unbounded_without_size_start",
+        "unbounded_without_size_middle",
         "multiple_clusters",
     ],
 )
@@ -3766,6 +3772,19 @@ async def test_gcsfs_cat_ranges_validation():
         await fs._cat_ranges(["bucket/file.txt"], starts=[0, 10], ends=[5])
 
     assert await fs._cat_ranges([], starts=[], ends=[]) == []
+
+    # Generator inputs for starts and ends
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        return b"0123456789"[start:end]
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file):
+        res = await fs._cat_ranges(
+            ["b/f", "b/f"],
+            starts=(x for x in [0, 5]),
+            ends=(x for x in [5, 10]),
+            max_gap=None,
+        )
+        assert [bytes(r) for r in res] == [b"01234", b"56789"]
 
 
 @pytest.mark.asyncio
@@ -3787,7 +3806,14 @@ async def test_gcsfs_cat_ranges_coalesced():
 
         mock_cat.reset_mock()
 
-        # 2. Test multi-file coalescing with gaps
+        # 2. Test contiguous coalescing with max_gap=0
+        res_zero_gap = await fs._cat_ranges(["b/f1", "b/f1"], starts=[0, 5], ends=[5, 10], max_gap=0)
+        assert [bytes(r) for r in res_zero_gap] == [b"01234", b"56789"]
+        assert mock_cat.call_count == 1
+
+        mock_cat.reset_mock()
+
+        # 3. Test multi-file coalescing with gaps
         paths = ["b/f1", "b/f2", "b/f1", "b/f2", "b/f1"]
         starts = [0, 0, 6, 5, 30]
         ends = [5, 4, 10, 9, 35]
