@@ -147,7 +147,7 @@ def _prepare_files(gcs, file_paths, file_size=0):
             return
 
     chunk_size = min(100 * MB, file_size)
-    pool_size = min(len(file_paths), 64)
+    pool_size = 16
 
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("forkserver")
