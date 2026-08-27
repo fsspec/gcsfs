@@ -50,13 +50,10 @@ class ComparisonConfigurator(BaseBenchmarkConfigurator):
             bucket_name = self.get_bucket_name(b_type)
             if not bucket_name:
                 continue
-            name = f"{scenario_name}_{b_type}_{size_mb}MB_{threads}threads"
-            if procs > 1:
-                name += f"_{procs}procs"
-            if files_count > 1:
-                name += f"_{files_count}files"
-            if chunk_mb != 50:
-                name += f"_{chunk_mb}MBchunk"
+            name = (
+                f"{scenario_name}_{b_type}_{size_mb}MB_{chunk_mb}MB_chunk_{procs}procs"
+                f"_{threads}threads_{files_count}files"
+            )
 
             params = ComparisonBenchmarkParameters(
                 name=name,

@@ -50,13 +50,13 @@ def _gcsfs_open_read(gcs, remote_path, chunk_size):
 def _gcsfs_get_batch(gcs, remote_dir, local_dir, threads):
     """Download multiple files or a directory to local disk via gcs.get(recursive=True)."""
     os.makedirs(local_dir, exist_ok=True)
-    gcs.get(remote_dir, local_dir, recursive=True, max_workers=threads)
+    gcs.get(remote_dir, local_dir, recursive=True, batch_size=threads)
 
 
 def _gcsfs_cat_batch(gcs, remote_dir, threads):
     """Download multiple files directly into memory via gcs.cat()."""
     file_paths = gcs.find(remote_dir)
-    return gcs.cat(file_paths, max_workers=threads)
+    return gcs.cat(file_paths, batch_size=threads)
 
 
 def _gcsfs_put(gcs, local_path, remote_path, chunk_size):
@@ -66,14 +66,9 @@ def _gcsfs_put(gcs, local_path, remote_path, chunk_size):
 
 def _gcsfs_pipe(gcs, local_path, remote_path, chunk_size):
     """Upload data to GCS using in-memory or memory-mapped buffer via gcs.pipe()."""
-    if os.path.exists(local_path):
-        file_size = os.path.getsize(local_path)
-        if file_size > 0:
-            with open(local_path, "rb") as f:
-                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                    gcs.pipe(remote_path, mm, chunksize=chunk_size)
-            return
-    gcs.pipe(remote_path, b"", chunksize=chunk_size)
+    with open(local_path, "rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            gcs.pipe(remote_path, mm, chunksize=chunk_size)
 
 
 def _gcsfs_open_write(gcs, local_path, remote_path, chunk_size):
@@ -91,7 +86,7 @@ def _gcsfs_open_write(gcs, local_path, remote_path, chunk_size):
 
 def _gcsfs_put_batch(gcs, local_dir, remote_dir, threads):
     """Upload a local directory tree to GCS via gcs.put(recursive=True)."""
-    gcs.put(local_dir, remote_dir, recursive=True, max_workers=threads)
+    gcs.put(local_dir, remote_dir, recursive=True, batch_size=threads)
 
 
 def _gcsfs_pipe_batch(gcs, local_dir, remote_dir):
@@ -127,7 +122,7 @@ def _gcsfs_pipe_batch(gcs, local_dir, remote_dir):
 
 def _gcloud_cp(src, dst, threads=None):
     """Copy a file using gcloud storage cp."""
-    if not src.startswith("gs://") and os.path.exists(dst):
+    if not dst.startswith("gs://") and os.path.exists(dst):
         os.remove(dst)
     cmd = ["gcloud", "storage", "cp", src, dst]
     env = os.environ.copy()

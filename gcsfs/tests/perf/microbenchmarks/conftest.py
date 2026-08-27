@@ -512,6 +512,8 @@ def publish_benchmark_extra_info(
         params, "mrd_pool_cache_size", "N/A"
     )
     benchmark.extra_info["mrd_pool_size"] = getattr(params, "mrd_pool_size", "N/A")
+    benchmark.extra_info["engine"] = getattr(params, "engine", "N/A")
+    benchmark.extra_info["method"] = getattr(params, "method", "N/A")
 
     benchmark.group = benchmark_group
 
