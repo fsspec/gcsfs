@@ -84,46 +84,54 @@ def _prepare_files_gcloud(file_paths, file_size):
     """Fast parallel upload using gcloud storage cp if available."""
     if not shutil.which("gcloud"):
         return False
-    if not (len(file_paths) == 1 and file_size >= 100 * MB or len(file_paths) > 10):
-        return False
 
-    with tempfile.TemporaryDirectory(prefix="gcsfs-bench-prep-") as tmpdir:
-        env = {
-            **os.environ,
-            "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED": "True",
-            "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_THRESHOLD": "50M",
-            "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_COMPONENT_SIZE": "50M",
-            "CLOUDSDK_STORAGE_PROCESS_COUNT": "16",
-            "CLOUDSDK_STORAGE_THREAD_COUNT": "32",
-        }
-        if len(file_paths) == 1:
-            local_file = os.path.join(tmpdir, "source.bin")
-            _write_local_file(local_file, file_size)
-            cmd = ["gcloud", "storage", "cp", local_file, f"gs://{file_paths[0]}"]
-        else:
-            base_dir = os.path.commonpath(file_paths)
-            local_dir = os.path.join(tmpdir, "sources")
-            for path in file_paths:
-                local_path = os.path.join(local_dir, os.path.relpath(path, base_dir))
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                _write_local_file(local_path, file_size)
-            cmd = [
-                "gcloud",
-                "storage",
-                "cp",
-                "-r",
-                f"{local_dir}/*",
-                f"gs://{base_dir}/",
-            ]
+    try:
+        with tempfile.TemporaryDirectory(prefix="gcsfs-bench-prep-") as tmpdir:
+            env = {
+                **os.environ,
+                "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED": "True",
+                "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_THRESHOLD": "50M",
+                "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_COMPONENT_SIZE": "50M",
+                "CLOUDSDK_STORAGE_PROCESS_COUNT": "16",
+                "CLOUDSDK_STORAGE_THREAD_COUNT": "32",
+            }
+            if len(file_paths) == 1:
+                local_file = os.path.join(tmpdir, "source.bin")
+                _write_local_file(local_file, file_size)
+                cmd = ["gcloud", "storage", "cp", local_file, f"gs://{file_paths[0]}"]
+            else:
+                base_dir = os.path.commonpath(file_paths)
+                local_dir = os.path.join(tmpdir, "sources")
+                for path in file_paths:
+                    local_path = os.path.join(
+                        local_dir, os.path.relpath(path, base_dir)
+                    )
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    _write_local_file(local_path, file_size)
+                cmd = [
+                    "gcloud",
+                    "storage",
+                    "cp",
+                    "-r",
+                    f"{local_dir}/*",
+                    f"gs://{base_dir}/",
+                ]
 
-        res = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        if res.returncode == 0:
-            return True
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            if res.returncode != 0:
+                logging.warning(
+                    "gcloud storage cp failed during fixture preparation, "
+                    f"falling back to python upload: {res.stderr}"
+                )
+                return False
+    except Exception as e:
         logging.warning(
-            "gcloud storage cp failed during fixture preparation, "
-            f"falling back to python upload: {res.stderr}"
+            "gcloud storage cp failed during fixture preparation: "
+            f"{e!r}, falling back to python upload"
         )
         return False
+
+    return True
 
 
 def _prepare_files(gcs, file_paths, file_size=0):
@@ -134,8 +142,9 @@ def _prepare_files(gcs, file_paths, file_size=0):
         except Exception as e:
             pytest.fail(f"Failed to pipe files: {e}")
 
-    if _prepare_files_gcloud(file_paths, file_size):
-        return
+    if len(file_paths) * file_size >= 10240 * MB:
+        if _prepare_files_gcloud(file_paths, file_size):
+            return
 
     chunk_size = min(100 * MB, file_size)
     pool_size = min(len(file_paths), 64)
