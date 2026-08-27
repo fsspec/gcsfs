@@ -345,7 +345,6 @@ def test_comparison_configurator(mock_config_dependencies):
         "file_sizes_mb": [1024],
         "chunk_sizes_mb": [50],
         "threads": [4],
-        "processes": [1],
         "rounds": 3,
     }
     scenario = {"name": "download_large_file"}

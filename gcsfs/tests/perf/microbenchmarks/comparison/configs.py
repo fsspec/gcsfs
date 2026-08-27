@@ -25,7 +25,6 @@ class ComparisonConfigurator(BaseBenchmarkConfigurator):
             "chunk_sizes_mb", common_config.get("chunk_sizes_mb", [50])
         )
         threads_list = scenario.get("threads", common_config.get("threads", [4]))
-        processes_list = scenario.get("processes", common_config.get("processes", [1]))
         files_list = scenario.get("files", [1])
         rounds = scenario.get("rounds", common_config.get("rounds", 1))
 
@@ -35,7 +34,6 @@ class ComparisonConfigurator(BaseBenchmarkConfigurator):
             file_sizes_mb,
             chunk_sizes_mb,
             threads_list,
-            processes_list,
             files_list,
         )
 
@@ -44,14 +42,13 @@ class ComparisonConfigurator(BaseBenchmarkConfigurator):
             size_mb,
             chunk_mb,
             threads,
-            procs,
             files_count,
         ) in param_combinations:
             bucket_name = self.get_bucket_name(b_type)
             if not bucket_name:
                 continue
             name = (
-                f"{scenario_name}_{b_type}_{size_mb}MB_{chunk_mb}MB_chunk_{procs}procs"
+                f"{scenario_name}_{b_type}_{size_mb}MB_{chunk_mb}MB_chunk"
                 f"_{threads}threads_{files_count}files"
             )
 
@@ -64,7 +61,7 @@ class ComparisonConfigurator(BaseBenchmarkConfigurator):
                 chunk_size_bytes=int(chunk_mb * MB),
                 files=files_count,
                 threads=threads,
-                processes=procs,
+                processes=1,
                 rounds=rounds,
             )
             cases.append(params)
