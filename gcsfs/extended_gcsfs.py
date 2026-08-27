@@ -6,7 +6,6 @@ import os
 import uuid
 import weakref
 from collections import defaultdict
-from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from glob import has_magic
@@ -32,7 +31,12 @@ from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
-from gcsfs.core import GCSFile, GCSFileSystem, _coalesce_ranges
+from gcsfs.core import (
+    GCSFile,
+    GCSFileSystem,
+    _coalesce_ranges,
+    _validate_cat_ranges_input,
+)
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -663,18 +667,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         -------
         list of bytes or memoryview (when coalescing is active)
         """
-        if not isinstance(paths, list):
-            raise TypeError("paths must be a list")
-        if not isinstance(starts, Iterable) or isinstance(starts, (str, bytes)):
-            starts = [starts] * len(paths)
-        else:
-            starts = list(starts)
-        if not isinstance(ends, Iterable) or isinstance(ends, (str, bytes)):
-            ends = [ends] * len(paths)
-        else:
-            ends = list(ends)
-        if len(starts) != len(paths) or len(ends) != len(paths):
-            raise ValueError("paths, starts, and ends must have the same length")
+        starts, ends = _validate_cat_ranges_input(paths, starts, ends)
 
         n = len(paths)
         if n == 0:
@@ -765,7 +758,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     for s, e, idx in items
                 ]
 
-            effective_batch_size = batch_size or self.batch_size or 64
+            effective_batch_size = batch_size or 64
             for i in range(0, len(merged_ranges), effective_batch_size):
                 batch_merged = merged_ranges[i : i + effective_batch_size]
                 buffers = [io.BytesIO() for _ in range(len(batch_merged))]

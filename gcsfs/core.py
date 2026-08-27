@@ -258,6 +258,23 @@ def _coalesce_ranges(items, max_gap, file_size=None):
     return merged_ranges
 
 
+def _validate_cat_ranges_input(paths, starts, ends):
+    """Normalize and validate inputs for cat_ranges."""
+    if not isinstance(paths, list):
+        raise TypeError("paths must be a list")
+    if not isinstance(starts, Iterable) or isinstance(starts, (str, bytes)):
+        starts = [starts] * len(paths)
+    else:
+        starts = list(starts)
+    if not isinstance(ends, Iterable) or isinstance(ends, (str, bytes)):
+        ends = [ends] * len(paths)
+    else:
+        ends = list(ends)
+    if len(starts) != len(paths) or len(ends) != len(paths):
+        raise ValueError("paths, starts, and ends must have the same length")
+    return starts, ends
+
+
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -1384,18 +1401,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         -------
         list of bytes or memoryview (when coalescing is active)
         """
-        if not isinstance(paths, list):
-            raise TypeError("paths must be a list")
-        if not isinstance(starts, Iterable) or isinstance(starts, (str, bytes)):
-            starts = [starts] * len(paths)
-        else:
-            starts = list(starts)
-        if not isinstance(ends, Iterable) or isinstance(ends, (str, bytes)):
-            ends = [ends] * len(paths)
-        else:
-            ends = list(ends)
-        if len(starts) != len(paths) or len(ends) != len(paths):
-            raise ValueError("paths, starts, and ends must have the same length")
+        starts, ends = _validate_cat_ranges_input(paths, starts, ends)
 
         n = len(paths)
         if n == 0:
