@@ -9,13 +9,13 @@ import logging
 import mimetypes
 import os
 import posixpath
+import queue
 import re
 import sys
 import threading
 import uuid
 import warnings
 import weakref
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from glob import has_magic
 from urllib.parse import parse_qs
@@ -2369,18 +2369,36 @@ def _on_loop_thread(loop):
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
-_deferred_close_executor = None
-_deferred_close_executor_lock = threading.Lock()
+_deferred_close_queue = None
+_deferred_close_lock = threading.Lock()
 
 
-def _get_deferred_close_executor():
-    global _deferred_close_executor
-    with _deferred_close_executor_lock:
-        if _deferred_close_executor is None:
-            _deferred_close_executor = ThreadPoolExecutor(
-                thread_name_prefix=_DEFERRED_CLOSE_THREAD_NAME
-            )
-        return _deferred_close_executor
+def _deferred_close_worker(work):
+    while True:
+        job = work.get()
+        if job is None:  # pragma: no cover
+            return
+        try:
+            job()
+        except Exception:
+            logger.exception("deferred close failed")
+
+
+def _start_deferred_close_worker():
+    global _deferred_close_queue
+    if _deferred_close_queue is not None:
+        return _deferred_close_queue
+    with _deferred_close_lock:
+        if _deferred_close_queue is None:
+            work = queue.SimpleQueue()
+            threading.Thread(
+                target=_deferred_close_worker,
+                args=(work,),
+                name=_DEFERRED_CLOSE_THREAD_NAME,
+                daemon=True,
+            ).start()
+            _deferred_close_queue = work
+        return _deferred_close_queue
 
 
 def _defer_close(file):
@@ -2390,10 +2408,10 @@ def _defer_close(file):
         except Exception:
             logger.exception("deferred close of %s failed", file.path)
 
-    try:
-        _get_deferred_close_executor().submit(_run)
-    except RuntimeError:  # pragma: no cover
-        logger.debug("could not defer close of %s at shutdown", file.path)
+    work = _deferred_close_queue
+    if work is None:  # pragma: no cover
+        work = _start_deferred_close_worker()
+    work.put(_run)
 
 
 class GCSFile(fsspec.spec.AbstractBufferedFile):
@@ -2516,6 +2534,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.fixed_key_metadata.update(fixed_key_metadata or {})
         self.kms_key_name = kms_key_name
         self.timeout = timeout
+        _start_deferred_close_worker()
         if mode in {"wb", "xb"}:
             if self.blocksize < GCS_MIN_BLOCK_SIZE:
                 warnings.warn("Setting block size to minimum value, 2**18")
