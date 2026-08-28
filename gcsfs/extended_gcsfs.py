@@ -404,8 +404,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return offset, 0
         else:
             length = effective_end - offset  # Normal case
-            if size is not None and effective_end > size:
-                length = max(0, size - offset)  # Clamp and ensure non-negative
+            s = await _get_size()
+            if effective_end > s:
+                length = max(0, s - offset)  # Clamp and ensure non-negative
 
         return offset, length
 
@@ -739,11 +740,23 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
                 valid_items = []
                 for s, e, idx in items:
-                    offset, length = (
-                        await self._process_limits_to_offset_and_length(
-                            path, s, e, file_size=file_size
+                    if (
+                        not needs_file_size
+                        and s is not None
+                        and s >= 0
+                        and e is not None
+                    ):
+                        offset = s
+                        if e <= offset:
+                            length = 0
+                        else:
+                            length = e - offset
+                    else:
+                        offset, length = (
+                            await self._process_limits_to_offset_and_length(
+                                path, s, e, file_size=file_size
+                            )
                         )
-                    )
                     if length == 0:
                         results[idx] = b""
                     else:
@@ -762,31 +775,22 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
                 configured_batch_size = batch_size or self.batch_size or 64
                 if batch_size == -1:
-                    effective_batch_size = min(
-                        len(merged_ranges) or 1, MAX_BATCH_SIZE
-                    )
+                    effective_batch_size = min(len(merged_ranges) or 1, MAX_BATCH_SIZE)
                 else:
-                    effective_batch_size = min(
-                        configured_batch_size, MAX_BATCH_SIZE
-                    )
+                    effective_batch_size = min(configured_batch_size, MAX_BATCH_SIZE)
 
                 for i in range(0, len(merged_ranges), effective_batch_size):
                     batch_merged = merged_ranges[i : i + effective_batch_size]
                     buffers = [io.BytesIO() for _ in range(len(batch_merged))]
                     mrd_spec = [
-                        (s, e - s, buf)
-                        for (s, e, _), buf in zip(batch_merged, buffers)
+                        (s, e - s, buf) for (s, e, _), buf in zip(batch_merged, buffers)
                     ]
 
                     try:
-                        async with _get_mrd_from_pool_or_mrd(
-                            mrd_pool
-                        ) as m_client:
+                        async with _get_mrd_from_pool_or_mrd(mrd_pool) as m_client:
                             await m_client.download_ranges(mrd_spec)
 
-                        for buf, (_, _, slice_list) in zip(
-                            buffers, batch_merged
-                        ):
+                        for buf, (_, _, slice_list) in zip(buffers, batch_merged):
                             merged_chunk = buf.getvalue()
                             view = memoryview(merged_chunk)
                             for idx, rel_s, rel_e in slice_list:

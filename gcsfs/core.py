@@ -1410,8 +1410,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             return offset, 0
         else:
             length = effective_end - offset  # Normal case
-            if size is not None and effective_end > size:
-                length = max(0, size - offset)  # Clamp and ensure non-negative
+            s = await _get_size()
+            if effective_end > s:
+                length = max(0, s - offset)  # Clamp and ensure non-negative
 
         return offset, length
 
@@ -1483,9 +1484,16 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     continue
 
             for s, e, idx in items:
-                offset, length = await self._process_limits_to_offset_and_length(
-                    p, s, e, file_size=file_size
-                )
+                if not needs_file_size and s is not None and s >= 0 and e is not None:
+                    offset = s
+                    if e <= offset:
+                        length = 0
+                    else:
+                        length = e - offset
+                else:
+                    offset, length = await self._process_limits_to_offset_and_length(
+                        p, s, e, file_size=file_size
+                    )
                 if length == 0:
                     results[idx] = b""
                 else:
@@ -1507,9 +1515,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 if batch_size == -1:
                     effective_batch_size = min(len(coros), MAX_BATCH_SIZE)
                 else:
-                    effective_batch_size = min(
-                        configured_batch_size, MAX_BATCH_SIZE
-                    )
+                    effective_batch_size = min(configured_batch_size, MAX_BATCH_SIZE)
                 out = await asyn._run_coros_in_chunks(
                     coros,
                     batch_size=effective_batch_size,
@@ -1544,9 +1550,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             if batch_size == -1:
                 effective_batch_size = min(len(merged_coros), MAX_BATCH_SIZE)
             else:
-                effective_batch_size = min(
-                    configured_batch_size, MAX_BATCH_SIZE
-                )
+                effective_batch_size = min(configured_batch_size, MAX_BATCH_SIZE)
             merged_chunks = await asyn._run_coros_in_chunks(
                 merged_coros,
                 batch_size=effective_batch_size,

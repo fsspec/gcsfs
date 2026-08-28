@@ -3880,6 +3880,7 @@ async def test_gcsfs_cat_ranges_normalization():
             assert bytes(res[1]) == b""  # Zero length slice returned directly
             assert bytes(res[2]) == b"789"  # Negative start resolved to offset 7
             assert bytes(res[3]) == b"23"
+            assert mock_cat.call_count == 3
 
 
 @pytest.mark.asyncio
