@@ -857,7 +857,7 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     pool_a = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
     pool_b = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
 
-    assert fs._mrd_pool_cache._refcounts[("bucket", "key", "1", None, None)] == 2
+    assert fs._mrd_pool_cache._refcounts[("bucket", "key", "1", None)] == 2
     assert init_mrd_mock.await_count == 2
 
     a_mrd = pool_a._all_mrds[0]

@@ -597,6 +597,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         # A new MRDPool is required when read is done directly by the
         # GCSFilesystem class without creating a GCSFile object first.
+        # Compute metadata for MRDPool fallback and for concurrent fetching
+        cache_type, _, cache_source = _get_prefetcher_and_cache_config(
+            kwargs.get("cache_type"), kwargs
+        )
+        if "cache_source" in kwargs:
+            cache_source = kwargs["cache_source"]
+            
+        cache_val = _get_cache_type_header_value(cache_type, cache_source)
+        mrd_metadata = [("x-goog-api-client", cache_val)] if cache_val else None
+
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
             if not await self._is_zonal_bucket(bucket):
@@ -605,11 +615,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     path, start=start, end=end, concurrency=concurrency, **kwargs
                 )
 
-            cache_type = kwargs.get("cache_type", getattr(self, "cache_type", None))
-            cache_source = kwargs.get(
-                "cache_source", getattr(self, "cache_source", None)
-            )
-
             # Instantiate an MRDPool locally for this call
             mrd = await self._mrd_pool_cache.get(
                 bucket,
@@ -617,7 +622,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 generation,
                 pool_size=concurrency,
                 cache_type=cache_type,
-                cache_source=cache_source,
             )
             pool_created_here = True
 
@@ -643,6 +647,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 length,
                 concurrency,
                 mrd,
+                metadata=mrd_metadata,
             )
 
         finally:

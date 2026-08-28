@@ -281,7 +281,7 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
                     start=0,
                     end=10,
                     cache_type="readahead",
-                    cache_source="explicit",
+                    
                 )
 
             mock_get.assert_awaited_once_with(
@@ -290,7 +290,7 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
                 mock.ANY,
                 pool_size=mock.ANY,
                 cache_type="readahead",
-                cache_source="explicit",
+                
             )
 
 
