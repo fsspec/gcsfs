@@ -68,7 +68,7 @@ async def test_download_range():
     result = await zb_hns_utils.download_range(offset, length, mock_mrd)
 
     mock_mrd.download_ranges.assert_called_once_with(
-        [(offset, length, mock.ANY)], metadata=None
+        [(offset, length, mock.ANY)]
     )
     assert result == expected_data
 
@@ -145,7 +145,7 @@ async def test_init_mrd_success():
         )
 
         mock_create_mrd.assert_awaited_once_with(
-            mock_grpc_client, bucket_name, object_name, generation, metadata=None
+            mock_grpc_client, bucket_name, object_name, generation
         )
         assert result is mock_mrd_instance
 
