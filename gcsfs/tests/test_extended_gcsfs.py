@@ -1829,3 +1829,79 @@ async def test_extended_gcsfs_cat_ranges_zonal_lazy_info():
                 res = await fs._cat_ranges(paths, starts, ends, max_gap=5)
                 assert len(res) == 2
                 assert mock_info.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_zonal_pool_closed():
+    fs = ExtendedGcsFileSystem(token="anon")
+    mock_pool = mock.AsyncMock()
+    mock_pool.close = mock.AsyncMock()
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+            side_effect=RuntimeError("download failure"),
+        ):
+            paths = ["zonal-bucket/f.bin"]
+            starts = [0]
+            ends = [10]
+            with pytest.raises(RuntimeError, match="download failure"):
+                await fs._cat_ranges(paths, starts, ends, on_error="raise")
+            # Pool must be closed even when download fails
+            mock_pool.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_zonal_normalization():
+    fs = ExtendedGcsFileSystem(token="anon")
+    file_data = b"0123456789"
+
+    class MockMRD:
+        def __init__(self):
+            self.spec_called = []
+
+        async def download_ranges(self, mrd_spec):
+            self.spec_called.append(mrd_spec)
+            for s, length, buf in mrd_spec:
+                buf.write(file_data[s : s + length])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_mrd = MockMRD()
+    mock_pool = mock.AsyncMock()
+    mock_pool.close = mock.AsyncMock()
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+            return_value=mock_mrd,
+        ):
+            with mock.patch(
+                "gcsfs.extended_gcsfs._get_mrd_size", return_value=len(file_data)
+            ):
+                paths = [
+                    "zonal-bucket/f.bin",
+                    "zonal-bucket/f.bin",
+                    "zonal-bucket/f.bin",
+                    "zonal-bucket/f.bin",
+                ]
+                starts = [0, 5, -3, 2]
+                ends = [3, 5, None, 4]  # index 1 has length 0 (5 to 5)
+
+                res = await fs._cat_ranges(paths, starts, ends, batch_size=-1)
+                assert len(res) == 4
+                assert bytes(res[0]) == b"012"
+                assert bytes(res[1]) == b""  # Zero length slice returned directly
+                assert bytes(res[2]) == b"789"  # Negative start resolved to offset 7
+                assert bytes(res[3]) == b"23"
+                mock_pool.close.assert_awaited_once()

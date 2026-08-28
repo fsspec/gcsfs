@@ -404,9 +404,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return offset, 0
         else:
             length = effective_end - offset  # Normal case
-            s = await _get_size()
-            if effective_end > s:
-                length = max(0, s - offset)  # Clamp and ensure non-negative
+            if size is not None and effective_end > size:
+                length = max(0, size - offset)  # Clamp and ensure non-negative
 
         return offset, length
 
@@ -676,8 +675,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # 1. Group requests by file path, tracking original caller indices
         file_groups = defaultdict(list)
         for orig_idx, (p, s, e) in enumerate(zip(paths, starts, ends)):
-            s_val = s or 0
-            file_groups[p].append((s_val, e, orig_idx))
+            file_groups[p].append((s, e, orig_idx))
 
         # Check unique buckets to avoid redundant _is_zonal_bucket checks
         bucket_zonal_map = {}
@@ -705,6 +703,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             else:
                 zonal_files.append((path, items, bucket, object_name, generation))
 
+        MAX_BATCH_SIZE = 1000
+
         async def _fetch_zonal_file(path, items, bucket, object_name, generation):
             # 2. Zonal Bucket: Acquire MRD from pool cache
             try:
@@ -718,73 +718,87 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     results[idx] = exc
                 return
 
-            file_size = None
-            if any(e is None for _, e, _ in items):
-                try:
-                    file_size = await _get_mrd_size(mrd_pool)
-                    if file_size is None:
-                        file_size = (await self._info(path))["size"]
-                except Exception as exc:
-                    if on_error != "return":
-                        raise exc
-                    for _, _, idx in items:
-                        results[idx] = exc
+            try:
+                # Normalize limits using _process_limits_to_offset_and_length
+                needs_file_size = any(
+                    (s is not None and s < 0) or e is None or (e is not None and e < 0)
+                    for s, e, _ in items
+                )
+                file_size = None
+                if needs_file_size:
+                    try:
+                        file_size = await _get_mrd_size(mrd_pool)
+                        if file_size is None:
+                            file_size = (await self._info(path))["size"]
+                    except Exception as exc:
+                        if on_error != "return":
+                            raise exc
+                        for _, _, idx in items:
+                            results[idx] = exc
+                        return
+
+                valid_items = []
+                for s, e, idx in items:
+                    offset, length = (
+                        await self._process_limits_to_offset_and_length(
+                            path, s, e, file_size=file_size
+                        )
+                    )
+                    if length == 0:
+                        results[idx] = b""
+                    else:
+                        valid_items.append((offset, offset + length, idx))
+
+                if not valid_items:
                     return
 
-            # 3. Construct multi-range request for this file
-            if max_gap is not None and max_gap >= 0:
-                merged_ranges = _coalesce_ranges(items, max_gap, file_size=file_size)
-            else:
-                merged_ranges = [
-                    (
-                        s,
-                        e,
-                        [
-                            (
-                                idx,
-                                0,
-                                (
-                                    (e - s)
-                                    if e is not None
-                                    else (
-                                        (file_size - s)
-                                        if file_size is not None
-                                        else None
-                                    )
-                                ),
-                            )
-                        ],
+                # 3. Construct multi-range request for this file
+                if max_gap is not None and max_gap >= 0:
+                    merged_ranges = _coalesce_ranges(valid_items, max_gap)
+                else:
+                    merged_ranges = [
+                        (s, e, [(idx, 0, e - s)]) for s, e, idx in valid_items
+                    ]
+
+                configured_batch_size = batch_size or self.batch_size or 64
+                if batch_size == -1:
+                    effective_batch_size = min(
+                        len(merged_ranges) or 1, MAX_BATCH_SIZE
                     )
-                    for s, e, idx in items
-                ]
+                else:
+                    effective_batch_size = min(
+                        configured_batch_size, MAX_BATCH_SIZE
+                    )
 
-            effective_batch_size = batch_size or 64
-            for i in range(0, len(merged_ranges), effective_batch_size):
-                batch_merged = merged_ranges[i : i + effective_batch_size]
-                buffers = [io.BytesIO() for _ in range(len(batch_merged))]
-                mrd_spec = [
-                    (s, (e - s) if e is not None else (file_size - s), buf)
-                    for (s, e, _), buf in zip(batch_merged, buffers)
-                ]
+                for i in range(0, len(merged_ranges), effective_batch_size):
+                    batch_merged = merged_ranges[i : i + effective_batch_size]
+                    buffers = [io.BytesIO() for _ in range(len(batch_merged))]
+                    mrd_spec = [
+                        (s, e - s, buf)
+                        for (s, e, _), buf in zip(batch_merged, buffers)
+                    ]
 
-                try:
-                    async with _get_mrd_from_pool_or_mrd(mrd_pool) as m_client:
-                        await m_client.download_ranges(mrd_spec)
+                    try:
+                        async with _get_mrd_from_pool_or_mrd(
+                            mrd_pool
+                        ) as m_client:
+                            await m_client.download_ranges(mrd_spec)
 
-                    for buf, (_, _, slice_list) in zip(buffers, batch_merged):
-                        merged_chunk = buf.getvalue()
-                        view = memoryview(merged_chunk)
-                        for idx, rel_s, rel_e in slice_list:
-                            if rel_e is None:
-                                results[idx] = view[rel_s:]
-                            else:
+                        for buf, (_, _, slice_list) in zip(
+                            buffers, batch_merged
+                        ):
+                            merged_chunk = buf.getvalue()
+                            view = memoryview(merged_chunk)
+                            for idx, rel_s, rel_e in slice_list:
                                 results[idx] = view[rel_s:rel_e]
-                except Exception as exc:
-                    if on_error != "return":
-                        raise exc
-                    for _, _, slice_list in batch_merged:
-                        for idx, _, _ in slice_list:
-                            results[idx] = exc
+                    except Exception as exc:
+                        if on_error != "return":
+                            raise exc
+                        for _, _, slice_list in batch_merged:
+                            for idx, _, _ in slice_list:
+                                results[idx] = exc
+            finally:
+                await mrd_pool.close()
 
         async def _run_non_zonal():
             if not non_zonal_paths:
@@ -801,9 +815,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             for idx, res in zip(non_zonal_indices, nz_results):
                 results[idx] = res
 
-        tasks = [
-            _fetch_zonal_file(p, it, b, obj, gen) for p, it, b, obj, gen in zonal_files
-        ]
+        # Bound total active download jobs across all files using semaphore
+        file_concurrency = min(len(zonal_files) or 1, self.batch_size or 32)
+        sem = asyncio.Semaphore(file_concurrency)
+
+        async def _fetch_with_sem(file_args):
+            async with sem:
+                return await _fetch_zonal_file(*file_args)
+
+        tasks = [_fetch_with_sem(args) for args in zonal_files]
         if non_zonal_paths:
             tasks.append(_run_non_zonal())
 

@@ -3859,6 +3859,30 @@ async def test_gcsfs_cat_ranges_coalesced():
 
 
 @pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_normalization():
+    fs = GCSFileSystem(token="anon")
+    f_data = b"0123456789"
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        s = start or 0
+        e = end if end is not None else len(f_data)
+        return f_data[s:e]
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
+        with mock.patch.object(fs, "_info", return_value={"size": len(f_data)}):
+            paths = ["b/f", "b/f", "b/f", "b/f"]
+            starts = [0, 4, -3, 2]
+            ends = [2, 4, None, 4]  # index 1 has length 0
+
+            res = await fs._cat_ranges(paths, starts, ends, batch_size=-1)
+            assert len(res) == 4
+            assert bytes(res[0]) == b"01"
+            assert bytes(res[1]) == b""  # Zero length slice returned directly
+            assert bytes(res[2]) == b"789"  # Negative start resolved to offset 7
+            assert bytes(res[3]) == b"23"
+
+
+@pytest.mark.asyncio
 async def test_gcsfs_cat_ranges_error_handling():
     fs = GCSFileSystem(token="anon")
 

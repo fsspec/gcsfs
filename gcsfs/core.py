@@ -1368,6 +1368,57 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         # Once concurrency code path is stabilized, we can remove this if-else condition.
         return await self._cat_file_sequential(path, start=start, end=end, **kwargs)
 
+    async def _process_limits_to_offset_and_length(
+        self, path, start, end, file_size=None
+    ):
+        """
+        Calculates the read offset and length from start and end parameters.
+
+        Args:
+            path (str): The path to the file.
+            start (int | None): The starting byte position.
+            end (int | None): The ending byte position.
+            file_size (int | None): The total size of the file. If None, it will be fetched via _info().
+
+        Returns:
+            tuple: A tuple containing (offset, length).
+        """
+        size = file_size
+
+        async def _get_size():
+            nonlocal size
+            if size is None:
+                size = (await self._info(path))["size"]
+            return size
+
+        if start is None:
+            offset = 0
+        elif start < 0:
+            offset = max(0, await _get_size() + start)
+        else:
+            offset = start
+
+        if end is None:
+            effective_end = await _get_size()
+        elif end < 0:
+            effective_end = await _get_size() + end
+        else:
+            effective_end = end
+
+        # If the requested end is before or same as the start, return empty.
+        if effective_end <= offset:
+            return offset, 0
+        else:
+            length = effective_end - offset  # Normal case
+            if size is not None and effective_end > size:
+                length = max(0, size - offset)  # Clamp and ensure non-negative
+
+        return offset, length
+
+    sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
+        _process_limits_to_offset_and_length
+    )
+
     async def _cat_ranges(
         self,
         paths,
@@ -1407,66 +1458,116 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if n == 0:
             return []
 
-        # If coalescing is not enabled, fall back to standard uncoalesced per-range coroutines
-        if max_gap is None or max_gap < 0:
-            coros = [
-                self._cat_file(p, start=s, end=e, **kwargs)
-                for p, s, e in zip(paths, starts, ends)
-            ]
-            batch_size = batch_size or self.batch_size
-            out = await asyn._run_coros_in_chunks(
-                coros, batch_size=batch_size, nofiles=True, return_exceptions=True
-            )
-            if on_error != "return":
-                ex = next(filter(asyn.is_exception, out), None)
-                if ex is not None:
-                    raise ex
-            return out
-
-        # 1. Group requests by file path, tracking original caller indices
+        results = [None] * n
         file_groups = defaultdict(list)
         for orig_idx, (p, s, e) in enumerate(zip(paths, starts, ends)):
-            s_val = s or 0
-            file_groups[p].append((s_val, e, orig_idx))
+            file_groups[p].append((s, e, orig_idx))
 
+        # Normalize limits using _process_limits_to_offset_and_length
+        # Slices with length == 0 are populated directly without network I/O
+        valid_items_per_file = defaultdict(list)
+        for p, items in file_groups.items():
+            needs_file_size = any(
+                (s is not None and s < 0) or e is None or (e is not None and e < 0)
+                for s, e, _ in items
+            )
+            file_size = None
+            if needs_file_size:
+                try:
+                    file_size = (await self._info(p))["size"]
+                except Exception as exc:
+                    if on_error != "return":
+                        raise exc
+                    for _, _, idx in items:
+                        results[idx] = exc
+                    continue
+
+            for s, e, idx in items:
+                offset, length = await self._process_limits_to_offset_and_length(
+                    p, s, e, file_size=file_size
+                )
+                if length == 0:
+                    results[idx] = b""
+                else:
+                    valid_items_per_file[p].append((offset, offset + length, idx))
+
+        MAX_BATCH_SIZE = 1000
+
+        # If coalescing is not enabled, fall back to standard uncoalesced per-range coroutines
+        if max_gap is None or max_gap < 0:
+            coros = []
+            coro_indices = []
+            for p, items in valid_items_per_file.items():
+                for s, e, idx in items:
+                    coros.append(self._cat_file(p, start=s, end=e, **kwargs))
+                    coro_indices.append(idx)
+
+            if coros:
+                configured_batch_size = batch_size or self.batch_size or 64
+                if batch_size == -1:
+                    effective_batch_size = min(len(coros), MAX_BATCH_SIZE)
+                else:
+                    effective_batch_size = min(
+                        configured_batch_size, MAX_BATCH_SIZE
+                    )
+                out = await asyn._run_coros_in_chunks(
+                    coros,
+                    batch_size=effective_batch_size,
+                    nofiles=True,
+                    return_exceptions=True,
+                )
+                for idx, res in zip(coro_indices, out):
+                    if asyn.is_exception(res) and on_error != "return":
+                        raise res
+                    results[idx] = res
+            return results
+
+        # Coalesce adjacent/near-adjacent ranges per file
         merged_paths = []
         merged_starts = []
         merged_ends = []
         merged_slice_maps = []  # list of [(orig_idx, rel_start, rel_end), ...]
 
-        # 2. Coalesce adjacent/near-adjacent ranges per file
-        for p, items in file_groups.items():
+        for p, items in valid_items_per_file.items():
             for m_s, m_e, slice_list in _coalesce_ranges(items, max_gap):
                 merged_paths.append(p)
                 merged_starts.append(m_s)
                 merged_ends.append(m_e)
                 merged_slice_maps.append(slice_list)
 
-        # 3. Fetch coalesced ranges
-        merged_coros = [
-            self._cat_file(p, start=s, end=e, **kwargs)
-            for p, s, e in zip(merged_paths, merged_starts, merged_ends)
-        ]
-        batch_size = batch_size or self.batch_size
-        merged_chunks = await asyn._run_coros_in_chunks(
-            merged_coros, batch_size=batch_size, nofiles=True, return_exceptions=True
-        )
+        if merged_paths:
+            merged_coros = [
+                self._cat_file(p, start=s, end=e, **kwargs)
+                for p, s, e in zip(merged_paths, merged_starts, merged_ends)
+            ]
+            configured_batch_size = batch_size or self.batch_size or 64
+            if batch_size == -1:
+                effective_batch_size = min(len(merged_coros), MAX_BATCH_SIZE)
+            else:
+                effective_batch_size = min(
+                    configured_batch_size, MAX_BATCH_SIZE
+                )
+            merged_chunks = await asyn._run_coros_in_chunks(
+                merged_coros,
+                batch_size=effective_batch_size,
+                nofiles=True,
+                return_exceptions=True,
+            )
 
-        # 4. Unpack merged chunks back into original caller positions
-        results = [None] * n
-        for chunk, slice_list in zip(merged_chunks, merged_slice_maps):
-            if asyn.is_exception(chunk):
-                if on_error != "return":
-                    raise chunk
-                for orig_idx, _, _ in slice_list:
-                    results[orig_idx] = chunk
-                continue
+            # Unpack merged chunks back into original caller positions
+            for chunk, slice_list in zip(merged_chunks, merged_slice_maps):
+                if asyn.is_exception(chunk):
+                    if on_error != "return":
+                        raise chunk
+                    for orig_idx, _, _ in slice_list:
+                        results[orig_idx] = chunk
+                    continue
 
-            for orig_idx, rel_s, rel_e in slice_list:
-                if rel_e is None:
-                    results[orig_idx] = memoryview(chunk)[rel_s:]
-                else:
-                    results[orig_idx] = memoryview(chunk)[rel_s:rel_e]
+                for orig_idx, rel_s, rel_e in slice_list:
+                    if rel_e is None:
+                        results[orig_idx] = memoryview(chunk)[rel_s:]
+                    else:
+                        results[orig_idx] = memoryview(chunk)[rel_s:rel_e]
 
         return results
 
