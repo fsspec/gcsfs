@@ -59,7 +59,7 @@ async def test_download_range():
     expected_data = b"test data from download"
 
     # Simulate the download_ranges method writing data to the buffer
-    async def mock_download_ranges(ranges, **kwargs):
+    async def mock_download_ranges(ranges, metadata=None):
         _offset, _length, buffer = ranges[0]
         buffer.write(expected_data)
 

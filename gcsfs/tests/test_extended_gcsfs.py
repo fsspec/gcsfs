@@ -547,7 +547,7 @@ def test_multithreaded_read_one_fails_others_survive_zb(
             if current_call_idx == 2:  # Make the 3rd call (index 2) fail
                 raise DataCorruption(None, "Simulated data corruption for thread 3")
 
-            await original_download_ranges_side_effect(read_requests, **kwargs)
+            await original_download_ranges_side_effect(read_requests, metadata=metadata)
 
         mocks["downloader"].download_ranges.side_effect = (
             failing_download_ranges_side_effect
@@ -1198,7 +1198,7 @@ def _mrd_pool_with_downloads():
     mock_mrd.object_name = "test_object"
     mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
 
-    async def fake_download(ranges, **kwargs):
+    async def fake_download(ranges, metadata=None):
         for offset, length, buf in ranges:
             buf.write(b"A" * length)
 
@@ -1251,7 +1251,7 @@ async def test_concurrent_mrd_fetch_exception_masking(extended_gcsfs, monkeypatc
 
     call_count = 0
 
-    async def failing_download(ranges, **kwargs):
+    async def failing_download(ranges, metadata=None):
         nonlocal call_count
         call_count += 1
         if call_count == 2:
@@ -1542,7 +1542,7 @@ async def test_concurrent_mrd_fetch_buffer_error_surfaced(extended_gcsfs):
     mock_mrd.object_name = "test_object"
     mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
 
-    async def underfilling_download(ranges, **kwargs):
+    async def underfilling_download(ranges, metadata=None):
         for offset, length, buf in ranges:
             # We intentionally write 1 byte LESS than requested.
             # This causes no exception during the gather block (has_error = False),

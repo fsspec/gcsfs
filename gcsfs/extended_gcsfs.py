@@ -450,8 +450,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         cache_type, _, cache_source = _get_prefetcher_and_cache_config(
             kwargs.get("cache_type"), kwargs
         )
-        cache_val = _get_cache_type_header_value(cache_type, cache_source)
-        mrd_metadata = [("x-goog-api-client", cache_val)] if cache_val else None
 
         if mrd is None:
             # If no mrd is provided, we create one with pool size equal to passed concurrency.
