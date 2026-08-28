@@ -644,13 +644,21 @@ def test_zonal_file_fetch_range_without_prefetch_engine(mock_gcsfs):
             chunk_lengths=[5],
             size=zf.size,
             mrd=zf.mrd_pool,
+            cache_type=mock.ANY,
+            cache_source=mock.ANY,
         )
 
         result = zf._fetch_range(start=10, end=20)
 
         assert result == b"cat_data"
         mock_gcsfs._cat_file.assert_awaited_once_with(
-            zf.path, start=10, end=20, concurrency=zf.pool_size, mrd=zf.mrd_pool
+            zf.path,
+            start=10,
+            end=20,
+            concurrency=zf.pool_size,
+            mrd=zf.mrd_pool,
+            cache_type=mock.ANY,
+            cache_source=mock.ANY,
         )
 
         # Test catch of "not satisfiable"

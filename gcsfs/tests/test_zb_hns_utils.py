@@ -1439,3 +1439,58 @@ def test_direct_memmove_buffer_pypy_fallback():
     assert isinstance(buf._result_bytes, bytearray)
 
     executor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_download_range_with_metadata():
+    """Tests that download_range correctly propagates the metadata kwarg."""
+    offset = 10
+    length = 20
+    mock_mrd = mock.AsyncMock()
+    expected_data = b"test data from download"
+    expected_metadata = [("x-goog-api-client", "cache_type/readahead:e")]
+
+    async def mock_download_ranges(ranges, metadata=None):
+        _offset, _length, buffer = ranges[0]
+        buffer.write(expected_data)
+
+    mock_mrd.download_ranges.side_effect = mock_download_ranges
+
+    # Act: Explicitly pass metadata
+    result = await zb_hns_utils.download_range(
+        offset, length, mock_mrd, metadata=expected_metadata
+    )
+
+    # Assert: Enforce that metadata was passed to the underlying MRD
+    mock_mrd.download_ranges.assert_called_once_with(
+        [(offset, length, mock.ANY)], metadata=expected_metadata
+    )
+    assert result == expected_data
+
+
+@pytest.mark.asyncio
+async def test_download_ranges_with_metadata():
+    """Tests that download_ranges correctly propagates the metadata kwarg."""
+    mock_mrd = mock.AsyncMock()
+    expected_metadata = [("x-goog-api-client", "cache_type/readahead:e")]
+
+    # Write some distinct data to verify mapping
+    async def mock_side_effect(req_ranges, metadata=None):
+        for offset, length, buf in req_ranges:
+            buf.write(f"{offset}-{length}".encode())
+
+    mock_mrd.download_ranges.side_effect = mock_side_effect
+
+    # Define ranges and buffers
+    buf1 = BytesIO()
+    buf2 = BytesIO()
+    ranges = [(0, 5, buf1), (10, 5, buf2)]
+
+    # Act: Explicitly pass metadata
+    await zb_hns_utils.download_ranges(ranges, mock_mrd, metadata=expected_metadata)
+
+    # Assert: Verify the mocked method received the metadata
+    expected_mrd_calls = [(offset, length, mock.ANY) for offset, length, _ in ranges]
+    mock_mrd.download_ranges.assert_called_once_with(
+        expected_mrd_calls, metadata=expected_metadata
+    )
