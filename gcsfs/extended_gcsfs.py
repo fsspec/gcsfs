@@ -532,7 +532,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         f"mrd path: {m_client.object_name} | "
                         f"Requested range: [({o}, {s})]"
                     )
-                await m_client.download_ranges([(o, s, view)], metadata=metadata)
+                kwargs = {}
+                if metadata:
+                    kwargs["metadata"] = metadata
+
+                try:
+                    await m_client.download_ranges([(o, s, view)], **kwargs)
+                except TypeError as e:
+                    if "metadata" in str(e):
+                        # TODO: Remove this fallback once the latest google-cloud-storage
+                        # SDK is released with support for the metadata argument.
+                        await m_client.download_ranges([(o, s, view)])
+                    else:
+                        raise
 
         for relative_offset, actual_size in ranges:
             part_offset = offset + relative_offset

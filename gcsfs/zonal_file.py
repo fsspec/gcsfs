@@ -78,6 +78,8 @@ class ZonalFile(GCSFile):
             resolved_cache_type, _, resolved_cache_source = (
                 _get_prefetcher_and_cache_config(cache_type, kwargs)
             )
+            self._resolved_cache_type = resolved_cache_type
+            self._resolved_cache_source = resolved_cache_source
             self.mrd_pool = asyn.sync(
                 self.gcsfs.loop,
                 self.gcsfs._mrd_pool_cache.get,
@@ -236,6 +238,8 @@ class ZonalFile(GCSFile):
                     chunk_lengths=chunk_lengths,
                     size=self.size,
                     mrd=self.mrd_pool,
+                    cache_type=self._resolved_cache_type,
+                    cache_source=self._resolved_cache_source,
                 )
 
             return await self.gcsfs._cat_file(
@@ -244,6 +248,8 @@ class ZonalFile(GCSFile):
                 end=end,
                 concurrency=self.concurrency,
                 mrd=self.mrd_pool,
+                cache_type=self._resolved_cache_type,
+                cache_source=self._resolved_cache_source,
             )
 
         try:

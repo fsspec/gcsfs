@@ -61,10 +61,22 @@ async def init_mrd(
     if cache_val:
         metadata = [("x-goog-api-client", cache_val)]
 
+    kwargs = {}
+    if metadata:
+        kwargs["metadata"] = metadata
+
     try:
         return await AsyncMultiRangeDownloader.create_mrd(
-            grpc_client, bucket_name, object_name, generation, metadata=metadata
+            grpc_client, bucket_name, object_name, generation, **kwargs
         )
+    except TypeError as e:
+        if "metadata" in str(e):
+            # TODO: Remove this fallback once the latest google-cloud-storage
+            # SDK is released with support for the metadata argument.
+            return await AsyncMultiRangeDownloader.create_mrd(
+                grpc_client, bucket_name, object_name, generation
+            )
+        raise
     except NotFound:
         # We wrap the error here to match standard Python error handling
         # and avoid leaking Google API exceptions to users.
@@ -79,7 +91,19 @@ async def download_range(offset, length, mrd, metadata=None):
     if length == 0:
         return b""
     buffer = BytesIO()
-    await mrd.download_ranges([(offset, length, buffer)], metadata=metadata)
+    kwargs = {}
+    if metadata:
+        kwargs["metadata"] = metadata
+
+    try:
+        await mrd.download_ranges([(offset, length, buffer)], **kwargs)
+    except TypeError as e:
+        if "metadata" in str(e):
+            # TODO: Remove this fallback once the latest google-cloud-storage
+            # SDK is released with support for the metadata argument.
+            await mrd.download_ranges([(offset, length, buffer)])
+        else:
+            raise
     data = buffer.getvalue()
     bytes_downloaded = len(data)
 
@@ -125,9 +149,23 @@ async def download_ranges(ranges, mrd, metadata=None):
     if tasks:
         # The MRD expects list of (offset, length, buffer)
         # We extract these from our task list
-        await mrd.download_ranges(
-            [(off, length, buf) for _, off, length, buf in tasks], metadata=metadata
-        )
+        kwargs = {}
+        if metadata:
+            kwargs["metadata"] = metadata
+
+        try:
+            await mrd.download_ranges(
+                [(off, length, buf) for _, off, length, buf in tasks], **kwargs
+            )
+        except TypeError as e:
+            if "metadata" in str(e):
+                # TODO: Remove this fallback once the latest google-cloud-storage
+                # SDK is released with support for the metadata argument.
+                await mrd.download_ranges(
+                    [(off, length, buf) for _, off, length, buf in tasks]
+                )
+            else:
+                raise
 
     # Map results back to their original positions
     results = [b""] * len(ranges)
