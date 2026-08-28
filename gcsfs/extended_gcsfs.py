@@ -462,6 +462,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 generation,
                 pool_size=pool_size,
                 cache_type=cache_type,
+                cache_source=cache_source,
             )
             pool_created_here = True
 
@@ -610,8 +611,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         cache_type, _, cache_source = _get_prefetcher_and_cache_config(
             kwargs.get("cache_type"), kwargs
         )
-        if "cache_source" in kwargs:
-            cache_source = kwargs["cache_source"]
 
         cache_val = _get_cache_type_header_value(cache_type, cache_source)
         mrd_metadata = [("x-goog-api-client", cache_val)] if cache_val else None
@@ -631,6 +630,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 generation,
                 pool_size=concurrency,
                 cache_type=cache_type,
+                cache_source=cache_source,
             )
             pool_created_here = True
 

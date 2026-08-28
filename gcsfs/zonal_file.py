@@ -6,7 +6,12 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import zb_hns_utils
-from gcsfs.core import DEFAULT_BLOCK_SIZE, GCSFile, _coalesce_generation
+from gcsfs.core import (
+    DEFAULT_BLOCK_SIZE,
+    GCSFile,
+    _coalesce_generation,
+    _get_prefetcher_and_cache_config,
+)
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
     ReadAheadChunked,
@@ -70,13 +75,18 @@ class ZonalFile(GCSFile):
         self.pool_size = pool_size
         object_size = None
         if "r" in self.mode:
+            resolved_cache_type, _, resolved_cache_source = (
+                _get_prefetcher_and_cache_config(cache_type, kwargs)
+            )
             self.mrd_pool = asyn.sync(
                 self.gcsfs.loop,
                 self.gcsfs._mrd_pool_cache.get,
                 bucket,
                 key,
                 generation,
-                self.pool_size,
+                pool_size=self.pool_size,
+                cache_type=resolved_cache_type,
+                cache_source=resolved_cache_source,
             )
             if getattr(self.mrd_pool, "details", None) is not None:
                 self._details = self.mrd_pool.details

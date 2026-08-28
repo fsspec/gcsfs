@@ -289,6 +289,7 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
                 mock.ANY,
                 pool_size=mock.ANY,
                 cache_type="readahead",
+                cache_source="explicit",
             )
 
 

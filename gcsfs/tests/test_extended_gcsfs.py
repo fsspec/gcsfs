@@ -74,7 +74,7 @@ def gcs_bucket_mocks():
         )
         patch_target_gcsfs_cat_file = "gcsfs.core.GCSFileSystem._cat_file"
 
-        async def download_side_effect(read_requests, **kwargs):
+        async def download_side_effect(read_requests, metadata=None):
             for param_offset, param_length, buffer_arg in read_requests:
                 if hasattr(buffer_arg, "write"):
                     buffer_arg.write(
@@ -539,7 +539,7 @@ def test_multithreaded_read_one_fails_others_survive_zb(
         call_counter = 0
         counter_lock = threading.Lock()
 
-        async def failing_download_ranges_side_effect(read_requests, **kwargs):
+        async def failing_download_ranges_side_effect(read_requests, metadata=None):
             nonlocal call_counter
             with counter_lock:
                 current_call_idx = call_counter
@@ -953,11 +953,13 @@ def test_get_file_from_zonal_bucket(extended_gcsfs, gcs_bucket_mocks):
             mocks["downloader"].close.assert_awaited()
 
 
-async def create_mrd_side_effect(client, bucket, object_name, generation, **kwargs):
+async def create_mrd_side_effect(
+    client, bucket, object_name, generation, cache_type=None, cache_source=None
+):
     """Side effect function to create a mocked AsyncMultiRangeDownloader."""
     file_data = files[object_name]
 
-    async def download_side_effect(read_requests, **kwargs):
+    async def download_side_effect(read_requests, metadata=None):
         for param_offset, param_length, buffer_arg in read_requests:
             if hasattr(buffer_arg, "write"):
                 buffer_arg.write(file_data[param_offset : param_offset + param_length])
@@ -1479,10 +1481,16 @@ async def test_cat_file_delegates_resolved_range_to_mrd_fetch(
         )
         mock_concurrent_fetch.return_value = b"data"
 
-        await extended_gcsfs._cat_file("bucket/obj", concurrency=4)
+        await extended_gcsfs._cat_file(
+            "bucket/obj", concurrency=4, cache_type="readahead"
+        )
 
         mock_concurrent_fetch.assert_awaited_once_with(
-            0, 500, 4, mock_pool, metadata=mock.ANY
+            0,
+            500,
+            4,
+            mock_pool,
+            metadata=[("x-goog-api-client", "cache_type/readahead:e")],
         )
 
 

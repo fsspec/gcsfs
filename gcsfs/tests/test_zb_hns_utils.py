@@ -266,7 +266,7 @@ async def test_download_ranges_unified(ranges, expected_call_count):
     mock_mrd = mock.AsyncMock()
 
     # Writes distinct data like b"0-5" to verify mapping
-    async def side_effect(req_ranges, **kwargs):
+    async def side_effect(req_ranges, metadata=None):
         for offset, length, buf in req_ranges:
             buf.write(f"{offset}-{length}".encode())
 
