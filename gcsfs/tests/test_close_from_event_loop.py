@@ -132,10 +132,9 @@ def test_deferred_closes_share_a_bounded_thread_pool(fake_fs, io_loop):
         lambda: len(workers) == n_files
     ), f"only {len(workers)}/{n_files} deferred closes ran"
     idents = {ident for ident, _ in workers}
-    max_workers = core._get_deferred_close_executor()._max_workers
-    assert len(idents) <= max_workers, (
-        f"{len(idents)} threads used for {n_files} closes, "
-        f"pool is capped at {max_workers}"
+    assert len(idents) == 1, (
+        f"{len(idents)} threads used for {n_files} closes; deferred closes "
+        "should share one worker"
     )
     assert all(
         name.startswith(core._DEFERRED_CLOSE_THREAD_NAME) for _, name in workers
