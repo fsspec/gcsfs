@@ -1702,6 +1702,17 @@ async def test_extended_gcsfs_cat_ranges_zonal_error_handling():
                         paths, starts, ends, max_gap=5, on_error="raise"
                     )
 
+        # Failure during pool acquisition with start=None under on_error="return"
+        mock_pool_cache.get = mock.AsyncMock(side_effect=FileNotFoundError("missing"))
+        res_missing = await fs._cat_ranges(
+            ["zonal-bucket/missing.bin"],
+            starts=[None],
+            ends=[10],
+            on_error="return",
+        )
+        assert len(res_missing) == 1
+        assert isinstance(res_missing[0], FileNotFoundError)
+
 
 @pytest.mark.asyncio
 async def test_extended_gcsfs_cat_ranges_mixed_zonal_and_non_zonal():
@@ -1821,13 +1832,15 @@ async def test_extended_gcsfs_cat_ranges_zonal_lazy_info():
             return_value=MockMRD(),
         ):
             with mock.patch.object(fs, "_info") as mock_info:
-                # All ends are explicit, so _info should NOT be called
-                paths = ["zonal-bucket/f.bin", "zonal-bucket/f.bin"]
-                starts = [0, 10]
+                # All ends are explicit (including start=None and tuple paths), so _info should NOT be called
+                paths = ("zonal-bucket/f.bin", "zonal-bucket/f.bin")
+                starts = [None, 10]
                 ends = [5, 15]
 
                 res = await fs._cat_ranges(paths, starts, ends, max_gap=5)
                 assert len(res) == 2
+                assert bytes(res[0]) == b"XXXXX"
+                assert bytes(res[1]) == b"XXXXX"
                 assert mock_info.call_count == 0
 
 
@@ -1954,44 +1967,6 @@ async def test_extended_gcsfs_cat_ranges_return_types():
 
 
 @pytest.mark.asyncio
-async def test_extended_gcsfs_cat_ranges_start_none_lazy_info():
-    fs = ExtendedGcsFileSystem(token="anon")
-
-    class MockMRD:
-        async def download_ranges(self, mrd_spec):
-            for s, length, buf in mrd_spec:
-                buf.write(b"Y" * length)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-    mock_pool = mock.AsyncMock()
-    mock_pool.close = mock.AsyncMock()
-    mock_pool_cache = mock.AsyncMock()
-    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
-    fs._mrd_pool_cache = mock_pool_cache
-
-    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
-        with mock.patch(
-            "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
-            return_value=MockMRD(),
-        ):
-            with mock.patch.object(fs, "_info") as mock_info:
-                # start=None with explicit end=5 should NOT call _info()
-                paths = ("zonal-bucket/f.bin",)
-                starts = [None]
-                ends = [5]
-
-                res = await fs._cat_ranges(paths, starts, ends, max_gap=0)
-                assert len(res) == 1
-                assert bytes(res[0]) == b"YYYYY"
-                assert mock_info.call_count == 0
-
-
-@pytest.mark.asyncio
 async def test_extended_gcsfs_cat_ranges_batch_size_semaphore():
     fs = ExtendedGcsFileSystem(token="anon")
 
@@ -2025,22 +2000,3 @@ async def test_extended_gcsfs_cat_ranges_batch_size_semaphore():
                 # batch_size=2 should limit file_concurrency to 2
                 await fs._cat_ranges(paths, starts, ends, batch_size=2)
                 mock_sem.assert_called_with(2)
-
-
-@pytest.mark.asyncio
-async def test_extended_gcsfs_cat_ranges_start_none_error_handling():
-    fs = ExtendedGcsFileSystem(token="anon")
-
-    mock_pool_cache = mock.AsyncMock()
-    mock_pool_cache.get = mock.AsyncMock(side_effect=FileNotFoundError("missing"))
-    fs._mrd_pool_cache = mock_pool_cache
-
-    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
-        res = await fs._cat_ranges(
-            ["zonal-bucket/missing.bin"],
-            starts=[None],
-            ends=[10],
-            on_error="return",
-        )
-        assert len(res) == 1
-        assert isinstance(res[0], FileNotFoundError)
