@@ -655,8 +655,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             else:
                 zonal_files.append((path, items, bucket, object_name, generation))
 
-        MAX_BATCH_SIZE = 1000
-
         async def _fetch_zonal_file(path, items, bucket, object_name, generation):
             # 2. Zonal Bucket: Acquire MRD from pool cache
             try:
@@ -671,43 +669,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 return
 
             try:
-                # Normalize limits using _process_limits_to_offset_and_length
-                needs_file_size = any(
-                    (s is not None and s < 0) or e is None or (e is not None and e < 0)
-                    for s, e, _ in items
+                valid_items = await self._normalize_file_ranges(
+                    path,
+                    items,
+                    results,
+                    on_error=on_error,
+                    get_size_fn=lambda: _get_mrd_size(mrd_pool),
                 )
-                file_size = None
-                if needs_file_size:
-                    try:
-                        file_size = await _get_mrd_size(mrd_pool)
-                        if file_size is None:
-                            file_size = (await self._info(path))["size"]
-                    except Exception as exc:
-                        if on_error != "return":
-                            raise exc
-                        for _, _, idx in items:
-                            results[idx] = exc
-                        return
-
-                valid_items = []
-                for s, e, idx in items:
-                    offset = 0 if s is None else s
-                    if not needs_file_size and offset >= 0 and e is not None and e >= 0:
-                        if e <= offset:
-                            length = 0
-                        else:
-                            length = e - offset
-                    else:
-                        offset, length = (
-                            await self._process_limits_to_offset_and_length(
-                                path, s, e, file_size=file_size
-                            )
-                        )
-                    if length == 0:
-                        results[idx] = b""
-                    else:
-                        valid_items.append((offset, offset + length, idx))
-
                 if not valid_items:
                     return
 
@@ -719,11 +687,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         (s, e, [(idx, 0, e - s)]) for s, e, idx in valid_items
                     ]
 
-                configured_batch_size = batch_size or self.batch_size or 64
-                if batch_size == -1:
-                    effective_batch_size = min(len(merged_ranges) or 1, MAX_BATCH_SIZE)
-                else:
-                    effective_batch_size = min(configured_batch_size, MAX_BATCH_SIZE)
+                effective_batch_size = self._compute_effective_batch_size(
+                    batch_size, self.batch_size, len(merged_ranges)
+                )
 
                 for i in range(0, len(merged_ranges), effective_batch_size):
                     batch_merged = merged_ranges[i : i + effective_batch_size]

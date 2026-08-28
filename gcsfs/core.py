@@ -3,6 +3,7 @@ Google Cloud Storage pythonic interface
 """
 
 import asyncio
+import inspect
 import io
 import json
 import logging
@@ -1417,6 +1418,77 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         return offset, length
 
+    @staticmethod
+    def _compute_effective_batch_size(
+        batch_size, default_batch_size, total_items, max_batch_size=1000
+    ):
+        """Compute bounded batch size respecting batch_size=-1 and max_batch_size."""
+        if batch_size == -1:
+            return min(total_items or 1, max_batch_size)
+        configured = batch_size or default_batch_size or 64
+        return min(configured, max_batch_size)
+
+    async def _normalize_file_ranges(
+        self, path, items, results, on_error="return", get_size_fn=None
+    ):
+        """Normalize range limits (start, end) for all requests on a single file.
+
+        Populates 0-length slices with b"" directly in results, and records
+        exceptions in results if fetching file size fails with on_error="return".
+
+        Args:
+            path (str): File path.
+            items (list of (start, end, orig_idx)): Requested ranges with caller indices.
+            results (list): Output results list to populate for 0-length or error slices.
+            on_error (str): "return" or "raise".
+            get_size_fn (callable, optional): Sync or async function returning file size
+                if known without calling self._info(path).
+
+        Returns:
+            list of (offset, end_offset, orig_idx): Normalized non-zero ranges to fetch,
+            or None if an error occurred and was captured in results.
+        """
+        needs_file_size = any(
+            (s is not None and s < 0) or e is None or (e is not None and e < 0)
+            for s, e, _ in items
+        )
+        file_size = None
+        if needs_file_size:
+            try:
+                if get_size_fn is not None:
+                    res = get_size_fn()
+                    if inspect.isawaitable(res):
+                        file_size = await res
+                    else:
+                        file_size = res
+                if file_size is None:
+                    file_size = (await self._info(path))["size"]
+            except Exception as exc:
+                if on_error != "return":
+                    raise exc
+                for _, _, idx in items:
+                    results[idx] = exc
+                return None
+
+        valid_items = []
+        for s, e, idx in items:
+            offset = 0 if s is None else s
+            if not needs_file_size and offset >= 0 and e is not None and e >= 0:
+                if e <= offset:
+                    length = 0
+                else:
+                    length = e - offset
+            else:
+                offset, length = await self._process_limits_to_offset_and_length(
+                    path, s, e, file_size=file_size
+                )
+            if length == 0:
+                results[idx] = b""
+            else:
+                valid_items.append((offset, offset + length, idx))
+
+        return valid_items
+
     async def _cat_ranges(
         self,
         paths,
@@ -1461,42 +1533,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         for orig_idx, (p, s, e) in enumerate(zip(paths, starts, ends)):
             file_groups[p].append((s, e, orig_idx))
 
-        # Normalize limits using _process_limits_to_offset_and_length
+        # Normalize limits using _normalize_file_ranges
         # Slices with length == 0 are populated directly without network I/O
         valid_items_per_file = defaultdict(list)
         for p, items in file_groups.items():
-            needs_file_size = any(
-                (s is not None and s < 0) or e is None or (e is not None and e < 0)
-                for s, e, _ in items
+            valid_items = await self._normalize_file_ranges(
+                p, items, results, on_error=on_error
             )
-            file_size = None
-            if needs_file_size:
-                try:
-                    file_size = (await self._info(p))["size"]
-                except Exception as exc:
-                    if on_error != "return":
-                        raise exc
-                    for _, _, idx in items:
-                        results[idx] = exc
-                    continue
-
-            for s, e, idx in items:
-                offset = 0 if s is None else s
-                if not needs_file_size and offset >= 0 and e is not None and e >= 0:
-                    if e <= offset:
-                        length = 0
-                    else:
-                        length = e - offset
-                else:
-                    offset, length = await self._process_limits_to_offset_and_length(
-                        p, s, e, file_size=file_size
-                    )
-                if length == 0:
-                    results[idx] = b""
-                else:
-                    valid_items_per_file[p].append((offset, offset + length, idx))
-
-        MAX_BATCH_SIZE = 1000
+            if valid_items:
+                valid_items_per_file[p] = valid_items
 
         # If coalescing is not enabled, fall back to standard uncoalesced per-range coroutines
         if max_gap is None or max_gap < 0:
@@ -1508,11 +1553,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     coro_indices.append(idx)
 
             if coros:
-                configured_batch_size = batch_size or self.batch_size or 64
-                if batch_size == -1:
-                    effective_batch_size = min(len(coros), MAX_BATCH_SIZE)
-                else:
-                    effective_batch_size = min(configured_batch_size, MAX_BATCH_SIZE)
+                effective_batch_size = self._compute_effective_batch_size(
+                    batch_size, self.batch_size, len(coros)
+                )
                 out = await asyn._run_coros_in_chunks(
                     coros,
                     batch_size=effective_batch_size,
@@ -1543,11 +1586,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 self._cat_file(p, start=s, end=e, **kwargs)
                 for p, s, e in zip(merged_paths, merged_starts, merged_ends)
             ]
-            configured_batch_size = batch_size or self.batch_size or 64
-            if batch_size == -1:
-                effective_batch_size = min(len(merged_coros), MAX_BATCH_SIZE)
-            else:
-                effective_batch_size = min(configured_batch_size, MAX_BATCH_SIZE)
+            effective_batch_size = self._compute_effective_batch_size(
+                batch_size, self.batch_size, len(merged_coros)
+            )
             merged_chunks = await asyn._run_coros_in_chunks(
                 merged_coros,
                 batch_size=effective_batch_size,

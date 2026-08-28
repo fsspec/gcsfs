@@ -3989,3 +3989,21 @@ async def test_gcsfs_cat_ranges_start_none_error_handling():
             )
             assert len(res) == 1
             assert isinstance(res[0], FileNotFoundError)
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_normalize_file_ranges_helper():
+    fs = GCSFileSystem(token="anon")
+    results = [None, None, None, None]
+    items = [(0, 5, 0), (5, 5, 1), (-3, None, 2), (2, 4, 3)]
+
+    async def get_size():
+        return 10
+
+    valid = await fs._normalize_file_ranges(
+        "b/f1", items, results, on_error="return", get_size_fn=get_size
+    )
+    # Index 1 was length 0 -> results populated directly
+    assert results[1] == b""
+    # Remaining 3 are valid non-zero slices
+    assert valid == [(0, 5, 0), (7, 10, 2), (2, 4, 3)]
