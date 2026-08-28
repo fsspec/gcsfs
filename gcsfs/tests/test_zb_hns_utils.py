@@ -67,7 +67,9 @@ async def test_download_range():
 
     result = await zb_hns_utils.download_range(offset, length, mock_mrd)
 
-    mock_mrd.download_ranges.assert_called_once_with([(offset, length, mock.ANY)], metadata=None)
+    mock_mrd.download_ranges.assert_called_once_with(
+        [(offset, length, mock.ANY)], metadata=None
+    )
     assert result == expected_data
 
 

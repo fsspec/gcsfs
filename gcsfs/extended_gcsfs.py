@@ -29,7 +29,12 @@ from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
-from gcsfs.core import GCSFile, GCSFileSystem, _get_prefetcher_and_cache_config, _get_cache_type_header_value
+from gcsfs.core import (
+    GCSFile,
+    GCSFileSystem,
+    _get_cache_type_header_value,
+    _get_prefetcher_and_cache_config,
+)
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -508,7 +513,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if pool_created_here:
                 await mrd.close()
 
-    async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool, metadata=None):
+    async def _concurrent_mrd_fetch(
+        self, offset, length, concurrency, mrd_or_pool, metadata=None
+    ):
         """Helper to handle concurrent chunk downloads cleanly."""
         ranges = split_range(length, concurrency, self.MIN_CHUNK_SIZE_FOR_CONCURRENCY)
 
@@ -537,7 +544,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
             tasks.append(
                 asyncio.create_task(
-                    _download(part_offset, actual_size, view, mrd_or_pool, metadata=metadata)
+                    _download(
+                        part_offset, actual_size, view, mrd_or_pool, metadata=metadata
+                    )
                 )
             )
 
@@ -603,7 +612,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         )
         if "cache_source" in kwargs:
             cache_source = kwargs["cache_source"]
-            
+
         cache_val = _get_cache_type_header_value(cache_type, cache_source)
         mrd_metadata = [("x-goog-api-client", cache_val)] if cache_val else None
 

@@ -1481,7 +1481,9 @@ async def test_cat_file_delegates_resolved_range_to_mrd_fetch(
 
         await extended_gcsfs._cat_file("bucket/obj", concurrency=4)
 
-        mock_concurrent_fetch.assert_awaited_once_with(0, 500, 4, mock_pool, metadata=mock.ANY)
+        mock_concurrent_fetch.assert_awaited_once_with(
+            0, 500, 4, mock_pool, metadata=mock.ANY
+        )
 
 
 @pytest.mark.asyncio

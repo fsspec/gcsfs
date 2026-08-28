@@ -125,7 +125,9 @@ async def download_ranges(ranges, mrd, metadata=None):
     if tasks:
         # The MRD expects list of (offset, length, buffer)
         # We extract these from our task list
-        await mrd.download_ranges([(off, length, buf) for _, off, length, buf in tasks], metadata=metadata)
+        await mrd.download_ranges(
+            [(off, length, buf) for _, off, length, buf in tasks], metadata=metadata
+        )
 
     # Map results back to their original positions
     results = [b""] * len(ranges)
