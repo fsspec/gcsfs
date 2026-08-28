@@ -3947,3 +3947,45 @@ def test_cat_ranges_coalesce_logic(gcs):
     assert bytes(res[1]) == b"6789a"
     assert bytes(res[2]) == b"k"
     assert bytes(res[3]) == b"mnopqrst"
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_tuple_paths_and_start_none():
+    fs = GCSFileSystem(token="anon")
+    f_data = b"0123456789abcdef"
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        s = start or 0
+        e = end if end is not None else len(f_data)
+        return f_data[s:e]
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file):
+        with mock.patch.object(fs, "_info") as mock_info:
+            # Test tuple input for paths and starts=[None]
+            paths = ("b/f1", "b/f1")
+            starts = [None, 5]
+            ends = [4, 9]
+
+            res = await fs._cat_ranges(paths, starts, ends, max_gap=2)
+            assert len(res) == 2
+            assert bytes(res[0]) == b"0123"
+            assert bytes(res[1]) == b"5678"
+            # start=None with explicit end must NOT call _info
+            assert mock_info.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_start_none_error_handling():
+    fs = GCSFileSystem(token="anon")
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        raise FileNotFoundError(f"{path} not found")
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file):
+        with mock.patch.object(fs, "_info", side_effect=FileNotFoundError("missing")):
+            # Even with start=None, on_error="return" must isolate the error
+            res = await fs._cat_ranges(
+                ["b/missing"], starts=[None], ends=[10], on_error="return"
+            )
+            assert len(res) == 1
+            assert isinstance(res[0], FileNotFoundError)

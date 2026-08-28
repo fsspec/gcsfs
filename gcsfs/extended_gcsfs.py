@@ -618,7 +618,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         -------
         list of bytes or memoryview (when coalescing is active)
         """
-        starts, ends = _validate_cat_ranges_input(paths, starts, ends)
+        paths, starts, ends = _validate_cat_ranges_input(paths, starts, ends)
 
         n = len(paths)
         if n == 0:
@@ -691,13 +691,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
                 valid_items = []
                 for s, e, idx in items:
-                    if (
-                        not needs_file_size
-                        and s is not None
-                        and s >= 0
-                        and e is not None
-                    ):
-                        offset = s
+                    offset = 0 if s is None else s
+                    if not needs_file_size and offset >= 0 and e is not None and e >= 0:
                         if e <= offset:
                             length = 0
                         else:
@@ -743,9 +738,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
                         for buf, (_, _, slice_list) in zip(buffers, batch_merged):
                             merged_chunk = buf.getvalue()
-                            view = memoryview(merged_chunk)
-                            for idx, rel_s, rel_e in slice_list:
-                                results[idx] = view[rel_s:rel_e]
+                            if max_gap is None or max_gap < 0:
+                                for idx, rel_s, rel_e in slice_list:
+                                    results[idx] = merged_chunk[rel_s:rel_e]
+                            else:
+                                view = memoryview(merged_chunk)
+                                for idx, rel_s, rel_e in slice_list:
+                                    results[idx] = view[rel_s:rel_e]
                     except Exception as exc:
                         if on_error != "return":
                             raise exc
@@ -771,7 +770,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 results[idx] = res
 
         # Bound total active download jobs across all files using semaphore
-        file_concurrency = min(len(zonal_files) or 1, self.batch_size or 32)
+        effective_file_limit = (
+            batch_size
+            if (batch_size is not None and batch_size > 0)
+            else (self.batch_size or 32)
+        )
+        file_concurrency = min(len(zonal_files) or 1, effective_file_limit)
         sem = asyncio.Semaphore(file_concurrency)
 
         async def _fetch_with_sem(file_args):

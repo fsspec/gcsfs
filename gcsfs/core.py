@@ -260,8 +260,9 @@ def _coalesce_ranges(items, max_gap, file_size=None):
 
 def _validate_cat_ranges_input(paths, starts, ends):
     """Normalize and validate inputs for cat_ranges."""
-    if not isinstance(paths, list):
-        raise TypeError("paths must be a list")
+    if isinstance(paths, (str, bytes)) or not isinstance(paths, (list, tuple)):
+        raise TypeError("paths must be a list or tuple of file paths")
+    paths = list(paths)
     if not isinstance(starts, Iterable) or isinstance(starts, (str, bytes)):
         starts = [starts] * len(paths)
     else:
@@ -272,7 +273,7 @@ def _validate_cat_ranges_input(paths, starts, ends):
         ends = list(ends)
     if len(starts) != len(paths) or len(ends) != len(paths):
         raise ValueError("paths, starts, and ends must have the same length")
-    return starts, ends
+    return paths, starts, ends
 
 
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
@@ -1449,7 +1450,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         -------
         list of bytes or memoryview (when coalescing is active)
         """
-        starts, ends = _validate_cat_ranges_input(paths, starts, ends)
+        paths, starts, ends = _validate_cat_ranges_input(paths, starts, ends)
 
         n = len(paths)
         if n == 0:
@@ -1480,8 +1481,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     continue
 
             for s, e, idx in items:
-                if not needs_file_size and s is not None and s >= 0 and e is not None:
-                    offset = s
+                offset = 0 if s is None else s
+                if not needs_file_size and offset >= 0 and e is not None and e >= 0:
                     if e <= offset:
                         length = 0
                     else:
