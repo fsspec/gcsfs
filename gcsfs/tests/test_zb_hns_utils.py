@@ -1482,16 +1482,14 @@ async def test_download_ranges_with_metadata():
 
     mock_mrd.download_ranges.side_effect = mock_side_effect
 
-    # Define ranges and buffers
-    buf1 = BytesIO()
-    buf2 = BytesIO()
-    ranges = [(0, 5, buf1), (10, 5, buf2)]
+    # Define ranges (download_ranges expects (offset, length))
+    ranges = [(0, 5), (10, 5)]
 
     # Act: Explicitly pass metadata
     await zb_hns_utils.download_ranges(ranges, mock_mrd, metadata=expected_metadata)
 
     # Assert: Verify the mocked method received the metadata
-    expected_mrd_calls = [(offset, length, mock.ANY) for offset, length, _ in ranges]
+    expected_mrd_calls = [(offset, length, mock.ANY) for offset, length in ranges]
     mock_mrd.download_ranges.assert_called_once_with(
         expected_mrd_calls, metadata=expected_metadata
     )
