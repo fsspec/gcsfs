@@ -125,7 +125,9 @@ def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
         "test-bucket",
         "test-key",
         "456",
-        mock.ANY,
+        pool_size=mock.ANY,
+        cache_type=mock.ANY,
+        cache_source=mock.ANY,
     )
     assert expected_call in mock_sync.call_args_list
     zf.close()
@@ -145,7 +147,9 @@ def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
         "test-bucket",
         "test-key",
         "123",
-        mock.ANY,
+        pool_size=mock.ANY,
+        cache_type=mock.ANY,
+        cache_source=mock.ANY,
     )
     assert expected_call in mock_sync.call_args_list
     zf.close()

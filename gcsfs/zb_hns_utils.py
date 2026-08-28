@@ -522,11 +522,10 @@ class MRDPool:
         self.generation = generation
         self._cache = cache
         self.cache_type = cache_type
-        # Note: Because MRDPool is shared across requests with different cache_sources,
-        # self.cache_source reflects the originator of the pool. Scale-up operations
-        # (_create_mrd) will emit this initial cache_source telemetry, even if triggered
-        # by a request with a different cache_source. Per-request telemetry is still
-        # accurately handled during download_ranges.
+        # Note: MRDPool is shared across requests with different cache configs.
+        # self.cache_source reflects the originator of the pool. Dynamic scale-up
+        # operations (_create_mrd) will emit this initial cache_source telemetry,
+        # even if triggered by a request with a different cache_source.
         self.cache_source = cache_source
         self._key = (bucket_name, object_name, generation, cache_type)
         self.pool_size = pool_size
