@@ -361,57 +361,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             **kwargs,
         )
 
-    # Replacement method for _process_limits to support new params (offset and length) for MRD.
-    async def _process_limits_to_offset_and_length(
-        self, path, start, end, file_size=None
-    ):
-        """
-        Calculates the read offset and length from start and end parameters.
-
-        Args:
-            path (str): The path to the file.
-            start (int | None): The starting byte position.
-            end (int | None): The ending byte position.
-            file_size (int | None): The total size of the file. If None, it will be fetched via _info().
-
-        Returns:
-            tuple: A tuple containing (offset, length).
-        """
-        size = file_size
-
-        async def _get_size():
-            nonlocal size
-            if size is None:
-                size = (await self._info(path))["size"]
-            return size
-
-        if start is None:
-            offset = 0
-        elif start < 0:
-            offset = max(0, await _get_size() + start)
-        else:
-            offset = start
-
-        if end is None:
-            effective_end = await _get_size()
-        elif end < 0:
-            effective_end = await _get_size() + end
-        else:
-            effective_end = end
-
-        # If the requested end is before/ same as the start, return empty.
-        if effective_end <= offset:
-            return offset, 0
-        else:
-            length = effective_end - offset  # Normal case
-            s = await _get_size()
-            if effective_end > s:
-                length = max(0, s - offset)  # Clamp and ensure non-negative
-
-        return offset, length
-
     sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
-        _process_limits_to_offset_and_length
+        GCSFileSystem._process_limits_to_offset_and_length
     )
 
     async def _is_zonal_bucket(self, bucket):

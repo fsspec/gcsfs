@@ -1416,10 +1416,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         return offset, length
 
-    sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
-        _process_limits_to_offset_and_length
-    )
-
     async def _cat_ranges(
         self,
         paths,
