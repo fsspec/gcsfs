@@ -71,7 +71,7 @@ async def init_mrd(
         raise FileNotFoundError(f"{bucket_name}/{object_name}")
 
 
-async def download_range(offset, length, mrd):
+async def download_range(offset, length, mrd, metadata=None):
     """
     Downloads a byte range from the file asynchronously.
     """
@@ -79,7 +79,7 @@ async def download_range(offset, length, mrd):
     if length == 0:
         return b""
     buffer = BytesIO()
-    await mrd.download_ranges([(offset, length, buffer)])
+    await mrd.download_ranges([(offset, length, buffer)], metadata=metadata)
     data = buffer.getvalue()
     bytes_downloaded = len(data)
 
@@ -96,7 +96,7 @@ async def download_range(offset, length, mrd):
     return data
 
 
-async def download_ranges(ranges, mrd):
+async def download_ranges(ranges, mrd, metadata=None):
     """
     Downloads multiple byte ranges from the file asynchronously in a single batch.
 
@@ -125,7 +125,7 @@ async def download_ranges(ranges, mrd):
     if tasks:
         # The MRD expects list of (offset, length, buffer)
         # We extract these from our task list
-        await mrd.download_ranges([(off, length, buf) for _, off, length, buf in tasks])
+        await mrd.download_ranges([(off, length, buf) for _, off, length, buf in tasks], metadata=metadata)
 
     # Map results back to their original positions
     results = [b""] * len(ranges)
@@ -521,7 +521,7 @@ class MRDPool:
         self._cache = cache
         self.cache_type = cache_type
         self.cache_source = cache_source
-        self._key = (bucket_name, object_name, generation, cache_type, cache_source)
+        self._key = (bucket_name, object_name, generation, cache_type)
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
@@ -798,7 +798,7 @@ class MRDPoolCache:
         info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
         if generation is None:
             generation = info.get("generation")
-        key = (bucket_name, object_name, generation, cache_type, cache_source)
+        key = (bucket_name, object_name, generation, cache_type)
         finalized = info.get("timeFinalized") is not None
 
         self._incref(key)

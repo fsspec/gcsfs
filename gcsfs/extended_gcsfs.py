@@ -29,7 +29,7 @@ from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
-from gcsfs.core import GCSFile, GCSFileSystem
+from gcsfs.core import GCSFile, GCSFileSystem, _get_prefetcher_and_cache_config, _get_cache_type_header_value
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -441,12 +441,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         pool_created_here = False
         bucket, object_name, generation = self.split_path(path)
 
-        if mrd is None:
-            cache_type = kwargs.get("cache_type", getattr(self, "cache_type", None))
-            cache_source = kwargs.get(
-                "cache_source", getattr(self, "cache_source", None)
-            )
+        # Resolve cache_type correctly before getting from cache
+        cache_type, _, cache_source = _get_prefetcher_and_cache_config(
+            kwargs.get("cache_type"), kwargs
+        )
+        cache_val = _get_cache_type_header_value(cache_type, cache_source)
+        mrd_metadata = [("x-goog-api-client", cache_val)] if cache_val else None
 
+        if mrd is None:
             # If no mrd is provided, we create one with pool size equal to passed concurrency.
             pool_size = min(len(chunk_lengths), concurrency)
             mrd = await self._mrd_pool_cache.get(
@@ -455,7 +457,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 generation,
                 pool_size=pool_size,
                 cache_type=cache_type,
-                cache_source=cache_source,
             )
             pool_created_here = True
 
@@ -464,6 +465,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             current_offset = start_offset
 
             cat_kwargs = kwargs.copy()
+            cat_kwargs["cache_type"] = cache_type
+            cat_kwargs["cache_source"] = cache_source
 
             for length in chunk_lengths:
                 end_offset = current_offset + length
@@ -505,7 +508,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if pool_created_here:
                 await mrd.close()
 
-    async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool):
+    async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool, metadata=None):
         """Helper to handle concurrent chunk downloads cleanly."""
         ranges = split_range(length, concurrency, self.MIN_CHUNK_SIZE_FOR_CONCURRENCY)
 
@@ -516,14 +519,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # The master buffer manages its own allocation under the hood
         master_buffer = DirectMemmoveBuffer(length, self._memmove_executor)
 
-        async def _download(o, s, view, mrd_or_pool):
+        async def _download(o, s, view, mrd_or_pool, metadata=None):
             async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m_client:
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         f"mrd path: {m_client.object_name} | "
                         f"Requested range: [({o}, {s})]"
                     )
-                await m_client.download_ranges([(o, s, view)])
+                await m_client.download_ranges([(o, s, view)], metadata=metadata)
 
         for relative_offset, actual_size in ranges:
             part_offset = offset + relative_offset
@@ -534,7 +537,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
             tasks.append(
                 asyncio.create_task(
-                    _download(part_offset, actual_size, view, mrd_or_pool)
+                    _download(part_offset, actual_size, view, mrd_or_pool, metadata=metadata)
                 )
             )
 
