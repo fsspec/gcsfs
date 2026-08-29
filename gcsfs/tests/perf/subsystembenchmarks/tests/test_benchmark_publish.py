@@ -21,5 +21,7 @@ def test_publish_resource_metrics_uses_macrobenchmark_metric_names():
         "memory_usage_peak_bytes": 1024,
         "network_received_mean_bytes_per_sec": 200.0,
         "network_sent_mean_bytes_per_sec": 100.0,
+        "network_received_bytes": 400,
+        "network_sent_bytes": 200,
         "host_vcpu_count": 8,
     }

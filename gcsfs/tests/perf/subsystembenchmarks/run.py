@@ -109,8 +109,10 @@ _AMPLIFICATION_COLS = (
     "gcs_bucket_name",
     "measurement_window_start_unix_seconds",
     "measurement_window_end_unix_seconds",
-    "dataset_size_bytes",
 )
+
+_AMPLIFICATION_COLS_DATASET = ("dataset_size_bytes",)
+_AMPLIFICATION_COLS_CHECKPOINT = ("checkpoint_physical_size_bytes",)
 
 
 def _csv_has_amplification_inputs(csv_path):
@@ -119,7 +121,11 @@ def _csv_has_amplification_inputs(csv_path):
     try:
         with open(csv_path, newline="") as file:
             header = next(csv.reader(file), [])
-        return all(column in header for column in _AMPLIFICATION_COLS)
+        if not all(column in header for column in _AMPLIFICATION_COLS):
+            return False
+        return any(column in header for column in _AMPLIFICATION_COLS_DATASET) or any(
+            column in header for column in _AMPLIFICATION_COLS_CHECKPOINT
+        )
     except Exception:
         return False
 

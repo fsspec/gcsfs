@@ -3,6 +3,10 @@ import unittest.mock as mock
 import pytest
 
 from gcsfs.tests.perf.microbenchmarks import configs
+from gcsfs.tests.perf.microbenchmarks.comparison.configs import (
+    ComparisonConfigurator,
+    get_comparison_benchmark_cases,
+)
 from gcsfs.tests.perf.microbenchmarks.delete.configs import get_delete_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.glob.configs import get_glob_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.info.configs import (
@@ -328,3 +332,32 @@ def test_validate_actual_yaml_configs():
         # Glob
         cases = get_glob_benchmark_cases()
         assert len(cases) > 0, "Glob config produced no cases"
+
+        # Comparison
+        cases = get_comparison_benchmark_cases()
+        assert len(cases) > 0, "Comparison config produced no cases"
+
+
+def test_comparison_configurator(mock_config_dependencies):
+    """Test that ComparisonConfigurator correctly builds benchmark parameters."""
+    common = {
+        "bucket_types": ["regional"],
+        "file_sizes_mb": [1024],
+        "chunk_sizes_mb": [50],
+        "threads": [4],
+        "rounds": 3,
+    }
+    scenario = {"name": "download_large_file"}
+
+    configurator = ComparisonConfigurator("dummy")
+    cases = configurator.build_cases(scenario, common)
+
+    assert len(cases) == 1
+    case = cases[0]
+    assert case.scenario == "download_large_file"
+    assert case.file_size_bytes == 1024 * MB
+    assert case.chunk_size_bytes == 50 * MB
+    assert case.threads == 4
+    assert case.processes == 1
+    assert case.rounds == 3
+    assert case.bucket_type == "regional"

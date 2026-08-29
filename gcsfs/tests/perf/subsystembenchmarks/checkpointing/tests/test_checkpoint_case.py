@@ -23,11 +23,17 @@ class _FakeWriteResult:
         self.extra_columns = extra_columns or {}
 
 
-class _FakeDriver:
+class _FakeWriteDriver:
     def __init__(self, durations=None):
         self._durations = durations or [1.0, 1.5]
+        self.setup_prefix = None
+        self.run_prefix = None
 
-    def run_save(self, prefix, params):
+    def setup(self, prefix, params):
+        self.setup_prefix = prefix
+
+    def run(self, prefix, params):
+        self.run_prefix = prefix
         return _FakeWriteResult(durations=self._durations)
 
 
@@ -75,7 +81,18 @@ def _local_bucket_ctx(tmp_path):
     return ctx
 
 
-def test_run_checkpoint_case(tmp_path, monkeypatch):
+class _FakeReadDriver:
+    def setup(self, prefix, params):
+        pass
+
+    def __init__(self, durations=None):
+        self._durations = durations or [0.8, 1.2]
+
+    def run(self, prefix, params):
+        return _FakeWriteResult(durations=self._durations)
+
+
+def test_run_checkpoint_write_case(tmp_path, monkeypatch):
     monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
 
     original_url_to_fs = fsspec.core.url_to_fs
@@ -96,7 +113,7 @@ def test_run_checkpoint_case(tmp_path, monkeypatch):
 
     bench = _Bench()
     params = _params()
-    driver = _FakeDriver()
+    driver = _FakeWriteDriver()
 
     checkpoint_case.run_checkpoint_case(
         bench,
@@ -113,3 +130,97 @@ def test_run_checkpoint_case(tmp_path, monkeypatch):
     assert bench.extra_info["world_size"] == 1
     assert bench.extra_info["tensor_parallel_size"] == 1
     assert bench.extra_info["data_parallel_size"] == 1
+
+
+def test_run_checkpoint_read_case(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            mem_url = url.replace("gs://", "memory://")
+            fs, path = original_url_to_fs(mem_url)
+            # Create a mock checkpoint file
+            model_file = os.path.join(path, "model.ckpt")
+            fs.makedirs(os.path.dirname(model_file), exist_ok=True)
+            with fs.open(model_file, "wb") as f:
+                f.write(b"0" * 500)  # 500 bytes
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+
+    bench = _Bench()
+    params = _params(scenario="checkpoint_read")
+    driver = _FakeReadDriver()
+
+    checkpoint_case.run_checkpoint_case(
+        bench,
+        _Monitor(),
+        params,
+        driver,
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+
+    assert bench.group == "checkpoint_read"
+    assert bench.extra_info["workload_implementation"] == "fake"
+    assert bench.extra_info["checkpoint_physical_size_bytes"] == 500
+    assert bench.extra_info["checkpoint_read_throughput_mean_bytes_per_second"] > 0
+
+
+def test_checkpoint_case_prefix_generation(monkeypatch):
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            mem_url = url.replace("gs://", "memory://")
+            fs, path = original_url_to_fs(mem_url)
+            # Create a mock checkpoint file
+            model_file = os.path.join(path, "model.ckpt")
+            fs.makedirs(os.path.dirname(model_file), exist_ok=True)
+            with fs.open(model_file, "wb") as f:
+                f.write(b"0" * 500)  # 500 bytes
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+
+    bench = _Bench()
+    params = _params()
+
+    # Test with full URI returned by bucket_ctx
+    driver_uri = _FakeWriteDriver()
+
+    @contextlib.contextmanager
+    def uri_bucket_ctx(spec, case_id, **kw):
+        yield "gs://my-bucket/data/"
+
+    checkpoint_case.run_checkpoint_case(
+        bench,
+        _Monitor(),
+        params,
+        driver_uri,
+        bucket_ctx=uri_bucket_ctx,
+    )
+
+    assert driver_uri.run_prefix == "gs://my-bucket/checkpoint/"
+
+    # Test with plain bucket name returned by bucket_ctx
+    driver_name = _FakeWriteDriver()
+
+    @contextlib.contextmanager
+    def name_bucket_ctx(spec, case_id, **kw):
+        yield "my-bucket-name"
+
+    checkpoint_case.run_checkpoint_case(
+        bench,
+        _Monitor(),
+        params,
+        driver_name,
+        bucket_ctx=name_bucket_ctx,
+    )
+
+    assert driver_name.run_prefix == "gs://my-bucket-name/checkpoint/"

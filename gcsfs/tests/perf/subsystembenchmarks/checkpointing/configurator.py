@@ -39,7 +39,18 @@ class CheckpointParameters:
     world_size: int = 1
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1
+    setup_world_size: int = None
+    setup_tensor_parallel_size: int = None
+    setup_data_parallel_size: int = None
     sweep_axis: str = "baseline"
+
+    def __post_init__(self):
+        if self.setup_world_size is None:
+            self.setup_world_size = self.world_size
+        if self.setup_tensor_parallel_size is None:
+            self.setup_tensor_parallel_size = self.tensor_parallel_size
+        if self.setup_data_parallel_size is None:
+            self.setup_data_parallel_size = self.data_parallel_size
 
     def extra_columns(self):
         """Loader-specific CSV columns."""
@@ -47,17 +58,43 @@ class CheckpointParameters:
             "world_size": self.world_size,
             "tensor_parallel_size": self.tensor_parallel_size,
             "data_parallel_size": self.data_parallel_size,
+            "setup_world_size": self.setup_world_size,
+            "setup_tensor_parallel_size": self.setup_tensor_parallel_size,
+            "setup_data_parallel_size": self.setup_data_parallel_size,
         }
 
     def benchmark_name(self):
         """Stable, param-encoding pytest-benchmark id using swept values."""
+        op = "load" if "read" in self.scenario else "save"
         parts = [
-            "save",
+            op,
             _model_id_slug(self.model_id),
             _STRATEGY[self.strategy],
         ]
+
+        # Encode setup topology if it differs from load topology (cross_size axis)
+        setup_ws = getattr(self, "setup_world_size", None) or self.world_size
+        setup_tp = (
+            getattr(self, "setup_tensor_parallel_size", None)
+            or self.tensor_parallel_size
+        )
+        setup_dp = (
+            getattr(self, "setup_data_parallel_size", None) or self.data_parallel_size
+        )
+
         if self.strategy in ("model_parallel_full", "model_parallel_sharded"):
+            if (
+                setup_tp != self.tensor_parallel_size
+                or setup_dp != self.data_parallel_size
+            ):
+                parts.append(f"setup-tp{setup_tp}dp{setup_dp}")
             parts.append(f"tp{self.tensor_parallel_size}dp{self.data_parallel_size}")
+
+        if setup_ws != self.world_size:
+            parts.append(f"setup-ws{setup_ws}")
+        if self.world_size > 1:
+            parts.append(f"ws{self.world_size}")
+
         parts.append(_BUCKET[self.bucket_type])
         return "-".join(parts)
 

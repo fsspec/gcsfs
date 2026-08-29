@@ -12,7 +12,7 @@ of a training workload.
 The currently runnable groups are:
 
 - `dataloading/huggingface_datasets`: Measures full-corpus streaming reads of a synthetic dataset through Hugging Face Datasets, `fsspec`, and `gcsfs`, with a PyTorch `DataLoader` consuming the stream.
-- `checkpointing/pytorch_lightning`: Measures checkpoint write performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
+- `checkpointing/pytorch_lightning`: Measures checkpoint write and read performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
 
 > **This README describes the workload: what it runs, what is timed, and how to
 > debug it directly.** The normal way to provision the benchmark VM, run the

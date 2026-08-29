@@ -43,6 +43,8 @@ def publish_resource_metrics(benchmark, monitor):
             # max_cpu is percent normalized by vCPUs; convert it back to cores.
             "cpu_usage_peak_cores": (monitor.max_cpu * monitor.vcpus / 100.0),
             "memory_usage_peak_bytes": int(monitor.max_mem),
+            "network_received_bytes": int(monitor.net_recv),
+            "network_sent_bytes": int(monitor.net_sent),
             "network_received_mean_bytes_per_sec": (
                 monitor.net_recv / duration if duration > 0 else 0.0
             ),
