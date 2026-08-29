@@ -59,7 +59,7 @@ async def test_download_range():
     expected_data = b"test data from download"
 
     # Simulate the download_ranges method writing data to the buffer
-    async def mock_download_ranges(ranges, metadata=None):
+    async def mock_download_ranges(ranges):
         _offset, _length, buffer = ranges[0]
         buffer.write(expected_data)
 
@@ -264,7 +264,7 @@ async def test_download_ranges_unified(ranges, expected_call_count):
     mock_mrd = mock.AsyncMock()
 
     # Writes distinct data like b"0-5" to verify mapping
-    async def side_effect(req_ranges, metadata=None):
+    async def side_effect(req_ranges):
         for offset, length, buf in req_ranges:
             buf.write(f"{offset}-{length}".encode())
 
@@ -1442,53 +1442,39 @@ def test_direct_memmove_buffer_pypy_fallback():
 
 
 @pytest.mark.asyncio
-async def test_download_range_with_metadata():
-    """Tests that download_range correctly propagates the metadata kwarg."""
-    offset = 10
-    length = 20
-    mock_mrd = mock.AsyncMock()
-    expected_data = b"test data from download"
-    expected_metadata = [("x-goog-api-client", "cache_type/readahead:e")]
+async def test_init_mrd_metadata_fallback():
+    """Tests that init_mrd falls back when metadata kwarg is rejected."""
+    mock_grpc_client = mock.Mock()
 
-    async def mock_download_ranges(ranges, metadata=None):
-        _offset, _length, buffer = ranges[0]
-        buffer.write(expected_data)
+    async def mock_create_mrd(*args, **kwargs):
+        if "metadata" in kwargs:
+            raise TypeError(
+                "create_mrd() got an unexpected keyword argument 'metadata'"
+            )
+        return "fallback_success"
 
-    mock_mrd.download_ranges.side_effect = mock_download_ranges
-
-    # Act: Explicitly pass metadata
-    result = await zb_hns_utils.download_range(
-        offset, length, mock_mrd, metadata=expected_metadata
-    )
-
-    # Assert: Enforce that metadata was passed to the underlying MRD
-    mock_mrd.download_ranges.assert_called_once_with(
-        [(offset, length, mock.ANY)], metadata=expected_metadata
-    )
-    assert result == expected_data
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        side_effect=mock_create_mrd,
+    ) as mock_create:
+        result = await zb_hns_utils.init_mrd(
+            mock_grpc_client, "bucket", "obj", generation=1, cache_type="readahead"
+        )
+        assert result == "fallback_success"
+        assert mock_create.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_download_ranges_with_metadata():
-    """Tests that download_ranges correctly propagates the metadata kwarg."""
-    mock_mrd = mock.AsyncMock()
-    expected_metadata = [("x-goog-api-client", "cache_type/readahead:e")]
+async def test_mrd_methods_raise_unrelated_type_error():
+    """Tests that unrelated TypeErrors are properly re-raised."""
+    mock_grpc_client = mock.Mock()
 
-    # Write some distinct data to verify mapping
-    async def mock_side_effect(req_ranges, metadata=None):
-        for offset, length, buf in req_ranges:
-            buf.write(f"{offset}-{length}".encode())
-
-    mock_mrd.download_ranges.side_effect = mock_side_effect
-
-    # Define ranges (download_ranges expects (offset, length))
-    ranges = [(0, 5), (10, 5)]
-
-    # Act: Explicitly pass metadata
-    await zb_hns_utils.download_ranges(ranges, mock_mrd, metadata=expected_metadata)
-
-    # Assert: Verify the mocked method received the metadata
-    expected_mrd_calls = [(offset, length, mock.ANY) for offset, length in ranges]
-    mock_mrd.download_ranges.assert_called_once_with(
-        expected_mrd_calls, metadata=expected_metadata
-    )
+    # Test init_mrd re-raise
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        side_effect=TypeError("some other error"),
+    ):
+        with pytest.raises(TypeError, match="some other error"):
+            await zb_hns_utils.init_mrd(
+                mock_grpc_client, "b", "o", cache_type="readahead"
+            )

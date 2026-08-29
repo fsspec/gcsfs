@@ -1490,7 +1490,6 @@ async def test_cat_file_delegates_resolved_range_to_mrd_fetch(
             500,
             4,
             mock_pool,
-            metadata=[("x-goog-api-client", "cache_type/readahead:e")],
         )
 
 

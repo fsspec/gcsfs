@@ -83,7 +83,7 @@ async def init_mrd(
         raise FileNotFoundError(f"{bucket_name}/{object_name}")
 
 
-async def download_range(offset, length, mrd, metadata=None):
+async def download_range(offset, length, mrd):
     """
     Downloads a byte range from the file asynchronously.
     """
@@ -91,19 +91,7 @@ async def download_range(offset, length, mrd, metadata=None):
     if length == 0:
         return b""
     buffer = BytesIO()
-    kwargs = {}
-    if metadata:
-        kwargs["metadata"] = metadata
-
-    try:
-        await mrd.download_ranges([(offset, length, buffer)], **kwargs)
-    except TypeError as e:
-        if "metadata" in str(e):
-            # TODO: Remove this fallback once the latest google-cloud-storage
-            # SDK is released with support for the metadata argument.
-            await mrd.download_ranges([(offset, length, buffer)])
-        else:
-            raise
+    await mrd.download_ranges([(offset, length, buffer)])
     data = buffer.getvalue()
     bytes_downloaded = len(data)
 
@@ -120,7 +108,7 @@ async def download_range(offset, length, mrd, metadata=None):
     return data
 
 
-async def download_ranges(ranges, mrd, metadata=None):
+async def download_ranges(ranges, mrd):
     """
     Downloads multiple byte ranges from the file asynchronously in a single batch.
 
@@ -149,23 +137,7 @@ async def download_ranges(ranges, mrd, metadata=None):
     if tasks:
         # The MRD expects list of (offset, length, buffer)
         # We extract these from our task list
-        kwargs = {}
-        if metadata:
-            kwargs["metadata"] = metadata
-
-        try:
-            await mrd.download_ranges(
-                [(off, length, buf) for _, off, length, buf in tasks], **kwargs
-            )
-        except TypeError as e:
-            if "metadata" in str(e):
-                # TODO: Remove this fallback once the latest google-cloud-storage
-                # SDK is released with support for the metadata argument.
-                await mrd.download_ranges(
-                    [(off, length, buf) for _, off, length, buf in tasks]
-                )
-            else:
-                raise
+        await mrd.download_ranges([(off, length, buf) for _, off, length, buf in tasks])
 
     # Map results back to their original positions
     results = [b""] * len(ranges)

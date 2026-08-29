@@ -29,12 +29,7 @@ from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
-from gcsfs.core import (
-    GCSFile,
-    GCSFileSystem,
-    _get_cache_type_header_value,
-    _get_prefetcher_and_cache_config,
-)
+from gcsfs.core import GCSFile, GCSFileSystem, _get_prefetcher_and_cache_config
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -515,9 +510,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if pool_created_here:
                 await mrd.close()
 
-    async def _concurrent_mrd_fetch(
-        self, offset, length, concurrency, mrd_or_pool, metadata=None
-    ):
+    async def _concurrent_mrd_fetch(self, offset, length, concurrency, mrd_or_pool):
         """Helper to handle concurrent chunk downloads cleanly."""
         ranges = split_range(length, concurrency, self.MIN_CHUNK_SIZE_FOR_CONCURRENCY)
 
@@ -528,26 +521,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # The master buffer manages its own allocation under the hood
         master_buffer = DirectMemmoveBuffer(length, self._memmove_executor)
 
-        async def _download(o, s, view, mrd_or_pool, metadata=None):
+        async def _download(o, s, view, mrd_or_pool):
             async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m_client:
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         f"mrd path: {m_client.object_name} | "
                         f"Requested range: [({o}, {s})]"
                     )
-                kwargs = {}
-                if metadata:
-                    kwargs["metadata"] = metadata
-
-                try:
-                    await m_client.download_ranges([(o, s, view)], **kwargs)
-                except TypeError as e:
-                    if "metadata" in str(e):
-                        # TODO: Remove this fallback once the latest google-cloud-storage
-                        # SDK is released with support for the metadata argument.
-                        await m_client.download_ranges([(o, s, view)])
-                    else:
-                        raise
+                await m_client.download_ranges([(o, s, view)])
 
         for relative_offset, actual_size in ranges:
             part_offset = offset + relative_offset
@@ -558,9 +539,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
             tasks.append(
                 asyncio.create_task(
-                    _download(
-                        part_offset, actual_size, view, mrd_or_pool, metadata=metadata
-                    )
+                    _download(part_offset, actual_size, view, mrd_or_pool)
                 )
             )
 
@@ -628,9 +607,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 kwargs.get("cache_type"), kwargs
             )
 
-        cache_val = _get_cache_type_header_value(cache_type, cache_source)
-        mrd_metadata = [("x-goog-api-client", cache_val)] if cache_val else None
-
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
             if not await self._is_zonal_bucket(bucket):
@@ -672,7 +648,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 length,
                 concurrency,
                 mrd,
-                metadata=mrd_metadata,
             )
 
         finally:
@@ -1746,7 +1721,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         generation = path_generation or kwargs.get("generation")
         callback = callback or NoOpCallback()
 
-        mrd_pool = await self._mrd_pool_cache.get(bucket, key, generation, pool_size=1)
+        cache_type = kwargs.get("cache_type")
+        cache_source = kwargs.get("cache_source")
+        if not cache_type or not cache_source:
+            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
+                kwargs.get("cache_type"), kwargs
+            )
+
+        mrd_pool = await self._mrd_pool_cache.get(
+            bucket,
+            key,
+            generation,
+            pool_size=1,
+            cache_type=cache_type,
+            cache_source=cache_source,
+        )
         try:
             async with mrd_pool.get_mrd() as mrd:
                 size = mrd.persisted_size
@@ -1823,9 +1812,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         generation = path_generation or kwargs.get("generation")
 
+        cache_type = kwargs.get("cache_type")
+        cache_source = kwargs.get("cache_source")
+        if not cache_type or not cache_source:
+            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
+                kwargs.get("cache_type"), kwargs
+            )
+
         # Initialize the MRDPool once for this concurrent operation
         mrd_pool = await self._mrd_pool_cache.get(
-            bucket, key, generation, pool_size=concurrency
+            bucket,
+            key,
+            generation,
+            pool_size=concurrency,
+            cache_type=cache_type,
+            cache_source=cache_source,
         )
 
         # Define a custom fetcher that passes the pool to _cat_file
