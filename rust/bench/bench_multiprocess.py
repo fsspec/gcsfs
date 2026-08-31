@@ -200,16 +200,23 @@ def main():
     parser.add_argument("--concurrency", type=int, default=16, help="Range request concurrency per read (default: 16)")
     parser.add_argument("--max-prefetch-size", type=int, default=256 * 1024 * 1024, help="Readahead ceiling (default: 256MiB)")
     parser.add_argument("--bytes-per-process", type=int, default=None, help="Bytes limit per process (default: None, reads full 10GB file)")
+    parser.add_argument("--json", action="store_true", help="Print JSON results")
 
     args = parser.parse_args()
 
     res = run_benchmark(args)
-    gib = res["total_bytes"] / (1024 ** 3)
-    print(f"[{res['backend'].upper()}] Processes: {res['processes']:2d} | Read {gib:6.1f} GiB in {res['wall_elapsed']:6.2f}s | "
-          f"Throughput: {res['agg_throughput_mbps']:8.2f} MB/s | "
-          f"Peak Agg RSS: {res['peak_agg_rss_mb']:7.1f} MB (per-proc: {res['peak_proc_rss_mb']:5.1f} MB) | "
-          f"CPU: {res['cpu_percent']:6.1f}% (User: {res['user_time']:.1f}s, Sys: {res['sys_time']:.1f}s)")
+    if args.json:
+        import json
+        # Remove non-serializable objects if any
+        print(json.dumps(res))
+    else:
+        gib = res["total_bytes"] / (1024 ** 3)
+        print(f"[{res['backend'].upper()}] Processes: {res['processes']:2d} | Read {gib:6.1f} GiB in {res['wall_elapsed']:6.2f}s | "
+              f"Throughput: {res['agg_throughput_mbps']:8.2f} MB/s | "
+              f"Peak Agg RSS: {res['peak_agg_rss_mb']:7.1f} MB (per-proc: {res['peak_proc_rss_mb']:5.1f} MB) | "
+              f"CPU: {res['cpu_percent']:6.1f}% (User: {res['user_time']:.1f}s, Sys: {res['sys_time']:.1f}s)")
 
 
 if __name__ == "__main__":
     main()
+

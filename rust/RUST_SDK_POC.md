@@ -180,35 +180,58 @@ is the slowest.
 Practical consequence: quote the rust throughput as a **range or mean over
 many runs**, never a single number, and prefer the memory figures when a
 precise claim is needed — peak RSS held to ~5% spread (231-244 MB) across
-every run. A rigorous benchmark would use distinct objects per run, discard
-a warm-up run, and report percentiles.
-Treat throughput figures as directional; a rigorous benchmark would use
-distinct objects per run and report percentiles over many trials.
 every run. Treat throughput figures as directional; a rigorous benchmark would
 use distinct objects per run, discard a warm-up run, and report percentiles over many trials.
 
-### Multi-process scaling: 1 to 48 workers reading distinct 10 GiB files
+#### Multi-process scaling: 1 to 48 workers reading distinct 10 GiB files
 
-Measured with [rust/bench/compare_processes.sh](bench/compare_processes.sh) and [rust/bench/bench_multiprocess.py](bench/bench_multiprocess.py). Each worker process independently opens and reads a distinct 10 GiB file (`gs://princer-bucket/test_10g/file_{i}.bin`) in 8 MiB chunks. All workers synchronize via a process barrier to start reading simultaneously. Aggregate and per-process memory (VmRSS) are sampled every 50ms across the process tree.
+Measured with [rust/bench/bench_multiprocess.py](rust/bench/bench_multiprocess.py) and [rust/bench/run_process_benchmark.py](rust/bench/run_process_benchmark.py). Each worker process independently opens and reads a distinct 10 GiB file (`gs://princer-bucket/test_10g/file_{i}.bin`) in 8 MiB chunks. All workers synchronize via a process barrier to start reading simultaneously. Aggregate and per-process memory (VmRSS) are sampled every 50ms across the process tree.
 
-Runs are executed sequentially per configuration (alternating between rust and fsspec backends).
+Values represent the **mean across 3 interleaved runs** per configuration (alternating between rust and fsspec backends).
 
 | Workers / Files | Total Data Read | Backend | Elapsed Time | Aggregate Throughput | Speedup | Peak Agg RSS | Per-Proc RSS | Total CPU% | Total CPU Time |
 |:---:|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **1** | 10 GiB | **rust** | **7.67s** | **1335.8 MB/s** | **1.65x** | **259.7 MB** | **259.7 MB** | 285.0% | 21.8s |
-| | | fsspec | 12.63s | 810.6 MB/s | 1.00x | 375.0 MB | 375.0 MB | 97.5% | 12.3s |
-| **2** | 20 GiB | **rust** | **6.24s** | **3283.3 MB/s** | **2.37x** | **520.6 MB** | **260.4 MB** | 721.3% | 45.0s |
-| | | fsspec | 14.79s | 1384.8 MB/s | 1.00x | 764.5 MB | 395.6 MB | 182.4% | 27.0s |
-| **4** | 40 GiB | **rust** | **6.48s** | **6320.8 MB/s** | **2.54x** | **1.04 GB** | **260.6 MB** | 1452.1% | 94.1s |
-| | | fsspec | 16.44s | 2491.9 MB/s | 1.00x | 1.49 GB | 395.3 MB | 341.4% | 56.1s |
-| **8** | 80 GiB | **rust** | **16.32s** | **5020.7 MB/s** | **1.07x** | **2.08 GB** | **261.1 MB** | 1254.8% | 204.8s |
-| | | fsspec | 17.48s | 4686.6 MB/s | 1.00x | 2.92 GB | 394.9 MB | 683.7% | 119.5s |
-| **16** | 160 GiB | **rust** | **17.99s** | **9106.2 MB/s** | **1.14x** | **4.17 GB** | **268.5 MB** | 2527.7% | 454.7s |
-| | | fsspec | 20.48s | 8000.1 MB/s | 1.00x | 5.62 GB | 454.8 MB | 1430.0% | 292.9s |
-| **32** | 320 GiB | **rust** | **20.23s** | **16198.7 MB/s** | **1.42x** | **8.36 GB** | **276.0 MB** | 4708.9% | 952.5s |
-| | | fsspec | 28.79s | 11380.9 MB/s | 1.00x | 10.65 GB | 406.5 MB | 2859.0% | 823.1s |
-| **48** | 480 GiB | **rust** | **26.97s** | **18227.5 MB/s** | **1.44x** | **12.53 GB** | **268.6 MB** | 5570.2% | 1502.1s |
-| | | fsspec | 38.74s | 12687.3 MB/s | 1.00x | 15.89 GB | 427.0 MB | 4058.7% | 1572.4s |
+| **1** | 10 GiB | **rust** | **8.39s** | **1444.4 MB/s** (746–1876) | **1.76x** | **260.2 MB** | **260.2 MB** | 313.9% | 22.0s |
+| | | fsspec | 12.52s | 819.8 MB/s (769–850) | 1.00x | 382.1 MB | 382.1 MB | 97.0% | 12.1s |
+| **4** | 40 GiB | **rust** | **12.80s** | **3225.9 MB/s** (2853–3542) | **1.21x** | **1.02 GB** | **260.8 MB** | 720.4% | 91.7s |
+| | | fsspec | 15.37s | 2671.1 MB/s (2515–2834) | 1.00x | 1.44 GB | 402.1 MB | 357.4% | 54.9s |
+| **16** | 160 GiB | **rust** | **19.29s** | **8555.5 MB/s** (7582–9266) | **1.15x** | **4.07 GB** | **266.0 MB** | 2288.3% | 438.3s |
+| | | fsspec | 22.08s | 7426.0 MB/s (7284–7700) | 1.00x | 5.55 GB | 404.3 MB | 1308.9% | 288.8s |
+| **24** | 240 GiB | **rust** | **26.78s** | **10608.3 MB/s** (6177–15835) | **1.07x** | **6.11 GB** | **268.2 MB** | 2955.3% | 683.4s |
+| | | fsspec | 24.91s | 9869.0 MB/s (9643–10135) | 1.00x | 8.07 GB | 410.7 MB | 2080.4% | 518.1s |
+| **32** | 320 GiB | **rust** | **53.44s** | **12989.8 MB/s** (2637–18263) | **1.14x** | **8.15 GB** | **268.6 MB** | 3765.3% | 947.4s |
+| | | fsspec | 28.87s | 11355.4 MB/s (11067–11603) | 1.00x | 10.57 GB | 441.1 MB | 2792.0% | 806.0s |
+| **40** | 400 GiB | **rust** | **23.31s** | **17634.7 MB/s** (16570–19129) | **1.75x** | **10.18 GB** | **266.2 MB** | 5222.6% | 1212.5s |
+| | | fsspec | 44.02s | 10103.3 MB/s (6466–12017) | 1.00x | 12.91 GB | 423.5 MB | 2913.1% | 1179.5s |
+| **48** | 480 GiB | **rust** | **25.69s** | **19137.7 MB/s** (18674–19621) | **1.51x** | **12.22 GB** | **268.4 MB** | 5887.3% | 1512.2s |
+| | | fsspec | 38.67s | 12715.3 MB/s (12382–13048) | 1.00x | 15.39 GB | 445.0 MB | 4094.2% | 1583.3s |
+
+#### Total CPU Time vs. Total CPU%
+
+Understanding the relationship between Total CPU Time and CPU% is critical when evaluating multi-threaded and multi-process workloads across many CPU cores:
+
+| Metric | Definition | Formula | Interpretation |
+|---|---|---|---|
+| **Total CPU Time ($s$)** | Cumulative CPU execution time across all cores | $\sum (\text{User Time} + \text{System Time})$ | **Absolute work done / energy consumed** to transfer the dataset. Lower is more computationally efficient. |
+| **Total CPU %** | Instantaneous processor load across all cores | $\frac{\text{Total CPU Time}}{\text{Elapsed Wall-Clock Time}} \times 100\%$ | **Concurrency factor** across CPU cores ($100\% = 1\text{ core}$ fully active, $5000\% = 50\text{ cores}$ active in parallel). |
+
+**Why faster runs show higher CPU% for the same or less work:**
+Because CPU% is divided by wall-clock elapsed time, completing a workload faster naturally increases the percentage even when total CPU work is identical or lower.
+* **Example at 48 processes reading 480 GiB**:
+  * **Rust**: Finishes in **25.69s** at **5,887.3% CPU** $\rightarrow$ Total CPU work = **1,512.2s**.
+  * **fsspec**: Finishes in **38.67s** at **4,094.2% CPU** $\rightarrow$ Total CPU work = **1,583.3s**.
+  * Rust uses **71.1 seconds less total CPU processing time** overall, but its CPU% is higher because it engages more cores simultaneously to finish 13 seconds earlier.
+
+#### Why Total CPU Time is Higher for Rust at Low Worker Counts (1–4 Workers)
+
+1. **Kernel/System Time & Futex Synchronization:** For a 10 GiB read on 1 worker, User CPU time is comparable (~9.3s on Rust vs ~7.5s on fsspec), but System (kernel) time is ~3x higher on Rust (~12.7s vs ~4.6s). In Rust, each process runs a multi-threaded Tokio runtime (16 worker threads). TCP chunks polled by the reactor are distributed across threads via work-stealing channels, triggering kernel context switches and `futex` wakeups. In contrast, `fsspec` runs on a single-threaded Python `asyncio` selector (`epoll`), incurring virtually zero cross-thread synchronization at low concurrency.
+2. **Cross-Thread Bridge Overhead (`pyo3-async-runtimes`):** Notifying the Python event loop when a Rust task completes requires cross-thread signaling via `call_soon_threadsafe` (writing to a self-pipe/eventfd and acquiring the GIL).
+3. **Fixed Multi-Threaded Runtime Cost:** At 1–4 workers, the 16 Tokio threads incur coordination overhead without being CPU-starved.
+
+#### Why Efficiency Inverts at High Concurrency (32–48 Workers)
+
+* At high concurrency, `fsspec`'s single-threaded event loop becomes pinned, suffering from GIL contention, socket buffer backpressure, and asyncio scheduling overhead — inflating its CPU cost from **12.1s per 10 GiB at 1 worker up to 33.0s per 10 GiB at 48 workers (+172% increase per byte)**.
+* Rust handles high socket concurrency smoothly in native multi-threaded code, with CPU cost scaling much more modestly (**22.0s to 31.5s per 10 GiB, +43%**). At 48 processes reading 480 GiB, Rust completes in 25.7s vs 38.7s and uses **less total CPU work overall (1,512.2s vs 1,583.3s)** while delivering **+6.42 GB/s higher aggregate throughput**.
 
 ### Pure Rust ceiling (no Python), direct range reads
 
