@@ -3801,7 +3801,7 @@ async def test_gcsfs_cat_ranges_validation():
     async def mock_cat_file(path, start=None, end=None, **kwargs):
         return b"0123456789"[start:end]
 
-    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file):
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file), mock.patch.object(fs, "_info", return_value={"size": 10}):
         res = await fs._cat_ranges(
             ["b/f", "b/f"],
             starts=(x for x in [0, 5]),
@@ -3829,7 +3829,10 @@ async def test_gcsfs_cat_ranges_coalesced():
         e = end if end is not None else len(data)
         return data[s:e]
 
-    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
+    async def mock_info(path, **kwargs):
+        return {"size": len(f1_data) if path == "b/f1" else len(f2_data)}
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat, mock.patch.object(fs, "_info", side_effect=mock_info):
         # 1. Test scalar broadcast (uncoalesced)
         res_scalar = await fs._cat_ranges(
             ["b/f1", "b/f2"], starts=2, ends=7, max_gap=None
@@ -3900,9 +3903,12 @@ async def test_gcsfs_cat_ranges_error_handling():
         return b"0123456789"
 
     with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file):
-        with mock.patch.object(
-            fs, "_info", side_effect=FileNotFoundError("Object not found")
-        ):
+        async def mock_info(path, **kwargs):
+            if path == "b/error.txt":
+                raise FileNotFoundError("Object not found")
+            return {"size": 100}
+
+        with mock.patch.object(fs, "_info", side_effect=mock_info):
             paths = ["b/ok.txt", "b/error.txt", "b/ok.txt"]
             starts = [None, None, 5]  # Index 0 and 1 have starts=None
             ends = [5, 5, 10]
