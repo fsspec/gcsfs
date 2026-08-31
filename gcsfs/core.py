@@ -1449,7 +1449,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             or None if an error occurred and was captured in results.
         """
         needs_file_size = any(
-            (s is not None and s < 0) or e is None or (e is not None and e < 0)
+            not (s is not None and s >= 0 and e is not None and e >= 0 and e <= s)
             for s, e, _ in items
         )
         file_size = None
@@ -1472,16 +1472,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         valid_items = []
         for s, e, idx in items:
-            offset = 0 if s is None else s
-            if not needs_file_size and offset >= 0 and e is not None and e >= 0:
-                if e <= offset:
-                    length = 0
-                else:
-                    length = e - offset
-            else:
-                offset, length = await self._process_limits_to_offset_and_length(
-                    path, s, e, file_size=file_size
-                )
+            offset, length = await self._process_limits_to_offset_and_length(
+                path, s, e, file_size=file_size
+            )
             if length == 0:
                 results[idx] = b""
             else:
