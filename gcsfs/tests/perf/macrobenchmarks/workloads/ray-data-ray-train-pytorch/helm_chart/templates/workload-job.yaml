@@ -1,0 +1,194 @@
+# yamllint disable
+{{- $root := . -}}
+{{ $timestamp := now | date "2006-01-02-15-04-05" }}
+{{ $jobuuid := uuidv4 }}
+{{ $nodes := .Values.workload.nodes }}
+{{ $ranksPerNode := .Values.workload.ranksPerNode }}
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Values.namespace }}"
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: workload
+    replicas: 1
+    template:
+      spec:
+        parallelism: {{ $nodes }}
+        completions: {{ $nodes }}
+        backoffLimit: 0
+        completionMode: Indexed
+        ttlSecondsAfterFinished: 43200
+        template:
+          metadata:
+            name: {{ .Release.Name }}
+            annotations:
+              kubectl.kubernetes.io/default-container: workload
+          spec:
+            serviceAccountName: {{ $root.Values.serviceAccount }}
+            subdomain: "{{ .Release.Name }}"
+            restartPolicy: Never
+            {{- if $root.Values.nodeSelector }}
+            nodeSelector:
+              {{- toYaml $root.Values.nodeSelector | nindent 14 }}
+            {{- end }}
+            {{- if $root.Values.workload.singlePodPerNode }}
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      jobset.sigs.k8s.io/jobset-name: "{{ .Release.Name }}"
+            {{- end }}
+            {{- if $root.Values.workload.gpu }}
+            tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+            {{- end }}
+            volumes:
+            - name: workload-configuration
+              configMap:
+                name: "{{ .Release.Name }}-config"
+                items:
+                - key: workload-configuration
+                  path: {{ $root.Values.workload.configFile }}
+                - key: metric_logging.py
+                  path: metric_logging.py
+                - key: requirements.txt
+                  path: requirements.txt
+                - key: requirements-cpu.txt
+                  path: requirements-cpu.txt
+            - name: workload-launcher
+              configMap:
+                name: "{{ .Release.Name }}-launcher"
+            - name: shared-memory
+              emptyDir:
+                medium: Memory
+                sizeLimit: {{ $root.Values.workload.sharedMemorySize }}
+            containers:
+            - name: workload
+              image: "{{ $root.Values.workload.image }}"
+              imagePullPolicy: Always
+              {{- if $root.Values.workload.gpu }}
+              resources:
+                limits:
+                  nvidia.com/gpu: {{ $ranksPerNode }}
+              {{- end }}
+              env:
+              - name: JOB_TIMESTAMP
+                value: "{{ $timestamp }}"
+              - name: JOB_UUID
+                value: "{{ $jobuuid }}"
+              - name: RUN_ID
+                value: "{{ .Release.Name }}"
+              - name: JOB_COMPLETION_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+              - name: RANKS_PER_NODE
+                value: "{{ $ranksPerNode }}"
+              - name: NNODES
+                value: "{{ $nodes }}"
+              - name: RAY_PORT
+                value: "6379"
+              - name: RAY_HEAD_ADDRESS
+                value: "{{ .Release.Name }}-workload-0-0.{{ .Release.Name }}.{{ $root.Values.namespace }}.svc.cluster.local:6379"
+              - name: RAY_OBJECT_STORE_MEMORY_BYTES
+                value: {{ $root.Values.workload.rayObjectStoreMemoryBytes | quote }}
+              - name: TORCH_DISTRIBUTED_TIMEOUT_SECONDS
+                value: "{{ $root.Values.workload.torchDistributedTimeoutSeconds }}"
+              - name: MAX_STEPS
+                value: "{{ $root.Values.workload.steps }}"
+              - name: NUM_TRAIN_EPOCHS
+                value: "{{ $root.Values.workload.epochs }}"
+              {{- if $root.Values.workload.hfToken }}
+              - name: HF_TOKEN
+                value: "{{ $root.Values.workload.hfToken }}"
+              {{- end }}
+              - name: DATASET_PATH
+                value: "{{ $root.Values.gcsfs.datasetPath }}"
+              - name: CKPT_WRITE_PATH
+                value: "{{ $root.Values.gcsfs.ckptWritePath }}"
+              - name: CKPT_LOAD_PATH
+                value: "{{ $root.Values.gcsfs.ckptLoadPath }}"
+              - name: CHECKPOINT_WRITE_INTERVAL
+                value: "{{ $root.Values.workload.ckptWriterInterval }}"
+              - name: CKPT_TO_KEEP
+                value: "{{ $root.Values.workload.ckptToKeep }}"
+              - name: CHECKPOINT_UPLOAD_TIMEOUT_SECONDS
+                value: "{{ $root.Values.workload.checkpointUploadTimeoutSeconds }}"
+              - name: OVERWRITE_EXISTING_RUN
+                value: "{{ $root.Values.workload.overwriteExistingRun }}"
+              - name: MODEL_ID
+                value: "{{ $root.Values.workload.modelId }}"
+              - name: TRAINING_STRATEGY
+                value: "{{ $root.Values.workload.trainingStrategy }}"
+              - name: TENSOR_PARALLEL_SIZE
+                value: "{{ $root.Values.workload.tensorParallelSize }}"
+              - name: DATA_PARALLEL_SIZE
+                value: "{{ $root.Values.workload.dataParallelSize }}"
+              - name: SIMULATED_STEP_COMPUTE_SECONDS
+                value: "{{ $root.Values.workload.simulatedStepComputeSeconds }}"
+              - name: PER_DEVICE_TRAIN_BATCH_SIZE
+                value: "{{ $root.Values.workload.perDeviceBatch }}"
+              - name: GRADIENT_ACCUMULATION_STEPS
+                value: "{{ $root.Values.workload.gradAccum }}"
+              - name: DATALOADER_NUM_WORKERS
+                value: "{{ $root.Values.workload.dataloaderWorkers }}"
+              - name: DATALOADER_PREFETCH_FACTOR
+                value: "{{ $root.Values.workload.dataloaderPrefetchFactor }}"
+              - name: READ_CONCURRENCY
+                value: "{{ $root.Values.workload.readConcurrency }}"
+              - name: USE_GPU
+                value: "{{ $root.Values.workload.gpu }}"
+              {{- if $root.Values.workload.gpu }}
+              - name: TORCH_NCCL_TRACE_BUFFER_SIZE
+                value: "2000"
+              - name: TORCH_NCCL_DUMP_ON_TIMEOUT
+                value: "1"
+              - name: TORCH_NCCL_DEBUG_INFO_TEMP_FILE
+                value: "/tmp/ray/flight-recorder-"
+              {{- end }}
+              - name: TOKENIZE_BATCH_SIZE
+                value: "{{ $root.Values.workload.tokenizeBatchSize }}"
+              - name: SHUFFLE_FILES
+                value: "{{ $root.Values.workload.shuffleFiles }}"
+              - name: SHUFFLE_BUFFER_SIZE
+                value: "{{ $root.Values.workload.shuffleBufferSize }}"
+              - name: LEARNING_RATE
+                value: "{{ $root.Values.workload.learningRate }}"
+              - name: WEIGHT_DECAY
+                value: "{{ $root.Values.workload.weightDecay }}"
+              - name: WARMUP_RATIO
+                value: "{{ $root.Values.workload.warmupRatio }}"
+              - name: MAX_GRAD_NORM
+                value: "{{ $root.Values.workload.maxGradNorm }}"
+              - name: REQUIREMENTS
+                value: "{{ $root.Values.workload.requirements }}"
+              {{- if $root.Values.workload.envs }}
+              {{- toYaml .Values.workload.envs | nindent 14 }}
+              {{- end }}
+              - name: PYTHON_MAIN
+                value: "{{ $root.Values.workload.configPath }}{{ $root.Values.workload.configFile }}"
+              command:
+              - bash
+              - -c
+              - |
+                echo "Pod on $(hostname --fqdn) is running"
+                echo "Pod is assigned job index of $JOB_COMPLETION_INDEX"
+                bash /workload/launcher/launch-workload.sh
+              volumeMounts:
+              - name: workload-configuration
+                mountPath: {{ $root.Values.workload.configPath }}
+              - name: workload-launcher
+                mountPath: /workload/launcher
+              - name: shared-memory
+                mountPath: /dev/shm
+              - name: shared-memory
+                mountPath: /tmp
