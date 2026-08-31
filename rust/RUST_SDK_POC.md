@@ -187,6 +187,29 @@ distinct objects per run and report percentiles over many trials.
 every run. Treat throughput figures as directional; a rigorous benchmark would
 use distinct objects per run, discard a warm-up run, and report percentiles over many trials.
 
+### Multi-process scaling: 1 to 48 workers reading distinct 10 GiB files
+
+Measured with [rust/bench/compare_processes.sh](bench/compare_processes.sh) and [rust/bench/bench_multiprocess.py](bench/bench_multiprocess.py). Each worker process independently opens and reads a distinct 10 GiB file (`gs://princer-bucket/test_10g/file_{i}.bin`) in 8 MiB chunks. All workers synchronize via a process barrier to start reading simultaneously. Aggregate and per-process memory (VmRSS) are sampled every 50ms across the process tree.
+
+Runs are executed sequentially per configuration (alternating between rust and fsspec backends).
+
+| Workers / Files | Total Data Read | Backend | Elapsed Time | Aggregate Throughput | Speedup | Peak Agg RSS | Per-Proc RSS | Total CPU% | Total CPU Time |
+|:---:|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **1** | 10 GiB | **rust** | **7.67s** | **1335.8 MB/s** | **1.65x** | **259.7 MB** | **259.7 MB** | 285.0% | 21.8s |
+| | | fsspec | 12.63s | 810.6 MB/s | 1.00x | 375.0 MB | 375.0 MB | 97.5% | 12.3s |
+| **2** | 20 GiB | **rust** | **6.24s** | **3283.3 MB/s** | **2.37x** | **520.6 MB** | **260.4 MB** | 721.3% | 45.0s |
+| | | fsspec | 14.79s | 1384.8 MB/s | 1.00x | 764.5 MB | 395.6 MB | 182.4% | 27.0s |
+| **4** | 40 GiB | **rust** | **6.48s** | **6320.8 MB/s** | **2.54x** | **1.04 GB** | **260.6 MB** | 1452.1% | 94.1s |
+| | | fsspec | 16.44s | 2491.9 MB/s | 1.00x | 1.49 GB | 395.3 MB | 341.4% | 56.1s |
+| **8** | 80 GiB | **rust** | **16.32s** | **5020.7 MB/s** | **1.07x** | **2.08 GB** | **261.1 MB** | 1254.8% | 204.8s |
+| | | fsspec | 17.48s | 4686.6 MB/s | 1.00x | 2.92 GB | 394.9 MB | 683.7% | 119.5s |
+| **16** | 160 GiB | **rust** | **17.99s** | **9106.2 MB/s** | **1.14x** | **4.17 GB** | **268.5 MB** | 2527.7% | 454.7s |
+| | | fsspec | 20.48s | 8000.1 MB/s | 1.00x | 5.62 GB | 454.8 MB | 1430.0% | 292.9s |
+| **32** | 320 GiB | **rust** | **20.23s** | **16198.7 MB/s** | **1.42x** | **8.36 GB** | **276.0 MB** | 4708.9% | 952.5s |
+| | | fsspec | 28.79s | 11380.9 MB/s | 1.00x | 10.65 GB | 406.5 MB | 2859.0% | 823.1s |
+| **48** | 480 GiB | **rust** | **26.97s** | **18227.5 MB/s** | **1.44x** | **12.53 GB** | **268.6 MB** | 5570.2% | 1502.1s |
+| | | fsspec | 38.74s | 12687.3 MB/s | 1.00x | 15.89 GB | 427.0 MB | 4058.7% | 1572.4s |
+
 ### Pure Rust ceiling (no Python), direct range reads
 
 | Parallelism | Throughput |
