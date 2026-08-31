@@ -7,9 +7,10 @@ intentionally excluded.
 
 import argparse
 import csv
+import math
 import os
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from metrics import raw_store, stats, summary_schema
 
@@ -102,11 +103,35 @@ def _prefixed(stats_dict: dict, prefix: str, count: int, count_name: str) -> dic
     return out
 
 
-def calc_write_metrics(write_rows: list) -> dict:
+def _write_durations_by_group(write_rows: list, *, maximum_rank_duration: bool) -> dict:
+    groups = defaultdict(list)
+    for row in write_rows:
+        key = (row["checkpoint_step"], row["checkpoint_location"])
+        groups[key].append(row)
+
+    if maximum_rank_duration:
+        return {
+            key: max(row["end_time"] - row["start_time"] for row in rows)
+            for key, rows in groups.items()
+        }
+    return {
+        key: max(row["end_time"] for row in rows)
+        - min(row["start_time"] for row in rows)
+        for key, rows in groups.items()
+    }
+
+
+def calc_write_metrics(
+    write_rows: list, *, maximum_rank_duration: bool = False
+) -> dict:
     if not write_rows:
         return {}
-    groups = _durations_by_group(write_rows, ("checkpoint_step", "checkpoint_location"))
-    durations = [g["duration"] for g in groups.values()]
+    durations = list(
+        _write_durations_by_group(
+            write_rows,
+            maximum_rank_duration=maximum_rank_duration,
+        ).values()
+    )
     return _prefixed(
         stats.duration_stats(durations),
         "checkpoint_write_time",
@@ -186,6 +211,61 @@ def calc_data_loading_metrics(dl_rows: list) -> dict:
     }
 
 
+def _finite_nonnegative(row: dict, field_name: str) -> float:
+    value = row.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _fail_validation(f"Ray Data {field_name} must be finite nonnegative")
+    value = float(value)
+    if not math.isfinite(value) or value < 0:
+        _fail_validation(f"Ray Data {field_name} must be finite nonnegative")
+    return value
+
+
+def calc_ray_data_metrics(ray_data_iteration_rows: list) -> dict:
+    """Map the bottleneck Ray Data iterator snapshot to summary fields.
+
+    ``num_data_wait_spans`` is deliberately not populated. Ray's ``blocked_calls``
+    counts every batch fetch of the run, which is not the same quantity as the
+    Lightning profiler spans that column carries for the other workload; filling
+    it here would put two values differing by orders of magnitude in one column.
+    ``data_wait_iterator_setup_time`` is Ray's time-to-first-batch, which Ray
+    restarts each epoch, so it is the per-epoch total for the run.
+    """
+    if not ray_data_iteration_rows:
+        return {}
+
+    blocked_values = [
+        _finite_nonnegative(row, "total_blocked_s") for row in ray_data_iteration_rows
+    ]
+    row = ray_data_iteration_rows[
+        max(range(len(ray_data_iteration_rows)), key=blocked_values.__getitem__)
+    ]
+    blocked = _finite_nonnegative(row, "total_blocked_s")
+    setup = _finite_nonnegative(row, "time_to_first_batch_s")
+    total = _finite_nonnegative(row, "total_s")
+    # Validated but not reported: a snapshot with a nonsensical fetch count is a
+    # broken observation even though the count itself has no summary column.
+    blocked_calls = row.get("blocked_calls")
+    if (
+        isinstance(blocked_calls, bool)
+        or not isinstance(blocked_calls, int)
+        or blocked_calls < 0
+    ):
+        _fail_validation("Ray Data blocked_calls must be a nonnegative integer")
+    if total == 0 and blocked != 0:
+        _fail_validation("Ray Data blocked time is nonzero for a zero lifetime")
+    percent = 0.0 if total == 0 else 100.0 * blocked / total
+    if percent > 100.0 + 1e-9:
+        _fail_validation("Ray Data blocked percent exceeds 100")
+    return {
+        "data_wait_total_time": blocked,
+        "data_wait_iterator_setup_time": setup,
+        "data_wait_batch_fetch_time": max(0.0, blocked - setup),
+        "accelerator_blocked_time": blocked,
+        "accelerator_blocked_percent": min(percent, 100.0),
+    }
+
+
 # The two Lightning profiler actions DataWaitProfiler watches; disjoint and
 # jointly exhaustive of the time the fit loop blocks on the train dataloader
 # (see the workload's DATA_WAIT_ACTIONS).
@@ -253,7 +333,12 @@ def calc_dataset_build_metrics(dataset_build_rows: list) -> dict:
     return {"dataset_build_time": max(durations)}
 
 
-def calc_throughput_metrics(write_rows: list, size_rows: list) -> dict:
+def calc_throughput_metrics(
+    write_rows: list,
+    size_rows: list,
+    *,
+    maximum_rank_duration: bool = False,
+) -> dict:
     out = {}
 
     written_sizes = [
@@ -267,13 +352,14 @@ def calc_throughput_metrics(write_rows: list, size_rows: list) -> dict:
         for r in size_rows
         if r.get("checkpoint_step") is not None and r.get("size_bytes") is not None
     }
-    write_groups = _durations_by_group(
-        write_rows, ("checkpoint_step", "checkpoint_location")
+    write_durations = _write_durations_by_group(
+        write_rows,
+        maximum_rank_duration=maximum_rank_duration,
     )
     write_tps = [
-        size_by_step[step] / g["duration"]
-        for (step, _loc), g in write_groups.items()
-        if step in size_by_step and g["duration"] > 0
+        size_by_step[step] / duration
+        for (step, _loc), duration in write_durations.items()
+        if step in size_by_step and duration > 0
     ]
     if write_tps:
         out["checkpoint_write_throughput_avg_bytes_per_sec"] = stats.mean(write_tps)
@@ -439,7 +525,9 @@ def build_summary_row(
     system_rows: list = None,
     data_wait_rows: list = None,
     dataset_build_rows: list = None,
+    ray_data_iteration_rows: list = None,
     dimensions: dict = None,
+    maximum_rank_write_duration: bool = False,
 ) -> dict:
     row = {
         "run_id": run_id,
@@ -449,13 +537,27 @@ def build_summary_row(
     if dimensions:
         row.update({k: v for k, v in dimensions.items() if v is not None})
     row.update(calc_step_time_metrics(step_rows))
-    row.update(calc_write_metrics(write_rows))
+    row.update(
+        calc_write_metrics(
+            write_rows,
+            maximum_rank_duration=maximum_rank_write_duration,
+        )
+    )
     row.update(calc_restore_metrics(restore_rows))
     row.update(calc_delete_metrics(delete_rows))
     row.update(calc_data_loading_metrics(dl_rows))
     row.update(calc_data_wait_metrics(data_wait_rows or []))
     row.update(calc_dataset_build_metrics(dataset_build_rows or []))
-    row.update(calc_throughput_metrics(write_rows, size_rows or []))
+    # Ray's structured iterator snapshot is more complete than the legacy
+    # Lightning profiler rows, so it deliberately owns the overlapping fields.
+    row.update(calc_ray_data_metrics(ray_data_iteration_rows or []))
+    row.update(
+        calc_throughput_metrics(
+            write_rows,
+            size_rows or [],
+            maximum_rank_duration=maximum_rank_write_duration,
+        )
+    )
     row.update(calc_system_metrics(system_rows or []))
     restore_throughput = _restore_throughput(
         row.get("checkpoint_restored_bytes"),
@@ -592,6 +694,205 @@ def validate_required_metrics(
             )
 
 
+def _required_positive_int(value, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        _fail_validation(f"strict Ray metrics require positive {name}")
+    return value
+
+
+def _counter_for(rows: list, field_name: str) -> Counter:
+    return Counter(
+        row.get(field_name) for row in rows if row.get(field_name) is not None
+    )
+
+
+def validate_required_ray_metrics(
+    *,
+    step_rows: list,
+    write_rows: list,
+    restore_rows: list,
+    delete_rows: list,
+    size_rows: list,
+    dataset_build_rows: list,
+    ray_data_iteration_rows: list,
+    expected_steps: int,
+    nodes: int,
+    ranks_per_node: int,
+    checkpoint_interval: int,
+    checkpoints_to_keep: int,
+    training_strategy: str,
+    data_parallel_size: int = None,
+    resume_run: bool = False,
+) -> None:
+    """Enforce the complete structured-observation contract for Ray runs."""
+    nodes = _required_positive_int(nodes, "nodes")
+    ranks_per_node = _required_positive_int(ranks_per_node, "ranks_per_node")
+    checkpoint_interval = _required_positive_int(
+        checkpoint_interval, "checkpoint_interval"
+    )
+    checkpoints_to_keep = _required_positive_int(
+        checkpoints_to_keep, "checkpoints_to_keep"
+    )
+    if (
+        not isinstance(expected_steps, int)
+        or expected_steps == 0
+        or expected_steps < -1
+    ):
+        _fail_validation("strict Ray metrics require expected_steps > 0 or -1")
+    if not isinstance(training_strategy, str) or not training_strategy:
+        _fail_validation("strict Ray metrics require training_strategy")
+    world_size = nodes * ranks_per_node
+
+    observed_step_counter = _counter_for(step_rows, "step")
+    if expected_steps == -1:
+        if not observed_step_counter:
+            _fail_validation("Ray step IDs are missing")
+        last_step = max(observed_step_counter)
+        commit_steps = [
+            row.get("checkpoint_step")
+            for row in write_rows
+            if row.get("checkpoint_step") is not None
+        ]
+        # An epoch-bounded run has no configured step count, so a lost tail of
+        # `step` records would otherwise define the very expectation it is
+        # checked against. The checkpoint schedule is an independent witness:
+        # the run must have ended inside the interval that follows its last
+        # checkpoint, which bounds an undetectable loss to less than one
+        # interval instead of leaving it unbounded.
+        if commit_steps:
+            last_commit = max(commit_steps)
+            if not last_commit <= last_step < last_commit + checkpoint_interval:
+                _fail_validation(
+                    f"Ray step records end at {last_step}, which is inconsistent "
+                    f"with the last checkpoint at step {last_commit} and "
+                    f"checkpoint interval {checkpoint_interval}"
+                )
+    else:
+        last_step = expected_steps
+    expected_step_ids = set(range(1, last_step + 1))
+    if (
+        set(observed_step_counter) != expected_step_ids
+        or any(count != 1 for count in observed_step_counter.values())
+        or len(step_rows) != len(expected_step_ids)
+    ):
+        _fail_validation(
+            "Ray step IDs must be exactly contiguous from 1 through "
+            f"{last_step}; found {sorted(observed_step_counter)}"
+        )
+
+    scheduled_steps = {
+        step for step in expected_step_ids if step % checkpoint_interval == 0
+    }
+    checkpoint_ranks = (
+        range(world_size) if training_strategy.endswith("_sharded") else (0,)
+    )
+    expected_commits = Counter(
+        (step, rank) for step in scheduled_steps for rank in checkpoint_ranks
+    )
+    observed_commits = Counter(
+        (row.get("checkpoint_step"), row.get("global_rank")) for row in write_rows
+    )
+    if observed_commits != expected_commits:
+        _fail_validation(
+            "Ray checkpoint commits must contain exactly one row per expected "
+            f"step and rank; expected {dict(expected_commits)}, found "
+            f"{dict(observed_commits)}"
+        )
+    expected_checkpoint_counter = Counter({step: 1 for step in scheduled_steps})
+    size_counter = _counter_for(size_rows, "checkpoint_step")
+    if size_counter != expected_checkpoint_counter or len(size_rows) != len(
+        scheduled_steps
+    ):
+        _fail_validation(
+            "Ray checkpoint sizes must contain exactly one row for scheduled "
+            f"steps {sorted(scheduled_steps)}; found {dict(size_counter)}"
+        )
+    size_locations = {
+        row["checkpoint_step"]: row.get("checkpoint_location") for row in size_rows
+    }
+    commit_locations = defaultdict(set)
+    for row in write_rows:
+        commit_locations[row["checkpoint_step"]].add(row.get("checkpoint_location"))
+    if any(
+        commit_locations[step] != {size_locations.get(step)}
+        or not size_locations.get(step)
+        for step in scheduled_steps
+    ):
+        _fail_validation("Ray checkpoint commit and size locations do not match")
+
+    if len(dataset_build_rows) != 1:
+        _fail_validation(
+            "Ray metrics require exactly one dataset-build row; found "
+            f"{len(dataset_build_rows)}"
+        )
+    if dataset_build_rows[0].get("global_rank") != 0:
+        _fail_validation("Ray dataset-build row must be emitted by global rank 0")
+
+    model_parallel = training_strategy.startswith("model_parallel")
+    if model_parallel:
+        data_parallel_size = _required_positive_int(
+            data_parallel_size, "data_parallel_size"
+        )
+        if world_size % data_parallel_size:
+            _fail_validation(
+                "Ray model-parallel world size is not divisible by DP size"
+            )
+        tensor_parallel_size = world_size // data_parallel_size
+        expected_leader_ranks = {
+            split * tensor_parallel_size for split in range(data_parallel_size)
+        }
+        expected_data_leaders = data_parallel_size
+    else:
+        expected_leader_ranks = set(range(world_size))
+        expected_data_leaders = world_size
+    expected_splits = set(range(expected_data_leaders))
+    split_counter = _counter_for(ray_data_iteration_rows, "split_index")
+    observed_leader_ranks = {row.get("global_rank") for row in ray_data_iteration_rows}
+    if (
+        split_counter != Counter({split: 1 for split in expected_splits})
+        or len(ray_data_iteration_rows) != expected_data_leaders
+        or observed_leader_ranks != expected_leader_ranks
+    ):
+        _fail_validation(
+            "Ray Data snapshots must contain exactly one row per data leader; "
+            f"expected splits {sorted(expected_splits)} and ranks "
+            f"{sorted(expected_leader_ranks)}, found splits {dict(split_counter)} "
+            f"and ranks {sorted(observed_leader_ranks, key=str)}"
+        )
+    for row in ray_data_iteration_rows:
+        calc_ray_data_metrics([row])
+
+    expected_world_ranks = set(range(world_size))
+    if resume_run:
+        restore_rank_counter = _counter_for(restore_rows, "global_rank")
+        if (
+            restore_rank_counter != Counter({rank: 1 for rank in expected_world_ranks})
+            or len(restore_rows) != world_size
+        ):
+            _fail_validation(
+                "Ray restore metrics must contain exactly one row per world rank; "
+                f"found {dict(restore_rank_counter)}"
+            )
+        restore_locations = {row.get("checkpoint_location") for row in restore_rows}
+        if len(restore_locations) != 1 or None in restore_locations:
+            _fail_validation("Ray restore ranks did not restore the same checkpoint")
+    elif restore_rows:
+        _fail_validation("unexpected Ray restore metrics for a fresh run")
+
+    # A failed deletion is rejected by parsers/ray_train.py, which refuses to
+    # emit a row for it at all, so there is deliberately no second check here.
+    expected_deletes = max(0, len(scheduled_steps) - checkpoints_to_keep)
+    delete_keys = {
+        (row.get("checkpoint_step"), row.get("checkpoint_location"))
+        for row in delete_rows
+    }
+    if len(delete_rows) != expected_deletes or len(delete_keys) != expected_deletes:
+        _fail_validation(
+            f"Ray checkpoint deletion metrics require exactly {expected_deletes} "
+            f"unique rows; found {len(delete_rows)}"
+        )
+
+
 def _fail_validation(message: str) -> None:
     print(f"ERROR: {message}", file=sys.stderr)
     raise SystemExit(1)
@@ -619,6 +920,11 @@ def main(argv=None) -> None:
         "--require-data-wait-metrics",
         action="store_true",
         help="Fail unless both Data Wait span kinds (setup + fetch) are present.",
+    )
+    parser.add_argument(
+        "--require-ray-metrics",
+        action="store_true",
+        help="Fail unless the complete structured Ray metric profile is present.",
     )
     parser.add_argument(
         "--resume-run",
@@ -674,22 +980,45 @@ def main(argv=None) -> None:
         resume_run=args.resume_run,
         checkpoint_interval=args.checkpoint_interval,
     )
-
-    # global_batch_size = per_device_batch * grad_accum * world_size, with
-    # world_size = nodes * ranks_per_node -- mirrors the sim's formula. Derived
-    # here (not a flag) so it stays consistent with its components; left N/A
-    # when any component is absent rather than reporting a partial product.
-    global_batch_size = None
-    components = (
-        args.per_device_batch,
-        args.grad_accum,
-        args.nodes,
-        args.ranks_per_node,
-    )
-    if all(c is not None for c in components):
-        global_batch_size = (
-            args.per_device_batch * args.grad_accum * args.nodes * args.ranks_per_node
+    if args.require_ray_metrics:
+        validate_required_ray_metrics(
+            step_rows=step_rows,
+            write_rows=write_rows,
+            restore_rows=restore_rows,
+            delete_rows=delete_rows,
+            size_rows=size_rows,
+            dataset_build_rows=tables.dataset_build_rows,
+            ray_data_iteration_rows=tables.ray_data_iteration_rows,
+            expected_steps=args.expected_steps,
+            nodes=args.nodes,
+            ranks_per_node=args.ranks_per_node,
+            checkpoint_interval=args.checkpoint_interval,
+            checkpoints_to_keep=args.checkpoints_to_keep,
+            training_strategy=args.training_strategy,
+            data_parallel_size=args.data_parallel_size,
+            resume_run=args.resume_run,
         )
+
+    # Tensor-parallel ranks cooperate on each sample, so model-parallel runs
+    # scale batch size by DP replicas. Other strategies use every world rank as
+    # a data replica. Leave the result N/A when a required input is absent.
+    global_batch_size = None
+    model_parallel = (args.training_strategy or "").startswith("model_parallel")
+    if model_parallel:
+        components = (
+            args.per_device_batch,
+            args.grad_accum,
+            args.data_parallel_size,
+        )
+    else:
+        components = (
+            args.per_device_batch,
+            args.grad_accum,
+            args.nodes,
+            args.ranks_per_node,
+        )
+    if all(c is not None for c in components):
+        global_batch_size = math.prod(components)
 
     # max_epochs can end a run before --steps is reached; report what ran.
     recorded_steps = args.steps
@@ -724,7 +1053,7 @@ def main(argv=None) -> None:
     }
     # TP/DP apply to model_parallel only; omitting them for ddp/fsdp lets
     # DictWriter's restval="N/A" mark them not-applicable.
-    if (args.training_strategy or "").startswith("model_parallel"):
+    if model_parallel:
         dimensions["tensor_parallel_size"] = args.tensor_parallel_size
         dimensions["data_parallel_size"] = args.data_parallel_size
     row = build_summary_row(
@@ -740,7 +1069,9 @@ def main(argv=None) -> None:
         system_rows=system_rows,
         data_wait_rows=tables.data_wait_rows,
         dataset_build_rows=tables.dataset_build_rows,
+        ray_data_iteration_rows=tables.ray_data_iteration_rows,
         dimensions=dimensions,
+        maximum_rank_write_duration=args.require_ray_metrics,
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out_file)), exist_ok=True)

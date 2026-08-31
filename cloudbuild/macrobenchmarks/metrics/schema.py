@@ -24,6 +24,8 @@ DATASET_BUILD_DIRECTORY = "dataset_build"
 DATASET_BUILD_METRICS_FILE = "dataset_build_metrics.csv"
 SYSTEM_METRICS_DIRECTORY = "system_metrics"
 SYSTEM_METRICS_FILE = "system_metrics.csv"
+RAY_DATA_ITERATION_DIRECTORY = "ray_data_iteration"
+RAY_DATA_ITERATION_METRICS_FILE = "ray_data_iteration_metrics.csv"
 
 
 def fieldnames(dataclass_type) -> list:
@@ -130,3 +132,14 @@ class CheckpointSizeMetrics:
     checkpoint_location: str
     size_bytes: int
     global_rank: int = None
+
+
+@dataclass(kw_only=True)
+class RayDataIterationMetrics:
+    run_id: str
+    global_rank: int
+    split_index: int
+    total_blocked_s: float
+    total_s: float
+    time_to_first_batch_s: float
+    blocked_calls: int

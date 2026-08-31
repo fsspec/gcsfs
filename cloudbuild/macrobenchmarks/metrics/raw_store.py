@@ -30,6 +30,7 @@ class RawMetricTables:
     system_rows: List[dict] = field(default_factory=list)
     data_wait_rows: List[dict] = field(default_factory=list)
     dataset_build_rows: List[dict] = field(default_factory=list)
+    ray_data_iteration_rows: List[dict] = field(default_factory=list)
 
 
 def write_raw_metrics(
@@ -125,6 +126,17 @@ def write_raw_metrics(
             parsed.dataset_build_metrics,
         )
 
+    if getattr(parsed, "ray_data_iteration_metrics", None):
+        _write_csv(
+            os.path.join(
+                out_dir,
+                schema.RAY_DATA_ITERATION_DIRECTORY,
+                schema.RAY_DATA_ITERATION_METRICS_FILE,
+            ),
+            schema.RayDataIterationMetrics,
+            parsed.ray_data_iteration_metrics,
+        )
+
 
 def write_system_metrics(system_rows, out_dir: str) -> None:
     """Write SystemMetric rows to the system-metrics CSV (owned here like the rest)."""
@@ -194,6 +206,13 @@ def read_raw_metrics(
                 in_dir,
                 schema.DATASET_BUILD_DIRECTORY,
                 schema.DATASET_BUILD_METRICS_FILE,
+            )
+        ),
+        ray_data_iteration_rows=_read_csv(
+            os.path.join(
+                in_dir,
+                schema.RAY_DATA_ITERATION_DIRECTORY,
+                schema.RAY_DATA_ITERATION_METRICS_FILE,
             )
         ),
     )

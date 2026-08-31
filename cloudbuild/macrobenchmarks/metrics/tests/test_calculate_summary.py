@@ -1,7 +1,7 @@
 import csv
 
 import pytest
-from metrics import calculate
+from metrics import calculate, raw_store, schema, summary_schema
 
 
 def test_data_loading_passthrough_uses_run_wide_row():
@@ -855,6 +855,86 @@ def test_main_emits_model_parallel_training_strategy(tmp_path):
     assert "data_parallel_size" in calculate.SUMMARY_FIELDNAMES
 
 
+def test_model_parallel_global_batch_counts_data_parallel_replicas(tmp_path):
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "ray-data-ray-train-pytorch",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--training-strategy",
+            "model_parallel_sharded",
+            "--nodes",
+            "2",
+            "--ranks-per-node",
+            "4",
+            "--tensor-parallel-size",
+            "4",
+            "--data-parallel-size",
+            "2",
+            "--per-device-batch",
+            "8",
+            "--grad-accum",
+            "1",
+        ]
+    )
+
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["global_batch_size"] == "16"
+
+
+def test_non_model_parallel_global_batch_counts_every_world_rank(tmp_path):
+    """The DP-replica formula applies to model_parallel only; ddp/fsdp keep
+    every world rank as a data replica."""
+    in_dir = tmp_path / "raw"
+    _write_step_csv(in_dir)
+    _write_data_loading_csv(in_dir)
+    out_file = tmp_path / "summary.csv"
+    calculate.main(
+        [
+            "--run-id",
+            "r",
+            "--workload-name",
+            "ray-data-ray-train-pytorch",
+            "--requirements",
+            "gcsfs==1.0",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(out_file),
+            "--require-data-loading-metrics",
+            "--training-strategy",
+            "ddp",
+            "--nodes",
+            "2",
+            "--ranks-per-node",
+            "4",
+            "--data-parallel-size",
+            "2",
+            "--per-device-batch",
+            "8",
+            "--grad-accum",
+            "1",
+        ]
+    )
+
+    with open(out_file) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["global_batch_size"] == "64"
+
+
 def test_tp_dp_are_na_for_non_model_parallel_run(tmp_path):
     # ddp run must not be labeled TP=4.
     in_dir = tmp_path / "raw"
@@ -1225,3 +1305,114 @@ def test_summary_restore_throughput_na_without_restored_bytes(tmp_path):
     with open(out_file) as f:
         rows = list(csv.DictReader(f))
     assert rows[0]["checkpoint_restore_throughput_avg_bytes_per_sec"] == "N/A"
+
+
+def test_main_writes_complete_strict_ray_summary(tmp_path):
+    checkpoint_2 = "gs://bucket/checkpoints/checkpoint_000002"
+    checkpoint_4 = "gs://bucket/checkpoints/checkpoint_000004"
+    parsed = type(
+        "Parsed",
+        (),
+        {
+            "step_metrics": [
+                schema.StepMetrics(
+                    step=step,
+                    step_duration=1.0,
+                    step_end_time=float(step),
+                    samples_per_second=8.0,
+                )
+                for step in range(1, 5)
+            ],
+            "write_metrics": {
+                0: [
+                    schema.WriteDurationMetrics(
+                        checkpoint_step=step,
+                        checkpoint_location=location,
+                        start_time=float(step),
+                        end_time=float(step) + 1.0,
+                        global_rank=0,
+                    )
+                    for step, location in ((2, checkpoint_2), (4, checkpoint_4))
+                ]
+            },
+            "restore_metrics": {},
+            "delete_metrics": {
+                0: [
+                    schema.DeleteDurationMetrics(
+                        checkpoint_step=2,
+                        checkpoint_location=checkpoint_2,
+                        start_time=5.0,
+                        end_time=6.0,
+                        global_rank=0,
+                    )
+                ]
+            },
+            "data_loading_metrics": [],
+            "checkpoint_sizes": [
+                schema.CheckpointSizeMetrics(
+                    checkpoint_step=step,
+                    checkpoint_location=location,
+                    size_bytes=1000,
+                    global_rank=0,
+                )
+                for step, location in ((2, checkpoint_2), (4, checkpoint_4))
+            ],
+            "data_wait_metrics": [],
+            "dataset_build_metrics": [
+                schema.DatasetBuildMetrics(
+                    global_rank=0,
+                    duration=2.0,
+                    dataset_path="gs://bucket/dataset",
+                )
+            ],
+            "ray_data_iteration_metrics": [
+                schema.RayDataIterationMetrics(
+                    run_id="run-1",
+                    global_rank=0,
+                    split_index=0,
+                    total_blocked_s=3.0,
+                    total_s=10.0,
+                    time_to_first_batch_s=1.0,
+                    blocked_calls=3,
+                )
+            ],
+        },
+    )()
+    in_dir = tmp_path / "raw"
+    output = tmp_path / "summary.csv"
+    raw_store.write_raw_metrics(parsed, str(in_dir))
+
+    calculate.main(
+        [
+            "--run-id",
+            "run-1",
+            "--workload-name",
+            "ray-data-ray-train-pytorch",
+            "--requirements",
+            "ray @ wheel.whl",
+            "--in-dir",
+            str(in_dir),
+            "--out-file",
+            str(output),
+            "--require-ray-metrics",
+            "--expected-steps",
+            "4",
+            "--nodes",
+            "1",
+            "--ranks-per-node",
+            "1",
+            "--checkpoint-interval",
+            "2",
+            "--checkpoints-to-keep",
+            "1",
+            "--training-strategy",
+            "ddp",
+        ]
+    )
+
+    with output.open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        assert reader.fieldnames == summary_schema.fieldnames()
+        row = next(reader)
+    assert row["accelerator_blocked_time"] == "3.0"
+    assert row["accelerator_blocked_percent"] == "30.0"
