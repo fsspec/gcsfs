@@ -672,8 +672,6 @@ def _drain_queue(q):
 
 
 class MRDPoolCache:
-    pool_class = None
-
     """Filesystem-level cache of MRD pools.
 
     Keyed by (bucket, object, generation). Idle pools are kept in an LRU cache
@@ -768,8 +766,7 @@ class MRDPoolCache:
         finalized = info.get("timeFinalized") is not None
 
         self._incref(key)
-        pool_cls = self.pool_class or MRDPool
-        mrd_pool = pool_cls(
+        mrd_pool = MRDPool(
             fs,
             bucket_name,
             object_name,
