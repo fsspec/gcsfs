@@ -1545,7 +1545,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 merged_ranges = _coalesce_ranges(items, max_gap)
             else:
                 merged_ranges = [(s, e, [(idx, 0, e - s)]) for s, e, idx in items]
-            
+
             for m_s, m_e, slice_list in merged_ranges:
                 merged_paths.append(p)
                 merged_starts.append(m_s)
