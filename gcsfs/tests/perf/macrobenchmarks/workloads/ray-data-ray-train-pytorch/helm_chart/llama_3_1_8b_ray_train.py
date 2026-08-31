@@ -1258,11 +1258,8 @@ def _report_checkpoint(prepared_checkpoint, *, upload_fn):
         except Exception as cleanup_error:
             raise RuntimeError(
                 f"checkpoint step {prepared_checkpoint.step} report failed and "
-                "local staging cleanup also failed"
-            ) from ExceptionGroup(
-                "checkpoint report and cleanup failures",
-                [report_error, cleanup_error],
-            )
+                f"local staging cleanup also failed: {cleanup_error}"
+            ) from report_error
         raise
     return _PendingCheckpoint(
         step=prepared_checkpoint.step,
