@@ -1412,9 +1412,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             return offset, 0
         else:
             length = effective_end - offset  # Normal case
-            s = await _get_size()
-            if effective_end > s:
-                length = max(0, s - offset)  # Clamp and ensure non-negative
+            if size is not None and effective_end > size:
+                length = max(0, size - offset)  # Clamp and ensure non-negative
 
         return offset, length
 
@@ -1449,7 +1448,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             or None if an error occurred and was captured in results.
         """
         needs_file_size = any(
-            not (s is not None and s >= 0 and e is not None and e >= 0 and e <= s)
+            (s is not None and s < 0) or e is None or (e is not None and e < 0)
             for s, e, _ in items
         )
         file_size = None
