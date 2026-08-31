@@ -16,12 +16,12 @@ from gcsfs.zonal_file import ZonalFile
 
 
 class DummyDelaySimulator:
-    """Simulates network latency (TTFB in ms) and streaming bandwidth transfer delay (MB/s)."""
+    """Simulates network latency (TTFB in ms) and streaming bandwidth transfer delay in Megabytes per second (MB/s)."""
 
     def __init__(
         self,
         ttfb_ms: Optional[float] = None,
-        bandwidth_mb_per_sec: Optional[float] = None,
+        bandwidth_megabytes_per_sec: Optional[float] = None,
     ):
         if ttfb_ms is None:
             env_ttfb = os.getenv("GCSFS_DUMMY_IO_TTFB_MS", "0")
@@ -32,23 +32,29 @@ class DummyDelaySimulator:
         else:
             self.ttfb_ms = float(ttfb_ms)
 
-        if bandwidth_mb_per_sec is None:
-            env_bw = os.getenv("GCSFS_DUMMY_IO_BANDWIDTH_MB_PER_SEC", "")
+        if bandwidth_megabytes_per_sec is None:
+            env_bw = os.getenv("GCSFS_DUMMY_IO_BANDWIDTH_MEGABYTES_PER_SEC", "")
             try:
-                self.bandwidth_mb_per_sec = float(env_bw) if env_bw else None
+                self.bandwidth_megabytes_per_sec = float(env_bw) if env_bw else None
             except ValueError:
-                self.bandwidth_mb_per_sec = None
+                self.bandwidth_megabytes_per_sec = None
         else:
-            self.bandwidth_mb_per_sec = (
-                float(bandwidth_mb_per_sec) if bandwidth_mb_per_sec else None
+            self.bandwidth_megabytes_per_sec = (
+                float(bandwidth_megabytes_per_sec)
+                if bandwidth_megabytes_per_sec
+                else None
             )
 
     def calculate_delay(self, size: int = 0, is_first_chunk: bool = False) -> float:
         delay = 0.0
         if is_first_chunk and self.ttfb_ms > 0:
             delay += self.ttfb_ms / 1000.0
-        if self.bandwidth_mb_per_sec and self.bandwidth_mb_per_sec > 0 and size > 0:
-            delay += size / (self.bandwidth_mb_per_sec * 1024 * 1024)
+        if (
+            self.bandwidth_megabytes_per_sec
+            and self.bandwidth_megabytes_per_sec > 0
+            and size > 0
+        ):
+            delay += size / (self.bandwidth_megabytes_per_sec * 1024 * 1024)
         return delay
 
     async def async_delay(self, size: int = 0, is_first_chunk: bool = False):
@@ -105,14 +111,14 @@ class DummyGcsFileSystem(ExtendedGcsFileSystem):
         self,
         *args,
         dummy_io_ttfb_ms: Optional[float] = None,
-        dummy_io_bandwidth_mb_per_sec: Optional[float] = None,
+        dummy_io_bandwidth_megabytes_per_sec: Optional[float] = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
         self.delay_simulator = DummyDelaySimulator(
             ttfb_ms=dummy_io_ttfb_ms,
-            bandwidth_mb_per_sec=dummy_io_bandwidth_mb_per_sec,
+            bandwidth_megabytes_per_sec=dummy_io_bandwidth_megabytes_per_sec,
         )
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
@@ -134,10 +140,10 @@ class DummyGcsFileSystem(ExtendedGcsFileSystem):
 async def test_dummy_delay_simulator(monkeypatch):
     """Verify TTFB and bandwidth delay calculations and execution."""
     monkeypatch.setenv("GCSFS_DUMMY_IO_TTFB_MS", "50")
-    monkeypatch.setenv("GCSFS_DUMMY_IO_BANDWIDTH_MB_PER_SEC", "100")
+    monkeypatch.setenv("GCSFS_DUMMY_IO_BANDWIDTH_MEGABYTES_PER_SEC", "100")
     sim = DummyDelaySimulator()
     assert sim.ttfb_ms == 50.0
-    assert sim.bandwidth_mb_per_sec == 100.0
+    assert sim.bandwidth_megabytes_per_sec == 100.0
 
     # 50ms TTFB + 10MB / 100MB/s (100ms) = 150ms
     delay = sim.calculate_delay(size=10 * 1024 * 1024, is_first_chunk=True)
@@ -156,10 +162,10 @@ async def test_dummy_delay_simulator(monkeypatch):
 def test_dummy_delay_simulator_invalid_env(monkeypatch):
     """Verify fallback when environment variables contain invalid float values."""
     monkeypatch.setenv("GCSFS_DUMMY_IO_TTFB_MS", "invalid_ttfb")
-    monkeypatch.setenv("GCSFS_DUMMY_IO_BANDWIDTH_MB_PER_SEC", "invalid_bw")
+    monkeypatch.setenv("GCSFS_DUMMY_IO_BANDWIDTH_MEGABYTES_PER_SEC", "invalid_bw")
     sim = DummyDelaySimulator()
     assert sim.ttfb_ms == 0.0
-    assert sim.bandwidth_mb_per_sec is None
+    assert sim.bandwidth_megabytes_per_sec is None
 
 
 @pytest.mark.asyncio
