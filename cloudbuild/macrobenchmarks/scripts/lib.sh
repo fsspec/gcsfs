@@ -63,6 +63,7 @@ shared_workload_helm_args() {
     --set workload.shuffleMaxBufferInputShards="${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
     --set workload.dataloaderPrefetchFactor="${_DATALOADER_PREFETCH_FACTOR}"
     --set workload.dataloaderWorkers="${_DATALOADER_WORKERS}"
+    --set workload.torchDistributedTimeoutSeconds="${TORCH_DISTRIBUTED_TIMEOUT_SECONDS:-${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS:-900}}"
     --set "nodeSelector.cloud\.google\.com/gke-nodepool=${_MACHINE_TYPE}"
     --set serviceAccount=default
   )
@@ -70,12 +71,14 @@ shared_workload_helm_args() {
 
 # Poll a JobSet until it reports Completed (return 0) or Failed/timeout (record
 # the failure in the ledger, dump diagnostics, return 1). Shared by the
-# seed-checkpoint and run-workload steps so the 240x30s poll lives in one place.
+# seed-checkpoint and run-workload steps so the polling loop lives in one place.
 # Usage: wait_for_jobset <jobset-name> <step-id>
 wait_for_jobset() {
   local jobset="$1" step="$2" complete failed
-  echo "Waiting for JobSet $jobset to complete..."
-  for _ in $(seq 1 240); do
+  local timeout_seconds="${WORKLOAD_TIMEOUT_SECONDS:-${_WORKLOAD_TIMEOUT_SECONDS:-14400}}"
+  local max_iterations=$(( (timeout_seconds + 29) / 30 ))
+  echo "Waiting for JobSet $jobset to complete (timeout: ${timeout_seconds}s, up to ${max_iterations} checks)..."
+  for _ in $(seq 1 "${max_iterations}"); do
     complete=$(kubectl get jobset "$jobset" -o jsonpath='{.status.conditions[?(@.type=="Completed")].status}' 2>/dev/null || echo "")
     failed=$(kubectl get jobset "$jobset" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
     if [ "$complete" = "True" ]; then echo "JobSet $jobset completed."; return 0; fi
@@ -88,7 +91,7 @@ wait_for_jobset() {
     fi
     sleep 30
   done
-  echo "Timed out waiting for JobSet $jobset to complete."
+  echo "Timed out waiting for JobSet $jobset to complete after ${timeout_seconds}s."
   kubectl describe jobset "$jobset" || true
   kubectl get pods -l jobset.sigs.k8s.io/jobset-name="$jobset" -o wide || true
   record_failure "$step"
