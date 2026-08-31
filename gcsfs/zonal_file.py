@@ -253,6 +253,12 @@ class ZonalFile(GCSFile):
         """
         Writes data using AsyncAppendableObjectWriter.
 
+        Unlike standard GCSFile which buffers writes in an in-memory buffer before
+        uploading chunks, ZonalFile does not require an internal write buffer here.
+        The underlying AsyncAppendableObjectWriter manages its own internal buffering,
+        streaming, and chunk flushes. Data is passed directly to `self.aaow.append()`,
+        avoiding redundant memory copies.
+
         For more details, see the documentation for AsyncAppendableObjectWriter:
         https://github.com/googleapis/python-storage/blob/9e6fefdc24a12a9189f7119bc9119e84a061842f/google/cloud/storage/_experimental/asyncio/async_appendable_object_writer.py#L38
         """
