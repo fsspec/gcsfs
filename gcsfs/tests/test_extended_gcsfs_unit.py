@@ -293,6 +293,35 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
             )
 
 
+def test_resolve_cache_config():
+    """Tests _resolve_cache_config logic under various kwargs configurations."""
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    # 1. Both cache_type and cache_source already present
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(
+        {"cache_type": "custom", "cache_source": "explicit"}
+    )
+    assert c_type == "custom"
+    assert c_source == "explicit"
+
+    # 2. Only cache_type provided (cache_source missing)
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(
+        {"cache_type": "readahead"}
+    )
+    assert c_type == "readahead"
+    assert c_source == "explicit"
+
+    # 3. Neither provided (defaults resolved via _get_prefetcher_and_cache_config)
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config({})
+    assert c_type in ("none", "readahead")
+    assert c_source == "default"
+
+    # 4. kwargs is None
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(None)
+    assert c_type in ("none", "readahead")
+    assert c_source == "default"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "unsupported_kwarg",

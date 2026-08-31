@@ -411,6 +411,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket_type = await self._lookup_bucket_type(bucket)
         return bucket_type == BucketType.ZONAL_HIERARCHICAL
 
+    @staticmethod
+    def _resolve_cache_config(kwargs):
+        """Resolves cache_type and cache_source from kwargs if not already provided."""
+        kwargs = kwargs or {}
+        cache_type = kwargs.get("cache_type")
+        cache_source = kwargs.get("cache_source")
+        if not cache_type or not cache_source:
+            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
+                cache_type, kwargs
+            )
+        return cache_type, cache_source
+
     async def _fetch_range_split(
         self,
         path,
@@ -442,12 +454,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket, object_name, generation = self.split_path(path)
 
         # Only resolve if the config wasn't already passed down (e.g., from ZonalFile)
-        cache_type = kwargs.get("cache_type")
-        cache_source = kwargs.get("cache_source")
-        if not cache_type or not cache_source:
-            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
-                kwargs.get("cache_type"), kwargs
-            )
+        cache_type, cache_source = self._resolve_cache_config(kwargs)
 
         if mrd is None:
             # If no mrd is provided, we create one with pool size equal to passed concurrency.
@@ -600,12 +607,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # A new MRDPool is required when read is done directly by the
         # GCSFilesystem class without creating a GCSFile object first.
         # Only resolve if the config wasn't already passed down (e.g., from ZonalFile)
-        cache_type = kwargs.get("cache_type")
-        cache_source = kwargs.get("cache_source")
-        if not cache_type or not cache_source:
-            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
-                kwargs.get("cache_type"), kwargs
-            )
+        cache_type, cache_source = self._resolve_cache_config(kwargs)
 
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
@@ -1721,12 +1723,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         generation = path_generation or kwargs.get("generation")
         callback = callback or NoOpCallback()
 
-        cache_type = kwargs.get("cache_type")
-        cache_source = kwargs.get("cache_source")
-        if not cache_type or not cache_source:
-            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
-                kwargs.get("cache_type"), kwargs
-            )
+        cache_type, cache_source = self._resolve_cache_config(kwargs)
 
         mrd_pool = await self._mrd_pool_cache.get(
             bucket,
@@ -1812,12 +1809,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         generation = path_generation or kwargs.get("generation")
 
-        cache_type = kwargs.get("cache_type")
-        cache_source = kwargs.get("cache_source")
-        if not cache_type or not cache_source:
-            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
-                kwargs.get("cache_type"), kwargs
-            )
+        cache_type, cache_source = self._resolve_cache_config(kwargs)
 
         # Initialize the MRDPool once for this concurrent operation
         mrd_pool = await self._mrd_pool_cache.get(
