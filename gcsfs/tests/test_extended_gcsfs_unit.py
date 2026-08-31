@@ -127,7 +127,7 @@ def test_process_limits_parametrized(
     Verifies that start/end limits are correctly converted to offset/length
     """
     offset, length = extended_gcsfs.sync_process_limits_to_offset_and_length(
-        file_path, start, end
+        file_path, start, end, file_size=file_size
     )
 
     assert offset == exp_offset
