@@ -197,7 +197,6 @@ def test_dummy_zonal_read():
                             assert data == bytes(2048)
 
 
-def test_dummy_sequential_read():
 def test_standard_read():
     """Verify standard dummy sequential read path through GCSFile and _cat_file_sequential."""
     fs = DummyGcsFileSystem()
