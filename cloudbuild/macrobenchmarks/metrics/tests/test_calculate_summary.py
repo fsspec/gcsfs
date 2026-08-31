@@ -1395,6 +1395,10 @@ def test_main_writes_complete_strict_ray_summary(tmp_path):
             "--out-file",
             str(output),
             "--require-ray-metrics",
+            # The strict Ray profile owns checkpoint completeness; the generic
+            # minimum is intentionally impossible for this two-checkpoint run.
+            "--min-write-datapoints",
+            "3",
             "--expected-steps",
             "4",
             "--nodes",

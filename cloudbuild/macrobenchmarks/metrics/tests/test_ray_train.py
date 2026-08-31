@@ -237,6 +237,54 @@ def test_malformed_metric_records_fail(message):
 
 
 @pytest.mark.parametrize(
+    "payload,missing_field",
+    [
+        ({}, "event"),
+        (
+            {
+                "event": "step",
+                "duration_s": 1.0,
+                "samples_per_second": 2.0,
+            },
+            "step",
+        ),
+        (
+            {
+                "event": "step",
+                "step": 1,
+                "samples_per_second": 2.0,
+            },
+            "duration_s",
+        ),
+        (
+            {
+                "event": "dataset_build",
+                "global_rank": 0,
+                "duration_s": 1.0,
+            },
+            "dataset_path",
+        ),
+        (
+            {
+                "event": "checkpoint_deleted",
+                "checkpoint_step": 1,
+                "checkpoint_location": "gs://bucket/checkpoint",
+                "duration_s": 1.0,
+            },
+            "success",
+        ),
+    ],
+)
+def test_missing_structured_event_fields_raise_metric_event_error(
+    payload, missing_field
+):
+    with pytest.raises(
+        ray_train.MetricEventError, match=rf"^Missing field {missing_field}$"
+    ):
+        ray_train._validate_event_fields(payload)
+
+
+@pytest.mark.parametrize(
     "entries,match",
     [
         (

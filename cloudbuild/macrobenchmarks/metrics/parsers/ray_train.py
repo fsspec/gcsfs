@@ -78,15 +78,21 @@ class ParsedRawMetrics:
     )
 
 
+def _require_field(payload: dict, field_name: str):
+    if field_name not in payload:
+        raise MetricEventError(f"Missing field {field_name}")
+    return payload[field_name]
+
+
 def _require_string(payload: dict, field_name: str) -> str:
-    value = payload[field_name]
+    value = _require_field(payload, field_name)
     if not isinstance(value, str) or not value:
         raise MetricEventError(f"Ray metric field {field_name} must be a string")
     return value
 
 
 def _require_int(payload: dict, field_name: str, *, nonnegative=True) -> int:
-    value = payload[field_name]
+    value = _require_field(payload, field_name)
     if isinstance(value, bool) or not isinstance(value, int):
         raise MetricEventError(f"Ray metric field {field_name} must be an integer")
     if nonnegative and value < 0:
@@ -95,7 +101,7 @@ def _require_int(payload: dict, field_name: str, *, nonnegative=True) -> int:
 
 
 def _require_number(payload: dict, field_name: str, *, nonnegative=True) -> float:
-    value = payload[field_name]
+    value = _require_field(payload, field_name)
     if isinstance(value, bool) or not isinstance(value, Real):
         raise MetricEventError(f"Ray metric field {field_name} must be numeric")
     value = float(value)
@@ -131,7 +137,7 @@ def _require_location_under(location: str, root: str, event: str) -> None:
 
 
 def _validate_event_fields(payload: dict) -> None:
-    event = payload["event"]
+    event = _require_field(payload, "event")
     if event == "step":
         _require_int(payload, "step")
         _require_number(payload, "duration_s")
@@ -164,7 +170,7 @@ def _validate_event_fields(payload: dict) -> None:
         _require_int(payload, "checkpoint_step")
         _require_string(payload, "checkpoint_location")
         _require_number(payload, "duration_s")
-        if not isinstance(payload["success"], bool):
+        if not isinstance(_require_field(payload, "success"), bool):
             raise MetricEventError("Ray metric field success must be a boolean")
     elif event == "ray_data_iteration":
         for field_name in ("global_rank", "split_index"):

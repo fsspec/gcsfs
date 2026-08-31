@@ -254,6 +254,8 @@ def calc_ray_data_metrics(ray_data_iteration_rows: list) -> dict:
         _fail_validation("Ray Data blocked_calls must be a nonnegative integer")
     if total == 0 and blocked != 0:
         _fail_validation("Ray Data blocked time is nonzero for a zero lifetime")
+    if setup > blocked:
+        _fail_validation("Ray Data first-batch time exceeds blocked time")
     percent = 0.0 if total == 0 else 100.0 * blocked / total
     if percent > 100.0 + 1e-9:
         _fail_validation("Ray Data blocked percent exceeds 100")
@@ -966,20 +968,6 @@ def main(argv=None) -> None:
     size_rows = tables.size_rows
     system_rows = tables.system_rows
 
-    validate_required_metrics(
-        step_rows=step_rows,
-        write_rows=write_rows,
-        dl_rows=dl_rows,
-        data_wait_rows=tables.data_wait_rows,
-        restore_rows=restore_rows,
-        expected_steps=args.expected_steps,
-        min_write_datapoints=args.min_write_datapoints,
-        min_restore_datapoints=args.min_restore_datapoints,
-        require_data_loading=args.require_data_loading_metrics,
-        require_data_wait=args.require_data_wait_metrics,
-        resume_run=args.resume_run,
-        checkpoint_interval=args.checkpoint_interval,
-    )
     if args.require_ray_metrics:
         validate_required_ray_metrics(
             step_rows=step_rows,
@@ -997,6 +985,21 @@ def main(argv=None) -> None:
             training_strategy=args.training_strategy,
             data_parallel_size=args.data_parallel_size,
             resume_run=args.resume_run,
+        )
+    else:
+        validate_required_metrics(
+            step_rows=step_rows,
+            write_rows=write_rows,
+            dl_rows=dl_rows,
+            data_wait_rows=tables.data_wait_rows,
+            restore_rows=restore_rows,
+            expected_steps=args.expected_steps,
+            min_write_datapoints=args.min_write_datapoints,
+            min_restore_datapoints=args.min_restore_datapoints,
+            require_data_loading=args.require_data_loading_metrics,
+            require_data_wait=args.require_data_wait_metrics,
+            resume_run=args.resume_run,
+            checkpoint_interval=args.checkpoint_interval,
         )
 
     # Tensor-parallel ranks cooperate on each sample, so model-parallel runs

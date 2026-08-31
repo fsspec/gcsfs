@@ -56,6 +56,10 @@ def test_ray_data_reducer_accepts_zero_lifetime_when_unblocked():
     [
         ({"total_blocked_s": 1.0, "total_s": 0.0}, "zero lifetime"),
         ({"total_blocked_s": 11.0, "total_s": 10.0}, "exceeds 100"),
+        (
+            {"total_blocked_s": 1.0, "time_to_first_batch_s": 2.0},
+            "first-batch time exceeds blocked time",
+        ),
         ({"total_blocked_s": float("nan")}, "finite nonnegative"),
         ({"time_to_first_batch_s": -1.0}, "finite nonnegative"),
         ({"blocked_calls": 1.5}, "blocked_calls"),
