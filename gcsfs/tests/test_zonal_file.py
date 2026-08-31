@@ -125,7 +125,9 @@ def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
         "test-bucket",
         "test-key",
         "456",
-        mock.ANY,
+        pool_size=mock.ANY,
+        cache_type=mock.ANY,
+        cache_source=mock.ANY,
     )
     assert expected_call in mock_sync.call_args_list
     zf.close()
@@ -145,7 +147,9 @@ def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
         "test-bucket",
         "test-key",
         "123",
-        mock.ANY,
+        pool_size=mock.ANY,
+        cache_type=mock.ANY,
+        cache_source=mock.ANY,
     )
     assert expected_call in mock_sync.call_args_list
     zf.close()
@@ -640,13 +644,21 @@ def test_zonal_file_fetch_range_without_prefetch_engine(mock_gcsfs):
             chunk_lengths=[5],
             size=zf.size,
             mrd=zf.mrd_pool,
+            cache_type=mock.ANY,
+            cache_source=mock.ANY,
         )
 
         result = zf._fetch_range(start=10, end=20)
 
         assert result == b"cat_data"
         mock_gcsfs._cat_file.assert_awaited_once_with(
-            zf.path, start=10, end=20, concurrency=zf.pool_size, mrd=zf.mrd_pool
+            zf.path,
+            start=10,
+            end=20,
+            concurrency=zf.pool_size,
+            mrd=zf.mrd_pool,
+            cache_type=mock.ANY,
+            cache_source=mock.ANY,
         )
 
         # Test catch of "not satisfiable"
@@ -857,7 +869,7 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
     pool_a = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
     pool_b = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
 
-    assert fs._mrd_pool_cache._refcounts[("bucket", "key", "1")] == 2
+    assert fs._mrd_pool_cache._refcounts[("bucket", "key", "1", None)] == 2
     assert init_mrd_mock.await_count == 2
 
     a_mrd = pool_a._all_mrds[0]

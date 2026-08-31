@@ -149,6 +149,34 @@ async def test_init_mrd_success():
 
 
 @pytest.mark.asyncio
+async def test_init_mrd_with_cache_type():
+    """Tests that init_mrd passes cache_type as metadata."""
+    mock_mrd_instance = mock.Mock()
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        new_callable=mock.AsyncMock,
+        return_value=mock_mrd_instance,
+    ) as mock_create_mrd:
+        result = await zb_hns_utils.init_mrd(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            generation,
+            cache_type="readahead",
+            cache_source="explicit",
+        )
+
+        mock_create_mrd.assert_awaited_once_with(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            generation,
+            metadata=[("x-goog-api-client", "cache_type/readahead:e")],
+        )
+        assert result is mock_mrd_instance
+
+
+@pytest.mark.asyncio
 async def test_init_mrd_not_found():
     """Tests that init_mrd raises FileNotFoundError when object is not found."""
 
@@ -912,7 +940,39 @@ async def test_mrd_pool_cache_get_creates_mrd_queue(init_mrd_mock, mock_gcsfs):
     assert mrd_pool.persisted_size == 8
     assert mrd_pool.pool_size == 2
     assert mrd_pool._cache is cache
-    assert cache._refcounts[("bucket", "obj", "123")] == 1
+    assert cache._refcounts[("bucket", "obj", "123", None)] == 1
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_cache_type(init_mrd_mock, mock_gcsfs):
+    mock_mrd = mock.AsyncMock()
+    mock_mrd.persisted_size = 8
+    init_mrd_mock.return_value = mock_mrd
+
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+    mrd_pool = await cache.get(
+        "bucket",
+        "obj",
+        "123",
+        pool_size=2,
+        cache_type="readahead",
+        cache_source="explicit",
+    )
+
+    assert mrd_pool.cache_type == "readahead"
+    assert mrd_pool.cache_source == "explicit"
+
+    await mrd_pool.initialize()
+
+    init_mrd_mock.assert_awaited_once_with(
+        mock_gcsfs.grpc_client,
+        "bucket",
+        "obj",
+        "123",
+        cache_type="readahead",
+        cache_source="explicit",
+    )
 
 
 @pytest.mark.asyncio
@@ -926,7 +986,7 @@ async def test_mrd_pool_cache_get_shares_mrd_queue(init_mrd_mock, mock_gcsfs):
     b = await cache.get("bucket", "obj", "123", pool_size=4)
 
     assert a_queue is b._cache._mrd_queues[b._key]
-    assert cache._refcounts[("bucket", "obj", "123")] == 2
+    assert cache._refcounts[("bucket", "obj", "123", None)] == 2
     assert init_mrd_mock.await_count == 2
 
 
@@ -952,13 +1012,13 @@ async def test_mrd_pool_cache_get_init_failure_drops_entry(init_mrd_mock, mock_g
     with pytest.raises(RuntimeError, match="init boom"):
         await cache.get("bucket", "obj", "1", pool_size=1)
 
-    assert ("bucket", "obj", "1") not in cache._mrd_queues
+    assert ("bucket", "obj", "1", None) not in cache._mrd_queues
 
     # A retry succeeds
     init_mrd_mock.side_effect = None
     init_mrd_mock.return_value = mock.AsyncMock(persisted_size=0)
     await cache.get("bucket", "obj", "1", pool_size=1)
-    assert cache._refcounts[("bucket", "obj", "1")] == 1
+    assert cache._refcounts[("bucket", "obj", "1", None)] == 1
 
 
 @pytest.mark.asyncio
@@ -972,7 +1032,7 @@ async def test_mrd_pool_cache_get_init_failure_with_max_idle_zero(
     with pytest.raises(RuntimeError, match="init boom"):
         await cache.get("bucket", "obj", "1", pool_size=1)
 
-    assert ("bucket", "obj", "1") not in cache._mrd_queues
+    assert ("bucket", "obj", "1", None) not in cache._mrd_queues
 
 
 @pytest.mark.asyncio
@@ -985,12 +1045,12 @@ async def test_mrd_pool_cache_release_refcount(init_mrd_mock, mock_gcsfs):
     b = await cache.get("bucket", "obj", "1", pool_size=1)
 
     await a.close()
-    assert cache._refcounts[("bucket", "obj", "1")] == 1
-    assert ("bucket", "obj", "1") not in cache._evictable_keys
+    assert cache._refcounts[("bucket", "obj", "1", None)] == 1
+    assert ("bucket", "obj", "1", None) not in cache._evictable_keys
 
     await b.close()
-    assert ("bucket", "obj", "1") not in cache._refcounts
-    assert ("bucket", "obj", "1") in cache._evictable_keys
+    assert ("bucket", "obj", "1", None) not in cache._refcounts
+    assert ("bucket", "obj", "1", None) in cache._evictable_keys
 
 
 @pytest.mark.asyncio
@@ -1015,12 +1075,12 @@ async def test_mrd_pool_cache_lru_eviction(init_mrd_mock, mock_gcsfs):
         await mrd_pool.close()
 
     # Only the most recent 2 should remain
-    assert ("bucket", "obj-0", "1") not in cache._mrd_queues
-    assert ("bucket", "obj-1", "1") in cache._mrd_queues
-    assert ("bucket", "obj-2", "1") in cache._mrd_queues
+    assert ("bucket", "obj-0", "1", None) not in cache._mrd_queues
+    assert ("bucket", "obj-1", "1", None) in cache._mrd_queues
+    assert ("bucket", "obj-2", "1", None) in cache._mrd_queues
     assert list(cache._evictable_keys.keys()) == [
-        ("bucket", "obj-1", "1"),
-        ("bucket", "obj-2", "1"),
+        ("bucket", "obj-1", "1", None),
+        ("bucket", "obj-2", "1", None),
     ]
     # The evicted MRD queue's MRDs were torn down
     mock_mrds[0].close.assert_awaited_once()
@@ -1133,12 +1193,12 @@ async def test_mrd_pool_cache_close_no_op_when_already_closed(
 async def test_mrd_pool_cache_get_idle_mrd_closed(mock_gcsfs):
     cache = MRDPoolCache(mock_gcsfs)
     await cache.close()
-    assert cache.get_idle_mrd(("bucket", "obj", "1")) is None
+    assert cache.get_idle_mrd(("bucket", "obj", "1", None)) is None
 
 
 def test_mrd_pool_cache_get_idle_mrd_not_found(mock_gcsfs):
     cache = MRDPoolCache(mock_gcsfs)
-    assert cache.get_idle_mrd(("bucket", "obj", "1")) is None
+    assert cache.get_idle_mrd(("bucket", "obj", "1", None)) is None
 
 
 @pytest.mark.asyncio
@@ -1172,7 +1232,7 @@ async def test_mrd_pool_cache_max_queue_size_limit(init_mrd_mock, mock_gcsfs):
     await pool_b.close()
 
     # The queue size should be exactly max_queue_size (2)
-    queue = cache._mrd_queues[("bucket", "obj", "1")]
+    queue = cache._mrd_queues[("bucket", "obj", "1", None)]
     assert len(queue) == 2
 
     # Two of the MRDs should have been closed
@@ -1192,7 +1252,7 @@ async def test_mrd_pool_cache_max_queue_size_zero(init_mrd_mock, mock_gcsfs):
 
     await pool.close()
 
-    queue = cache._mrd_queues[("bucket", "obj", "1")]
+    queue = cache._mrd_queues[("bucket", "obj", "1", None)]
     assert len(queue) == 0
     mrd_instance.close.assert_awaited_once()
 
@@ -1379,3 +1439,42 @@ def test_direct_memmove_buffer_pypy_fallback():
     assert isinstance(buf._result_bytes, bytearray)
 
     executor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_init_mrd_metadata_fallback():
+    """Tests that init_mrd falls back when metadata kwarg is rejected."""
+    mock_grpc_client = mock.Mock()
+
+    async def mock_create_mrd(*args, **kwargs):
+        if "metadata" in kwargs:
+            raise TypeError(
+                "create_mrd() got an unexpected keyword argument 'metadata'"
+            )
+        return "fallback_success"
+
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        side_effect=mock_create_mrd,
+    ) as mock_create:
+        result = await zb_hns_utils.init_mrd(
+            mock_grpc_client, "bucket", "obj", generation=1, cache_type="readahead"
+        )
+        assert result == "fallback_success"
+        assert mock_create.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_mrd_methods_raise_unrelated_type_error():
+    """Tests that unrelated TypeErrors are properly re-raised."""
+    mock_grpc_client = mock.Mock()
+
+    # Test init_mrd re-raise
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        side_effect=TypeError("some other error"),
+    ):
+        with pytest.raises(TypeError, match="some other error"):
+            await zb_hns_utils.init_mrd(
+                mock_grpc_client, "b", "o", cache_type="readahead"
+            )
