@@ -1535,39 +1535,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             if valid_items:
                 valid_items_per_file[p] = valid_items
 
-        # If coalescing is not enabled, fall back to standard uncoalesced per-range coroutines
-        if max_gap is None or max_gap < 0:
-            coros = []
-            coro_indices = []
-            for p, items in valid_items_per_file.items():
-                for s, e, idx in items:
-                    coros.append(self._cat_file(p, start=s, end=e, **kwargs))
-                    coro_indices.append(idx)
-
-            if coros:
-                effective_batch_size = self._compute_effective_batch_size(
-                    batch_size, self.batch_size, len(coros)
-                )
-                out = await asyn._run_coros_in_chunks(
-                    coros,
-                    batch_size=effective_batch_size,
-                    nofiles=True,
-                    return_exceptions=True,
-                )
-                for idx, res in zip(coro_indices, out):
-                    if asyn.is_exception(res) and on_error != "return":
-                        raise res
-                    results[idx] = res
-            return results
-
-        # Coalesce adjacent/near-adjacent ranges per file
         merged_paths = []
         merged_starts = []
         merged_ends = []
         merged_slice_maps = []  # list of [(orig_idx, rel_start, rel_end), ...]
 
         for p, items in valid_items_per_file.items():
-            for m_s, m_e, slice_list in _coalesce_ranges(items, max_gap):
+            if max_gap is not None and max_gap >= 0:
+                merged_ranges = _coalesce_ranges(items, max_gap)
+            else:
+                merged_ranges = [(s, e, [(idx, 0, e - s)]) for s, e, idx in items]
+            
+            for m_s, m_e, slice_list in merged_ranges:
                 merged_paths.append(p)
                 merged_starts.append(m_s)
                 merged_ends.append(m_e)
@@ -1598,10 +1577,13 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     continue
 
                 for orig_idx, rel_s, rel_e in slice_list:
-                    if rel_e is None:
-                        results[orig_idx] = memoryview(chunk)[rel_s:]
+                    if max_gap is None or max_gap < 0:
+                        results[orig_idx] = chunk
                     else:
-                        results[orig_idx] = memoryview(chunk)[rel_s:rel_e]
+                        if rel_e is None:
+                            results[orig_idx] = memoryview(chunk)[rel_s:]
+                        else:
+                            results[orig_idx] = memoryview(chunk)[rel_s:rel_e]
 
         return results
 
