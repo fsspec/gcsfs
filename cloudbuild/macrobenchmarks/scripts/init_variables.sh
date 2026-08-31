@@ -13,6 +13,11 @@ fi
 if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_GKE_SERVICE_ACCOUNT}" ] || [ -z "${_DATASET_PATH}" ] || [ -z "${_REQUIREMENTS}" ]; then
   echo "ERROR: required substitution missing (_INFRA_PREFIX,_ZONE,_GKE_SERVICE_ACCOUNT,_DATASET_PATH,_REQUIREMENTS)."; exit 1
 fi
+# Reject an unknown workload before provisioning anything.
+case "${_WORKLOAD:-hf-pytorch-lightning-cpu}" in
+  hf-pytorch-lightning-cpu|ray-data-ray-train-pytorch) ;;
+  *) echo "ERROR: _WORKLOAD must be hf-pytorch-lightning-cpu or ray-data-ray-train-pytorch (got '${_WORKLOAD}')."; exit 1 ;;
+esac
 # Validate config before provisioning anything: an unsupported _BUCKET_TYPE
 # silently skips checkpoint-bucket creation, and a non-positive _CHECKPOINT_INTERVAL
 # divides-by-zero in scrape-metrics. Fail fast here so misconfig never reaches

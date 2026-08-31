@@ -74,11 +74,11 @@ shared_workload_helm_args() {
 # seed-checkpoint and run-workload steps so the polling loop lives in one place.
 # Usage: wait_for_jobset <jobset-name> <step-id>
 wait_for_jobset() {
-  local jobset="$1" step="$2" complete failed
+  local jobset="$1" step="$2" complete failed i
   local timeout_seconds="${WORKLOAD_TIMEOUT_SECONDS:-${_WORKLOAD_TIMEOUT_SECONDS:-14400}}"
   local max_iterations=$(( (timeout_seconds + 29) / 30 ))
   echo "Waiting for JobSet $jobset to complete (timeout: ${timeout_seconds}s, up to ${max_iterations} checks)..."
-  for _ in $(seq 1 "${max_iterations}"); do
+  for ((i = 1; i <= max_iterations; i++)); do
     complete=$(kubectl get jobset "$jobset" -o jsonpath='{.status.conditions[?(@.type=="Completed")].status}' 2>/dev/null || echo "")
     failed=$(kubectl get jobset "$jobset" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
     if [ "$complete" = "True" ]; then echo "JobSet $jobset completed."; return 0; fi
