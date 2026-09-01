@@ -233,6 +233,29 @@ Because CPU% is divided by wall-clock elapsed time, completing a workload faster
 * At high concurrency, `fsspec`'s single-threaded event loop becomes pinned, suffering from GIL contention, socket buffer backpressure, and asyncio scheduling overhead — inflating its CPU cost from **12.1s per 10 GiB at 1 worker up to 33.0s per 10 GiB at 48 workers (+172% increase per byte)**.
 * Rust handles high socket concurrency smoothly in native multi-threaded code, with CPU cost scaling much more modestly (**22.0s to 31.5s per 10 GiB, +43%**). At 48 processes reading 480 GiB, Rust completes in 25.7s vs 38.7s and uses **less total CPU work overall (1,512.2s vs 1,583.3s)** while delivering **+6.42 GB/s higher aggregate throughput**.
 
+### Multi-Process Scaling with 16MB I/O Size & Reduced Tokio Worker Threads (4 Threads)
+
+To evaluate larger transfer blocks and resolve CPU core oversubscription across 24–48 worker processes:
+1. **`MIN_CHUNK_SIZE_FOR_CONCURRENCY = 16MB`**: Prevents 16MB read requests from being chopped into 3 $\times$ 5.33MB sub-chunks and concatenated with `b"".join()` in Python.
+2. **`GCSFS_RUST_WORKER_THREADS = 4`**: Reduces Tokio worker threads per process from 16 to 4. For 24–48 processes, this keeps total host threads at 96–192 (matching the 192 physical vCPUs) instead of oversubscribing with 384–768 threads.
+3. **Application I/O Size**: `io_size = 16MB` (`f.read(16 * 1024 * 1024)`).
+
+#### 3-Run Average Summary Table (24, 32, 48 Workers)
+
+| Workers / Files | Total Data Read | Backend | Elapsed Time | Aggregate Throughput | Speedup | Peak Agg RSS | Per-Proc RSS | Total CPU % | CPU Cost per Byte | CPU Intensity |
+|:---:|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **24** | 240 GiB | **rust** | **15.54s** | **15,878.5 MB/s** (14910–17364) | **1.39x** | **6.56 GB** | **286.5 MB** | 3,204.0% | **2.07 CPU-s / GiB** | **2.07 vCPUs / GBps** |
+| | | fsspec | 21.45s | 11,457.0 MB/s (11363–11542) | 1.00x | 8.18 GB | 461.1 MB | 2,141.5% | 1.91 CPU-s / GiB | 1.91 vCPUs / GBps |
+| **32** | 320 GiB | **rust** | **18.40s** | **17,813.9 MB/s** (17302–18081) | **1.30x** | **8.76 GB** | **286.4 MB** | 3,957.1% | **2.27 CPU-s / GiB** | **2.27 vCPUs / GBps** |
+| | | fsspec | 23.94s | 13,686.2 MB/s (13665–13708) | 1.00x | 11.00 GB | 461.0 MB | 2,804.9% | 2.10 CPU-s / GiB | 2.10 vCPUs / GBps |
+| **48** | 480 GiB | **rust** | **25.36s** | **19,383.5 MB/s** (19213–19565) | **1.18x** | **13.17 GB** | **291.7 MB** | 4,641.0% | **2.45 CPU-s / GiB** | **2.45 vCPUs / GBps** |
+| | | fsspec | 30.01s | 16,403.3 MB/s (15602–17162) | 1.00x | 15.87 GB | 433.1 MB | 4,128.8% | 2.58 CPU-s / GiB | 2.58 vCPUs / GBps |
+
+**Key Takeaways from 16MB & 4-Thread Tuning:**
+* **Line-Rate Saturation at Scale**: Rust reaches **19.38 GB/s at 48 workers** (saturating the full NIC ceiling) and **15.88 GB/s at 24 workers**.
+* **CPU Efficiency Lead at Scale**: By eliminating core oversubscription, Rust burns **2.45 CPU-s / GiB vs 2.58 CPU-s / GiB for `fsspec` at 48 workers** (**Rust is more CPU-efficient per byte**).
+* **RAM Footprint**: Rust maintains a steady **~286–292 MB per process**, saving **2.70 GB of host memory** compared to `fsspec` at 48 workers.
+
 ### Pure Rust ceiling (no Python), direct range reads
 
 | Parallelism | Throughput |
