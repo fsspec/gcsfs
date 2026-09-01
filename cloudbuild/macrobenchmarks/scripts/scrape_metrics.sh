@@ -29,6 +29,21 @@ if [ -n "${_CHECKPOINT_LOAD_PATH}" ] || [ "${_SEED_CHECKPOINT}" = "true" ]; then
   MIN_RESTORE_DATAPOINTS=1
   RESUME_ARGS=(--resume-run)
 fi
+case "${_WORKLOAD}" in
+  ray-data-ray-train-pytorch)
+    PARSER_MODULE=metrics.parsers.ray_train
+    PROFILE_ARGS=(--require-ray-metrics)
+    # The strict profile derives exact write/restore sets from the observed
+    # schedule and topology. Disable the legacy approximate minimums so short
+    # and full-pass Ray runs are not forced to invent a checkpoint.
+    MIN_WRITE_DATAPOINTS=0
+    MIN_RESTORE_DATAPOINTS=0
+    ;;
+  *)
+    PARSER_MODULE=metrics.parsers.hf
+    PROFILE_ARGS=(--require-data-loading-metrics --require-data-wait-metrics)
+    ;;
+esac
 # Run the calculator over the current raw metrics into the summary file $1.
 run_calculate() {
   python3 -m metrics.calculate \
@@ -38,8 +53,7 @@ run_calculate() {
       --min-write-datapoints "$MIN_WRITE_DATAPOINTS" \
       --min-restore-datapoints "$MIN_RESTORE_DATAPOINTS" \
       "${RESUME_ARGS[@]}" \
-      --require-data-loading-metrics \
-      --require-data-wait-metrics \
+      "${PROFILE_ARGS[@]}" \
       --bucket-type "${_BUCKET_TYPE}" --zone "${_ZONE}" --region "$REGION" \
       --machine-type "${_MACHINE_TYPE}" \
       --nodes "${_NODES}" --ranks-per-node "${_RANKS_PER_NODE}" \
@@ -74,7 +88,7 @@ for attempt in $(seq 1 5); do
   # The parser hits the Cloud Logging API; a transient API error should fall
   # through to the backoff like the ingestion-lag case, not abort the step via
   # set -e / the ERR trap. Guard it in a condition so a failure retries.
-  if ! python3 -m metrics.parsers.hf \
+  if ! python3 -m "${PARSER_MODULE}" \
       --run-id "$RUN_ID" --project "${PROJECT_ID}" \
       --start-time "$START_TIME" --end-time "$END_TIME" \
       --checkpoint-location "gs://$CHECKPOINT_BUCKET/checkpoints" \

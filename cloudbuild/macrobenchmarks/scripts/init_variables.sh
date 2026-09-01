@@ -13,6 +13,11 @@ fi
 if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_GKE_SERVICE_ACCOUNT}" ] || [ -z "${_DATASET_PATH}" ] || [ -z "${_REQUIREMENTS}" ]; then
   echo "ERROR: required substitution missing (_INFRA_PREFIX,_ZONE,_GKE_SERVICE_ACCOUNT,_DATASET_PATH,_REQUIREMENTS)."; exit 1
 fi
+# Reject an unknown workload before provisioning anything.
+case "${_WORKLOAD:-hf-pytorch-lightning-cpu}" in
+  hf-pytorch-lightning-cpu|ray-data-ray-train-pytorch) ;;
+  *) echo "ERROR: _WORKLOAD must be hf-pytorch-lightning-cpu or ray-data-ray-train-pytorch (got '${_WORKLOAD}')."; exit 1 ;;
+esac
 # Validate config before provisioning anything: an unsupported _BUCKET_TYPE
 # silently skips checkpoint-bucket creation, and a non-positive _CHECKPOINT_INTERVAL
 # divides-by-zero in scrape-metrics. Fail fast here so misconfig never reaches
@@ -61,7 +66,9 @@ for pair in "_NODES=${_NODES}" "_RANKS_PER_NODE=${_RANKS_PER_NODE}" \
   "_DATA_PARALLEL_SIZE=${_DATA_PARALLEL_SIZE}" \
   "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}" "_EPOCHS=${_EPOCHS}" \
   "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}" \
-  "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"; do
+  "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}" \
+  "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS:-900}" \
+  "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS:-14400}"; do
   key=${pair%%=*}; val=${pair#*=}
   if ! echo "$val" | grep -Eq '^[1-9][0-9]*$'; then
     echo "ERROR: $key must be a positive integer (got '$val')."; exit 1
@@ -134,3 +141,5 @@ echo "export CHECKPOINT_BUCKET=${_INFRA_PREFIX}-macrobench-checkpoint-${SHORT_BU
 echo "export DATASET_BUCKET=${_INFRA_PREFIX}-macrobench-dataset-${SHORT_BUILD_ID}" >> "${BUILD_VARS_FILE}"
 echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-macrobench-results" >> "${BUILD_VARS_FILE}"
 echo "export REGION=${REGION}" >> "${BUILD_VARS_FILE}"
+echo "export TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS:-900}" >> "${BUILD_VARS_FILE}"
+echo "export WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS:-14400}" >> "${BUILD_VARS_FILE}"

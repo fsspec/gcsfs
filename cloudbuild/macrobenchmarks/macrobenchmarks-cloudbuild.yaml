@@ -52,6 +52,10 @@ substitutions:
   _SHUFFLE_MAX_BUFFER_INPUT_SHARDS: "10"
   # Batches to prefetch per dataloader worker.
   _DATALOADER_PREFETCH_FACTOR: "2"
+  # Per-collective timeout. Keep this shorter than the overall workload timeout
+  # so a stalled rank reports its distributed error before the JobSet watchdog.
+  _TORCH_DISTRIBUTED_TIMEOUT_SECONDS: "900"
+  _WORKLOAD_TIMEOUT_SECONDS: "14400"
   _JOBSET_VERSION: "v0.12.0"
   _SKIP_CLEANUP: "false"
 
@@ -69,6 +73,7 @@ steps:
       - "_INFRA_PREFIX=${_INFRA_PREFIX}"
       - "_ZONE=${_ZONE}"
       - "_GKE_SERVICE_ACCOUNT=${_GKE_SERVICE_ACCOUNT}"
+      - "_WORKLOAD=${_WORKLOAD}"
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_REQUIREMENTS=${_REQUIREMENTS}"
       - "_BUCKET_TYPE=${_BUCKET_TYPE}"
@@ -93,6 +98,8 @@ steps:
       - "_SHUFFLE_BUFFER_SIZE=${_SHUFFLE_BUFFER_SIZE}"
       - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
       - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
+      - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
+      - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/init_variables.sh"]
     waitFor: ["-"]
 
@@ -161,6 +168,8 @@ steps:
       - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
       - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
       - "_DATALOADER_WORKERS=${_DATALOADER_WORKERS}"
+      - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
+      - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/seed_checkpoint.sh"]
     waitFor: ["create-cluster", "create-buckets"]
 
@@ -196,6 +205,8 @@ steps:
       - "_SHUFFLE_BUFFER_SIZE=${_SHUFFLE_BUFFER_SIZE}"
       - "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS=${_SHUFFLE_MAX_BUFFER_INPUT_SHARDS}"
       - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
+      - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
+      - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/run_workload.sh"]
     waitFor: ["seed-checkpoint"]
 

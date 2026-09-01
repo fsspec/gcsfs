@@ -4,10 +4,19 @@
 
 This directory contains the Cloud Build automation that runs the GCSFS
 macrobenchmark end to end: it provisions an **ephemeral** GKE cluster, runs the
-Llama 3.1 8B PyTorch-Lightning CPU simulation as a Kubernetes JobSet, scrapes the
-resulting metrics from Cloud Logging and Cloud Monitoring into a single summary
-CSV, uploads it to a results bucket, and (via a second pipeline) ingests it into
-BigQuery for historical analysis.
+selected CPU workload as a Kubernetes JobSet, scrapes the resulting metrics from
+Cloud Logging and Cloud Monitoring into a single summary CSV, uploads it to a
+results bucket, and (via a second pipeline) ingests it into BigQuery for
+historical analysis. `_WORKLOAD` selects either the existing
+`hf-pytorch-lightning-cpu` simulation or the `ray-data-ray-train-pytorch` Ray
+Data/Ray Train workload.
+
+The retained Cloud Build flow is CPU-default: it creates the existing CPU node
+pool and the Ray chart leaves `workload.gpu=false`. GPU provisioning is outside
+this pipeline. To run the Ray workload on GPUs, deploy its chart directly to an
+already provisioned GPU-capable node pool with `--set workload.gpu=true`; this
+does not introduce a `_USE_GPU`, `_GPU_TYPE`, or `_GPU_COUNT_PER_NODE`
+substitution.
 
 The workload being run -- what it simulates and what each metric means -- is
 documented separately in
@@ -83,10 +92,19 @@ Before creating the triggers, set up the following in your GCP project.
    point at the HuggingFace repo, or pre-stage the weights + tokenizer to a
    `gs://` path and set `_MODEL_ID` to it (the default).
 
-7. **The `gcsfs` build under test**: supplied via `_REQUIREMENTS` (a
-   pip-installable spec/URL), installed last on every pod so it overrides the
-   chart's pinned versions. This is how you point the benchmark at the exact
-   `gcsfs` you want to measure.
+7. **The build overrides under test**: supplied via `_REQUIREMENTS` as
+   whitespace-separated pip specs/URLs and installed last on every pod. The
+   Lightning and Ray workloads both need only the gcsfs build under test --
+   the Ray workload runs on the released Ray pinned in its chart. Include a
+   SHA-256 URL fragment and record the artifact checksum with the run:
+
+   ```text
+   _REQUIREMENTS="https://.../gcsfs.whl#sha256=<sha256>"
+   ```
+
+   The Ray launcher checks the required callback/iterator capabilities after
+   installing these overrides and fails before starting the cluster workload if
+   the wrong wheel was supplied.
 
 ## Run pipeline flow
 
@@ -115,14 +133,14 @@ Before creating the triggers, set up the following in your GCP project.
 | `_ZONE` | GCP zone for the cluster and zonal buckets (e.g. `us-central1-a`). The region is derived from it. |
 | `_GKE_SERVICE_ACCOUNT` | Email of the node service account (see prerequisites). |
 | `_DATASET_PATH` | `gs://` directory of `*.parquet` shards (with a `text` column) to train on. Must match the run's region and bucket type. |
-| `_REQUIREMENTS` | Pip spec/URL of the `gcsfs` build under test (installed last, overriding pins). |
+| `_REQUIREMENTS` | Whitespace-separated immutable pip specs/URLs installed last. Every workload requires the gcsfs build under test; the Ray workload needs nothing else. |
 | `_HF_TOKEN` | HuggingFace token. Required only when `_MODEL_ID` is a gated HF repo (not a `gs://` path). |
 
 ### Tuning / optional (with defaults)
 
 | Substitution | Default | Description |
 | :----------- | :------ | :---------- |
-| `_WORKLOAD` | `hf-pytorch-lightning-cpu` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`. |
+| `_WORKLOAD` | `hf-pytorch-lightning-cpu` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`: `hf-pytorch-lightning-cpu` or `ray-data-ray-train-pytorch`. The retained Cloud Build path is CPU-default for both. |
 | `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, or `hns`. Must match the dataset bucket. |
 | `_MACHINE_TYPE` | `c4-standard-192` | Node machine type for the workload pool. |
 | `_ENABLE_TIER1_NETWORKING` | `true` | Enable TIER_1 high-bandwidth egress (requires gVNIC / C-series). |
@@ -142,6 +160,8 @@ Before creating the triggers, set up the following in your GCP project.
 | `_GRAD_ACCUM` | `1` | Gradient-accumulation steps. |
 | `_DATALOADER_WORKERS` | `16` | Dataloader worker processes per rank. |
 | `_IMAGE` | `nvcr.io/nvidia/pytorch:26.05-py3` | Container image for the pods. |
+| `_TORCH_DISTRIBUTED_TIMEOUT_SECONDS` | `900` | Per-collective Torch distributed timeout in seconds. |
+| `_WORKLOAD_TIMEOUT_SECONDS` | `14400` | Workload/JobSet completion timeout in seconds (default 4 hours). |
 | `_JOBSET_VERSION` | `v0.12.0` | JobSet controller release to install. |
 | `_SKIP_CLEANUP` | `false` | Leave infra standing after the run (for debugging). |
 
@@ -218,6 +238,14 @@ of truth; the calculator derives its CSV header from it). The columns, by family
 * **Checkpoint write / restore / delete**: `checkpoint_<op>_time_{min,max,avg,stddev,p50,p90,p99,p100}`,
   `num_checkpoint_<op>_datapoints`, plus `checkpoint_restore_time_initial`.
 * **Data loading**: `accelerator_blocked_time`, `accelerator_blocked_percent`.
+  Ray also populates `data_wait_total_time`, `data_wait_iterator_setup_time`,
+  and `data_wait_batch_fetch_time` from the same bottleneck iterator snapshot.
+  These four families are defined per workload and are only comparable within a
+  single `workload_name`: Lightning measures profiler spans around the fit
+  loop's dataloader calls, Ray measures its iterator's cumulative blocked
+  timers. `num_data_wait_spans` is Lightning-only -- Ray's equivalent counter
+  counts every batch fetch, so it is deliberately left `N/A` rather than put a
+  differently-scaled value in a shared column.
 * **System / resource**: `cpu_usage_{peak,mean}_cores`,
   `memory_usage_{peak,mean}_bytes`, `memory_limit_utilization_peak`,
   `cpu_limit_utilization_peak`,
@@ -227,8 +255,23 @@ of truth; the calculator derives its CSV header from it). The columns, by family
   `dataset_read_bytes`, `dataset_read_request_count`, `dataset_size_bytes`,
   `dataset_sample_count`, `dataset_read_amplification_ratio`.
 
+`global_batch_size` is derived, not passed in. For `model_parallel_*` strategies
+it is `per_device_batch x grad_accum x data_parallel_size`, because
+tensor-parallel ranks cooperate on one sample rather than each consuming their
+own; every other strategy uses `nodes x ranks_per_node`. The model-parallel case
+changed with the Ray workload and applies to both workloads, so a `model_parallel_*`
+series that spans that change will step -- compare across it with care.
+
 The per-metric aggregation logic lives in `metrics/` (`calculate.py`,
-`stats.py`, `parsers/hf.py`, `monitoring.py`).
+`stats.py`, `parsers/hf.py`, `parsers/ray_train.py`, `monitoring.py`). Both
+workloads emit the same Lightning-style text records for shared metrics and use
+regex parsers; Ray adds one record for its iterator snapshot. Ray actors write
+each metric atomically to the container's original stdout, bypassing Ray's
+asynchronous worker-log forwarding. Its strict profile still makes missing
+steps, checkpoint commits/sizes, dataset build, data-leader snapshots, required
+restores, or retention deletions fail collection and prevent summary upload.
+External Cloud Monitoring enrichment remains best effort and can leave its
+fields `N/A`.
 
 ### Ingestion into BigQuery
 
