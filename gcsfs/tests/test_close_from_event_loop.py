@@ -152,3 +152,53 @@ def test_off_loop_close_still_blocks_and_propagates_errors(fake_fs):
     with pytest.raises(RuntimeError, match="MRD pool teardown failed"):
         zf.close()
     assert started.is_set(), "close() must run the teardown synchronously"
+
+
+def test_gcsfile_finalizer_when_already_closed_or_deferred(fake_fs):
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb")
+    f.closed = True
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f.__del__()
+        mock_defer.assert_not_called()
+
+    f2 = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb")
+    f2._close_deferred = True
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f2.__del__()
+        mock_defer.assert_not_called()
+
+
+def test_gcsfile_finalizer_when_sys_finalizing(fake_fs, monkeypatch):
+    monkeypatch.setattr(sys, "is_finalizing", lambda: True)
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb")
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f.__del__()
+        assert f.closed is True
+        mock_defer.assert_not_called()
+
+
+def test_gcsfile_finalizer_when_queue_is_none(fake_fs, monkeypatch):
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="readahead")
+    monkeypatch.setattr(core, "_deferred_close_queue", None)
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f.__del__()
+        assert f.closed is True
+        mock_defer.assert_not_called()
+
+
+def test_gcsfile_finalized_on_loop_thread_defers_close(fake_fs, io_loop, monkeypatch):
+    seen = []
+    monkeypatch.setattr(sys, "unraisablehook", seen.append)
+    closed = threading.Event()
+
+    class RecordingGCSFile(core.GCSFile):
+        def _close_impl(self):
+            closed.set()
+            super()._close_impl()
+
+    gf = RecordingGCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="readahead")
+    holder = [gf]
+    del gf
+    finalize_on_loop(io_loop, holder)
+    assert wait_until(closed.is_set), "GCSFile._close_impl() was never called"
+    assert seen == [], f"exception escaped the finalizer: {seen}"
