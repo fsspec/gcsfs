@@ -38,6 +38,32 @@ def test_write_throughput_joins_size_by_step():
     assert m["checkpoint_write_throughput_avg_bytes_per_sec"] == 100.0
 
 
+def test_ray_write_throughput_uses_the_slowest_rank_duration():
+    write_rows = [
+        {
+            "checkpoint_step": 25,
+            "checkpoint_location": "gs://b/ckpt",
+            "start_time": 28.0,
+            "end_time": 30.0,
+        },
+        {
+            "checkpoint_step": 25,
+            "checkpoint_location": "gs://b/ckpt",
+            "start_time": 93.0,
+            "end_time": 100.0,
+        },
+    ]
+    size_rows = [{"checkpoint_step": 25, "size_bytes": 700}]
+
+    m = calculate.calc_throughput_metrics(
+        write_rows,
+        size_rows,
+        maximum_rank_duration=True,
+    )
+
+    assert m["checkpoint_write_throughput_avg_bytes_per_sec"] == 100.0
+
+
 def test_restore_throughput_from_restored_bytes_and_duration():
     assert calculate._restore_throughput(2000, 5.0) == 400.0
 
