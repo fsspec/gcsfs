@@ -2417,6 +2417,16 @@ def _defer_close(file):
 class GCSFile(fsspec.spec.AbstractBufferedFile):
     _close_deferred = False
 
+    def __del__(self):
+        """Defer finalizer cleanup so it never waits on the I/O loop."""
+        if getattr(self, "closed", True) or getattr(self, "_close_deferred", False):
+            return
+        if sys.is_finalizing() or _deferred_close_queue is None:
+            self.closed = True
+            return
+        self._close_deferred = True
+        _defer_close(self)
+
     def __init__(
         self,
         gcsfs,
