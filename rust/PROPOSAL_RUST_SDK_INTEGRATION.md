@@ -27,6 +27,7 @@ graph TD
     
     subgraph Current ["Current Python Dual-Stack Architecture"]
         API -->|Regional Standard| PyStd["Python aiohttp / asyncio Stack"]
+        API -->|Regional Standard| PyStd["Raw HTTP/REST via aiohttp (No Official SDK)"]
         API -->|Zonal Rapid| PyRapid["Python grpcio / AsyncMultiRangeDownloader (MRD)"]
         
         PyStd -->|HTTP/1.1 REST JSON| GCSStd["Standard GCS (storage.googleapis.com)"]
@@ -35,6 +36,7 @@ graph TD
 
     subgraph Bottlenecks ["Core System Bottlenecks"]
         PyStd -.-> B1["❌ 1 Core Pinned at ~800 MB/s<br>❌ High CPU/byte (+163% at 48 procs)<br>❌ Needs 64+ procs for line-rate"]
+        PyStd -.-> B1["❌ No official Storage SDK (raw aiohttp)<br>❌ 1 Core Pinned at ~800 MB/s<br>❌ High CPU/byte (+163% at 48 procs)<br>❌ Needs 64+ procs for line-rate"]
         PyRapid -.-> B2["❌ Heavy GIL locking during streams<br>❌ Fragile MRDPool lifecycle<br>❌ DirectPath Python FFI overhead"]
         B1 & B2 -.-> B3["❌ Connection Explosion: 64+ clients, TCP socket buffer bloat, TIME_WAIT accumulation"]
     end
@@ -49,6 +51,7 @@ graph TD
 
 ### The Crisis in Numbers:
 1. **The Single-Worker Wall**: In Python `aiohttp`, single-threaded `epoll` polling and Python byte slicing saturate an entire CPU core at **$\sim800\text{ MB/s}$**, unable to tap into the remaining $95\%$ of available network bandwidth [Ref 1, 2].
+1. **Lack of Official Storage SDK & The Single-Worker Wall**: Standard GCS access in `gcsfs` does not go through any official, robust Google Cloud Storage SDK. Instead, it relies on hand-crafted HTTP REST calls over Python `aiohttp`. Single-threaded `epoll` polling, HTTP header parsing, and Python byte slicing saturate an entire CPU core at **$\sim800\text{ MB/s}$**, unable to tap into the remaining $95\%$ of available network bandwidth [Ref 1, 2].
 2. **The Efficiency Collapse at Scale**: Spawning 48 worker processes to compensate triggers severe GIL preemption, interpreter contention, and memory arena fragmentation:
    * CPU cost per transferred byte surges from **$1.21\text{ CPU-s/GiB}$ to $3.18\text{ CPU-s/GiB}$ ($+163\%$ wasted compute)**.
    * Resident memory balloons to **$430\text{–}460\text{ MB per process}$** ($>16\text{ GB}$ total RAM).
