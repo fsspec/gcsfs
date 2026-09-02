@@ -17,7 +17,7 @@ from gcsfs.telemetry.context import (
 from gcsfs.telemetry.detectors.base import BaseDetector
 from gcsfs.telemetry.detectors.framework import FrameworkDetector
 from gcsfs.telemetry.manager import UsageMetricsTracker
-from gcsfs.telemetry.sanitizer import sanitize_framework
+from gcsfs.telemetry.sanitizer import sanitize_framework, sanitize_token
 
 # ============================================================================
 # 1. Sanitizer Tests
@@ -57,6 +57,31 @@ def test_sanitize_framework_length_truncation():
     long_str = "a" * 100
     assert len(sanitize_framework(long_str, max_len=64)) == 64
     assert len(sanitize_framework(long_str, max_len=10)) == 10
+
+
+def test_sanitize_token_valid_and_edge_cases():
+    # Valid tokens
+    assert sanitize_token("fw/pandas") == "fw/pandas"
+    assert sanitize_token("env/gke") == "env/gke"
+    assert sanitize_token("pandas") == "pandas"
+
+    # Multi-slash values sanitized to single slash
+    assert sanitize_token("fw/my/custom/lib") == "fw/my_custom_lib"
+
+    # CRLF and forbidden characters sanitized
+    assert (
+        sanitize_token("fw/custom\r\nInjected-Header: injected_val")
+        == "fw/custom__Injected-Header__injected_val"
+    )
+
+    # Empty, none, non-string, or malformed tokens
+    assert sanitize_token(None) is None
+    assert sanitize_token("") is None
+    assert sanitize_token(123) is None
+    assert sanitize_token("   ") is None
+    assert sanitize_token("fw/") is None
+    assert sanitize_token("/pandas") is None
+    assert sanitize_token("///") is None
 
 
 # ============================================================================
@@ -187,6 +212,43 @@ def test_multidimensional_telemetry_registration():
         assert tracker.get_dimension(Dimension.FRAMEWORK) == "fw/pandas"
     finally:
         reset_telemetry_context(token)
+
+
+def test_get_tokens_sanitization_user_controlled_context():
+    """Verify that get_tokens and get_dimension sanitize forbidden chars and CRLF from user context."""
+    tracker = UsageMetricsTracker()
+
+    # User sets context with CRLF and custom headers
+    token = set_dimension_context(
+        Dimension.FRAMEWORK, "fw/custom\r\nInjected-Header: injected_val"
+    )
+    try:
+        tokens = tracker.get_tokens()
+        assert tokens == ["fw/custom__Injected-Header__injected_val"]
+        assert (
+            tracker.get_dimension(Dimension.FRAMEWORK)
+            == "fw/custom__Injected-Header__injected_val"
+        )
+    finally:
+        reset_telemetry_context(token)
+
+    # Extra slashes in value (e.g. fw/my/custom/lib -> fw/my_custom_lib)
+    token = set_dimension_context(Dimension.FRAMEWORK, "fw/my/custom/lib")
+    try:
+        tokens = tracker.get_tokens()
+        assert tokens == ["fw/my_custom_lib"]
+        assert tracker.get_dimension(Dimension.FRAMEWORK) == "fw/my_custom_lib"
+    finally:
+        reset_telemetry_context(token)
+
+    # Dangling / leading slash or empty should not produce invalid tokens like 'fw/'
+    for malformed in ["fw/", "/pandas", "   ", ""]:
+        token = set_dimension_context(Dimension.FRAMEWORK, malformed)
+        try:
+            assert tracker.get_tokens() == []
+            assert tracker.get_dimension(Dimension.FRAMEWORK) is None
+        finally:
+            reset_telemetry_context(token)
 
 
 # ============================================================================

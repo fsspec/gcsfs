@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 from gcsfs.telemetry.context import Dimension, get_telemetry_context
 from gcsfs.telemetry.detectors.base import BaseDetector
 from gcsfs.telemetry.detectors.framework import FrameworkDetector
+from gcsfs.telemetry.sanitizer import sanitize_token
 
 
 def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
@@ -158,14 +159,19 @@ class UsageMetricsTracker:
         List[str]: List of formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
         token_map = self.collect_tokens_map()
-        return list(token_map.values())
+        sanitized_tokens = []
+        for token in token_map.values():
+            clean = sanitize_token(token)
+            if clean:
+                sanitized_tokens.append(clean)
+        return sanitized_tokens
 
     def get_dimension(self, dimension: Dimension) -> Optional[str]:
         """
         Resolve a specific dimension token (e.g. Dimension.FRAMEWORK).
         """
         token_map = self.collect_tokens_map()
-        return token_map.get(dimension.value)
+        return sanitize_token(token_map.get(dimension.value))
 
 
 # Default singleton instance pre-configured with standard framework detector

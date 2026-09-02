@@ -36,3 +36,28 @@ def sanitize_framework(value: Optional[str], max_len: int = 64) -> str:
     # Replace forbidden characters with '_' and truncate
     sanitized = _TOKEN_SANITIZE_REGEX.sub("_", cleaned)
     return sanitized[:max_len]
+
+
+def sanitize_token(token: Optional[str], max_len: int = 64) -> Optional[str]:
+    """
+    Sanitize a full dimension token (e.g. 'fw/pandas', 'env/gke') splitting at most once by '/'.
+
+    Parameters
+    ----------
+    token: Optional[str]
+        Raw token string to sanitize.
+    max_len: int, default 64
+        Maximum allowed length per segment.
+
+    Returns
+    -------
+    Optional[str]: Valid sanitized RFC 9110 token string, or None if invalid or empty.
+    """
+    if not token or not isinstance(token, str):
+        return None
+
+    parts = token.split("/", 1)
+    sanitized_parts = [sanitize_framework(p, max_len=max_len) for p in parts]
+    if all(sanitized_parts):
+        return "/".join(sanitized_parts)
+    return None
