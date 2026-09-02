@@ -34,7 +34,8 @@ from gcsfs.concurrency import split_range
 from gcsfs.core import (
     GCSFile,
     GCSFileSystem,
-    _coalesce_ranges,
+    _merge_file_ranges,
+    _unpack_range_results,
     _validate_cat_ranges_input,
 )
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
@@ -636,165 +637,129 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if bucket not in bucket_zonal_map:
                 bucket_zonal_map[bucket] = await self._is_zonal_bucket(bucket)
 
-        results = [None] * n
-        non_zonal_paths, non_zonal_starts, non_zonal_ends, non_zonal_indices = (
-            [],
-            [],
-            [],
-            [],
-        )
-        zonal_files = []
-        for path, items in file_groups.items():
-            bucket, object_name, generation = self.split_path(path)
-            if not bucket_zonal_map[bucket]:
-                for s, e, idx in items:
-                    non_zonal_paths.append(path)
-                    non_zonal_starts.append(s)
-                    non_zonal_ends.append(e)
-                    non_zonal_indices.append(idx)
-            else:
-                zonal_files.append((path, items, bucket, object_name, generation))
-
-        async def _fetch_zonal_file(path, items, bucket, object_name, generation):
-            # 2. Zonal Bucket: Acquire MRD from pool cache
-            concurrency = kwargs.get("concurrency", zb_hns_utils.DEFAULT_CONCURRENCY)
-            effective_batch_size = self._compute_effective_batch_size(
-                batch_size, self.batch_size, len(items)
-            )
-            max_batches = (
-                len(items) + effective_batch_size - 1
-            ) // effective_batch_size
-            pool_size = min(max_batches, max(1, concurrency))
-
-            try:
-                mrd_pool = await self._mrd_pool_cache.get(
-                    bucket, object_name, generation, pool_size=pool_size
-                )
-            except Exception as exc:
-                if on_error != "return":
-                    raise exc
-                for _, _, idx in items:
-                    results[idx] = exc
-                return
-
-            try:
-                valid_items = await self._normalize_file_ranges(
-                    path,
-                    items,
-                    results,
-                    on_error=on_error,
-                    get_size_fn=lambda: _get_mrd_size(mrd_pool),
-                )
-                if not valid_items:
-                    return
-
-                # 3. Construct multi-range request for this file
-                if max_gap is not None and max_gap >= 0:
-                    merged_ranges = _coalesce_ranges(valid_items, max_gap)
-                else:
-                    merged_ranges = [
-                        (s, e, [(idx, 0, e - s)]) for s, e, idx in valid_items
-                    ]
-
-                effective_batch_size = self._compute_effective_batch_size(
-                    batch_size, self.batch_size, len(merged_ranges)
-                )
-                batches = [
-                    merged_ranges[i : i + effective_batch_size]
-                    for i in range(0, len(merged_ranges), effective_batch_size)
-                ]
-
-                num_workers = min(len(batches), pool_size)
-
-                async def _process_batch(batch_merged):
-                    buffers = [io.BytesIO() for _ in range(len(batch_merged))]
-                    mrd_spec = [
-                        (s, e - s, buf) for (s, e, _), buf in zip(batch_merged, buffers)
-                    ]
-
-                    try:
-                        async with _get_mrd_from_pool_or_mrd(mrd_pool) as m_client:
-                            await m_client.download_ranges(mrd_spec)
-
-                        for buf, (_, _, slice_list) in zip(buffers, batch_merged):
-                            merged_chunk = buf.getvalue()
-                            if max_gap is None or max_gap < 0:
-                                for idx, rel_s, rel_e in slice_list:
-                                    results[idx] = merged_chunk[rel_s:rel_e]
-                            else:
-                                view = memoryview(merged_chunk)
-                                for idx, rel_s, rel_e in slice_list:
-                                    results[idx] = view[rel_s:rel_e]
-                    except Exception as exc:
-                        if on_error != "return":
-                            raise exc
-                        for _, _, slice_list in batch_merged:
-                            for idx, _, _ in slice_list:
-                                results[idx] = exc
-
-                if num_workers <= 1:
-                    for batch_merged in batches:
-                        await _process_batch(batch_merged)
-                else:
-                    queue = asyncio.Queue()
-                    for b in batches:
-                        queue.put_nowait(b)
-
-                    async def worker():
-                        while not queue.empty():
-                            try:
-                                b = queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                break
-                            await _process_batch(b)
-
-                    workers = [
-                        asyncio.create_task(worker()) for _ in range(num_workers)
-                    ]
-                    try:
-                        await asyncio.gather(*workers)
-                    except Exception:
-                        for w in workers:
-                            if not w.done():
-                                w.cancel()
-                        await asyncio.gather(*workers, return_exceptions=True)
-                        raise
-            finally:
-                await mrd_pool.close()
-
-        async def _run_non_zonal():
-            if not non_zonal_paths:
-                return
-            nz_results = await super(ExtendedGcsFileSystem, self)._cat_ranges(
-                non_zonal_paths,
-                non_zonal_starts,
-                non_zonal_ends,
+        # If all paths belong to non-zonal buckets, delegate directly to base class
+        if not any(bucket_zonal_map.values()):
+            return await super(ExtendedGcsFileSystem, self)._cat_ranges(
+                paths,
+                starts,
+                ends,
                 max_gap=max_gap,
                 batch_size=batch_size,
                 on_error=on_error,
                 **kwargs,
             )
-            for idx, res in zip(non_zonal_indices, nz_results):
-                results[idx] = res
 
-        coros = [_fetch_zonal_file(*args) for args in zonal_files]
-        if non_zonal_paths:
-            coros.append(_run_non_zonal())
+        results = [None] * n
+        coros = []
+        mrd_pools = []
 
-        if coros:
-            effective_file_limit = self._compute_effective_batch_size(
-                batch_size, self.batch_size, len(coros)
-            )
-            chunks = await asyn._run_coros_in_chunks(
-                coros,
-                batch_size=effective_file_limit,
-                nofiles=True,
-                return_exceptions=True,
-            )
-            if on_error != "return":
-                for c in chunks:
-                    if asyn.is_exception(c):
-                        raise c
+        async def _fetch_non_zonal_range(p, s, e, slice_list):
+            try:
+                chunk = await self._cat_file(p, start=s, end=e, **kwargs)
+                _unpack_range_results(chunk, slice_list, results, max_gap)
+            except Exception as exc:
+                if on_error != "return":
+                    raise exc
+                for orig_idx, _, _ in slice_list:
+                    results[orig_idx] = exc
+
+        async def _fetch_zonal_batch(batch_merged, pool):
+            buffers = [io.BytesIO() for _ in range(len(batch_merged))]
+            mrd_spec = [
+                (s, e - s, buf) for (s, e, _), buf in zip(batch_merged, buffers)
+            ]
+            try:
+                async with _get_mrd_from_pool_or_mrd(pool) as m_client:
+                    await m_client.download_ranges(mrd_spec)
+
+                for buf, (_, _, slice_list) in zip(buffers, batch_merged):
+                    _unpack_range_results(buf.getvalue(), slice_list, results, max_gap)
+            except Exception as exc:
+                if on_error != "return":
+                    raise exc
+                for _, _, slice_list in batch_merged:
+                    for idx, _, _ in slice_list:
+                        results[idx] = exc
+
+        try:
+            for path, items in file_groups.items():
+                bucket, object_name, generation = self.split_path(path)
+                is_zonal = bucket_zonal_map[bucket]
+                mrd_pool = None
+
+                if is_zonal:
+                    concurrency = kwargs.get(
+                        "concurrency", zb_hns_utils.DEFAULT_CONCURRENCY
+                    )
+                    effective_batch_size = self._compute_effective_batch_size(
+                        batch_size, self.batch_size, len(items)
+                    )
+                    max_batches = (
+                        len(items) + effective_batch_size - 1
+                    ) // effective_batch_size
+                    pool_size = min(max_batches, max(1, concurrency))
+
+                    try:
+                        mrd_pool = await self._mrd_pool_cache.get(
+                            bucket, object_name, generation, pool_size=pool_size
+                        )
+                        mrd_pools.append(mrd_pool)
+                    except Exception as exc:
+                        if on_error != "return":
+                            raise exc
+                        for _, _, idx in items:
+                            results[idx] = exc
+                        continue
+
+                    get_size_fn = lambda p=mrd_pool: _get_mrd_size(p)
+                else:
+                    get_size_fn = None
+
+                valid_items = await self._normalize_file_ranges(
+                    path,
+                    items,
+                    results,
+                    on_error=on_error,
+                    get_size_fn=get_size_fn,
+                )
+                if not valid_items:
+                    continue
+
+                merged_ranges = _merge_file_ranges(valid_items, max_gap)
+
+                if is_zonal:
+                    effective_range_batch_size = self._compute_effective_batch_size(
+                        batch_size, self.batch_size, len(merged_ranges)
+                    )
+                    batches = [
+                        merged_ranges[i : i + effective_range_batch_size]
+                        for i in range(
+                            0, len(merged_ranges), effective_range_batch_size
+                        )
+                    ]
+                    for batch_merged in batches:
+                        coros.append(_fetch_zonal_batch(batch_merged, mrd_pool))
+                else:
+                    for m_s, m_e, slice_list in merged_ranges:
+                        coros.append(_fetch_non_zonal_range(path, m_s, m_e, slice_list))
+
+            if coros:
+                effective_batch_size = self._compute_effective_batch_size(
+                    batch_size, self.batch_size, len(coros)
+                )
+                chunks = await asyn._run_coros_in_chunks(
+                    coros,
+                    batch_size=effective_batch_size,
+                    nofiles=True,
+                    return_exceptions=True,
+                )
+                if on_error != "return":
+                    for c in chunks:
+                        if asyn.is_exception(c):
+                            raise c
+        finally:
+            for pool in mrd_pools:
+                await pool.close()
 
         return results
 

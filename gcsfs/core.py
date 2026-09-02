@@ -277,6 +277,29 @@ def _validate_cat_ranges_input(paths, starts, ends):
     return paths, starts, ends
 
 
+def _is_coalesce_enabled(max_gap):
+    """Return True if range coalescing is enabled (max_gap is not None and >= 0)."""
+    return max_gap is not None and max_gap >= 0
+
+
+def _merge_file_ranges(valid_items, max_gap):
+    """Merge adjacent ranges if coalescing is active, or preserve 1-to-1 mappings."""
+    if _is_coalesce_enabled(max_gap):
+        return _coalesce_ranges(valid_items, max_gap)
+    return [(s, e, [(idx, 0, e - s)]) for s, e, idx in valid_items]
+
+
+def _unpack_range_results(chunk, slice_list, results, max_gap):
+    """Populate slice results from a downloaded chunk (bytes or memoryview)."""
+    if not _is_coalesce_enabled(max_gap):
+        for idx, rel_s, rel_e in slice_list:
+            results[idx] = chunk[rel_s:rel_e] if rel_e is not None else chunk[rel_s:]
+    else:
+        view = memoryview(chunk)
+        for idx, rel_s, rel_e in slice_list:
+            results[idx] = view[rel_s:rel_e] if rel_e is not None else view[rel_s:]
+
+
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -1541,10 +1564,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         merged_slice_maps = []  # list of [(orig_idx, rel_start, rel_end), ...]
 
         for p, items in valid_items_per_file.items():
-            if max_gap is not None and max_gap >= 0:
-                merged_ranges = _coalesce_ranges(items, max_gap)
-            else:
-                merged_ranges = [(s, e, [(idx, 0, e - s)]) for s, e, idx in items]
+            merged_ranges = _merge_file_ranges(items, max_gap)
 
             for m_s, m_e, slice_list in merged_ranges:
                 merged_paths.append(p)
@@ -1576,14 +1596,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                         results[orig_idx] = chunk
                     continue
 
-                for orig_idx, rel_s, rel_e in slice_list:
-                    if max_gap is None or max_gap < 0:
-                        results[orig_idx] = chunk
-                    else:
-                        if rel_e is None:
-                            results[orig_idx] = memoryview(chunk)[rel_s:]
-                        else:
-                            results[orig_idx] = memoryview(chunk)[rel_s:rel_e]
+                _unpack_range_results(chunk, slice_list, results, max_gap)
 
         return results
 
