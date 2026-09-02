@@ -657,9 +657,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         async def _fetch_zonal_file(path, items, bucket, object_name, generation):
             # 2. Zonal Bucket: Acquire MRD from pool cache
+            concurrency = kwargs.get("concurrency", zb_hns_utils.DEFAULT_CONCURRENCY)
+            effective_batch_size = self._compute_effective_batch_size(
+                batch_size, self.batch_size, len(items)
+            )
+            max_batches = (
+                len(items) + effective_batch_size - 1
+            ) // effective_batch_size
+            pool_size = min(max_batches, max(1, concurrency))
+
             try:
                 mrd_pool = await self._mrd_pool_cache.get(
-                    bucket, object_name, generation, pool_size=1
+                    bucket, object_name, generation, pool_size=pool_size
                 )
             except Exception as exc:
                 if on_error != "return":
@@ -690,9 +699,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 effective_batch_size = self._compute_effective_batch_size(
                     batch_size, self.batch_size, len(merged_ranges)
                 )
+                batches = [
+                    merged_ranges[i : i + effective_batch_size]
+                    for i in range(0, len(merged_ranges), effective_batch_size)
+                ]
 
-                for i in range(0, len(merged_ranges), effective_batch_size):
-                    batch_merged = merged_ranges[i : i + effective_batch_size]
+                num_workers = min(len(batches), pool_size)
+
+                async def _process_batch(batch_merged):
                     buffers = [io.BytesIO() for _ in range(len(batch_merged))]
                     mrd_spec = [
                         (s, e - s, buf) for (s, e, _), buf in zip(batch_merged, buffers)
@@ -717,6 +731,34 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         for _, _, slice_list in batch_merged:
                             for idx, _, _ in slice_list:
                                 results[idx] = exc
+
+                if num_workers <= 1:
+                    for batch_merged in batches:
+                        await _process_batch(batch_merged)
+                else:
+                    queue = asyncio.Queue()
+                    for b in batches:
+                        queue.put_nowait(b)
+
+                    async def worker():
+                        while not queue.empty():
+                            try:
+                                b = queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                            await _process_batch(b)
+
+                    workers = [
+                        asyncio.create_task(worker()) for _ in range(num_workers)
+                    ]
+                    try:
+                        await asyncio.gather(*workers)
+                    except Exception:
+                        for w in workers:
+                            if not w.done():
+                                w.cancel()
+                        await asyncio.gather(*workers, return_exceptions=True)
+                        raise
             finally:
                 await mrd_pool.close()
 

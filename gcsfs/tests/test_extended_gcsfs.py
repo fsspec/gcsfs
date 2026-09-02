@@ -2000,3 +2000,54 @@ async def test_extended_gcsfs_cat_ranges_batch_size_semaphore():
                 # batch_size=2 should limit file_concurrency to 2
                 await fs._cat_ranges(paths, starts, ends, batch_size=2)
                 mock_sem.assert_called_with(2)
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_concurrent_batches():
+    fs = ExtendedGcsFileSystem(token="anon")
+
+    active_concurrent_calls = 0
+    max_observed_concurrency = 0
+
+    class ConcurrentMRD:
+        async def download_ranges(self, mrd_spec):
+            nonlocal active_concurrent_calls, max_observed_concurrency
+            active_concurrent_calls += 1
+            if active_concurrent_calls > max_observed_concurrency:
+                max_observed_concurrency = active_concurrent_calls
+            await asyncio.sleep(0.01)
+            for _, length, buf in mrd_spec:
+                buf.write(b"M" * length)
+            active_concurrent_calls -= 1
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_pool = mock.AsyncMock()
+    mock_pool.close = mock.AsyncMock()
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+            return_value=ConcurrentMRD(),
+        ):
+            paths = ["zonal-bucket/f.bin"] * 6
+            starts = [i * 10 for i in range(6)]
+            ends = [s + 5 for s in starts]
+
+            # 6 ranges, batch_size=2 -> 3 batches. concurrency=3 -> 3 workers.
+            res = await fs._cat_ranges(
+                paths, starts, ends, max_gap=0, batch_size=2, concurrency=3
+            )
+            assert len(res) == 6
+            assert all(bytes(r) == b"MMMMM" for r in res)
+            assert max_observed_concurrency > 1
+            mock_pool_cache.get.assert_called_with(
+                "zonal-bucket", "f.bin", None, pool_size=3
+            )
