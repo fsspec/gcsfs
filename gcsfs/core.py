@@ -37,7 +37,12 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
-from .telemetry.context import Dimension, reset_telemetry_context, set_telemetry_context
+from .telemetry.context import (
+    Dimension,
+    get_telemetry_context,
+    reset_telemetry_context,
+    set_telemetry_context,
+)
 from .telemetry.manager import default_usage_tracker, mirror_gcs_sync_methods
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
 
@@ -2441,9 +2446,10 @@ def _start_deferred_close_worker():
 
 
 def _defer_close(file):
-    tokens_map = default_usage_tracker.collect_tokens_map()
-    if getattr(file, "caller_framework", None):
-        tokens_map[Dimension.FRAMEWORK.value] = file.caller_framework
+    tokens_map = get_telemetry_context()
+    fw = getattr(file, "caller_framework", None)
+    if fw:
+        tokens_map[Dimension.FRAMEWORK.value] = fw
 
     def _run():
         token = set_telemetry_context(tokens_map)
@@ -2801,7 +2807,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """Async fetcher mapped to the Prefetcher engine for regional buckets."""
-        tokens_map = default_usage_tracker.collect_tokens_map()
+        tokens_map = get_telemetry_context()
         if self.caller_framework:
             tokens_map[Dimension.FRAMEWORK.value] = self.caller_framework
 
