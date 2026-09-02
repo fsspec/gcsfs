@@ -3710,3 +3710,65 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
+
+
+def test_user_agent_telemetry_integration(gcs):
+    """Verify that gcs._get_headers and User-Agent include telemetry tokens and handle overrides."""
+    from gcsfs.telemetry.context import (
+        Dimension,
+        reset_telemetry_context,
+        set_dimension_context,
+    )
+
+    # 1. Default headers
+    headers = gcs._get_headers(None)
+    assert headers["User-Agent"].startswith("python-gcsfs/")
+    assert "cache_type" not in headers["User-Agent"]
+
+    # 2. Cache type explicit & default
+    headers_explicit = gcs._get_headers(
+        None, cache_type="readahead", cache_source="explicit"
+    )
+    assert "cache_type/readahead:e" in headers_explicit["User-Agent"]
+
+    headers_default = gcs._get_headers(
+        None, cache_type="none", cache_source="default"
+    )
+    assert "cache_type/none:d" in headers_default["User-Agent"]
+
+    # 3. ContextVar caller framework
+    token = set_dimension_context(Dimension.FRAMEWORK, "fw/torch")
+    try:
+        headers_caller = gcs._get_headers(None)
+        assert "fw/torch" in headers_caller["User-Agent"]
+        assert headers_caller["User-Agent"].startswith("python-gcsfs/")
+    finally:
+        reset_telemetry_context(token)
+
+    # 4. Preset User-Agent is preserved
+    token = set_dimension_context(Dimension.FRAMEWORK, "fw/pandas")
+    try:
+        headers_preset = gcs._get_headers({"User-Agent": "my-custom-agent"})
+        assert headers_preset["User-Agent"] == "my-custom-agent"
+    finally:
+        reset_telemetry_context(token)
+
+
+def test_no_eager_property_evaluation_on_init(monkeypatch):
+    """
+    Verify that instantiating GCSFileSystem does NOT eagerly invoke
+    properties like `fs.buckets`, which would trigger network I/O.
+    """
+    from gcsfs.core import GCSFileSystem
+
+    buckets_called = False
+
+    async def mock_list_buckets(self, *args, **kwargs):
+        nonlocal buckets_called
+        buckets_called = True
+        return []
+
+    monkeypatch.setattr(GCSFileSystem, "_list_buckets", mock_list_buckets)
+
+    _ = GCSFileSystem(token="anon", project="test-project")
+    assert not buckets_called, "GCSFileSystem.__init__ eagerly evaluated fs.buckets!"

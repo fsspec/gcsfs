@@ -3,6 +3,7 @@ Google Cloud Storage pythonic interface
 """
 
 import asyncio
+import inspect
 import io
 import json
 import logging
@@ -36,6 +37,12 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
+from .telemetry.context import (
+    Dimension,
+    reset_telemetry_context,
+    set_telemetry_context,
+)
+from .telemetry.manager import default_usage_tracker, mirror_gcs_sync_methods
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
 
 logger = logging.getLogger("gcsfs")
@@ -193,6 +200,21 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     elif cache_source == "default":
         suffix = ":d"
     return f"cache_type/{cache_type}{suffix}"
+
+
+def _build_user_agent(cache_type=None, cache_source=None):
+    """Build the standard User-Agent header string for HTTP requests."""
+    tokens = [f"python-gcsfs/{version}"]
+
+    cache_val = _get_cache_type_header_value(cache_type, cache_source)
+    if cache_val:
+        tokens.append(cache_val)
+
+    telemetry_tokens = default_usage_tracker.get_tokens()
+    if telemetry_tokens:
+        tokens.extend(telemetry_tokens)
+
+    return " ".join(tokens)
 
 
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
@@ -375,6 +397,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
+        mirror_gcs_sync_methods(self)
 
     @property
     def _location(self):
@@ -488,13 +511,36 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if headers is not None:
             out.update(headers)
         if "User-Agent" not in out:
-            ua = "python-gcsfs/" + version
-            cache_val = _get_cache_type_header_value(cache_type, cache_source)
-            if cache_val:
-                ua += f" {cache_val}"
-            out["User-Agent"] = ua
+            out["User-Agent"] = _build_user_agent(
+                cache_type=cache_type,
+                cache_source=cache_source,
+            )
         self.credentials.apply(out)
         return out
+
+    def _sync(self, func, *args, timeout=None, **kwargs):
+        """
+        GCSFS-specific synchronization bridge.
+        Bridges caller thread telemetry context to the background asyncio event loop thread.
+        """
+        tokens_map = default_usage_tracker.collect_tokens_map()
+
+        async def _coro_with_context():
+            token = set_telemetry_context(tokens_map)
+            try:
+                if inspect.iscoroutinefunction(func):
+                    return await func(*args, **kwargs)
+                elif inspect.iscoroutine(func) or inspect.isawaitable(func):
+                    return await func
+                else:
+                    res = func(*args, **kwargs)
+                    if inspect.iscoroutine(res) or inspect.isawaitable(res):
+                        return await res
+                    return res
+            finally:
+                reset_telemetry_context(token)
+
+        return asyn.sync(self.loop, _coro_with_context, timeout=timeout)
 
     def _format_path(self, path, args):
         if not path.startswith("http"):
@@ -560,7 +606,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """Return list of available project buckets."""
         return [
             b["name"]
-            for b in asyn.sync(self.loop, self._list_buckets, timeout=self.timeout)
+            for b in self._sync(self._list_buckets, timeout=self.timeout)
         ]
 
     def _process_object(self, bucket, object_metadata):
@@ -2402,11 +2448,18 @@ def _start_deferred_close_worker():
 
 
 def _defer_close(file):
+    tokens_map = default_usage_tracker.collect_tokens_map()
+    if getattr(file, "caller_framework", None):
+        tokens_map[Dimension.FRAMEWORK.value] = file.caller_framework
+
     def _run():
+        token = set_telemetry_context(tokens_map)
         try:
             file._close_impl()
         except Exception:
             logger.exception("deferred close of %s failed", file.path)
+        finally:
+            reset_telemetry_context(token)
 
     work = _deferred_close_queue
     if work is None:  # pragma: no cover
@@ -2512,6 +2565,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             **kwargs,
         )
         self.cache_type = cache_type
+        self._caller_framework = default_usage_tracker.get_dimension(
+            Dimension.FRAMEWORK
+        )
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
@@ -2564,6 +2620,19 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             )
         else:
             self._prefetch_engine = None
+
+    @property
+    def caller_framework(self):
+        """Dynamically fetch caller if currently None, and cache once found."""
+        if not self._caller_framework:
+            self._caller_framework = default_usage_tracker.get_dimension(
+                Dimension.FRAMEWORK
+            )
+        return self._caller_framework
+
+    @caller_framework.setter
+    def caller_framework(self, value):
+        self._caller_framework = value
 
     @property
     def details(self):
@@ -2668,8 +2737,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def _initiate_upload(self):
         """Create multi-upload"""
-        self.location = asyn.sync(
-            self.gcsfs.loop,
+        self.location = self.gcsfs._sync(
             initiate_upload,
             self.gcsfs,
             self.bucket,
@@ -2700,8 +2768,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """One-shot upload, less than 5MB"""
         self.buffer.seek(0)
         data = self.buffer.read()
-        j = asyn.sync(
-            self.gcsfs.loop,
+        j = self.gcsfs._sync(
             simple_upload,
             self.gcsfs,
             self.bucket,
@@ -2741,14 +2808,22 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """Async fetcher mapped to the Prefetcher engine for regional buckets."""
-        return await self.gcsfs._cat_file_concurrent(
-            self.path,
-            start=start_offset,
-            end=start_offset + total_size,
-            concurrency=split_factor,
-            cache_type=self.cache_type,
-            cache_source=self.cache_source,
-        )
+        tokens_map = default_usage_tracker.collect_tokens_map()
+        if self.caller_framework:
+            tokens_map[Dimension.FRAMEWORK.value] = self.caller_framework
+
+        token = set_telemetry_context(tokens_map)
+        try:
+            return await self.gcsfs._cat_file_concurrent(
+                self.path,
+                start=start_offset,
+                end=start_offset + total_size,
+                concurrency=split_factor,
+                cache_type=self.cache_type,
+                cache_source=self.cache_source,
+            )
+        finally:
+            reset_telemetry_context(token)
 
     def close(self):
         if self.closed or self._close_deferred:
