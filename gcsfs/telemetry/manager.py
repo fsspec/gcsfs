@@ -57,16 +57,19 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
 
 def mirror_gcs_sync_methods(obj: Any) -> None:
     """
-    Binds sync methods on a GCSFileSystem instance using _gcs_sync_wrapper.
+    Binds sync methods on a GCSFileSystem class or instance using _gcs_sync_wrapper.
     Uses class __mro__ to find all async coroutines and async generators,
     avoiding eager property evaluation.
     """
     from fsspec.asyn import async_methods
 
+    is_class = isinstance(obj, type)
+    target_type = obj if is_class else type(obj)
+
     # Collect coroutine and async generator method names strictly from class dictionaries in MRO
     method_names = set(async_methods)
 
-    for cls in type(obj).__mro__:
+    for cls in target_type.__mro__:
         if cls is object:
             continue
         for name, attr in cls.__dict__.items():
@@ -91,15 +94,15 @@ def mirror_gcs_sync_methods(obj: Any) -> None:
         if not (
             hasattr(AbstractFileSystem, smethod)
             or method in async_methods
-            or hasattr(type(obj), smethod)
+            or hasattr(target_type, smethod)
         ):
             continue
 
         async_fn = getattr(obj, method, None)
         if inspect.iscoroutinefunction(async_fn):
-            mth = _gcs_sync_wrapper(async_fn, obj=obj)
+            mth = _gcs_sync_wrapper(async_fn, obj=None if is_class else obj)
         elif inspect.isasyncgenfunction(async_fn):
-            mth = _gcs_async_gen_wrapper(async_fn, obj=obj)
+            mth = _gcs_async_gen_wrapper(async_fn, obj=None if is_class else obj)
         else:
             continue
 

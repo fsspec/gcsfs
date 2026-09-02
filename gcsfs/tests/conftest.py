@@ -678,8 +678,10 @@ def mock_gcs_harness(monkeypatch):
             return {}, sample_csv_data
         return {}, sample_pt_data
 
+    from gcsfs.telemetry.manager import _gcs_sync_wrapper
+
     monkeypatch.setattr(GCSFileSystem, "_call", mock_call)
-    monkeypatch.setattr(GCSFileSystem, "call", asyn.sync_wrapper(mock_call))
+    monkeypatch.setattr(GCSFileSystem, "call", _gcs_sync_wrapper(mock_call))
 
     class Harness:
         def __init__(self):

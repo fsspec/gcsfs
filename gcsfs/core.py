@@ -398,7 +398,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
-        mirror_gcs_sync_methods(self)
 
     @property
     def _location(self):
@@ -2410,6 +2409,9 @@ def _on_loop_thread(loop):
         return asyncio.get_running_loop() is loop
     except RuntimeError:
         return False
+
+
+mirror_gcs_sync_methods(GCSFileSystem)
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
