@@ -19,8 +19,8 @@ def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        self = obj or (args[0] if args else None)
-        if self is not None and hasattr(self, "_sync"):
+        self = obj or args[0]
+        if hasattr(self, "_sync"):
             return self._sync(func, *args, **kwargs)
         # Fallback if unbound
         import fsspec.asyn
@@ -38,11 +38,11 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        self = obj or (args[0] if args else None)
+        self = obj or args[0]
         gen = func(*args, **kwargs)
         while True:
             try:
-                if self is not None and hasattr(self, "_sync"):
+                if hasattr(self, "_sync"):
                     yield self._sync(gen.__anext__)
                 else:
                     import fsspec.asyn
