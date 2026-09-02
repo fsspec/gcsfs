@@ -13,6 +13,17 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List
 
 from metrics import raw_store, schema
+from metrics.parsers.common import _MAX_PAGE_SIZE as _COMMON_MAX_PAGE_SIZE
+from metrics.parsers.common import LogEntry
+from metrics.parsers.common import _default_read_retry as _common_default_read_retry
+from metrics.parsers.common import _to_log_entry as _common_to_log_entry
+from metrics.parsers.common import iter_log_entries
+
+# Preserve the parser's prior private names for callers and tests that import
+# them while keeping the implementation shared with structured parsers.
+_MAX_PAGE_SIZE = _COMMON_MAX_PAGE_SIZE
+_default_read_retry = _common_default_read_retry
+_to_log_entry = _common_to_log_entry
 
 # --- regexes -----------------------------------------------------------
 STEP_METRICS_PATTERN = (
@@ -78,12 +89,6 @@ ALL_PATTERNS = [
     DATA_WAIT_PATTERN,
     DATASET_BUILD_PATTERN,
 ]
-
-
-@dataclass
-class LogEntry:
-    timestamp: float  # epoch seconds
-    message: str
 
 
 @dataclass
@@ -279,70 +284,6 @@ def parse_entries(
                 print(f"Warning: Could not parse dataset build metrics from: {message}")
 
     return out
-
-
-_MAX_PAGE_SIZE = 1000
-
-
-def _default_read_retry():
-    from google.api_core import exceptions as gexc
-    from google.api_core import retry as retries
-
-    return retries.Retry(
-        predicate=retries.if_exception_type(gexc.ResourceExhausted),
-        initial=2.0,
-        maximum=60.0,
-        multiplier=2.0,
-        deadline=180.0,
-    )
-
-
-def _to_log_entry(entry) -> LogEntry:
-    payload = entry.text_payload or (
-        dict(entry.json_payload) if entry.json_payload else ""
-    )
-    message = (
-        payload
-        if isinstance(payload, str)
-        else (payload.get("message", "") if payload else "")
-    )
-    return LogEntry(timestamp=entry.timestamp.timestamp(), message=message)
-
-
-def iter_log_entries(
-    client,
-    project: str,
-    filter_string: str,
-    *,
-    page_size: int = _MAX_PAGE_SIZE,
-    retry=None,
-) -> Iterable[LogEntry]:
-    if retry is None:
-        retry = _default_read_retry()
-
-    def _fetch(token):
-        request = {
-            "resource_names": [f"projects/{project}"],
-            "filter": filter_string,
-            "order_by": "timestamp asc",
-            "page_size": page_size,
-            "page_token": token,
-        }
-        pager = client.list_log_entries(request=request)
-        page = next(pager.pages, None)
-        if page is None:
-            return None, None
-        return page.entries, page.next_page_token
-
-    page_token = None
-    while True:
-        page, page_token = retry(_fetch)(page_token)
-        if page is None:
-            return
-        for entry in page:
-            yield _to_log_entry(entry)
-        if not page_token:
-            return
 
 
 def build_filter(*, project: str, run_id: str, start_time: str, end_time: str) -> str:

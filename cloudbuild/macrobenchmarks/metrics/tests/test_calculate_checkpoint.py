@@ -28,6 +28,18 @@ def test_write_metrics_groups_multiple_rows_per_step():
     assert m["checkpoint_write_time_max"] == 40.0
 
 
+def test_ray_write_metrics_use_the_slowest_rank_duration_not_log_span():
+    rows = [
+        _w(25, 28.0, 30.0),
+        _w(25, 93.0, 100.0),
+    ]
+
+    m = calculate.calc_write_metrics(rows, maximum_rank_duration=True)
+
+    assert m["num_checkpoint_write_datapoints"] == 1
+    assert m["checkpoint_write_time_max"] == 7.0
+
+
 def test_delete_metrics_prefix():
     rows = [
         {

@@ -12,6 +12,7 @@ class _FakeParsed:
     delete_metrics: dict = field(default_factory=dict)
     data_loading_metrics: List = field(default_factory=list)
     checkpoint_sizes: List = field(default_factory=list)
+    ray_data_iteration_metrics: List = field(default_factory=list)
 
 
 def test_checkpoint_sizes_roundtrip(tmp_path):
@@ -37,6 +38,30 @@ def test_checkpoint_sizes_roundtrip(tmp_path):
     ]
 
 
-def test_absent_sizes_read_as_empty(tmp_path):
+def test_ray_data_iteration_roundtrip(tmp_path):
+    parsed = _FakeParsed(
+        ray_data_iteration_metrics=[
+            schema.RayDataIterationMetrics(
+                run_id="run-1",
+                global_rank=0,
+                split_index=0,
+                total_blocked_s=10.0,
+                total_s=20.0,
+                time_to_first_batch_s=3.0,
+                blocked_calls=5,
+            )
+        ]
+    )
+    raw_store.write_raw_metrics(parsed, str(tmp_path))
     tables = raw_store.read_raw_metrics(str(tmp_path))
-    assert tables.size_rows == []
+    assert tables.ray_data_iteration_rows == [
+        {
+            "run_id": "run-1",
+            "global_rank": 0,
+            "split_index": 0,
+            "total_blocked_s": 10.0,
+            "total_s": 20.0,
+            "time_to_first_batch_s": 3.0,
+            "blocked_calls": 5,
+        }
+    ]
