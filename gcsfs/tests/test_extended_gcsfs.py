@@ -12,6 +12,7 @@ from itertools import chain
 from unittest import mock
 
 import pytest
+from fsspec import asyn
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
@@ -1967,7 +1968,7 @@ async def test_extended_gcsfs_cat_ranges_return_types():
 
 
 @pytest.mark.asyncio
-async def test_extended_gcsfs_cat_ranges_batch_size_semaphore():
+async def test_extended_gcsfs_cat_ranges_batch_size_chunks():
     fs = ExtendedGcsFileSystem(token="anon")
 
     class MockMRD:
@@ -1988,7 +1989,10 @@ async def test_extended_gcsfs_cat_ranges_batch_size_semaphore():
     fs._mrd_pool_cache = mock_pool_cache
 
     with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
-        with mock.patch("asyncio.Semaphore", wraps=asyncio.Semaphore) as mock_sem:
+        with mock.patch(
+            "fsspec.asyn._run_coros_in_chunks",
+            wraps=asyn._run_coros_in_chunks,
+        ) as mock_chunks:
             with mock.patch(
                 "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
                 return_value=MockMRD(),
@@ -1997,9 +2001,15 @@ async def test_extended_gcsfs_cat_ranges_batch_size_semaphore():
                 starts = [0] * 5
                 ends = [10] * 5
 
-                # batch_size=2 should limit file_concurrency to 2
+                # batch_size=2 should limit file concurrency to 2
                 await fs._cat_ranges(paths, starts, ends, batch_size=2)
-                mock_sem.assert_called_with(2)
+                mock_chunks.assert_called()
+                assert mock_chunks.call_args.kwargs.get("batch_size") == 2
+
+
+test_extended_gcsfs_cat_ranges_batch_size_semaphore = (
+    test_extended_gcsfs_cat_ranges_batch_size_chunks
+)
 
 
 @pytest.mark.asyncio

@@ -777,25 +777,24 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             for idx, res in zip(non_zonal_indices, nz_results):
                 results[idx] = res
 
-        # Bound total active download jobs across all files using semaphore
-        effective_file_limit = (
-            batch_size
-            if (batch_size is not None and batch_size > 0)
-            else (self.batch_size or 32)
-        )
-        file_concurrency = min(len(zonal_files) or 1, effective_file_limit)
-        sem = asyncio.Semaphore(file_concurrency)
-
-        async def _fetch_with_sem(file_args):
-            async with sem:
-                return await _fetch_zonal_file(*file_args)
-
-        tasks = [_fetch_with_sem(args) for args in zonal_files]
+        coros = [_fetch_zonal_file(*args) for args in zonal_files]
         if non_zonal_paths:
-            tasks.append(_run_non_zonal())
+            coros.append(_run_non_zonal())
 
-        if tasks:
-            await asyncio.gather(*tasks)
+        if coros:
+            effective_file_limit = self._compute_effective_batch_size(
+                batch_size, self.batch_size, len(coros)
+            )
+            chunks = await asyn._run_coros_in_chunks(
+                coros,
+                batch_size=effective_file_limit,
+                nofiles=True,
+                return_exceptions=True,
+            )
+            if on_error != "return":
+                for c in chunks:
+                    if asyn.is_exception(c):
+                        raise c
 
         return results
 
