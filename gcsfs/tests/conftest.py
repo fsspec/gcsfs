@@ -645,6 +645,7 @@ def pytest_ignore_collect(collection_path, config):
             "glob",
             "put",
             "comparison",
+            "cat_ranges",
         }
 
         path_parts = set(path_str.replace(os.sep, "/").split("/"))

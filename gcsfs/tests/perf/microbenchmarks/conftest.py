@@ -268,6 +268,21 @@ def gcsfs_benchmark_pipe(extended_gcs_factory, request):
     )
 
 
+@pytest.fixture
+def gcsfs_benchmark_cat_ranges(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a cat_ranges benchmark run.
+    It creates the test file(s) and cleans them up afterward.
+    """
+    params = request.param
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-cat-ranges",
+        create_files=True,
+    )
+
+
 def _benchmark_put_fixture_helper(extended_gcs_factory, params, prefix_tag):
     gcs = extended_gcs_factory()
 
@@ -558,6 +573,9 @@ def publish_benchmark_extra_info(
 
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
+    benchmark.extra_info["num_ranges"] = getattr(params, "num_ranges", "N/A")
+    benchmark.extra_info["max_gap"] = getattr(params, "max_gap", "N/A")
+    benchmark.extra_info["batch_size"] = getattr(params, "batch_size", "N/A")
     benchmark.extra_info["runtime"] = getattr(params, "runtime", "N/A")
     benchmark.extra_info["threads"] = params.threads
     benchmark.extra_info["rounds"] = params.rounds
