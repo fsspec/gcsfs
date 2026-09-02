@@ -65,7 +65,7 @@ class FrameworkDetector(BaseDetector):
         Traverses the frame chain from top (outermost / root) to bottom (innermost / gcsfs).
         Returns the first recognized framework encountered from the top.
         """
-        frames = []
+        module_names = []
         frame = start_frame
         depth = 0
 
@@ -84,16 +84,13 @@ class FrameworkDetector(BaseDetector):
                 except Exception:
                     pass
 
-            frames.append(frame)
+            if mod_name:
+                module_names.append(mod_name)
             frame = frame.f_back
             depth += 1
 
         # Scan in call order (outermost root -> innermost) to match the initiating framework first
-        for f in reversed(frames):
-            mod_name = f.f_globals.get("__name__")
-            if not mod_name:
-                continue
-
+        for mod_name in reversed(module_names):
             top_pkg = mod_name.partition(".")[0]
             if top_pkg in self.KNOWN_FRAMEWORKS:
                 framework_name = self.KNOWN_FRAMEWORKS[top_pkg]
