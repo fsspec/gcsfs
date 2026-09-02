@@ -70,16 +70,19 @@ class FrameworkDetector(BaseDetector):
         depth = 0
 
         while frame is not None and depth < self.max_depth:
-            # If any frame has a file instance with cached _caller_framework, use it immediately
-            try:
-                f_locals = getattr(frame, "f_locals", None)
-                if f_locals is not None:
-                    instance = f_locals.get("self")
-                    cached_fw = getattr(instance, "_caller_framework", None)
-                    if isinstance(cached_fw, str) and cached_fw:
-                        return cached_fw
-            except Exception:
-                pass
+            f_globals = getattr(frame, "f_globals", None) or {}
+            mod_name = f_globals.get("__name__", "")
+            if mod_name.startswith("gcsfs"):
+                # If any gcsfs frame has a file instance with cached _caller_framework, use it immediately
+                try:
+                    f_locals = getattr(frame, "f_locals", None)
+                    if f_locals is not None:
+                        instance = f_locals.get("self")
+                        cached_fw = getattr(instance, "_caller_framework", None)
+                        if isinstance(cached_fw, str) and cached_fw:
+                            return cached_fw
+                except Exception:
+                    pass
 
             frames.append(frame)
             frame = frame.f_back

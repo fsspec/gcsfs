@@ -65,16 +65,19 @@ def mirror_gcs_sync_methods(obj: Any) -> None:
     from gcsfs.core import GCSFileSystem
 
     # Collect coroutine and async generator method names strictly from target class dictionaries
-    target_classes = [AsyncFileSystem, GCSFileSystem, type(obj)]
+    target_classes = {AsyncFileSystem, GCSFileSystem, type(obj)}
     method_names = set(async_methods + ["_call"])
 
     for cls in target_classes:
-        for name in cls.__dict__:
+        for name, attr in cls.__dict__.items():
             # Only pick private methods that are NOT dunders (e.g. '_ls', '_cat_file', '_info')
             if name.startswith("_") and not (
                 name.startswith("__") and name.endswith("__")
             ):
-                method_names.add(name)
+                if inspect.iscoroutinefunction(attr) or inspect.isasyncgenfunction(
+                    attr
+                ):
+                    method_names.add(name)
 
     # Bind the sync wrapper only for valid public methods
     from fsspec.spec import AbstractFileSystem

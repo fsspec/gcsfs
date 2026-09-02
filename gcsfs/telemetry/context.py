@@ -15,22 +15,23 @@ class Dimension(str, Enum):
 
 
 # ContextVar for propagating multi-dimensional telemetry tokens across async event loop and thread boundaries
-_current_telemetry: contextvars.ContextVar[Dict[str, str]] = contextvars.ContextVar(
-    "gcsfs_current_telemetry", default={}
+_current_telemetry: contextvars.ContextVar[Optional[Dict[str, str]]] = (
+    contextvars.ContextVar("gcsfs_current_telemetry", default=None)
 )
 
 
 if hasattr(os, "register_at_fork"):
 
     def _reset_telemetry_in_child():
-        _current_telemetry.set({})
+        _current_telemetry.set(None)
 
     os.register_at_fork(after_in_child=_reset_telemetry_in_child)
 
 
 def get_telemetry_context() -> Dict[str, str]:
     """Retrieve active telemetry tokens mapping from context."""
-    return dict(_current_telemetry.get())
+    val = _current_telemetry.get()
+    return dict(val) if val is not None else {}
 
 
 def set_telemetry_context(tokens: Dict[str, str]) -> contextvars.Token:
