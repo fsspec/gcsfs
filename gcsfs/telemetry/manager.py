@@ -57,18 +57,17 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
 def mirror_gcs_sync_methods(obj: Any) -> None:
     """
     Binds sync methods on a GCSFileSystem instance using _gcs_sync_wrapper.
-    Uses __dict__ across AsyncFileSystem, GCSFileSystem, and the concrete type
-    to find all async coroutines and async generators, avoiding object inspection.
+    Uses class __mro__ to find all async coroutines and async generators,
+    avoiding eager property evaluation.
     """
-    from fsspec.asyn import AsyncFileSystem, async_methods
+    from fsspec.asyn import async_methods
 
-    from gcsfs.core import GCSFileSystem
+    # Collect coroutine and async generator method names strictly from class dictionaries in MRO
+    method_names = set(async_methods)
 
-    # Collect coroutine and async generator method names strictly from target class dictionaries
-    target_classes = {AsyncFileSystem, GCSFileSystem, type(obj)}
-    method_names = set(async_methods + ["_call"])
-
-    for cls in target_classes:
+    for cls in type(obj).__mro__:
+        if cls is object:
+            continue
         for name, attr in cls.__dict__.items():
             # Only pick private methods that are NOT dunders (e.g. '_ls', '_cat_file', '_info')
             if name.startswith("_") and not (
