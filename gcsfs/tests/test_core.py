@@ -3731,9 +3731,7 @@ def test_user_agent_telemetry_integration(gcs):
     )
     assert "cache_type/readahead:e" in headers_explicit["User-Agent"]
 
-    headers_default = gcs._get_headers(
-        None, cache_type="none", cache_source="default"
-    )
+    headers_default = gcs._get_headers(None, cache_type="none", cache_source="default")
     assert "cache_type/none:d" in headers_default["User-Agent"]
 
     # 3. ContextVar caller framework

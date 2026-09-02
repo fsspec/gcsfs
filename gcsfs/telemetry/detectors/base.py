@@ -1,4 +1,5 @@
 """Base class for telemetry detectors following gcsfs/fsspec conventions."""
+
 from __future__ import annotations
 
 import os
@@ -27,4 +28,8 @@ class BaseDetector:
 
     def is_enabled(self) -> bool:
         """Check if telemetry opt-out environment variable is active."""
-        return os.environ.get("GCSFS_NO_TELEMETRY", "").lower() not in ("1", "true", "yes")
+        return os.environ.get("GCSFS_NO_TELEMETRY", "").lower() not in (
+            "1",
+            "true",
+            "yes",
+        )

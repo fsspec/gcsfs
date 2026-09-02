@@ -633,7 +633,9 @@ def mock_gcs_harness(monkeypatch):
 
         # Mock initiate_upload (resumable upload session)
         if kwargs.get("uploadType") == "resumable":
-            return {"Location": "http://mock-gcs/upload/session-12345678901234567890"}, b""
+            return {
+                "Location": "http://mock-gcs/upload/session-12345678901234567890"
+            }, b""
 
         # Mock upload chunk / upload completion
         if "http://mock-gcs/upload" in str(path):

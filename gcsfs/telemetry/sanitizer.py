@@ -1,4 +1,5 @@
 """RFC 9110 compliant token sanitization helper."""
+
 from __future__ import annotations
 
 import re

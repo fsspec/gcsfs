@@ -1,14 +1,12 @@
 """Central Telemetry Coordinator managing detectors and context propagation."""
+
 from __future__ import annotations
 
 import functools
 import inspect
 from typing import Any, Callable, Dict, List, Optional
 
-from gcsfs.telemetry.context import (
-    Dimension,
-    get_telemetry_context,
-)
+from gcsfs.telemetry.context import Dimension, get_telemetry_context
 from gcsfs.telemetry.detectors.base import BaseDetector
 from gcsfs.telemetry.detectors.framework import FrameworkDetector
 
@@ -18,6 +16,7 @@ def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
     GCS-specific sync wrapper that captures caller thread telemetry
     and bridges it into the background asyncio loop thread via self._sync.
     """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         self = obj or (args[0] if args else None)
@@ -25,6 +24,7 @@ def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
             return self._sync(func, *args, **kwargs)
         # Fallback if unbound
         import fsspec.asyn
+
         return fsspec.asyn.sync(self.loop, func, *args, **kwargs)
 
     return wrapper
@@ -35,6 +35,7 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
     GCS-specific async generator wrapper that routes each generator yield
     through self._sync to capture caller thread telemetry context.
     """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         self = obj or (args[0] if args else None)
@@ -45,6 +46,7 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
                     yield self._sync(gen.__anext__)
                 else:
                     import fsspec.asyn
+
                     yield fsspec.asyn.sync(self.loop, gen.__anext__)
             except StopAsyncIteration:
                 break
@@ -58,7 +60,8 @@ def mirror_gcs_sync_methods(obj: Any) -> None:
     Uses __dict__ across AsyncFileSystem, GCSFileSystem, and the concrete type
     to find all async coroutines and async generators, avoiding object inspection.
     """
-    from fsspec.asyn import async_methods, AsyncFileSystem
+    from fsspec.asyn import AsyncFileSystem, async_methods
+
     from gcsfs.core import GCSFileSystem
 
     # Collect coroutine and async generator method names strictly from target class dictionaries
@@ -68,17 +71,25 @@ def mirror_gcs_sync_methods(obj: Any) -> None:
     for cls in target_classes:
         for name in cls.__dict__:
             # Only pick private methods that are NOT dunders (e.g. '_ls', '_cat_file', '_info')
-            if name.startswith("_") and not (name.startswith("__") and name.endswith("__")):
+            if name.startswith("_") and not (
+                name.startswith("__") and name.endswith("__")
+            ):
                 method_names.add(name)
 
     # Bind the sync wrapper only for valid public methods
     from fsspec.spec import AbstractFileSystem
 
     for method in method_names:
-        smethod = method[1:]  # e.g., "_ls" -> "ls", "_cat_file" -> "cat_file", "_walk" -> "walk"
+        smethod = method[
+            1:
+        ]  # e.g., "_ls" -> "ls", "_cat_file" -> "cat_file", "_walk" -> "walk"
 
         # Only mirror if smethod is a valid public method (in AbstractFileSystem, async_methods, or the class)
-        if not (hasattr(AbstractFileSystem, smethod) or method in async_methods or hasattr(type(obj), smethod)):
+        if not (
+            hasattr(AbstractFileSystem, smethod)
+            or method in async_methods
+            or hasattr(type(obj), smethod)
+        ):
             continue
 
         async_fn = getattr(obj, method, None)
@@ -101,7 +112,9 @@ class UsageMetricsTracker:
     """Coordinates multi-dimensional detectors and context propagation."""
 
     def __init__(self, detectors: Optional[List[BaseDetector]] = None):
-        self.detectors: List[BaseDetector] = list(detectors) if detectors is not None else []
+        self.detectors: List[BaseDetector] = (
+            list(detectors) if detectors is not None else []
+        )
 
     def register_detector(self, detector: BaseDetector) -> None:
         """Register a new detector for a telemetry dimension (e.g. env, op)."""
@@ -154,6 +167,8 @@ class UsageMetricsTracker:
 
 
 # Default singleton instance pre-configured with standard framework detector
-default_usage_tracker = UsageMetricsTracker(detectors=[
-    FrameworkDetector(),
-])
+default_usage_tracker = UsageMetricsTracker(
+    detectors=[
+        FrameworkDetector(),
+    ]
+)

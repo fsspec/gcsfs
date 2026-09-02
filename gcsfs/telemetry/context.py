@@ -1,14 +1,16 @@
 """Internal thread-safe and coroutine-safe context management for telemetry state."""
+
 from __future__ import annotations
 
 import contextvars
-from enum import Enum
 import os
+from enum import Enum
 from typing import Dict, Optional
 
 
 class Dimension(str, Enum):
     """Standard telemetry dimension keys."""
+
     FRAMEWORK = "fw"
 
 
@@ -19,6 +21,7 @@ _current_telemetry: contextvars.ContextVar[Dict[str, str]] = contextvars.Context
 
 
 if hasattr(os, "register_at_fork"):
+
     def _reset_telemetry_in_child():
         _current_telemetry.set({})
 

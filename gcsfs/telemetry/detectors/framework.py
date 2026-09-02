@@ -1,4 +1,5 @@
 """Top-to-bottom stack frame detector for upstream caller frameworks (name-only)."""
+
 from __future__ import annotations
 
 import sys

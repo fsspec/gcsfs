@@ -37,11 +37,7 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
-from .telemetry.context import (
-    Dimension,
-    reset_telemetry_context,
-    set_telemetry_context,
-)
+from .telemetry.context import Dimension, reset_telemetry_context, set_telemetry_context
 from .telemetry.manager import default_usage_tracker, mirror_gcs_sync_methods
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
 
@@ -604,10 +600,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     @property
     def buckets(self):
         """Return list of available project buckets."""
-        return [
-            b["name"]
-            for b in self._sync(self._list_buckets, timeout=self.timeout)
-        ]
+        return [b["name"] for b in self._sync(self._list_buckets, timeout=self.timeout)]
 
     def _process_object(self, bucket, object_metadata):
         """Process object resource into gcsfs object information format.

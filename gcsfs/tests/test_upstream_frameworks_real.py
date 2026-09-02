@@ -1,12 +1,13 @@
 """Real integration tests verifying framework detection when upstream packages use gcsfs."""
+
 from __future__ import annotations
 
 import pytest
 
-
 # ============================================================================
 # 1. PyTorch Lightning Integration Test
 # ============================================================================
+
 
 def test_pytorch_lightning_real_invocation(mock_gcs_harness):
     """
@@ -15,7 +16,7 @@ def test_pytorch_lightning_real_invocation(mock_gcs_harness):
     """
     lightning = pytest.importorskip("lightning")
     import torch
-    from torch.utils.data import Dataset, DataLoader
+    from torch.utils.data import DataLoader, Dataset
 
     # Create a custom PyTorch dataset that reads from GCS using fsspec/gcsfs
     class GCSStreamDataset(Dataset):
@@ -72,7 +73,9 @@ def test_pytorch_lightning_real_invocation(mock_gcs_harness):
     # Verify that User-Agent contains fw/lightning
     assert len(mock_gcs_harness.user_agents) > 0
     for ua in mock_gcs_harness.user_agents:
-        assert "fw/lightning" in ua, f"Expected 'fw/lightning' in User-Agent, got: '{ua}'"
+        assert (
+            "fw/lightning" in ua
+        ), f"Expected 'fw/lightning' in User-Agent, got: '{ua}'"
 
 
 def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness):
@@ -98,19 +101,22 @@ def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness):
 
     assert len(mock_gcs_harness.user_agents) > 0
     for ua in mock_gcs_harness.user_agents:
-        assert "fw/lightning" in ua, f"Expected 'fw/lightning' in User-Agent, got: '{ua}'"
+        assert (
+            "fw/lightning" in ua
+        ), f"Expected 'fw/lightning' in User-Agent, got: '{ua}'"
 
 
 # ============================================================================
 # 2. PyTorch Native DataLoader Integration Test
 # ============================================================================
 
+
 def test_pytorch_native_dataloader_real_invocation(mock_gcs_harness):
     """
     Verify that native PyTorch DataLoader reads detect 'fw/torch'.
     """
     torch = pytest.importorskip("torch")
-    from torch.utils.data import Dataset, DataLoader
+    from torch.utils.data import DataLoader, Dataset
 
     class TorchGCSDataset(Dataset):
         def __init__(self, fs):
@@ -139,6 +145,7 @@ def test_pytorch_native_dataloader_real_invocation(mock_gcs_harness):
 # 3. Pandas Native Integration Tests
 # ============================================================================
 
+
 def test_pandas_read_csv_native(mock_gcs_harness):
     """
     Verify that pd.read_csv("gcs://...") automatically tags User-Agent with 'fw/pandas'.
@@ -146,7 +153,9 @@ def test_pandas_read_csv_native(mock_gcs_harness):
     pandas = pytest.importorskip("pandas")
 
     mock_gcs_harness.clear()
-    df = pandas.read_csv("gcs://test-bucket/data.csv", storage_options={"token": "anon"})
+    df = pandas.read_csv(
+        "gcs://test-bucket/data.csv", storage_options={"token": "anon"}
+    )
 
     assert not df.empty
     assert len(mock_gcs_harness.user_agents) > 0

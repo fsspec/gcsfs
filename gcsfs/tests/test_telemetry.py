@@ -1,12 +1,13 @@
 """Unit tests for the gcsfs telemetry subsystem."""
+
 from __future__ import annotations
 
 import os
 import sys
 import types
+
 import pytest
 
-from gcsfs.telemetry.sanitizer import sanitize_framework
 from gcsfs.telemetry.context import (
     Dimension,
     get_dimension_context,
@@ -16,11 +17,12 @@ from gcsfs.telemetry.context import (
 from gcsfs.telemetry.detectors.base import BaseDetector
 from gcsfs.telemetry.detectors.framework import FrameworkDetector
 from gcsfs.telemetry.manager import UsageMetricsTracker
-
+from gcsfs.telemetry.sanitizer import sanitize_framework
 
 # ============================================================================
 # 1. Sanitizer Tests
 # ============================================================================
+
 
 def test_sanitize_framework_empty_and_none():
     assert sanitize_framework(None) == ""
@@ -39,7 +41,10 @@ def test_sanitize_framework_valid_characters():
 
 def test_sanitize_framework_forbidden_chars_and_crlf():
     # CRLF injection attempt (\r\n replaced, delimiters like ':' and '/' sanitized)
-    assert sanitize_framework("pandas\r\nInjected-Header: bad") == "pandas__Injected-Header__bad"
+    assert (
+        sanitize_framework("pandas\r\nInjected-Header: bad")
+        == "pandas__Injected-Header__bad"
+    )
     # Slashes and colons are sanitized to prevent malformed tokens
     assert sanitize_framework("fw/torch") == "fw_torch"
     assert sanitize_framework("host:8080") == "host_8080"
@@ -57,6 +62,7 @@ def test_sanitize_framework_length_truncation():
 # ============================================================================
 # 2. Framework Detector Tests
 # ============================================================================
+
 
 def _create_mock_frame(module_name: str, back_frame=None):
     """Helper to create a fake execution frame for testing stack traversal."""
@@ -141,6 +147,7 @@ def test_framework_detector_opt_out(monkeypatch):
 # 3. Context Management Tests
 # ============================================================================
 
+
 def test_set_and_get_dimension_context():
     # Initial state
     assert get_dimension_context(Dimension.FRAMEWORK) is None
@@ -157,6 +164,7 @@ def test_set_and_get_dimension_context():
 # ============================================================================
 # 4. Telemetry Manager & Header Building Tests
 # ============================================================================
+
 
 def test_multidimensional_telemetry_registration():
     class DummyEnvDetector(BaseDetector):
@@ -185,12 +193,14 @@ def test_multidimensional_telemetry_registration():
 # 5. GCSFS Telemetry Propagation Tests
 # ============================================================================
 
+
 def test_nested_method_calls_telemetry():
     """
     Verify that deeply nested method calls (e.g. outer sync -> bridged async -> inner async)
     correctly maintain the outer framework across all levels and cleanly reset context.
     """
     import fsspec.asyn
+
     from gcsfs.core import GCSFileSystem
 
     fs = GCSFileSystem(token="anon", project="test-project")
@@ -251,7 +261,9 @@ def test_multithreaded_context_isolation():
                 for _ in range(5):
                     current = get_dimension_context(Dimension.FRAMEWORK)
                     if current != f"fw/{framework_name}":
-                        errors.append(f"{framework_name}: expected fw/{framework_name}, got {current}")
+                        errors.append(
+                            f"{framework_name}: expected fw/{framework_name}, got {current}"
+                        )
                     time.sleep(0.005)
             finally:
                 reset_telemetry_context(token)
@@ -264,8 +276,7 @@ def test_multithreaded_context_isolation():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
-            executor.submit(worker, name)
-            for name in ["pandas", "torch", "dask", "ray"]
+            executor.submit(worker, name) for name in ["pandas", "torch", "dask", "ray"]
         ]
         concurrent.futures.wait(futures)
 
@@ -279,7 +290,9 @@ def test_deep_stack_traversal(monkeypatch):
     # Build a 50-frame stack where the top frame (frame 50) is 'lightning'
     current_frame = _create_mock_frame("lightning.pytorch.trainer")
     for i in range(49):
-        current_frame = _create_mock_frame(f"internal_module_{i}", back_frame=current_frame)
+        current_frame = _create_mock_frame(
+            f"internal_module_{i}", back_frame=current_frame
+        )
 
     monkeypatch.setattr(sys, "_getframe", lambda: current_frame)
     detected = detector.detect()
@@ -332,7 +345,9 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
         token = set_dimension_context(Dimension.FRAMEWORK, expected_token)
         try:
             op()
-            assert len(captured) > 0, f"operation {name} did not execute any network calls"
+            assert (
+                len(captured) > 0
+            ), f"operation {name} did not execute any network calls"
             assert all(
                 expected_token in ua for ua in captured
             ), f"operation {name} had requests missing {expected_token}: {captured}"
@@ -344,12 +359,14 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
 # 8. Fork Reset Tests
 # ============================================================================
 
+
 def test_post_fork_telemetry_reset():
     """Verify os.register_at_fork automatically clears telemetry in a real forked child process."""
     if not hasattr(os, "fork"):
         pytest.skip("os.fork is only supported on Unix platforms")
 
     import multiprocessing
+
     from gcsfs.telemetry.context import (
         get_dimension_context,
         get_telemetry_context,
