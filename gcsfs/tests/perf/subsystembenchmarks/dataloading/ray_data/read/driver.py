@@ -2,7 +2,6 @@
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import fsspec
 import pyarrow.fs
@@ -86,8 +85,6 @@ def _rows_in_batch(batch):
         v = next(iter(batch.values()))
     if hasattr(v, "shape"):
         return int(v.shape[0])
-    if isinstance(v, list) and len(v) > 0 and hasattr(v[0], "shape"):
-        return sum(int(x.shape[0]) for x in v)
     return len(v)
 
 
@@ -130,6 +127,39 @@ def run_single_rank(dataset, params):
     return durations, rows_list, (ttfb if ttfb is not None else float("inf"))
 
 
+@ray.remote
+def _consume_shard(shard, params, shuffle_seed, collate_fn):
+    begin = timestamp()
+    ttfb = None
+    rows = 0
+    batch_iter = iter(
+        shard.iter_torch_batches(
+            batch_size=params.batch_size,
+            prefetch_batches=params.prefetch_factor,
+            local_shuffle_buffer_size=(
+                params.shuffle_buffer_size
+                if params.access == "shuffled" and params.shuffle_buffer_size > 0
+                else None
+            ),
+            local_shuffle_seed=shuffle_seed,
+            collate_fn=collate_fn,
+            device=torch.device("cpu"),
+            pin_memory=False,
+            drop_last=False,
+        )
+    )
+    for batch in batch_iter:
+        if ttfb is None:
+            ttfb = timestamp() - begin
+        rows += _rows_in_batch(batch)
+    return (
+        begin,
+        timestamp(),
+        rows,
+        (ttfb if ttfb is not None else float("inf")),
+    )
+
+
 def run_multi_rank(dataset, params):
     """Iterates dataset split equally across world_size consumer ranks concurrently."""
     world_size = params.world_size
@@ -143,40 +173,11 @@ def run_multi_rank(dataset, params):
             else None
         )
 
-        def consume(shard):
-            begin = timestamp()
-            ttfb = None
-            rows = 0
-            batch_iter = iter(
-                shard.iter_torch_batches(
-                    batch_size=params.batch_size,
-                    prefetch_batches=params.prefetch_factor,
-                    local_shuffle_buffer_size=(
-                        params.shuffle_buffer_size
-                        if params.access == "shuffled"
-                        and params.shuffle_buffer_size > 0
-                        else None
-                    ),
-                    local_shuffle_seed=shuffle_seed,
-                    collate_fn=collate_fn,
-                    device=torch.device("cpu"),
-                    pin_memory=False,
-                    drop_last=False,
-                )
-            )
-            for batch in batch_iter:
-                if ttfb is None:
-                    ttfb = timestamp() - begin
-                rows += _rows_in_batch(batch)
-            return (
-                begin,
-                timestamp(),
-                rows,
-                (ttfb if ttfb is not None else float("inf")),
-            )
-
-        with ThreadPoolExecutor(max_workers=world_size) as pool:
-            rank_records = list(pool.map(consume, splits))
+        futures = [
+            _consume_shard.remote(split, params, shuffle_seed, collate_fn)
+            for split in splits
+        ]
+        rank_records = ray.get(futures)
         epoch_records.append(rank_records)
 
     results = []

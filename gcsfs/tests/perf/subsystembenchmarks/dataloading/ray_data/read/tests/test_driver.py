@@ -151,3 +151,24 @@ def test_driver_reads_text_parquet_single_and_multi_rank(ray_cluster, tmp_path):
     assert result.rows_per_epoch == [40, 40]
     assert result.ttfb_seconds > 0
     assert result.build_seconds >= 0
+
+
+def test_rows_in_batch_with_label_tensor():
+    import torch
+
+    batch = {"label": torch.zeros(10), "tokens": torch.zeros((10, 128))}
+    assert driver._rows_in_batch(batch) == 10
+
+
+def test_rows_in_batch_with_list_of_tensors():
+    import torch
+
+    # If a column contains a list of 1D tensors (e.g. sequence length 128),
+    # _rows_in_batch must count samples (rows), not sequence length.
+    batch = {"tokens": [torch.zeros(128) for _ in range(5)]}
+    assert driver._rows_in_batch(batch) == 5
+
+
+def test_rows_in_batch_with_list_of_strings():
+    batch = {"text": ["sample1", "sample2", "sample3"]}
+    assert driver._rows_in_batch(batch) == 3
