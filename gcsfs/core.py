@@ -3,6 +3,7 @@ Google Cloud Storage pythonic interface
 """
 
 import asyncio
+import inspect
 import io
 import json
 import logging
@@ -16,6 +17,8 @@ import threading
 import uuid
 import warnings
 import weakref
+from collections import defaultdict
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from glob import has_magic
 from urllib.parse import parse_qs
@@ -193,6 +196,108 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     elif cache_source == "default":
         suffix = ":d"
     return f"cache_type/{cache_type}{suffix}"
+
+
+def _coalesce_ranges(items, max_gap, file_size=None):
+    """
+    Helper to coalesce contiguous or near-contiguous ranges for a single file.
+
+    Parameters
+    ----------
+    items: list of (start, end, orig_idx)
+    max_gap: int
+        Maximum allowed gap between ranges to be coalesced.
+    file_size: int, optional
+        If known, used to resolve end=None.
+
+    Returns
+    -------
+    list of (merged_start, merged_end, slice_list) where
+    slice_list is a list of (orig_idx, rel_start, rel_end).
+    If rel_end is None, it means the slice extends to the end of the merged chunk.
+    """
+    if not items:
+        return []
+
+    items.sort(key=lambda x: x[0])
+    merged_ranges = []
+
+    cur_s, cur_e, cur_idx = items[0]
+    if cur_e is None and file_size is not None:
+        cur_e = file_size
+
+    if cur_e is None:
+        # Without knowing file size, we cannot coalesce past an unbounded range safely
+        merged_ranges.append((cur_s, None, [(cur_idx, 0, None)]))
+        cur_slices = None
+    else:
+        cur_slices = [(cur_idx, 0, cur_e - cur_s)]
+
+    for s, e, idx in items[1:]:
+        if e is None and file_size is not None:
+            e = file_size
+
+        if cur_e is not None and e is not None and s <= cur_e + max_gap:
+            rel_s = s - cur_s
+            rel_e = rel_s + (e - s)
+            cur_slices.append((idx, rel_s, rel_e))
+            cur_e = max(cur_e, e)
+        else:
+            if cur_slices is not None:
+                merged_ranges.append((cur_s, cur_e, cur_slices))
+            cur_s = s
+            cur_e = e
+
+            if cur_e is not None:
+                cur_slices = [(idx, 0, cur_e - cur_s)]
+            else:
+                merged_ranges.append((cur_s, None, [(idx, 0, None)]))
+                cur_slices = None
+
+    if cur_slices is not None:
+        merged_ranges.append((cur_s, cur_e, cur_slices))
+    return merged_ranges
+
+
+def _validate_cat_ranges_input(paths, starts, ends):
+    """Normalize and validate inputs for cat_ranges."""
+    if isinstance(paths, (str, bytes)) or not isinstance(paths, (list, tuple)):
+        raise TypeError("paths must be a list or tuple of file paths")
+    paths = list(paths)
+    if not isinstance(starts, Iterable) or isinstance(starts, (str, bytes)):
+        starts = [starts] * len(paths)
+    else:
+        starts = list(starts)
+    if not isinstance(ends, Iterable) or isinstance(ends, (str, bytes)):
+        ends = [ends] * len(paths)
+    else:
+        ends = list(ends)
+    if len(starts) != len(paths) or len(ends) != len(paths):
+        raise ValueError("paths, starts, and ends must have the same length")
+    return paths, starts, ends
+
+
+def _is_coalesce_enabled(max_gap):
+    """Return True if range coalescing is enabled (max_gap is not None and >= 0)."""
+    return max_gap is not None and max_gap >= 0
+
+
+def _merge_file_ranges(valid_items, max_gap):
+    """Merge adjacent ranges if coalescing is active, or preserve 1-to-1 mappings."""
+    if _is_coalesce_enabled(max_gap):
+        return _coalesce_ranges(valid_items, max_gap)
+    return [(s, e, [(idx, 0, e - s)]) for s, e, idx in valid_items]
+
+
+def _unpack_range_results(chunk, slice_list, results, max_gap):
+    """Populate slice results from a downloaded chunk (bytes or memoryview)."""
+    if not _is_coalesce_enabled(max_gap):
+        for idx, rel_s, rel_e in slice_list:
+            results[idx] = chunk[rel_s:rel_e] if rel_e is not None else chunk[rel_s:]
+    else:
+        view = memoryview(chunk)
+        for idx, rel_s, rel_e in slice_list:
+            results[idx] = view[rel_s:rel_e] if rel_e is not None else view[rel_s:]
 
 
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
@@ -1287,6 +1392,215 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         # to keep it separate because concurrency code path is still in an experimental phase.
         # Once concurrency code path is stabilized, we can remove this if-else condition.
         return await self._cat_file_sequential(path, start=start, end=end, **kwargs)
+
+    async def _process_limits_to_offset_and_length(
+        self, path, start, end, file_size=None
+    ):
+        """
+        Calculates the read offset and length from start and end parameters.
+
+        Args:
+            path (str): The path to the file.
+            start (int | None): The starting byte position.
+            end (int | None): The ending byte position.
+            file_size (int | None): The total size of the file. If None, it will be fetched via _info().
+
+        Returns:
+            tuple: A tuple containing (offset, length).
+        """
+        size = file_size
+
+        async def _get_size():
+            nonlocal size
+            if size is None:
+                size = (await self._info(path))["size"]
+            return size
+
+        if start is None:
+            offset = 0
+        elif start < 0:
+            offset = max(0, await _get_size() + start)
+        else:
+            offset = start
+
+        if end is None:
+            effective_end = await _get_size()
+        elif end < 0:
+            effective_end = await _get_size() + end
+        else:
+            effective_end = end
+
+        # If the requested end is before or same as the start, return empty.
+        if effective_end <= offset:
+            return offset, 0
+        else:
+            length = effective_end - offset  # Normal case
+            if size is not None and effective_end > size:
+                length = max(0, size - offset)  # Clamp and ensure non-negative
+
+        return offset, length
+
+    @staticmethod
+    def _compute_effective_batch_size(
+        batch_size, default_batch_size, total_items, max_batch_size=1000
+    ):
+        """Compute bounded batch size respecting batch_size=-1 and max_batch_size."""
+        if batch_size == -1:
+            return min(total_items or 1, max_batch_size)
+        configured = batch_size or default_batch_size or 64
+        return min(configured, max_batch_size)
+
+    async def _normalize_file_ranges(
+        self, path, items, results, on_error="return", get_size_fn=None
+    ):
+        """Normalize range limits (start, end) for all requests on a single file.
+
+        Populates 0-length slices with b"" directly in results, and records
+        exceptions in results if fetching file size fails with on_error="return".
+
+        Args:
+            path (str): File path.
+            items (list of (start, end, orig_idx)): Requested ranges with caller indices.
+            results (list): Output results list to populate for 0-length or error slices.
+            on_error (str): "return" or "raise".
+            get_size_fn (callable, optional): Sync or async function returning file size
+                if known without calling self._info(path).
+
+        Returns:
+            list of (offset, end_offset, orig_idx): Normalized non-zero ranges to fetch,
+            or None if an error occurred and was captured in results.
+        """
+        needs_file_size = any(
+            (s is not None and s < 0) or e is None or (e is not None and e < 0)
+            for s, e, _ in items
+        )
+        file_size = None
+        if needs_file_size:
+            try:
+                if get_size_fn is not None:
+                    res = get_size_fn()
+                    if inspect.isawaitable(res):
+                        file_size = await res
+                    else:
+                        file_size = res
+                if file_size is None:
+                    file_size = (await self._info(path))["size"]
+            except Exception as exc:
+                if on_error != "return":
+                    raise exc
+                for _, _, idx in items:
+                    results[idx] = exc
+                return None
+
+        valid_items = []
+        for s, e, idx in items:
+            offset, length = await self._process_limits_to_offset_and_length(
+                path, s, e, file_size=file_size
+            )
+            if length == 0:
+                results[idx] = b""
+            else:
+                valid_items.append((offset, offset + length, idx))
+
+        return valid_items
+
+    async def _cat_ranges(
+        self,
+        paths,
+        starts,
+        ends,
+        max_gap=None,
+        batch_size=None,
+        on_error="return",
+        **kwargs,
+    ):
+        """Get the contents of byte ranges from one or more files.
+
+        Parameters
+        ----------
+        paths: list of str
+            A list of filepaths on this filesystem.
+        starts, ends: int or list of int
+            Byte limits of the read. If using a single int, the same value will be
+            used for all files.
+        max_gap: int, optional
+            If specified and >= 0, adjacent byte ranges on the same file with a gap
+            <= max_gap will be coalesced into a single larger read request.
+        batch_size: int, optional
+            Number of concurrent range fetches. Defaults to self.batch_size.
+        on_error: "return" or "raise"
+            If "return" (default), any per-range exception is placed in the output
+            list at the corresponding position. Otherwise the first such exception
+            is raised.
+
+        Returns
+        -------
+        list of bytes or memoryview (when coalescing is active)
+        """
+        paths, starts, ends = _validate_cat_ranges_input(paths, starts, ends)
+
+        n = len(paths)
+        if n == 0:
+            return []
+
+        results = [None] * n
+        file_groups = defaultdict(list)
+        for orig_idx, (p, s, e) in enumerate(zip(paths, starts, ends)):
+            file_groups[p].append((s, e, orig_idx))
+
+        # Normalize limits using _normalize_file_ranges
+        # Slices with length == 0 are populated directly without network I/O
+        valid_items_per_file = defaultdict(list)
+        for p, items in file_groups.items():
+            valid_items = await self._normalize_file_ranges(
+                p, items, results, on_error=on_error
+            )
+            if valid_items:
+                valid_items_per_file[p] = valid_items
+
+        merged_paths = []
+        merged_starts = []
+        merged_ends = []
+        merged_slice_maps = []  # list of [(orig_idx, rel_start, rel_end), ...]
+
+        for p, items in valid_items_per_file.items():
+            merged_ranges = _merge_file_ranges(items, max_gap)
+
+            for m_s, m_e, slice_list in merged_ranges:
+                merged_paths.append(p)
+                merged_starts.append(m_s)
+                merged_ends.append(m_e)
+                merged_slice_maps.append(slice_list)
+
+        if merged_paths:
+            merged_coros = [
+                self._cat_file(p, start=s, end=e, **kwargs)
+                for p, s, e in zip(merged_paths, merged_starts, merged_ends)
+            ]
+            effective_batch_size = self._compute_effective_batch_size(
+                batch_size, self.batch_size, len(merged_coros)
+            )
+            merged_chunks = await asyn._run_coros_in_chunks(
+                merged_coros,
+                batch_size=effective_batch_size,
+                nofiles=True,
+                return_exceptions=True,
+            )
+
+            # Unpack merged chunks back into original caller positions
+            for chunk, slice_list in zip(merged_chunks, merged_slice_maps):
+                if asyn.is_exception(chunk):
+                    if on_error != "return":
+                        raise chunk
+                    for orig_idx, _, _ in slice_list:
+                        results[orig_idx] = chunk
+                    continue
+
+                _unpack_range_results(chunk, slice_list, results, max_gap)
+
+        return results
+
+    cat_ranges = asyn.sync_wrapper(_cat_ranges)
 
     async def _getxattr(self, path, attr):
         """Get user-defined metadata attribute"""
