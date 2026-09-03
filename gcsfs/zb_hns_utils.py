@@ -69,14 +69,6 @@ async def init_mrd(
         return await AsyncMultiRangeDownloader.create_mrd(
             grpc_client, bucket_name, object_name, generation, **kwargs
         )
-    except TypeError as e:
-        if "metadata" in str(e):
-            # TODO: Remove this fallback once the latest google-cloud-storage
-            # SDK is released with support for the metadata argument.
-            return await AsyncMultiRangeDownloader.create_mrd(
-                grpc_client, bucket_name, object_name, generation
-            )
-        raise
     except NotFound:
         # We wrap the error here to match standard Python error handling
         # and avoid leaking Google API exceptions to users.
