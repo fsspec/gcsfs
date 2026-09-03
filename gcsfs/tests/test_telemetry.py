@@ -459,3 +459,71 @@ def test_post_fork_telemetry_reset():
         assert get_dimension_context(Dimension.FRAMEWORK) == "fw/parent-process"
     finally:
         reset_telemetry_context(token)
+
+
+def test_async_gen_wrapper_aclose_on_early_exit():
+    """Verify that _gcs_async_gen_wrapper properly closes the underlying async generator on early exit."""
+    from gcsfs.core import GCSFileSystem
+    from gcsfs.telemetry.manager import _gcs_async_gen_wrapper
+
+    closed = False
+
+    async def sample_async_gen():
+        nonlocal closed
+        try:
+            yield 1
+            yield 2
+            yield 3
+        finally:
+            closed = True
+
+    fs = GCSFileSystem(token="anon")
+    wrapped_gen = _gcs_async_gen_wrapper(sample_async_gen, obj=fs)
+    gen_instance = wrapped_gen()
+    val = next(gen_instance)
+    assert val == 1
+    assert not closed
+    # Close the sync generator early (simulating break in for loop)
+    gen_instance.close()
+    assert closed
+
+
+def test_collect_tokens_map_records_empty_for_none_detection():
+    """Verify that collect_tokens_map records empty string for None detection and avoids redundant checks."""
+    from gcsfs.telemetry.context import (
+        Dimension,
+        reset_telemetry_context,
+        set_telemetry_context,
+    )
+    from gcsfs.telemetry.detectors.base import BaseDetector
+    from gcsfs.telemetry.manager import UsageMetricsTracker
+
+    call_count = 0
+
+    class DummyNoneDetector(BaseDetector):
+        @property
+        def name(self):
+            return Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal call_count
+            call_count += 1
+            return None
+
+    tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
+    tokens_map = tracker.collect_tokens_map()
+    assert tokens_map == {"fw": ""}
+    assert call_count == 1
+
+    # In _sync(), the captured tokens_map is bridged into ContextVar:
+    token = set_telemetry_context(tokens_map)
+    try:
+        # All downstream operations on event loop (get_tokens, get_dimension, collect_tokens_map)
+        # must now be O(1) without re-running detect()
+        assert tracker.get_tokens() == []
+        assert tracker.get_dimension(Dimension.FRAMEWORK) is None
+        tokens_map_2 = tracker.collect_tokens_map()
+        assert tokens_map_2 == {"fw": ""}
+        assert call_count == 1  # Still 1, no additional detect() calls!
+    finally:
+        reset_telemetry_context(token)

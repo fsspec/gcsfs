@@ -41,16 +41,25 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
     def wrapper(*args, **kwargs):
         self = obj or args[0]
         gen = func(*args, **kwargs)
-        while True:
-            try:
-                if hasattr(self, "_sync"):
-                    yield self._sync(gen.__anext__)
-                else:
+        try:
+            while True:
+                try:
+                    if hasattr(self, "_sync"):
+                        yield self._sync(gen.__anext__)
+                    else:
+                        import fsspec.asyn
+
+                        yield fsspec.asyn.sync(self.loop, gen.__anext__)
+                except StopAsyncIteration:
+                    break
+        finally:
+            if hasattr(gen, "aclose"):
+                try:
                     import fsspec.asyn
 
-                    yield fsspec.asyn.sync(self.loop, gen.__anext__)
-            except StopAsyncIteration:
-                break
+                    fsspec.asyn.sync(self.loop, gen.aclose)
+                except Exception:
+                    pass
 
     return wrapper
 
@@ -146,8 +155,7 @@ class UsageMetricsTracker:
             if detector.is_enabled() and dim_key not in tokens:
                 try:
                     detected_val = detector.detect()
-                    if detected_val:
-                        tokens[dim_key] = detected_val
+                    tokens[dim_key] = detected_val or ""
                 except Exception:
                     pass
 
