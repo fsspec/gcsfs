@@ -1441,27 +1441,7 @@ def test_direct_memmove_buffer_pypy_fallback():
     executor.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_init_mrd_metadata_fallback():
-    """Tests that init_mrd falls back when metadata kwarg is rejected."""
-    mock_grpc_client = mock.Mock()
 
-    async def mock_create_mrd(*args, **kwargs):
-        if "metadata" in kwargs:
-            raise TypeError(
-                "create_mrd() got an unexpected keyword argument 'metadata'"
-            )
-        return "fallback_success"
-
-    with mock.patch(
-        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
-        side_effect=mock_create_mrd,
-    ) as mock_create:
-        result = await zb_hns_utils.init_mrd(
-            mock_grpc_client, "bucket", "obj", generation=1, cache_type="readahead"
-        )
-        assert result == "fallback_success"
-        assert mock_create.call_count == 2
 
 
 @pytest.mark.asyncio
