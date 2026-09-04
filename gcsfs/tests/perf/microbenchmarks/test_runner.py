@@ -62,11 +62,18 @@ def test_run_single_threaded(mock_benchmark, mock_monitor):
     assert mock_benchmark.extra_info["threads"] == 1
     assert mock_benchmark.extra_info["processes"] == 1
     assert mock_benchmark.group == "read"
+    assert mock_benchmark.extra_info["total_bytes"] == 100
 
     mock_monitor.assert_called_once()
     mock_benchmark.pedantic.assert_called_once_with(func, rounds=5, args=args)
 
     assert mock_benchmark.extra_info["cpu_max_global"] == "10.00"
+
+    # Test explicit total_bytes passed to run_single_threaded
+    runner.run_single_threaded(
+        mock_benchmark, mock_monitor, params, func, args, "cat_ranges", total_bytes=500
+    )
+    assert mock_benchmark.extra_info["total_bytes"] == 500
 
 
 def test_run_multi_threaded(mock_benchmark, mock_monitor):

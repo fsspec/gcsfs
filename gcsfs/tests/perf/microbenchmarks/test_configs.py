@@ -610,14 +610,14 @@ def test_publish_benchmark_extra_info_total_bytes():
         rounds = 1
         bucket_name = "test-bucket"
         bucket_type = "regional"
-        total_bytes = 25 * MB
 
     bench = MockBenchmark()
-    publish_benchmark_extra_info(bench, MockParams(), "cat_ranges")
+    publish_benchmark_extra_info(
+        bench, MockParams(), "cat_ranges", total_bytes=25 * MB
+    )
     assert bench.extra_info["total_bytes"] == 25 * MB
 
     # Test fallback to file_size * files when total_bytes is None
-    del MockParams.total_bytes
     bench_fallback = MockBenchmark()
     publish_benchmark_extra_info(bench_fallback, MockParams(), "read")
     assert bench_fallback.extra_info["total_bytes"] == 20 * MB
