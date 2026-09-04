@@ -491,13 +491,12 @@ class ZonalFile(GCSFile):
         if loop is None or not loop.is_running():
             # If the event loop is absent, closed, or not actively running,
             # synchronous coordination via asyn.sync() is impossible.
-            logger.error(
-                "Skipping %s for %s: no usable IO loop available. This may "
-                "leave server-side resources unfinalized.",
-                description,
-                path,
+            msg = (
+                f"Skipping {description} for {path}: no usable IO loop available. "
+                "This may leave server-side resources unfinalized."
             )
-            return
+            logger.error(msg)
+            raise RuntimeError(msg)
 
         if _on_loop_thread(loop):
             # Avoid deadlock when closing reentrantly from the event loop thread.

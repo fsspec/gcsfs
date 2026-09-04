@@ -873,9 +873,9 @@ class BackgroundPrefetcher:
 
     async def aclose(self):
         """Safely shuts down the prefetcher from an asynchronous context."""
-        if self.is_stopped:
-            return
         self.is_stopped = True
+        if self.producer is None or self.producer.is_stopped:
+            return
         await self._async_close()
 
     def close(self, timeout: float | None = 10.0):
@@ -889,9 +889,9 @@ class BackgroundPrefetcher:
                 to 10.0 seconds. If 0 or negative, teardown runs fire-and-forget.
                 If None, waits indefinitely.
         """
-        if self.is_stopped:
-            return
         self.is_stopped = True
+        if self.producer is None or self.producer.is_stopped:
+            return
 
         if sys.is_finalizing():
             return

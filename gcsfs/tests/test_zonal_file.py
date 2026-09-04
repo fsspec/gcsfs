@@ -859,10 +859,10 @@ def test_sync_teardown_skips_during_interpreter_finalization(monkeypatch):
     assert calls == []
 
 
-def test_sync_teardown_logs_and_skips_when_loop_not_running(caplog):
+def test_sync_teardown_logs_and_raises_when_loop_not_running(caplog):
     """Unlike the prefetcher's read-only teardown, skipping here can leave
     an upload unfinalized server-side, so this must be logged loudly
-    (error, not swallowed) rather than silently dropped.
+    (error, not swallowed) and a RuntimeError raised rather than silently dropped.
     """
     loop = fsspec.asyn.get_loop()
     zf = _bare_zonal_file(loop)
@@ -874,13 +874,14 @@ def test_sync_teardown_logs_and_skips_when_loop_not_running(caplog):
 
     with mock.patch.object(loop, "is_running", return_value=False):
         with caplog.at_level(logging.ERROR, logger="gcsfs.zonal_file"):
-            zf._sync_teardown(loop, coro, description="test op")
+            with pytest.raises(RuntimeError, match="usable IO loop"):
+                zf._sync_teardown(loop, coro, description="test op")
 
     assert calls == []
     assert any("test op" in r.message for r in caplog.records)
 
 
-def test_sync_teardown_logs_and_skips_when_loop_missing(caplog):
+def test_sync_teardown_logs_and_raises_when_loop_missing(caplog):
     zf = _bare_zonal_file(None)
 
     calls = []
@@ -889,7 +890,8 @@ def test_sync_teardown_logs_and_skips_when_loop_missing(caplog):
         calls.append(1)
 
     with caplog.at_level(logging.ERROR, logger="gcsfs.zonal_file"):
-        zf._sync_teardown(None, coro, description="test op")
+        with pytest.raises(RuntimeError, match="usable IO loop"):
+            zf._sync_teardown(None, coro, description="test op")
 
     assert calls == []
     assert any("test op" in r.message for r in caplog.records)
