@@ -9,7 +9,7 @@ import fsspec.asyn
 import pytest
 
 from gcsfs import core
-from gcsfs.zonal_file import ZonalFile
+from gcsfs.zonal_file import ZonalFile, _defer_task, _deferred_close_tasks
 
 
 def wait_until(predicate, timeout=10.0):
@@ -202,3 +202,51 @@ def test_gcsfile_finalized_on_loop_thread_defers_close(fake_fs, io_loop, monkeyp
     finalize_on_loop(io_loop, holder)
     assert wait_until(closed.is_set), "GCSFile._close_impl() was never called"
     assert seen == [], f"exception escaped the finalizer: {seen}"
+
+
+def test_defer_task_tracks_and_discards_task(io_loop):
+    step1 = threading.Event()
+    step2 = threading.Event()
+
+    async def sample_coro():
+        step1.set()
+        while not step2.is_set():
+            await asyncio.sleep(0.01)
+
+    async def schedule():
+        return _defer_task(io_loop, sample_coro(), description="sample")
+
+    task = fsspec.asyn.sync(io_loop, schedule)
+    assert step1.wait(timeout=5.0)
+    assert task in _deferred_close_tasks
+
+    step2.set()
+    assert wait_until(lambda: task not in _deferred_close_tasks, timeout=5.0)
+    assert task.done()
+
+
+def test_defer_task_logs_exception(io_loop, caplog):
+    import logging
+
+    async def boom():
+        raise ValueError("custom boom error")
+
+    async def schedule():
+        task = _defer_task(
+            io_loop,
+            boom(),
+            description="custom boom",
+            logger=logging.getLogger("gcsfs"),
+            log_level=logging.ERROR,
+        )
+        await asyncio.sleep(0.05)
+        return task
+
+    with caplog.at_level(logging.ERROR, logger="gcsfs"):
+        task = fsspec.asyn.sync(io_loop, schedule)
+        assert wait_until(lambda: task not in _deferred_close_tasks, timeout=5.0)
+
+    assert any(
+        "custom boom" in r.message and "custom boom error" in r.message
+        for r in caplog.records
+    )

@@ -7,10 +7,14 @@ test_extended_hns_gcsfs.py or integration/test_extended_hns.py.
 """
 
 import asyncio
+import logging
 import os
+import sys
 from unittest import mock
 
+import fsspec.asyn
 import pytest
+from fsspec.asyn import FSTimeoutError
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
@@ -19,7 +23,7 @@ from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests.conftest import requires_rapid
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
-from gcsfs.zonal_file import ZonalFile
+from gcsfs.zonal_file import _DEFAULT_TEARDOWN_TIMEOUT_SECONDS, ZonalFile
 
 test_data = b"hello world"
 
@@ -816,8 +820,236 @@ def test_zonal_file_close_cleans_up_new_pools(mock_sync, mock_gcsfs):
     zf.close()
 
     mock_engine.close.assert_called_once()
-    expected_call = mock.call(mock_gcsfs.loop, mock_pool.close)
+    expected_call = mock.call(
+        mock_gcsfs.loop, mock_pool.close, timeout=_DEFAULT_TEARDOWN_TIMEOUT_SECONDS
+    )
     assert expected_call in mock_sync.call_args_list
+
+
+def _bare_zonal_file(loop, timeout=None):
+    """A ZonalFile built via __new__ to skip real GCS setup, for testing
+    _sync_teardown directly with a real (not mocked) event loop."""
+    zf = ZonalFile.__new__(ZonalFile)
+    zf.path = "gs://bucket/object"
+    zf.gcsfs = mock.Mock(loop=loop)
+    zf.timeout = timeout
+    zf.closed = False
+    zf.mode = "rb"
+    zf.fs = None
+    zf.aaow = None
+    zf._close_deferred = False
+    return zf
+
+
+def test_sync_teardown_skips_during_interpreter_finalization(monkeypatch):
+    """Mirrors the prefetcher's sys.is_finalizing() guard: never touch the
+    IO loop once the interpreter itself is tearing down.
+    """
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+    monkeypatch.setattr(sys, "is_finalizing", lambda: True)
+
+    calls = []
+
+    async def coro():
+        calls.append(1)
+
+    zf._sync_teardown(loop, coro, description="test op")
+
+    assert calls == []
+
+
+def test_sync_teardown_logs_and_skips_when_loop_not_running(caplog):
+    """Unlike the prefetcher's read-only teardown, skipping here can leave
+    an upload unfinalized server-side, so this must be logged loudly
+    (error, not swallowed) rather than silently dropped.
+    """
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+
+    calls = []
+
+    async def coro():
+        calls.append(1)
+
+    with mock.patch.object(loop, "is_running", return_value=False):
+        with caplog.at_level(logging.ERROR, logger="gcsfs.zonal_file"):
+            zf._sync_teardown(loop, coro, description="test op")
+
+    assert calls == []
+    assert any("test op" in r.message for r in caplog.records)
+
+
+def test_sync_teardown_logs_and_skips_when_loop_missing(caplog):
+    zf = _bare_zonal_file(None)
+
+    calls = []
+
+    async def coro():
+        calls.append(1)
+
+    with caplog.at_level(logging.ERROR, logger="gcsfs.zonal_file"):
+        zf._sync_teardown(None, coro, description="test op")
+
+    assert calls == []
+    assert any("test op" in r.message for r in caplog.records)
+
+
+def test_sync_teardown_runs_coroutine_on_healthy_loop():
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+
+    calls = []
+
+    async def coro():
+        calls.append(1)
+
+    zf._sync_teardown(loop, coro, description="test op")
+
+    assert calls == [1]
+
+
+def test_sync_teardown_passes_args_and_kwargs_through():
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+
+    seen = {}
+
+    async def coro(aaow, finalize_on_close=False):
+        seen["aaow"] = aaow
+        seen["finalize_on_close"] = finalize_on_close
+
+    sentinel = object()
+    zf._sync_teardown(
+        loop, coro, sentinel, finalize_on_close=True, description="close_aaow"
+    )
+
+    assert seen == {"aaow": sentinel, "finalize_on_close": True}
+
+
+def test_sync_teardown_on_loop_thread_schedules_task_instead_of_raising():
+    """asyn.sync() raises NotImplementedError when called from the loop
+    it's supposed to wait on -- this is the same class of bug the
+    prefetcher fix addresses. Verify _sync_teardown avoids it by scheduling
+    a task instead of blocking.
+    """
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+
+    calls = []
+
+    async def coro():
+        calls.append(1)
+
+    async def run_from_loop():
+        zf._sync_teardown(loop, coro, description="test op")
+        await asyncio.sleep(0.05)  # let the scheduled task complete
+
+    fsspec.asyn.sync(loop, run_from_loop)
+
+    assert calls == [1]
+
+
+def test_sync_teardown_raises_and_logs_on_timeout(caplog):
+    """A hung teardown must not block the caller (and, transitively, the
+    single serial gcsfs-deferred-close worker thread) forever. Unlike the
+    prefetcher, which lets the background job keep running after a
+    timeout, write finalization surfaces the timeout as an error the
+    caller can see, since silently continuing could hide a lost upload.
+    """
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop, timeout=0.05)
+
+    async def coro():
+        await asyncio.sleep(2.0)
+
+    with caplog.at_level(logging.ERROR, logger="gcsfs.zonal_file"):
+        with pytest.raises(FSTimeoutError):
+            zf._sync_teardown(loop, coro, description="slow op")
+
+    assert any("slow op" in r.message for r in caplog.records)
+
+
+def test_close_impl_uses_default_timeout_when_file_has_none(monkeypatch):
+    """When the file carries no per-request timeout, teardown must still
+    be bounded (falls back to _DEFAULT_TEARDOWN_TIMEOUT_SECONDS) rather than
+    reverting to fsspec.asyn.sync's unbounded wait.
+    """
+    import gcsfs.zonal_file as zonal_file_module
+
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop, timeout=None)
+    mock_pool = mock.Mock()
+
+    async def fake_close():
+        pass
+
+    mock_pool.close = fake_close
+    zf.mrd_pool = mock_pool
+
+    captured = {}
+    real_sync = fsspec.asyn.sync
+
+    def spy_sync(loop_, func, *args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return real_sync(loop_, func, *args, **kwargs)
+
+    monkeypatch.setattr(zonal_file_module.asyn, "sync", spy_sync)
+    zf._close_impl()
+
+    assert captured["timeout"] == _DEFAULT_TEARDOWN_TIMEOUT_SECONDS
+
+
+def test_sync_teardown_reentrant_task_logs_exception(caplog):
+    """Verify that when a reentrant teardown task on the IO loop thread
+    raises an exception, it is logged with logger.error and not left unretrieved.
+    """
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+
+    async def boom():
+        raise RuntimeError("reentrant teardown exploded")
+
+    async def run_from_loop():
+        zf._sync_teardown(loop, boom, description="failing op")
+        await asyncio.sleep(0.05)
+
+    with caplog.at_level(logging.ERROR, logger="gcsfs.zonal_file"):
+        fsspec.asyn.sync(loop, run_from_loop)
+
+    assert any(
+        "failing op" in r.message and "reentrant teardown exploded" in r.message
+        for r in caplog.records
+    )
+
+
+def test_close_impl_mrd_pool_failure_does_not_skip_aaow():
+    """Verify that if mrd_pool.close fails, aaow teardown is still executed."""
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+    zf.finalize_on_close = False
+
+    async def failing_mrd_close():
+        raise RuntimeError("mrd pool failed")
+
+    mock_pool = mock.Mock(close=failing_mrd_close)
+    zf.mrd_pool = mock_pool
+
+    aaow_closed = []
+
+    async def fake_close_aaow(aaow, finalize_on_close=False):
+        aaow_closed.append(True)
+
+    mock_aaow = mock.Mock(_is_stream_open=True)
+    zf.aaow = mock_aaow
+
+    with mock.patch("gcsfs.zb_hns_utils.close_aaow", side_effect=fake_close_aaow):
+        with pytest.raises(RuntimeError, match="mrd pool failed"):
+            zf._close_impl()
+
+    assert aaow_closed == [
+        True
+    ], "close_aaow should have been called even though mrd_pool failed"
 
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")

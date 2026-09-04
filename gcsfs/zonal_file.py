@@ -1,4 +1,6 @@
 import logging
+import sys
+import threading
 
 from fsspec import asyn
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
@@ -11,6 +13,7 @@ from gcsfs.core import (
     GCSFile,
     _coalesce_generation,
     _get_prefetcher_and_cache_config,
+    _on_loop_thread,
 )
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
@@ -18,6 +21,53 @@ from .caching import (  # noqa: F401 Unused import to register GCS-Specific cach
 )
 
 logger = logging.getLogger("gcsfs.zonal_file")
+
+# Strong references for background tasks scheduled via loop.create_task().
+# Without holding external references, Python's asyncio event loop may allow
+# pending tasks to be garbage-collected mid-execution ("Task was destroyed but
+# it is pending").
+_deferred_close_tasks = set()
+_deferred_close_lock = threading.Lock()
+
+
+def _defer_task(
+    loop,
+    coro,
+    description="deferred task",
+    logger=None,
+    log_level=logging.WARNING,
+):
+    """Schedules a coroutine as a tracked background task on ``loop``.
+
+    Retains a strong reference in ``_deferred_close_tasks`` until completion to
+    prevent asyncio garbage collection from discarding pending tasks mid-flight,
+    and ensures unhandled task exceptions are retrieved and logged.
+    """
+    task = loop.create_task(coro)
+    with _deferred_close_lock:
+        _deferred_close_tasks.add(task)
+
+    def _on_done(t):
+        with _deferred_close_lock:
+            _deferred_close_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                log = logger or logging.getLogger("gcsfs")
+                log.log(
+                    log_level,
+                    "%s failed during asynchronous execution: %s",
+                    description,
+                    exc,
+                    exc_info=exc,
+                )
+
+    task.add_done_callback(_on_done)
+    return task
+
+
+# Default timeout for synchronous teardowns when the file has no timeout set.
+_DEFAULT_TEARDOWN_TIMEOUT_SECONDS = 60.0
 
 
 class ZonalFile(GCSFile):
@@ -397,13 +447,81 @@ class ZonalFile(GCSFile):
     def _close_impl(self):
         super()._close_impl()
 
-        if hasattr(self, "mrd_pool") and self.mrd_pool:
-            asyn.sync(self.gcsfs.loop, self.mrd_pool.close)
+        loop = getattr(getattr(self, "gcsfs", None), "loop", None)
+        errors = []
 
-        if self.aaow and self.aaow._is_stream_open:
-            asyn.sync(
-                self.gcsfs.loop,
-                zb_hns_utils.close_aaow,
-                self.aaow,
-                finalize_on_close=self.finalize_on_close,
+        # Teardown the read-side MRD pool if initialized.
+        if hasattr(self, "mrd_pool") and self.mrd_pool:
+            try:
+                self._sync_teardown(
+                    loop, self.mrd_pool.close, description="closing mrd_pool"
+                )
+            except Exception as e:
+                errors.append(e)
+
+        # Finalize and close the write-side AAOW stream.
+        # Wrapped independently so a read pool failure does not abandon write finalization.
+        if getattr(self, "aaow", None) and self.aaow._is_stream_open:
+            try:
+                self._sync_teardown(
+                    loop,
+                    zb_hns_utils.close_aaow,
+                    self.aaow,
+                    finalize_on_close=self.finalize_on_close,
+                    description="finalizing AsyncAppendableObjectWriter",
+                )
+            except Exception as e:
+                errors.append(e)
+
+        if errors:
+            raise errors[0]
+
+    def _sync_teardown(self, loop, func, *args, description, **kwargs):
+        """Runs an async teardown coroutine on ``loop`` from synchronous context.
+
+        Unlike purely read-side caching, write-side teardown finalizes appendable
+        objects server-side. Branches that cannot safely run the teardown coroutine
+        log warnings or errors to provide visibility into potential unfinalized resources.
+        """
+        path = getattr(self, "path", "<unknown>")
+
+        if sys.is_finalizing():
+            return
+
+        if loop is None or not loop.is_running():
+            # If the event loop is absent, closed, or not actively running,
+            # synchronous coordination via asyn.sync() is impossible.
+            logger.error(
+                "Skipping %s for %s: no usable IO loop available. This may "
+                "leave server-side resources unfinalized.",
+                description,
+                path,
             )
+            return
+
+        if _on_loop_thread(loop):
+            # Avoid deadlock when closing reentrantly from the event loop thread.
+            _defer_task(
+                loop,
+                func(*args, **kwargs),
+                description=f"{description} for {path}",
+                logger=logger,
+                log_level=logging.ERROR,
+            )
+            return
+
+        # Bound synchronous teardown so hung network calls do not stall the deferred-close thread forever.
+        teardown_timeout = (
+            getattr(self, "timeout", None) or _DEFAULT_TEARDOWN_TIMEOUT_SECONDS
+        )
+        try:
+            asyn.sync(loop, func, *args, timeout=teardown_timeout, **kwargs)
+        except asyn.FSTimeoutError:
+            logger.error(
+                "%s for %s did not complete within %ss; the upload may be "
+                "left unfinalized.",
+                description,
+                path,
+                teardown_timeout,
+            )
+            raise
