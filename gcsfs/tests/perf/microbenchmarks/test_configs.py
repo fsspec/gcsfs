@@ -431,46 +431,43 @@ def test_cat_ranges_configurator_empty_fallbacks(mock_config_dependencies):
     assert case.max_gap is None
 
 
-def test_cat_ranges_generate_ranges_sequential_wraparound():
-    """Test sequential range generation wraps around when offset exceeds file bound."""
+def test_cat_ranges_generate_ranges_sequential_exceeds_capacity():
+    """Test sequential range generation raises ValueError when requested ranges exceed file size."""
     from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
         _generate_ranges,
     )
 
-    # 100 MB file with 30 MB chunks: max_offset is 70 MB.
-    # Offsets: 0, 30, 60, then wrap to 0, 30, 60, ... ensuring all 10 requested ranges are generated.
+    # 100 MB file with 10 x 30 MB chunks exceeds 100 MB capacity
+    with pytest.raises(
+        ValueError,
+        match="Requested sequential ranges exceed file size; cannot generate non-overlapping ranges.",
+    ):
+        _generate_ranges(
+            file_paths=["test.bin"],
+            file_size_bytes=100 * MB,
+            chunk_sizes_bytes=30 * MB,
+            num_ranges=10,
+            pattern="seq",
+        )
+
+
+def test_cat_ranges_generate_ranges_sequential_contiguous():
+    """Test sequential range generation produces contiguous non-overlapping ranges."""
+    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
+        _generate_ranges,
+    )
+
+    # 100 MB file with 3 x 30 MB chunks fits within 100 MB
     paths, starts, ends = _generate_ranges(
         file_paths=["test.bin"],
         file_size_bytes=100 * MB,
         chunk_sizes_bytes=30 * MB,
-        num_ranges=10,
+        num_ranges=3,
         pattern="seq",
     )
-    assert len(paths) == len(starts) == len(ends) == 10
-    assert starts == [
-        0,
-        30 * MB,
-        60 * MB,
-        0,
-        30 * MB,
-        60 * MB,
-        0,
-        30 * MB,
-        60 * MB,
-        0,
-    ]
-    assert ends == [
-        30 * MB,
-        60 * MB,
-        90 * MB,
-        30 * MB,
-        60 * MB,
-        90 * MB,
-        30 * MB,
-        60 * MB,
-        90 * MB,
-        30 * MB,
-    ]
+    assert len(paths) == len(starts) == len(ends) == 3
+    assert starts == [0, 30 * MB, 60 * MB]
+    assert ends == [30 * MB, 60 * MB, 90 * MB]
 
 
 def test_cat_ranges_generate_ranges_multi_file_sequential():

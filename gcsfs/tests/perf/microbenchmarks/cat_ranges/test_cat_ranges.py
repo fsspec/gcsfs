@@ -27,6 +27,23 @@ def _generate_ranges(
     Supports uniform chunk size (int) or varying chunk sizes (list of ints)
     within the same test case.
     """
+    chunk_sizes = (
+        chunk_sizes_bytes
+        if isinstance(chunk_sizes_bytes, list)
+        else [chunk_sizes_bytes]
+    )
+    if max(chunk_sizes) > file_size_bytes:
+        raise ValueError(
+            f"Range size {max(chunk_sizes)} bytes exceeds file size {file_size_bytes} bytes."
+        )
+    if (
+        pattern == "seq"
+        and (num_ranges / len(file_paths)) * max(chunk_sizes) > file_size_bytes
+    ):
+        raise ValueError(
+            "Requested sequential ranges exceed file size; cannot generate non-overlapping ranges."
+        )
+
     rng = random.Random(seed)
     paths = []
     starts = []
@@ -51,8 +68,6 @@ def _generate_ranges(
         # 3. Determine start and end offsets within file bounds
         max_offset = max(0, file_size_bytes - range_size)
         if pattern == "seq":
-            if per_file_offsets[path] > max_offset:
-                per_file_offsets[path] = 0
             start = per_file_offsets[path]
             per_file_offsets[path] += range_size
         elif pattern == "rand":
