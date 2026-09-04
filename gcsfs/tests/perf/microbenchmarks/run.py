@@ -231,26 +231,30 @@ def _create_table_row(row):
         except (ValueError, TypeError):
             pass
     else:
-        try:
-            mean_latency = float(row.get("mean", 0))
-            latency = f"{mean_latency:.4f}"
-
-            total_bytes_str = row.get("total_bytes", "N/A")
-            if total_bytes_str != "N/A":
-                total_bytes = float(total_bytes_str)
-            elif row.get("group") == "cat_ranges":
-                num_ranges = float(row.get("num_ranges", 0))
-                chunk_size = float(row.get("chunk_size", 0))
-                total_bytes = num_ranges * chunk_size
+        if row.get("group") == "cat_ranges":
+            total_bytes_val = row.get("total_bytes")
+            if total_bytes_val is None or total_bytes_val in ("N/A", ""):
+                raise ValueError(
+                    "Missing 'total_bytes' for cat_ranges benchmark; "
+                    "logical throughput cannot be calculated."
+                )
+            total_bytes = float(total_bytes_val)
+        else:
+            total_bytes_val = row.get("total_bytes")
+            if total_bytes_val not in (None, "N/A", ""):
+                total_bytes = float(total_bytes_val)
             else:
                 file_size_str = row.get("file_size", "N/A")
-                if file_size_str != "N/A":
+                if file_size_str not in (None, "N/A", ""):
                     file_size = float(file_size_str)
                     files = float(row.get("files", 1))
                     total_bytes = file_size * files
                 else:
                     total_bytes = 0
 
+        try:
+            mean_latency = float(row.get("mean", 0))
+            latency = f"{mean_latency:.4f}"
             throughput_val = (
                 total_bytes / mean_latency
                 if mean_latency > MIN_TIME_THRESHOLD and total_bytes > 0

@@ -154,17 +154,40 @@ def test_create_table_row_with_total_bytes():
     assert table_row[18] == "5.00"  # 10 MB / 2.0s = 5.00 MB/s, NOT 100 MB / 2.0s
 
 
-def test_create_table_row_cat_ranges_fallback():
+def test_create_table_row_cat_ranges_missing_total_bytes():
     row = {
         "group": "cat_ranges",
-        "num_ranges": 100,
-        "chunk_size": 1024 * 1024,
         "file_size": 1000 * 1024 * 1024,
         "files": 1,
         "mean": 2.0,
     }
-    table_row = run._create_table_row(row)
-    assert table_row[18] == "50.00"  # (100 * 1 MB) / 2.0s = 50.00 MB/s
+    with pytest.raises(
+        ValueError,
+        match="Missing 'total_bytes' for cat_ranges benchmark",
+    ):
+        run._create_table_row(row)
+
+    row_none = {
+        "group": "cat_ranges",
+        "total_bytes": None,
+        "mean": 2.0,
+    }
+    with pytest.raises(
+        ValueError,
+        match="Missing 'total_bytes' for cat_ranges benchmark",
+    ):
+        run._create_table_row(row_none)
+
+    row_na = {
+        "group": "cat_ranges",
+        "total_bytes": "N/A",
+        "mean": 2.0,
+    }
+    with pytest.raises(
+        ValueError,
+        match="Missing 'total_bytes' for cat_ranges benchmark",
+    ):
+        run._create_table_row(row_na)
 
 
 @mock.patch("gcsfs.tests.perf.microbenchmarks.run.PrettyTable")
