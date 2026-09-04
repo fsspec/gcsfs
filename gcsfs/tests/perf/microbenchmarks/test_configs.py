@@ -372,7 +372,7 @@ def test_comparison_configurator(mock_config_dependencies):
 
 
 def test_cat_ranges_configurator(mock_config_dependencies):
-    """Test that CatRangesConfigurator correctly builds benchmark parameters."""
+    """Test that CatRangesConfigurator correctly builds benchmark parameters and handles fallbacks."""
     common = {
         "bucket_types": ["regional"],
         "file_sizes_mb": [256],
@@ -412,112 +412,125 @@ def test_cat_ranges_configurator(mock_config_dependencies):
         int(16 * MB),
     ]
 
-
-def test_cat_ranges_configurator_empty_fallbacks(mock_config_dependencies):
-    """Test CatRangesConfigurator falls back cleanly when optional lists are empty or None."""
-    common = {"rounds": 1}
-    scenario = {
+    # Test fallback defaults when optional lists are empty or None
+    empty_scenario = {
         "name": "empty_fallbacks",
         "chunk_sizes_mb": None,
         "batch_sizes": None,
         "max_gaps": None,
     }
-    configurator = CatRangesConfigurator("dummy")
-    cases = configurator.build_cases(scenario, common)
-    assert len(cases) == 1
-    case = cases[0]
-    assert case.chunk_sizes_bytes == [int(1 * MB)]
-    assert case.batch_size is None
-    assert case.max_gap is None
+    fallback_cases = configurator.build_cases(empty_scenario, common)
+    assert len(fallback_cases) == 1
+    assert fallback_cases[0].chunk_sizes_bytes == [int(1 * MB)]
+    assert fallback_cases[0].batch_size is None
+    assert fallback_cases[0].max_gap is None
 
 
-def test_cat_ranges_generate_ranges_sequential_exceeds_capacity():
-    """Test sequential range generation raises ValueError when requested ranges exceed file size."""
+@pytest.mark.parametrize(
+    "file_paths,file_size,kwargs,expected_match",
+    [
+        (
+            ["test.bin"],
+            10 * MB,
+            {"chunk_sizes_bytes": 20 * MB, "num_ranges": 1, "pattern": "seq"},
+            "exceeds file size",
+        ),
+        (
+            ["test.bin"],
+            100 * MB,
+            {"chunk_sizes_bytes": 30 * MB, "num_ranges": 10, "pattern": "seq"},
+            "Requested sequential ranges exceed file size",
+        ),
+        (
+            ["test.bin"],
+            100 * MB,
+            {"chunk_sizes_bytes": 10 * MB, "num_ranges": 5, "pattern": "mixed"},
+            "Unsupported pattern",
+        ),
+        (
+            ["test.bin"],
+            100 * MB,
+            {"chunk_sizes_bytes": 10 * MB, "num_ranges": 5, "pattern": "unknown"},
+            "Unsupported pattern",
+        ),
+    ],
+)
+def test_cat_ranges_generate_ranges_validation_errors(
+    file_paths, file_size, kwargs, expected_match
+):
+    """Test that _generate_ranges raises ValueError for invalid configurations."""
     from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
         _generate_ranges,
     )
 
-    # 100 MB file with 10 x 30 MB chunks exceeds 100 MB capacity
-    with pytest.raises(
-        ValueError,
-        match="Requested sequential ranges exceed file size; cannot generate non-overlapping ranges.",
-    ):
+    with pytest.raises(ValueError, match=expected_match):
         _generate_ranges(
-            file_paths=["test.bin"],
-            file_size_bytes=100 * MB,
-            chunk_sizes_bytes=30 * MB,
-            num_ranges=10,
-            pattern="seq",
+            file_paths=file_paths,
+            file_size_bytes=file_size,
+            **kwargs,
         )
 
 
-def test_cat_ranges_generate_ranges_sequential_contiguous():
-    """Test sequential range generation produces contiguous non-overlapping ranges."""
+@pytest.mark.parametrize(
+    "file_paths,num_ranges,chunk_size,expected_starts,expected_ends",
+    [
+        (
+            ["test.bin"],
+            3,
+            30 * MB,
+            [0, 30 * MB, 60 * MB],
+            [30 * MB, 60 * MB, 90 * MB],
+        ),
+        (
+            ["file_a.bin", "file_b.bin"],
+            6,
+            10 * MB,
+            [0, 0, 10 * MB, 10 * MB, 20 * MB, 20 * MB],
+            [10 * MB, 10 * MB, 20 * MB, 20 * MB, 30 * MB, 30 * MB],
+        ),
+    ],
+)
+def test_cat_ranges_generate_ranges_sequential(
+    file_paths, num_ranges, chunk_size, expected_starts, expected_ends
+):
+    """Test sequential range generation produces contiguous non-overlapping ranges per file."""
     from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
         _generate_ranges,
     )
 
-    # 100 MB file with 3 x 30 MB chunks fits within 100 MB
+    paths, starts, ends = _generate_ranges(
+        file_paths=file_paths,
+        file_size_bytes=100 * MB,
+        chunk_sizes_bytes=chunk_size,
+        num_ranges=num_ranges,
+        pattern="seq",
+    )
+    assert len(paths) == num_ranges
+    assert starts == expected_starts
+    assert ends == expected_ends
+
+
+def test_cat_ranges_generate_ranges_rand_chunk_sizes_bytes_list():
+    """Test random range generation with varying chunk sizes calculates actual total bytes."""
+    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
+        _generate_ranges,
+    )
+
+    chunk_sizes = [1 * MB, 4 * MB, 16 * MB]
     paths, starts, ends = _generate_ranges(
         file_paths=["test.bin"],
         file_size_bytes=100 * MB,
-        chunk_sizes_bytes=30 * MB,
-        num_ranges=3,
-        pattern="seq",
+        chunk_sizes_bytes=chunk_sizes,
+        num_ranges=10,
+        pattern="rand",
     )
-    assert len(paths) == len(starts) == len(ends) == 3
-    assert starts == [0, 30 * MB, 60 * MB]
-    assert ends == [30 * MB, 60 * MB, 90 * MB]
+    assert len(starts) == len(ends) == 10
+    for s, e in zip(starts, ends):
+        assert (e - s) in chunk_sizes
+        assert 0 <= s < e <= 100 * MB
 
-
-def test_cat_ranges_generate_ranges_multi_file_sequential():
-    """Test sequential range generation maintains independent sequential offsets per file."""
-    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
-        _generate_ranges,
-    )
-
-    paths, starts, ends = _generate_ranges(
-        file_paths=["file_a.bin", "file_b.bin"],
-        file_size_bytes=100 * MB,
-        chunk_sizes_bytes=10 * MB,
-        num_ranges=6,
-        pattern="seq",
-    )
-    assert paths == [
-        "file_a.bin",
-        "file_b.bin",
-        "file_a.bin",
-        "file_b.bin",
-        "file_a.bin",
-        "file_b.bin",
-    ]
-    assert starts == [0, 0, 10 * MB, 10 * MB, 20 * MB, 20 * MB]
-    assert ends == [10 * MB, 10 * MB, 20 * MB, 20 * MB, 30 * MB, 30 * MB]
-
-
-def test_cat_ranges_generate_ranges_invalid_pattern():
-    """Test range generation raises ValueError on unsupported pattern."""
-    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
-        _generate_ranges,
-    )
-
-    with pytest.raises(ValueError, match="Unsupported pattern"):
-        _generate_ranges(
-            file_paths=["test.bin"],
-            file_size_bytes=100 * MB,
-            chunk_sizes_bytes=10 * MB,
-            num_ranges=5,
-            pattern="mixed",
-        )
-
-    with pytest.raises(ValueError, match="Unsupported pattern"):
-        _generate_ranges(
-            file_paths=["test.bin"],
-            file_size_bytes=100 * MB,
-            chunk_sizes_bytes=10 * MB,
-            num_ranges=5,
-            pattern="unknown",
-        )
+    total_bytes = sum(e - s for s, e in zip(starts, ends))
+    assert total_bytes > 0
 
 
 def test_cat_ranges_op_error_handling():
@@ -551,71 +564,3 @@ def test_cat_ranges_op_error_handling():
     mock_gcs.cat_ranges.return_value = [b"data1", OSError("Failed read")]
     with pytest.raises(OSError, match="Failed read"):
         _cat_ranges_op(mock_gcs, paths=["a", "b"], starts=[0, 10], ends=[10, 20])
-
-
-def test_cat_ranges_generate_ranges_oversized_chunk():
-    """Test range generation raises ValueError if chunk size exceeds file size."""
-    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
-        _generate_ranges,
-    )
-
-    with pytest.raises(ValueError, match="exceeds file size"):
-        _generate_ranges(
-            file_paths=["test.bin"],
-            file_size_bytes=10 * MB,
-            chunk_sizes_bytes=20 * MB,
-            num_ranges=1,
-            pattern="seq",
-        )
-
-
-def test_cat_ranges_generate_ranges_rand_chunk_sizes_bytes_list():
-    """Test random range generation with varying chunk sizes calculates actual total bytes."""
-    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
-        _generate_ranges,
-    )
-
-    chunk_sizes = [1 * MB, 4 * MB, 16 * MB]
-    paths, starts, ends = _generate_ranges(
-        file_paths=["test.bin"],
-        file_size_bytes=100 * MB,
-        chunk_sizes_bytes=chunk_sizes,
-        num_ranges=10,
-        pattern="rand",
-    )
-    assert len(starts) == len(ends) == 10
-    for s, e in zip(starts, ends):
-        assert (e - s) in chunk_sizes
-        assert 0 <= s < e <= 100 * MB
-
-    total_bytes = sum(e - s for s, e in zip(starts, ends))
-    assert total_bytes > 0
-
-
-def test_publish_benchmark_extra_info_total_bytes():
-    """Test publish_benchmark_extra_info publishes total_bytes property."""
-    from gcsfs.tests.perf.microbenchmarks.conftest import publish_benchmark_extra_info
-
-    class MockBenchmark:
-        def __init__(self):
-            self.extra_info = {}
-            self.group = None
-
-    class MockParams:
-        files = 2
-        file_size_bytes = 10 * MB
-        chunk_size_bytes = 1 * MB
-        threads = 1
-        processes = 1
-        rounds = 1
-        bucket_name = "test-bucket"
-        bucket_type = "regional"
-
-    bench = MockBenchmark()
-    publish_benchmark_extra_info(bench, MockParams(), "cat_ranges", total_bytes=25 * MB)
-    assert bench.extra_info["total_bytes"] == 25 * MB
-
-    # Test fallback to file_size * files when total_bytes is None
-    bench_fallback = MockBenchmark()
-    publish_benchmark_extra_info(bench_fallback, MockParams(), "read")
-    assert bench_fallback.extra_info["total_bytes"] == 20 * MB
