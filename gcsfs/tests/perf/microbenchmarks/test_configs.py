@@ -431,14 +431,14 @@ def test_cat_ranges_configurator_empty_fallbacks(mock_config_dependencies):
     assert case.max_gap is None
 
 
-def test_cat_ranges_generate_ranges_sequential_stop():
-    """Test sequential range generation stops when offset exceeds file bound."""
+def test_cat_ranges_generate_ranges_sequential_wraparound():
+    """Test sequential range generation wraps around when offset exceeds file bound."""
     from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
         _generate_ranges,
     )
 
     # 100 MB file with 30 MB chunks: max_offset is 70 MB.
-    # Offsets: 0, 30, 60. Next is 90 > 70, so it should stop at 3 ranges even if 10 requested.
+    # Offsets: 0, 30, 60, then wrap to 0, 30, 60, ... ensuring all 10 requested ranges are generated.
     paths, starts, ends = _generate_ranges(
         file_paths=["test.bin"],
         file_size_bytes=100 * MB,
@@ -446,9 +446,125 @@ def test_cat_ranges_generate_ranges_sequential_stop():
         num_ranges=10,
         pattern="seq",
     )
-    assert len(paths) == len(starts) == len(ends) == 3
-    assert starts == [0, 30 * MB, 60 * MB]
-    assert ends == [30 * MB, 60 * MB, 90 * MB]
+    assert len(paths) == len(starts) == len(ends) == 10
+    assert starts == [
+        0,
+        30 * MB,
+        60 * MB,
+        0,
+        30 * MB,
+        60 * MB,
+        0,
+        30 * MB,
+        60 * MB,
+        0,
+    ]
+    assert ends == [
+        30 * MB,
+        60 * MB,
+        90 * MB,
+        30 * MB,
+        60 * MB,
+        90 * MB,
+        30 * MB,
+        60 * MB,
+        90 * MB,
+        30 * MB,
+    ]
+
+
+def test_cat_ranges_generate_ranges_multi_file_sequential():
+    """Test sequential range generation maintains independent sequential offsets per file."""
+    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
+        _generate_ranges,
+    )
+
+    paths, starts, ends = _generate_ranges(
+        file_paths=["file_a.bin", "file_b.bin"],
+        file_size_bytes=100 * MB,
+        chunk_sizes_bytes=10 * MB,
+        num_ranges=6,
+        pattern="seq",
+    )
+    assert paths == [
+        "file_a.bin",
+        "file_b.bin",
+        "file_a.bin",
+        "file_b.bin",
+        "file_a.bin",
+        "file_b.bin",
+    ]
+    assert starts == [0, 0, 10 * MB, 10 * MB, 20 * MB, 20 * MB]
+    assert ends == [10 * MB, 10 * MB, 20 * MB, 20 * MB, 30 * MB, 30 * MB]
+
+
+def test_cat_ranges_generate_ranges_mixed_pattern():
+    """Test mixed range generation creates the requested number of valid ranges."""
+    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
+        _generate_ranges,
+    )
+
+    num_ranges = 25
+    paths, starts, ends = _generate_ranges(
+        file_paths=["test.bin"],
+        file_size_bytes=100 * MB,
+        chunk_sizes_bytes=5 * MB,
+        num_ranges=num_ranges,
+        pattern="mixed",
+    )
+    assert len(paths) == len(starts) == len(ends) == num_ranges
+    for s, e in zip(starts, ends):
+        assert 0 <= s <= 95 * MB
+        assert e == s + 5 * MB
+
+
+def test_cat_ranges_generate_ranges_invalid_pattern():
+    """Test range generation raises ValueError on unsupported pattern."""
+    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
+        _generate_ranges,
+    )
+
+    with pytest.raises(ValueError, match="Unsupported pattern"):
+        _generate_ranges(
+            file_paths=["test.bin"],
+            file_size_bytes=100 * MB,
+            chunk_sizes_bytes=10 * MB,
+            num_ranges=5,
+            pattern="unknown",
+        )
+
+
+def test_cat_ranges_op_error_handling():
+    """Test _cat_ranges_op requests on_error='raise' and raises on failure."""
+    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
+        _cat_ranges_op,
+    )
+
+    mock_gcs = mock.MagicMock()
+    mock_gcs.cat_ranges.return_value = [b"data1", b"data2"]
+
+    res = _cat_ranges_op(
+        mock_gcs,
+        paths=["a", "b"],
+        starts=[0, 10],
+        ends=[10, 20],
+        max_gap=1024,
+        batch_size=32,
+    )
+    assert res == [b"data1", b"data2"]
+    mock_gcs.cat_ranges.assert_called_once_with(
+        ["a", "b"],
+        [0, 10],
+        [10, 20],
+        on_error="raise",
+        max_gap=1024,
+        batch_size=32,
+    )
+
+    # Test error handling when an Exception is returned in results
+    mock_gcs.cat_ranges.return_value = [b"data1", OSError("Failed read")]
+    with pytest.raises(OSError, match="Failed read"):
+        _cat_ranges_op(mock_gcs, paths=["a", "b"], starts=[0, 10], ends=[10, 20])
 
 
 def test_cat_ranges_generate_ranges_oversized_chunk():

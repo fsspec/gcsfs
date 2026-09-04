@@ -47,7 +47,7 @@ To run this automation in your own GCP project, you need to set up atleast two C
     *   `_INFRA_PREFIX`: A prefix for created resources (e.g., `gcsfs-perf`).
     *   `_ZONE`: The GCP zone for the VM and Zonal buckets (e.g., `us-central1-a`).
     *   `_VM_SERVICE_ACCOUNT`: The service account email attached to the VM (must have GCS read/write permissions).
-    *   `_BENCHMARK_CONFIG`: Space-separated list of benchmark groups/configs to run (e.g., `read:read_seq write:write_seq cat_ranges:`).
+    *   `_BENCHMARK_CONFIG`: Space-separated list of benchmark groups/configs to run (e.g., `read:read_seq write:write_seq`).
     *   `_BUCKET_TYPES`: Space-separated list of bucket types to create and test against (e.g., `regional zonal hns`).
 
 ### Ingestion Trigger

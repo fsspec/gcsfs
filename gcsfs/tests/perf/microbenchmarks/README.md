@@ -55,8 +55,6 @@ The benchmarks use a set of parameter classes to define the configuration for ea
     *   `num_ranges`: Number of byte ranges requested across files.
     *   `batch_size`: Batch size for concurrent range operations.
     *   `max_gap`: Maximum gap in bytes between adjacent ranges to coalesce into a single request (`0` for contiguous/overlapping ranges only).
-    *   `chunk_size_bytes`: Size in bytes of chunks for range requests (or list of varied chunk sizes).
-    *   `pattern`: Range selection pattern ("seq" for sequential, "rand" for random).
 
 ## Configuration
 
@@ -127,12 +125,6 @@ python gcsfs/tests/perf/microbenchmarks/run.py --group=write --regional-bucket=<
 Enables detailed logging to the console during execution.
 ```bash
 python gcsfs/tests/perf/microbenchmarks/run.py --group=delete --regional-bucket=<BUCKET_NAME> --log=true --log-level=INFO
-```
-
-**6. Run cat_ranges benchmark**
-Runs the `cat_ranges` benchmark group across bucket types.
-```bash
-python gcsfs/tests/perf/microbenchmarks/run.py --group=cat_ranges --regional-bucket=<REGIONAL_BUCKET> --zonal-bucket=<ZONAL_BUCKET> --hns-bucket=<HNS_BUCKET>
 ```
 
 ## Output

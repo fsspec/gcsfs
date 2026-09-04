@@ -32,7 +32,7 @@ def _generate_ranges(
     starts = []
     ends = []
 
-    current_seq_offset = 0
+    per_file_offsets = {p: 0 for p in file_paths}
     for i in range(num_ranges):
         # 1. Path allocation (round-robin across available files)
         path = file_paths[i % len(file_paths)]
@@ -51,12 +51,25 @@ def _generate_ranges(
         # 3. Determine start and end offsets within file bounds
         max_offset = max(0, file_size_bytes - range_size)
         if pattern == "seq":
-            if current_seq_offset > max_offset:
-                break
-            start = current_seq_offset
-            current_seq_offset += range_size
-        else:
+            if per_file_offsets[path] > max_offset:
+                per_file_offsets[path] = 0
+            start = per_file_offsets[path]
+            per_file_offsets[path] += range_size
+        elif pattern == "rand":
             start = rng.randint(0, max_offset) if max_offset > 0 else 0
+            per_file_offsets[path] = start + range_size
+        elif pattern == "mixed":
+            if rng.random() < 0.5:
+                if per_file_offsets[path] > max_offset:
+                    per_file_offsets[path] = 0
+                start = per_file_offsets[path]
+            else:
+                start = rng.randint(0, max_offset) if max_offset > 0 else 0
+            per_file_offsets[path] = start + range_size
+        else:
+            raise ValueError(
+                f"Unsupported pattern: {pattern}. Expected 'seq', 'rand', or 'mixed'."
+            )
 
         paths.append(path)
         starts.append(start)
@@ -68,12 +81,16 @@ def _generate_ranges(
 def _cat_ranges_op(gcs, paths, starts, ends, max_gap=None, batch_size=None):
     """Fetch byte ranges from GCS files using cat_ranges."""
     try:
-        kwargs = {}
+        kwargs = {"on_error": "raise"}
         if max_gap is not None:
             kwargs["max_gap"] = max_gap
         if batch_size is not None:
             kwargs["batch_size"] = batch_size
-        return gcs.cat_ranges(paths, starts, ends, **kwargs)
+        results = gcs.cat_ranges(paths, starts, ends, **kwargs)
+        for res in results:
+            if isinstance(res, Exception):
+                raise res
+        return results
     except Exception as e:
         logging.error(f"Error in cat_ranges: {e}")
         raise
