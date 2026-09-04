@@ -381,7 +381,7 @@ def test_cat_ranges_configurator(mock_config_dependencies):
     }
     scenario = {
         "name": "cat_ranges_test",
-        "pattern": "mixed",
+        "pattern": "rand",
         "files": 1,
         "chunk_sizes_mb": [[0.0625, 1, 4, 16]],
         "batch_sizes": [64],
@@ -395,7 +395,7 @@ def test_cat_ranges_configurator(mock_config_dependencies):
     case = cases[0]
     assert (
         case.name
-        == "cat_ranges_test_256MB_file_1files_mixed_0.0625_1_4_16MB_chunk_200ranges_64batch_1024maxgap_mixed_regional"
+        == "cat_ranges_test_256MB_file_1files_mixed_0.0625_1_4_16MB_chunk_200ranges_64batch_1024maxgap_rand_regional"
     )
     assert case.files == 1
     assert case.threads == 1
@@ -403,7 +403,7 @@ def test_cat_ranges_configurator(mock_config_dependencies):
     assert case.num_ranges == 200
     assert case.batch_size == 64
     assert case.max_gap == 1024
-    assert case.pattern == "mixed"
+    assert case.pattern == "rand"
     assert case.file_size_bytes == 256 * MB
     assert case.chunk_sizes_bytes == [
         int(0.0625 * MB),
@@ -498,31 +498,20 @@ def test_cat_ranges_generate_ranges_multi_file_sequential():
     assert ends == [10 * MB, 10 * MB, 20 * MB, 20 * MB, 30 * MB, 30 * MB]
 
 
-def test_cat_ranges_generate_ranges_mixed_pattern():
-    """Test mixed range generation creates the requested number of valid ranges."""
-    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
-        _generate_ranges,
-    )
-
-    num_ranges = 25
-    paths, starts, ends = _generate_ranges(
-        file_paths=["test.bin"],
-        file_size_bytes=100 * MB,
-        chunk_sizes_bytes=5 * MB,
-        num_ranges=num_ranges,
-        pattern="mixed",
-    )
-    assert len(paths) == len(starts) == len(ends) == num_ranges
-    for s, e in zip(starts, ends):
-        assert 0 <= s <= 95 * MB
-        assert e == s + 5 * MB
-
-
 def test_cat_ranges_generate_ranges_invalid_pattern():
     """Test range generation raises ValueError on unsupported pattern."""
     from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
         _generate_ranges,
     )
+
+    with pytest.raises(ValueError, match="Unsupported pattern"):
+        _generate_ranges(
+            file_paths=["test.bin"],
+            file_size_bytes=100 * MB,
+            chunk_sizes_bytes=10 * MB,
+            num_ranges=5,
+            pattern="mixed",
+        )
 
     with pytest.raises(ValueError, match="Unsupported pattern"):
         _generate_ranges(

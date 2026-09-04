@@ -57,18 +57,9 @@ def _generate_ranges(
             per_file_offsets[path] += range_size
         elif pattern == "rand":
             start = rng.randint(0, max_offset) if max_offset > 0 else 0
-            per_file_offsets[path] = start + range_size
-        elif pattern == "mixed":
-            if rng.random() < 0.5:
-                if per_file_offsets[path] > max_offset:
-                    per_file_offsets[path] = 0
-                start = per_file_offsets[path]
-            else:
-                start = rng.randint(0, max_offset) if max_offset > 0 else 0
-            per_file_offsets[path] = start + range_size
         else:
             raise ValueError(
-                f"Unsupported pattern: {pattern}. Expected 'seq', 'rand', or 'mixed'."
+                f"Unsupported pattern: {pattern}. Expected 'seq' or 'rand'."
             )
 
         paths.append(path)

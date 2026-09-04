@@ -12,7 +12,7 @@ class CatRangesBenchmarkParameters(IOBenchmarkParameters):
     # Number of byte ranges to fetch in a single cat_ranges call
     num_ranges: int
 
-    # Range selection pattern: "seq", "rand", or "mixed"
+    # Range selection pattern: "seq" or "rand"
     pattern: str = "rand"
 
     # List of chunk sizes (in bytes) used across ranges within a single test case
