@@ -5,10 +5,12 @@ import contextlib
 import ctypes
 import logging
 import os
+import sys
 import threading
 import weakref
 from io import BytesIO
 
+from fsspec.asyn import FSTimeoutError
 from google.api_core.exceptions import NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
@@ -214,6 +216,107 @@ async def close_aaow(aaow, finalize_on_close=False):
             logger.warning(
                 f"Error closing AsyncAppendableObjectWriter for {aaow.bucket_name}/{aaow.object_name}: {e}"
             )
+
+
+# Default timeout for synchronous teardowns when no explicit timeout is configured.
+DEFAULT_TEARDOWN_TIMEOUT_SECONDS = 60.0
+
+# Strong references for background tasks scheduled via loop.create_task().
+# Without holding external references, Python's asyncio event loop may allow
+# pending tasks to be garbage-collected mid-execution ("Task was destroyed but
+# it is pending").
+_deferred_close_tasks = set()
+_deferred_close_lock = threading.Lock()
+
+
+def _on_loop_thread(loop):
+    """Returns True if the current thread is servicing the given event loop."""
+    if loop is None:
+        return False
+    try:
+        return asyncio.get_running_loop() is loop
+    except RuntimeError:
+        return False
+
+
+def _defer_task(
+    loop,
+    coro,
+    description="deferred task",
+    logger=None,
+    log_level=logging.WARNING,
+):
+    """Schedules a coroutine as a tracked background task on ``loop``.
+
+    Retains a strong reference in ``_deferred_close_tasks`` until completion to
+    prevent asyncio garbage collection from discarding pending tasks mid-flight,
+    and ensures unhandled task exceptions are retrieved and logged.
+    """
+    task = loop.create_task(coro)
+    with _deferred_close_lock:
+        _deferred_close_tasks.add(task)
+
+    def _on_done(t):
+        with _deferred_close_lock:
+            _deferred_close_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                log = logger or logging.getLogger("gcsfs")
+                log.log(
+                    log_level,
+                    "%s failed during asynchronous execution: %s",
+                    description,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+    task.add_done_callback(_on_done)
+    return task
+
+
+def sync_teardown(
+    loop,
+    func_or_coro,
+    *args,
+    timeout=None,
+    description="teardown",
+    **kwargs,
+):
+    """Safely runs an async teardown coroutine on ``loop`` from synchronous context.
+
+    Schedules via :func:`asyncio.run_coroutine_threadsafe` or defers on the loop
+    thread to prevent deadlocks.
+    """
+    coro = func_or_coro(*args, **kwargs) if callable(func_or_coro) else func_or_coro
+    if not asyncio.iscoroutine(coro):
+        return
+
+    if sys.is_finalizing():
+        coro.close()
+        return
+
+    if loop is None or not loop.is_running() or loop.is_closed():
+        coro.close()
+        raise RuntimeError(f"Skipping {description}: no usable IO loop available.")
+
+    if _on_loop_thread(loop):
+        _defer_task(loop, coro, description=description, log_level=logging.ERROR)
+        return
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+    except RuntimeError:
+        coro.close()
+        raise RuntimeError(f"Skipping {description}: event loop is closed.")
+
+    if timeout is not None and timeout <= 0:
+        return
+
+    try:
+        return future.result(timeout)
+    except concurrent.futures.TimeoutError:
+        raise FSTimeoutError(f"{description} did not complete within {timeout}s.")
 
 
 class PartialView:

@@ -9,7 +9,8 @@ import fsspec.asyn
 import pytest
 
 from gcsfs import core
-from gcsfs.zonal_file import ZonalFile, _defer_task, _deferred_close_tasks
+from gcsfs.zb_hns_utils import _defer_task, _deferred_close_tasks
+from gcsfs.zonal_file import ZonalFile
 
 
 def wait_until(predicate, timeout=10.0):

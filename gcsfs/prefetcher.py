@@ -1,20 +1,17 @@
 import asyncio
-import concurrent.futures
 import ctypes
 import logging
-import sys
 import weakref
 from collections import deque
 
 import fsspec.asyn
 
-from gcsfs.core import _on_loop_thread
 from gcsfs.zb_hns_utils import (
     HAS_CPYTHON_API,
     PyBytes_AsString,
     PyBytes_FromStringAndSize,
+    sync_teardown,
 )
-from gcsfs.zonal_file import _defer_task
 
 logger = logging.getLogger(__name__)
 
@@ -889,44 +886,14 @@ class BackgroundPrefetcher:
         """
         self.is_stopped = True
 
-        if sys.is_finalizing():
-            return
-
-        loop = self.loop
-        if loop is None or loop.is_closed() or not loop.is_running():
-            # If the event loop is absent, closed, or not currently serviced
-            # by a running thread, async scheduling is impossible.
-            return
-
-        if _on_loop_thread(loop):
-            # Avoid deadlock when closing reentrantly from the event loop thread.
-            _defer_task(
-                loop,
-                self._async_close(),
+        try:
+            sync_teardown(
+                self.loop,
+                self._async_close,
+                timeout=timeout,
                 description="BackgroundPrefetcher teardown",
-                logger=logger,
-                log_level=logging.WARNING,
             )
-            return
-
-        coro = self._async_close()
-        try:
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-        except RuntimeError:
-            # Loop was closed concurrently between the checks above and here.
-            # Explicitly close the unawaited coroutine to avoid RuntimeWarning.
-            coro.close()
-            return
-
-        if timeout is not None and timeout <= 0:
-            # Fire-and-forget requested: teardown is scheduled, return without waiting.
-            return
-
-        try:
-            future.result(timeout)
-        except concurrent.futures.TimeoutError:
-            # Teardown timed out on the caller thread. Leave coroutine running in
-            # background on the IO loop so pending network buffers can drain safely.
+        except fsspec.asyn.FSTimeoutError:
             logger.warning(
                 "BackgroundPrefetcher teardown did not complete within %ss; "
                 "it will keep running in the background.",
