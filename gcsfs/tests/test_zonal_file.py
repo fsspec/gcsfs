@@ -1052,6 +1052,31 @@ def test_close_impl_mrd_pool_failure_does_not_skip_aaow():
     ], "close_aaow should have been called even though mrd_pool failed"
 
 
+def test_close_impl_aaow_failure_raises():
+    """Verify that if close_aaow fails, the error is recorded and re-raised."""
+    loop = fsspec.asyn.get_loop()
+    zf = _bare_zonal_file(loop)
+    zf.finalize_on_close = False
+
+    mock_pool = mock.Mock()
+
+    async def fake_mrd_close():
+        pass
+
+    mock_pool.close = fake_mrd_close
+    zf.mrd_pool = mock_pool
+
+    mock_aaow = mock.Mock(_is_stream_open=True)
+    zf.aaow = mock_aaow
+
+    async def failing_close_aaow(aaow, finalize_on_close=False):
+        raise RuntimeError("aaow close failed")
+
+    with mock.patch("gcsfs.zb_hns_utils.close_aaow", side_effect=failing_close_aaow):
+        with pytest.raises(RuntimeError, match="aaow close failed"):
+            zf._close_impl()
+
+
 @mock.patch("gcsfs.zonal_file.asyn.sync")
 def test_zonal_file_fetch_range_unhandled_runtime_error(mock_sync, mock_gcsfs):
     """Tests that a RuntimeError not containing 'not satisfiable' is re-raised."""

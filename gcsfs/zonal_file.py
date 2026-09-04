@@ -59,7 +59,7 @@ def _defer_task(
                     "%s failed during asynchronous execution: %s",
                     description,
                     exc,
-                    exc_info=exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
                 )
 
     task.add_done_callback(_on_done)

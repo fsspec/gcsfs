@@ -876,29 +876,32 @@ def test_close_zero_and_negative_timeout_is_fire_and_forget(prefetcher_factory):
         coro.close()  # avoid a "coroutine was never awaited" warning
         return never_resolves
 
-    with mock.patch(
-        "asyncio.run_coroutine_threadsafe", side_effect=fake_schedule
-    ) as mock_schedule:
-        start = time.monotonic()
-        bp.close(timeout=0)
-        elapsed_zero = time.monotonic() - start
+    try:
+        with mock.patch(
+            "asyncio.run_coroutine_threadsafe", side_effect=fake_schedule
+        ) as mock_schedule:
+            start = time.monotonic()
+            bp.close(timeout=0)
+            elapsed_zero = time.monotonic() - start
 
-    mock_schedule.assert_called_once()
-    assert bp.is_stopped is True
-    assert elapsed_zero < 0.5
+        mock_schedule.assert_called_once()
+        assert bp.is_stopped is True
+        assert elapsed_zero < 0.5
 
-    # Also verify negative timeout is non-blocking
-    bp2 = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
-    with mock.patch(
-        "asyncio.run_coroutine_threadsafe", side_effect=fake_schedule
-    ) as mock_schedule_neg:
-        start = time.monotonic()
-        bp2.close(timeout=-1)
-        elapsed_neg = time.monotonic() - start
+        # Also verify negative timeout is non-blocking
+        bp2 = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
+        with mock.patch(
+            "asyncio.run_coroutine_threadsafe", side_effect=fake_schedule
+        ) as mock_schedule_neg:
+            start = time.monotonic()
+            bp2.close(timeout=-1)
+            elapsed_neg = time.monotonic() - start
 
-    mock_schedule_neg.assert_called_once()
-    assert bp2.is_stopped is True
-    assert elapsed_neg < 0.5
+        mock_schedule_neg.assert_called_once()
+        assert bp2.is_stopped is True
+        assert elapsed_neg < 0.5
+    finally:
+        never_resolves.cancel()
 
 
 def test_close_does_not_swallow_teardown_exceptions(prefetcher_factory, caplog):
@@ -1000,3 +1003,30 @@ def test_close_concurrent_with_inflight_read_does_not_truncate(prefetcher_factor
 
     assert "exc" not in result, f"reader raised unexpectedly: {result.get('exc')}"
     assert len(result["data"]) == 1_000_000
+
+
+def test_close_and_aclose_idempotence(prefetcher_factory):
+    """Verify that close() and aclose() are idempotent and return early on subsequent calls."""
+    bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=1)
+    assert not bp.is_stopped
+    bp.close()
+    assert bp.is_stopped
+    # Second close() hits the `if self.is_stopped: return` branch
+    bp.close()
+    assert bp.is_stopped
+
+    # Test aclose() idempotence
+    loop = fsspec.asyn.get_loop()
+
+    async def run_aclose_twice():
+        bp2 = BackgroundPrefetcher(
+            fetcher=MockFetcher(b"Y" * 100), size=100, concurrency=1, loop=loop
+        )
+        assert not bp2.is_stopped
+        await bp2.aclose()
+        assert bp2.is_stopped
+        # Second aclose() hits the `if self.is_stopped: return` branch
+        await bp2.aclose()
+        assert bp2.is_stopped
+
+    fsspec.asyn.sync(loop, run_aclose_twice)
