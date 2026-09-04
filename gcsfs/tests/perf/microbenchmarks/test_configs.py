@@ -567,3 +567,57 @@ def test_cat_ranges_generate_ranges_oversized_chunk():
             num_ranges=1,
             pattern="seq",
         )
+
+
+def test_cat_ranges_generate_ranges_rand_chunk_sizes_bytes_list():
+    """Test random range generation with varying chunk sizes calculates actual total bytes."""
+    from gcsfs.tests.perf.microbenchmarks.cat_ranges.test_cat_ranges import (
+        _generate_ranges,
+    )
+
+    chunk_sizes = [1 * MB, 4 * MB, 16 * MB]
+    paths, starts, ends = _generate_ranges(
+        file_paths=["test.bin"],
+        file_size_bytes=100 * MB,
+        chunk_sizes_bytes=chunk_sizes,
+        num_ranges=10,
+        pattern="rand",
+    )
+    assert len(starts) == len(ends) == 10
+    for s, e in zip(starts, ends):
+        assert (e - s) in chunk_sizes
+        assert 0 <= s < e <= 100 * MB
+
+    total_bytes = sum(e - s for s, e in zip(starts, ends))
+    assert total_bytes > 0
+
+
+def test_publish_benchmark_extra_info_total_bytes():
+    """Test publish_benchmark_extra_info publishes total_bytes property."""
+    from gcsfs.tests.perf.microbenchmarks.conftest import publish_benchmark_extra_info
+
+    class MockBenchmark:
+        def __init__(self):
+            self.extra_info = {}
+            self.group = None
+
+    class MockParams:
+        files = 2
+        file_size_bytes = 10 * MB
+        chunk_size_bytes = 1 * MB
+        threads = 1
+        processes = 1
+        rounds = 1
+        bucket_name = "test-bucket"
+        bucket_type = "regional"
+        total_bytes = 25 * MB
+
+    bench = MockBenchmark()
+    publish_benchmark_extra_info(bench, MockParams(), "cat_ranges")
+    assert bench.extra_info["total_bytes"] == 25 * MB
+
+    # Test fallback to file_size * files when total_bytes is None
+    del MockParams.total_bytes
+    bench_fallback = MockBenchmark()
+    publish_benchmark_extra_info(bench_fallback, MockParams(), "read")
+    assert bench_fallback.extra_info["total_bytes"] == 20 * MB

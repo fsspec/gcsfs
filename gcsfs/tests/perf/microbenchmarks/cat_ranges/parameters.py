@@ -23,3 +23,6 @@ class CatRangesBenchmarkParameters(IOBenchmarkParameters):
 
     # Batch size for async concurrent range execution in cat_ranges (defaults to None)
     batch_size: int | None = None
+
+    # Total logical bytes requested across all ranges
+    total_bytes: int | None = None

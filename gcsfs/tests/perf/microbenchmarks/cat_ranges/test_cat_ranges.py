@@ -123,6 +123,7 @@ def test_cat_ranges_single_threaded(benchmark, gcsfs_benchmark_cat_ranges, monit
         params.num_ranges,
         params.pattern,
     )
+    params.total_bytes = sum(end - start for start, end in zip(starts, ends))
     op_args = (gcs, paths, starts, ends, params.max_gap, params.batch_size)
 
     run_single_threaded(
