@@ -1,18 +1,22 @@
 import asyncio
+import concurrent.futures
 import ctypes
 import logging
+import sys
 import weakref
 from collections import deque
 
 import fsspec.asyn
 
-logger = logging.getLogger(__name__)
-
+from gcsfs.core import _on_loop_thread
 from gcsfs.zb_hns_utils import (
     HAS_CPYTHON_API,
     PyBytes_AsString,
     PyBytes_FromStringAndSize,
 )
+from gcsfs.zonal_file import _defer_task
+
+logger = logging.getLogger(__name__)
 
 
 # Please refer to following discussion to understand why this is required at this point
@@ -821,15 +825,16 @@ class BackgroundPrefetcher:
                 raise
 
     async def _async_close(self):
-        """Asynchronous teardown logic protected by the async lock."""
+        """Asynchronous teardown logic protected by the async lock.
+
+        Held for the duration of teardown so a concurrent in-flight
+        ``_async_fetch`` cannot observe a stopped producer/empty queue as
+        EOF and silently return a truncated read.
+        """
         async with self._async_lock:
-            if self.is_stopped:
-                return
+            logger.debug("Signaling prefetcher stop and tearing down producer.")
 
-            self.is_stopped = True
-            logger.debug("Acquired async lock. Tearing down producer and buffers.")
-
-            if self.producer:
+            if self.producer and not self.producer.is_stopped:
                 await self.producer.stop()
 
             self.consumer.clear_buffer()
@@ -868,8 +873,66 @@ class BackgroundPrefetcher:
 
     async def aclose(self):
         """Safely shuts down the prefetcher from an asynchronous context."""
+        self.is_stopped = True
         await self._async_close()
 
-    def close(self):
-        """Safely shuts down the prefetcher from a synchronous context."""
-        fsspec.asyn.sync(self.loop, self._async_close)
+    def close(self, timeout: float | None = 10.0):
+        """Safely shuts down the prefetcher from a synchronous context.
+
+        Schedules teardown on the IO loop. If the wait times out, teardown
+        continues in the background to let in-flight reads finish cleanly.
+
+        Args:
+            timeout: Maximum seconds to wait for teardown to finish. Defaults
+                to 10.0 seconds. If 0 or negative, teardown runs fire-and-forget.
+                If None, waits indefinitely.
+        """
+        self.is_stopped = True
+
+        if sys.is_finalizing():
+            return
+
+        loop = self.loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            # If the event loop is absent, closed, or not currently serviced
+            # by a running thread, async scheduling is impossible.
+            return
+
+        if _on_loop_thread(loop):
+            # Avoid deadlock when closing reentrantly from the event loop thread.
+            _defer_task(
+                loop,
+                self._async_close(),
+                description="BackgroundPrefetcher teardown",
+                logger=logger,
+                log_level=logging.WARNING,
+            )
+            return
+
+        coro = self._async_close()
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            # Loop was closed concurrently between the checks above and here.
+            # Explicitly close the unawaited coroutine to avoid RuntimeWarning.
+            coro.close()
+            return
+
+        if timeout is not None and timeout <= 0:
+            # Fire-and-forget requested: teardown is scheduled, return without waiting.
+            return
+
+        try:
+            future.result(timeout)
+        except concurrent.futures.TimeoutError:
+            # Teardown timed out on the caller thread. Leave coroutine running in
+            # background on the IO loop so pending network buffers can drain safely.
+            logger.warning(
+                "BackgroundPrefetcher teardown did not complete within %ss; "
+                "it will keep running in the background.",
+                timeout,
+            )
+        except Exception:
+            logger.warning(
+                "Exception while closing BackgroundPrefetcher", exc_info=True
+            )
