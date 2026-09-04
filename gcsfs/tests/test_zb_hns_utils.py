@@ -1441,9 +1441,6 @@ def test_direct_memmove_buffer_pypy_fallback():
     executor.shutdown()
 
 
-
-
-
 @pytest.mark.asyncio
 async def test_mrd_methods_raise_unrelated_type_error():
     """Tests that unrelated TypeErrors are properly re-raised."""
