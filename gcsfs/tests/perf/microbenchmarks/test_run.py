@@ -138,6 +138,38 @@ def test_create_table_row():
     assert table_row[0] == "regional"
     assert table_row[3] == 0.6
     assert table_row[10] == "1.00"  # file size MB
+    assert table_row[17] == "1.1000"  # mean latency
+    assert table_row[18] == "0.91"  # 1 MB / 1.1s = 0.91 MB/s
+
+
+def test_create_table_row_with_total_bytes():
+    row = {
+        "group": "cat_ranges",
+        "total_bytes": 10 * 1024 * 1024,
+        "file_size": 100 * 1024 * 1024,
+        "files": 1,
+        "mean": 2.0,
+    }
+    table_row = run._create_table_row(row)
+    assert table_row[18] == "5.00"  # 10 MB / 2.0s = 5.00 MB/s, NOT 100 MB / 2.0s
+
+
+@pytest.mark.parametrize("bad_total_bytes", ["missing", None, "N/A"])
+def test_create_table_row_cat_ranges_missing_total_bytes(bad_total_bytes):
+    row = {
+        "group": "cat_ranges",
+        "file_size": 1000 * 1024 * 1024,
+        "files": 1,
+        "mean": 2.0,
+    }
+    if bad_total_bytes != "missing":
+        row["total_bytes"] = bad_total_bytes
+
+    with pytest.raises(
+        ValueError,
+        match="Missing 'total_bytes' for cat_ranges benchmark",
+    ):
+        run._create_table_row(row)
 
 
 @mock.patch("gcsfs.tests.perf.microbenchmarks.run.PrettyTable")

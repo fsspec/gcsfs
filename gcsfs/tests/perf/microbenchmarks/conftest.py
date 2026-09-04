@@ -268,6 +268,21 @@ def gcsfs_benchmark_pipe(extended_gcs_factory, request):
     )
 
 
+@pytest.fixture
+def gcsfs_benchmark_cat_ranges(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a cat_ranges benchmark run.
+    It creates the test file(s) and cleans them up afterward.
+    """
+    params = request.param
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-cat-ranges",
+        create_files=True,
+    )
+
+
 def _benchmark_put_fixture_helper(extended_gcs_factory, params, prefix_tag):
     gcs = extended_gcs_factory()
 
@@ -537,7 +552,10 @@ def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info
 
 
 def publish_benchmark_extra_info(
-    benchmark: Any, params: Any, benchmark_group: str
+    benchmark: Any,
+    params: Any,
+    benchmark_group: str,
+    total_bytes: int | None = None,
 ) -> None:
     """
     Helper function to publish benchmark parameters to the extra_info property.
@@ -558,7 +576,18 @@ def publish_benchmark_extra_info(
 
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
+    benchmark.extra_info["num_ranges"] = getattr(params, "num_ranges", "N/A")
+    benchmark.extra_info["max_gap"] = getattr(params, "max_gap", "N/A")
+    benchmark.extra_info["batch_size"] = getattr(params, "batch_size", "N/A")
     benchmark.extra_info["runtime"] = getattr(params, "runtime", "N/A")
+    if total_bytes is None:
+        file_size = getattr(params, "file_size_bytes", None)
+        files = getattr(params, "files", 1)
+        if file_size is not None and file_size != "N/A":
+            total_bytes = file_size * files
+    benchmark.extra_info["total_bytes"] = (
+        total_bytes if total_bytes is not None else "N/A"
+    )
     benchmark.extra_info["threads"] = params.threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name

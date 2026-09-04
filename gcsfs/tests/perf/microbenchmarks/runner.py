@@ -20,9 +20,13 @@ def filter_test_cases(all_cases):
     return single_threaded, multi_threaded, multi_process
 
 
-def run_single_threaded(benchmark, monitor_cls, params, func, args, benchmark_group):
+def run_single_threaded(
+    benchmark, monitor_cls, params, func, args, benchmark_group, total_bytes=None
+):
     """Runs a single-threaded benchmark."""
-    publish_benchmark_extra_info(benchmark, params, benchmark_group)
+    publish_benchmark_extra_info(
+        benchmark, params, benchmark_group, total_bytes=total_bytes
+    )
 
     with monitor_cls() as m:
         benchmark.pedantic(func, rounds=params.rounds, args=args)
@@ -56,7 +60,13 @@ def run_single_threaded_fixed_duration(
 
 
 def run_multi_threaded(
-    benchmark, monitor_cls, params, worker_func, args_list, benchmark_group
+    benchmark,
+    monitor_cls,
+    params,
+    worker_func,
+    args_list,
+    benchmark_group,
+    total_bytes=None,
 ):
     """
     Runs a multi-threaded benchmark.
@@ -65,7 +75,9 @@ def run_multi_threaded(
         worker_func: The function to run in each thread.
         args_list: A list of tuples, where each tuple contains arguments for one thread.
     """
-    publish_benchmark_extra_info(benchmark, params, benchmark_group)
+    publish_benchmark_extra_info(
+        benchmark, params, benchmark_group, total_bytes=total_bytes
+    )
 
     def workload():
         logging.info(
@@ -140,6 +152,7 @@ def run_multi_process(
     benchmark_group,
     gcs_kwargs=None,
     request=None,
+    total_bytes=None,
 ):
     """
     Orchestrates a multi-process benchmark.
@@ -150,7 +163,9 @@ def run_multi_process(
                       that returns the arguments for the worker_target.
         gcs_kwargs: Optional dictionary of arguments for the GCS factory (e.g. block_size).
     """
-    publish_benchmark_extra_info(benchmark, params, benchmark_group)
+    publish_benchmark_extra_info(
+        benchmark, params, benchmark_group, total_bytes=total_bytes
+    )
 
     ctx = multiprocessing.get_context("forkserver")
     process_data_shared = ctx.Array("d", params.processes)

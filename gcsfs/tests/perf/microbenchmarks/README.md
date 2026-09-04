@@ -2,7 +2,7 @@
 
 ## Introduction
 
-GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, put, listing, walk, delete, rename, open, and glob.
+GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, put, listing, walk, delete, rename, open, glob, and cat_ranges.
 
 These benchmarks are built using the `pytest` and `pytest-benchmark` frameworks. Each benchmark test is a parameterized pytest case, where the parameters are dynamically configured at runtime from YAML configuration files. This allows for flexible and extensive testing scenarios without modifying the code.
 
@@ -51,6 +51,11 @@ The benchmarks use a set of parameter classes to define the configuration for ea
 *   **Open Parameters**: Specific to Open operations.
     *    `folders`: Number of folders to distribute files into.
 
+*   **Cat Ranges Parameters**: Specific to `cat_ranges` operations.
+    *   `num_ranges`: Number of byte ranges requested across files.
+    *   `batch_size`: Batch size for concurrent range operations.
+    *   `max_gap`: Maximum gap in bytes between adjacent ranges to coalesce into a single request (`0` for contiguous/overlapping ranges only).
+
 ## Configuration
 
 Configuration values are stored in YAML files (e.g., `configs.yaml`) located within each benchmark's directory. These files define:
@@ -80,7 +85,7 @@ The `run.py` script is the central entry point for executing benchmarks. It hand
 
 | Option | Description | Required |
 | :--- | :--- | :--- |
-| `--group` | The benchmark group to run (e.g., `read`, `write`, `put`, `listing`, `info`, `open`, `glob`). Runs all groups if not specified. | No |
+| `--group` | The benchmark group to run (e.g., `read`, `write`, `put`, `listing`, `info`, `open`, `glob`, `cat_ranges`). Runs all groups if not specified. | No |
 | `--config` | Specific scenario names to run (e.g., `read_seq`, `list_flat`). Accepts multiple values. | No |
 | `--regional-bucket` | Name of the regional GCS bucket. | Yes* |
 | `--zonal-bucket` | Name of the zonal GCS bucket. | Yes* |
