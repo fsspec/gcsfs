@@ -527,3 +527,81 @@ def test_collect_tokens_map_records_empty_for_none_detection():
         assert call_count == 1  # Still 1, no additional detect() calls!
     finally:
         reset_telemetry_context(token)
+
+
+@pytest.mark.asyncio
+async def test_gcs_async_wrapper_scopes_context(monkeypatch):
+    """Verify that _gcs_async_wrapper scopes context so inner HTTP requests skip stack detection."""
+    from gcsfs.telemetry.context import Dimension, get_telemetry_context
+    from gcsfs.telemetry.detectors.base import BaseDetector
+    from gcsfs.telemetry.manager import UsageMetricsTracker, _gcs_async_wrapper
+    import gcsfs.telemetry.manager as manager_mod
+
+    # 1. Count how many times detect() actually executes
+    detect_count = 0
+
+    class MockDetector(BaseDetector):
+        @property
+        def name(self):
+            return Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal detect_count
+            detect_count += 1
+            return "fw/pandas"
+
+    tracker = UsageMetricsTracker(detectors=[MockDetector()])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    # 2. Simulate an async file operation (like _cat_file) making 5 inner HTTP requests
+    async def simulated_cat_file():
+        for _ in range(5):
+            # Each HTTP request calls tracker.get_tokens() for the User-Agent header
+            tokens = tracker.get_tokens()
+            assert tokens == ["fw/pandas"]
+        return "done"
+
+    # 3. Wrap with _gcs_async_wrapper
+    wrapped_cat_file = _gcs_async_wrapper(simulated_cat_file)
+
+    # 4. Run the operation
+    assert await wrapped_cat_file() == "done"
+
+    # 5. Check: detect() ran ONCE at entry (instead of 5 times for 5 HTTP requests)
+    assert detect_count == 1
+
+    # 6. Check: ContextVar is cleanly reset after the operation finishes
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_consecutive_native_async_calls_isolated(monkeypatch):
+    """Verify that consecutive native async calls under different frameworks are 100% isolated."""
+    from gcsfs.telemetry.context import get_telemetry_context
+    from gcsfs.telemetry.manager import _gcs_async_wrapper
+    import gcsfs.telemetry.manager as manager_mod
+
+    current_fw = "pandas"
+    monkeypatch.setattr(
+        manager_mod.default_usage_tracker,
+        "collect_tokens_map",
+        lambda: {"fw": f"fw/{current_fw}"},
+    )
+
+    captured = []
+
+    async def file_operation():
+        captured.append(get_telemetry_context().get("fw"))
+
+    wrapped = _gcs_async_wrapper(file_operation)
+
+    current_fw = "pandas"
+    await wrapped()
+    assert captured[-1] == "fw/pandas"
+    assert get_telemetry_context() == {}
+
+    current_fw = "torch"
+    await wrapped()
+    assert captured[-1] == "fw/torch"
+    assert get_telemetry_context() == {}
+

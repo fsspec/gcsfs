@@ -43,7 +43,7 @@ from .telemetry.context import (
     reset_telemetry_context,
     set_telemetry_context,
 )
-from .telemetry.manager import default_usage_tracker, mirror_gcs_sync_methods
+from .telemetry.manager import default_usage_tracker, mirror_gcs_methods
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
 
 logger = logging.getLogger("gcsfs")
@@ -2411,7 +2411,7 @@ def _on_loop_thread(loop):
         return False
 
 
-mirror_gcs_sync_methods(GCSFileSystem)
+mirror_gcs_methods(GCSFileSystem)
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"

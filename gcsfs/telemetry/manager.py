@@ -6,10 +6,40 @@ import functools
 import inspect
 from typing import Any, Callable, Dict, List, Optional
 
-from gcsfs.telemetry.context import Dimension, get_telemetry_context
+from gcsfs.telemetry.context import (
+    Dimension,
+    get_telemetry_context,
+    reset_telemetry_context,
+    set_telemetry_context,
+)
 from gcsfs.telemetry.detectors.base import BaseDetector
 from gcsfs.telemetry.detectors.framework import FrameworkDetector
 from gcsfs.telemetry.sanitizer import sanitize_token
+
+
+def _gcs_async_wrapper(func: Callable, obj: Any = None) -> Callable:
+    """
+    GCS-specific async wrapper that scopes telemetry context during native async execution,
+    avoiding repetitive stack-walking across internal coroutines or chunk fetches.
+    """
+    if getattr(func, "_is_gcs_async_wrapped", False):
+        return func
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        # Fast path: If telemetry context is already active (e.g. nested call or _sync), pass through in O(1)
+        if get_telemetry_context():
+            return await func(*args, **kwargs)
+
+        tokens_map = default_usage_tracker.collect_tokens_map()
+        token = set_telemetry_context(tokens_map)
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            reset_telemetry_context(token)
+
+    wrapper._is_gcs_async_wrapped = True
+    return wrapper
 
 
 def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
@@ -17,6 +47,8 @@ def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
     GCS-specific sync wrapper that captures caller thread telemetry
     and bridges it into the background asyncio loop thread via self._sync.
     """
+    if getattr(func, "_is_gcs_sync_wrapped", False):
+        return func
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -28,6 +60,7 @@ def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
 
         return fsspec.asyn.sync(self.loop, func, *args, **kwargs)
 
+    wrapper._is_gcs_sync_wrapped = True
     return wrapper
 
 
@@ -36,6 +69,8 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
     GCS-specific async generator wrapper that routes each generator yield
     through self._sync to capture caller thread telemetry context.
     """
+    if getattr(func, "_is_gcs_gen_wrapped", False):
+        return func
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -61,12 +96,14 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
                 except Exception:
                     pass
 
+    wrapper._is_gcs_gen_wrapped = True
     return wrapper
 
 
-def mirror_gcs_sync_methods(obj: Any) -> None:
+def mirror_gcs_methods(obj: Any) -> None:
     """
-    Binds sync methods on a GCSFileSystem class or instance using _gcs_sync_wrapper.
+    Binds sync and native async methods on a GCSFileSystem class or instance using
+    telemetry-aware wrappers.
     Uses class __mro__ to find all async coroutines and async generators,
     avoiding eager property evaluation.
     """
@@ -91,7 +128,7 @@ def mirror_gcs_sync_methods(obj: Any) -> None:
                 ):
                     method_names.add(name)
 
-    # Bind the sync wrapper only for valid public methods
+    # Bind the wrappers for valid methods
     from fsspec.spec import AbstractFileSystem
 
     for method in method_names:
@@ -99,28 +136,35 @@ def mirror_gcs_sync_methods(obj: Any) -> None:
             1:
         ]  # e.g., "_ls" -> "ls", "_cat_file" -> "cat_file", "_walk" -> "walk"
 
-        # Only mirror if smethod is a valid public method (in AbstractFileSystem, async_methods, or the class)
-        if not (
+        async_fn = getattr(obj, method, None)
+        mth = None
+
+        if inspect.iscoroutinefunction(async_fn):
+            # Wrap native async method for scoped context in native async mode
+            wrapped_async = _gcs_async_wrapper(
+                async_fn, obj=None if is_class else obj
+            )
+            setattr(obj, method, wrapped_async)
+            mth = _gcs_sync_wrapper(async_fn, obj=None if is_class else obj)
+
+        elif inspect.isasyncgenfunction(async_fn):
+            mth = _gcs_async_gen_wrapper(async_fn, obj=None if is_class else obj)
+
+        # Only mirror sync method if smethod is a valid public method
+        if mth is not None and (
             hasattr(AbstractFileSystem, smethod)
             or method in async_methods
             or hasattr(target_type, smethod)
         ):
-            continue
+            if not getattr(mth, "__doc__", None):
+                mth.__doc__ = getattr(
+                    getattr(AbstractFileSystem, smethod, None), "__doc__", ""
+                )
+            setattr(obj, smethod, mth)
 
-        async_fn = getattr(obj, method, None)
-        if inspect.iscoroutinefunction(async_fn):
-            mth = _gcs_sync_wrapper(async_fn, obj=None if is_class else obj)
-        elif inspect.isasyncgenfunction(async_fn):
-            mth = _gcs_async_gen_wrapper(async_fn, obj=None if is_class else obj)
-        else:
-            continue
 
-        if not getattr(mth, "__doc__", None):
-            mth.__doc__ = getattr(
-                getattr(AbstractFileSystem, smethod, None), "__doc__", ""
-            )
-
-        setattr(obj, smethod, mth)
+# Alias for backward compatibility
+mirror_gcs_sync_methods = mirror_gcs_methods
 
 
 class UsageMetricsTracker:

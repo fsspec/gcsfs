@@ -31,7 +31,7 @@ from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
 from gcsfs.core import GCSFile, GCSFileSystem, _get_prefetcher_and_cache_config
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
-from gcsfs.telemetry.manager import _gcs_sync_wrapper, mirror_gcs_sync_methods
+from gcsfs.telemetry.manager import _gcs_sync_wrapper, mirror_gcs_methods
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
 
@@ -2116,4 +2116,4 @@ async def simple_upload(
         await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
 
-mirror_gcs_sync_methods(ExtendedGcsFileSystem)
+mirror_gcs_methods(ExtendedGcsFileSystem)
