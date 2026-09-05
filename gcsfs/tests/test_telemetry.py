@@ -532,10 +532,10 @@ def test_collect_tokens_map_records_empty_for_none_detection():
 @pytest.mark.asyncio
 async def test_gcs_async_wrapper_scopes_context(monkeypatch):
     """Verify that _gcs_async_wrapper scopes context so inner HTTP requests skip stack detection."""
+    import gcsfs.telemetry.manager as manager_mod
     from gcsfs.telemetry.context import Dimension, get_telemetry_context
     from gcsfs.telemetry.detectors.base import BaseDetector
     from gcsfs.telemetry.manager import UsageMetricsTracker, _gcs_async_wrapper
-    import gcsfs.telemetry.manager as manager_mod
 
     # 1. Count how many times detect() actually executes
     detect_count = 0
@@ -577,9 +577,9 @@ async def test_gcs_async_wrapper_scopes_context(monkeypatch):
 @pytest.mark.asyncio
 async def test_consecutive_native_async_calls_isolated(monkeypatch):
     """Verify that consecutive native async calls under different frameworks are 100% isolated."""
+    import gcsfs.telemetry.manager as manager_mod
     from gcsfs.telemetry.context import get_telemetry_context
     from gcsfs.telemetry.manager import _gcs_async_wrapper
-    import gcsfs.telemetry.manager as manager_mod
 
     current_fw = "pandas"
     monkeypatch.setattr(
@@ -604,4 +604,3 @@ async def test_consecutive_native_async_calls_isolated(monkeypatch):
     await wrapped()
     assert captured[-1] == "fw/torch"
     assert get_telemetry_context() == {}
-
