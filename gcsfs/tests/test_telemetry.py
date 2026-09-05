@@ -604,3 +604,39 @@ async def test_consecutive_native_async_calls_isolated(monkeypatch):
     await wrapped()
     assert captured[-1] == "fw/torch"
     assert get_telemetry_context() == {}
+
+
+def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkeypatch):
+    """Verify that GCSFile.caller_framework caches empty string when None and avoids repeated detect calls."""
+    from gcsfs.core import GCSFile, GCSFileSystem
+    from gcsfs.telemetry.context import Dimension
+    from gcsfs.telemetry.detectors.base import BaseDetector
+    from gcsfs.telemetry.manager import UsageMetricsTracker
+
+    detect_count = 0
+
+    class DummyNoneDetector(BaseDetector):
+        @property
+        def name(self):
+            return Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal detect_count
+            detect_count += 1
+            return None
+
+    tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
+    monkeypatch.setattr("gcsfs.core.default_usage_tracker", tracker)
+    monkeypatch.setattr("gcsfs.telemetry.manager.default_usage_tracker", tracker)
+
+    fs = GCSFileSystem(token="anon")
+    f = GCSFile(fs, "bucket/test.txt", mode="wb")
+
+    # Initialized once during GCSFile.__init__
+    assert detect_count == 1
+    assert f.caller_framework == ""
+
+    # Subsequent reads of property must be O(1) without re-running detect()
+    for _ in range(10):
+        assert f.caller_framework == ""
+    assert detect_count == 1
