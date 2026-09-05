@@ -528,15 +528,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         async def _coro_with_context():
             token = set_telemetry_context(tokens_map)
             try:
-                if inspect.iscoroutinefunction(func):
-                    return await func(*args, **kwargs)
-                elif inspect.iscoroutine(func) or inspect.isawaitable(func):
-                    return await func
-                else:
-                    res = func(*args, **kwargs)
-                    if inspect.iscoroutine(res) or inspect.isawaitable(res):
-                        return await res
-                    return res
+                res = func(*args, **kwargs) if callable(func) else func
+                if inspect.isawaitable(res):
+                    return await res
+                return res
             finally:
                 reset_telemetry_context(token)
 
