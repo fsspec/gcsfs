@@ -140,9 +140,10 @@ def mirror_gcs_methods(obj: Any) -> None:
         mth = None
 
         if inspect.iscoroutinefunction(async_fn):
-            # Wrap native async method for scoped context in native async mode
-            wrapped_async = _gcs_async_wrapper(async_fn, obj=None if is_class else obj)
-            setattr(obj, method, wrapped_async)
+            # Only wrap private async methods defined directly on this class to preserve inheritance
+            if is_class and method in target_type.__dict__:
+                wrapped_async = _gcs_async_wrapper(async_fn)
+                setattr(obj, method, wrapped_async)
             mth = _gcs_sync_wrapper(async_fn, obj=None if is_class else obj)
 
         elif inspect.isasyncgenfunction(async_fn):
