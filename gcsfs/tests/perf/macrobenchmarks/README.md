@@ -150,6 +150,34 @@ first:
   every rank -- a `gs://` directory holding a pre-staged copy of the weights and
   tokenizer files.
 
+## Node-local bootstrap cache
+
+A run with `_SEED_CHECKPOINT=true` (the default) starts two pod generations on
+the same nodes: the `seed-checkpoint` release, then the measured release. Both
+run the same `launcher.sh`, so without a cache the measured run re-fetches the
+~16 GB of model weights, the gcloud CLI, and every wheel the seed run already
+staged -- roughly 32 GB of redundant transfer per run while the node pool sits
+idle.
+
+Both charts therefore mount a `hostPath` at `/workload/cache`, controlled by
+`workload.hostCachePath` (default `/var/lib/gcsfs-macrobench`), and stage the
+model, the gcloud SDK, and the pip wheel cache into it. The directory is
+node-local and the benchmark cluster is created and deleted per build, so
+nothing survives a run and no state carries between builds.
+
+* **It moves no metric.** The model download deliberately goes through `gcloud`,
+  not `gcsfs`, precisely so it stays out of the bucket-level read counters that
+  feed `dataset_read_bytes` and the amplification ratios. The build under test is
+  always installed with `--no-cache-dir`, so a re-pushed artifact at an unchanged
+  URL can never be served stale from the pip cache.
+* **Cache entries are published atomically.** Each is staged into a sibling
+  directory and renamed into place only after a `.complete` marker is written, so
+  a pod killed mid-download cannot leave a partial directory that the next pod
+  mistakes for a hit.
+* **Set `workload.hostCachePath=""` to disable it.** The volume, mount, and
+  `HOST_CACHE_PATH` env var all disappear and every pod bootstraps from scratch,
+  which is the behaviour to fall back to if a cluster policy disallows `hostPath`.
+
 ## Running it
 
 Standing up the GKE cluster, running the workload, scraping the metrics, and

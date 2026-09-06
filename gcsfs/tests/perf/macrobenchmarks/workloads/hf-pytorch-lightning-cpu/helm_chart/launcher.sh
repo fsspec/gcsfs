@@ -23,34 +23,130 @@ if ! command -v curl >/dev/null 2>&1; then
   rm -rf /var/lib/apt/lists/*
 fi
 
-echo "Installing standalone gcloud CLI..."
-cd /tmp
-curl -sSO https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz
-tar -xf google-cloud-cli-linux-x86_64.tar.gz
-rm google-cloud-cli-linux-x86_64.tar.gz
-export PATH=$PATH:/tmp/google-cloud-sdk/bin
-cd -
+# --- node-local bootstrap cache ---------------------------------------------
+# HOST_CACHE_PATH is a hostPath volume (chart value workload.hostCachePath) that
+# outlives the pod. The seed-checkpoint release and the measured release land on
+# the same nodes, so whatever is staged here once is reused by the second
+# generation instead of being fetched again. Unset/empty keeps the previous
+# per-pod behaviour: every path below still works, it just always misses.
+CACHE_ROOT="${HOST_CACHE_PATH:-}"
+if [[ -n "$CACHE_ROOT" ]]; then
+  mkdir -p "$CACHE_ROOT"
+  echo "Bootstrap cache: $CACHE_ROOT"
+else
+  echo "Bootstrap cache disabled; staging into the pod filesystem."
+fi
 
-# If MODEL_ID is a GCS path, pull the weights once per pod. cpu_sim.py will
-# then load from /tmp/<basename> with local_files_only=True, so the ranks
-# on this node do not race on the HuggingFace API. Skipping the download if
-# the directory already exists keeps pod restarts cheap.
+# Publish a directory into the cache only once it is provably whole: populate a
+# unique staging sibling, drop a marker, then rename. The rename is atomic, so a
+# pod killed mid-download cannot leave a partial directory that the next pod
+# mistakes for a hit -- the failure the old "does the directory exist" guard
+# would have made permanent now that the cache survives pod deletion.
+#
+# Contract: the command is invoked with a staging directory as its final
+# argument and must produce exactly one entry inside it named after $dest. Both
+# `gcloud storage cp -r SRC dir/` and `tar -C dir -xf` do that naturally.
+stage_once() {
+  local dest="$1"; shift
+  local name staging
+  name=$(basename "$dest")
+  if [[ -f "$dest/.complete" ]]; then
+    echo "Cache hit: $dest"
+    return 0
+  fi
+  staging="${dest}.staging.$$"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  # Guarded rather than bare so a failed download cleans up after itself; the
+  # `return 1` still aborts the launcher under `set -e`, which is what should
+  # happen -- a pod that cannot stage its model must fail, not train on nothing.
+  if ! "$@" "$staging"; then
+    echo "stage_once: population failed for $dest" >&2
+    rm -rf "$staging"
+    return 1
+  fi
+  if [[ ! -d "$staging/$name" ]]; then
+    echo "stage_once: command did not produce $staging/$name" >&2
+    rm -rf "$staging"
+    return 1
+  fi
+  touch "$staging/$name/.complete"
+  # Only an incomplete leftover from an earlier crash can be at $dest here; a
+  # complete one returned above. Clear it so the rename lands.
+  rm -rf "$dest"
+  # Plain `mv`, not `mv -T`: -T is GNU-only and the images are not guaranteed to
+  # ship it. $dest was just removed, so this is a rename within one directory
+  # (same filesystem => atomic), not a move-into-directory. The marker check
+  # catches the move-into-directory shape if something recreated $dest in the
+  # meantime -- only reachable when singlePodPerNode is off and two pods on one
+  # node race, which this chart does not do.
+  if ! mv "$staging/$name" "$dest" || [[ ! -f "$dest/.complete" ]]; then
+    rm -rf "$staging"
+    # The other pod's copy is equally valid, so a lost race is not an error.
+    if [[ -f "$dest/.complete" ]]; then
+      echo "Cache populated concurrently: $dest"
+      return 0
+    fi
+    echo "Failed to publish $dest" >&2
+    return 1
+  fi
+  rm -rf "$staging"
+  echo "Cached: $dest"
+}
+
+fetch_gcloud_sdk() {
+  local staging="$1"
+  local archive="$staging/google-cloud-cli-linux-x86_64.tar.gz"
+  curl -fsSL \
+    https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz \
+    -o "$archive"
+  tar -C "$staging" -xf "$archive"
+  rm -f "$archive"
+}
+
+if ! command -v gcloud >/dev/null 2>&1; then
+  echo "Installing standalone gcloud CLI..."
+  GCLOUD_PARENT="${CACHE_ROOT:-/tmp}"
+  mkdir -p "$GCLOUD_PARENT"
+  stage_once "$GCLOUD_PARENT/google-cloud-sdk" fetch_gcloud_sdk
+  export PATH="$PATH:$GCLOUD_PARENT/google-cloud-sdk/bin"
+fi
+
+# Wheels are immutable per (name, version, url), so a shared pip cache is safe
+# and saves the second pod generation the whole download+build pass. The
+# artifact under test is deliberately excluded below.
+if [[ -n "$CACHE_ROOT" ]]; then
+  export PIP_CACHE_DIR="$CACHE_ROOT/pip"
+  mkdir -p "$PIP_CACHE_DIR"
+  PIP_ARGS=()
+else
+  PIP_ARGS=(--no-cache-dir)
+fi
+
+# If MODEL_ID is a GCS path, pull the ~16GB of weights once per *node* (not
+# once per pod) into the bootstrap cache, so the measured release reuses what
+# the seed release already staged. cpu_sim.py loads it from $LOCAL_MODEL_PATH
+# with local_files_only=True, so the ranks on this node do not race on the
+# HuggingFace API. This download is deliberately outside the measurement
+# boundary (gcloud, not gcsfs) so caching it moves no metric -- it only removes
+# idle time from the run.
+fetch_model_from_gcs() {
+  # Strip trailing slash: `gcloud storage cp -r gs://bucket/dir/ dest/` would
+  # copy the *contents* of dir into dest (rsync-style), so the files would land
+  # at dest/config.json instead of dest/<basename>/config.json. stage_once
+  # requires the latter.
+  gcloud storage cp -r "${MODEL_ID%/}" "$1/"
+}
 if [[ "${MODEL_ID:-}" == gs://* ]]; then
   echo "MODEL_ID is a GCS path: $MODEL_ID"
   DIR_NAME=$(basename "${MODEL_ID%/}")
-  LOCAL_MODEL_PATH="/tmp/$DIR_NAME"
-
-  if [[ ! -d "$LOCAL_MODEL_PATH" ]]; then
-    echo "Downloading model from GCS to $LOCAL_MODEL_PATH..."
-    # Strip trailing slash: `gcloud storage cp -r gs://bucket/dir/ /tmp/` would
-    # copy the *contents* of dir into /tmp (rsync-style), so the files would
-    # land at /tmp/config.json instead of /tmp/<basename>/config.json. cpu_sim
-    # looks for the latter via local_files_only on $LOCAL_MODEL_PATH.
-    /tmp/google-cloud-sdk/bin/gcloud storage cp -r "${MODEL_ID%/}" /tmp/
-    echo "Download complete."
-  else
-    echo "Model already exists at $LOCAL_MODEL_PATH, skipping download."
-  fi
+  MODEL_ROOT="${CACHE_ROOT:-/tmp}"
+  mkdir -p "$MODEL_ROOT"
+  LOCAL_MODEL_PATH="$MODEL_ROOT/$DIR_NAME"
+  stage_once "$LOCAL_MODEL_PATH" fetch_model_from_gcs
+  # cpu_sim.py reads this to find the staged weights; it falls back to
+  # /tmp/<basename> when unset, which is where they used to land.
+  export LOCAL_MODEL_PATH
 fi
 
 # Install workload deps. requirements.txt is mounted alongside the .py via
@@ -68,8 +164,8 @@ fi
 #     no-ops (~5s total for resolver pass).
 #   - On the bare python:3.11-slim fallback: actually installs everything
 #     (~3 min). The version pins in requirements.txt are the canonical ones.
-pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
-pip3 install --no-cache-dir -r /workload/configs/requirements.txt
+pip3 install "${PIP_ARGS[@]}" --index-url https://download.pytorch.org/whl/cpu torch
+pip3 install "${PIP_ARGS[@]}" -r /workload/configs/requirements.txt
 
 if [[ -n "${REQUIREMENTS:-}" ]]; then
   # Optional escape hatch: REQUIREMENTS lets a run install/override arbitrary
@@ -77,12 +173,15 @@ if [[ -n "${REQUIREMENTS:-}" ]]; then
   # without rebuilding the image or editing requirements.txt. It runs AFTER
   # requirements.txt, so a spec here overrides the pinned versions there.
   # Word-split intentional.
+  # --no-cache-dir regardless of the shared pip cache: the build under test is
+  # the one thing that must never be served from a previous pod's download, so a
+  # re-pushed artifact at an unchanged URL can never go stale here.
   # shellcheck disable=SC2086
-  pip3 install $REQUIREMENTS
+  pip3 install --no-cache-dir $REQUIREMENTS
   # Reinstall only the requested packages so their dependency graph is not
   # unnecessarily reinstalled after the normal resolution pass above.
   # shellcheck disable=SC2086
-  pip3 install --no-deps --force-reinstall $REQUIREMENTS
+  pip3 install --no-cache-dir --no-deps --force-reinstall $REQUIREMENTS
 fi
 
 # JOB_COMPLETION_INDEX is set by the K8s Indexed Job (one value per pod,
