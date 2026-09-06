@@ -173,7 +173,11 @@ nothing survives a run and no state carries between builds.
 * **Cache entries are published atomically.** Each is staged into a sibling
   directory and renamed into place only after a `.complete` marker is written, so
   a pod killed mid-download cannot leave a partial directory that the next pod
-  mistakes for a hit.
+  mistakes for a hit. Two pods staging the same entry on one node is also safe:
+  whoever finishes second sees the other's marker and keeps their copy rather
+  than replacing a directory that is already being read. (The `podAntiAffinity`
+  only excludes pods of the *same* release, so this is reachable whenever
+  `singlePodPerNode` is off or two releases are installed onto a shared pool.)
 * **Set `workload.hostCachePath=""` to disable it.** The volume, mount, and
   `HOST_CACHE_PATH` env var all disappear and every pod bootstraps from scratch,
   which is the behaviour to fall back to if a cluster policy disallows `hostPath`.

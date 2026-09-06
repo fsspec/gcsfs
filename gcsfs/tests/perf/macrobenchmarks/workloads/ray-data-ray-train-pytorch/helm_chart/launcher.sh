@@ -70,16 +70,23 @@ stage_once() {
     return 1
   fi
   touch "$staging/$name/.complete"
-  # Only an incomplete leftover from an earlier crash can be at $dest here; a
-  # complete one returned above. Clear it so the rename lands.
+  # Re-check before touching $dest. The download above takes minutes, and two
+  # pods can share a node -- the podAntiAffinity only excludes pods of the *same*
+  # release, and singlePodPerNode is an operator toggle. If another pod published
+  # while we were downloading, deleting $dest would unlink files it already has
+  # open and leave a window with no $dest at all. Its copy is as good as ours.
+  if [[ -f "$dest/.complete" ]]; then
+    rm -rf "$staging"
+    echo "Cache populated concurrently: $dest"
+    return 0
+  fi
+  # Nothing at $dest carries a marker now, so it can only be a crashed pod's
+  # leftover. Clear it so the rename lands.
   rm -rf "$dest"
   # Plain `mv`, not `mv -T`: -T is GNU-only and the images are not guaranteed to
-  # ship it. $dest was just removed, so this is a rename within one directory
-  # (same filesystem => atomic), not a move-into-directory. The marker check
-  # catches the move-into-directory shape if something recreated $dest in the
-  # meantime -- only reachable when singlePodPerNode is off and two pods on one
-  # node race, which this chart does not do.
-  if ! mv "$staging/$name" "$dest" || [[ ! -f "$dest/.complete" ]]; then
+  # ship it. $dest was just removed, so this is normally a rename within one
+  # directory (same filesystem => atomic), not a move-into-directory.
+  if ! mv "$staging/$name" "$dest"; then
     rm -rf "$staging"
     # The other pod's copy is equally valid, so a lost race is not an error.
     if [[ -f "$dest/.complete" ]]; then
@@ -90,6 +97,21 @@ stage_once() {
     return 1
   fi
   rm -rf "$staging"
+  # The re-check above narrows the race but cannot close it: another pod can
+  # still publish between that check and this rename, and `mv` into a directory
+  # that now exists nests inside it instead of replacing it. Our own marker
+  # inside $dest/$name is the signature of that nesting (a real model directory
+  # does not contain a marked copy of itself). Theirs is authoritative, so drop
+  # ours rather than leaving a stray tree inside the cache entry.
+  if [[ -f "$dest/$name/.complete" && -f "$dest/.complete" ]]; then
+    rm -rf "$dest/$name"
+    echo "Cache populated concurrently: $dest"
+    return 0
+  fi
+  if [[ ! -f "$dest/.complete" ]]; then
+    echo "Failed to publish $dest" >&2
+    return 1
+  fi
   echo "Cached: $dest"
 }
 
