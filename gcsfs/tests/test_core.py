@@ -3712,8 +3712,7 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
 
 
-def test_process_object_structure():
-    fs = GCSFileSystem(token="anon")
+def test_process_object_structure(gcs):
     bucket = "my-bucket"
     metadata = {
         "kind": "storage#object",
@@ -3730,7 +3729,7 @@ def test_process_object_structure():
         "md5Hash": "dummyHash==",
     }
 
-    processed = fs._process_object(bucket, metadata)
+    processed = gcs._process_object(bucket, metadata)
 
     assert processed["name"] == "my-bucket/nested/file.txt"
     assert processed["size"] == 4096
@@ -3745,16 +3744,15 @@ def test_process_object_structure():
     assert processed["metageneration"] == "2"
 
 
-def test_process_object_leading_slash():
-    fs = GCSFileSystem(token="anon")
+def test_process_object_leading_slash(gcs):
     bucket = "my-bucket"
     metadata = {
         "name": "/leading_slash_file.txt",
         "size": "100",
     }
 
-    processed = fs._process_object(bucket, metadata)
-    parsed_bucket, parsed_key, _ = fs.split_path(processed["name"])
+    processed = gcs._process_object(bucket, metadata)
+    parsed_bucket, parsed_key, _ = gcs.split_path(processed["name"])
 
     assert processed["name"] == "my-bucket//leading_slash_file.txt"
     assert parsed_bucket == "my-bucket"
