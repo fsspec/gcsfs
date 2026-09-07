@@ -3757,3 +3757,50 @@ def test_process_object_leading_slash(gcs):
     assert processed["name"] == "my-bucket//leading_slash_file.txt"
     assert parsed_bucket == "my-bucket"
     assert parsed_key == "/leading_slash_file.txt"
+
+
+def test_get_dirs_and_update_cache_nested(gcs):
+    bucket = "test-bucket"
+    objects = [
+        {"name": f"{bucket}/dir1/sub1/file1.txt", "size": 100, "type": "file"},
+        {"name": f"{bucket}/dir1/sub1/file2.txt", "size": 200, "type": "file"},
+        {"name": f"{bucket}/dir1/sub2/file3.txt", "size": 300, "type": "file"},
+        {"name": f"{bucket}/dir2/file4.txt", "size": 400, "type": "file"},
+    ]
+
+    gcs.dircache.clear()
+    dirs = gcs._get_dirs_and_update_cache(bucket, objects, prefix="", update_cache=True)
+
+    assert f"{bucket}/dir1" in dirs
+    assert f"{bucket}/dir1/sub1" in dirs
+    assert f"{bucket}/dir1/sub2" in dirs
+    assert f"{bucket}/dir2" in dirs
+    assert f"{bucket}" in gcs.dircache
+    assert f"{bucket}/dir1" in gcs.dircache
+    assert f"{bucket}/dir1/sub1" in gcs.dircache
+    assert f"{bucket}/dir1/sub2" in gcs.dircache
+    assert f"{bucket}/dir2" in gcs.dircache
+    root_children = [c["name"] for c in gcs.dircache[bucket]]
+    assert f"{bucket}/dir1" in root_children
+    assert f"{bucket}/dir2" in root_children
+    sub1_children = [c["name"] for c in gcs.dircache[f"{bucket}/dir1/sub1"]]
+    assert f"{bucket}/dir1/sub1/file1.txt" in sub1_children
+    assert f"{bucket}/dir1/sub1/file2.txt" in sub1_children
+
+
+def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
+    bucket = "test-bucket"
+    objects = [
+        {"name": f"{bucket}/a/b/c/file1.txt", "size": 100, "type": "file"},
+        {"name": f"{bucket}/a/b/empty_folder", "size": 0, "type": "directory"},
+    ]
+
+    gcs.dircache.clear()
+    dirs = gcs._get_dirs_and_update_cache(
+        bucket, objects, prefix="a/b", update_cache=False
+    )
+
+    assert f"{bucket}/a/b" in dirs
+    assert f"{bucket}/a/b/c" in dirs
+    # Cache should remain empty because update_cache=False and prefix is used
+    assert len(gcs.dircache) == 0

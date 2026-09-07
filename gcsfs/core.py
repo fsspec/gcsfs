@@ -1908,46 +1908,58 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if prefix:
             full_prefix = path.rstrip("/") + "/" + prefix
 
+        root_len = len(path.rstrip("/"))
+        should_update_cache = bool(not prefix and update_cache)
+
         for obj in objects:
             # For native HNS empty folders, which are returned as directory types
             # but are not placeholders, we need to ensure they have an entry in the cache.
-            if not prefix and update_cache and obj.get("type") == "directory":
+            if should_update_cache and obj.get("type") == "directory":
                 cache_entries.setdefault(obj["name"], {})
 
             parent = self._parent(obj["name"])
             previous = obj
 
             while parent:
-                dir_key = self.split_path(parent)[1]
-                if len(parent) < len(path.rstrip("/")):
+                if len(parent) < root_len:
                     break
 
                 if prefix and not parent.startswith(full_prefix):
                     # If this parent doesn't match the prefix, neither will its parents.
                     break
 
-                if dir_key:
-                    dirs[parent] = {
-                        "Key": dir_key,
-                        "Size": 0,
-                        "name": parent,
-                        "StorageClass": "DIRECTORY",
-                        "type": "directory",
-                        "size": 0,
-                    }
+                parent_already_seen = parent in dirs
+                if not parent_already_seen:
+                    dir_key = self.split_path(parent)[1]
+                    if dir_key:
+                        dirs[parent] = {
+                            "Key": dir_key,
+                            "Size": 0,
+                            "name": parent,
+                            "StorageClass": "DIRECTORY",
+                            "type": "directory",
+                            "size": 0,
+                        }
 
-                if not prefix and update_cache:
+                if should_update_cache:
                     listing = cache_entries.setdefault(parent, {})
                     name = previous["name"]
                     if name not in listing:
                         listing[name] = previous
+                    elif parent_already_seen:
+                        break
+                elif parent_already_seen:
+                    # When cache is not updated or prefix is used, once parent is in dirs,
+                    # all ancestors are already guaranteed to be in dirs. Break immediately.
+                    break
 
                 if parent in dirs:
                     previous = dirs[parent]
                 parent = self._parent(parent)
-        if not prefix and update_cache:
-            cache_entries_list = {k: list(v.values()) for k, v in cache_entries.items()}
-            self.dircache.update(cache_entries_list)
+        if should_update_cache:
+            self.dircache.update(
+                {k: list(v.values()) for k, v in cache_entries.items()}
+            )
         return dirs
 
     @retry_request(retries=retries)
