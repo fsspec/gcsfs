@@ -3710,3 +3710,52 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
+
+
+def test_process_object_structure():
+    fs = GCSFileSystem(token="anon")
+    bucket = "my-bucket"
+    metadata = {
+        "kind": "storage#object",
+        "id": "my-bucket/nested/file.txt/12345",
+        "name": "nested/file.txt",
+        "bucket": "my-bucket",
+        "generation": "12345",
+        "metageneration": "2",
+        "contentType": "text/plain",
+        "timeCreated": "2024-01-15T10:30:00.000Z",
+        "updated": "2024-01-15T11:45:00.123456Z",
+        "storageClass": "STANDARD",
+        "size": "4096",
+        "md5Hash": "dummyHash==",
+    }
+
+    processed = fs._process_object(bucket, metadata)
+
+    assert processed["name"] == "my-bucket/nested/file.txt"
+    assert processed["size"] == 4096
+    assert processed["type"] == "file"
+    assert processed["ctime"] == datetime(
+        2024, 1, 15, 10, 30, 0, 0, tzinfo=timezone.utc
+    )
+    assert processed["mtime"] == datetime(
+        2024, 1, 15, 11, 45, 0, 123456, tzinfo=timezone.utc
+    )
+    assert processed["generation"] == "12345"
+    assert processed["metageneration"] == "2"
+
+
+def test_process_object_leading_slash():
+    fs = GCSFileSystem(token="anon")
+    bucket = "my-bucket"
+    metadata = {
+        "name": "/leading_slash_file.txt",
+        "size": "100",
+    }
+
+    processed = fs._process_object(bucket, metadata)
+    parsed_bucket, parsed_key, _ = fs.split_path(processed["name"])
+
+    assert processed["name"] == "my-bucket//leading_slash_file.txt"
+    assert parsed_bucket == "my-bucket"
+    assert parsed_key == "/leading_slash_file.txt"
