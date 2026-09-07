@@ -1081,11 +1081,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     def created(self, path):
         return self.info(path)["ctime"]
 
-    def _parse_timestamp(self, timestamp):
-        assert timestamp.endswith("Z")
-        timestamp = timestamp[:-1]
-        timestamp = timestamp + "0" * (6 - len(timestamp.rsplit(".", 1)[-1]))
-        return datetime.fromisoformat(timestamp + "+00:00")
+    @staticmethod
+    def _parse_timestamp(timestamp):
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
     async def _info(self, path, generation=None, **kwargs):
         """File information about this path."""
