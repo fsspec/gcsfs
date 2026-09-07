@@ -46,7 +46,7 @@ fi
 # Contract: the command is invoked with a staging directory as its final
 # argument and must produce exactly one entry inside it named after $dest. Both
 # `gcloud storage cp -r SRC dir/` and `tar -C dir -xf` do that naturally.
-stage_once() {
+_stage_once_body() {
   local dest="$1"; shift
   local name staging
   name=$(basename "$dest")
@@ -54,12 +54,18 @@ stage_once() {
     echo "Cache hit: $dest"
     return 0
   fi
-  staging="${dest}.staging.$$"
-  rm -rf "$staging"
-  mkdir -p "$staging"
+  # mktemp, not "$dest.staging.$$": every pod has its own PID namespace, so $$
+  # collides across pods routinely (two pods are both PID 7), and the staging
+  # directory lives on the hostPath they share. Colliding pods would write into
+  # one directory and delete each other's in-flight download. mktemp -d picks a
+  # name that does not already exist and creates it in one atomic step.
+  mkdir -p "$(dirname "$dest")" || return 1
+  staging=$(mktemp -d "${dest}.staging.XXXXXX") || return 1
   # Guarded rather than bare so a failed download cleans up after itself; the
   # `return 1` still aborts the launcher under `set -e`, which is what should
   # happen -- a pod that cannot stage its model must fail, not train on nothing.
+  # Note this `if` also suspends errexit inside the callee for its whole dynamic
+  # extent, so each fetch helper reports its own failures explicitly.
   if ! "$@" "$staging"; then
     echo "stage_once: population failed for $dest" >&2
     rm -rf "$staging"
@@ -116,14 +122,55 @@ stage_once() {
   echo "Cached: $dest"
 }
 
+# Serialise pods staging the same entry on one node, so N pods do not each pull
+# the same ~16GB. Strictly an efficiency win: _stage_once_body is correct on its
+# own, and this wrapper falls through to it whenever the lock is unavailable.
+# flock is released by the kernel when the holder dies, so unlike a mkdir- or
+# file-based lock there is no stale-lock state to recover from.
+stage_once() {
+  local dest="$1"; shift
+  local rc=0
+  if [[ -f "$dest/.complete" ]]; then
+    echo "Cache hit: $dest"
+    return 0
+  fi
+  # Both the lock file below and mktemp in the body need the parent to exist;
+  # every call site creates it already, but do not depend on that.
+  mkdir -p "$(dirname "$dest")" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    # Subshell so fd 9 -- and with it the lock -- is released however the body
+    # exits. The body re-checks the marker first, so a waiter that was blocked
+    # by the pod which just published takes the cache-hit path.
+    #
+    # Consequence: on this path the staging command runs in a subshell, so it
+    # must communicate through the filesystem only -- a variable it sets is not
+    # visible to the caller. Every fetch helper here only writes files.
+    (
+      flock -w "${STAGE_LOCK_TIMEOUT_SECONDS:-1800}" 9 || \
+        echo "stage_once: timed out on the staging lock for $dest; proceeding without it" >&2
+      _stage_once_body "$dest" "$@"
+    ) 9>>"${dest}.lock" || rc=$?
+    return "$rc"
+  fi
+  _stage_once_body "$dest" "$@"
+}
+
+# Every fallible step needs an explicit `|| return`. This runs as the condition
+# of an `if` inside stage_once, and POSIX suspends errexit for the whole dynamic
+# extent of a condition -- so a bare failing command would not abort the
+# function, which would fall through and return the status of its last line
+# (`rm -f`, effectively always 0). A partially extracted archive would then pass
+# the shape check and be published to the node cache as complete, poisoning it
+# for every later pod.
 fetch_gcloud_sdk() {
   local staging="$1"
   local archive="$staging/google-cloud-cli-linux-x86_64.tar.gz"
   curl -fsSL \
     https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz \
-    -o "$archive"
-  tar -C "$staging" -xf "$archive"
-  rm -f "$archive"
+    -o "$archive" || return 1
+  tar -C "$staging" -xf "$archive" || return 1
+  rm -f "$archive" || return 1
+  return 0
 }
 
 if ! command -v gcloud >/dev/null 2>&1; then
@@ -157,7 +204,7 @@ fetch_model_from_gcs() {
   # copy the *contents* of dir into dest (rsync-style), so the files would land
   # at dest/config.json instead of dest/<basename>/config.json. stage_once
   # requires the latter.
-  gcloud storage cp -r "${MODEL_ID%/}" "$1/"
+  gcloud storage cp -r "${MODEL_ID%/}" "$1/" || return 1
 }
 if [[ "${MODEL_ID:-}" == gs://* ]]; then
   echo "MODEL_ID is a GCS path: $MODEL_ID"
