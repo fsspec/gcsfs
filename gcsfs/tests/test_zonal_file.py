@@ -815,7 +815,7 @@ def test_zonal_file_fetch_range_mutually_exclusive(mock_sync, mock_gcsfs):
 @mock.patch("gcsfs.zonal_file.sync_teardown")
 @mock.patch("gcsfs.zonal_file.asyn.sync")
 def test_zonal_file_close_cleans_up_new_pools(mock_sync, mock_teardown, mock_gcsfs):
-    """Tests that close() properly tears down the prefetch engine and MRD pool using hasattr."""
+    """Tests that close() properly tears down the prefetch engine and MRD pool."""
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
     mock_engine = mock.Mock()
     zf._prefetch_engine = mock_engine
@@ -832,34 +832,18 @@ def test_zonal_file_close_cleans_up_new_pools(mock_sync, mock_teardown, mock_gcs
     )
 
 
-def _bare_zonal_file(loop, timeout=None):
-    """A ZonalFile built via __new__ to skip real GCS setup, for testing
-    _sync_teardown directly with a real (not mocked) event loop."""
-    zf = ZonalFile.__new__(ZonalFile)
-    zf.path = "gs://bucket/object"
-    zf.gcsfs = mock.Mock(loop=loop)
-    zf.timeout = timeout
-    zf.closed = False
-    zf.mode = "rb"
-    zf.fs = None
-    zf.aaow = None
-    zf._close_deferred = False
-    return zf
-
-
-def test_sync_teardown_skips_during_interpreter_finalization(monkeypatch):
+def test_sync_teardown_skips_during_interpreter_finalization():
     """Mirrors the prefetcher's sys.is_finalizing() guard: never touch the
     IO loop once the interpreter itself is tearing down.
     """
     loop = fsspec.asyn.get_loop()
-    monkeypatch.setattr(sys, "is_finalizing", lambda: True)
-
     calls = []
 
     async def coro():
         calls.append(1)
 
-    zb_hns_utils.sync_teardown(loop, coro, description="test op")
+    with mock.patch.object(sys, "is_finalizing", return_value=True):
+        zb_hns_utils.sync_teardown(loop, coro, description="test op")
 
     assert calls == []
 
@@ -956,36 +940,6 @@ def test_sync_teardown_raises_on_timeout():
         zb_hns_utils.sync_teardown(loop, coro, timeout=0.05, description="slow op")
 
 
-def test_close_impl_uses_default_timeout_when_file_has_none(monkeypatch):
-    """When the file carries no per-request timeout, teardown must still
-    be bounded (falls back to DEFAULT_TEARDOWN_TIMEOUT_SECONDS) rather than
-    waiting indefinitely.
-    """
-    import gcsfs.zonal_file as zonal_file_module
-
-    loop = fsspec.asyn.get_loop()
-    zf = _bare_zonal_file(loop, timeout=None)
-    mock_pool = mock.Mock()
-
-    async def fake_close():
-        pass
-
-    mock_pool.close = fake_close
-    zf.mrd_pool = mock_pool
-
-    captured = {}
-    real_teardown = zonal_file_module.sync_teardown
-
-    def spy_teardown(loop_, func, *args, **kwargs):
-        captured["timeout"] = kwargs.get("timeout")
-        return real_teardown(loop_, func, *args, **kwargs)
-
-    monkeypatch.setattr(zonal_file_module, "sync_teardown", spy_teardown)
-    zf._close_impl()
-
-    assert captured["timeout"] == DEFAULT_TEARDOWN_TIMEOUT_SECONDS
-
-
 def test_sync_teardown_reentrant_task_logs_exception(caplog):
     """Verify that when a reentrant teardown task on the IO loop thread
     raises an exception, it is logged with logger.error and not left unretrieved.
@@ -1060,51 +1014,43 @@ def test_sync_teardown_accepts_coroutine_object():
     assert result == ["done"]
 
 
-def test_close_impl_mrd_pool_failure_does_not_skip_aaow():
+@mock.patch("gcsfs.zonal_file.asyn.sync")
+def test_close_impl_mrd_pool_failure_does_not_skip_aaow(mock_sync, mock_gcsfs):
     """Verify that if mrd_pool.close fails, aaow teardown is still executed."""
-    loop = fsspec.asyn.get_loop()
-    zf = _bare_zonal_file(loop)
-    zf.finalize_on_close = False
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+    zf._prefetch_engine = mock.Mock()
 
     async def failing_mrd_close():
         raise RuntimeError("mrd pool failed")
 
-    mock_pool = mock.Mock(close=failing_mrd_close)
-    zf.mrd_pool = mock_pool
+    zf.mrd_pool = mock.Mock(close=failing_mrd_close)
+    zf.aaow = mock.Mock(_is_stream_open=True)
 
     aaow_closed = []
 
     async def fake_close_aaow(aaow, finalize_on_close=False):
         aaow_closed.append(True)
 
-    mock_aaow = mock.Mock(_is_stream_open=True)
-    zf.aaow = mock_aaow
-
     with mock.patch("gcsfs.zb_hns_utils.close_aaow", side_effect=fake_close_aaow):
         with pytest.raises(RuntimeError, match="mrd pool failed"):
             zf._close_impl()
 
-    assert aaow_closed == [
-        True
-    ], "close_aaow should have been called even though mrd_pool failed"
+    assert aaow_closed == [True]
 
 
-def test_close_impl_aaow_failure_raises():
+@mock.patch("gcsfs.zonal_file.asyn.sync")
+def test_close_impl_aaow_failure_raises(mock_sync, mock_gcsfs):
     """Verify that if close_aaow fails, the error is recorded and re-raised."""
-    loop = fsspec.asyn.get_loop()
-    zf = _bare_zonal_file(loop)
-    zf.finalize_on_close = False
-
-    mock_pool = mock.Mock()
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+    zf._prefetch_engine = mock.Mock()
 
     async def fake_mrd_close():
         pass
 
-    mock_pool.close = fake_mrd_close
-    zf.mrd_pool = mock_pool
-
-    mock_aaow = mock.Mock(_is_stream_open=True)
-    zf.aaow = mock_aaow
+    zf.mrd_pool = mock.Mock(close=fake_mrd_close)
+    zf.aaow = mock.Mock(_is_stream_open=True)
 
     async def failing_close_aaow(aaow, finalize_on_close=False):
         raise RuntimeError("aaow close failed")

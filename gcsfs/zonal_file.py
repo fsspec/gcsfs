@@ -398,34 +398,32 @@ class ZonalFile(GCSFile):
     def _close_impl(self):
         super()._close_impl()
 
-        loop = getattr(getattr(self, "gcsfs", None), "loop", None)
-        path = getattr(self, "path", "<unknown>")
-        timeout = getattr(self, "timeout", None) or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
+        timeout = self.timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
         errors = []
 
         # Teardown the read-side MRD pool if initialized.
         if hasattr(self, "mrd_pool") and self.mrd_pool:
             try:
                 sync_teardown(
-                    loop,
+                    self.gcsfs.loop,
                     self.mrd_pool.close,
                     timeout=timeout,
-                    description=f"closing mrd_pool for {path}",
+                    description=f"closing mrd_pool for {self.path}",
                 )
             except Exception as e:
                 errors.append(e)
 
         # Finalize and close the write-side AAOW stream.
         # Wrapped independently so a read pool failure does not abandon write finalization.
-        if getattr(self, "aaow", None) and self.aaow._is_stream_open:
+        if self.aaow and self.aaow._is_stream_open:
             try:
                 sync_teardown(
-                    loop,
+                    self.gcsfs.loop,
                     zb_hns_utils.close_aaow,
                     self.aaow,
                     timeout=timeout,
                     finalize_on_close=self.finalize_on_close,
-                    description=f"finalizing AsyncAppendableObjectWriter for {path}",
+                    description=f"finalizing AsyncAppendableObjectWriter for {self.path}",
                 )
             except Exception as e:
                 errors.append(e)

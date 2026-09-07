@@ -860,7 +860,10 @@ def test_close_none_timeout_waits_for_teardown(prefetcher_factory):
     assert bp.producer.is_stopped is True
 
 
-def test_close_zero_and_negative_timeout_is_fire_and_forget(prefetcher_factory):
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_close_zero_and_negative_timeout_is_fire_and_forget(
+    prefetcher_factory, timeout
+):
     """timeout=0 or negative means fire-and-forget: teardown is scheduled
     on the IO loop, but close() returns immediately without waiting.
     """
@@ -875,28 +878,11 @@ def test_close_zero_and_negative_timeout_is_fire_and_forget(prefetcher_factory):
 
     bp._async_close = slow_close
 
-    bp.close(timeout=0)
+    bp.close(timeout=timeout)
 
     assert bp.is_stopped is True
     assert not teardown_done.is_set()
     assert teardown_done.wait(timeout=2.0)
-
-    bp2 = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
-    teardown_done2 = threading.Event()
-    real_close2 = bp2._async_close
-
-    async def slow_close2():
-        await asyncio.sleep(0.1)
-        teardown_done2.set()
-        await real_close2()
-
-    bp2._async_close = slow_close2
-
-    bp2.close(timeout=-1)
-
-    assert bp2.is_stopped is True
-    assert not teardown_done2.is_set()
-    assert teardown_done2.wait(timeout=2.0)
 
 
 def test_close_does_not_swallow_teardown_exceptions(prefetcher_factory, caplog):
