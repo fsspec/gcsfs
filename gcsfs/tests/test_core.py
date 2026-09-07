@@ -3710,3 +3710,49 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
+
+
+@pytest.mark.parametrize(
+    "ts_str, expected_dt",
+    [
+        (
+            "2024-01-15T10:30:00.000Z",
+            datetime(2024, 1, 15, 10, 30, 0, 0, tzinfo=timezone.utc),
+        ),
+        (
+            "2024-01-15T11:45:00.123456Z",
+            datetime(2024, 1, 15, 11, 45, 0, 123456, tzinfo=timezone.utc),
+        ),
+        (
+            "2024-01-15T10:30:00Z",
+            datetime(2024, 1, 15, 10, 30, 0, 0, tzinfo=timezone.utc),
+        ),
+        (
+            "2024-01-15T10:30:00.12Z",
+            datetime(2024, 1, 15, 10, 30, 0, 120000, tzinfo=timezone.utc),
+        ),
+        (
+            "2024-01-15T10:30:00.1234Z",
+            datetime(2024, 1, 15, 10, 30, 0, 123400, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_parse_timestamp_formats(gcs, ts_str, expected_dt):
+    assert gcs._parse_timestamp(ts_str) == expected_dt
+    assert GCSFileSystem._parse_timestamp(ts_str) == expected_dt
+
+
+def test_process_object_timestamps(gcs):
+    metadata = {
+        "name": "test_obj.txt",
+        "size": "50",
+        "timeCreated": "2024-01-15T10:30:00.000Z",
+        "updated": "2024-01-15T11:45:00.123456Z",
+    }
+    processed = gcs._process_object("my-bucket", metadata)
+    assert processed["ctime"] == datetime(
+        2024, 1, 15, 10, 30, 0, 0, tzinfo=timezone.utc
+    )
+    assert processed["mtime"] == datetime(
+        2024, 1, 15, 11, 45, 0, 123456, tzinfo=timezone.utc
+    )
