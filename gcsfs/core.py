@@ -2561,7 +2561,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             **kwargs,
         )
         self.cache_type = cache_type
-        self._caller_framework = (
+        self.caller_framework = (
             default_usage_tracker.get_dimension(Dimension.FRAMEWORK) or ""
         )
         self.gcsfs = gcsfs
@@ -2616,19 +2616,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             )
         else:
             self._prefetch_engine = None
-
-    @property
-    def caller_framework(self):
-        """Dynamically fetch caller if currently None, and cache once found."""
-        if self._caller_framework is None:
-            self._caller_framework = (
-                default_usage_tracker.get_dimension(Dimension.FRAMEWORK) or ""
-            )
-        return self._caller_framework
-
-    @caller_framework.setter
-    def caller_framework(self, value):
-        self._caller_framework = value
 
     @property
     def details(self):

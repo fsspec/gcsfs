@@ -100,6 +100,7 @@ def _create_mock_frame(module_name: str, back_frame=None):
 def test_framework_detector_known_frameworks_mapping():
     detector = FrameworkDetector()
     assert detector.KNOWN_FRAMEWORKS["pandas"] == "pandas"
+    assert detector.KNOWN_FRAMEWORKS["polars"] == "polars"
     assert detector.KNOWN_FRAMEWORKS["dask"] == "dask"
     assert detector.KNOWN_FRAMEWORKS["lightning"] == "lightning"
     assert detector.KNOWN_FRAMEWORKS["pytorch_lightning"] == "lightning"
@@ -249,6 +250,32 @@ def test_get_tokens_sanitization_user_controlled_context():
             assert tracker.get_dimension(Dimension.FRAMEWORK) is None
         finally:
             reset_telemetry_context(token)
+
+
+def test_collect_tokens_map_caches_detector_exception():
+    """Verify that if a detector raises an exception, it caches empty string to prevent repeated calls."""
+    call_count = 0
+
+    class FailingDetector(BaseDetector):
+        @property
+        def name(self):
+            return Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("Frame traversal failed unexpectedly")
+
+    tracker = UsageMetricsTracker(detectors=[FailingDetector()])
+
+    tokens1 = tracker.collect_tokens_map()
+    assert tokens1 == {Dimension.FRAMEWORK.value: ""}
+    assert call_count == 1
+
+    # Second call with the same token dictionary should not re-invoke detect()
+    tokens2 = tracker.collect_tokens_map(tokens=tokens1)
+    assert tokens2 == {Dimension.FRAMEWORK.value: ""}
+    assert call_count == 1
 
 
 # ============================================================================

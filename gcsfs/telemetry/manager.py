@@ -200,7 +200,7 @@ class UsageMetricsTracker:
                     detected_val = detector.detect()
                     tokens[dim_key] = detected_val or ""
                 except Exception:
-                    pass
+                    tokens[dim_key] = ""
 
         return tokens
 
