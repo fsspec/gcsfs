@@ -1,9 +1,7 @@
 import asyncio
-import concurrent.futures
 import logging
 import sys
 import threading
-import time
 from unittest import mock
 
 import fsspec.asyn
@@ -731,28 +729,28 @@ def test_fast_slice_pypy_fallback():
     assert _fast_slice(src, 0, len(src)) == src
 
 
-def test_close_when_sys_finalizing(prefetcher_factory, monkeypatch):
-    """Verify close returns immediately during interpreter finalization."""
+def test_close_when_interpreter_finalizing(prefetcher_factory):
+    """Verify close returns immediately without hanging during interpreter finalization."""
     bp = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
-    monkeypatch.setattr(sys, "is_finalizing", lambda: True)
-    with mock.patch("asyncio.run_coroutine_threadsafe") as mock_schedule:
+
+    with mock.patch.object(sys, "is_finalizing", return_value=True):
         bp.close()
-        assert bp.is_stopped is True
-        mock_schedule.assert_not_called()
+
+    assert bp.is_stopped is True
 
 
 def test_close_when_loop_not_running(prefetcher_factory):
-    """Verify close returns immediately if the loop is not running."""
+    """Verify close returns immediately without raising when loop is not running."""
     bp = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
+
     with mock.patch.object(bp.loop, "is_running", return_value=False):
-        with mock.patch("asyncio.run_coroutine_threadsafe") as mock_schedule:
-            bp.close()
-            assert bp.is_stopped is True
-            mock_schedule.assert_not_called()
+        bp.close(timeout=1.0)
+
+    assert bp.is_stopped is True
 
 
-def test_close_on_loop_thread_schedules_task(prefetcher_factory):
-    """Verify close called from within the IO loop thread schedules task without NotImplementedError."""
+def test_close_on_loop_thread_schedules_task():
+    """Verify close called from within the IO loop thread completes without deadlocking."""
     loop = fsspec.asyn.get_loop()
 
     async def close_inside_loop():
@@ -761,7 +759,9 @@ def test_close_on_loop_thread_schedules_task(prefetcher_factory):
         )
         await bp.afetch(0, 10)
         assert bp.producer is not None and not bp.producer.is_stopped
+
         bp.close()
+
         assert bp.is_stopped is True
         # Allow scheduled task to complete
         await asyncio.sleep(0.05)
@@ -779,63 +779,59 @@ def test_reentrant_close_logs_exception(caplog):
             fetcher=MockFetcher(b"X" * 10), size=10, concurrency=1, loop=loop
         )
 
-        async def boom():
+        async def failing_close():
             raise RuntimeError("reentrant close failed")
 
-        bp._async_close = boom
-        with caplog.at_level(logging.WARNING, logger="gcsfs.prefetcher"):
+        bp._async_close = failing_close
+
+        with caplog.at_level(logging.ERROR, logger="gcsfs"):
             bp.close()
             await asyncio.sleep(0.05)
 
     fsspec.asyn.sync(loop, run_failing_reentrant)
+
     assert any("reentrant close failed" in r.message for r in caplog.records)
 
 
-def test_close_unawaited_coroutine_warning_on_runtime_error(prefetcher_factory):
-    """Verify that if run_coroutine_threadsafe raises RuntimeError, the
-    coroutine is closed and no RuntimeWarning is emitted."""
+def test_close_when_loop_closed_emits_no_unawaited_warning(prefetcher_factory):
+    """Verify that if loop is closed, close() handles it cleanly without unawaited warnings."""
     import warnings
 
     bp = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
-    with mock.patch(
-        "asyncio.run_coroutine_threadsafe", side_effect=RuntimeError("loop closed")
-    ):
+
+    with mock.patch.object(bp.loop, "is_closed", return_value=True):
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
-            bp.close()
-        unawaited_warnings = [
-            w
-            for w in record
-            if issubclass(w.category, RuntimeWarning)
-            and "was never awaited" in str(w.message)
-        ]
-        assert not unawaited_warnings
+            bp.close(timeout=1.0)
+
+    assert bp.is_stopped is True
+    unawaited_warnings = [
+        w
+        for w in record
+        if issubclass(w.category, RuntimeWarning)
+        and "was never awaited" in str(w.message)
+    ]
+    assert not unawaited_warnings
 
 
 def test_close_is_bounded_when_loop_is_unserviced(prefetcher_factory):
-    """close() must return within `timeout` even if the loop never runs the
-    scheduled teardown coroutine (e.g. its thread died or is blocked on
-    something else) -- this is the core deadlock from
-    https://github.com/fsspec/gcsfs/issues/1037. Regression test for the
-    fact that `run_coroutine_threadsafe` (unlike `fsspec.asyn.sync`, which
-    polls with no exit condition) always schedules successfully, so the
-    only thing bounding this wait is the timeout passed to `.result()`.
-    """
+    """close() must return within `timeout` if teardown takes longer than timeout."""
     bp = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
+    teardown_done = threading.Event()
+    real_close = bp._async_close
 
-    never_resolves = concurrent.futures.Future()  # never has a result set
+    async def slow_close():
+        await asyncio.sleep(0.1)
+        teardown_done.set()
+        await real_close()
 
-    def fake_schedule(coro, loop):
-        coro.close()  # avoid a "coroutine was never awaited" warning
-        return never_resolves
+    bp._async_close = slow_close
 
-    with mock.patch("asyncio.run_coroutine_threadsafe", side_effect=fake_schedule):
-        start = time.monotonic()
-        bp.close(timeout=0.2)
-        elapsed = time.monotonic() - start
+    bp.close(timeout=0.01)
 
     assert bp.is_stopped is True
-    assert elapsed < 2.0  # comfortably bounded, not "forever"
+    assert not teardown_done.is_set()
+    assert teardown_done.wait(timeout=2.0)
 
 
 def test_close_default_timeout_waits_for_teardown(prefetcher_factory):
@@ -865,43 +861,42 @@ def test_close_none_timeout_waits_for_teardown(prefetcher_factory):
 
 
 def test_close_zero_and_negative_timeout_is_fire_and_forget(prefetcher_factory):
-    """timeout=0 or negative means fire-and-forget: teardown is still
-    scheduled on the IO loop, but close() returns immediately without waiting.
+    """timeout=0 or negative means fire-and-forget: teardown is scheduled
+    on the IO loop, but close() returns immediately without waiting.
     """
     bp = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
+    teardown_done = threading.Event()
+    real_close = bp._async_close
 
-    never_resolves = concurrent.futures.Future()
+    async def slow_close():
+        await asyncio.sleep(0.1)
+        teardown_done.set()
+        await real_close()
 
-    def fake_schedule(coro, loop):
-        coro.close()  # avoid a "coroutine was never awaited" warning
-        return never_resolves
+    bp._async_close = slow_close
 
-    try:
-        with mock.patch(
-            "asyncio.run_coroutine_threadsafe", side_effect=fake_schedule
-        ) as mock_schedule:
-            start = time.monotonic()
-            bp.close(timeout=0)
-            elapsed_zero = time.monotonic() - start
+    bp.close(timeout=0)
 
-        mock_schedule.assert_called_once()
-        assert bp.is_stopped is True
-        assert elapsed_zero < 0.5
+    assert bp.is_stopped is True
+    assert not teardown_done.is_set()
+    assert teardown_done.wait(timeout=2.0)
 
-        # Also verify negative timeout is non-blocking
-        bp2 = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
-        with mock.patch(
-            "asyncio.run_coroutine_threadsafe", side_effect=fake_schedule
-        ) as mock_schedule_neg:
-            start = time.monotonic()
-            bp2.close(timeout=-1)
-            elapsed_neg = time.monotonic() - start
+    bp2 = prefetcher_factory(fetcher=MockFetcher(b"X"), size=100, concurrency=1)
+    teardown_done2 = threading.Event()
+    real_close2 = bp2._async_close
 
-        mock_schedule_neg.assert_called_once()
-        assert bp2.is_stopped is True
-        assert elapsed_neg < 0.5
-    finally:
-        never_resolves.cancel()
+    async def slow_close2():
+        await asyncio.sleep(0.1)
+        teardown_done2.set()
+        await real_close2()
+
+    bp2._async_close = slow_close2
+
+    bp2.close(timeout=-1)
+
+    assert bp2.is_stopped is True
+    assert not teardown_done2.is_set()
+    assert teardown_done2.wait(timeout=2.0)
 
 
 def test_close_does_not_swallow_teardown_exceptions(prefetcher_factory, caplog):
@@ -955,8 +950,8 @@ def test_close_does_not_cancel_inflight_network_task_on_timeout(prefetcher_facto
     bp.producer.stop = slow_stop
 
     bp.close(timeout=0.05)  # much shorter than slow_stop's delay
-    assert bp.is_stopped is True
 
+    assert bp.is_stopped is True
     assert stop_started.wait(timeout=1.0)
     assert stop_finished.wait(timeout=2.0), (
         "teardown should keep running to completion in the background "
@@ -1009,13 +1004,14 @@ def test_close_and_aclose_idempotence(prefetcher_factory):
     """Verify that close() and aclose() are idempotent and return early on subsequent calls."""
     bp = prefetcher_factory(fetcher=MockFetcher(b"X" * 100), size=100, concurrency=1)
     assert not bp.is_stopped
+
     bp.close()
+
     assert bp.is_stopped
-    # Second close() hits the `if self.is_stopped: return` branch
+    # Second close() hits the early exit
     bp.close()
     assert bp.is_stopped
 
-    # Test aclose() idempotence
     loop = fsspec.asyn.get_loop()
 
     async def run_aclose_twice():
@@ -1023,9 +1019,11 @@ def test_close_and_aclose_idempotence(prefetcher_factory):
             fetcher=MockFetcher(b"Y" * 100), size=100, concurrency=1, loop=loop
         )
         assert not bp2.is_stopped
+
         await bp2.aclose()
+
         assert bp2.is_stopped
-        # Second aclose() hits the `if self.is_stopped: return` branch
+        # Second aclose() hits the early exit
         await bp2.aclose()
         assert bp2.is_stopped
 

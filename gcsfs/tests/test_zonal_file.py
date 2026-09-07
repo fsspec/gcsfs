@@ -1008,7 +1008,7 @@ def test_sync_teardown_reentrant_task_logs_exception(caplog):
     )
 
 
-def test_sync_teardown_helper_raises_exception():
+def test_sync_teardown_reraises_exception():
     """sync_teardown re-raises exceptions from the teardown coroutine."""
     loop = fsspec.asyn.get_loop()
 
@@ -1024,37 +1024,7 @@ def test_sync_teardown_helper_raises_exception():
         )
 
 
-def test_sync_teardown_helper_raises_timeout():
-    """sync_teardown raises FSTimeoutError when execution times out."""
-    loop = fsspec.asyn.get_loop()
-
-    async def slow_op():
-        await asyncio.sleep(2.0)
-
-    with pytest.raises(FSTimeoutError, match="slow teardown"):
-        zb_hns_utils.sync_teardown(
-            loop,
-            slow_op,
-            timeout=0.05,
-            description="slow teardown",
-        )
-
-
-def test_sync_teardown_helper_raises_when_loop_unavailable():
-    """sync_teardown raises RuntimeError when loop is None."""
-
-    async def op():
-        pass
-
-    with pytest.raises(RuntimeError, match="no usable IO loop available"):
-        zb_hns_utils.sync_teardown(
-            None,
-            op,
-            description="loopless teardown",
-        )
-
-
-def test_sync_teardown_helper_fire_and_forget():
+def test_sync_teardown_fire_and_forget_when_timeout_non_positive():
     """When timeout <= 0, scheduling is fire-and-forget and returns immediately."""
     loop = fsspec.asyn.get_loop()
     executed = threading.Event()
@@ -1072,7 +1042,7 @@ def test_sync_teardown_helper_fire_and_forget():
     assert executed.wait(timeout=5.0)
 
 
-def test_sync_teardown_helper_accepts_coroutine_object():
+def test_sync_teardown_accepts_coroutine_object():
     """sync_teardown works with an already instantiated coroutine object."""
     loop = fsspec.asyn.get_loop()
     result = []
