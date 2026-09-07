@@ -8,7 +8,6 @@ import json
 import logging
 import mimetypes
 import os
-import posixpath
 import queue
 import re
 import sys
@@ -574,7 +573,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """
         result = dict(object_metadata)
         result["size"] = int(object_metadata.get("size", 0))
-        result["name"] = posixpath.join(bucket, object_metadata["name"])
+        result["name"] = f"{bucket}/{object_metadata['name']}"
         result["type"] = "file"
         # Translate time metadata from GCS names to fsspec standard names.
         # TODO(issues/559): Remove legacy names `updated` and `timeCreated`?
