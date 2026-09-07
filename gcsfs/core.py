@@ -36,7 +36,7 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
-from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
+from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
 
@@ -2357,15 +2357,6 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs):
             )
         cache_type = "none" if use_prefetch_reader else "readahead"
     return cache_type, use_prefetch_reader, cache_source
-
-
-def _on_loop_thread(loop):
-    if loop is None:
-        return False
-    try:
-        return asyncio.get_running_loop() is loop
-    except RuntimeError:
-        return False
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
