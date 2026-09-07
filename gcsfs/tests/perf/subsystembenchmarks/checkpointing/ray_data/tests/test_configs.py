@@ -14,9 +14,14 @@ def test_case_ids_unique_and_named():
     cases = _cases()
     names = [c.name for c in cases]
     assert len(names) == len(set(names))
-    for c in cases:
+    save_cases = [c for c in cases if c.scenario == "checkpoint_write"]
+    load_cases = [c for c in cases if c.scenario == "checkpoint_read"]
+    assert len(save_cases) == 6
+    assert len(load_cases) == 9
+    for c in save_cases:
         assert c.name.startswith("save-")
-        assert c.scenario == "checkpoint_write"
+    for c in load_cases:
+        assert c.name.startswith("load-")
 
 
 def test_default_model_id():
@@ -50,9 +55,21 @@ def test_expected_strategies_present():
 def test_model_parallel_topology():
     cases = _cases()
     mp_cases = [c for c in cases if c.strategy.startswith("model_parallel")]
-    assert len(mp_cases) == 2
+    assert len(mp_cases) == 5
     for c in mp_cases:
-        assert c.tensor_parallel_size == 4
-        assert c.data_parallel_size == 2
-        assert c.world_size == 8
-        assert "tp4dp2" in c.name
+        if c.sweep_axis != "cross_size":
+            assert c.tensor_parallel_size == 4
+            assert c.data_parallel_size == 2
+            assert c.world_size == 8
+            assert "tp4dp2" in c.name
+
+
+def test_cross_size_cases():
+    cases = _cases()
+    cross_cases = [c for c in cases if c.sweep_axis == "cross_size"]
+    assert len(cross_cases) == 3
+    for c in cross_cases:
+        assert c.scenario == "checkpoint_read"
+        assert c.setup_world_size != c.world_size or (
+            c.setup_tensor_parallel_size != c.tensor_parallel_size
+        )

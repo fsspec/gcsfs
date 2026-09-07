@@ -15,3 +15,16 @@ scenarios:
       - {axis: "strategy", strategy: "fsdp_full", world_size: 8}
       - {axis: "strategy", strategy: "model_parallel_full", tensor_parallel_size: 4, data_parallel_size: 2, world_size: 8}
       - {axis: "strategy", strategy: "model_parallel_sharded", tensor_parallel_size: 4, data_parallel_size: 2, world_size: 8}
+  - name: "checkpoint_read"
+    scenario: "checkpoint_read"
+    variants:
+      # Strategy variants
+      - {axis: "strategy", strategy: "ddp", world_size: 8}
+      - {axis: "strategy", strategy: "fsdp_sharded", world_size: 8}
+      - {axis: "strategy", strategy: "fsdp_full", world_size: 8}
+      - {axis: "strategy", strategy: "model_parallel_full", tensor_parallel_size: 4, data_parallel_size: 2, world_size: 8}
+      - {axis: "strategy", strategy: "model_parallel_sharded", tensor_parallel_size: 4, data_parallel_size: 2, world_size: 8}
+      # Cross-topology restore variants
+      - {axis: "cross_size", strategy: "fsdp_sharded", setup_world_size: 4, world_size: 8}
+      - {axis: "cross_size", strategy: "fsdp_sharded", setup_world_size: 8, world_size: 4}
+      - {axis: "cross_size", strategy: "model_parallel_sharded", setup_tensor_parallel_size: 4, setup_data_parallel_size: 2, setup_world_size: 8, tensor_parallel_size: 2, data_parallel_size: 2, world_size: 4}
