@@ -3571,6 +3571,60 @@ async def test_cat_file_generation():
             assert "generation=12345" in url
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "start,end,expected_headers",
+    [
+        (None, None, {"If-Match": "etag", "range": "bytes=1-2"}),
+        (0, 10, {"If-Match": "etag", "Range": "bytes=0-10"}),
+    ],
+)
+async def test_cat_file_headers(start, end, expected_headers):
+    fs = gcsfs.core.GCSFileSystem(token="anon")
+    headers = {"If-Match": "etag", "range": "bytes=1-2"}
+
+    with (
+        mock.patch.object(
+            fs, "_call", new_callable=mock.AsyncMock, return_value=({}, b"data")
+        ) as mock_call,
+        mock.patch.object(
+            fs,
+            "_process_limits",
+            new_callable=mock.AsyncMock,
+            return_value="bytes=0-10",
+        ),
+    ):
+        await fs._cat_file(
+            "bucket/file", start=start, end=end, concurrency=1, headers=headers
+        )
+
+        sent_headers = mock_call.call_args.kwargs["headers"]
+        assert sent_headers == expected_headers
+        assert headers == {"If-Match": "etag", "range": "bytes=1-2"}
+
+
+@pytest.mark.asyncio
+async def test_get_file_headers_use_concurrent_path(tmp_path):
+    fs = gcsfs.core.GCSFileSystem(token="anon")
+    headers = {"If-Match": "etag"}
+
+    with (
+        mock.patch.object(
+            fs, "_get_file_concurrent", new_callable=mock.AsyncMock
+        ) as mock_concurrent,
+        mock.patch.object(
+            fs, "_get_file_request", new_callable=mock.AsyncMock
+        ) as mock_request,
+    ):
+        await fs._get_file(
+            "bucket/file", tmp_path / "file", concurrency=2, headers=headers
+        )
+
+        mock_concurrent.assert_awaited_once()
+        assert mock_concurrent.await_args.kwargs["headers"] is headers
+        mock_request.assert_not_awaited()
+
+
 def test_file_url_generation():
     fs = gcsfs.core.GCSFileSystem(token="anon")
     f = gcsfs.core.GCSFile(fs, "bucket/file", mode="wb")
