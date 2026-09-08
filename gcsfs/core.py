@@ -37,12 +37,7 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
-from .telemetry.context import (
-    Dimension,
-    get_telemetry_context,
-    reset_telemetry_context,
-    set_telemetry_context,
-)
+from .telemetry.context import Dimension, reset_telemetry_context, set_telemetry_context
 from .telemetry.manager import default_usage_tracker, mirror_gcs_methods
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
 
@@ -2443,19 +2438,11 @@ def _start_deferred_close_worker():
 
 
 def _defer_close(file):
-    tokens_map = get_telemetry_context()
-    fw = getattr(file, "caller_framework", None)
-    if fw:
-        tokens_map[Dimension.FRAMEWORK.value] = fw
-
     def _run():
-        token = set_telemetry_context(tokens_map)
         try:
             file._close_impl()
         except Exception:
             logger.exception("deferred close of %s failed", file.path)
-        finally:
-            reset_telemetry_context(token)
 
     work = _deferred_close_queue
     if work is None:  # pragma: no cover
@@ -2791,22 +2778,14 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """Async fetcher mapped to the Prefetcher engine for regional buckets."""
-        tokens_map = get_telemetry_context()
-        if self.caller_framework:
-            tokens_map[Dimension.FRAMEWORK.value] = self.caller_framework
-
-        token = set_telemetry_context(tokens_map)
-        try:
-            return await self.gcsfs._cat_file_concurrent(
-                self.path,
-                start=start_offset,
-                end=start_offset + total_size,
-                concurrency=split_factor,
-                cache_type=self.cache_type,
-                cache_source=self.cache_source,
-            )
-        finally:
-            reset_telemetry_context(token)
+        return await self.gcsfs._cat_file_concurrent(
+            self.path,
+            start=start_offset,
+            end=start_offset + total_size,
+            concurrency=split_factor,
+            cache_type=self.cache_type,
+            cache_source=self.cache_source,
+        )
 
     def close(self):
         if self.closed or self._close_deferred:
@@ -3025,3 +3004,8 @@ async def simple_upload(
     checker.update(datain)
     checker.validate_json_response(j)
     return j
+
+
+from .telemetry.manager import wrap_file_methods
+
+wrap_file_methods()

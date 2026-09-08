@@ -100,6 +100,58 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
     return wrapper
 
 
+def _setup_file_telemetry(file_obj) -> Optional[Any]:
+    fw = getattr(file_obj, "caller_framework", None)
+
+    from gcsfs.telemetry.context import has_telemetry_context
+
+    if has_telemetry_context() or not fw:
+        return None
+
+    tokens_map = get_telemetry_context()
+    tokens_map[Dimension.FRAMEWORK.value] = fw
+    return set_telemetry_context(tokens_map)
+
+
+def _file_telemetry_wrapper(func):
+    is_async = inspect.iscoroutinefunction(func)
+
+    @functools.wraps(func)
+    def sync_wrapper(self, *args, **kwargs):
+        token = _setup_file_telemetry(self)
+        if token is None:
+            return func(self, *args, **kwargs)
+
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            reset_telemetry_context(token)
+
+    @functools.wraps(func)
+    async def async_wrapper(self, *args, **kwargs):
+        token = _setup_file_telemetry(self)
+        if token is None:
+            return await func(self, *args, **kwargs)
+
+        try:
+            return await func(self, *args, **kwargs)
+        finally:
+            reset_telemetry_context(token)
+
+    return async_wrapper if is_async else sync_wrapper
+
+
+def wrap_file_methods():
+    from gcsfs.core import GCSFile
+
+    for name, attr in list(GCSFile.__dict__.items()):
+        if not name.startswith("__") and callable(attr):
+            if not getattr(attr, "_is_telemetry_wrapped", False):
+                wrapped = _file_telemetry_wrapper(attr)
+                wrapped._is_telemetry_wrapped = True
+                setattr(GCSFile, name, wrapped)
+
+
 def mirror_gcs_methods(obj: Any) -> None:
     """
     Binds sync and native async methods on a GCSFileSystem class or instance using
@@ -160,10 +212,6 @@ def mirror_gcs_methods(obj: Any) -> None:
                     getattr(AbstractFileSystem, smethod, None), "__doc__", ""
                 )
             setattr(obj, smethod, mth)
-
-
-# Alias for backward compatibility
-mirror_gcs_sync_methods = mirror_gcs_methods
 
 
 class UsageMetricsTracker:

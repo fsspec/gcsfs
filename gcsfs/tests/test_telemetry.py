@@ -272,8 +272,14 @@ def test_collect_tokens_map_caches_detector_exception():
     assert tokens1 == {Dimension.FRAMEWORK.value: ""}
     assert call_count == 1
 
-    # Second call with the same token dictionary should not re-invoke detect()
-    tokens2 = tracker.collect_tokens_map(tokens=tokens1)
+    # Second call
+    from gcsfs.telemetry.context import reset_telemetry_context, set_telemetry_context
+
+    t = set_telemetry_context(tokens1)
+    try:
+        tokens2 = tracker.collect_tokens_map()
+    finally:
+        reset_telemetry_context(t)
     assert tokens2 == {Dimension.FRAMEWORK.value: ""}
     assert call_count == 1
 
@@ -667,3 +673,75 @@ def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkey
     for _ in range(10):
         assert f.caller_framework == ""
     assert detect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_range_propagates_caller_framework():
+    """Verify that background prefetch coroutines inherit the framework context."""
+    from gcsfs.telemetry.context import Dimension, get_telemetry_context
+
+    captured_context = {}
+
+    async def mock_cat_file_concurrent(*args, **kwargs):
+        captured_context.update(get_telemetry_context())
+        return b"data"
+
+    import unittest.mock as mock
+
+    import gcsfs
+
+    fs = mock.MagicMock()
+    fs._cat_file_concurrent = mock.AsyncMock(side_effect=mock_cat_file_concurrent)
+    fs.split_path.return_value = ("bucket", "test.parquet", None)
+
+    # Bypass info call during init
+    with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
+        f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "rb", cache_type="none")
+
+    f.caller_framework = "fw/pandas"
+    # Ensure it is wrapped since it is manually instantiated without module load hooks
+    from gcsfs.telemetry.manager import _file_telemetry_wrapper
+
+    f._async_fetch_range = _file_telemetry_wrapper(
+        gcsfs.core.GCSFile._async_fetch_range
+    ).__get__(f)
+
+    await f._async_fetch_range(0, 10)
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "fw/pandas"
+
+
+def test_defer_close_propagates_caller_framework():
+    """Verify that background deferred close inherits the framework context."""
+    import threading
+
+    from gcsfs.telemetry.context import Dimension, get_telemetry_context
+
+    captured_context = {}
+
+    import unittest.mock as mock
+
+    import gcsfs
+
+    fs = mock.MagicMock()
+    fs.split_path.return_value = ("bucket", "test.parquet", None)
+    with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
+        f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "wb")
+
+    f.caller_framework = "fw/ray"
+
+    def mock_upload_chunk(self, final=False):
+        captured_context.update(get_telemetry_context())
+
+    from gcsfs.telemetry.manager import _file_telemetry_wrapper
+
+    f._upload_chunk = _file_telemetry_wrapper(mock_upload_chunk).__get__(f)
+
+    def background_job():
+        f._upload_chunk(final=True)
+
+    t = threading.Thread(target=background_job)
+    t.start()
+    t.join()
+
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "fw/ray"
+    f.closed = True
