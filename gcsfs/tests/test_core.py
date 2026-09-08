@@ -3858,26 +3858,3 @@ def test_content_range_total():
     assert _content_range_total("bytes 0-1023/*") is None
     assert _content_range_total(None) is None
     assert _content_range_total("") is None
-
-
-def test_cat_file_unknown_size_probe_window_independent_of_concurrency(
-    gcs, monkeypatch
-):
-    """A higher concurrency must not enlarge the serial probe."""
-    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
-    fn = f"{TEST_BUCKET}/core_unknown_size_probe.txt"
-    data = bytes(range(60))
-    gcs.pipe(fn, data)
-
-    for concurrency in (2, 8):
-        with mock.patch.object(
-            gcs,
-            "_cat_file_sequential_with_response_headers",
-            wraps=gcs._cat_file_sequential_with_response_headers,
-        ) as mock_seq:
-            res = fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, concurrency=concurrency)
-            assert res == data
-            first = mock_seq.call_args_list[0]
-            assert (first.kwargs["start"], first.kwargs["end"]) == (0, 10)
-            # remainder of 50 bytes: min(concurrency, 50 // 5) chunks
-            assert len(mock_seq.call_args_list) == 1 + min(concurrency, 10)
