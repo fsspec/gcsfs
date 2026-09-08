@@ -1239,9 +1239,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self, path, start=None, end=None, **kwargs
     ):
         """One-shot get of file data, returning ``(response_headers, data)``.
-
-        The headers are the *response* headers (used to read ``Content-Range``);
-        this has nothing to do with caller-supplied request headers.
+        The headers are the *response* headers (used to read ``Content-Range``).
         """
         # if start and end are both provided and valid, but start >= end, return empty bytes
         # Otherwise, _process_limits would generate an invalid HTTP range (e.g. "bytes=5-4"
@@ -1320,10 +1318,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         request; only larger objects fall through to a concurrent fetch of the
         remainder, paying the probe's serial transfer instead of the ``_info``
         round-trip.
-
-        The window is deliberately independent of ``concurrency``: scaling it
-        with the fan-out would serialise exactly the objects that a high
-        concurrency is meant to parallelise.
         """
         probe_end = start + 2 * self.MIN_CHUNK_SIZE_FOR_CONCURRENCY
         try:
