@@ -4,6 +4,32 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.9.0
+--------
+
+* upgrades google-cloud-storage (#1039)
+* microbenchmarks: separate regional and zonal large file comparison configurations (#1032)
+* fix(core): defer GCSFile finalizer cleanup during garbage collection (#1031)
+* feat(macrobenchmarks): add Ray Data and Ray Train PyTorch workload (#1030)
+* ci(macrobenchmarks): integrate Ray Train workload into Cloud Build automation and docs (#1029)
+* feat(macrobenchmarks): add Ray Data and Ray Train metrics parsers and calculation engine (#1028)
+* adds cache_type and cache_source for grpc client (#1019)
+* fix(benchmarks): add engine and method fields to BigQuery benchmarks schema (#1026)
+* Comment why internal write buffer is not needed for ZonalFile (#1027)
+* fix(core): prevent deadlock in deferred file close during garbage collection (#1025)
+* feat(microbenchmark): add comparison between gcsfs and cli (#1022)
+* perf(microbenchmarks): accelerate fixture data prep (#1021)
+* ci: add GitHub Actions workflow to mark and close stale issues (#1023)
+* refactor(core.py): simplify split_range and _cat_file_concurrent implementations (#1016)
+* fix(benchmark): precisely simulate Lightning checkpoint loading sequence (#1018)
+* fix(subsystembenchmarks): make checkpoint_case prefix generation robust to bucket URIs (#1015)
+* feat(subsystembenchmarks): add PyTorch Lightning checkpoint load benchmark (#1006)
+* adds agent skills file (#1012)
+* fix(subsystembenchmarks): enable finalize_on_close for datagen shard writes (#1011)
+* fix: prevent NotImplementedError when closing GCSFile from event loop thread (#1009)
+* refactor(subsystembenchmarks): switch datagen ingest pool to spawn-based ProcessPoolExecutor (#1010)
+* perf(subsystembenchmarks): remove num_workers=0 variant from webdataset read benchmarks (#1008)
+
 2026.8.0
 --------
 
