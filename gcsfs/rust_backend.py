@@ -23,7 +23,9 @@ _has_async = available and hasattr(_rust, "read_range_async")
 logger = logging.getLogger("gcsfs.rust_backend")
 
 
-async def cat_file_range(bucket, object, start=None, end=None, generation=None):
+async def cat_file_range(
+    bucket, object, start=None, end=None, generation=None, transport=None
+):
     """Read a byte range of a GCS object using the Rust SDK backend.
 
     Prefers the extension's native awaitable, which lets the running asyncio
@@ -35,9 +37,20 @@ async def cat_file_range(bucket, object, start=None, end=None, generation=None):
             "The 'rust' read backend requires the optional 'gcsfs-rust-backend' "
             "package (see rust/gcsfs_rust in the gcsfs source tree)."
         )
-    logger.debug("rust backend read: %s/%s %s-%s", bucket, object, start, end)
-    if _has_async:
-        return await _rust.read_range_async(bucket, object, start, end, generation)
-    return await asyncio.to_thread(
-        _rust.read_range, bucket, object, start, end, generation
+    logger.debug(
+        "rust backend read: %s/%s %s-%s transport=%s",
+        bucket,
+        object,
+        start,
+        end,
+        transport,
     )
+    if _has_async:
+        return await _rust.read_range_async(
+            bucket, object, start, end, generation, transport
+        )
+    return await asyncio.to_thread(
+        _rust.read_range, bucket, object, start, end, generation, transport
+    )
+
+

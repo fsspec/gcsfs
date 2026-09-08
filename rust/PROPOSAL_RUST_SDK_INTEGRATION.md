@@ -143,32 +143,70 @@ Metadata operations have distinct performance and frequency profiles:
 
 To validate the architecture, we ran an exhaustive benchmark matrix on a Google Cloud **`c4-standard-192` VM** (192 vCPUs, 708 GB RAM, `us-west4-a`), transferring **hundreds of gigabytes** from `gs://princer-bucket/test_10g/`.
 
-### 3-Run Averaged Multi-Process Benchmark Results
+### 1. Multi-Threading Benchmark (Threading-Only Across Shared Process)
 
-| Workers / Files | Total Data Read | Backend | Elapsed Time | Aggregate Throughput | Speedup vs `fsspec` | Peak Agg RSS | Per-Proc RSS | Total CPU % | CPU Cost per Byte | CPU Intensity |
-|:---:|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **24** | 240 GiB | **rust** | **15.54s** | **15,878.5 MB/s** (14910–17364) | **1.39x** | **6.56 GB** | **286.5 MB** | 3,204.0% | **2.07 CPU-s / GiB** | **2.07 vCPUs / GBps** |
-| | | fsspec | 21.45s | 11,457.0 MB/s (11363–11542) | 1.00x | 8.18 GB | 461.1 MB | 2,141.5% | 1.91 CPU-s / GiB | 1.91 vCPUs / GBps |
-| **32** | 320 GiB | **rust** | **18.40s** | **17,813.9 MB/s** (17302–18081) | **1.30x** | **8.76 GB** | **286.4 MB** | 3,957.1% | **2.27 CPU-s / GiB** | **2.27 vCPUs / GBps** |
-| | | fsspec | 23.94s | 13,686.2 MB/s (13665–13708) | 1.00x | 11.00 GB | 461.0 MB | 2,804.9% | 2.10 CPU-s / GiB | 2.10 vCPUs / GBps |
-| **48** | 480 GiB | **rust** | **25.36s** | **19,383.5 MB/s** (19213–19565) | **1.18x** | **13.17 GB** | **291.7 MB** | 4,641.0% | **2.45 CPU-s / GiB** | **2.45 vCPUs / GBps** |
-| | | fsspec | 30.01s | 16,403.3 MB/s (15602–17162) | 1.00x | 15.87 GB | 433.1 MB | 4,128.8% | 2.58 CPU-s / GiB | 2.58 vCPUs / GBps |
+| Workers / Threads | Total Data Read | Backend | Elapsed Time | Aggregate Throughput | Network Bandwidth | Peak Process RSS | Total CPU % | CPU Cost (s/GiB) |
+|:---:|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **1** | 10.0 GiB | `gcsfs_http` (aiohttp) | 14.03s | 730.11 MB/s | 6.12 Gbps | 437.9 MB | 97.6% (1 core) | 1.37 |
+| | | `rust_http` (Rust JSON) | 7.93s | **1291.41 MB/s** | **10.83 Gbps** | 508.5 MB | 223.3% (2.2 cores) | 1.77 |
+| | | `rust_grpc` (48 channels) | 6.92s | **1479.99 MB/s** | **12.42 Gbps** | 1135.2 MB | 431.6% (4.3 cores) | 2.99 |
+| | | `rust_grpc` (200 channels) | 15.29s | 669.75 MB/s | 5.62 Gbps | 580.7 MB | 177.3% (1.8 cores) | 2.71 |
+| **16** | 160.0 GiB | `gcsfs_http` (aiohttp) | 268.31s | 610.65 MB/s | 5.12 Gbps | 2186.8 MB | 100.6% (1 core) | 1.69 |
+| | | `rust_http` (Rust JSON) | 42.74s | **3833.42 MB/s** | **32.16 Gbps** | 3897.0 MB | 671.0% (6.7 cores) | 1.79 |
+| | | `rust_grpc` (48 channels) | 43.78s | **3741.94 MB/s** | **31.39 Gbps** | 7673.3 MB | 901.5% (9.0 cores) | 2.47 |
+| | | `rust_grpc` (200 channels) | 41.85s | **3914.92 MB/s** | **32.84 Gbps** | 4567.7 MB | 916.2% (9.2 cores) | 2.40 |
+| **24** | 240.0 GiB | `gcsfs_http` (aiohttp) | 388.23s | 633.03 MB/s | 5.31 Gbps | 2925.8 MB | 100.7% (1 core) | 1.63 |
+| | | `rust_http` (Rust JSON) | 62.56s | **3928.11 MB/s** | **32.95 Gbps** | 5459.3 MB | 725.6% (7.3 cores) | 1.89 |
+| | | `rust_grpc` (48 channels) | 65.15s | **3771.94 MB/s** | **31.64 Gbps** | 10654.9 MB | 859.4% (8.6 cores) | 2.33 |
+| | | `rust_grpc` (200 channels) | 55.54s | **4425.27 MB/s** | **37.12 Gbps** | 6129.9 MB | 1026.9% (10.3 cores) | 2.38 |
+| **48** | 480.0 GiB | `gcsfs_http` (aiohttp) | 673.15s | 730.17 MB/s | 6.13 Gbps | 4928.5 MB | 100.7% (1 core) | 1.41 |
+| | | `rust_http` (Rust JSON) | 101.23s | **4855.32 MB/s** | **40.73 Gbps** | 9849.7 MB | 819.4% (8.2 cores) | 1.73 |
+| | | `rust_grpc` (48 channels) | 119.26s | **4121.32 MB/s** | **34.57 Gbps** | 18465.1 MB | 961.0% (9.6 cores) | 2.39 |
+| | | `rust_grpc` (200 channels) | 107.00s | **4593.57 MB/s** | **38.53 Gbps** | 11055.4 MB | 986.9% (9.9 cores) | 2.20 |
+
+### 2. Multi-Processing Benchmark (Independent Worker Processes)
+
+| Workers / Procs | Total Data Read | Backend | Elapsed Time | Aggregate Throughput | Network Bandwidth | Peak Agg RSS | Per-Proc RSS | Total CPU % | CPU Cost (s/GiB) |
+|:---:|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **1** | 10.0 GiB | `gcsfs_http` (aiohttp) | 15.63s | 655.13 MB/s | 5.50 Gbps | 519.8 MB | 519.8 MB | 98.1% | 1.53 |
+| | | `rust_http` (Rust JSON) | 7.01s | **1461.31 MB/s** | **12.26 Gbps** | 368.9 MB | 368.9 MB | 317.4% | 2.22 |
+| | | `rust_grpc` (48 channels) | 6.68s | **1534.03 MB/s** | **12.87 Gbps** | 1006.0 MB | 1006.0 MB | 418.3% | 2.79 |
+| | | `rust_grpc` (200 channels) | 19.32s | 530.01 MB/s | 4.45 Gbps | 598.4 MB | 598.4 MB | 141.0% | 2.72 |
+| **16** | 160.0 GiB | `gcsfs_http` (aiohttp) | 24.81s | 6604.17 MB/s | 55.40 Gbps | 6200.5 MB | 387.5 MB | 1406.8% | 2.18 |
+| | | `rust_http` (Rust JSON) | 11.97s | **13683.78 MB/s** | **114.79 Gbps** | 5488.7 MB | 343.0 MB | 3751.0% | 2.81 |
+| | | `rust_grpc` (48 channels) | 19.62s | **8349.14 MB/s** | **70.04 Gbps** | 12349.4 MB | 771.8 MB | 4109.1% | 5.04 |
+| | | `rust_grpc` (200 channels) | 25.42s | **6444.74 MB/s** | **54.06 Gbps** | 8973.6 MB | 560.8 MB | 2675.2% | 4.25 |
+| **24** | 240.0 GiB | `gcsfs_http` (aiohttp) | 26.90s | 9137.54 MB/s | 76.65 Gbps | 9583.2 MB | 399.3 MB | 2108.5% | 2.36 |
+| | | `rust_http` (Rust JSON) | 13.59s | **18084.74 MB/s** | **151.71 Gbps** | 8061.3 MB | 335.9 MB | 5390.3% | 3.05 |
+| | | `rust_grpc` (48 channels) | 27.16s | **9047.51 MB/s** | **75.90 Gbps** | 16184.7 MB | 674.4 MB | 4452.3% | 5.04 |
+| | | `rust_grpc` (200 channels) | 28.89s | **8507.83 MB/s** | **71.37 Gbps** | 13574.0 MB | 565.6 MB | 4074.2% | 4.90 |
+| **48** | 480.0 GiB | `gcsfs_http` (aiohttp) | 48.49s | 10136.31 MB/s | 85.03 Gbps | 18097.8 MB | 377.0 MB | 4019.6% | 4.06 |
+| | | `rust_http` (Rust JSON) | 28.00s | **17551.20 MB/s** | **147.23 Gbps** | 16087.0 MB | 335.1 MB | 5904.1% | 3.44 |
+| | | `rust_grpc` (48 channels) | 39.51s | **12439.37 MB/s** | **104.35 Gbps** | 22558.7 MB | 470.0 MB | 6303.3% | 5.19 |
+| | | `rust_grpc` (200 channels) | 173.17s | 2838.29 MB/s | 23.81 Gbps | 22599.2 MB | 470.8 MB | 1410.8% | 5.09 |
 
 ```
- Aggregate Throughput at Scale (48 Workers / 480 GiB)
+ Multi-Threading Throughput Comparison (48 Threads / 480 GiB)
+ Multi-Threading Scaling (24 & 48 Threads)
  ─────────────────────────────────────────────────────────────────────────────
- Rust (4 threads) : ████████████████████████████████████████████ 19.38 GB/s (100% Line-Rate)
- fsspec (aiohttp) : █████████████████████████████████ 16.40 GB/s
+ rust_http (Rust JSON) : ████████████████████████████████ 4.86 GB/s (40.7 Gbps) [6.65x faster]
+ rust_grpc (48 ch)     : ███████████████████████████ 4.12 GB/s (34.6 Gbps) [5.64x faster]
+ gcsfs_http (aiohttp)  : ████ 0.73 GB/s (6.1 Gbps - GIL Pinned at 1 core)
+ rust_grpc (200 ch, 24 th) : ████████████████████████████████ 4.43 GB/s (37.1 Gbps)
+ rust_grpc (200 ch, 48 th) : █████████████████████████████████ 4.59 GB/s (38.5 Gbps)
+ rust_http (48 th)         : ███████████████████████████████████ 4.86 GB/s (40.7 Gbps)
+ gcsfs_http (48 th)        : ████ 0.73 GB/s (6.1 Gbps - GIL Pinned at 1 core)
 
- Memory Footprint per Worker Process
+ Multi-Processing Line-Rate Saturation (24 & 48 Workers)
  ─────────────────────────────────────────────────────────────────────────────
- Rust             : █████████████ 286.5 MB (-38% Memory Footprint)
- fsspec (aiohttp) : ██─────────────────── 461.1 MB
-
- CPU Cost per Byte at Scale (48 Workers)
- ─────────────────────────────────────────────────────────────────────────────
- Rust             : ████████████████████ 2.45 CPU-s / GiB (24% Lower CPU Burn)
- fsspec (aiohttp) : █████████████████████████ 2.58–3.22 CPU-s / GiB
+ rust_http (24 procs)  : ████████████████████████████████████████ 18.08 GB/s (151.7 Gbps)
+ rust_http (48 procs)  : ███████████████████████████████████████ 17.55 GB/s (147.2 Gbps)
+ rust_grpc (48 procs)  : ███████████████████████████ 12.44 GB/s (104.4 Gbps)
+ gcsfs_http (48 procs) : ██████████████████████ 10.14 GB/s (85.0 Gbps)
+ rust_http (24 procs)      : ████████████████████████████████████████ 18.08 GB/s (151.7 Gbps)
+ rust_http (48 procs)      : ███████████████████████████████████████ 17.55 GB/s (147.2 Gbps)
+ rust_grpc (48 ch, 48 procs): ███████████████████████████ 12.44 GB/s (104.4 Gbps)
+ gcsfs_http (48 procs)     : ██████████████████████ 10.14 GB/s (85.0 Gbps)
 ```
 
 ### The Four Key Breakthroughs:

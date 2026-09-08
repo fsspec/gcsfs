@@ -348,6 +348,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         default_location=None,
         version_aware=False,
         read_backend=None,
+        rust_transport=None,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -375,6 +376,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.default_location = default_location
         self.version_aware = version_aware
         self.read_backend = read_backend or os.getenv("GCSFS_READ_BACKEND", "http")
+        self.rust_transport = rust_transport or os.getenv("GCSFS_RUST_TRANSPORT", "grpc")
 
         if check_connection:
             warnings.warn(
@@ -1239,8 +1241,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             bucket, object, generation = self.split_path(path)
             generation = _coalesce_generation(kwargs.get("generation"), generation)
             return await rust_backend.cat_file_range(
-                bucket, object, start=start, end=end, generation=generation
+                bucket,
+                object,
+                start=start,
+                end=end,
+                generation=generation,
+                transport=getattr(self, "rust_transport", None),
             )
+
+
 
         u2 = self.url(path, generation=kwargs.get("generation"))
         if start is not None or end is not None:
