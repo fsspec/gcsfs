@@ -3757,3 +3757,127 @@ def test_process_object_leading_slash(gcs):
     assert processed["name"] == "my-bucket//leading_slash_file.txt"
     assert parsed_bucket == "my-bucket"
     assert parsed_key == "/leading_slash_file.txt"
+
+
+def test_cat_file_unknown_size_single_request(gcs):
+    """With concurrency>1 and no end, a small object must cost one request and no _info."""
+    fn = f"{TEST_BUCKET}/core_unknown_size_small.txt"
+    data = b"0123456789abcdefghijk"
+    gcs.pipe(fn, data)
+
+    with mock.patch.object(gcs, "_info", wraps=gcs._info) as mock_info:
+        with mock.patch.object(
+            gcs,
+            "_cat_file_sequential_with_response_headers",
+            wraps=gcs._cat_file_sequential_with_response_headers,
+        ) as mock_seq:
+            res = fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, concurrency=4)
+            assert res == data
+            assert mock_info.call_count == 0
+            assert mock_seq.call_count == 1
+
+
+def test_cat_file_unknown_size_offset_and_suffix(gcs):
+    fn = f"{TEST_BUCKET}/core_unknown_size_offset.txt"
+    data = b"0123456789abcdefghijk"
+    gcs.pipe(fn, data)
+
+    with mock.patch.object(gcs, "_info", wraps=gcs._info) as mock_info:
+        assert (
+            fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, start=5, concurrency=4)
+            == data[5:]
+        )
+        assert (
+            fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, start=-4, concurrency=4)
+            == data[-4:]
+        )
+        assert mock_info.call_count == 0
+
+
+def test_cat_file_unknown_size_empty_and_past_end(gcs):
+    fn = f"{TEST_BUCKET}/core_unknown_size_empty.txt"
+    gcs.pipe(fn, b"")
+    assert fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, concurrency=4) == b""
+
+    fn2 = f"{TEST_BUCKET}/core_unknown_size_past_end.txt"
+    gcs.pipe(fn2, b"0123456789")
+    assert (
+        fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn2, start=10, concurrency=4) == b""
+    )
+    assert (
+        fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn2, start=50, concurrency=4) == b""
+    )
+
+
+def test_cat_file_unknown_size_large_object_fetches_remainder_concurrently(
+    gcs, monkeypatch
+):
+    """Objects larger than the probe window: probe + concurrent remainder, still no _info."""
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
+    fn = f"{TEST_BUCKET}/core_unknown_size_large.txt"
+    data = b"0123456789abcdefghijklmnopqrstuvwxyz"  # 36 bytes; probe window = 2*5 = 10
+    gcs.pipe(fn, data)
+
+    with mock.patch.object(gcs, "_info", wraps=gcs._info) as mock_info:
+        with mock.patch.object(
+            gcs,
+            "_cat_file_sequential_with_response_headers",
+            wraps=gcs._cat_file_sequential_with_response_headers,
+        ) as mock_seq:
+            res = fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, concurrency=4)
+            assert res == data
+            assert mock_info.call_count == 0
+            # probe [0, 10) then the 26-byte remainder split across concurrency=4
+            ranges = [
+                (call.kwargs["start"], call.kwargs["end"])
+                for call in mock_seq.call_args_list
+            ]
+            assert ranges[0] == (0, 10)
+            assert ranges[1:] == [(10, 16), (16, 22), (22, 28), (28, 36)]
+
+
+def test_cat_file_unknown_size_data_integrity(gcs):
+    """Real-size object larger than the 10 MiB default probe window."""
+    fn = f"{TEST_BUCKET}/core_unknown_size_integrity.txt"
+    file_size = 25 * 1024 * 1024
+    data = os.urandom(file_size)
+    gcs.pipe(fn, data)
+
+    with mock.patch.object(gcs, "_info", wraps=gcs._info) as mock_info:
+        res = fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, concurrency=4)
+        assert len(res) == file_size
+        assert res == data
+        assert mock_info.call_count == 0
+
+
+def test_content_range_total():
+    from gcsfs.core import _content_range_total
+
+    assert _content_range_total("bytes 0-1023/5448771") == 5448771
+    assert _content_range_total("bytes */5448771") == 5448771
+    assert _content_range_total("bytes 0-1023/*") is None
+    assert _content_range_total(None) is None
+    assert _content_range_total("") is None
+
+
+def test_cat_file_unknown_size_probe_window_independent_of_concurrency(
+    gcs, monkeypatch
+):
+    """A higher concurrency must not enlarge the serial probe."""
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
+    fn = f"{TEST_BUCKET}/core_unknown_size_probe.txt"
+    data = bytes(range(60))
+    gcs.pipe(fn, data)
+
+    for concurrency in (2, 8):
+        with mock.patch.object(
+            gcs,
+            "_cat_file_sequential_with_response_headers",
+            wraps=gcs._cat_file_sequential_with_response_headers,
+        ) as mock_seq:
+            res = fsspec.asyn.sync(gcs.loop, gcs._cat_file, fn, concurrency=concurrency)
+            assert res == data
+            first = mock_seq.call_args_list[0]
+            assert (first.kwargs["start"], first.kwargs["end"]) == (0, 10)
+            # remainder of 50 bytes: min(concurrency, 50 // 5) chunks
+            assert len(mock_seq.call_args_list) == 1 + min(concurrency, 10)

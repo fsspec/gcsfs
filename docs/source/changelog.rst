@@ -4,6 +4,19 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+Unreleased
+----------
+
+* ``cat_file`` with the default ``concurrency`` no longer performs an ``_info``
+  lookup (an object GET plus a list request) before downloading an object of
+  unknown size. The first request now asks for the largest range the
+  concurrent path would fetch as a single chunk anyway
+  (``2 * MIN_CHUNK_SIZE_FOR_CONCURRENCY``, 10 MiB by default) and reads the
+  object size from ``Content-Range``, so objects below that size are fetched
+  in exactly one HTTP round-trip, as they were before 2026.8.0 raised the
+  default concurrency from 1 to 4. Many-small-object workloads (zarr,
+  parquet) were paying three round-trips per object.
+
 2026.8.0
 --------
 

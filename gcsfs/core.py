@@ -34,7 +34,7 @@ from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
-from .retry import errs, retry_request, validate_response
+from .retry import HttpError, errs, retry_request, validate_response
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
@@ -180,6 +180,18 @@ def _coalesce_generation(*args):
 
 def _is_directory_marker(entry):
     return entry["size"] == 0 and entry["name"].endswith("/")
+
+
+def _content_range_total(value):
+    """Total object size from a ``Content-Range`` header, or None if unknown.
+
+    ``bytes 0-1023/5448771`` -> 5448771; ``bytes */5448771`` -> 5448771;
+    missing header or ``bytes 0-1023/*`` -> None.
+    """
+    if not value:
+        return None
+    _, _, total = value.rpartition("/")
+    return int(total) if total.isdigit() else None
 
 
 def _get_cache_type_header_value(cache_type, cache_source=None):
@@ -1218,11 +1230,24 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
+        _, out = await self._cat_file_sequential_with_response_headers(
+            path, start=start, end=end, **kwargs
+        )
+        return out
+
+    async def _cat_file_sequential_with_response_headers(
+        self, path, start=None, end=None, **kwargs
+    ):
+        """One-shot get of file data, returning ``(response_headers, data)``.
+
+        The headers are the *response* headers (used to read ``Content-Range``);
+        this has nothing to do with caller-supplied request headers.
+        """
         # if start and end are both provided and valid, but start >= end, return empty bytes
         # Otherwise, _process_limits would generate an invalid HTTP range (e.g. "bytes=5-4"
         # for start=5, end=5), causing the server to return the whole file instead of nothing.
         if start is not None and end is not None and start >= end >= 0:
-            return b""
+            return {}, b""
 
         u2 = self.url(path, generation=kwargs.get("generation"))
         if start is not None or end is not None:
@@ -1235,7 +1260,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         headers, out = await self._call(
             "GET", u2, headers=head, cache_type=cache_type, cache_source=cache_source
         )
-        return out
+        return headers, out
 
     async def _cat_file_concurrent(
         self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
@@ -1244,7 +1269,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if start is None:
             start = 0
         if end is None:
-            end = (await self._info(path))["size"]
+            if start < 0:
+                # Suffix read: a single "bytes=-N" range request handles it.
+                return await self._cat_file_sequential(path, start=start, **kwargs)
+            return await self._cat_file_concurrent_unknown_size(
+                path, start, concurrency, **kwargs
+            )
         if start >= end:
             return b""
 
@@ -1272,6 +1302,53 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+
+    async def _cat_file_concurrent_unknown_size(
+        self, path, start, concurrency, **kwargs
+    ):
+        """Concurrent fetch of ``path[start:]`` without a prior size lookup.
+
+        Looking the size up with ``_info`` costs one or two extra HTTP
+        round-trips (object GET plus a list request) before any data flows,
+        which dominates for the many-small-objects access pattern of formats
+        such as zarr or parquet-with-row-groups. Instead, the first request
+        asks for the largest range that the known-size path would fetch as a
+        single chunk anyway (``split_range`` only splits from
+        ``2 * MIN_CHUNK_SIZE_FOR_CONCURRENCY`` upwards, 10 MiB by default)
+        and reads the object size from the ``Content-Range`` response header.
+        Objects that fit in that window are therefore fetched in exactly one
+        request; only larger objects fall through to a concurrent fetch of the
+        remainder, paying the probe's serial transfer instead of the ``_info``
+        round-trip.
+
+        The window is deliberately independent of ``concurrency``: scaling it
+        with the fan-out would serialise exactly the objects that a high
+        concurrency is meant to parallelise.
+        """
+        probe_end = start + 2 * self.MIN_CHUNK_SIZE_FOR_CONCURRENCY
+        try:
+            headers, first = await self._cat_file_sequential_with_response_headers(
+                path, start=start, end=probe_end, **kwargs
+            )
+        except HttpError as e:
+            if e.code == 416:
+                # Range not satisfiable: start is at or beyond the end of the
+                # object (including the empty-object case). Mirrors the
+                # ``start >= end`` short-circuit of the known-size path.
+                return b""
+            raise
+
+        total = _content_range_total(headers.get("Content-Range"))
+        if total is None:
+            # Server ignored the Range header and returned the whole object.
+            return first[start:] if start else first
+        if total <= probe_end:
+            return first
+
+        rest = await self._cat_file_concurrent(
+            path, start=probe_end, end=total, concurrency=concurrency, **kwargs
+        )
+        return first + rest
 
     async def _cat_file(
         self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
