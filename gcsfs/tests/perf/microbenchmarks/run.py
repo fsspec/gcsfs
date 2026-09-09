@@ -266,6 +266,8 @@ def _create_table_row(row):
         _format_mb(row.get("block_size", 0)),
         row.get("mrd_pool_cache_size", "N/A"),
         row.get("mrd_pool_size", "N/A"),
+        row.get("concurrency", "N/A"),
+        row.get("requests_per_op", "N/A"),
         latency,
         _format_mb(throughput_val),
         f"{float(row.get('cpu_max_global', 0)):.2f}",
@@ -308,6 +310,10 @@ def _print_csv_to_shell(report_path):
             "Block Size (MiB)",
             "MRD Pool Cache Size",
             "MRD Pool Size",
+            "Concurrency",
+            # Round-trips per filesystem operation. A whole-object read should
+            # cost 1; anything higher is request amplification (gcsfs#1048).
+            "Requests/Op",
             "Mean Latency (s)",
             "Mean Throughput (MiB/s)",
             "Max CPU (%)",

@@ -2,7 +2,7 @@
 
 ## Introduction
 
-GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, write, put, listing, walk, delete, rename, open, and glob.
+GCSFS microbenchmarks are a suite of performance tests designed to evaluate the efficiency and latency of various Google Cloud Storage file system operations, including read, cat, write, put, listing, walk, delete, rename, open, and glob.
 
 These benchmarks are built using the `pytest` and `pytest-benchmark` frameworks. Each benchmark test is a parameterized pytest case, where the parameters are dynamically configured at runtime from YAML configuration files. This allows for flexible and extensive testing scenarios without modifying the code.
 
@@ -51,6 +51,44 @@ The benchmarks use a set of parameter classes to define the configuration for ea
 *   **Open Parameters**: Specific to Open operations.
     *    `folders`: Number of folders to distribute files into.
 
+*   **Cat Parameters**: Specific to whole-object reads (extends IO Parameters).
+    *    `pattern`: `whole` (`cat_file(path)`), `ranged` (`cat_file(path, start=, end=)`), or `batch` (`cat(paths)`).
+    *    `concurrency`: Value passed as `cat_file(concurrency=...)`. Unset means the gcsfs default, which is what production code gets.
+    *    Sizes for this group are configured in **bytes** (`file_sizes_bytes`), not MB — the objects it cares about are as small as 8 bytes.
+
+## Request counting
+
+Latency alone does not catch **request amplification**. An extra metadata
+round-trip per read is a few milliseconds: invisible in throughput on a
+multi-GB object, and lost in network noise on a small one. This is how
+[fsspec/gcsfs#1048](https://github.com/fsspec/gcsfs/issues/1048) shipped —
+`cat_file()` on a small object quietly went from one HTTP round-trip to three
+(object GET + objects.list + download) and no benchmark moved.
+
+So benchmarks that know how many filesystem operations they perform pass
+`operations_per_round` to `run_single_threaded` / `run_multi_threaded`. That
+counts the HTTP calls gcsfs issues and reports them as a **`Requests/Op`**
+column next to latency:
+
+| Column | Meaning |
+| :--- | :--- |
+| `requests_per_op` | Round-trips per filesystem operation. A whole-object read should be `1`. |
+| `requests_download` | Object media downloads (`?alt=media`). |
+| `requests_object_get` | Object metadata GETs (`storage.objects.get`). |
+| `requests_list` | Object listings (`storage.objects.list`). |
+| `requests_other` | Everything else (writes, deletes, bucket calls). |
+
+Two caveats:
+
+*   Only the JSON API is counted. Zonal buckets serve reads over gRPC via the
+    multi-range downloader, which does not go through `_call`, so their counts
+    read as ~0. Compare latency there, not counts.
+*   Counting happens in-process, so multi-process cases are not counted.
+
+The budget is also pinned in CI, without needing a bucket: `test_request_counter.py`
+stubs the transport and asserts that a whole-object read costs one round-trip.
+It currently `xfail`s against #1048 and will flip to `XPASS` once that is fixed.
+
 ## Configuration
 
 Configuration values are stored in YAML files (e.g., `configs.yaml`) located within each benchmark's directory. These files define:
@@ -80,7 +118,7 @@ The `run.py` script is the central entry point for executing benchmarks. It hand
 
 | Option | Description | Required |
 | :--- | :--- | :--- |
-| `--group` | The benchmark group to run (e.g., `read`, `write`, `put`, `listing`, `info`, `open`, `glob`). Runs all groups if not specified. | No |
+| `--group` | The benchmark group to run (e.g., `read`, `cat`, `write`, `put`, `listing`, `info`, `open`, `glob`). Runs all groups if not specified. | No |
 | `--config` | Specific scenario names to run (e.g., `read_seq`, `list_flat`). Accepts multiple values. | No |
 | `--regional-bucket` | Name of the regional GCS bucket. | Yes* |
 | `--zonal-bucket` | Name of the zonal GCS bucket. | Yes* |
