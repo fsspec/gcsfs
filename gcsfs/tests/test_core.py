@@ -540,6 +540,7 @@ def test_rm_batch(gcs):
 @pytest.mark.asyncio
 async def test_rm_batch_error(gcs):
     path = TEST_BUCKET + "/test_error_file"
+    boundary = "==========7330845974216740156=="
     mock_response_content = (
         f"\n--{boundary}\n"
         "Content-Type: application/http\n"
@@ -572,7 +573,7 @@ async def test_rm_batch_not_found_invalidates_stale_cache(gcs):
         if hasattr(gcs, "_is_bucket_hns_enabled")
         else False
     )
-
+    boundary = "==========7330845974216740156=="
     mock_response_content = (
         f"\n--{boundary}\n"
         "Content-Type: application/http\n"
@@ -3768,6 +3769,8 @@ def test_no_eager_property_evaluation_on_init(monkeypatch):
 
     _ = GCSFileSystem(token="anon", project="test-project")
     assert not buckets_called, "GCSFileSystem.__init__ eagerly evaluated fs.buckets!"
+
+
 def test_process_object_structure(gcs):
     bucket = "my-bucket"
     metadata = {
