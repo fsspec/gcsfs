@@ -52,15 +52,17 @@ steps:
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "init-variables"
     entrypoint: "bash"
+    env:
+      - "BUILD_ID=${BUILD_ID}"
     args:
       - "-c"
       - |
-        SHORT_BUILD_ID=${BUILD_ID:0:8}
-        echo "export SHORT_BUILD_ID=${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-reg-${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-${SHORT_BUILD_ID}" >> /workspace/build_vars.env
-        echo "export VM_NAME='${_INFRA_PREFIX}-vm-${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+        SHORT_BUILD_ID=$${BUILD_ID:0:8}
+        echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-reg-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
 
   # 3. Create test buckets in parallel (only those specified in _BUCKET_TYPES)

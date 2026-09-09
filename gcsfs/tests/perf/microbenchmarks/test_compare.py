@@ -67,8 +67,14 @@ def test_compare_runs_latency():
     pr = {
         "bench_pass": {"name": "bench_pass", "stats": {"mean": 1.04}},  # +4% (pass)
         "bench_fail": {"name": "bench_fail", "stats": {"mean": 1.06}},  # +6% (fail >5%)
-        "bench_improved": {"name": "bench_improved", "stats": {"mean": 0.90}},  # -10% (improved)
-        "bench_exact": {"name": "bench_exact", "stats": {"mean": 1.05}},  # +5% (exact threshold, pass)
+        "bench_improved": {
+            "name": "bench_improved",
+            "stats": {"mean": 0.90},
+        },  # -10% (improved)
+        "bench_exact": {
+            "name": "bench_exact",
+            "stats": {"mean": 1.05},
+        },  # +5% (exact threshold, pass)
     }
 
     comparisons, summary = compare.compare_runs(base, pr, threshold_pct=5.0)
@@ -109,12 +115,18 @@ def test_compare_runs_throughput():
         "bench_tp_fail": {
             "name": "bench_tp_fail",
             "stats": {"mean": 0},
-            "extra_info": {"runtime": "1", "mean_run": 93 * 1024 * 1024},  # -7% (regression)
+            "extra_info": {
+                "runtime": "1",
+                "mean_run": 93 * 1024 * 1024,
+            },  # -7% (regression)
         },
         "bench_tp_pass": {
             "name": "bench_tp_pass",
             "stats": {"mean": 0},
-            "extra_info": {"runtime": "1", "mean_run": 110 * 1024 * 1024},  # +10% (improvement)
+            "extra_info": {
+                "runtime": "1",
+                "mean_run": 110 * 1024 * 1024,
+            },  # +10% (improvement)
         },
     }
 
@@ -151,7 +163,11 @@ def test_markdown_and_console_generation():
         "b1": {"name": "b1", "param": "b1_param", "stats": {"mean": 0.01}},
     }
     pr = {
-        "b1": {"name": "b1", "param": "b1_param", "stats": {"mean": 0.012}},  # +20% regression
+        "b1": {
+            "name": "b1",
+            "param": "b1_param",
+            "stats": {"mean": 0.012},
+        },  # +20% regression
     }
 
     comparisons, summary = compare.compare_runs(base, pr, threshold_pct=5.0)
@@ -179,13 +195,17 @@ def test_main_cli_success(tmp_path):
     base_file.write_text(json.dumps(data_base))
     pr_file.write_text(json.dumps(data_pr))
 
-    ret = compare.main([
-        str(base_file),
-        str(pr_file),
-        "--threshold=5.0",
-        "--output-markdown", str(md_file),
-        "--output-json", str(json_file),
-    ])
+    ret = compare.main(
+        [
+            str(base_file),
+            str(pr_file),
+            "--threshold=5.0",
+            "--output-markdown",
+            str(md_file),
+            "--output-json",
+            str(json_file),
+        ]
+    )
 
     assert ret == 0
     assert md_file.exists()
@@ -199,15 +219,19 @@ def test_main_cli_failure(tmp_path):
     pr_file = tmp_path / "pr.json"
 
     data_base = {"benchmarks": [{"name": "test1", "stats": {"mean": 1.0}}]}
-    data_pr = {"benchmarks": [{"name": "test1", "stats": {"mean": 1.10}}]}  # +10% (fail >5%)
+    data_pr = {
+        "benchmarks": [{"name": "test1", "stats": {"mean": 1.10}}]
+    }  # +10% (fail >5%)
 
     base_file.write_text(json.dumps(data_base))
     pr_file.write_text(json.dumps(data_pr))
 
-    ret = compare.main([
-        str(base_file),
-        str(pr_file),
-        "--threshold=5.0",
-    ])
+    ret = compare.main(
+        [
+            str(base_file),
+            str(pr_file),
+            "--threshold=5.0",
+        ]
+    )
 
     assert ret == 1

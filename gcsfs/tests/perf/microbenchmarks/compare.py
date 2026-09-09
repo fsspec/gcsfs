@@ -45,7 +45,9 @@ def format_metric_val(val: Optional[float], unit: str) -> str:
     return f"{val:.4f} {unit}"
 
 
-def extract_benchmark_metric(bench: Optional[Dict[str, Any]]) -> Tuple[str, float, str, bool]:
+def extract_benchmark_metric(
+    bench: Optional[Dict[str, Any]],
+) -> Tuple[str, float, str, bool]:
     """
     Extract primary performance metric from benchmark dict.
     Returns (metric_name, value, unit, higher_is_better).
@@ -60,7 +62,9 @@ def extract_benchmark_metric(bench: Optional[Dict[str, Any]]) -> Tuple[str, floa
     if runtime not in (None, "N/A"):
         try:
             r_val = float(runtime)
-            mean_bytes = float(extra.get("mean_run", bench.get("stats", {}).get("mean", 0)))
+            mean_bytes = float(
+                extra.get("mean_run", bench.get("stats", {}).get("mean", 0))
+            )
             throughput = (mean_bytes / r_val) / (1024 * 1024) if r_val > 0 else 0.0
             return "Throughput", throughput, "MB/s", True
         except (ValueError, TypeError):
@@ -102,8 +106,12 @@ def compare_runs(
         base = base_benchmarks.get(key)
         pr = pr_benchmarks.get(key)
 
-        b_metric, b_val, b_unit, b_hib = extract_benchmark_metric(base) if base else (None, None, "", False)
-        p_metric, p_val, p_unit, p_hib = extract_benchmark_metric(pr) if pr else (None, None, "", False)
+        b_metric, b_val, b_unit, b_hib = (
+            extract_benchmark_metric(base) if base else (None, None, "", False)
+        )
+        p_metric, p_val, p_unit, p_hib = (
+            extract_benchmark_metric(pr) if pr else (None, None, "", False)
+        )
 
         metric_name = p_metric or b_metric
         unit = p_unit or b_unit
@@ -118,9 +126,19 @@ def compare_runs(
             status = "REMOVED"
             removed_count += 1
         else:
-            diff_pct = 0.0 if b_val == 0 else round(((p_val - b_val) / abs(b_val)) * 100.0, 6)
-            is_regression = diff_pct < -threshold_pct if higher_is_better else diff_pct > threshold_pct
-            is_improvement = diff_pct > threshold_pct if higher_is_better else diff_pct < -threshold_pct
+            diff_pct = (
+                0.0 if b_val == 0 else round(((p_val - b_val) / abs(b_val)) * 100.0, 6)
+            )
+            is_regression = (
+                diff_pct < -threshold_pct
+                if higher_is_better
+                else diff_pct > threshold_pct
+            )
+            is_improvement = (
+                diff_pct > threshold_pct
+                if higher_is_better
+                else diff_pct < -threshold_pct
+            )
 
             if is_regression:
                 status = "REGRESSION"
@@ -132,21 +150,23 @@ def compare_runs(
                 status = "NO_CHANGE"
                 unchanged += 1
 
-        comparisons.append({
-            "id": key,
-            "name": (pr or base).get("param") or key,
-            "group": (pr or base).get("group", ""),
-            "metric_name": metric_name,
-            "unit": unit,
-            "higher_is_better": higher_is_better,
-            "base_value": b_val,
-            "pr_value": p_val,
-            "diff_pct": diff_pct,
-            "status": status,
-            "is_regression": is_regression,
-            "base_bench": base,
-            "pr_bench": pr,
-        })
+        comparisons.append(
+            {
+                "id": key,
+                "name": (pr or base).get("param") or key,
+                "group": (pr or base).get("group", ""),
+                "metric_name": metric_name,
+                "unit": unit,
+                "higher_is_better": higher_is_better,
+                "base_value": b_val,
+                "pr_value": p_val,
+                "diff_pct": diff_pct,
+                "status": status,
+                "is_regression": is_regression,
+                "base_bench": base,
+                "pr_bench": pr,
+            }
+        )
 
     summary = {
         "total": len(comparisons),
@@ -161,7 +181,9 @@ def compare_runs(
     return comparisons, summary
 
 
-def generate_console_table(comparisons: List[Dict[str, Any]], summary: Dict[str, Any]) -> str:
+def generate_console_table(
+    comparisons: List[Dict[str, Any]], summary: Dict[str, Any]
+) -> str:
     """Format comparisons as a readable console table."""
     table = PrettyTable()
     table.set_style(TableStyle.MARKDOWN)
@@ -179,14 +201,16 @@ def generate_console_table(comparisons: List[Dict[str, Any]], summary: Dict[str,
         base_str = format_metric_val(row["base_value"], row["unit"])
         pr_str = format_metric_val(row["pr_value"], row["unit"])
         diff_str = f"{row['diff_pct']:+.2f}%" if row["diff_pct"] is not None else "N/A"
-        table.add_row([
-            row["name"],
-            row["metric_name"],
-            base_str,
-            pr_str,
-            diff_str,
-            status_display.get(row["status"], row["status"]),
-        ])
+        table.add_row(
+            [
+                row["name"],
+                row["metric_name"],
+                base_str,
+                pr_str,
+                diff_str,
+                status_display.get(row["status"], row["status"]),
+            ]
+        )
 
     return table.get_string()
 
@@ -231,9 +255,13 @@ def generate_markdown_report(
     for row in comparisons:
         base_str = format_metric_val(row["base_value"], row["unit"])
         pr_str = format_metric_val(row["pr_value"], row["unit"])
-        diff_str = f"**{row['diff_pct']:+.2f}%**" if row["diff_pct"] is not None else "N/A"
+        diff_str = (
+            f"**{row['diff_pct']:+.2f}%**" if row["diff_pct"] is not None else "N/A"
+        )
         icon = status_icons.get(row["status"], row["status"])
-        lines.append(f"| `{row['name']}` | {row['metric_name']} | {base_str} | {pr_str} | {diff_str} | {icon} |")
+        lines.append(
+            f"| `{row['name']}` | {row['metric_name']} | {base_str} | {pr_str} | {diff_str} | {icon} |"
+        )
 
     return "\n".join(lines) + "\n"
 
@@ -243,8 +271,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Compare GCSFS microbenchmark runs.")
     parser.add_argument("base_json", help="Path to base branch benchmark results JSON")
     parser.add_argument("pr_json", help="Path to PR branch benchmark results JSON")
-    parser.add_argument("--threshold", type=float, default=5.0, help="Regression threshold %% (default: 5.0)")
-    parser.add_argument("--base-ref", default="master", help="Base branch name or commit")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=5.0,
+        help="Regression threshold %% (default: 5.0)",
+    )
+    parser.add_argument(
+        "--base-ref", default="master", help="Base branch name or commit"
+    )
     parser.add_argument("--pr-ref", default="PR", help="PR branch name or commit")
     parser.add_argument("--output-markdown", help="Path to save markdown report")
     parser.add_argument("--output-json", help="Path to save comparison JSON")
@@ -259,7 +294,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         logging.error(f"Failed to load benchmark results: {e}")
         return 1
 
-    comparisons, summary = compare_runs(base_benchmarks, pr_benchmarks, threshold_pct=args.threshold)
+    comparisons, summary = compare_runs(
+        base_benchmarks, pr_benchmarks, threshold_pct=args.threshold
+    )
 
     print("\n" + generate_console_table(comparisons, summary))
     print(
@@ -268,13 +305,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if args.output_markdown:
-        os.makedirs(os.path.dirname(os.path.abspath(args.output_markdown)) or ".", exist_ok=True)
+        os.makedirs(
+            os.path.dirname(os.path.abspath(args.output_markdown)) or ".", exist_ok=True
+        )
         with open(args.output_markdown, "w", encoding="utf-8") as f:
-            f.write(generate_markdown_report(comparisons, summary, args.base_ref, args.pr_ref))
+            f.write(
+                generate_markdown_report(
+                    comparisons, summary, args.base_ref, args.pr_ref
+                )
+            )
 
     if args.output_json:
-        os.makedirs(os.path.dirname(os.path.abspath(args.output_json)) or ".", exist_ok=True)
-        clean_rows = [{k: v for k, v in c.items() if k not in ("base_bench", "pr_bench")} for c in comparisons]
+        os.makedirs(
+            os.path.dirname(os.path.abspath(args.output_json)) or ".", exist_ok=True
+        )
+        clean_rows = [
+            {k: v for k, v in c.items() if k not in ("base_bench", "pr_bench")}
+            for c in comparisons
+        ]
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump({"summary": summary, "comparisons": clean_rows}, f, indent=2)
 
