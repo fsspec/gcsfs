@@ -25,6 +25,7 @@ substitutions:
   _ZONE: "us-central1-a"
   _INFRA_PREFIX: "gcsfs-pr-perf"
   _VM_SERVICE_ACCOUNT: ""
+  _ZONAL_VM_SERVICE_ACCOUNT: ""
   _BENCHMARK_GROUP: "info"
   _BENCHMARK_CONFIG: "info_bucket"
   _BUCKET_TYPES: "regional"
@@ -96,6 +97,13 @@ steps:
       - |
         ${_SKIP_IF_FAILED}
         source /workspace/build_vars.env
+        SA_FLAG=()
+        if [ -n "${_VM_SERVICE_ACCOUNT}" ]; then
+          SA_FLAG=("--service-account=${_VM_SERVICE_ACCOUNT}")
+        elif [ -n "${_ZONAL_VM_SERVICE_ACCOUNT}" ]; then
+          SA_FLAG=("--service-account=${_ZONAL_VM_SERVICE_ACCOUNT}")
+        fi
+
         gcloud compute instances create "$$VM_NAME" \
           --project="${PROJECT_ID}" \
           --zone="${_ZONE}" \
@@ -103,7 +111,7 @@ steps:
           --image-family="ubuntu-2404-lts-amd64" \
           --image-project="ubuntu-os-cloud" \
           --scopes="https://www.googleapis.com/auth/cloud-platform" \
-          --service-account="${_VM_SERVICE_ACCOUNT}" \
+          "$${SA_FLAG[@]}" \
           --metadata="enable-oslogin=TRUE" \
           --tags="allow-ssh" \
           --quiet || { echo "create-vm" >> /workspace/FAILED; exit 1; }
