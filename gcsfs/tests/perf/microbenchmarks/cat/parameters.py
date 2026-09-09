@@ -3,6 +3,10 @@ from typing import Optional
 
 from gcsfs.tests.perf.microbenchmarks.parameters import IOBenchmarkParameters
 
+# The read patterns a case may use. configs.py rejects anything else while
+# building cases, and test_cat.py maps each one to the operation it runs.
+SUPPORTED_PATTERNS = ("whole", "ranged", "batch")
+
 
 @dataclass
 class CatBenchmarkParameters(IOBenchmarkParameters):

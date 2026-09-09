@@ -100,6 +100,18 @@ def test_counter_restores_call_on_error():
     assert GCSFileSystem._call is original
 
 
+def test_counter_exit_is_idempotent():
+    """A second exit must not restore None over the class attribute."""
+    original = GCSFileSystem._call
+    counter = RequestCounter()
+
+    counter.__enter__()
+    counter.__exit__(None, None, None)
+    counter.__exit__(None, None, None)
+
+    assert GCSFileSystem._call is original
+
+
 def test_counter_rejects_reentry():
     with RequestCounter() as counter:
         with pytest.raises(RuntimeError):

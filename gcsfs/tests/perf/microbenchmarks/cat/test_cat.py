@@ -42,7 +42,8 @@ def _cat_batch(gcs, file_paths, file_size, concurrency):
     gcs.cat(file_paths)
 
 
-_OPS = {
+# Must cover every entry in SUPPORTED_PATTERNS; test_configs.py pins that.
+CAT_OPERATIONS = {
     "whole": _cat_file_whole,
     "ranged": _cat_file_ranged,
     "batch": _cat_batch,
@@ -50,8 +51,10 @@ _OPS = {
 
 
 def _build_cat_worker(params, gcs, file_paths):
+    # Configured cases are validated in cat/configs.py; this catches a params
+    # object built directly, in a test or from the REPL.
     try:
-        op = _OPS[params.pattern]
+        op = CAT_OPERATIONS[params.pattern]
     except KeyError:
         raise ValueError(f"Unsupported cat pattern: {params.pattern}")
     return op, (gcs, file_paths, params.file_size_bytes, params.concurrency)

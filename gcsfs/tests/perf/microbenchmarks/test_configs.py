@@ -428,3 +428,27 @@ def test_cat_configurator_covers_small_objects():
     assert any(c.pattern == "whole" and c.concurrency is None for c in small)
     # And the ranged control it is compared against.
     assert any(c.pattern == "ranged" for c in small)
+
+
+def test_cat_configurator_rejects_unknown_pattern(mock_config_dependencies):
+    """A typo in configs.yaml fails while building cases, not mid-benchmark."""
+    configurator = CatConfigurator("dummy")
+
+    with pytest.raises(ValueError, match="Unsupported cat pattern"):
+        configurator.build_cases(
+            {"name": "cat_typo", "pattern": "wohle"},
+            {"bucket_types": ["regional"], "file_sizes_bytes": [8]},
+        )
+
+
+def test_cat_supported_patterns_all_have_an_operation():
+    """Validation is only useful if every accepted pattern can actually run.
+
+    Otherwise a pattern added to SUPPORTED_PATTERNS but not to the operation
+    table passes configuration and then dies after the fixture has uploaded
+    its objects -- exactly the failure the validation exists to prevent.
+    """
+    from gcsfs.tests.perf.microbenchmarks.cat.parameters import SUPPORTED_PATTERNS
+    from gcsfs.tests.perf.microbenchmarks.cat.test_cat import CAT_OPERATIONS
+
+    assert set(CAT_OPERATIONS) == set(SUPPORTED_PATTERNS)

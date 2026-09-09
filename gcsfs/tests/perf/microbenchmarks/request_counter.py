@@ -99,6 +99,10 @@ class RequestCounter:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        GCSFileSystem._call = self._original_call
-        self._original_call = None
+        # Guard against a second exit. _call is a class attribute, so restoring
+        # None here would not just end this measurement -- it would break every
+        # GCSFileSystem in the process for the rest of the run.
+        if self._original_call is not None:
+            GCSFileSystem._call = self._original_call
+            self._original_call = None
         return False

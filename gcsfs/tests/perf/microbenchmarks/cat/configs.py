@@ -1,7 +1,10 @@
 import itertools
 from typing import List
 
-from gcsfs.tests.perf.microbenchmarks.cat.parameters import CatBenchmarkParameters
+from gcsfs.tests.perf.microbenchmarks.cat.parameters import (
+    SUPPORTED_PATTERNS,
+    CatBenchmarkParameters,
+)
 from gcsfs.tests.perf.microbenchmarks.configs import BaseBenchmarkConfigurator
 
 
@@ -30,6 +33,14 @@ class CatConfigurator(BaseBenchmarkConfigurator):
         files = scenario.get("files", common_config.get("files", 20))
         rounds = scenario.get("rounds", common_config.get("rounds", 5))
         pattern = scenario.get("pattern", "whole")
+        # Fail while building cases rather than mid-run: by the time a test
+        # body sees a bad pattern the fixture has already uploaded its objects
+        # to a real bucket, and the error repeats once per case.
+        if pattern not in SUPPORTED_PATTERNS:
+            raise ValueError(
+                f"Unsupported cat pattern {pattern!r} in scenario "
+                f"{scenario_name!r}; expected one of {list(SUPPORTED_PATTERNS)}"
+            )
 
         cases = []
         param_combinations = itertools.product(
