@@ -103,10 +103,16 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
 def _setup_file_telemetry(file_obj) -> Optional[Any]:
     fw = getattr(file_obj, "caller_framework", None)
 
-    from gcsfs.telemetry.context import has_telemetry_context
-
-    if has_telemetry_context() or not fw:
+    if not isinstance(fw, str):
         return None
+
+    from gcsfs.telemetry.context import Dimension, get_dimension_context
+
+    # O(1) zero-allocation fast path check
+    if get_dimension_context(Dimension.FRAMEWORK) == fw:
+        return None
+
+    from gcsfs.telemetry.context import get_telemetry_context, set_telemetry_context
 
     tokens_map = get_telemetry_context()
     tokens_map[Dimension.FRAMEWORK.value] = fw

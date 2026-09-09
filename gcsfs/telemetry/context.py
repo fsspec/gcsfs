@@ -28,11 +28,6 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_telemetry_in_child)
 
 
-def has_telemetry_context() -> bool:
-    """Check if telemetry context is active without dict allocations (O(1))."""
-    return bool(_current_telemetry.get())
-
-
 def get_telemetry_context() -> Dict[str, str]:
     """Retrieve active telemetry tokens mapping from context."""
     val = _current_telemetry.get()
@@ -51,7 +46,8 @@ def reset_telemetry_context(token: contextvars.Token) -> None:
 
 def get_dimension_context(dimension: Dimension) -> Optional[str]:
     """Retrieve active telemetry token for a specific dimension from context."""
-    return get_telemetry_context().get(dimension.value)
+    val = _current_telemetry.get()
+    return val.get(dimension.value) if val is not None else None
 
 
 def set_dimension_context(dimension: Dimension, value: str) -> contextvars.Token:
