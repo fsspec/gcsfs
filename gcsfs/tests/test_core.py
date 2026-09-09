@@ -2857,6 +2857,82 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.read() == b"HelloWorld"
 
 
+def test_cat_file_default_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_default_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+    is_zonal = hasattr(gcs, "_is_zonal_bucket") and sync(
+        gcs.loop, gcs._is_zonal_bucket, TEST_BUCKET
+    )
+
+    # Act
+    if is_zonal:
+        with mock.patch.object(
+            gcs._mrd_pool_cache, "get", wraps=gcs._mrd_pool_cache.get
+        ) as mock_pool:
+            data = gcs.cat_file(fn)
+    else:
+        with mock.patch.object(
+            gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+        ) as mock_conc:
+            data = gcs.cat_file(fn)
+
+    # Assert
+    assert data == b"cat test data"
+    if is_zonal:
+        assert mock_pool.call_args.kwargs["pool_size"] == 1
+    else:
+        assert mock_conc.call_count == 0
+
+
+def test_cat_file_explicit_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_explicit_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+    is_zonal = hasattr(gcs, "_is_zonal_bucket") and sync(
+        gcs.loop, gcs._is_zonal_bucket, TEST_BUCKET
+    )
+
+    # Act
+    if is_zonal:
+        with mock.patch.object(
+            gcs._mrd_pool_cache, "get", wraps=gcs._mrd_pool_cache.get
+        ) as mock_pool:
+            data = gcs.cat_file(fn, concurrency=2)
+    else:
+        with mock.patch.object(
+            gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+        ) as mock_conc:
+            data = gcs.cat_file(fn, concurrency=2)
+
+    # Assert
+    assert data == b"cat test data"
+    if is_zonal:
+        assert mock_pool.call_args.kwargs["pool_size"] == 2
+    else:
+        assert mock_conc.call_count == 1
+        assert mock_conc.call_args.kwargs["concurrency"] == 2
+
+
+def test_prefetcher_default_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_prefetcher_concurrency.txt"
+    gcs.pipe(fn, b"prefetcher test data")
+
+    # Act
+    with gcs.open(fn, "rb") as f:
+        file_concurrency = getattr(f, "pool_size", getattr(f, "concurrency", None))
+        prefetch_engine_concurrency = (
+            f._prefetch_engine.concurrency
+            if getattr(f, "_prefetch_engine", None) is not None
+            else getattr(f, "pool_size", None)
+        )
+
+    # Assert
+    assert file_concurrency == 4
+    assert prefetch_engine_concurrency == 4
+
+
 def test_gcsfile_prefetch_sequential_integrity(gcs):
     fn = f"{TEST_BUCKET}/integrated_seq.txt"
     file_size = 10 * 1024 * 1024
