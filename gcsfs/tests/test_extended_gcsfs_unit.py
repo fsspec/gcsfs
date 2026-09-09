@@ -293,6 +293,34 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
             )
 
 
+@pytest.mark.asyncio
+async def test_cat_file_zonal_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
+    """Tests that cat_file defaults to pool_size=1 on zonal buckets."""
+    # Arrange
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        # Act
+        await extended_gcsfs._cat_file(file_path, start=0, end=10)
+
+        # Assert
+        assert mocks["pool_cache_get"].call_args.kwargs["pool_size"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cat_file_zonal_explicit_concurrency(extended_gcsfs, gcs_bucket_mocks):
+    """Tests that cat_file propagates explicit concurrency to pool_size on zonal buckets."""
+    # Arrange
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        # Act
+        await extended_gcsfs._cat_file(file_path, start=0, end=10, concurrency=3)
+
+        # Assert
+        assert mocks["pool_cache_get"].call_args.kwargs["pool_size"] == 3
+
+
 def test_resolve_cache_config():
     """Tests _resolve_cache_config logic under various kwargs configurations."""
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
