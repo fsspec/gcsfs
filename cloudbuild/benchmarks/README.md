@@ -56,3 +56,8 @@ To run this automation in your own GCP project, you need to set up atleast two C
     *   `_DATASET_NAME`: The name of the BigQuery dataset to store results (e.g., `gcsfs_benchmarks`).
     *   `_INFRA_PREFIX`: The prefix used for resources in the benchmarks run (e.g., `gcsfs-perf`). Must match the one used in the run trigger.
 *   **Trigger Event**: This trigger is typically scheduled to run after the benchmarks pipeline completes, or triggered manually.
+
+### PR Performance Benchmarks Trigger
+*   **Configuration File**: `cloudbuild/benchmarks/pr-benchmarks-cloudbuild.yaml`
+*   **Trigger Event**: Pull Request comment `/perf-test`.
+*   **Description**: Runs microbenchmarks on both base (`main`) and PR branch, compares them using `compare.py`, and fails if degradation exceeds 5%.
