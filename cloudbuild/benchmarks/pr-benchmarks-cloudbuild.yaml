@@ -196,21 +196,21 @@ steps:
           python3 -m venv env && source env/bin/activate
           pip install -q -e . -r gcsfs/tests/perf/microbenchmarks/requirements.txt
           python gcsfs/tests/perf/microbenchmarks/run.py --group=${_BENCHMARK_GROUP} \
-            \$$CONFIG_ARG \$$BUCKET_ARGS --log=true --log-level=INFO
-          BASE_JSON=\$(ls -td gcsfs/tests/perf/microbenchmarks/__run__/*/results.json | head -1)
+            $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+          BASE_JSON_PATH=\$(pwd)/\$(ls -td gcsfs/tests/perf/microbenchmarks/__run__/*/results.json | head -1)
 
           echo '=== Benchmarking PR Branch ==='
           cd ~/gcsfs-pr
           python3 -m venv env && source env/bin/activate
           pip install -q -e . -r gcsfs/tests/perf/microbenchmarks/requirements.txt
           python gcsfs/tests/perf/microbenchmarks/run.py --group=${_BENCHMARK_GROUP} \
-            \$$CONFIG_ARG \$$BUCKET_ARGS --log=true --log-level=INFO
-          PR_JSON=\$(ls -td gcsfs/tests/perf/microbenchmarks/__run__/*/results.json | head -1)
+            $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+          PR_JSON_PATH=\$(pwd)/\$(ls -td gcsfs/tests/perf/microbenchmarks/__run__/*/results.json | head -1)
 
           echo '=== Comparing Performance (Threshold: ${_THRESHOLD}%) ==='
-          python ~/gcsfs-pr/gcsfs/tests/perf/microbenchmarks/compare.py \
-            \"~/gcsfs-base/\$$BASE_JSON\" \
-            \"~/gcsfs-pr/\$$PR_JSON\" \
+          python gcsfs/tests/perf/microbenchmarks/compare.py \
+            \$$BASE_JSON_PATH \
+            \$$PR_JSON_PATH \
             --threshold=${_THRESHOLD} \
             --base-ref='${_BASE_BRANCH}' \
             --pr-ref='PR'
