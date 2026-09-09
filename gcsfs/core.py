@@ -9,7 +9,6 @@ import json
 import logging
 import mimetypes
 import os
-import posixpath
 import queue
 import re
 import sys
@@ -39,7 +38,7 @@ from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
 from .telemetry.context import Dimension, reset_telemetry_context, set_telemetry_context
 from .telemetry.manager import default_usage_tracker, mirror_gcs_methods
-from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
+from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
 
@@ -607,7 +606,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """
         result = dict(object_metadata)
         result["size"] = int(object_metadata.get("size", 0))
-        result["name"] = posixpath.join(bucket, object_metadata["name"])
+        result["name"] = f"{bucket}/{object_metadata['name']}"
         result["type"] = "file"
         # Translate time metadata from GCS names to fsspec standard names.
         # TODO(issues/559): Remove legacy names `updated` and `timeCreated`?
@@ -2392,18 +2391,7 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs):
     return cache_type, use_prefetch_reader, cache_source
 
 
-def _on_loop_thread(loop):
-    if loop is None:
-        return False
-    try:
-        return asyncio.get_running_loop() is loop
-    except RuntimeError:
-        return False
-
-
 mirror_gcs_methods(GCSFileSystem)
-
-
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
 _deferred_close_queue = None
 _deferred_close_lock = threading.Lock()

@@ -540,7 +540,6 @@ def test_rm_batch(gcs):
 @pytest.mark.asyncio
 async def test_rm_batch_error(gcs):
     path = TEST_BUCKET + "/test_error_file"
-    boundary = "==========7330845974216740156=="
     mock_response_content = (
         f"\n--{boundary}\n"
         "Content-Type: application/http\n"
@@ -574,7 +573,6 @@ async def test_rm_batch_not_found_invalidates_stale_cache(gcs):
         else False
     )
 
-    boundary = "==========7330845974216740156=="
     mock_response_content = (
         f"\n--{boundary}\n"
         "Content-Type: application/http\n"
@@ -3770,3 +3768,48 @@ def test_no_eager_property_evaluation_on_init(monkeypatch):
 
     _ = GCSFileSystem(token="anon", project="test-project")
     assert not buckets_called, "GCSFileSystem.__init__ eagerly evaluated fs.buckets!"
+def test_process_object_structure(gcs):
+    bucket = "my-bucket"
+    metadata = {
+        "kind": "storage#object",
+        "id": "my-bucket/nested/file.txt/12345",
+        "name": "nested/file.txt",
+        "bucket": "my-bucket",
+        "generation": "12345",
+        "metageneration": "2",
+        "contentType": "text/plain",
+        "timeCreated": "2024-01-15T10:30:00.000Z",
+        "updated": "2024-01-15T11:45:00.123456Z",
+        "storageClass": "STANDARD",
+        "size": "4096",
+        "md5Hash": "dummyHash==",
+    }
+
+    processed = gcs._process_object(bucket, metadata)
+
+    assert processed["name"] == "my-bucket/nested/file.txt"
+    assert processed["size"] == 4096
+    assert processed["type"] == "file"
+    assert processed["ctime"] == datetime(
+        2024, 1, 15, 10, 30, 0, 0, tzinfo=timezone.utc
+    )
+    assert processed["mtime"] == datetime(
+        2024, 1, 15, 11, 45, 0, 123456, tzinfo=timezone.utc
+    )
+    assert processed["generation"] == "12345"
+    assert processed["metageneration"] == "2"
+
+
+def test_process_object_leading_slash(gcs):
+    bucket = "my-bucket"
+    metadata = {
+        "name": "/leading_slash_file.txt",
+        "size": "100",
+    }
+
+    processed = gcs._process_object(bucket, metadata)
+    parsed_bucket, parsed_key, _ = gcs.split_path(processed["name"])
+
+    assert processed["name"] == "my-bucket//leading_slash_file.txt"
+    assert parsed_bucket == "my-bucket"
+    assert parsed_key == "/leading_slash_file.txt"

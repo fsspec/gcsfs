@@ -36,6 +36,13 @@ workload:
   shuffleFiles: true
   shuffleBufferSize: 10000
   modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
+  # Node-local directory (hostPath) shared by every pod generation in one build.
+  # The seed-checkpoint release and the measured release run on the same nodes,
+  # so without this the measured run re-downloads the ~16GB model, the gcloud
+  # CLI, and every wheel the seed run already staged. Nothing survives the build:
+  # the cluster is created and deleted per run. Set to "" to disable and have
+  # every pod bootstrap from scratch.
+  hostCachePath: /var/lib/gcsfs-macrobench
   trainingStrategy: ddp
   tensorParallelSize: 4
   dataParallelSize: 2
