@@ -56,7 +56,7 @@ class FrameworkDetector(BaseDetector):
 
         try:
             start_frame = sys._getframe()
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RuntimeError, PermissionError):
             return None
 
         return self._walk_top_down(start_frame)
