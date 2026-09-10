@@ -1,8 +1,15 @@
+import collections
 import unittest.mock as mock
 
 import pytest
 
 from gcsfs.tests.perf.microbenchmarks import runner
+from gcsfs.tests.perf.microbenchmarks.request_counter import (
+    DOWNLOAD,
+    LIST,
+    OBJECT_GET,
+    OTHER,
+)
 
 
 class MockParams:
@@ -271,3 +278,82 @@ def test_run_multi_process_resets_shared_data(mock_mp, mock_benchmark, mock_moni
     # that doesn't actually run (since we mocked Process), the final results appended
     # will be 0.0, because the array was reset and never populated by the non-running mock process.
     assert mock_benchmark.extra_info["runs"] == [0.0, 0.0]
+
+
+class FakeRequestCounter:
+    """Stands in for RequestCounter so the runner plumbing is tested on its own.
+
+    Real counting is covered in test_request_counter.py against a stubbed
+    transport; what matters here is that the runner enters a counter and
+    divides the total by operations x rounds.
+    """
+
+    def __init__(self):
+        self.counts = collections.Counter(
+            {DOWNLOAD: 8, OBJECT_GET: 8, LIST: 0, OTHER: 0}
+        )
+
+    @property
+    def total(self):
+        return sum(self.counts.values())
+
+    def per_operation(self, operations):
+        return self.total / operations
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_run_single_threaded_counts_requests(mock_benchmark, mock_monitor):
+    """operations_per_round turns counting on and normalises per operation."""
+    params = MockParams(rounds=2)
+
+    with mock.patch.object(runner, "RequestCounter", FakeRequestCounter):
+        runner.run_single_threaded(
+            mock_benchmark,
+            mock_monitor,
+            params,
+            mock.Mock(),
+            (),
+            "cat",
+            operations_per_round=4,
+        )
+
+    extra = mock_benchmark.extra_info
+    assert extra["requests_total"] == 16
+    # 16 calls over 2 rounds of 4 operations.
+    assert extra["requests_per_op"] == 2.0
+    assert extra["requests_download"] == 8
+    assert extra["requests_object_get"] == 8
+
+
+def test_run_multi_threaded_counts_requests(mock_benchmark, mock_monitor):
+    params = MockParams(threads=2, rounds=1)
+
+    with mock.patch.object(runner, "RequestCounter", FakeRequestCounter):
+        runner.run_multi_threaded(
+            mock_benchmark,
+            mock_monitor,
+            params,
+            mock.Mock(),
+            [(), ()],
+            "cat",
+            operations_per_round=8,
+        )
+
+    assert mock_benchmark.extra_info["requests_per_op"] == 2.0
+
+
+def test_run_single_threaded_without_op_count_skips_request_metrics(
+    mock_benchmark, mock_monitor
+):
+    """Groups that cannot supply an operation count report no request columns."""
+    runner.run_single_threaded(
+        mock_benchmark, mock_monitor, MockParams(), mock.Mock(), (), "read"
+    )
+
+    assert mock_benchmark.extra_info["requests_per_op"] == "N/A"
+    assert mock_benchmark.extra_info["requests_total"] == "N/A"
