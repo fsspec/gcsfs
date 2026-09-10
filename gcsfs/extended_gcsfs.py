@@ -562,7 +562,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         start=None,
         end=None,
         mrd=None,
-        concurrency=zb_hns_utils.DEFAULT_CONCURRENCY,
         **kwargs,
     ):
         """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
@@ -575,11 +574,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             end (int, optional): The ending byte position to read to.
             mrd (AsyncMultiRangeDownloader, MRDPool, optional): An existing multi-range
                 downloader instance or a pool of MRD. If not provided, a new one will be created for Zonal buckets.
-            concurrency (int, optional): The max number of concurrent request to fetch the data.
 
         Returns:
             bytes: The content of the file or file range.
         """
+        concurrency = kwargs.pop("concurrency", 1)
         pool_created_here = False
 
         # A new MRDPool is required when read is done directly by the

@@ -2857,6 +2857,54 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.read() == b"HelloWorld"
 
 
+def test_cat_file_default_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_default_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+
+    # Act
+    with mock.patch.object(
+        gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+    ) as mock_conc:
+        data = gcs.cat_file(fn)
+
+    # Assert
+    assert data == b"cat test data"
+    assert mock_conc.call_count == 0
+
+
+def test_cat_file_explicit_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_explicit_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+
+    # Act
+    with mock.patch.object(
+        gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+    ) as mock_conc:
+        data = gcs.cat_file(fn, concurrency=2)
+
+    # Assert
+    assert data == b"cat test data"
+    assert mock_conc.call_count == 1
+    assert mock_conc.call_args.kwargs["concurrency"] == 2
+
+
+def test_prefetcher_default_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_prefetcher_concurrency.txt"
+    gcs.pipe(fn, b"prefetcher test data")
+
+    # Act
+    with gcs.open(fn, "rb") as f:
+        file_concurrency = f.concurrency
+        prefetch_engine_concurrency = f._prefetch_engine.concurrency
+
+    # Assert
+    assert file_concurrency == 4
+    assert prefetch_engine_concurrency == 4
+
+
 def test_gcsfile_prefetch_sequential_integrity(gcs):
     fn = f"{TEST_BUCKET}/integrated_seq.txt"
     file_size = 10 * 1024 * 1024
