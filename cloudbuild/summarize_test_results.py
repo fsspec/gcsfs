@@ -9,6 +9,7 @@ failure list) and the output never exceeds --max-chars.
 import argparse
 import os
 import xml.etree.ElementTree as ET
+from collections import deque
 
 TRACEBACK_LINES = 40
 LOG_TAIL_LINES = 60
@@ -85,9 +86,11 @@ def build_summary(results_dir, suites, failed_steps=None, max_chars=30000):
             )
             head.append(f"{suite:<12}  {reason}")
             if os.path.isfile(log_path):
+                # Keep only the last lines in memory; a crashed suite's log can be large.
                 with open(log_path, errors="replace") as f:
-                    body = f"Last {LOG_TAIL_LINES} lines of {suite}.log:\n"
-                    body += _tail(f.read(), LOG_TAIL_LINES)
+                    log_tail = "".join(deque(f, maxlen=LOG_TAIL_LINES))
+                body = f"Last {LOG_TAIL_LINES} lines of {suite}.log:\n"
+                body += _tail(log_tail, LOG_TAIL_LINES)
             else:
                 body = "The suite did not run; see its step log above."
             problems.append(

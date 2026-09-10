@@ -148,7 +148,7 @@ def test_missing_xml_prints_log_tail(tmp_path):
     assert re.search(r"^zonal\s+no JUnit results$", out, re.M)
     assert "--- zonal: no JUnit results ---" in out
     assert "line-099" in out
-    assert "line-040" in out
+    assert "Last 60 lines of zonal.log:\nline-040\n" in out
     assert "line-039" not in out
 
 
