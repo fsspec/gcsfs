@@ -204,6 +204,10 @@ steps:
           BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
         fi
 
+        # CONFIG_ARG and BUCKET_ARGS are defined locally in the Cloud Build runner shell.
+        # They use $$ (unescaped in bash) so the local shell expands their values into
+        # BENCHMARK_SCRIPT before SSH transmission. Remote variables (e.g. \$$BASE_JSON_PATH)
+        # remain escaped with \$$ so they evaluate dynamically on the VM.
         BENCHMARK_SCRIPT="
           set -e
           export TMPDIR=/mnt/ramdisk
