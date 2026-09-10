@@ -7,10 +7,13 @@ steps can exit early without provisioning VMs or creating test buckets.
 
 import argparse
 import json
+import logging
 import os
 import sys
 import urllib.error
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 
 def check_pr_label(
@@ -24,12 +27,12 @@ def check_pr_label(
     Returns True if benchmarks should proceed, False if they should be skipped.
     """
     if not required_label or not required_label.strip():
-        print("ℹ️ No _REQUIRED_LABEL specified. Proceeding with benchmarks.")
+        logger.info("No _REQUIRED_LABEL specified. Proceeding with benchmarks.")
         return True
 
     if not pr_number or not pr_number.strip():
-        print(
-            "ℹ️ Not a pull request build (_PR_NUMBER is empty). Proceeding with"
+        logger.info(
+            "Not a pull request build (_PR_NUMBER is empty). Proceeding with"
             " benchmarks."
         )
         return True
@@ -41,9 +44,12 @@ def check_pr_label(
     target_labels = [t.strip().lower() for t in required_label.split(",") if t.strip()]
 
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
-    print(
-        f"Checking for label(s) {target_labels} on {repo}#{pr_number} via"
-        f" GitHub API ({url})..."
+    logger.info(
+        "Checking for label(s) %s on %s#%s via GitHub API (%s)...",
+        target_labels,
+        repo,
+        pr_number,
+        url,
     )
 
     req = urllib.request.Request(
@@ -56,45 +62,50 @@ def check_pr_label(
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as err:
-        print(f"⚠️ GitHub API returned HTTP {err.code}: {err.reason} for {url}.")
-        print("Proceeding with build to avoid blocking CI on external errors.")
+        logger.warning(
+            "GitHub API returned HTTP %s: %s for %s.", err.code, err.reason, url
+        )
+        logger.info("Proceeding with build to avoid blocking CI on external errors.")
         return True
     except Exception as exc:
-        print(f"⚠️ Warning: Failed to query GitHub API for PR labels: {exc}")
-        print("Proceeding with build to avoid blocking CI on external errors.")
+        logger.warning("Failed to query GitHub API for PR labels: %s", exc)
+        logger.info("Proceeding with build to avoid blocking CI on external errors.")
         return True
 
     pr_labels = [str(l.get("name", "")).strip().lower() for l in data.get("labels", [])]
-    print(f"PR #{pr_number} current labels: {pr_labels if pr_labels else 'None'}")
+    logger.info(
+        "PR #%s current labels: %s", pr_number, pr_labels if pr_labels else "None"
+    )
 
     matched = any(t in pr_labels for t in target_labels)
     if matched:
-        print(
-            f"✅ Required label (one of {target_labels}) found on PR"
-            f" #{pr_number}. Proceeding with benchmarks."
+        logger.info(
+            "Required label (one of %s) found on PR #%s. Proceeding with benchmarks.",
+            target_labels,
+            pr_number,
         )
         return True
-    else:
-        print(
-            f"⏭️ Required label (one of {target_labels}) NOT found on PR"
-            f" #{pr_number}."
-        )
-        print("Marking build as skipped to conserve compute resources.")
-        try:
-            os.makedirs(os.path.dirname(skip_file), exist_ok=True)
-            with open(skip_file, "w") as f:
-                f.write(
-                    f"PR #{pr_number} does not have required label"
-                    f" '{required_label}'.\n"
-                )
-        except Exception as e:
-            print(f"Warning: Failed to write {skip_file}: {e}")
-        return False
+
+    logger.info(
+        "Required label (one of %s) not found on PR #%s.",
+        target_labels,
+        pr_number,
+    )
+    logger.info("Skipping benchmarks to conserve compute resources.")
+    try:
+        os.makedirs(os.path.dirname(skip_file), exist_ok=True)
+        with open(skip_file, "w", encoding="utf-8") as f:
+            f.write(
+                f"PR #{pr_number} does not have required label '{required_label}'.\n"
+            )
+    except Exception as exc:
+        logger.warning("Failed to write %s: %s", skip_file, exc)
+    return False
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Check PR labels for performance benchmarks."
     )
@@ -117,6 +128,8 @@ def main():
         help="File to write if build should be skipped",
     )
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     check_pr_label(
         repo=args.repo,

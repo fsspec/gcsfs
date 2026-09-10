@@ -11,7 +11,12 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from prettytable import PrettyTable, TableStyle
+try:
+    from prettytable import PrettyTable, TableStyle
+
+    _HAS_PRETTYTABLE = True
+except ImportError:
+    _HAS_PRETTYTABLE = False
 
 
 def format_duration(seconds: Optional[float]) -> str:
@@ -185,10 +190,6 @@ def generate_console_table(
     comparisons: List[Dict[str, Any]], summary: Dict[str, Any]
 ) -> str:
     """Format comparisons as a readable console table."""
-    table = PrettyTable()
-    table.set_style(TableStyle.MARKDOWN)
-    table.field_names = ["Benchmark", "Metric", "Base", "PR", "Diff (%)", "Status"]
-
     status_display = {
         "REGRESSION": "FAIL (Regression)",
         "IMPROVED": "PASS (Improved)",
@@ -197,14 +198,43 @@ def generate_console_table(
         "REMOVED": "REMOVED",
     }
 
+    if _HAS_PRETTYTABLE:
+        table = PrettyTable()
+        table.set_style(TableStyle.MARKDOWN)
+        table.field_names = ["Benchmark", "Metric", "Base", "PR", "Diff (%)", "Status"]
+
+        for row in comparisons:
+            base_str = format_metric_val(row["base_value"], row["unit"])
+            pr_str = format_metric_val(row["pr_value"], row["unit"])
+            diff_str = (
+                f"{row['diff_pct']:+.2f}%" if row["diff_pct"] is not None else "N/A"
+            )
+            table.add_row(
+                [
+                    row["name"],
+                    row["metric_name"],
+                    base_str,
+                    pr_str,
+                    diff_str,
+                    status_display.get(row["status"], row["status"]),
+                ]
+            )
+
+        return table.get_string()
+
+    # Fallback formatting when prettytable is not installed
+    headers = ["Benchmark", "Metric", "Base", "PR", "Diff (%)", "Status"]
+    rows = [headers]
     for row in comparisons:
         base_str = format_metric_val(row["base_value"], row["unit"])
         pr_str = format_metric_val(row["pr_value"], row["unit"])
-        diff_str = f"{row['diff_pct']:+.2f}%" if row["diff_pct"] is not None else "N/A"
-        table.add_row(
+        diff_str = (
+            f"{row['diff_pct']:+.2f}%" if row["diff_pct"] is not None else "N/A"
+        )
+        rows.append(
             [
-                row["name"],
-                row["metric_name"],
+                str(row["name"]),
+                str(row["metric_name"]),
                 base_str,
                 pr_str,
                 diff_str,
@@ -212,7 +242,16 @@ def generate_console_table(
             ]
         )
 
-    return table.get_string()
+    col_widths = [max(len(row[i]) for row in rows) for i in range(len(headers))]
+    lines = [
+        "| " + " | ".join(h.ljust(w) for h, w in zip(headers, col_widths)) + " |",
+        "| " + " | ".join("-" * w for w in col_widths) + " |",
+    ]
+    for r in rows[1:]:
+        lines.append(
+            "| " + " | ".join(cell.ljust(w) for cell, w in zip(r, col_widths)) + " |"
+        )
+    return "\n".join(lines)
 
 
 def generate_markdown_report(
@@ -227,29 +266,36 @@ def generate_markdown_report(
 
     lines = [
         "<!-- gcsfs-perf-benchmark-report -->",
-        "## ⚡ Microbenchmark Performance Comparison\n",
-        f"**Base:** `{base_ref or 'master'}` | **PR:** `{pr_ref or 'PR'}` | **Threshold:** `{threshold:.1f}%`\n",
+        "## Microbenchmark Performance Comparison\n",
+        (
+            f"**Base:** `{base_ref or 'master'}` | **PR:** `{pr_ref or 'PR'}` |"
+            f" **Threshold:** `{threshold:.1f}%`\n"
+        ),
     ]
 
     if has_reg:
         lines.append(
-            f"> [!CAUTION]\n> **Performance Regression Detected:** {summary['regressions']} benchmark(s) "
-            f"exceeded the {threshold:.1f}% degradation threshold.\n"
+            "> [!CAUTION]\n"
+            f"> **Performance Regression Detected:** {summary['regressions']}"
+            f" benchmark(s) exceeded the {threshold:.1f}% degradation"
+            " threshold.\n"
         )
     else:
         lines.append(
-            f"> [!NOTE]\n> **Performance Checks Passed:** Microbenchmarks are within the {threshold:.1f}% threshold.\n"
+            "> [!NOTE]\n"
+            "> **Performance Checks Passed:** Microbenchmarks are within the"
+            f" {threshold:.1f}% threshold.\n"
         )
 
     lines.append("| Benchmark | Metric | Base | PR | Diff (%) | Status |")
     lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
 
-    status_icons = {
-        "REGRESSION": f"❌ **Regression** (>+{threshold:.1f}%)",
-        "IMPROVED": "🚀 **Improved**",
-        "NO_CHANGE": "➖ No change",
-        "NEW": "🆕 New",
-        "REMOVED": "🗑️ Removed",
+    status_labels = {
+        "REGRESSION": f"FAIL (Regression >+{threshold:.1f}%)",
+        "IMPROVED": "PASS (Improved)",
+        "NO_CHANGE": "PASS (No change)",
+        "NEW": "NEW",
+        "REMOVED": "REMOVED",
     }
 
     for row in comparisons:
@@ -258,9 +304,10 @@ def generate_markdown_report(
         diff_str = (
             f"**{row['diff_pct']:+.2f}%**" if row["diff_pct"] is not None else "N/A"
         )
-        icon = status_icons.get(row["status"], row["status"])
+        status_text = status_labels.get(row["status"], row["status"])
         lines.append(
-            f"| `{row['name']}` | {row['metric_name']} | {base_str} | {pr_str} | {diff_str} | {icon} |"
+            f"| `{row['name']}` | {row['metric_name']} | {base_str} | {pr_str} |"
+            f" {diff_str} | {status_text} |"
         )
 
     return "\n".join(lines) + "\n"
@@ -291,7 +338,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         base_benchmarks = load_benchmarks(args.base_json)
         pr_benchmarks = load_benchmarks(args.pr_json)
     except Exception as e:
-        logging.error(f"Failed to load benchmark results: {e}")
+        logging.error("Failed to load benchmark results: %s", e)
         return 1
 
     comparisons, summary = compare_runs(

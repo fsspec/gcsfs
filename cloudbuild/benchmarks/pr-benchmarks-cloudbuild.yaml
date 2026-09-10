@@ -34,8 +34,7 @@ substitutions:
   _BUCKET_TYPES: "regional"
   _BASE_BRANCH: "main"
   _THRESHOLD: "5.0"
-  _MACHINE_TYPE: "e2-standard-4"
-  _SKIP_IF_FAILED: '[[ -f /workspace/SKIPPED ]] && exit 0; [[ -f /workspace/FAILED ]] && echo "⚠️ Skipping: Previous failure" && exit 0'
+  _SKIP_IF_FAILED: '[[ -f /workspace/SKIPPED ]] && exit 0; [[ -f /workspace/FAILED ]] && echo "Skipping: Previous failure" && exit 0'
 
 steps:
   # 0. Check if PR has the required performance test label
@@ -296,16 +295,16 @@ steps:
       - "-c"
       - |
         if [[ -f /workspace/SKIPPED ]]; then
-          echo "⏭️ Performance benchmarks skipped: $$(cat /workspace/SKIPPED)"
+          echo "Performance benchmarks skipped: $$(cat /workspace/SKIPPED)"
           echo "To run performance benchmarks on this PR, apply the '${_REQUIRED_LABEL}' label to the PR and comment '/gcbrun'."
           exit 0
         fi
         if [[ -f /workspace/FAILED ]]; then
-          echo "❌ Benchmark build failed due to:"
+          echo "Benchmark build failed due to:"
           cat /workspace/FAILED | sed 's/^/ - /'
           exit 1
         fi
-        echo "✅ Performance benchmarks passed within ${_THRESHOLD}% threshold."
+        echo "Performance benchmarks passed within ${_THRESHOLD}% threshold."
     waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key"]
 
 timeout: "1800s"
