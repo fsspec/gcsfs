@@ -7,16 +7,9 @@ calculates percentage differences, and flags regressions exceeding a threshold.
 import argparse
 import json
 import logging
-import os
+from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional, Tuple
-
-try:
-    from prettytable import PrettyTable, TableStyle
-
-    _HAS_PRETTYTABLE = True
-except ImportError:
-    _HAS_PRETTYTABLE = False
 
 
 def format_duration(seconds: Optional[float]) -> str:
@@ -34,9 +27,7 @@ def format_duration(seconds: Optional[float]) -> str:
 
 def format_throughput(mb_s: Optional[float]) -> str:
     """Format throughput in MB/s into a human-readable string."""
-    if mb_s is None:
-        return "N/A"
-    return f"{mb_s:.2f} MB/s"
+    return f"{mb_s:.2f} MB/s" if mb_s is not None else "N/A"
 
 
 def format_metric_val(val: Optional[float], unit: str) -> str:
@@ -53,10 +44,7 @@ def format_metric_val(val: Optional[float], unit: str) -> str:
 def extract_benchmark_metric(
     bench: Optional[Dict[str, Any]],
 ) -> Tuple[str, float, str, bool]:
-    """
-    Extract primary performance metric from benchmark dict.
-    Returns (metric_name, value, unit, higher_is_better).
-    """
+    """Extract primary performance metric. Returns (metric_name, value, unit, higher_is_better)."""
     if not bench:
         return "Mean Latency", 0.0, "s", False
 
@@ -76,7 +64,7 @@ def extract_benchmark_metric(
             pass
 
     # Multi-process duration metric
-    if "mean_run" in extra and extra["mean_run"] not in (None, "N/A"):
+    if extra.get("mean_run") not in (None, "N/A"):
         try:
             return "Mean Latency", float(extra["mean_run"]), "s", False
         except (ValueError, TypeError):
@@ -89,12 +77,8 @@ def extract_benchmark_metric(
 
 def load_benchmarks(json_path: str) -> Dict[str, Dict[str, Any]]:
     """Load pytest-benchmark JSON into a dictionary keyed by benchmark name."""
-    if not os.path.exists(json_path):
-        raise FileNotFoundError(f"Benchmark file not found: {json_path}")
-
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-
     return {b["name"]: b for b in data.get("benchmarks", []) if "name" in b}
 
 
@@ -197,34 +181,8 @@ def generate_console_table(
         "NEW": "NEW",
         "REMOVED": "REMOVED",
     }
-
-    if _HAS_PRETTYTABLE:
-        table = PrettyTable()
-        table.set_style(TableStyle.MARKDOWN)
-        table.field_names = ["Benchmark", "Metric", "Base", "PR", "Diff (%)", "Status"]
-
-        for row in comparisons:
-            base_str = format_metric_val(row["base_value"], row["unit"])
-            pr_str = format_metric_val(row["pr_value"], row["unit"])
-            diff_str = (
-                f"{row['diff_pct']:+.2f}%" if row["diff_pct"] is not None else "N/A"
-            )
-            table.add_row(
-                [
-                    row["name"],
-                    row["metric_name"],
-                    base_str,
-                    pr_str,
-                    diff_str,
-                    status_display.get(row["status"], row["status"]),
-                ]
-            )
-
-        return table.get_string()
-
-    # Fallback formatting when prettytable is not installed
     headers = ["Benchmark", "Metric", "Base", "PR", "Diff (%)", "Status"]
-    rows = [headers]
+    rows = []
     for row in comparisons:
         base_str = format_metric_val(row["base_value"], row["unit"])
         pr_str = format_metric_val(row["pr_value"], row["unit"])
@@ -242,12 +200,13 @@ def generate_console_table(
             ]
         )
 
-    col_widths = [max(len(row[i]) for row in rows) for i in range(len(headers))]
+    all_rows = [headers] + rows
+    col_widths = [max(len(r[i]) for r in all_rows) for i in range(len(headers))]
     lines = [
         "| " + " | ".join(h.ljust(w) for h, w in zip(headers, col_widths)) + " |",
         "| " + " | ".join("-" * w for w in col_widths) + " |",
     ]
-    for r in rows[1:]:
+    for r in rows:
         lines.append(
             "| " + " | ".join(cell.ljust(w) for cell, w in zip(r, col_widths)) + " |"
         )
@@ -264,31 +223,23 @@ def generate_markdown_report(
     threshold = summary["threshold_pct"]
     has_reg = summary["has_regression"]
 
+    alert = (
+        "> [!CAUTION]\n"
+        f"> **Performance Regression Detected:** {summary['regressions']}"
+        f" benchmark(s) exceeded the {threshold:.1f}% degradation threshold.\n"
+        if has_reg
+        else "> [!NOTE]\n"
+        f"> **Performance Checks Passed:** Microbenchmarks are within the {threshold:.1f}% threshold.\n"
+    )
+
     lines = [
         "<!-- gcsfs-perf-benchmark-report -->",
         "## Microbenchmark Performance Comparison\n",
-        (
-            f"**Base:** `{base_ref or 'master'}` | **PR:** `{pr_ref or 'PR'}` |"
-            f" **Threshold:** `{threshold:.1f}%`\n"
-        ),
+        f"**Base:** `{base_ref or 'master'}` | **PR:** `{pr_ref or 'PR'}` | **Threshold:** `{threshold:.1f}%`\n",
+        alert,
+        "| Benchmark | Metric | Base | PR | Diff (%) | Status |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- |",
     ]
-
-    if has_reg:
-        lines.append(
-            "> [!CAUTION]\n"
-            f"> **Performance Regression Detected:** {summary['regressions']}"
-            f" benchmark(s) exceeded the {threshold:.1f}% degradation"
-            " threshold.\n"
-        )
-    else:
-        lines.append(
-            "> [!NOTE]\n"
-            "> **Performance Checks Passed:** Microbenchmarks are within the"
-            f" {threshold:.1f}% threshold.\n"
-        )
-
-    lines.append("| Benchmark | Metric | Base | PR | Diff (%) | Status |")
-    lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
 
     status_labels = {
         "REGRESSION": f"FAIL (Regression >+{threshold:.1f}%)",
@@ -352,29 +303,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if args.output_markdown:
-        os.makedirs(
-            os.path.dirname(os.path.abspath(args.output_markdown)) or ".", exist_ok=True
+        p = Path(args.output_markdown)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            generate_markdown_report(comparisons, summary, args.base_ref, args.pr_ref),
+            encoding="utf-8",
         )
-        with open(args.output_markdown, "w", encoding="utf-8") as f:
-            f.write(
-                generate_markdown_report(
-                    comparisons, summary, args.base_ref, args.pr_ref
-                )
-            )
 
     if args.output_json:
-        os.makedirs(
-            os.path.dirname(os.path.abspath(args.output_json)) or ".", exist_ok=True
-        )
+        p = Path(args.output_json)
+        p.parent.mkdir(parents=True, exist_ok=True)
         clean_rows = [
             {k: v for k, v in c.items() if k not in ("base_bench", "pr_bench")}
             for c in comparisons
         ]
-        with open(args.output_json, "w", encoding="utf-8") as f:
-            json.dump({"summary": summary, "comparisons": clean_rows}, f, indent=2)
+        p.write_text(
+            json.dumps({"summary": summary, "comparisons": clean_rows}, indent=2),
+            encoding="utf-8",
+        )
 
     return 1 if summary["has_regression"] else 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
