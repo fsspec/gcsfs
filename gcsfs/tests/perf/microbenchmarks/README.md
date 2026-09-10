@@ -143,6 +143,7 @@ python gcsfs/tests/perf/microbenchmarks/compare.py base.json pr.json --threshold
 
 ## PR Performance Testing
 
-* **Trigger**: Comment `/perf-test` on any Pull Request.
+* **Trigger**: Apply the `perf-test` label to the PR and comment `/gcbrun`.
+* **Label Filtering**: If the `perf-test` label is not present on the PR, the pipeline exits early in seconds without creating VMs or buckets, conserving cloud resources and CI quota.
 * **Environment**: Executes in Cloud Build on a GCP VM against real Regional, Zonal, and HNS buckets.
 * **Comparison**: Runs benchmarks on both base (`main`) and PR branches; fails if any metric degrades by more than **5%**.
