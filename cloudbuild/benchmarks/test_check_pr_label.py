@@ -4,8 +4,8 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
 import urllib.error
+from unittest.mock import MagicMock, patch
 
 from cloudbuild.benchmarks import check_pr_label
 
@@ -42,9 +42,9 @@ class TestCheckPrLabel(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_matching_label_proceeds(self, mock_urlopen):
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "labels": [{"name": "perf-test"}, {"name": "bug"}]
-        }).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(
+            {"labels": [{"name": "perf-test"}, {"name": "bug"}]}
+        ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
 
@@ -60,9 +60,9 @@ class TestCheckPrLabel(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_case_insensitive_matching(self, mock_urlopen):
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "labels": [{"name": "Perf-Test"}]
-        }).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(
+            {"labels": [{"name": "Perf-Test"}]}
+        ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
 
@@ -78,9 +78,9 @@ class TestCheckPrLabel(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_multiple_target_labels(self, mock_urlopen):
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "labels": [{"name": "run-perf"}]
-        }).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(
+            {"labels": [{"name": "run-perf"}]}
+        ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
 
@@ -96,9 +96,9 @@ class TestCheckPrLabel(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_missing_label_writes_skip_file(self, mock_urlopen):
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "labels": [{"name": "enhancement"}, {"name": "documentation"}]
-        }).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(
+            {"labels": [{"name": "enhancement"}, {"name": "documentation"}]}
+        ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
 

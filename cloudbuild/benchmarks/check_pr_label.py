@@ -38,9 +38,7 @@ def check_pr_label(
     pr_number = pr_number.strip()
     required_label = required_label.strip()
 
-    target_labels = [
-        t.strip().lower() for t in required_label.split(",") if t.strip()
-    ]
+    target_labels = [t.strip().lower() for t in required_label.split(",") if t.strip()]
 
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
     print(
@@ -60,9 +58,7 @@ def check_pr_label(
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as err:
-        print(
-            f"⚠️ GitHub API returned HTTP {err.code}: {err.reason} for {url}."
-        )
+        print(f"⚠️ GitHub API returned HTTP {err.code}: {err.reason} for {url}.")
         print("Proceeding with build to avoid blocking CI on external errors.")
         return True
     except Exception as exc:
@@ -70,9 +66,7 @@ def check_pr_label(
         print("Proceeding with build to avoid blocking CI on external errors.")
         return True
 
-    pr_labels = [
-        str(l.get("name", "")).strip().lower() for l in data.get("labels", [])
-    ]
+    pr_labels = [str(l.get("name", "")).strip().lower() for l in data.get("labels", [])]
     print(f"PR #{pr_number} current labels: {pr_labels if pr_labels else 'None'}")
 
     matched = any(t in pr_labels for t in target_labels)
