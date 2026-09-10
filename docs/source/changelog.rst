@@ -4,7 +4,7 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
-Unreleased
+2026.8.1
 ----------
 
 * Default ``cat_file`` concurrency to 1 (#1048).
