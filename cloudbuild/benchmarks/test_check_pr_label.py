@@ -33,7 +33,7 @@ class TestCheckPrLabel(unittest.TestCase):
         result = check_pr_label.check_pr_label(
             repo="fsspec/gcsfs",
             pr_number="",
-            required_label="perf-test",
+            required_label="execute-perf-test",
             skip_file=self.skip_file,
         )
         self.assertTrue(result)
@@ -43,7 +43,7 @@ class TestCheckPrLabel(unittest.TestCase):
     def test_matching_label_proceeds(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps(
-            {"labels": [{"name": "perf-test"}, {"name": "bug"}]}
+            {"labels": [{"name": "execute-perf-test"}, {"name": "bug"}]}
         ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
@@ -51,7 +51,7 @@ class TestCheckPrLabel(unittest.TestCase):
         result = check_pr_label.check_pr_label(
             repo="fsspec/gcsfs",
             pr_number="123",
-            required_label="perf-test",
+            required_label="execute-perf-test",
             skip_file=self.skip_file,
         )
         self.assertTrue(result)
@@ -61,7 +61,7 @@ class TestCheckPrLabel(unittest.TestCase):
     def test_case_insensitive_matching(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps(
-            {"labels": [{"name": "Perf-Test"}]}
+            {"labels": [{"name": "Execute-Perf-Test"}]}
         ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
@@ -69,7 +69,7 @@ class TestCheckPrLabel(unittest.TestCase):
         result = check_pr_label.check_pr_label(
             repo="fsspec/gcsfs",
             pr_number="123",
-            required_label="perf-test",
+            required_label="execute-perf-test",
             skip_file=self.skip_file,
         )
         self.assertTrue(result)
@@ -87,7 +87,7 @@ class TestCheckPrLabel(unittest.TestCase):
         result = check_pr_label.check_pr_label(
             repo="fsspec/gcsfs",
             pr_number="123",
-            required_label="perf-test,run-perf",
+            required_label="execute-perf-test,run-perf",
             skip_file=self.skip_file,
         )
         self.assertTrue(result)
@@ -105,14 +105,14 @@ class TestCheckPrLabel(unittest.TestCase):
         result = check_pr_label.check_pr_label(
             repo="fsspec/gcsfs",
             pr_number="123",
-            required_label="perf-test",
+            required_label="execute-perf-test",
             skip_file=self.skip_file,
         )
         self.assertFalse(result)
         self.assertTrue(os.path.exists(self.skip_file))
         with open(self.skip_file) as f:
             content = f.read()
-        self.assertIn("PR #123 does not have required label 'perf-test'", content)
+        self.assertIn("PR #123 does not have required label 'execute-perf-test'", content)
 
     @patch("urllib.request.urlopen")
     def test_http_error_proceeds_gracefully(self, mock_urlopen):
@@ -123,7 +123,7 @@ class TestCheckPrLabel(unittest.TestCase):
         result = check_pr_label.check_pr_label(
             repo="fsspec/gcsfs",
             pr_number="123",
-            required_label="perf-test",
+            required_label="execute-perf-test",
             skip_file=self.skip_file,
         )
         self.assertTrue(result)

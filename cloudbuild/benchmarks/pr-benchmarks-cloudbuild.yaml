@@ -1,7 +1,7 @@
 # =======================================================================================
 # Cloud Build Pipeline: PR Performance Benchmarking
 #
-# Triggered via PR comment: `/gcbrun` (requires `perf-test` PR label by default)
+# Triggered via PR comment: `/gcbrun` (requires `execute-perf-test` PR label by default)
 #
 # Default configuration is optimized for fast E2E validation (~2-3 minutes):
 # - Small VM: e2-standard-4 (4 vCPU, 16 GB RAM)
@@ -10,7 +10,7 @@
 # - Can be overridden to c4-standard-192, full read/write suites, etc. via substitutions.
 #
 # Workflow:
-# 0. Check PR label: verify PR has required label (perf-test). If missing, skip early.
+# 0. Check PR label: verify PR has required label (execute-perf-test). If missing, skip early.
 # 1. Ephemeral SSH key generation with OS Login.
 # 2. Parallel provisioning of ephemeral GCE VM and test bucket(s).
 # 3. Setup VM environment (Python venv, dynamic RAM disk on /mnt/ramdisk).
@@ -22,7 +22,7 @@
 # =======================================================================================
 
 substitutions:
-  _REQUIRED_LABEL: "perf-test"
+  _REQUIRED_LABEL: "execute-perf-test"
   _REPO: "fsspec/gcsfs"
   _REGION: "us-central1"
   _ZONE: "us-central1-a"

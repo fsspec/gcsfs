@@ -70,8 +70,8 @@ PR Performance Benchmarking
 Pull requests can be evaluated for performance regressions against ``main``
 via the Cloud Build performance pipeline:
 
-- **Trigger**: Apply the ``perf-test`` label to the PR and comment ``/gcbrun``.
-- **Filter**: If the ``perf-test`` label is not present on the PR, the pipeline exits early without provisioning infrastructure, preventing unwanted benchmark runs when running standard tests.
+- **Trigger**: Apply the ``execute-perf-test`` label to the PR and comment ``/gcbrun``.
+- **Filter**: If the ``execute-perf-test`` label is not present on the PR, the pipeline exits early without provisioning infrastructure, preventing unwanted benchmark runs when running standard tests.
 - **Environment**: Runs on a Google Cloud VM testing against real Regional, Zonal, and HNS buckets.
 - **Threshold**: Fails if performance regresses by more than **5%**.
 - **Local Comparison**: Compare two benchmark runs locally using ``compare.py``:

@@ -119,7 +119,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--label",
-        default=os.environ.get("_REQUIRED_LABEL", "perf-test"),
+        default=os.environ.get("_REQUIRED_LABEL", "execute-perf-test"),
         help="Required label(s), comma-separated",
     )
     parser.add_argument(

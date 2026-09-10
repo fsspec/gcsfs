@@ -59,6 +59,6 @@ To run this automation in your own GCP project, you need to set up atleast two C
 
 ### PR Performance Benchmarks Trigger
 *   **Configuration File**: `cloudbuild/benchmarks/pr-benchmarks-cloudbuild.yaml`
-*   **Trigger Event**: Pull Request comment `/gcbrun` with the `perf-test` PR label.
-*   **Label Filter**: Automatically checks if the PR has the `perf-test` label (configurable via `_REQUIRED_LABEL`). If the label is missing, the build exits early in seconds without allocating compute or storage resources.
+*   **Trigger Event**: Pull Request comment `/gcbrun` with the `execute-perf-test` PR label.
+*   **Label Filter**: Automatically checks if the PR has the `execute-perf-test` label (configurable via `_REQUIRED_LABEL`). If the label is missing, the build exits early in seconds without allocating compute or storage resources.
 *   **Description**: Runs microbenchmarks on both base (`main`) and PR branch, compares them using `compare.py`, and fails if degradation exceeds 5%.
