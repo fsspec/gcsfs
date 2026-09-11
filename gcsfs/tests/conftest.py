@@ -607,6 +607,99 @@ async def async_gcs():
         await _close_gcs_async(gcs)
 
 
+@pytest.fixture
+def mock_gcs_harness(monkeypatch):
+    """
+    Harness that mocks GCSFileSystem HTTP transport and records the exact
+    User-Agent header sent on every outgoing GCS request.
+    """
+    captured_user_agents = []
+    sample_pt_data = b"MOCK_PT_BINARY_DATA_FOR_TORCH_LOADER_TESTING_12345"
+    sample_csv_data = b"col1,col2,col3\n1,2,3\n4,5,6\n"
+
+    async def mock_call(self, method, path, *args, **kwargs):
+        if args:
+            path = path.format(*args)
+        # Capture the User-Agent header
+        headers = kwargs.get("headers") or {}
+        ua = headers.get("User-Agent")
+        if not ua:
+            ua = self._get_headers(
+                headers,
+                cache_type=kwargs.get("cache_type"),
+                cache_source=kwargs.get("cache_source"),
+            ).get("User-Agent")
+        captured_user_agents.append(ua or "")
+
+        # Mock initiate_upload (resumable upload session)
+        if kwargs.get("uploadType") == "resumable":
+            return {
+                "Location": "http://mock-gcs/upload/session-12345678901234567890"
+            }, b""
+
+        # Mock upload chunk / upload completion
+        if "http://mock-gcs/upload" in str(path):
+            return {}, b'{"generation": "1"}'
+
+        # Mock object metadata response (json_out=True returns dict directly)
+        if kwargs.get("json_out"):
+            if path in ["b", "b?"] or str(path).startswith("b?"):
+                return {"kind": "storage#buckets", "items": [{"name": "test-bucket"}]}
+            if str(path).startswith("b/") and "/o" not in str(path):
+                return {
+                    "kind": "storage#bucket",
+                    "name": "test-bucket",
+                    "items": [{"name": "test-bucket"}],
+                }
+            if str(path).endswith("/o") or "/o?" in str(path):
+                return {
+                    "items": [
+                        {
+                            "name": "model.pt" if "model" in str(path) else "file.txt",
+                            "bucket": "test-bucket",
+                            "size": str(len(sample_pt_data)),
+                            "generation": "1",
+                        }
+                    ]
+                }
+            obj_name = path.split("/o/")[-1] if "/o/" in path else path.split("/")[-1]
+            size = len(sample_csv_data) if "csv" in obj_name else len(sample_pt_data)
+            return {
+                "name": obj_name,
+                "bucket": "test-bucket",
+                "size": str(size),
+                "generation": "1",
+                "timeCreated": "2026-01-01T00:00:00.000Z",
+                "updated": "2026-01-01T00:00:00.000Z",
+            }
+
+        # Mock object data content
+        if "csv" in str(path):
+            return {}, sample_csv_data
+        return {}, sample_pt_data
+
+    from gcsfs.telemetry.manager import _gcs_sync_wrapper
+
+    monkeypatch.setattr(GCSFileSystem, "_call", mock_call)
+    monkeypatch.setattr(GCSFileSystem, "call", _gcs_sync_wrapper(mock_call))
+
+    class Harness:
+        def __init__(self):
+            self.user_agents = captured_user_agents
+            self.fs = GCSFileSystem(
+                token="anon", project="test-project", consistency="none"
+            )
+
+        def clear(self):
+            self.user_agents.clear()
+
+        def last_user_agent(self) -> str:
+            assert len(self.user_agents) > 0, "No User-Agent was captured!"
+            return self.user_agents[-1]
+
+    return Harness()
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-benchmarks",
