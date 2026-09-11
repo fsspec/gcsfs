@@ -1,0 +1,318 @@
+# =======================================================================================
+# Cloud Build Pipeline: PR Performance Benchmarking
+#
+# Triggered via PR comment: `/gcbrun` (requires `execute-perf-test` PR label by default)
+#
+# Default configuration is optimized for fast E2E validation (~2-3 minutes):
+# - Small VM: e2-standard-4 (4 vCPU, 16 GB RAM)
+# - Fast benchmark: group=info, config=info_bucket
+# - Single regional test bucket
+# - Can be overridden to c4-standard-192, full read/write suites, etc. via substitutions.
+#
+# Workflow:
+# 0. Check PR label: verify PR has required label (execute-perf-test). If missing, skip early.
+# 1. Ephemeral SSH key generation with OS Login.
+# 2. Parallel provisioning of ephemeral GCE VM and test bucket(s).
+# 3. Setup VM environment (Python venv, dynamic RAM disk on /mnt/ramdisk).
+# 4. Benchmark the base branch (main) on the VM.
+# 5. Benchmark the PR branch with identical parameters on the same VM.
+# 6. Run compare.py to evaluate latency and throughput regressions against threshold (5%).
+# 7. Unconditional cleanup of VM, buckets, and SSH keys (guaranteed by allowFailure: true).
+# 8. Check for failures and report build status to GitHub Check Run.
+# =======================================================================================
+
+substitutions:
+  _REQUIRED_LABEL: "execute-perf-test"
+  _REPO: "fsspec/gcsfs"
+  _REGION: "us-central1"
+  _ZONE: "us-central1-a"
+  _INFRA_PREFIX: "gcsfs-pr-perf"
+  _VM_SERVICE_ACCOUNT: ""
+  _ZONAL_VM_SERVICE_ACCOUNT: ""
+  _BENCHMARK_GROUP: "info"
+  _BENCHMARK_CONFIG: "info_bucket"
+  _BUCKET_TYPES: "regional"
+  _BASE_BRANCH: "main"
+  _THRESHOLD: "5.0"
+  _SKIP_IF_FAILED: '[[ -f /workspace/SKIPPED ]] && exit 0; [[ -f /workspace/FAILED ]] && echo "Skipping: Previous failure" && exit 0'
+
+steps:
+  # 0. Check if PR has the required performance test label
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-pr-label"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        python3 cloudbuild/benchmarks/check_pr_label.py \
+          --label="${_REQUIRED_LABEL}" \
+          --pr="${_PR_NUMBER}" \
+          --repo="${_REPO}"
+    waitFor: ["-"]
+
+  # 1. Generate persistent SSH key for this build run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "generate-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        mkdir -p /workspace/.ssh
+        ssh-keygen -q -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
+        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=2h > /dev/null
+    waitFor: ["check-pr-label"]
+    allowFailure: true
+
+  # 2. Initialize shared variables
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "init-variables"
+    entrypoint: "bash"
+    env:
+      - "BUILD_ID=${BUILD_ID}"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        SHORT_BUILD_ID=$${BUILD_ID:0:8}
+        echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-reg-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+    waitFor: ["check-pr-label"]
+
+  # 3. Create test buckets in parallel (only those specified in _BUCKET_TYPES)
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
+          gcloud storage buckets create "gs://$${REGIONAL_BUCKET}" --project=${PROJECT_ID} --location=${_REGION} &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
+          gcloud storage buckets create "gs://$${ZONAL_BUCKET}" --project=${PROJECT_ID} --location=${_REGION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
+          gcloud storage buckets create "gs://$${HNS_BUCKET}" --project=${PROJECT_ID} --location=${_REGION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
+        wait || { echo "create-buckets" >> /workspace/FAILED; exit 1; }
+    waitFor: ["init-variables"]
+    allowFailure: true
+
+  # 4. Provision Compute Engine VM
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+        SA_FLAG=()
+        if [ -n "${_VM_SERVICE_ACCOUNT}" ]; then
+          SA_FLAG=("--service-account=${_VM_SERVICE_ACCOUNT}")
+        elif [ -n "${_ZONAL_VM_SERVICE_ACCOUNT}" ]; then
+          SA_FLAG=("--service-account=${_ZONAL_VM_SERVICE_ACCOUNT}")
+        fi
+
+        gcloud compute instances create "$$VM_NAME" \
+          --project="${PROJECT_ID}" \
+          --zone="${_ZONE}" \
+          --machine-type="${_MACHINE_TYPE}" \
+          --image-family="ubuntu-2404-lts-amd64" \
+          --image-project="ubuntu-os-cloud" \
+          --scopes="https://www.googleapis.com/auth/cloud-platform" \
+          "$${SA_FLAG[@]}" \
+          --metadata="enable-oslogin=TRUE" \
+          --tags="allow-ssh" \
+          --quiet || { echo "create-vm" >> /workspace/FAILED; exit 1; }
+    waitFor: ["init-variables"]
+    allowFailure: true
+
+  # 5. Setup VM and source trees
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "setup-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+
+        # Wait for SSH via reusable helper
+        bash cloudbuild/wait_for_ssh.sh "$$VM_NAME" "${_ZONE}" || { echo "setup-vm (wait-ssh)" >> /workspace/FAILED; exit 1; }
+
+        # Copy PR source to VM
+        gcloud compute scp --recurse . "$$VM_NAME:~/gcsfs-pr" \
+          --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine || { echo "setup-vm (scp-pr)" >> /workspace/FAILED; exit 1; }
+
+        # Setup OS, dynamic RAM disk, and clone base branch
+        SETUP_SCRIPT="
+          set -e
+          total_mem_gb=\$(awk '/MemTotal:/ {print int(\$2 / 1024 / 1024)}' /proc/meminfo)
+          ramdisk_size_gb=\$(( total_mem_gb * 50 / 100 ))
+          [ \"\$ramdisk_size_gb\" -lt 2 ] && ramdisk_size_gb=2
+          echo \"--- Setting up RAM disk of \$ramdisk_size_gb GB on /mnt/ramdisk ---\"
+          sudo mkdir -p /mnt/ramdisk
+          sudo mount -t tmpfs -o size=\"\${ramdisk_size_gb}G\" tmpfs /mnt/ramdisk
+          sudo chmod 1777 /mnt/ramdisk
+
+          sudo apt-get update > /dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3-venv git > /dev/null
+
+          # Clone base branch
+          git clone https://github.com/fsspec/gcsfs.git ~/gcsfs-base
+          cd ~/gcsfs-base && git checkout ${_BASE_BRANCH}
+        "
+        gcloud compute ssh "$$VM_NAME" \
+          --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="$$SETUP_SCRIPT" || { echo "setup-vm (deps)" >> /workspace/FAILED; exit 1; }
+    waitFor: ["create-vm", "generate-ssh-key"]
+    allowFailure: true
+
+  # 6. Run benchmarks on base & PR branches, then compare
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-and-compare"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+
+        CONFIG_ARG=""
+        if [ -n "${_BENCHMARK_CONFIG}" ]; then
+          CONFIG_ARG="--config=${_BENCHMARK_CONFIG}"
+        fi
+
+        BUCKET_ARGS=""
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
+          BUCKET_ARGS="$${BUCKET_ARGS} --regional-bucket='$${REGIONAL_BUCKET}'"
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
+          BUCKET_ARGS="$${BUCKET_ARGS} --zonal-bucket='$${ZONAL_BUCKET}'"
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
+          BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
+        fi
+
+        # CONFIG_ARG and BUCKET_ARGS are defined locally in the Cloud Build runner shell.
+        # They use $$ (unescaped in bash) so the local shell expands their values into
+        # BENCHMARK_SCRIPT before SSH transmission. Remote variables (e.g. \$$BASE_JSON_PATH)
+        # remain escaped with \$$ so they evaluate dynamically on the VM.
+        BENCHMARK_SCRIPT="
+          set -e
+          export TMPDIR=/mnt/ramdisk
+
+          echo '=== Benchmarking Base Branch (${_BASE_BRANCH}) ==='
+          cd ~/gcsfs-base
+          python3 -m venv env && source env/bin/activate
+          pip install -q -e . -r gcsfs/tests/perf/microbenchmarks/requirements.txt
+          python gcsfs/tests/perf/microbenchmarks/run.py --group=${_BENCHMARK_GROUP} \
+            $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+          BASE_JSON_PATH=\$(pwd)/\$(ls -td gcsfs/tests/perf/microbenchmarks/__run__/*/results.json | head -1)
+
+          echo '=== Benchmarking PR Branch ==='
+          cd ~/gcsfs-pr
+          python3 -m venv env && source env/bin/activate
+          pip install -q -e . -r gcsfs/tests/perf/microbenchmarks/requirements.txt
+          python gcsfs/tests/perf/microbenchmarks/run.py --group=${_BENCHMARK_GROUP} \
+            $$CONFIG_ARG $$BUCKET_ARGS --log=true --log-level=INFO
+          PR_JSON_PATH=\$(pwd)/\$(ls -td gcsfs/tests/perf/microbenchmarks/__run__/*/results.json | head -1)
+
+          echo '=== Comparing Performance (Threshold: ${_THRESHOLD}%) ==='
+          python gcsfs/tests/perf/microbenchmarks/compare.py \
+            \$$BASE_JSON_PATH \
+            \$$PR_JSON_PATH \
+            --threshold=${_THRESHOLD} \
+            --base-ref='${_BASE_BRANCH}' \
+            --pr-ref='PR'
+        "
+
+        gcloud compute ssh "$$VM_NAME" \
+          --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="$$BENCHMARK_SCRIPT" || { echo "run-and-compare" >> /workspace/FAILED; exit 1; }
+    waitFor: ["setup-vm", "create-buckets"]
+    allowFailure: true
+
+  # 7. Cleanup VM
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [[ -f /workspace/SKIPPED ]] && exit 0
+        source /workspace/build_vars.env 2>/dev/null || true
+        if [ -n "$${VM_NAME:-}" ]; then
+          gcloud compute instances delete "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --quiet || true
+        fi
+    waitFor: ["run-and-compare"]
+
+  # 8. Cleanup Buckets
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [[ -f /workspace/SKIPPED ]] && exit 0
+        source /workspace/build_vars.env 2>/dev/null || true
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]] && [ -n "$${REGIONAL_BUCKET:-}" ]; then
+          gcloud storage rm --recursive "gs://$$REGIONAL_BUCKET" || true
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]] && [ -n "$${ZONAL_BUCKET:-}" ]; then
+          gcloud storage rm --recursive "gs://$$ZONAL_BUCKET" || true
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]] && [ -n "$${HNS_BUCKET:-}" ]; then
+          gcloud storage rm --recursive "gs://$$HNS_BUCKET" || true
+        fi
+    waitFor: ["run-and-compare"]
+
+  # 9. Cleanup SSH Key
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [[ -f /workspace/SKIPPED ]] && exit 0
+        if [[ -f /workspace/gcb_ssh_key.pub ]]; then
+          gcloud compute os-login ssh-keys remove --key-file=/workspace/gcb_ssh_key.pub --quiet || true
+        fi
+    waitFor: ["run-and-compare"]
+
+  # 10. Check build result
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-failure"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [[ -f /workspace/SKIPPED ]]; then
+          echo "Performance benchmarks skipped: $$(cat /workspace/SKIPPED)"
+          echo "To run performance benchmarks on this PR, apply the '${_REQUIRED_LABEL}' label to the PR and comment '/gcbrun'."
+          exit 0
+        fi
+        if [[ -f /workspace/FAILED ]]; then
+          echo "Benchmark build failed due to:"
+          cat /workspace/FAILED | sed 's/^/ - /'
+          exit 1
+        fi
+        echo "Performance benchmarks passed within ${_THRESHOLD}% threshold."
+    waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key"]
+
+timeout: "1800s"
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${_REGION}/workerPools/cloud-build-worker-pool"

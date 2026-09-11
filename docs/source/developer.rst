@@ -58,6 +58,28 @@ re-triggered by adding a ``/gcbrun`` comment or by using re-run option from Gith
 The logs from the test run are available in the "details" section of the Checks
 tab in the pull request.
 
+Performance Testing
+-------------------
+
+GCSFS provides microbenchmarks in ``gcsfs/tests/perf/microbenchmarks`` to measure
+operation latency and throughput.
+
+PR Performance Benchmarking
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pull requests can be evaluated for performance regressions against ``main``
+via the Cloud Build performance pipeline:
+
+- **Trigger**: Apply the ``execute-perf-test`` label to the PR and comment ``/gcbrun``.
+- **Filter**: If the ``execute-perf-test`` label is not present on the PR, the pipeline exits early without provisioning infrastructure, preventing unwanted benchmark runs when running standard tests.
+- **Environment**: Runs on a Google Cloud VM testing against real Regional, Zonal, and HNS buckets.
+- **Threshold**: Fails if performance regresses by more than **5%**.
+- **Local Comparison**: Compare two benchmark runs locally using ``compare.py``:
+
+  .. code-block:: bash
+
+      python gcsfs/tests/perf/microbenchmarks/compare.py base.json pr.json --threshold=5.0
+
 Release Process
 ---------------
 
