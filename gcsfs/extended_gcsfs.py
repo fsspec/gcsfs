@@ -640,8 +640,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         max_gap: int or str, optional
             If specified and >= 0, adjacent byte ranges on the same file with a gap
             <= max_gap will be coalesced into a single larger read request.
-            Can also be set to "auto" or "adaptive" to dynamically calculate max_gap
-            based on median chunk size.
+            Can also be set to "auto" to dynamically calculate max_gap based on
+            median chunk size.
         batch_size: int, optional
             Number of concurrent range fetches. Defaults to self.batch_size.
         on_error: "return" or "raise"
@@ -674,11 +674,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if bucket not in bucket_zonal_map:
                 bucket_zonal_map[bucket] = await self._is_zonal_bucket(bucket)
 
-        auto_enabled = (
-            auto_max_gap
-            or kwargs.pop("adaptive", False)
-            or kwargs.pop("adaptive_max_gap", False)
-            or (isinstance(max_gap, str) and max_gap.lower() in ("auto", "adaptive"))
+        auto_enabled = auto_max_gap or (
+            isinstance(max_gap, str) and max_gap.lower() == "auto"
         )
 
         # If all paths belong to non-zonal buckets, delegate directly to base class

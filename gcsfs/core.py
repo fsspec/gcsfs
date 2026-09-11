@@ -11,8 +11,8 @@ import mimetypes
 import os
 import queue
 import re
-import sys
 import statistics
+import sys
 import threading
 import uuid
 import warnings
@@ -1540,8 +1540,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         max_gap: int or str, optional
             If specified and >= 0, adjacent byte ranges on the same file with a gap
             <= max_gap will be coalesced into a single larger read request.
-            Can also be set to "auto" or "adaptive" to dynamically calculate max_gap
-            based on median chunk size.
+            Can also be set to "auto" to dynamically calculate max_gap based on
+            median chunk size.
         batch_size: int, optional
             Number of concurrent range fetches. Defaults to self.batch_size.
         on_error: "return" or "raise"
@@ -1577,11 +1577,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             if valid_items:
                 valid_items_per_file[p] = valid_items
 
-        auto_enabled = (
-            auto_max_gap
-            or kwargs.pop("adaptive", False)
-            or kwargs.pop("adaptive_max_gap", False)
-            or (isinstance(max_gap, str) and max_gap.lower() in ("auto", "adaptive"))
+        auto_enabled = auto_max_gap or (
+            isinstance(max_gap, str) and max_gap.lower() == "auto"
         )
         if auto_enabled:
             all_lengths = [

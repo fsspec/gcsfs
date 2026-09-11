@@ -22,8 +22,8 @@ from fsspec.utils import seek_delimiter
 import gcsfs.checkers
 import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
-from gcsfs.core import _compute_adaptive_max_gap
 from gcsfs import __version__ as version
+from gcsfs.core import _compute_adaptive_max_gap
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import (
     a,
@@ -3975,23 +3975,7 @@ async def test_gcsfs_cat_ranges_adaptive():
         assert bytes(res[1]) == b"x" * 100
         assert mock_cat.call_count == 1
 
-        # 3. max_gap="adaptive"
-        mock_cat.reset_mock()
-        res = await fs._cat_ranges(paths, starts, ends, max_gap="adaptive")
-        assert len(res) == 2
-        assert bytes(res[0]) == b"x" * 100
-        assert bytes(res[1]) == b"x" * 100
-        assert mock_cat.call_count == 1
-
-        # 4. adaptive=True via kwargs
-        mock_cat.reset_mock()
-        res = await fs._cat_ranges(paths, starts, ends, adaptive=True)
-        assert len(res) == 2
-        assert bytes(res[0]) == b"x" * 100
-        assert bytes(res[1]) == b"x" * 100
-        assert mock_cat.call_count == 1
-
-        # 5. Gap exceeding adaptive max_gap (gap = 10 > 5): not coalesced
+        # 3. Gap exceeding adaptive max_gap (gap = 10 > 5): not coalesced
         mock_cat.reset_mock()
         starts_wide = [0, 110]
         ends_wide = [100, 210]
