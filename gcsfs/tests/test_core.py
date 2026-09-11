@@ -625,6 +625,32 @@ def test_rm_chunked_batch(gcs):
         assert fn not in files_removed
 
 
+@pytest.mark.asyncio
+async def test_delete_files_with_exception(gcs):
+    # Arrange
+    files = [f"{TEST_BUCKET}/file_{i}" for i in range(3)]
+    exc = RuntimeError("batch failed")
+
+    async def mock_rm_files(batch):
+        if files[2] in batch:
+            raise exc
+        return [True] * len(batch)
+
+    with (
+        mock.patch.object(
+            type(gcs),
+            "on_google",
+            new_callable=mock.PropertyMock(return_value=True),
+        ),
+        mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
+    ):
+        # Act
+        result = await gcs._delete_files(files, batchsize=2)
+
+        # Assert
+        assert result == [True, True, exc]
+
+
 def test_rm_wildcards_in_directory(gcs):
     base_dir = f"{TEST_BUCKET}/test_rm_complex_{uuid.uuid4().hex}"
     files = [

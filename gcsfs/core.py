@@ -1627,7 +1627,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             )
             out = []
             for r in chunk_results:
-                out.extend(r)
+                if isinstance(r, Exception):
+                    out.append(r)
+                else:
+                    out.extend(r)
             return out
         else:
             return await asyn._run_coros_in_chunks(
