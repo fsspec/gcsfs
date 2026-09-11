@@ -100,3 +100,8 @@ def test_build_pytest_args_includes_run_benchmarks():
 def test_webdataset_group_is_discoverable():
     """Verifies dataloading/webdataset is discovered from its requirements.txt."""
     assert "dataloading/webdataset" in run.discover_groups()
+
+
+def test_ray_checkpointing_group_is_discoverable():
+    """Verifies checkpointing/ray_data is discovered from its requirements.txt."""
+    assert "checkpointing/ray_data" in run.discover_groups()
