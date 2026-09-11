@@ -3,7 +3,7 @@
 Test placement: keep zonal-specific write behavior here, including ZonalFile
 tests and ExtendedGcsFileSystem zonal write routing tests. Standard filesystem
 behavior belongs in test_core.py; HNS-specific behavior belongs in
-test_extended_hns_gcsfs.py or integration/test_extended_hns.py.
+test_hns_unit.py or integration/test_extended_hns.py.
 """
 
 import asyncio

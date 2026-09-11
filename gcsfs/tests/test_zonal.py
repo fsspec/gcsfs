@@ -1,4 +1,7 @@
-# Integration tests for ExtendedGcsFileSystem
+"""Integration tests for Zonal bucket support in ExtendedGcsFileSystem.
+These tests exercise gRPC rapid plane features (MRD, AAOW) and require a live Zonal bucket.
+"""
+
 import asyncio
 import contextlib
 import io

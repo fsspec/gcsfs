@@ -13,7 +13,7 @@ and `mkdir`.
 
 Test placement: keep real-GCS HNS behavior in this file. Standard-bucket
 integration behavior belongs in test_core.py; zonal-specific behavior belongs
-in zonal test modules such as test_zonal_file.py.
+in zonal test modules such as test_zonal.py or test_zonal_file.py.
 """
 
 import uuid
