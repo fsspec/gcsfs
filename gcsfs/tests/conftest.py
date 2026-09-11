@@ -1,6 +1,7 @@
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import time
 import uuid
@@ -137,6 +138,8 @@ def _mock_get_bucket_type_on_emulator():
 
 
 def stop_docker(container):
+    if not shutil.which("docker"):
+        return
     cmd = shlex.split('docker ps -a -q --filter "name=%s"' % container)
     cid = subprocess.check_output(cmd).strip().decode()
     if cid:
@@ -153,6 +156,15 @@ def docker_gcs():
 
         yield _location()
         return
+
+    if not shutil.which("docker"):
+        pytest.skip(
+            "Docker is not available and STORAGE_EMULATOR_HOST is not set. "
+            "To run tests, set STORAGE_EMULATOR_HOST (e.g. "
+            "export STORAGE_EMULATOR_HOST=https://storage.googleapis.com) "
+            "or run a fake-gcs-server emulator."
+        )
+
     container = "gcsfs_test"
     cmd = (
         "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "

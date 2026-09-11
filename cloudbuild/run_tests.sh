@@ -93,10 +93,10 @@ case "$TEST_SUITE" in
     run_pytest "${ARGS[@]}" \
       gcsfs/tests/test_zonal.py \
       gcsfs/tests/test_zonal_file.py \
-      gcsfs/tests/integration/test_async_gcsfs.py \
-      gcsfs/tests/integration/test_hns.py \
-      --deselect gcsfs/tests/integration/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_mkdir_fails_without_quota_project \
-      --deselect gcsfs/tests/integration/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays || STATUS=$?
+      gcsfs/tests/test_async.py \
+      gcsfs/tests/test_hns.py \
+      --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_mkdir_fails_without_quota_project \
+      --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays || STATUS=$?
     ;;
 
   "hns")

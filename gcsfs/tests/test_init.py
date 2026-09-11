@@ -8,6 +8,10 @@ class TestConditionalImport:
         """Setup for each test method."""
         self.original_env = os.environ.get("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT")
 
+        import fsspec.caching
+
+        self.original_caches = fsspec.caching.caches.copy()
+
         # Snapshot original gcsfs modules
         self.original_modules = {
             name: mod for name, mod in sys.modules.items() if name.startswith("gcsfs")
@@ -36,6 +40,12 @@ class TestConditionalImport:
         # Restore the original gcsfs modules from the snapshot to avoid side effect
         # affecting other tests
         sys.modules.update(self.original_modules)
+
+        # Restore fsspec cache registry to ensure external caches match original module classes
+        import fsspec.caching
+
+        fsspec.caching.caches.clear()
+        fsspec.caching.caches.update(self.original_caches)
 
     def test_experimental_env_is_set_by_default(self):
         """
