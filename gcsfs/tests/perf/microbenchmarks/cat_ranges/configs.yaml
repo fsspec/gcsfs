@@ -1,0 +1,61 @@
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+    - "hns"
+  file_sizes_mb:
+    - 1024 # 1 GB
+  num_ranges_list:
+    - 200
+  batch_sizes:
+    - 64
+  rounds: 3
+
+scenarios:
+  - name: "cat_ranges_seq"
+    pattern: "seq"
+    files: 1
+    chunk_sizes_mb:
+      - [1] # 1 MB uniform
+
+  - name: "cat_ranges_rand"
+    pattern: "rand"
+    files: 1
+    chunk_sizes_mb:
+      - [1] # 1 MB uniform
+
+  - name: "cat_ranges_mixed_sizes"
+    pattern: "rand"
+    files: 1
+    chunk_sizes_mb:
+      - [0.0625, 1, 4, 16] # 64KB, 1MB, 4MB, 16MB varied in one call
+
+  - name: "cat_ranges_multi_file"
+    pattern: "rand"
+    files: 5
+    chunk_sizes_mb:
+      - [1]
+
+  - name: "cat_ranges_batch_size_sweep"
+    pattern: "rand"
+    files: 1
+    num_ranges_list:
+      - 200
+    batch_sizes:
+      - 16
+      - 64
+      - 128
+    chunk_sizes_mb:
+      - [1]
+
+  - name: "cat_ranges_large_file_large_ranges"
+    pattern: "rand"
+    files: 1
+    file_sizes_mb:
+      - 10240 # 10 GB
+    num_ranges_list:
+      - 1000
+    batch_sizes:
+      - 64
+    chunk_sizes_mb:
+      - [0.0625, 1, 4, 16]

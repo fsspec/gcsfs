@@ -45,16 +45,20 @@ def run_single_threaded(
     func,
     args,
     benchmark_group,
+    total_bytes=None,
     operations_per_round=None,
 ):
     """Runs a single-threaded benchmark.
 
     Args:
+        total_bytes: Optional override for total bytes transferred (e.g. for cat_ranges).
         operations_per_round: Number of filesystem operations ``func`` performs
             per round. When given, the HTTP calls gcsfs issues are counted and
             reported as ``requests_per_op``.
     """
-    publish_benchmark_extra_info(benchmark, params, benchmark_group)
+    publish_benchmark_extra_info(
+        benchmark, params, benchmark_group, total_bytes=total_bytes
+    )
 
     with monitor_cls() as m, _optional_request_counter(operations_per_round) as counter:
         benchmark.pedantic(func, rounds=params.rounds, args=args)
@@ -97,6 +101,7 @@ def run_multi_threaded(
     worker_func,
     args_list,
     benchmark_group,
+    total_bytes=None,
     operations_per_round=None,
 ):
     """
@@ -105,11 +110,14 @@ def run_multi_threaded(
     Args:
         worker_func: The function to run in each thread.
         args_list: A list of tuples, where each tuple contains arguments for one thread.
+        total_bytes: Optional override for total bytes transferred.
         operations_per_round: Total filesystem operations performed across all
             threads per round. When given, the HTTP calls gcsfs issues are
             counted and reported as ``requests_per_op``.
     """
-    publish_benchmark_extra_info(benchmark, params, benchmark_group)
+    publish_benchmark_extra_info(
+        benchmark, params, benchmark_group, total_bytes=total_bytes
+    )
 
     def workload():
         logging.info(
@@ -187,6 +195,7 @@ def run_multi_process(
     benchmark_group,
     gcs_kwargs=None,
     request=None,
+    total_bytes=None,
 ):
     """
     Orchestrates a multi-process benchmark.
@@ -197,7 +206,9 @@ def run_multi_process(
                       that returns the arguments for the worker_target.
         gcs_kwargs: Optional dictionary of arguments for the GCS factory (e.g. block_size).
     """
-    publish_benchmark_extra_info(benchmark, params, benchmark_group)
+    publish_benchmark_extra_info(
+        benchmark, params, benchmark_group, total_bytes=total_bytes
+    )
 
     ctx = multiprocessing.get_context("forkserver")
     process_data_shared = ctx.Array("d", params.processes)
