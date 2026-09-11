@@ -23,6 +23,7 @@ import gcsfs.checkers
 import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
+from gcsfs.core import _compute_adaptive_max_gap
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import (
     a,
@@ -3797,6 +3798,352 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
+
+
+from gcsfs.core import _coalesce_ranges
+
+
+@pytest.mark.parametrize(
+    "items, max_gap, file_size, expected",
+    [
+        # Empty list
+        ([], 5, None, []),
+        # Single item
+        ([(0, 10, 0)], 5, None, [(0, 10, [(0, 0, 10)])]),
+        # Contiguous ranges (gap == 0)
+        ([(0, 10, 0), (10, 20, 1)], 0, None, [(0, 20, [(0, 0, 10), (1, 10, 20)])]),
+        # Within max_gap
+        ([(0, 10, 0), (15, 25, 1)], 5, None, [(0, 25, [(0, 0, 10), (1, 15, 25)])]),
+        # Exceeding max_gap
+        (
+            [(0, 10, 0), (16, 25, 1)],
+            5,
+            None,
+            [(0, 10, [(0, 0, 10)]), (16, 25, [(1, 0, 9)])],
+        ),
+        # Overlapping ranges
+        ([(0, 15, 0), (5, 20, 1)], 0, None, [(0, 20, [(0, 0, 15), (1, 5, 20)])]),
+        # Unordered inputs with preserved caller indices
+        (
+            [(20, 30, 0), (0, 10, 2), (10, 20, 1)],
+            0,
+            None,
+            [(0, 30, [(2, 0, 10), (1, 10, 20), (0, 20, 30)])],
+        ),
+        # Unbounded range with known file size
+        ([(0, 50, 0), (60, None, 1)], 10, 100, [(0, 100, [(0, 0, 50), (1, 60, 100)])]),
+        # Unbounded range without known file size at start
+        (
+            [(0, None, 0), (10, 20, 1)],
+            10,
+            None,
+            [(0, None, [(0, 0, None)]), (10, 20, [(1, 0, 10)])],
+        ),
+        # Unbounded range in the middle without known file size
+        (
+            [(0, 10, 0), (15, None, 1), (20, 30, 2)],
+            5,
+            None,
+            [(0, 10, [(0, 0, 10)]), (15, None, [(1, 0, None)]), (20, 30, [(2, 0, 10)])],
+        ),
+        # Multiple separated clusters
+        (
+            [(0, 5, 0), (6, 11, 1), (20, 21, 2), (22, 30, 3)],
+            5,
+            None,
+            [(0, 11, [(0, 0, 5), (1, 6, 11)]), (20, 30, [(2, 0, 1), (3, 2, 10)])],
+        ),
+    ],
+    ids=[
+        "empty",
+        "single",
+        "contiguous",
+        "within_gap",
+        "exceeding_gap",
+        "overlapping",
+        "unordered",
+        "unbounded_with_size",
+        "unbounded_without_size_start",
+        "unbounded_without_size_middle",
+        "multiple_clusters",
+    ],
+)
+def test_coalesce_ranges(items, max_gap, file_size, expected):
+    merged = _coalesce_ranges(items, max_gap=max_gap, file_size=file_size)
+    assert merged == expected
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_validation():
+    fs = GCSFileSystem(token="anon")
+
+    with pytest.raises(TypeError, match="paths must be a list"):
+        await fs._cat_ranges("bucket/file.txt", starts=[0], ends=[10])
+
+    with pytest.raises(ValueError, match="same length"):
+        await fs._cat_ranges(["bucket/file.txt"], starts=[0, 10], ends=[5])
+
+    assert await fs._cat_ranges([], starts=[], ends=[]) == []
+
+    # Generator inputs for starts and ends
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        return b"0123456789"[start:end]
+
+    with (
+        mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file),
+        mock.patch.object(fs, "_info", return_value={"size": 10}),
+    ):
+        res = await fs._cat_ranges(
+            ["b/f", "b/f"],
+            starts=(x for x in [0, 5]),
+            ends=(x for x in [5, 10]),
+            max_gap=None,
+        )
+        assert [bytes(r) for r in res] == [b"01234", b"56789"]
+
+        # Tuple input for paths
+        res_tuple = await fs._cat_ranges(
+            ("b/f", "b/f"), starts=[0, 5], ends=[5, 10], max_gap=None
+        )
+        assert [bytes(r) for r in res_tuple] == [b"01234", b"56789"]
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_coalesced():
+    fs = GCSFileSystem(token="anon")
+    f1_data = b"0123456789abcdefghijklmnopqrstuvwxyz"
+    f2_data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        data = f1_data if path == "b/f1" else f2_data
+        s = start or 0
+        e = end if end is not None else len(data)
+        return data[s:e]
+
+    async def mock_info(path, **kwargs):
+        return {"size": len(f1_data) if path == "b/f1" else len(f2_data)}
+
+    with (
+        mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat,
+        mock.patch.object(fs, "_info", side_effect=mock_info),
+    ):
+        # 1. Test scalar broadcast (uncoalesced)
+        res_scalar = await fs._cat_ranges(
+            ["b/f1", "b/f2"], starts=2, ends=7, max_gap=None
+        )
+        assert [bytes(r) for r in res_scalar] == [b"23456", b"CDEFG"]
+
+        mock_cat.reset_mock()
+
+        # 2. Test contiguous coalescing with max_gap=0
+        res_zero_gap = await fs._cat_ranges(
+            ["b/f1", "b/f1"], starts=[0, 5], ends=[5, 10], max_gap=0
+        )
+        assert [bytes(r) for r in res_zero_gap] == [b"01234", b"56789"]
+        assert mock_cat.call_count == 1
+
+        mock_cat.reset_mock()
+
+        # 3. Test multi-file coalescing with gaps
+        paths = ["b/f1", "b/f2", "b/f1", "b/f2", "b/f1"]
+        starts = [0, 0, 6, 5, 30]
+        ends = [5, 4, 10, 9, 35]
+
+        res_coalesced = await fs._cat_ranges(paths, starts, ends, max_gap=5)
+        assert [bytes(r) for r in res_coalesced] == [
+            b"01234",
+            b"ABCD",
+            b"6789",
+            b"FGHI",
+            b"uvwxy",
+        ]
+        # 3 merged calls: f1 [0, 10), f1 [30, 35), f2 [0, 9)
+        assert mock_cat.call_count == 3
+
+
+def test_compute_adaptive_max_gap():
+    assert _compute_adaptive_max_gap([]) == 0
+    # Small chunks: median 100 -> 100 * 0.05 = 5
+    assert _compute_adaptive_max_gap([100, 100, 100]) == 5
+    # Even count median: [100, 200] -> median 150 -> 150 * 0.05 = 7
+    assert _compute_adaptive_max_gap([100, 200]) == 7
+    # 10MB chunk -> 10 * 1024 * 1024 * 0.05 = 524288
+    ten_mb = 10 * 1024 * 1024
+    assert _compute_adaptive_max_gap([ten_mb]) == int(ten_mb * 0.05)
+    # 100MB chunk -> capped at 1MB (1048576)
+    hundred_mb = 100 * 1024 * 1024
+    assert _compute_adaptive_max_gap([hundred_mb]) == 1048576
+    # Custom cap and ratio
+    assert _compute_adaptive_max_gap([1000], max_cap=50, ratio=0.1) == 50
+    assert _compute_adaptive_max_gap([1000], max_cap=200, ratio=0.1) == 100
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_adaptive():
+    fs = GCSFileSystem(token="anon")
+    f1_data = b"x" * 300
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        s = start or 0
+        e = end if end is not None else len(f1_data)
+        return f1_data[s:e]
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
+        # Chunks of length 100, median is 100.
+        # Adaptive max_gap will be int(100 * 0.05) = 5.
+        # Gap between [0, 100) and [105, 205) is 5 <= 5, so they coalesce into [0, 205).
+        paths = ["b/f1", "b/f1"]
+        starts = [0, 105]
+        ends = [100, 205]
+
+        # 1. auto_max_gap=True
+        mock_cat.reset_mock()
+        res = await fs._cat_ranges(paths, starts, ends, auto_max_gap=True)
+        assert len(res) == 2
+        assert bytes(res[0]) == b"x" * 100
+        assert bytes(res[1]) == b"x" * 100
+        assert mock_cat.call_count == 1
+        assert mock_cat.call_args_list[0].kwargs["start"] == 0
+        assert mock_cat.call_args_list[0].kwargs["end"] == 205
+
+        # 2. max_gap="auto"
+        mock_cat.reset_mock()
+        res = await fs._cat_ranges(paths, starts, ends, max_gap="auto")
+        assert len(res) == 2
+        assert bytes(res[0]) == b"x" * 100
+        assert bytes(res[1]) == b"x" * 100
+        assert mock_cat.call_count == 1
+
+        # 3. Gap exceeding adaptive max_gap (gap = 10 > 5): not coalesced
+        mock_cat.reset_mock()
+        starts_wide = [0, 110]
+        ends_wide = [100, 210]
+        res_wide = await fs._cat_ranges(
+            paths, starts_wide, ends_wide, auto_max_gap=True
+        )
+        assert len(res_wide) == 2
+        assert bytes(res_wide[0]) == b"x" * 100
+        assert bytes(res_wide[1]) == b"x" * 100
+        assert mock_cat.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_normalization():
+    fs = GCSFileSystem(token="anon")
+    f_data = b"0123456789"
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        s = start or 0
+        e = end if end is not None else len(f_data)
+        return f_data[s:e]
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
+        with mock.patch.object(fs, "_info", return_value={"size": len(f_data)}):
+            paths = ["b/f", "b/f", "b/f", "b/f", "b/f"]
+            starts = [0, 4, -3, 2, None]
+            ends = [2, 4, None, 4, 3]  # index 1 has length 0, index 4 has start=None
+
+            res = await fs._cat_ranges(paths, starts, ends, batch_size=-1)
+            assert len(res) == 5
+            assert bytes(res[0]) == b"01"
+            assert bytes(res[1]) == b""  # Zero length slice returned directly
+            assert bytes(res[2]) == b"789"  # Negative start resolved to offset 7
+            assert bytes(res[3]) == b"23"
+            assert bytes(res[4]) == b"012"  # start=None resolved to offset 0
+            assert mock_cat.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_error_handling():
+    fs = GCSFileSystem(token="anon")
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        if path == "b/error.txt":
+            raise FileNotFoundError("Object not found")
+        return b"0123456789"
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file):
+
+        async def mock_info(path, **kwargs):
+            if path == "b/error.txt":
+                raise FileNotFoundError("Object not found")
+            return {"size": 100}
+
+        with mock.patch.object(fs, "_info", side_effect=mock_info):
+            paths = ["b/ok.txt", "b/error.txt", "b/ok.txt"]
+            starts = [None, None, 5]  # Index 0 and 1 have starts=None
+            ends = [5, 5, 10]
+
+            # on_error="return" places exception at index 1
+            res = await fs._cat_ranges(
+                paths, starts, ends, max_gap=5, on_error="return"
+            )
+            assert len(res) == 3
+            assert bytes(res[0]) == b"01234"
+            assert isinstance(res[1], FileNotFoundError)
+            assert bytes(res[2]) == b"56789"
+
+            # on_error="raise" raises immediately
+            with pytest.raises(FileNotFoundError):
+                await fs._cat_ranges(paths, starts, ends, max_gap=5, on_error="raise")
+
+
+def test_cat_ranges_coalesce_logic(gcs):
+    """Test that cat_ranges appropriately coalesces inputs and zero-copy splices the return values."""
+    fn = f"{TEST_BUCKET}/cat_ranges_coalesce.txt"
+    data = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    gcs.pipe(fn, data)
+
+    # Test without coalescing
+    paths = [fn, fn, fn]
+    starts = [0, 10, 20]
+    ends = [5, 15, 25]
+
+    # max_gap = 0
+    res = gcs.cat_ranges(paths, starts, ends, max_gap=0)
+    assert len(res) == 3
+    assert bytes(res[0]) == b"01234"
+    assert bytes(res[1]) == b"abcde"
+    assert bytes(res[2]) == b"klmno"
+
+    # Test coalescing
+    # 0-5, 10-15, 20-25 -> coalesces to 0-25
+    res = gcs.cat_ranges(paths, starts, ends, max_gap=5)
+    assert len(res) == 3
+    assert bytes(res[0]) == b"01234"
+    assert bytes(res[1]) == b"abcde"
+    assert bytes(res[2]) == b"klmno"
+
+    # Check mixed gap sizes where it splits
+    paths = [fn, fn, fn, fn]
+    starts = [0, 6, 20, 22]
+    ends = [5, 11, 21, 30]
+
+    res = gcs.cat_ranges(paths, starts, ends, max_gap=5)
+
+    assert len(res) == 4
+    assert bytes(res[0]) == b"01234"
+    assert bytes(res[1]) == b"6789a"
+    assert bytes(res[2]) == b"k"
+    assert bytes(res[3]) == b"mnopqrst"
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_normalize_file_ranges_helper():
+    fs = GCSFileSystem(token="anon")
+    results = [None, None, None, None]
+    items = [(0, 5, 0), (5, 5, 1), (-3, None, 2), (2, 4, 3)]
+
+    async def get_size():
+        return 10
+
+    valid = await fs._normalize_file_ranges(
+        "b/f1", items, results, on_error="return", get_size_fn=get_size
+    )
+    # Index 1 was length 0 -> results populated directly
+    assert results[1] == b""
+    # Remaining 3 are valid non-zero slices
+    assert valid == [(0, 5, 0), (7, 10, 2), (2, 4, 3)]
 
 
 def test_process_object_structure(gcs):
