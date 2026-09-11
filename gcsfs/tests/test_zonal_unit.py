@@ -1,4 +1,7 @@
-# Unit tests for ExtendedGCSFileSystem.
+"""Unit tests for ExtendedGcsFileSystem with mocked backends.
+Focuses on Zonal bucket logic, MRD pool caching, and parameter validation.
+"""
+
 import asyncio
 import io
 import logging
@@ -21,7 +24,7 @@ from gcsfs.extended_gcsfs import (
 )
 from gcsfs.tests.conftest import csv_files, files, requires_rapid
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
+from gcsfs.tests.test_zonal import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
 from gcsfs.zb_hns_utils import MRDPoolCache
 

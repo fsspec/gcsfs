@@ -8,7 +8,7 @@ the logic within the filesystem extension without making real API calls.
 Test placement: keep HNS-specific ExtendedGcsFileSystem tests here. Standard
 filesystem behavior belongs in test_core.py, pure dircache strategy tests belong
 in test_dircache.py, and zonal-specific filesystem routing belongs in
-test_zonal_file.py.
+test_zonal.py or test_zonal_file.py.
 """
 
 import contextlib

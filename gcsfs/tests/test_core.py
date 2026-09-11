@@ -41,9 +41,9 @@ TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 TEST_KMS_KEY = gcsfs.tests.settings.TEST_KMS_KEY
 
 # Test placement: keep common behavior and standard-bucket coverage in this
-# file. HNS-specific filesystem behavior belongs in test_extended_hns_gcsfs.py
-# or integration/test_extended_hns.py; zonal-specific behavior belongs in
-# test_zonal_file.py.
+# file. HNS-specific filesystem behavior belongs in test_hns_unit.py
+# or test_hns.py; zonal-specific behavior belongs in
+# test_zonal.py or test_zonal_file.py.
 
 
 def test_simple(gcs, monkeypatch):
@@ -2744,7 +2744,7 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
         gcs.version_aware = original_version_aware
 
 
-def test_cat_file_routing_and_thresholds(gcs, monkeypatch):
+def test_cat_file_routing_and_thresholds(gcs, skip_if_zonal, monkeypatch):
     monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
     fn = f"{TEST_BUCKET}/core_routing.txt"
     data = b"0123456789abcdefghijk"
@@ -2797,13 +2797,13 @@ def test_cat_file_concurrent_data_integrity(gcs):
     gcs.pipe(fn, data)
 
     res = fsspec.asyn.sync(
-        gcs.loop, gcs._cat_file_concurrent, fn, start=0, end=file_size, concurrency=7
+        gcs.loop, gcs._cat_file, fn, start=0, end=file_size, concurrency=7
     )
     assert len(res) == file_size
     assert res == data
 
 
-def test_cat_file_concurrent_caps_tasks(gcs, monkeypatch):
+def test_cat_file_concurrent_caps_tasks(gcs, skip_if_zonal, monkeypatch):
     monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
     fn = f"{TEST_BUCKET}/core_capped_concurrency.txt"
     data = b"0123456789abcdefghij"
@@ -2828,7 +2828,7 @@ def test_cat_file_concurrent_caps_tasks(gcs, monkeypatch):
         ] == [(0, 5), (5, 10), (10, 15), (15, 20)]
 
 
-def test_cat_file_concurrent_exception_cancellation(gcs):
+def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
     fn = f"{TEST_BUCKET}/core_exception.txt"
     data = b"0123456789" * 6000000  # ~6MB
     gcs.pipe(fn, data)
@@ -2896,7 +2896,7 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.read() == b"HelloWorld"
 
 
-def test_cat_file_default_concurrency(gcs):
+def test_cat_file_default_concurrency(gcs, skip_if_zonal):
     # Arrange
     fn = f"{TEST_BUCKET}/test_cat_default_concurrency.txt"
     gcs.pipe(fn, b"cat test data")
@@ -2912,7 +2912,7 @@ def test_cat_file_default_concurrency(gcs):
     assert mock_conc.call_count == 0
 
 
-def test_cat_file_explicit_concurrency(gcs):
+def test_cat_file_explicit_concurrency(gcs, skip_if_zonal):
     # Arrange
     fn = f"{TEST_BUCKET}/test_cat_explicit_concurrency.txt"
     gcs.pipe(fn, b"cat test data")

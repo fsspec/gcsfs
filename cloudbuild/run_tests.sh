@@ -91,12 +91,12 @@ case "$TEST_SUITE" in
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
     # Excludes tests related to requster pays as Zonal buckets do not support requester pays feature
     run_pytest "${ARGS[@]}" \
-      gcsfs/tests/test_extended_gcsfs.py \
+      gcsfs/tests/test_zonal.py \
       gcsfs/tests/test_zonal_file.py \
-      gcsfs/tests/integration/test_async_gcsfs.py \
-      gcsfs/tests/integration/test_extended_hns.py \
-      --deselect gcsfs/tests/integration/test_extended_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_mkdir_fails_without_quota_project \
-      --deselect gcsfs/tests/integration/test_extended_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays || STATUS=$?
+      gcsfs/tests/test_async.py \
+      gcsfs/tests/test_hns.py \
+      --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_mkdir_fails_without_quota_project \
+      --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays || STATUS=$?
     ;;
 
   "hns")
@@ -108,17 +108,17 @@ case "$TEST_SUITE" in
     export GCSFS_RUN_HNS_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
     # Excludes tests that are not applicable to HNS buckets:
-    # - test_extended_gcsfs.py, test_zonal_file.py: Zonal bucket specific tests which won't work on HNS bucket.
-    # - test_extended_gcsfs_unit.py: Unit tests for zonal bucket features.
-    # - test_core_versioned.py: HNS buckets do not support versioning.
+    # - test_zonal.py, test_zonal_file.py: Zonal bucket specific tests which won't work on HNS bucket.
+    # - test_zonal_unit.py: Unit tests for zonal bucket features.
+    # - test_flat_versioned.py: HNS buckets do not support versioning.
     # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
     # - test_core.py::test_mv_file_cache: Integration test only applicable for regional buckets.
     # - test_core.py::test_rm_wildcards_non_recursive: HNS buckets have different behavior for non-recursive wildcard deletion.
     run_pytest "${ARGS[@]}" gcsfs/ \
-      --deselect gcsfs/tests/test_extended_gcsfs.py \
+      --deselect gcsfs/tests/test_zonal.py \
       --deselect gcsfs/tests/test_zonal_file.py \
-      --deselect gcsfs/tests/test_extended_gcsfs_unit.py \
-      --deselect gcsfs/tests/test_core_versioned.py \
+      --deselect gcsfs/tests/test_zonal_unit.py \
+      --deselect gcsfs/tests/test_flat_versioned.py \
       --deselect gcsfs/tests/test_core.py::test_sign \
       --deselect gcsfs/tests/test_core.py::test_mv_file_cache \
       --deselect gcsfs/tests/test_core.py::test_rm_wildcards_non_recursive || STATUS=$?
@@ -181,22 +181,6 @@ case "$TEST_SUITE" in
       "--deselect=gcsfs/tests/test_core.py::test_rm_wildcards_non_recursive"
       "--deselect=gcsfs/tests/test_core.py::test_write_x_mpu"
       "--deselect=gcsfs/tests/test_core.py::test_put_file_resumable_upload_cleanup_on_chunk_failure"
-    )
-
-    # The prefetcher engine is not integrated for zonal in this bucket.
-    # It will be integrated in a separate PR, after which this will be removed.
-    ZONAL_DESELECTS+=(
-      "--deselect=gcsfs/tests/test_core.py::test_cat_file_routing_and_thresholds"
-      "--deselect=gcsfs/tests/test_core.py::test_cat_file_concurrent_data_integrity"
-      "--deselect=gcsfs/tests/test_core.py::test_cat_file_concurrent_exception_cancellation"
-      "--deselect=gcsfs/tests/test_core.py::test_cat_file_default_concurrency"
-      "--deselect=gcsfs/tests/test_core.py::test_cat_file_explicit_concurrency"
-      "--deselect=gcsfs/tests/test_core.py::test_prefetcher_default_concurrency"
-      "--deselect=gcsfs/tests/test_core.py::test_gcsfile_prefetch_disabled_fallback"
-      "--deselect=gcsfs/tests/test_core.py::test_gcsfile_prefetch_sequential_integrity"
-      "--deselect=gcsfs/tests/test_core.py::test_gcsfile_prefetch_random_seek_integrity"
-      "--deselect=gcsfs/tests/test_core.py::test_gcsfile_multithreaded_read_integrity"
-      "--deselect=gcsfs/tests/test_core.py::test_gcsfile_not_satisfiable_range"
     )
 
     # Zonal buckets do not support the requester pays feature
