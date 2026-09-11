@@ -1,0 +1,63 @@
+# Whole-object reads via cat_file()/cat().
+#
+# This group exists because fsspec/gcsfs#1048 went unnoticed: reading a small
+# object grew from one HTTP round-trip to three (object GET + objects.list +
+# download) and no benchmark moved. The `read` group works on 20 GB objects
+# through gcs.open(), where two extra metadata calls vanish into the transfer
+# time, and `comparison` starts at 10 MB.
+#
+# So the sizes below deliberately sit under
+# GCSFileSystem.MIN_CHUNK_SIZE_FOR_CONCURRENCY (5 MiB). Under that threshold
+# the concurrent path never splits the range, which makes the size lookup pure
+# overhead and the request amplification a clean 3x. These are also the sizes
+# real zarr and xarray workloads read, which is where the regression was felt.
+#
+# Read the `requests_per_op` column alongside latency. A whole-object read
+# should cost 1. Zonal buckets serve reads over gRPC rather than the JSON API,
+# so their request counts read as ~0 -- compare latency there, not counts.
+common:
+  bucket_types:
+    - "regional"
+    - "zonal"
+  file_sizes_bytes:
+    - 8 # zarr .zarray-sized metadata blob
+    - 65536 # 64 KiB
+    - 1048576 # 1 MiB
+    - 4194304 # 4 MiB, just under MIN_CHUNK_SIZE_FOR_CONCURRENCY
+  files: 20
+  rounds: 5
+
+scenarios:
+  # The regression case: no explicit range, so gcsfs has to resolve the size.
+  - name: "cat_file_whole"
+    pattern: "whole"
+
+  # Control. The caller supplies the range, so no size lookup is needed and the
+  # read stays at one request. A gap opening up against cat_file_whole at the
+  # same object size is request amplification, not a slow network.
+  - name: "cat_file_ranged"
+    pattern: "ranged"
+
+  # Pins the cost of the concurrency default itself, which is what changed in
+  # #992. concurrency=1 takes the sequential path; 4 is the current default.
+  - name: "cat_file_concurrency"
+    pattern: "whole"
+    concurrency: [1, 4]
+
+  # Above MIN_CHUNK_SIZE_FOR_CONCURRENCY the range really is split, so the size
+  # lookup buys something. Kept as a contrast to the small-object rows.
+  - name: "cat_file_large_object"
+    pattern: "whole"
+    file_sizes_bytes:
+      - 8388608 # 8 MiB
+      - 67108864 # 64 MiB
+
+  # cat() over many paths at once - the shape of a zarr chunk fetch.
+  - name: "cat_batch"
+    pattern: "batch"
+    files: 100
+
+  - name: "cat_file_whole_multi_thread"
+    pattern: "whole"
+    threads: [16]
+    files: 160

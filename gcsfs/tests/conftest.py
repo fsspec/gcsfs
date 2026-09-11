@@ -634,6 +634,7 @@ def pytest_ignore_collect(collection_path, config):
             return True
 
         benchmark_subdirs = {
+            "cat",
             "delete",
             "listing",
             "read",

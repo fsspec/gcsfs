@@ -3,15 +3,13 @@
 {{ $timestamp := now | date "2006-01-02-15-04-05" }}
 {{ $jobuuid := uuidv4 }}
 {{ $nodes := .Values.workload.nodes }}
-{{/* Default 4 (not 8): a restoring rank's peak RSS ~doubles to ~92GB, so 8/node OOMs the 720GB c4-standard-192. See values_base.yaml. */}}
-{{ $ranksPerNode := default 4 .Values.workload.ranksPerNode }}
-{{ $worldSize := mul .Values.workload.nodes $ranksPerNode }}
+{{ $ranksPerNode := .Values.workload.ranksPerNode }}
 
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: "{{ .Release.Name }}"
-  namespace: default
+  namespace: "{{ .Values.namespace }}"
 spec:
   failurePolicy:
     maxRestarts: 0
@@ -47,6 +45,12 @@ spec:
                     matchLabels:
                       jobset.sigs.k8s.io/jobset-name: "{{ .Release.Name }}"
             {{- end }}
+            {{- if $root.Values.workload.gpu }}
+            tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+            {{- end }}
             volumes:
             - name: workload-configuration
               configMap:
@@ -54,15 +58,19 @@ spec:
                 items:
                 - key: workload-configuration
                   path: {{ $root.Values.workload.configFile }}
+                - key: metric_logging.py
+                  path: metric_logging.py
                 - key: requirements.txt
                   path: requirements.txt
+                - key: requirements-cpu.txt
+                  path: requirements-cpu.txt
             - name: workload-launcher
               configMap:
                 name: "{{ .Release.Name }}-launcher"
             - name: shared-memory
               emptyDir:
-                medium: "Memory"
-                sizeLimit: 250Gi
+                medium: Memory
+                sizeLimit: {{ $root.Values.workload.sharedMemorySize }}
             {{- if $root.Values.workload.hostCachePath }}
             # Node-local, survives pod deletion, so the measured release reuses
             # what the seed release staged. DirectoryOrCreate because the node
@@ -76,6 +84,11 @@ spec:
             - name: workload
               image: "{{ $root.Values.workload.image }}"
               imagePullPolicy: Always
+              {{- if $root.Values.workload.gpu }}
+              resources:
+                limits:
+                  nvidia.com/gpu: {{ $ranksPerNode }}
+              {{- end }}
               env:
               - name: JOB_TIMESTAMP
                 value: "{{ $timestamp }}"
@@ -87,16 +100,18 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
-              - name: MASTER_ADDR
-                value: "{{ .Release.Name }}-workload-0-0.{{ .Release.Name }}.default.svc.cluster.local"
-              - name: MASTER_PORT
-                value: "6002"
-              - name: WORLD_SIZE
-                value: "{{ $worldSize }}"
+              - name: RANKS_PER_NODE
+                value: "{{ $ranksPerNode }}"
               - name: NNODES
                 value: "{{ $nodes }}"
-              - name: GPUS_PER_NODE
-                value: "{{ $ranksPerNode }}"
+              - name: RAY_PORT
+                value: "6379"
+              - name: RAY_HEAD_ADDRESS
+                value: "{{ .Release.Name }}-workload-0-0.{{ .Release.Name }}.{{ $root.Values.namespace }}.svc.cluster.local:6379"
+              - name: RAY_OBJECT_STORE_MEMORY_BYTES
+                value: {{ $root.Values.workload.rayObjectStoreMemoryBytes | quote }}
+              - name: TORCH_DISTRIBUTED_TIMEOUT_SECONDS
+                value: "{{ $root.Values.workload.torchDistributedTimeoutSeconds }}"
               - name: MAX_STEPS
                 value: "{{ $root.Values.workload.steps }}"
               - name: NUM_TRAIN_EPOCHS
@@ -115,6 +130,10 @@ spec:
                 value: "{{ $root.Values.workload.ckptWriterInterval }}"
               - name: CKPT_TO_KEEP
                 value: "{{ $root.Values.workload.ckptToKeep }}"
+              - name: CHECKPOINT_UPLOAD_TIMEOUT_SECONDS
+                value: "{{ $root.Values.workload.checkpointUploadTimeoutSeconds }}"
+              - name: OVERWRITE_EXISTING_RUN
+                value: "{{ $root.Values.workload.overwriteExistingRun }}"
               - name: MODEL_ID
                 value: "{{ $root.Values.workload.modelId }}"
               {{- if $root.Values.workload.hostCachePath }}
@@ -135,12 +154,34 @@ spec:
                 value: "{{ $root.Values.workload.gradAccum }}"
               - name: DATALOADER_NUM_WORKERS
                 value: "{{ $root.Values.workload.dataloaderWorkers }}"
-              - name: SHUFFLE_BUFFER_SIZE
-                value: "{{ $root.Values.workload.shuffleBufferSize }}"
-              - name: SHUFFLE_MAX_BUFFER_INPUT_SHARDS
-                value: "{{ $root.Values.workload.shuffleMaxBufferInputShards }}"
               - name: DATALOADER_PREFETCH_FACTOR
                 value: "{{ $root.Values.workload.dataloaderPrefetchFactor }}"
+              - name: READ_CONCURRENCY
+                value: "{{ $root.Values.workload.readConcurrency }}"
+              - name: USE_GPU
+                value: "{{ $root.Values.workload.gpu }}"
+              {{- if $root.Values.workload.gpu }}
+              - name: TORCH_NCCL_TRACE_BUFFER_SIZE
+                value: "2000"
+              - name: TORCH_NCCL_DUMP_ON_TIMEOUT
+                value: "1"
+              - name: TORCH_NCCL_DEBUG_INFO_TEMP_FILE
+                value: "/tmp/ray/flight-recorder-"
+              {{- end }}
+              - name: TOKENIZE_BATCH_SIZE
+                value: "{{ $root.Values.workload.tokenizeBatchSize }}"
+              - name: SHUFFLE_FILES
+                value: "{{ $root.Values.workload.shuffleFiles }}"
+              - name: SHUFFLE_BUFFER_SIZE
+                value: "{{ $root.Values.workload.shuffleBufferSize }}"
+              - name: LEARNING_RATE
+                value: "{{ $root.Values.workload.learningRate }}"
+              - name: WEIGHT_DECAY
+                value: "{{ $root.Values.workload.weightDecay }}"
+              - name: WARMUP_RATIO
+                value: "{{ $root.Values.workload.warmupRatio }}"
+              - name: MAX_GRAD_NORM
+                value: "{{ $root.Values.workload.maxGradNorm }}"
               - name: REQUIREMENTS
                 value: "{{ $root.Values.workload.requirements }}"
               {{- if $root.Values.workload.envs }}
@@ -154,16 +195,20 @@ spec:
               - |
                 echo "Pod on $(hostname --fqdn) is running"
                 echo "Pod is assigned job index of $JOB_COMPLETION_INDEX"
-                sleep 10
                 bash /workload/launcher/launch-workload.sh
               volumeMounts:
-                - name: workload-configuration
-                  mountPath: {{ $root.Values.workload.configPath }}
-                - name: workload-launcher
-                  mountPath: /workload/launcher
-                - name: shared-memory
-                  mountPath: /dev/shm
-                {{- if $root.Values.workload.hostCachePath }}
-                - name: host-cache
-                  mountPath: /workload/cache
-                {{- end }}
+              - name: workload-configuration
+                mountPath: {{ $root.Values.workload.configPath }}
+              - name: workload-launcher
+                mountPath: /workload/launcher
+              - name: shared-memory
+                mountPath: /dev/shm
+              - name: shared-memory
+                mountPath: /tmp
+              {{- if $root.Values.workload.hostCachePath }}
+              # Deliberately not under /tmp: that path is the memory-backed
+              # emptyDir above, so staging the model there would charge ~16GB
+              # against the pod's memory instead of the node's disk.
+              - name: host-cache
+                mountPath: /workload/cache
+              {{- end }}

@@ -36,14 +36,6 @@ def _generate_ranges(
         raise ValueError(
             f"Range size {max(chunk_sizes)} bytes exceeds file size {file_size_bytes} bytes."
         )
-    if (
-        pattern == "seq"
-        and (num_ranges / len(file_paths)) * max(chunk_sizes) > file_size_bytes
-    ):
-        raise ValueError(
-            "Requested sequential ranges exceed file size; cannot generate non-overlapping ranges."
-        )
-
     rng = random.Random(seed)
     paths = []
     starts = []
@@ -77,9 +69,15 @@ def _generate_ranges(
                 f"Unsupported pattern: {pattern}. Expected 'seq' or 'rand'."
             )
 
+        end = start + range_size
+        if end > file_size_bytes:
+            raise ValueError(
+                "Requested sequential ranges exceed file size; cannot generate non-overlapping ranges."
+            )
+
         paths.append(path)
         starts.append(start)
-        ends.append(start + range_size)
+        ends.append(end)
 
     return paths, starts, ends
 

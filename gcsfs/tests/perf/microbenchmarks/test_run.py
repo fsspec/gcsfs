@@ -138,8 +138,8 @@ def test_create_table_row():
     assert table_row[0] == "regional"
     assert table_row[3] == 0.6
     assert table_row[10] == "1.00"  # file size MB
-    assert table_row[17] == "1.1000"  # mean latency
-    assert table_row[18] == "0.91"  # 1 MB / 1.1s = 0.91 MB/s
+    assert table_row[19] == "1.1000"  # mean latency
+    assert table_row[20] == "0.91"  # 1 MB / 1.1s = 0.91 MB/s
 
 
 def test_create_table_row_with_total_bytes():
@@ -151,7 +151,7 @@ def test_create_table_row_with_total_bytes():
         "mean": 2.0,
     }
     table_row = run._create_table_row(row)
-    assert table_row[18] == "5.00"  # 10 MB / 2.0s = 5.00 MB/s, NOT 100 MB / 2.0s
+    assert table_row[20] == "5.00"  # 10 MB / 2.0s = 5.00 MB/s, NOT 100 MB / 2.0s
 
 
 @pytest.mark.parametrize("bad_total_bytes", ["missing", None, "N/A"])

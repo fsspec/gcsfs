@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import multiprocessing
 import os
@@ -7,9 +8,26 @@ from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_benchmark_extra_info,
     publish_fixed_duration_benchmark_extra_info,
     publish_multi_process_benchmark_extra_info,
+    publish_request_metrics,
     publish_resource_metrics,
 )
+from gcsfs.tests.perf.microbenchmarks.request_counter import RequestCounter
 from gcsfs.tests.settings import BENCHMARK_CPU_AFFINITY
+
+
+@contextlib.contextmanager
+def _optional_request_counter(operations_per_round):
+    """Count gcsfs HTTP calls, but only when the caller knows the op count.
+
+    Without the number of operations the raw total is not comparable between
+    cases, so groups that cannot supply it opt out and pay no patching cost.
+    """
+    if not operations_per_round:
+        yield None
+        return
+
+    with RequestCounter() as counter:
+        yield counter
 
 
 def filter_test_cases(all_cases):
@@ -21,16 +39,33 @@ def filter_test_cases(all_cases):
 
 
 def run_single_threaded(
-    benchmark, monitor_cls, params, func, args, benchmark_group, total_bytes=None
+    benchmark,
+    monitor_cls,
+    params,
+    func,
+    args,
+    benchmark_group,
+    total_bytes=None,
+    operations_per_round=None,
 ):
-    """Runs a single-threaded benchmark."""
+    """Runs a single-threaded benchmark.
+
+    Args:
+        total_bytes: Optional override for total bytes transferred (e.g. for cat_ranges).
+        operations_per_round: Number of filesystem operations ``func`` performs
+            per round. When given, the HTTP calls gcsfs issues are counted and
+            reported as ``requests_per_op``.
+    """
     publish_benchmark_extra_info(
         benchmark, params, benchmark_group, total_bytes=total_bytes
     )
 
-    with monitor_cls() as m:
+    with monitor_cls() as m, _optional_request_counter(operations_per_round) as counter:
         benchmark.pedantic(func, rounds=params.rounds, args=args)
 
+    publish_request_metrics(
+        benchmark, counter, (operations_per_round or 0) * params.rounds
+    )
     publish_resource_metrics(benchmark, m)
 
 
@@ -67,6 +102,7 @@ def run_multi_threaded(
     args_list,
     benchmark_group,
     total_bytes=None,
+    operations_per_round=None,
 ):
     """
     Runs a multi-threaded benchmark.
@@ -74,6 +110,10 @@ def run_multi_threaded(
     Args:
         worker_func: The function to run in each thread.
         args_list: A list of tuples, where each tuple contains arguments for one thread.
+        total_bytes: Optional override for total bytes transferred.
+        operations_per_round: Total filesystem operations performed across all
+            threads per round. When given, the HTTP calls gcsfs issues are
+            counted and reported as ``requests_per_op``.
     """
     publish_benchmark_extra_info(
         benchmark, params, benchmark_group, total_bytes=total_bytes
@@ -88,9 +128,12 @@ def run_multi_threaded(
             for f in futures:
                 f.result()
 
-    with monitor_cls() as m:
+    with monitor_cls() as m, _optional_request_counter(operations_per_round) as counter:
         benchmark.pedantic(workload, rounds=params.rounds)
 
+    publish_request_metrics(
+        benchmark, counter, (operations_per_round or 0) * params.rounds
+    )
     publish_resource_metrics(benchmark, m)
 
 

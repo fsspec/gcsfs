@@ -185,16 +185,20 @@ else:
     metadata_model_id = "unknown"
 logging.info("model_id: %s", metadata_model_id)
 
-# If ``MODEL_ID`` is a GCS path, the launcher pre-downloads the weights to
-# ``/tmp/<basename>`` (gcloud storage cp -r). Remap ``model_id`` to the local
-# directory and force ``local_files_only`` so transformers does not phone home.
-# Without this, 8 ranks (2 nodes x 4 procs) would concurrently pull the
-# 16 GB Llama-3.1-8B weights from HuggingFace.
+# If ``MODEL_ID`` is a GCS path, the launcher pre-downloads the weights and
+# exports ``LOCAL_MODEL_PATH``. Remap ``model_id`` to that local directory and
+# force ``local_files_only`` so transformers does not phone home. Without this,
+# 8 ranks (2 nodes x 4 procs) would concurrently pull the 16 GB Llama-3.1-8B
+# weights from HuggingFace.
+#
+# The fallback is ``/tmp/<basename>``, where the launcher staged the weights
+# before they moved to the node-local bootstrap cache; it keeps this module
+# working against an older launcher (and with the cache disabled).
 use_local_files_only = False
 if model_id.startswith("gs://"):
     use_local_files_only = True
     dir_name = os.path.basename(model_id.rstrip("/"))
-    model_id = os.path.join("/tmp", dir_name)
+    model_id = os.getenv("LOCAL_MODEL_PATH") or os.path.join("/tmp", dir_name)
 
 # Required: dataset path. Fail fast if unset. Strip trailing slash so the
 # downstream glob doesn't produce ``gs://bucket/dir//*.parquet``, which

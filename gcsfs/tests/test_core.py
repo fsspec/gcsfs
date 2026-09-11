@@ -2857,6 +2857,54 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.read() == b"HelloWorld"
 
 
+def test_cat_file_default_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_default_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+
+    # Act
+    with mock.patch.object(
+        gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+    ) as mock_conc:
+        data = gcs.cat_file(fn)
+
+    # Assert
+    assert data == b"cat test data"
+    assert mock_conc.call_count == 0
+
+
+def test_cat_file_explicit_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_explicit_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+
+    # Act
+    with mock.patch.object(
+        gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+    ) as mock_conc:
+        data = gcs.cat_file(fn, concurrency=2)
+
+    # Assert
+    assert data == b"cat test data"
+    assert mock_conc.call_count == 1
+    assert mock_conc.call_args.kwargs["concurrency"] == 2
+
+
+def test_prefetcher_default_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_prefetcher_concurrency.txt"
+    gcs.pipe(fn, b"prefetcher test data")
+
+    # Act
+    with gcs.open(fn, "rb") as f:
+        file_concurrency = f.concurrency
+        prefetch_engine_concurrency = f._prefetch_engine.concurrency
+
+    # Assert
+    assert file_concurrency == 4
+    assert prefetch_engine_concurrency == 4
+
+
 def test_gcsfile_prefetch_sequential_integrity(gcs):
     fn = f"{TEST_BUCKET}/integrated_seq.txt"
     file_size = 10 * 1024 * 1024
@@ -3710,3 +3758,97 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
+
+
+def test_process_object_structure(gcs):
+    bucket = "my-bucket"
+    metadata = {
+        "kind": "storage#object",
+        "id": "my-bucket/nested/file.txt/12345",
+        "name": "nested/file.txt",
+        "bucket": "my-bucket",
+        "generation": "12345",
+        "metageneration": "2",
+        "contentType": "text/plain",
+        "timeCreated": "2024-01-15T10:30:00.000Z",
+        "updated": "2024-01-15T11:45:00.123456Z",
+        "storageClass": "STANDARD",
+        "size": "4096",
+        "md5Hash": "dummyHash==",
+    }
+
+    processed = gcs._process_object(bucket, metadata)
+
+    assert processed["name"] == "my-bucket/nested/file.txt"
+    assert processed["size"] == 4096
+    assert processed["type"] == "file"
+    assert processed["ctime"] == datetime(
+        2024, 1, 15, 10, 30, 0, 0, tzinfo=timezone.utc
+    )
+    assert processed["mtime"] == datetime(
+        2024, 1, 15, 11, 45, 0, 123456, tzinfo=timezone.utc
+    )
+    assert processed["generation"] == "12345"
+    assert processed["metageneration"] == "2"
+
+
+def test_process_object_leading_slash(gcs):
+    bucket = "my-bucket"
+    metadata = {
+        "name": "/leading_slash_file.txt",
+        "size": "100",
+    }
+
+    processed = gcs._process_object(bucket, metadata)
+    parsed_bucket, parsed_key, _ = gcs.split_path(processed["name"])
+
+    assert processed["name"] == "my-bucket//leading_slash_file.txt"
+    assert parsed_bucket == "my-bucket"
+    assert parsed_key == "/leading_slash_file.txt"
+
+
+def test_get_dirs_and_update_cache_nested(gcs):
+    bucket = "test-bucket"
+    objects = [
+        {"name": f"{bucket}/dir1/sub1/file1.txt", "size": 100, "type": "file"},
+        {"name": f"{bucket}/dir1/sub1/file2.txt", "size": 200, "type": "file"},
+        {"name": f"{bucket}/dir1/sub2/file3.txt", "size": 300, "type": "file"},
+        {"name": f"{bucket}/dir2/file4.txt", "size": 400, "type": "file"},
+    ]
+
+    gcs.dircache.clear()
+    dirs = gcs._get_dirs_and_update_cache(bucket, objects, prefix="", update_cache=True)
+
+    assert f"{bucket}/dir1" in dirs
+    assert f"{bucket}/dir1/sub1" in dirs
+    assert f"{bucket}/dir1/sub2" in dirs
+    assert f"{bucket}/dir2" in dirs
+    assert f"{bucket}" in gcs.dircache
+    assert f"{bucket}/dir1" in gcs.dircache
+    assert f"{bucket}/dir1/sub1" in gcs.dircache
+    assert f"{bucket}/dir1/sub2" in gcs.dircache
+    assert f"{bucket}/dir2" in gcs.dircache
+    root_children = [c["name"] for c in gcs.dircache[bucket]]
+    assert f"{bucket}/dir1" in root_children
+    assert f"{bucket}/dir2" in root_children
+    sub1_children = [c["name"] for c in gcs.dircache[f"{bucket}/dir1/sub1"]]
+    assert f"{bucket}/dir1/sub1/file1.txt" in sub1_children
+    assert f"{bucket}/dir1/sub1/file2.txt" in sub1_children
+
+
+def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
+    bucket = "test-bucket"
+    objects = [
+        {"name": f"{bucket}/a/b/c/file1.txt", "size": 100, "type": "file"},
+        {"name": f"{bucket}/a/b/empty_folder", "size": 0, "type": "directory"},
+    ]
+
+    gcs.dircache.clear()
+    dirs = gcs._get_dirs_and_update_cache(
+        bucket, objects, prefix="a/b", update_cache=False
+    )
+
+    assert f"{bucket}/a/b" in dirs
+    assert f"{bucket}/a/b/c" in dirs
+    # Cache should remain empty because update_cache=False and prefix is used
+    assert len(gcs.dircache) == 0

@@ -3,6 +3,10 @@ import unittest.mock as mock
 import pytest
 
 from gcsfs.tests.perf.microbenchmarks import configs
+from gcsfs.tests.perf.microbenchmarks.cat.configs import (
+    CatConfigurator,
+    get_cat_benchmark_cases,
+)
 from gcsfs.tests.perf.microbenchmarks.cat_ranges.configs import (
     CatRangesConfigurator,
     get_cat_ranges_benchmark_cases,
@@ -341,6 +345,10 @@ def test_validate_actual_yaml_configs():
         cases = get_comparison_benchmark_cases()
         assert len(cases) > 0, "Comparison config produced no cases"
 
+        # Cat
+        cases = get_cat_benchmark_cases()
+        assert len(cases) > 0, "Cat config produced no cases"
+
         # Cat Ranges
         cases = get_cat_ranges_benchmark_cases()
         assert len(cases) > 0, "Cat ranges config produced no cases"
@@ -369,6 +377,89 @@ def test_comparison_configurator(mock_config_dependencies):
     assert case.processes == 1
     assert case.rounds == 3
     assert case.bucket_type == "regional"
+
+
+def test_cat_configurator(mock_config_dependencies):
+    """Test that CatConfigurator correctly builds benchmark parameters."""
+    common = {
+        "bucket_types": ["regional"],
+        "file_sizes_bytes": [8],
+        "threads": [1],
+        "files": 20,
+        "rounds": 5,
+    }
+    scenario = {"name": "cat_file_whole", "pattern": "whole"}
+
+    configurator = CatConfigurator("dummy")
+    cases = configurator.build_cases(scenario, common)
+
+    assert len(cases) == 1
+    case = cases[0]
+    assert case.pattern == "whole"
+    # Left unset so the case exercises the concurrency production code gets.
+    assert case.concurrency is None
+    assert case.file_size_bytes == 8
+    assert case.files == 20
+    assert case.threads == 1
+    assert case.processes == 1
+    assert case.rounds == 5
+    assert case.bucket_type == "regional"
+
+
+def test_cat_configurator_covers_small_objects():
+    """The shipped config must keep reading objects small enough to catch #1048.
+
+    Request amplification only shows up below MIN_CHUNK_SIZE_FOR_CONCURRENCY,
+    where the concurrent path never splits the range. If someone raises every
+    size in configs.yaml the group stops testing what it was written for, so
+    pin that here rather than leaving it to review.
+    """
+    from gcsfs.core import GCSFileSystem
+
+    with (
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BUCKET_NAME_MAP",
+            {"regional": "test-bucket"},
+        ),
+        mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""),
+    ):
+        cases = get_cat_benchmark_cases()
+
+    small = [
+        c
+        for c in cases
+        if c.file_size_bytes < GCSFileSystem.MIN_CHUNK_SIZE_FOR_CONCURRENCY
+    ]
+    assert small, "cat config has no objects below MIN_CHUNK_SIZE_FOR_CONCURRENCY"
+
+    # The whole-object read with no explicit range is the regressing call.
+    assert any(c.pattern == "whole" and c.concurrency is None for c in small)
+    # And the ranged control it is compared against.
+    assert any(c.pattern == "ranged" for c in small)
+
+
+def test_cat_configurator_rejects_unknown_pattern(mock_config_dependencies):
+    """A typo in configs.yaml fails while building cases, not mid-benchmark."""
+    configurator = CatConfigurator("dummy")
+
+    with pytest.raises(ValueError, match="Unsupported cat pattern"):
+        configurator.build_cases(
+            {"name": "cat_typo", "pattern": "wohle"},
+            {"bucket_types": ["regional"], "file_sizes_bytes": [8]},
+        )
+
+
+def test_cat_supported_patterns_all_have_an_operation():
+    """Validation is only useful if every accepted pattern can actually run.
+
+    Otherwise a pattern added to SUPPORTED_PATTERNS but not to the operation
+    table passes configuration and then dies after the fixture has uploaded
+    its objects -- exactly the failure the validation exists to prevent.
+    """
+    from gcsfs.tests.perf.microbenchmarks.cat.parameters import SUPPORTED_PATTERNS
+    from gcsfs.tests.perf.microbenchmarks.cat.test_cat import CAT_OPERATIONS
+
+    assert set(CAT_OPERATIONS) == set(SUPPORTED_PATTERNS)
 
 
 def test_cat_ranges_configurator(mock_config_dependencies):
@@ -439,6 +530,12 @@ def test_cat_ranges_configurator(mock_config_dependencies):
             ["test.bin"],
             100 * MB,
             {"chunk_sizes_bytes": 30 * MB, "num_ranges": 10, "pattern": "seq"},
+            "Requested sequential ranges exceed file size",
+        ),
+        (
+            ["file_a.bin", "file_b.bin"],
+            100 * MB,
+            {"chunk_sizes_bytes": 40 * MB, "num_ranges": 5, "pattern": "seq"},
             "Requested sequential ranges exceed file size",
         ),
         (
