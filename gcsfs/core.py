@@ -1275,10 +1275,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             await asyncio.gather(*tasks, return_exceptions=True)
             raise e
 
-    async def _cat_file(
-        self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
-    ):
+    async def _cat_file(self, path, start=None, end=None, **kwargs):
         """Simple one-shot, or concurrent get of file data"""
+        concurrency = kwargs.pop("concurrency", 1)
         if concurrency > 1:
             return await self._cat_file_concurrent(
                 path, start=start, end=end, concurrency=concurrency, **kwargs

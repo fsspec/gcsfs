@@ -4,6 +4,14 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.8.1
+----------
+
+* Default ``cat_file`` concurrency to 1 (#1048).
+  Restores single-request sequential reads without range headers or extra round-trips
+  for small objects (e.g. Zarr, Xarray, Parquet metadata). Callers can still explicitly
+  pass ``concurrency=...`` to ``cat_file`` for concurrent fetches of large files.
+
 2026.8.0
 --------
 
