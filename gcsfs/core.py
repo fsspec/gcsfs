@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import sys
+import statistics
 import threading
 import uuid
 import warnings
@@ -278,7 +279,21 @@ def _validate_cat_ranges_input(paths, starts, ends):
 
 def _is_coalesce_enabled(max_gap):
     """Return True if range coalescing is enabled (max_gap is not None and >= 0)."""
-    return max_gap is not None and max_gap >= 0
+    return isinstance(max_gap, (int, float)) and max_gap >= 0
+
+
+def _compute_adaptive_max_gap(lengths, max_cap=1048576, ratio=0.05):
+    """Analyze requested chunk lengths to dynamically derive an optimal max_gap for range coalescing.
+
+    Calculates the median chunk size from the requested ranges. For large chunks
+    (e.g., in LLMs and distributed checkpoints with megabyte-scale chunks), allows coalescing
+    gaps proportional to the chunk size (default 5%, capped at max_cap = 1 MB). For small
+    chunks, scales down proportionately to prevent read amplification.
+    """
+    if not lengths:
+        return 0
+    median_length = statistics.median(lengths)
+    return min(max_cap, max(0, int(median_length * ratio)))
 
 
 def _merge_file_ranges(valid_items, max_gap):
@@ -1510,6 +1525,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         max_gap=None,
         batch_size=None,
         on_error="return",
+        auto_max_gap=False,
         **kwargs,
     ):
         """Get the contents of byte ranges from one or more files.
@@ -1521,15 +1537,20 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         starts, ends: int or list of int
             Byte limits of the read. If using a single int, the same value will be
             used for all files.
-        max_gap: int, optional
+        max_gap: int or str, optional
             If specified and >= 0, adjacent byte ranges on the same file with a gap
             <= max_gap will be coalesced into a single larger read request.
+            Can also be set to "auto" or "adaptive" to dynamically calculate max_gap
+            based on median chunk size.
         batch_size: int, optional
             Number of concurrent range fetches. Defaults to self.batch_size.
         on_error: "return" or "raise"
             If "return" (default), any per-range exception is placed in the output
             list at the corresponding position. Otherwise the first such exception
             is raised.
+        auto_max_gap: bool, default False
+            If True, automatically compute an adaptive max_gap based on the median
+            chunk size of the requested ranges (equivalent to max_gap="auto").
 
         Returns
         -------
@@ -1556,13 +1577,30 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             if valid_items:
                 valid_items_per_file[p] = valid_items
 
+        auto_enabled = (
+            auto_max_gap
+            or kwargs.pop("adaptive", False)
+            or kwargs.pop("adaptive_max_gap", False)
+            or (isinstance(max_gap, str) and max_gap.lower() in ("auto", "adaptive"))
+        )
+        if auto_enabled:
+            all_lengths = [
+                e - s
+                for items in valid_items_per_file.values()
+                for s, e, _ in items
+                if s is not None and e is not None and e > s
+            ]
+            effective_max_gap = _compute_adaptive_max_gap(all_lengths)
+        else:
+            effective_max_gap = max_gap
+
         merged_paths = []
         merged_starts = []
         merged_ends = []
         merged_slice_maps = []  # list of [(orig_idx, rel_start, rel_end), ...]
 
         for p, items in valid_items_per_file.items():
-            merged_ranges = _merge_file_ranges(items, max_gap)
+            merged_ranges = _merge_file_ranges(items, effective_max_gap)
 
             for m_s, m_e, slice_list in merged_ranges:
                 merged_paths.append(p)
@@ -1594,7 +1632,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                         results[orig_idx] = chunk
                     continue
 
-                _unpack_range_results(chunk, slice_list, results, max_gap)
+                _unpack_range_results(chunk, slice_list, results, effective_max_gap)
 
         return results
 

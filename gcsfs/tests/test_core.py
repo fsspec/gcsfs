@@ -22,6 +22,7 @@ from fsspec.utils import seek_delimiter
 import gcsfs.checkers
 import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
+from gcsfs.core import _compute_adaptive_max_gap
 from gcsfs import __version__ as version
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.tests.conftest import (
@@ -3919,6 +3920,88 @@ async def test_gcsfs_cat_ranges_coalesced():
         ]
         # 3 merged calls: f1 [0, 10), f1 [30, 35), f2 [0, 9)
         assert mock_cat.call_count == 3
+
+
+def test_compute_adaptive_max_gap():
+    assert _compute_adaptive_max_gap([]) == 0
+    # Small chunks: median 100 -> 100 * 0.05 = 5
+    assert _compute_adaptive_max_gap([100, 100, 100]) == 5
+    # Even count median: [100, 200] -> median 150 -> 150 * 0.05 = 7
+    assert _compute_adaptive_max_gap([100, 200]) == 7
+    # 10MB chunk -> 10 * 1024 * 1024 * 0.05 = 524288
+    ten_mb = 10 * 1024 * 1024
+    assert _compute_adaptive_max_gap([ten_mb]) == int(ten_mb * 0.05)
+    # 100MB chunk -> capped at 1MB (1048576)
+    hundred_mb = 100 * 1024 * 1024
+    assert _compute_adaptive_max_gap([hundred_mb]) == 1048576
+    # Custom cap and ratio
+    assert _compute_adaptive_max_gap([1000], max_cap=50, ratio=0.1) == 50
+    assert _compute_adaptive_max_gap([1000], max_cap=200, ratio=0.1) == 100
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_adaptive():
+    fs = GCSFileSystem(token="anon")
+    f1_data = b"x" * 300
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        s = start or 0
+        e = end if end is not None else len(f1_data)
+        return f1_data[s:e]
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
+        # Chunks of length 100, median is 100.
+        # Adaptive max_gap will be int(100 * 0.05) = 5.
+        # Gap between [0, 100) and [105, 205) is 5 <= 5, so they coalesce into [0, 205).
+        paths = ["b/f1", "b/f1"]
+        starts = [0, 105]
+        ends = [100, 205]
+
+        # 1. auto_max_gap=True
+        mock_cat.reset_mock()
+        res = await fs._cat_ranges(paths, starts, ends, auto_max_gap=True)
+        assert len(res) == 2
+        assert bytes(res[0]) == b"x" * 100
+        assert bytes(res[1]) == b"x" * 100
+        assert mock_cat.call_count == 1
+        assert mock_cat.call_args_list[0].kwargs["start"] == 0
+        assert mock_cat.call_args_list[0].kwargs["end"] == 205
+
+        # 2. max_gap="auto"
+        mock_cat.reset_mock()
+        res = await fs._cat_ranges(paths, starts, ends, max_gap="auto")
+        assert len(res) == 2
+        assert bytes(res[0]) == b"x" * 100
+        assert bytes(res[1]) == b"x" * 100
+        assert mock_cat.call_count == 1
+
+        # 3. max_gap="adaptive"
+        mock_cat.reset_mock()
+        res = await fs._cat_ranges(paths, starts, ends, max_gap="adaptive")
+        assert len(res) == 2
+        assert bytes(res[0]) == b"x" * 100
+        assert bytes(res[1]) == b"x" * 100
+        assert mock_cat.call_count == 1
+
+        # 4. adaptive=True via kwargs
+        mock_cat.reset_mock()
+        res = await fs._cat_ranges(paths, starts, ends, adaptive=True)
+        assert len(res) == 2
+        assert bytes(res[0]) == b"x" * 100
+        assert bytes(res[1]) == b"x" * 100
+        assert mock_cat.call_count == 1
+
+        # 5. Gap exceeding adaptive max_gap (gap = 10 > 5): not coalesced
+        mock_cat.reset_mock()
+        starts_wide = [0, 110]
+        ends_wide = [100, 210]
+        res_wide = await fs._cat_ranges(
+            paths, starts_wide, ends_wide, auto_max_gap=True
+        )
+        assert len(res_wide) == 2
+        assert bytes(res_wide[0]) == b"x" * 100
+        assert bytes(res_wide[1]) == b"x" * 100
+        assert mock_cat.call_count == 2
 
 
 @pytest.mark.asyncio

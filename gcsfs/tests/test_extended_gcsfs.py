@@ -1617,6 +1617,89 @@ async def test_extended_gcsfs_cat_ranges_non_zonal_delegation():
             assert res == [b"chunk1", b"chunk2"]
             assert mock_super.call_count == 1
 
+            await fs._cat_ranges(
+                ["reg-bucket/f1", "reg-bucket/f2"],
+                starts=[0, 10],
+                ends=[5, 15],
+                auto_max_gap=True,
+            )
+            assert mock_super.call_args.kwargs["auto_max_gap"] is True
+
+            await fs._cat_ranges(
+                ["reg-bucket/f1", "reg-bucket/f2"],
+                starts=[0, 10],
+                ends=[5, 15],
+                max_gap="auto",
+            )
+            assert mock_super.call_args.kwargs["auto_max_gap"] is True
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_adaptive():
+    fs = ExtendedGcsFileSystem(token="anon")
+    zonal_data = b"x" * 300
+
+    captured_specs = []
+
+    class MockMRD:
+        async def download_ranges(self, mrd_spec):
+            captured_specs.append([(s, length) for s, length, _ in mrd_spec])
+            for s, length, buf in mrd_spec:
+                buf.write(zonal_data[s : s + length])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_mrd_instance = MockMRD()
+    mock_pool = mock.AsyncMock()
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_size", return_value=len(zonal_data)
+        ):
+            with mock.patch(
+                "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+                return_value=mock_mrd_instance,
+            ):
+                paths = [
+                    "zonal-bucket/test_file.bin",
+                    "zonal-bucket/test_file.bin",
+                ]
+                starts = [0, 105]
+                ends = [100, 205]
+
+                # 1. auto_max_gap=True -> gap 5 <= adaptive max_gap 5 -> single coalesced range
+                captured_specs.clear()
+                res = await fs._cat_ranges(paths, starts, ends, auto_max_gap=True)
+                assert len(res) == 2
+                assert bytes(res[0]) == b"x" * 100
+                assert bytes(res[1]) == b"x" * 100
+                assert captured_specs == [[(0, 205)]]
+
+                # 2. max_gap="auto" -> single coalesced range
+                captured_specs.clear()
+                res = await fs._cat_ranges(paths, starts, ends, max_gap="auto")
+                assert len(res) == 2
+                assert bytes(res[0]) == b"x" * 100
+                assert bytes(res[1]) == b"x" * 100
+                assert captured_specs == [[(0, 205)]]
+
+                # 3. Gap exceeding adaptive max_gap (gap = 10 > 5) -> separate ranges
+                captured_specs.clear()
+                res = await fs._cat_ranges(
+                    paths, [0, 110], [100, 210], auto_max_gap=True
+                )
+                assert len(res) == 2
+                assert bytes(res[0]) == b"x" * 100
+                assert bytes(res[1]) == b"x" * 100
+                assert captured_specs == [[(0, 100), (110, 100)]]
+
 
 @pytest.mark.asyncio
 async def test_extended_gcsfs_cat_ranges_zonal_coalescing():

@@ -34,6 +34,7 @@ from gcsfs.concurrency import split_range
 from gcsfs.core import (
     GCSFile,
     GCSFileSystem,
+    _compute_adaptive_max_gap,
     _get_prefetcher_and_cache_config,
     _merge_file_ranges,
     _unpack_range_results,
@@ -624,6 +625,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         max_gap=None,
         batch_size=None,
         on_error="return",
+        auto_max_gap=False,
         **kwargs,
     ):
         """Get the contents of byte ranges, leveraging bulk AsyncMultiRangeDownloader for Zonal buckets.
@@ -635,15 +637,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         starts, ends: int or list of int
             Byte limits of the read. If using a single int, the same value will be
             used for all files.
-        max_gap: int, optional
+        max_gap: int or str, optional
             If specified and >= 0, adjacent byte ranges on the same file with a gap
             <= max_gap will be coalesced into a single larger read request.
+            Can also be set to "auto" or "adaptive" to dynamically calculate max_gap
+            based on median chunk size.
         batch_size: int, optional
             Number of concurrent range fetches. Defaults to self.batch_size.
         on_error: "return" or "raise"
             If "return" (default), any per-range exception is placed in the output
             list at the corresponding position. Otherwise the first such exception
             is raised.
+        auto_max_gap: bool, default False
+            If True, automatically compute an adaptive max_gap based on the median
+            chunk size of the requested ranges (equivalent to max_gap="auto").
 
         Returns
         -------
@@ -667,6 +674,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if bucket not in bucket_zonal_map:
                 bucket_zonal_map[bucket] = await self._is_zonal_bucket(bucket)
 
+        auto_enabled = (
+            auto_max_gap
+            or kwargs.pop("adaptive", False)
+            or kwargs.pop("adaptive_max_gap", False)
+            or (isinstance(max_gap, str) and max_gap.lower() in ("auto", "adaptive"))
+        )
+
         # If all paths belong to non-zonal buckets, delegate directly to base class
         if not any(bucket_zonal_map.values()):
             return await super(ExtendedGcsFileSystem, self)._cat_ranges(
@@ -676,6 +690,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 max_gap=max_gap,
                 batch_size=batch_size,
                 on_error=on_error,
+                auto_max_gap=auto_enabled,
                 **kwargs,
             )
 
@@ -683,17 +698,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         coros = []
         mrd_pools = []
 
-        async def _fetch_non_zonal_range(p, s, e, slice_list):
+        async def _fetch_non_zonal_range(p, s, e, slice_list, gap):
             try:
                 chunk = await self._cat_file(p, start=s, end=e, **kwargs)
-                _unpack_range_results(chunk, slice_list, results, max_gap)
+                _unpack_range_results(chunk, slice_list, results, gap)
             except Exception as exc:
                 if on_error != "return":
                     raise exc
                 for orig_idx, _, _ in slice_list:
                     results[orig_idx] = exc
 
-        async def _fetch_zonal_batch(batch_merged, pool):
+        async def _fetch_zonal_batch(batch_merged, pool, gap):
             buffers = [io.BytesIO() for _ in range(len(batch_merged))]
             mrd_spec = [
                 (s, e - s, buf) for (s, e, _), buf in zip(batch_merged, buffers)
@@ -703,7 +718,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     await m_client.download_ranges(mrd_spec)
 
                 for buf, (_, _, slice_list) in zip(buffers, batch_merged):
-                    _unpack_range_results(buf.getvalue(), slice_list, results, max_gap)
+                    _unpack_range_results(buf.getvalue(), slice_list, results, gap)
             except Exception as exc:
                 if on_error != "return":
                     raise exc
@@ -712,6 +727,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         results[idx] = exc
 
         try:
+            file_plans = []
             for path, items in file_groups.items():
                 bucket, object_name, generation = self.split_path(path)
                 is_zonal = bucket_zonal_map[bucket]
@@ -755,7 +771,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if not valid_items:
                     continue
 
-                merged_ranges = _merge_file_ranges(valid_items, max_gap)
+                file_plans.append((path, is_zonal, mrd_pool, valid_items))
+
+            if auto_enabled:
+                all_lengths = [
+                    e - s
+                    for _, _, _, valid_items in file_plans
+                    for s, e, _ in valid_items
+                    if s is not None and e is not None and e > s
+                ]
+                effective_max_gap = _compute_adaptive_max_gap(all_lengths)
+            else:
+                effective_max_gap = max_gap
+
+            for path, is_zonal, mrd_pool, valid_items in file_plans:
+                merged_ranges = _merge_file_ranges(valid_items, effective_max_gap)
 
                 if is_zonal:
                     effective_range_batch_size = self._compute_effective_batch_size(
@@ -768,10 +798,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         )
                     ]
                     for batch_merged in batches:
-                        coros.append(_fetch_zonal_batch(batch_merged, mrd_pool))
+                        coros.append(
+                            _fetch_zonal_batch(
+                                batch_merged, mrd_pool, effective_max_gap
+                            )
+                        )
                 else:
                     for m_s, m_e, slice_list in merged_ranges:
-                        coros.append(_fetch_non_zonal_range(path, m_s, m_e, slice_list))
+                        coros.append(
+                            _fetch_non_zonal_range(
+                                path, m_s, m_e, slice_list, effective_max_gap
+                            )
+                        )
 
             if coros:
                 effective_batch_size = self._compute_effective_batch_size(
