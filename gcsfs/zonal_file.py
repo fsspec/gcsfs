@@ -12,6 +12,7 @@ from gcsfs.core import (
     _coalesce_generation,
     _get_prefetcher_and_cache_config,
 )
+from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS, sync_teardown
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
     ReadAheadChunked,
@@ -397,13 +398,35 @@ class ZonalFile(GCSFile):
     def _close_impl(self):
         super()._close_impl()
 
-        if hasattr(self, "mrd_pool") and self.mrd_pool:
-            asyn.sync(self.gcsfs.loop, self.mrd_pool.close)
+        timeout = self.timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
+        errors = []
 
+        # Teardown the read-side MRD pool if initialized.
+        if hasattr(self, "mrd_pool") and self.mrd_pool:
+            try:
+                sync_teardown(
+                    self.gcsfs.loop,
+                    self.mrd_pool.close,
+                    timeout=timeout,
+                    description=f"closing mrd_pool for {self.path}",
+                )
+            except Exception as e:
+                errors.append(e)
+
+        # Finalize and close the write-side AAOW stream.
+        # Wrapped independently so a read pool failure does not abandon write finalization.
         if self.aaow and self.aaow._is_stream_open:
-            asyn.sync(
-                self.gcsfs.loop,
-                zb_hns_utils.close_aaow,
-                self.aaow,
-                finalize_on_close=self.finalize_on_close,
-            )
+            try:
+                sync_teardown(
+                    self.gcsfs.loop,
+                    zb_hns_utils.close_aaow,
+                    self.aaow,
+                    timeout=timeout,
+                    finalize_on_close=self.finalize_on_close,
+                    description=f"finalizing AsyncAppendableObjectWriter for {self.path}",
+                )
+            except Exception as e:
+                errors.append(e)
+
+        if errors:
+            raise errors[0]

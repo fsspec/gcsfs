@@ -9,7 +9,6 @@ import json
 import logging
 import mimetypes
 import os
-import posixpath
 import queue
 import re
 import sys
@@ -39,7 +38,7 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import errs, retry_request, validate_response
-from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE
+from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
 
@@ -679,7 +678,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """
         result = dict(object_metadata)
         result["size"] = int(object_metadata.get("size", 0))
-        result["name"] = posixpath.join(bucket, object_metadata["name"])
+        result["name"] = f"{bucket}/{object_metadata['name']}"
         result["type"] = "file"
         # Translate time metadata from GCS names to fsspec standard names.
         # TODO(issues/559): Remove legacy names `updated` and `timeCreated`?
@@ -1379,10 +1378,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    async def _cat_file(
-        self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
-    ):
+    async def _cat_file(self, path, start=None, end=None, **kwargs):
         """Simple one-shot, or concurrent get of file data"""
+        concurrency = kwargs.pop("concurrency", 1)
         if concurrency > 1:
             return await self._cat_file_concurrent(
                 path, start=start, end=end, concurrency=concurrency, **kwargs
@@ -2223,46 +2221,58 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if prefix:
             full_prefix = path.rstrip("/") + "/" + prefix
 
+        root_len = len(path.rstrip("/"))
+        should_update_cache = bool(not prefix and update_cache)
+
         for obj in objects:
             # For native HNS empty folders, which are returned as directory types
             # but are not placeholders, we need to ensure they have an entry in the cache.
-            if not prefix and update_cache and obj.get("type") == "directory":
+            if should_update_cache and obj.get("type") == "directory":
                 cache_entries.setdefault(obj["name"], {})
 
             parent = self._parent(obj["name"])
             previous = obj
 
             while parent:
-                dir_key = self.split_path(parent)[1]
-                if len(parent) < len(path.rstrip("/")):
+                if len(parent) < root_len:
                     break
 
                 if prefix and not parent.startswith(full_prefix):
                     # If this parent doesn't match the prefix, neither will its parents.
                     break
 
-                if dir_key:
-                    dirs[parent] = {
-                        "Key": dir_key,
-                        "Size": 0,
-                        "name": parent,
-                        "StorageClass": "DIRECTORY",
-                        "type": "directory",
-                        "size": 0,
-                    }
+                parent_already_seen = parent in dirs
+                if not parent_already_seen:
+                    dir_key = self.split_path(parent)[1]
+                    if dir_key:
+                        dirs[parent] = {
+                            "Key": dir_key,
+                            "Size": 0,
+                            "name": parent,
+                            "StorageClass": "DIRECTORY",
+                            "type": "directory",
+                            "size": 0,
+                        }
 
-                if not prefix and update_cache:
+                if should_update_cache:
                     listing = cache_entries.setdefault(parent, {})
                     name = previous["name"]
                     if name not in listing:
                         listing[name] = previous
+                    elif parent_already_seen:
+                        break
+                elif parent_already_seen:
+                    # When cache is not updated or prefix is used, once parent is in dirs,
+                    # all ancestors are already guaranteed to be in dirs. Break immediately.
+                    break
 
                 if parent in dirs:
                     previous = dirs[parent]
                 parent = self._parent(parent)
-        if not prefix and update_cache:
-            cache_entries_list = {k: list(v.values()) for k, v in cache_entries.items()}
-            self.dircache.update(cache_entries_list)
+        if should_update_cache:
+            self.dircache.update(
+                {k: list(v.values()) for k, v in cache_entries.items()}
+            )
         return dirs
 
     @retry_request(retries=retries)
@@ -2673,15 +2683,6 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs):
     return cache_type, use_prefetch_reader, cache_source
 
 
-def _on_loop_thread(loop):
-    if loop is None:
-        return False
-    try:
-        return asyncio.get_running_loop() is loop
-    except RuntimeError:
-        return False
-
-
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
 _deferred_close_queue = None
 _deferred_close_lock = threading.Lock()
@@ -2730,6 +2731,16 @@ def _defer_close(file):
 
 class GCSFile(fsspec.spec.AbstractBufferedFile):
     _close_deferred = False
+
+    def __del__(self):
+        """Defer finalizer cleanup so it never waits on the I/O loop."""
+        if getattr(self, "closed", True) or getattr(self, "_close_deferred", False):
+            return
+        if sys.is_finalizing() or _deferred_close_queue is None:
+            self.closed = True
+            return
+        self._close_deferred = True
+        _defer_close(self)
 
     def __init__(
         self,

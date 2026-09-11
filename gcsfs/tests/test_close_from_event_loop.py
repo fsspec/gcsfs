@@ -9,6 +9,7 @@ import fsspec.asyn
 import pytest
 
 from gcsfs import core
+from gcsfs.zb_hns_utils import _defer_task, _deferred_close_tasks
 from gcsfs.zonal_file import ZonalFile
 
 
@@ -152,3 +153,101 @@ def test_off_loop_close_still_blocks_and_propagates_errors(fake_fs):
     with pytest.raises(RuntimeError, match="MRD pool teardown failed"):
         zf.close()
     assert started.is_set(), "close() must run the teardown synchronously"
+
+
+def test_gcsfile_finalizer_when_already_closed_or_deferred(fake_fs):
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb")
+    f.closed = True
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f.__del__()
+        mock_defer.assert_not_called()
+
+    f2 = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb")
+    f2._close_deferred = True
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f2.__del__()
+        mock_defer.assert_not_called()
+
+
+def test_gcsfile_finalizer_when_sys_finalizing(fake_fs, monkeypatch):
+    monkeypatch.setattr(sys, "is_finalizing", lambda: True)
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb")
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f.__del__()
+        assert f.closed is True
+        mock_defer.assert_not_called()
+
+
+def test_gcsfile_finalizer_when_queue_is_none(fake_fs, monkeypatch):
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="readahead")
+    monkeypatch.setattr(core, "_deferred_close_queue", None)
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f.__del__()
+        assert f.closed is True
+        mock_defer.assert_not_called()
+
+
+def test_gcsfile_finalized_on_loop_thread_defers_close(fake_fs, io_loop, monkeypatch):
+    seen = []
+    monkeypatch.setattr(sys, "unraisablehook", seen.append)
+    closed = threading.Event()
+
+    class RecordingGCSFile(core.GCSFile):
+        def _close_impl(self):
+            closed.set()
+            super()._close_impl()
+
+    gf = RecordingGCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="readahead")
+    holder = [gf]
+    del gf
+    finalize_on_loop(io_loop, holder)
+    assert wait_until(closed.is_set), "GCSFile._close_impl() was never called"
+    assert seen == [], f"exception escaped the finalizer: {seen}"
+
+
+def test_defer_task_tracks_and_discards_task(io_loop):
+    step1 = threading.Event()
+    step2 = threading.Event()
+
+    async def sample_coro():
+        step1.set()
+        while not step2.is_set():
+            await asyncio.sleep(0.01)
+
+    async def schedule():
+        return _defer_task(io_loop, sample_coro(), description="sample")
+
+    task = fsspec.asyn.sync(io_loop, schedule)
+    assert step1.wait(timeout=5.0)
+    assert task in _deferred_close_tasks
+
+    step2.set()
+    assert wait_until(lambda: task not in _deferred_close_tasks, timeout=5.0)
+    assert task.done()
+
+
+def test_defer_task_logs_exception(io_loop, caplog):
+    import logging
+
+    async def boom():
+        raise ValueError("custom boom error")
+
+    async def schedule():
+        task = _defer_task(
+            io_loop,
+            boom(),
+            description="custom boom",
+            logger=logging.getLogger("gcsfs"),
+            log_level=logging.ERROR,
+        )
+        await asyncio.sleep(0.05)
+        return task
+
+    with caplog.at_level(logging.ERROR, logger="gcsfs"):
+        task = fsspec.asyn.sync(io_loop, schedule)
+        assert wait_until(lambda: task not in _deferred_close_tasks, timeout=5.0)
+
+    assert any(
+        "custom boom" in r.message and "custom boom error" in r.message
+        for r in caplog.records
+    )
