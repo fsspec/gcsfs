@@ -1618,16 +1618,17 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """Helper to delete files in batches."""
         if self.on_google:
             # emulators do not support batch
-            return sum(
-                await asyn._run_coros_in_chunks(
-                    [
-                        self._rm_files(files[i : i + batchsize])
-                        for i in range(0, len(files), batchsize)
-                    ],
-                    return_exceptions=True,
-                ),
-                [],
+            chunk_results = await asyn._run_coros_in_chunks(
+                [
+                    self._rm_files(files[i : i + batchsize])
+                    for i in range(0, len(files), batchsize)
+                ],
+                return_exceptions=True,
             )
+            out = []
+            for r in chunk_results:
+                out.extend(r)
+            return out
         else:
             return await asyn._run_coros_in_chunks(
                 [self._rm_file(f) for f in files], return_exceptions=True, batch_size=5

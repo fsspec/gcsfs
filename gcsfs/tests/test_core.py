@@ -625,6 +625,61 @@ def test_rm_chunked_batch(gcs):
         assert fn not in files_removed
 
 
+@pytest.mark.asyncio
+async def test_delete_files_batch_flattening():
+    # Arrange
+    fs = GCSFileSystem(token="anon")
+    files = [f"bucket/file_{i}" for i in range(10)]
+    batchsize = 3
+
+    with (
+        mock.patch.object(
+            GCSFileSystem,
+            "on_google",
+            new_callable=mock.PropertyMock(return_value=True),
+        ),
+        mock.patch.object(
+            fs, "_rm_files", side_effect=lambda batch: [f"{p}_deleted" for p in batch]
+        ) as mock_rm,
+    ):
+        # Act
+        result = await fs._delete_files(files, batchsize=batchsize)
+
+        # Assert
+        assert result == [f"bucket/file_{i}_deleted" for i in range(10)]
+        assert mock_rm.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_delete_files_batch_with_exception():
+    # Arrange
+    fs = GCSFileSystem(token="anon")
+    files = [f"bucket/file_{i}" for i in range(4)]
+    batchsize = 2
+    exc = RuntimeError("batch failed")
+
+    async def mock_rm_files(batch):
+        if "bucket/file_2" in batch:
+            raise exc
+        return [f"{p}_deleted" for p in batch]
+
+    with (
+        mock.patch.object(
+            GCSFileSystem,
+            "on_google",
+            new_callable=mock.PropertyMock(return_value=True),
+        ),
+        mock.patch.object(fs, "_rm_files", side_effect=mock_rm_files),
+    ):
+        # Act
+        result = await fs._delete_files(files, batchsize=batchsize)
+
+        # Assert
+        assert result[0] == "bucket/file_0_deleted"
+        assert result[1] == "bucket/file_1_deleted"
+        assert result[2] is exc
+
+
 def test_rm_wildcards_in_directory(gcs):
     base_dir = f"{TEST_BUCKET}/test_rm_complex_{uuid.uuid4().hex}"
     files = [
