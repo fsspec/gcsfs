@@ -2536,9 +2536,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             det = self.details
         else:
             det = {}
-        self.content_type = content_type or det.get(
-            "contentType",
-            mimetypes.guess_type(self.path)[0] or "application/octet-stream",
+        self.content_type = (
+            content_type
+            or det.get("contentType")
+            or mimetypes.guess_type(self.path)[0]
+            or "application/octet-stream"
         )
         self.metadata = metadata or det.get("metadata", {})
         self.fixed_key_metadata = _convert_fixed_key_metadata(det, from_google=True)
