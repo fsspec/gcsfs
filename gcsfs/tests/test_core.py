@@ -3852,22 +3852,3 @@ def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
     assert f"{bucket}/a/b/c" in dirs
     # Cache should remain empty because update_cache=False and prefix is used
     assert len(gcs.dircache) == 0
-
-
-# TEMPORARY (PR #1056): intentionally fail/error on the Cloud Build e2e run to validate the
-# test-report failure summary. Remove before merging.
-@requires_real_gcs
-def test_tmp_validate_e2e_report_failure(gcs):
-    assert not gcs.exists(
-        TEST_BUCKET
-    ), "intentional failure to validate the e2e test report"
-
-
-@pytest.fixture
-def tmp_broken_fixture():
-    raise RuntimeError("intentional fixture error to validate the e2e test report")
-
-
-@requires_real_gcs
-def test_tmp_validate_e2e_report_error(tmp_broken_fixture):
-    pass
