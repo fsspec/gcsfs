@@ -198,9 +198,54 @@ def test_output_never_exceeds_budget_and_keeps_counts(tmp_path):
     assert row(out, "standard") == (0, 300, 0, 0)
     assert row(out, "hns") == (0, 300, 0, 0)
     assert "--- standard: FAILED gcsfs.tests.test_standard::test_0 ---" in out
+    assert "--- hns: FAILED gcsfs.tests.test_hns::test_0 ---" in out
     assert "Not shown in detail (see the full logs below):" in out
+    assert "\nstandard: FAILED gcsfs.tests.test_standard::test_299\n" not in out
+    assert "\nhns: FAILED gcsfs.tests.test_hns::test_5\n" in out
     assert re.search(r"^\.\.\. and \d+ more$", out, re.M)
     assert out.endswith(summarize_test_results.FOOTER)
+
+
+def test_every_suite_shows_a_detail_when_an_earlier_suite_has_many_failures(tmp_path):
+    traceback = "\n".join("E   " + "x" * 200 for _ in range(60))
+    write_junit(
+        tmp_path / "standard.xml",
+        [
+            ("gcsfs.tests.test_core", f"test_{i}", "failed", "boom", traceback)
+            for i in range(300)
+        ],
+    )
+    write_junit(
+        tmp_path / "zonal.xml",
+        [
+            (
+                "gcsfs.tests.test_zonal_file",
+                "test_z",
+                "failed",
+                "zonal boom",
+                "E   zonal boom",
+            )
+        ],
+    )
+    (tmp_path / "hns.log").write_text("collection crashed\n")
+
+    out = summarize_test_results.build_summary(
+        str(tmp_path), ["standard", "zonal", "zonal-core", "hns"]
+    )
+
+    assert len(out) <= 30000
+    standard = out.index("--- standard: FAILED gcsfs.tests.test_core::test_0 ---")
+    zonal = out.index(
+        "--- zonal: FAILED gcsfs.tests.test_zonal_file::test_z ---\nzonal boom\nE   zonal boom"
+    )
+    zonal_core = out.index(
+        "--- zonal-core: no JUnit results ---\nThe suite did not run"
+    )
+    hns = out.index(
+        "--- hns: no JUnit results ---\nLast 60 lines of hns.log:\ncollection crashed"
+    )
+    # Details are still rendered in suite order.
+    assert standard < zonal < zonal_core < hns
 
 
 def test_tiny_budget_is_still_capped(tmp_path):

@@ -71,7 +71,7 @@ def build_summary(results_dir, suites, failed_steps=None, max_chars=30000):
         f"{'suite':<12}{'passed':>8}{'failed':>8}{'error':>8}{'skipped':>9}{'time':>10}"
     )
 
-    # (full detail, one-line fallback) for each problem, in suite order.
+    # (suite, full detail, one-line fallback) for each problem, in suite order.
     problems = []
     for suite in suites:
         xml_path = os.path.join(results_dir, f"{suite}.xml")
@@ -94,7 +94,7 @@ def build_summary(results_dir, suites, failed_steps=None, max_chars=30000):
             else:
                 body = "The suite did not run; see its step log above."
             problems.append(
-                (f"--- {suite}: {reason} ---\n{body}", f"{suite}: {reason}")
+                (suite, f"--- {suite}: {reason} ---\n{body}", f"{suite}: {reason}")
             )
             continue
 
@@ -104,31 +104,51 @@ def build_summary(results_dir, suites, failed_steps=None, max_chars=30000):
         )
         for outcome, nodeid, message, traceback in suite_problems:
             detail = f"--- {suite}: {outcome} {nodeid} ---\n{message}\n{traceback}"
-            problems.append((detail, f"{suite}: {outcome} {nodeid}"[:ONE_LINE_CHARS]))
+            one_line = f"{suite}: {outcome} {nodeid}"[:ONE_LINE_CHARS]
+            problems.append((suite, detail, one_line))
 
     if not problems:
         head.append("")
         head.append("No failures or errors.")
 
+    # Fill the budget round-robin across suites (each suite's 1st problem, then each 2nd, ...) so a
+    # suite with hundreds of failures cannot crowd out the other suites' failures.
+    next_rank = {}
+    ranked = []
+    for i, (suite, _, _) in enumerate(problems):
+        ranked.append((next_rank.get(suite, 0), i))
+        next_rank[suite] = next_rank.get(suite, 0) + 1
+    order = [i for _, i in sorted(ranked)]
+
     parts = ["\n".join(head)]
     used = len(parts[0]) + len(FOOTER) + NOTE_RESERVE
-    listed_only = []
-    for detail, one_line in problems:
-        if not listed_only and used + len(detail) + 2 <= max_chars:
-            parts.append(detail)
+    detailed = set()
+    suites_out_of_room = set()
+    for i in order:
+        suite, detail, _ = problems[i]
+        if suite not in suites_out_of_room and used + len(detail) + 2 <= max_chars:
+            detailed.add(i)
             used += len(detail) + 2
         else:
-            listed_only.append(one_line)
+            suites_out_of_room.add(suite)
 
-    if listed_only:
+    listed = set()
+    omitted = 0
+    for i in order:
+        if i in detailed:
+            continue
+        one_line = problems[i][2]
+        if used + len(one_line) + 1 <= max_chars:
+            listed.add(i)
+            used += len(one_line) + 1
+        else:
+            omitted += 1
+
+    # Render in suite order.
+    parts.extend(problems[i][1] for i in sorted(detailed))
+    if listed or omitted:
         lines = ["Not shown in detail (see the full logs below):"]
-        omitted = 0
-        for one_line in listed_only:
-            if used + len(one_line) + 1 <= max_chars:
-                lines.append(one_line)
-                used += len(one_line) + 1
-            else:
-                omitted += 1
+        lines.extend(problems[i][2] for i in sorted(listed))
         if omitted:
             lines.append(f"... and {omitted} more")
         parts.append("\n".join(lines))

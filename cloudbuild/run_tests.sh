@@ -31,8 +31,42 @@ RESULTS_LOG="${RESULTS_DIR}/${TEST_SUITE}.log"
 mkdir -p "${RESULTS_DIR}"
 ARGS+=("--junitxml=${RESULTS_DIR}/${TEST_SUITE}.xml")
 
+# While pytest runs, print the tests still in progress every HEARTBEAT_SECS. A hung test is failed by
+# pytest-timeout and a killed pytest leaves its log tail for test-report, but if the whole build times out
+# (or the VM is lost) test-report never runs, so these lines keep a stuck test visible in the step log.
+HEARTBEAT_SECS="${HEARTBEAT_SECS:-300}"
+if ! [[ "${HEARTBEAT_SECS}" =~ ^[0-9]+$ ]] || (( HEARTBEAT_SECS <= 0 )); then
+  HEARTBEAT_SECS=300
+fi
+
+in_progress_tests() {
+  # With -vv, xdist logs "<nodeid>" when a test starts and "[gwN] <OUTCOME> <nodeid>" when it finishes.
+  awk '
+    { sub(/ <- .*/, ""); sub(/[ \t]+$/, "") }
+    /^\[gw[0-9]+\] [A-Z]+ / { sub(/^\[gw[0-9]+\] [A-Z]+ /, ""); delete running[$0]; next }
+    /^[^ ]+\.py::/ { running[$0] = 1 }
+    END { for (t in running) printf "%s%s", (n++ ? ", " : ""), t; if (!n) printf "none" }
+  ' "${RESULTS_LOG}" 2>/dev/null | cut -c1-500
+}
+
+heartbeat() {
+  local elapsed=0
+  # Sleep in 1s steps so stopping the heartbeat never leaves a long sleep holding the ssh session open.
+  while sleep 1; do
+    elapsed=$((elapsed + 1))
+    if (( elapsed % HEARTBEAT_SECS == 0 )); then
+      echo "--- ${TEST_SUITE}: still running after $((elapsed / 60))m; in progress: $(in_progress_tests) ---"
+    fi
+  done
+}
+
 run_pytest() {
-  pytest "$@" > "${RESULTS_LOG}" 2>&1
+  local status=0
+  heartbeat &
+  local heartbeat_pid=$!
+  pytest "$@" > "${RESULTS_LOG}" 2>&1 || status=$?
+  { kill "${heartbeat_pid}" && wait "${heartbeat_pid}"; } 2>/dev/null
+  return "${status}"
 }
 STATUS=0
 
