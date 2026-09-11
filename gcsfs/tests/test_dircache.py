@@ -9,7 +9,7 @@ for writes. The HNS-specific overrides for deletes and moves live in
 
 Test placement: keep pure in-memory dircache strategy tests here. Filesystem
 integration and bucket-specific routing tests belong in test_core.py,
-test_hns_unit.py, integration/test_extended_hns.py, or
+test_hns_unit.py, test_hns.py, or
 test_zonal.py / test_zonal_file.py according to the bucket type they exercise.
 
 The methods under test are pure in-memory operations on ``self.dircache`` (via

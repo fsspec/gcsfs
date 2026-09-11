@@ -42,7 +42,7 @@ TEST_KMS_KEY = gcsfs.tests.settings.TEST_KMS_KEY
 
 # Test placement: keep common behavior and standard-bucket coverage in this
 # file. HNS-specific filesystem behavior belongs in test_hns_unit.py
-# or integration/test_extended_hns.py; zonal-specific behavior belongs in
+# or test_hns.py; zonal-specific behavior belongs in
 # test_zonal.py or test_zonal_file.py.
 
 
