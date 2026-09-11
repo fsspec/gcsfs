@@ -1923,6 +1923,45 @@ def test_content_type_put_guess(gcs):
     assert gcs.info(dst)["contentType"] == "text/plain"
 
 
+def test_content_type_lazy_evaluation():
+    from gcsfs.core import GCSFile
+
+    fs_mock = mock.MagicMock(spec=GCSFileSystem)
+    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fs_mock.info.return_value = {
+        "name": "test-bucket/test-key.txt",
+        "size": 10,
+        "contentType": "application/json",
+        "type": "file",
+    }
+    with mock.patch("mimetypes.guess_type") as mock_guess:
+        f = GCSFile(
+            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+        )
+        assert f.content_type == "application/json"
+        mock_guess.assert_not_called()
+
+
+def test_content_type_lazy_evaluation_fallback():
+    from gcsfs.core import GCSFile
+
+    fs_mock = mock.MagicMock(spec=GCSFileSystem)
+    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fs_mock.info.return_value = {
+        "name": "test-bucket/test-key.txt",
+        "size": 10,
+        "type": "file",
+    }
+    with mock.patch(
+        "mimetypes.guess_type", return_value=("text/plain", None)
+    ) as mock_guess:
+        f = GCSFile(
+            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+        )
+        assert f.content_type == "text/plain"
+        mock_guess.assert_called_once()
+
+
 def test_attrs(gcs):
     if not gcs.on_google:
         # https://github.com/fsspec/gcsfs/pull/479
