@@ -1,5 +1,5 @@
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_data import configs
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_data.configs import (
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch import configs
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.configs import (
     RayCheckpointConfigurator,
 )
 

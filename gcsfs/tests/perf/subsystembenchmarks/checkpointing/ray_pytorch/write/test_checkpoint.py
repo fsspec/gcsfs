@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_data import configs
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_data.configs import (
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch import configs
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.configs import (
     RayCheckpointConfigurator,
 )
 
@@ -28,7 +28,7 @@ def test_checkpoint_save(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.checkpoint_case import (
         run_checkpoint_case,
     )
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_data.write.driver import (
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.write.driver import (
         RayCheckpointWriteDriver,
     )
 

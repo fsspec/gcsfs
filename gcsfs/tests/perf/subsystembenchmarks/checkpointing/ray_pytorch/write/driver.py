@@ -14,7 +14,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_data.common import (
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common import (
     _get_staging_dir,
     _pyarrow_fs_copy_files,
     ensure_ray_initialized,
@@ -27,7 +27,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_data.common import (
 )
 
 
-@ray.remote
+@ray.remote(num_cpus=1)
 class RayCheckpointSaveWorker:
     """Ray Actor executing distributed checkpoint save operations on CPU."""
 
@@ -48,6 +48,7 @@ class RayCheckpointSaveWorker:
         self.destination_ckpt = f"{self.base_path.rstrip('/')}/model.ckpt"
 
     def save_rounds(self):
+        """Runs the save rounds and returns the per-round GCS upload windows."""
         try:
             durations = []
             is_sharded = self.params.strategy in (
@@ -60,9 +61,6 @@ class RayCheckpointSaveWorker:
             )
 
             for round_idx in range(self.params.rounds):
-                dist.barrier()
-                t_start = time.perf_counter()
-
                 local_dir = None
                 try:
                     # get_state_dict is a collective operation across all ranks for distributed strategies
@@ -71,6 +69,7 @@ class RayCheckpointSaveWorker:
                     )
                     app_state = {"model": model_state, "optimizer": opt_state}
 
+                    # Stage the checkpoint locally first.
                     if is_sharded:
                         local_dir = _get_staging_dir(
                             f"ray-ckpt-r{round_idx}-rank{self.rank}-"
@@ -79,29 +78,26 @@ class RayCheckpointSaveWorker:
                             {"app": app_state},
                             storage_writer=dcp.FileSystemWriter(local_dir),
                         )
+                    elif self.rank == 0:
+                        local_dir = _get_staging_dir(f"ray-ckpt-r{round_idx}-rank0-")
+                        ckpt_file = os.path.join(local_dir, "checkpoint.pt")
+                        torch.save(app_state, ckpt_file)
 
+                    del app_state, model_state, opt_state
+
+                    if local_dir is not None:
                         self.arrow_fs.create_dir(self.destination_ckpt)
+
+                    # Timed GCS window: bounded by barriers so every rank reports
+                    # the same interval, whether or not it owns data to upload.
+                    dist.barrier()
+                    t_start = time.perf_counter()
+                    if local_dir is not None:
                         _pyarrow_fs_copy_files(
                             local_dir,
                             self.destination_ckpt,
                             destination_filesystem=self.arrow_fs,
                         )
-                    else:
-                        if self.rank == 0:
-                            local_dir = _get_staging_dir(
-                                f"ray-ckpt-r{round_idx}-rank0-"
-                            )
-                            ckpt_file = os.path.join(local_dir, "checkpoint.pt")
-                            torch.save(app_state, ckpt_file)
-
-                            self.arrow_fs.create_dir(self.destination_ckpt)
-                            _pyarrow_fs_copy_files(
-                                local_dir,
-                                self.destination_ckpt,
-                                destination_filesystem=self.arrow_fs,
-                            )
-
-                    del app_state, model_state, opt_state
                     dist.barrier()
                     if is_sharded and self.rank == 0:
                         self.fs.touch(f"{self.destination_ckpt.rstrip('/')}/_SUCCESS")
