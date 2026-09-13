@@ -12,6 +12,7 @@ from typing import Any, List
 import pytest
 
 from gcsfs.tests.perf._common.resource_monitor import ResourceMonitor
+from gcsfs.tests.settings import BENCHMARK_REUSE_FILES
 
 MB = 1024 * 1024
 
@@ -215,26 +216,73 @@ def monitor():
     return ResourceMonitor
 
 
+@pytest.fixture(scope="session")
+def benchmark_file_cache():
+    """Session-scoped store of shared read-benchmark files.
+
+    Keyed by (bucket, file size, file count). Read benchmarks never mutate their
+    fixture files, so every case needing the same combination can share a single
+    upload. Deletion is deferred to the end of the session.
+    """
+    cache = {}
+    yield cache
+    for gcs, prefix, _ in cache.values():
+        logging.info(f"Removing shared benchmark files at {prefix}.")
+        try:
+            gcs.rm(prefix, recursive=True)
+        except Exception as e:
+            logging.error(f"Failed to clean up shared benchmark files: {e!r}")
+
+
 @pytest.fixture
-def gcsfs_benchmark_read(extended_gcs_factory, request):
+def gcsfs_benchmark_read(extended_gcs_factory, request, benchmark_file_cache):
     """
     A fixture that creates temporary files for a benchmark run and cleans
     them up afterward.
 
     It uses the parameters from the test's parametrization
     to determine how many files to create and of what size.
+
+    When GCSFS_BENCHMARK_REUSE_FILES is set, files are built once per distinct
+    (bucket, size, count) and shared across cases rather than rebuilt per case.
     """
     params = request.param
-    yield from _benchmark_io_fixture_helper(
-        extended_gcs_factory,
-        params,
-        "benchmark-read",
-        create_files=True,
-        gcs_kwargs={
-            "block_size": params.block_size_bytes,
-            "mrd_pool_cache_size": params.mrd_pool_cache_size,
-        },
-    )
+    gcs_kwargs = {
+        "block_size": params.block_size_bytes,
+        "mrd_pool_cache_size": params.mrd_pool_cache_size,
+    }
+
+    if not BENCHMARK_REUSE_FILES:
+        yield from _benchmark_io_fixture_helper(
+            extended_gcs_factory,
+            params,
+            "benchmark-read",
+            create_files=True,
+            gcs_kwargs=gcs_kwargs,
+        )
+        return
+
+    # The client is still built per case: block_size and mrd_pool_cache_size are part
+    # of what the benchmark measures. Only the underlying objects are shared.
+    gcs = extended_gcs_factory(**gcs_kwargs)
+    key = (params.bucket_name, params.file_size_bytes, params.files)
+
+    if key not in benchmark_file_cache:
+        prefix = f"{params.bucket_name}/benchmark-read-shared-{uuid.uuid4()}"
+        file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
+        logging.info(
+            f"Setting up benchmark '{params.name}': creating {params.files} shared "
+            f"file(s) of size {params.file_size_bytes / MB:.2f} MB each."
+        )
+        start_time = time.perf_counter()
+        _prepare_files(gcs, file_paths, params.file_size_bytes)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logging.info(f"Shared benchmark files created in {duration_ms:.2f} ms.")
+        benchmark_file_cache[key] = (gcs, prefix, file_paths)
+    else:
+        logging.info(f"Benchmark '{params.name}': reusing shared files for {key}.")
+
+    yield gcs, benchmark_file_cache[key][2], params
 
 
 @pytest.fixture

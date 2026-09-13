@@ -4,7 +4,24 @@ import os
 import yaml
 
 from gcsfs.tests.conftest import BUCKET_NAME_MAP
-from gcsfs.tests.settings import BENCHMARK_FILTER
+from gcsfs.tests.settings import BENCHMARK_CHUNK_SIZES_MB, BENCHMARK_FILTER
+
+
+def _parse_chunk_sizes(raw):
+    """Parse a comma-separated MB list, keeping whole numbers as ints.
+
+    Benchmark names embed this value, so 1 must stay "1MB_chunk" rather than
+    becoming "1.0MB_chunk" and breaking comparison against runs that did not
+    use the override.
+    """
+    sizes = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        value = float(token)
+        sizes.append(int(value) if value.is_integer() else value)
+    return sizes
 
 
 class BaseBenchmarkConfigurator:
@@ -23,6 +40,18 @@ class BaseBenchmarkConfigurator:
                 name.strip().lower() for name in BENCHMARK_FILTER.split(",")
             ]
             scenarios = [s for s in scenarios if s["name"].lower() in filter_names]
+
+        if BENCHMARK_CHUNK_SIZES_MB:
+            chunk_sizes = _parse_chunk_sizes(BENCHMARK_CHUNK_SIZES_MB)
+            if chunk_sizes:
+                logging.info(f"Overriding chunk_sizes_mb with {chunk_sizes}.")
+                common = {**common, "chunk_sizes_mb": chunk_sizes}
+                # Scenario-level values take precedence over common, so they have to be
+                # replaced too for the override to actually apply everywhere.
+                scenarios = [
+                    {**s, "chunk_sizes_mb": chunk_sizes} if "chunk_sizes_mb" in s else s
+                    for s in scenarios
+                ]
 
         return common, scenarios
 

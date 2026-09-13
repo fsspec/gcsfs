@@ -1,0 +1,345 @@
+# =======================================================================================
+# Cloud Build Pipeline: PR Performance Benchmarking
+#
+# Triggered via PR comment `/gcbrun`, gated on the `execute-perf-test` PR label.
+#
+# Benchmark selection:
+#   _BENCHMARK_GROUPS  "read" (default) | "info read" | "" for every group
+#   _BENCHMARK_CONFIG  comma-separated scenario filter within those groups, "" for all
+#   _CHUNK_SIZES_MB    comma-separated IO sizes, overriding the group's configs.yaml
+#
+# A PR author can override all three for a single run by putting `perf-groups:`,
+# `perf-scenarios:` or `perf-io-sizes:` lines in the PR description. Cloud Build matches
+# `/gcbrun` exactly and cannot carry arguments, so the PR body is the only per-PR
+# channel. check_pr_label.py validates those values and writes them to
+# /workspace/benchmark_selection.env, which the run-and-compare step sources.
+#
+# The default is the core read path at a single 1 MB IO size: 8 cases, ~20 min per
+# branch. Each case is a fixed-duration workload, so the cost is deterministic:
+#   cases x rounds x runtime  (read is rounds=5, runtime=30s per gcsfs/tests/perf/
+#   microbenchmarks/read/configs.yaml)
+# Clearing _CHUNK_SIZES_MB restores all four IO sizes (32 cases, ~1.4 h per branch);
+# the full read group is 58 cases and every group is 458, which will not fit below.
+#
+# Workflow:
+# 0. Check PR label. If the required label is absent, write SKIPPED and exit early
+#    before any billable resource is created.
+# 1. Generate an ephemeral SSH key registered with OS Login.
+# 2. Provision the GCE VM and test buckets in parallel.
+# 3. Set up the VM (Python venv, RAM disk on /mnt/ramdisk) and clone the base branch.
+# 4. Benchmark the PR branch first, so PR-side breakage fails before base time is spent.
+# 5. Benchmark the base branch using the PR's benchmark configs, so both sides run
+#    identical parameters.
+# 6. Compare with compare.py. Regressions are reported but do NOT fail the build;
+#    pass --fail-on-regression to make them blocking.
+# 7. Clean up VM, buckets, and SSH keys. Cleanup always runs because every step that
+#    can fail is marked allowFailure and records its name in /workspace/FAILED.
+# 8. Surface the comparison report and fail only on infrastructure errors.
+# =======================================================================================
+
+substitutions:
+  _REQUIRED_LABEL: "execute-perf-test"
+  _REPO: "fsspec/gcsfs"
+  _REGION: "us-central1"
+  _ZONE: "us-central1-a"
+  _INFRA_PREFIX: "gcsfs-pr-perf"
+  _VM_SERVICE_ACCOUNT: ""
+  _ZONAL_VM_SERVICE_ACCOUNT: ""
+  # Benchmark group(s) to run. Defaults to the read path.
+  # Empty runs every group, which takes many hours; see the note on timeout below.
+  _BENCHMARK_GROUPS: "read"
+  # Scenario filter within the group(s). Empty runs every scenario.
+  # seq + rand are the core read path. Widen this (or set it empty) to also cover the
+  # multi-thread, reopen and mixed scenarios, which is the full 58-case read group.
+  _BENCHMARK_CONFIG: "read_seq_fixed_duration,read_rand_fixed_duration"
+  # IO size(s) in MB, overriding the group's configs.yaml. read declares four sizes
+  # (0.0625, 1, 16, 100); pinning to 1 keeps a representative IO size and cuts the case
+  # count 4x. Empty uses every size the group declares.
+  _CHUNK_SIZES_MB: "1"
+  # No read scenario targets hns, so creating that bucket would be pure overhead.
+  _BUCKET_TYPES: "regional zonal"
+  # Share read fixture files between cases needing identical files, so the default
+  # selection does 2 twenty-gigabyte uploads per branch instead of one per case.
+  # Set to "false" to give every case a freshly written object.
+  _REUSE_FILES: "true"
+  _BASE_BRANCH: "main"
+  _THRESHOLD: "10.0"
+  # read forks up to 16 processes against 20 GB files; size accordingly.
+  _MACHINE_TYPE: "c4-standard-192"
+  _BOOT_DISK_SIZE: "50GB"
+  _SKIP_IF_FAILED: '[[ -f /workspace/SKIPPED ]] && exit 0; [[ -f /workspace/FAILED ]] && echo "Skipping: Previous failure" && exit 0'
+
+steps:
+  # 0. Check if PR has the required performance test label
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-pr-label"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        python3 cloudbuild/benchmarks/check_pr_label.py \
+          --label="${_REQUIRED_LABEL}" \
+          --pr="${_PR_NUMBER}" \
+          --repo="${_REPO}" \
+          --default-groups="${_BENCHMARK_GROUPS}"
+    waitFor: ["-"]
+
+  # 1. Generate persistent SSH key for this build run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "generate-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        mkdir -p /workspace/.ssh
+        ssh-keygen -q -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
+        cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=2h > /dev/null
+    waitFor: ["check-pr-label"]
+    allowFailure: true
+
+  # 2. Initialize shared variables
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "init-variables"
+    entrypoint: "bash"
+    env:
+      - "BUILD_ID=${BUILD_ID}"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        SHORT_BUILD_ID=$${BUILD_ID:0:8}
+        echo "export SHORT_BUILD_ID=$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-reg-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
+    waitFor: ["check-pr-label"]
+
+  # 3. Create test buckets in parallel (only those specified in _BUCKET_TYPES)
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
+          gcloud storage buckets create "gs://$${REGIONAL_BUCKET}" --project=${PROJECT_ID} --location=${_REGION} &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
+          gcloud storage buckets create "gs://$${ZONAL_BUCKET}" --project=${PROJECT_ID} --location=${_REGION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
+          gcloud storage buckets create "gs://$${HNS_BUCKET}" --project=${PROJECT_ID} --location=${_REGION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+        fi
+        wait || { echo "create-buckets" >> /workspace/FAILED; exit 1; }
+    waitFor: ["init-variables"]
+    allowFailure: true
+
+  # 4. Provision Compute Engine VM
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+        SA_FLAG=()
+        if [ -n "${_VM_SERVICE_ACCOUNT}" ]; then
+          SA_FLAG=("--service-account=${_VM_SERVICE_ACCOUNT}")
+        elif [ -n "${_ZONAL_VM_SERVICE_ACCOUNT}" ]; then
+          SA_FLAG=("--service-account=${_ZONAL_VM_SERVICE_ACCOUNT}")
+        fi
+
+        gcloud compute instances create "$$VM_NAME" \
+          --project="${PROJECT_ID}" \
+          --zone="${_ZONE}" \
+          --machine-type="${_MACHINE_TYPE}" \
+          --image-family="ubuntu-2404-lts-amd64" \
+          --image-project="ubuntu-os-cloud" \
+          --boot-disk-type="hyperdisk-balanced" \
+          --boot-disk-size="${_BOOT_DISK_SIZE}" \
+          --scopes="https://www.googleapis.com/auth/cloud-platform" \
+          "$${SA_FLAG[@]}" \
+          --metadata="enable-oslogin=TRUE" \
+          --tags="allow-ssh" \
+          --quiet || { echo "create-vm" >> /workspace/FAILED; exit 1; }
+    waitFor: ["init-variables"]
+    allowFailure: true
+
+  # 5. Setup VM and source trees
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "setup-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+
+        # Wait for SSH via reusable helper
+        bash cloudbuild/wait_for_ssh.sh "$$VM_NAME" "${_ZONE}" || { echo "setup-vm (wait-ssh)" >> /workspace/FAILED; exit 1; }
+
+        # Copy PR source to VM
+        gcloud compute scp --recurse . "$$VM_NAME:~/gcsfs-pr" \
+          --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine || { echo "setup-vm (scp-pr)" >> /workspace/FAILED; exit 1; }
+
+        # Setup OS, dynamic RAM disk, and clone base branch
+        SETUP_SCRIPT="
+          set -e
+          total_mem_gb=\$(awk '/MemTotal:/ {print int(\$2 / 1024 / 1024)}' /proc/meminfo)
+          ramdisk_size_gb=\$(( total_mem_gb * 50 / 100 ))
+          [ \"\$ramdisk_size_gb\" -lt 2 ] && ramdisk_size_gb=2
+          echo \"--- Setting up RAM disk of \$ramdisk_size_gb GB on /mnt/ramdisk ---\"
+          sudo mkdir -p /mnt/ramdisk
+          sudo mount -t tmpfs -o size=\"\${ramdisk_size_gb}G\" tmpfs /mnt/ramdisk
+          sudo chmod 1777 /mnt/ramdisk
+
+          sudo apt-get update > /dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3-venv git > /dev/null
+
+          # Clone base branch
+          git clone https://github.com/fsspec/gcsfs.git ~/gcsfs-base
+          cd ~/gcsfs-base && git checkout ${_BASE_BRANCH}
+        "
+        gcloud compute ssh "$$VM_NAME" \
+          --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="$$SETUP_SCRIPT" || { echo "setup-vm (deps)" >> /workspace/FAILED; exit 1; }
+    waitFor: ["create-vm", "generate-ssh-key"]
+    allowFailure: true
+
+  # 6. Run benchmarks on PR & base branches, then compare
+  #
+  # The VM-side logic lives in run_benchmarks.sh rather than inline here. An inline
+  # script would have to survive three layers of escaping (Cloud Build substitution,
+  # the runner shell, then the remote shell), which is unreadable and error prone.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-and-compare"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        source /workspace/build_vars.env
+
+        # Substitution defaults, overridable per PR. check-pr-label writes this file
+        # from validated `perf-*` directives in the PR description.
+        BENCHMARK_GROUPS='${_BENCHMARK_GROUPS}'
+        BENCHMARK_CONFIG='${_BENCHMARK_CONFIG}'
+        CHUNK_SIZES_MB='${_CHUNK_SIZES_MB}'
+        if [[ -f /workspace/benchmark_selection.env ]]; then
+          echo "Applying benchmark selection from PR description:"
+          cat /workspace/benchmark_selection.env
+          source /workspace/benchmark_selection.env
+        fi
+        echo "Groups='$$BENCHMARK_GROUPS' Scenarios='$$BENCHMARK_CONFIG' IO sizes='$$CHUNK_SIZES_MB'"
+
+        gcloud compute ssh "$$VM_NAME" \
+          --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="export BENCHMARK_GROUPS='$$BENCHMARK_GROUPS' \
+            BENCHMARK_CONFIG='$$BENCHMARK_CONFIG' \
+            CHUNK_SIZES_MB='$$CHUNK_SIZES_MB' \
+            BUCKET_TYPES='${_BUCKET_TYPES}' \
+            REGIONAL_BUCKET='$$REGIONAL_BUCKET' \
+            ZONAL_BUCKET='$$ZONAL_BUCKET' \
+            HNS_BUCKET='$$HNS_BUCKET' \
+            BASE_BRANCH='${_BASE_BRANCH}' \
+            THRESHOLD='${_THRESHOLD}' \
+            REUSE_FILES='${_REUSE_FILES}' \
+            REPORT_PATH='/tmp/perf_report.md' \
+            && bash ~/gcsfs-pr/cloudbuild/benchmarks/run_benchmarks.sh" \
+          || { echo "run-and-compare" >> /workspace/FAILED; exit 1; }
+
+        # Pull the report back so check-failure can surface it after the VM is gone.
+        gcloud compute scp "$$VM_NAME:/tmp/perf_report.md" /workspace/perf_report.md \
+          --project="${PROJECT_ID}" --zone="${_ZONE}" --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine || true
+    waitFor: ["setup-vm", "create-buckets"]
+    allowFailure: true
+
+  # 7. Cleanup VM
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [[ -f /workspace/SKIPPED ]] && exit 0
+        source /workspace/build_vars.env 2>/dev/null || true
+        if [ -n "$${VM_NAME:-}" ]; then
+          gcloud compute instances delete "$$VM_NAME" --project="${PROJECT_ID}" --zone="${_ZONE}" --quiet || true
+        fi
+    waitFor: ["run-and-compare"]
+
+  # 8. Cleanup Buckets
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "delete-buckets"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [[ -f /workspace/SKIPPED ]] && exit 0
+        source /workspace/build_vars.env 2>/dev/null || true
+        if [[ " ${_BUCKET_TYPES} " =~ " regional " ]] && [ -n "$${REGIONAL_BUCKET:-}" ]; then
+          gcloud storage rm --recursive "gs://$$REGIONAL_BUCKET" || true
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]] && [ -n "$${ZONAL_BUCKET:-}" ]; then
+          gcloud storage rm --recursive "gs://$$ZONAL_BUCKET" || true
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ " hns " ]] && [ -n "$${HNS_BUCKET:-}" ]; then
+          gcloud storage rm --recursive "gs://$$HNS_BUCKET" || true
+        fi
+    waitFor: ["run-and-compare"]
+
+  # 9. Cleanup SSH Key
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-ssh-key"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [[ -f /workspace/SKIPPED ]] && exit 0
+        if [[ -f /workspace/gcb_ssh_key.pub ]]; then
+          gcloud compute os-login ssh-keys remove --key-file=/workspace/gcb_ssh_key.pub --quiet || true
+        fi
+    waitFor: ["run-and-compare"]
+
+  # 10. Check build result
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "check-failure"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [[ -f /workspace/SKIPPED ]]; then
+          echo "Performance benchmarks skipped: $$(cat /workspace/SKIPPED)"
+          echo "To run performance benchmarks on this PR, apply the '${_REQUIRED_LABEL}' label to the PR and comment '/gcbrun'."
+          exit 0
+        fi
+        if [[ -f /workspace/FAILED ]]; then
+          echo "Benchmark build failed due to:"
+          cat /workspace/FAILED | sed 's/^/ - /'
+          exit 1
+        fi
+        if [[ -f /workspace/perf_report.md ]]; then
+          cat /workspace/perf_report.md
+        fi
+        echo "Performance comparison complete (threshold: ${_THRESHOLD}%). Regressions are reported, not blocking."
+    waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key"]
+
+# Sized for the default read-path selection. Per branch: 8 cases x 5 rounds x 30s of
+# measurement (~20 min) plus 2 shared 20 GB fixture uploads (~2 min, see _REUSE_FILES),
+# so ~22 min; both branches plus provisioning and dependency installation land near 1 h.
+# The margin here is deliberate, since a truncated build discards the whole run.
+timeout: "7200s"
+options:
+  logging: CLOUD_LOGGING_ONLY
+  pool:
+    name: "projects/${PROJECT_ID}/locations/${_REGION}/workerPools/cloud-build-worker-pool"

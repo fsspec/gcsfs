@@ -47,6 +47,12 @@ def _setup_environment(args):
     if args.config:
         os.environ["GCSFS_BENCHMARK_FILTER"] = ",".join(args.config)
 
+    if getattr(args, "chunk_sizes", None):
+        os.environ["GCSFS_BENCHMARK_CHUNK_SIZES_MB"] = args.chunk_sizes
+
+    if getattr(args, "reuse_files", False):
+        os.environ["GCSFS_BENCHMARK_REUSE_FILES"] = "true"
+
 
 def _run_benchmarks(results_dir, args):
     """Execute the benchmark suite using pytest.
@@ -363,6 +369,24 @@ def main():
         "--log-level",
         default="DEBUG",
         help="Set pytest console logging level (e.g., DEBUG, INFO, WARNING). Only effective if --log is enabled.",
+    )
+    parser.add_argument(
+        "--chunk-sizes",
+        help=(
+            "Comma-separated IO sizes in MB that replace the configured "
+            "chunk_sizes_mb for every selected scenario (e.g. '1'). Narrows the IO "
+            "dimension without editing the shared per-group configs.yaml."
+        ),
+    )
+    parser.add_argument(
+        "--reuse-files",
+        action="store_true",
+        help=(
+            "Build read-benchmark files once per distinct (bucket, size, count) and "
+            "share them across cases instead of rebuilding per case. Much faster when "
+            "many cases read identically sized files, at the cost of later cases "
+            "reading an object that earlier cases have already read."
+        ),
     )
     args = parser.parse_args()
 

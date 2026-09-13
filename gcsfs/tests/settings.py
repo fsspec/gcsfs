@@ -33,3 +33,13 @@ BENCHMARK_FILTER = os.environ.get("GCSFS_BENCHMARK_FILTER", "")
 BENCHMARK_CPU_AFFINITY = (
     os.environ.get("GCSFS_BENCHMARK_CPU_AFFINITY", "false").lower() == "true"
 )
+# Share read-benchmark fixture files between cases that need identical files instead of
+# rebuilding them per case. Opt-in: leaving it off preserves the historical behaviour of
+# every case reading a freshly written object.
+BENCHMARK_REUSE_FILES = (
+    os.environ.get("GCSFS_BENCHMARK_REUSE_FILES", "false").lower() == "true"
+)
+# Comma-separated IO sizes in MB that replace each group's configured chunk_sizes_mb.
+# Empty leaves the configured sizes alone. Lets a pipeline narrow the IO dimension
+# without editing the shared per-group configs.yaml.
+BENCHMARK_CHUNK_SIZES_MB = os.environ.get("GCSFS_BENCHMARK_CHUNK_SIZES_MB", "")

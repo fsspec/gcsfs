@@ -72,6 +72,9 @@ jobs:
         run: |
           pip install -r cloudbuild/macrobenchmarks/metrics/requirements.txt
           PYTHONPATH=cloudbuild/macrobenchmarks pytest cloudbuild/macrobenchmarks/metrics/tests
+      - name: Run PR Performance Pipeline Unit Tests
+        run: |
+          pytest cloudbuild/benchmarks/
       - name: Run Release Automation Tests
         run: |
           pytest -vv .github/release/
