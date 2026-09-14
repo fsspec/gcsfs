@@ -12,10 +12,7 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read import drive
 def ray_cluster():
     driver.ensure_ray_initialized()
     yield
-    import ray
-
-    if ray.is_initialized():
-        ray.shutdown()
+    driver.shutdown_ray()
 
 
 @pytest.fixture

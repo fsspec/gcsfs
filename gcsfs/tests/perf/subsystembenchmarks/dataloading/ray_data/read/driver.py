@@ -31,6 +31,12 @@ def ensure_ray_initialized():
     ctx.target_max_block_size = 64 * 1024 * 1024
 
 
+def shutdown_ray():
+    """Tears down the local Ray cluster so workers and object store memory are released."""
+    if ray.is_initialized():
+        ray.shutdown()
+
+
 def resolve_parquet_source(prefix):
     """Resolves Parquet file paths and wraps filesystem in PyArrow PyFileSystem."""
     fs, base_path = fsspec.core.url_to_fs(prefix)
@@ -127,10 +133,10 @@ def run_single_rank(dataset, params):
     return durations, rows_list, (ttfb if ttfb is not None else float("inf"))
 
 
-@ray.remote
+@ray.remote(num_cpus=1)
 def _consume_shard(shard, params, shuffle_seed, collate_fn):
-    begin = timestamp()
-    ttfb = None
+    """Consumes one streaming split, returning (first_batch, end, rows) timestamps."""
+    first_batch = None
     rows = 0
     batch_iter = iter(
         shard.iter_torch_batches(
@@ -149,15 +155,10 @@ def _consume_shard(shard, params, shuffle_seed, collate_fn):
         )
     )
     for batch in batch_iter:
-        if ttfb is None:
-            ttfb = timestamp() - begin
+        if first_batch is None:
+            first_batch = timestamp()
         rows += _rows_in_batch(batch)
-    return (
-        begin,
-        timestamp(),
-        rows,
-        (ttfb if ttfb is not None else float("inf")),
-    )
+    return first_batch, timestamp(), rows
 
 
 def run_multi_rank(dataset, params):
@@ -173,12 +174,24 @@ def run_multi_rank(dataset, params):
             else None
         )
 
+        # Start the clock before dispatch so the time Ray spends scheduling the
+        # consumer tasks is charged to the epoch instead of being invisible.
+        begin = timestamp()
         futures = [
             _consume_shard.remote(split, params, shuffle_seed, collate_fn)
             for split in splits
         ]
-        rank_records = ray.get(futures)
-        epoch_records.append(rank_records)
+        epoch_records.append(
+            [
+                (
+                    begin,
+                    end,
+                    rows,
+                    (first_batch - begin) if first_batch is not None else float("inf"),
+                )
+                for first_batch, end, rows in ray.get(futures)
+            ]
+        )
 
     results = []
     for r in range(world_size):
@@ -200,9 +213,9 @@ class RayDataReadDriver:
     def run_read(self, prefix, params, manifest):
         del manifest
         ensure_ray_initialized()
-        arrow_fs, paths = resolve_parquet_source(prefix)
 
         build_start = time.perf_counter()
+        arrow_fs, paths = resolve_parquet_source(prefix)
         dataset = build_dataset(arrow_fs, paths, params)
         build_seconds = time.perf_counter() - build_start
 

@@ -16,6 +16,17 @@ pytestmark = pytest.mark.skipif(
 CASES = configs.RayDataReadConfigurator(configs.__file__).generate_cases()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def shutdown_ray_after_cases():
+    """Releases the Ray cluster started by the cases so later benchmarks run clean."""
+    yield
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read.driver import (
+        shutdown_ray,
+    )
+
+    shutdown_ray()
+
+
 @pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
 def test_read(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read.driver import (
