@@ -135,11 +135,11 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
     # Populate extra_info and stats
     for key in extra_info_headers:
         val = bench["extra_info"].get(key)
-        if val is not None and val != "":
+        if val not in (None, ""):
             row[key] = val
     for key in stats_headers:
         val = bench["stats"].get(key)
-        if val is not None and val != "":
+        if val not in (None, ""):
             row[key] = val
 
     # Calculate percentiles

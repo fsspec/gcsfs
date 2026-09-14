@@ -28,10 +28,10 @@ def _process_benchmark_result(bench, extra_info_headers):
     extra_info = bench.get("extra_info", {})
     for key in extra_info_headers:
         val = extra_info.get(key)
-        row[key] = val if (val is not None and val != "") else "N/A"
+        row[key] = val if val not in (None, "") else "N/A"
     for stat, header in STATS_HEADERS.items():
         val = bench["stats"].get(stat)
-        row[header] = val if (val is not None and val != "") else "N/A"
+        row[header] = val if val not in (None, "") else "N/A"
     rounds_data = bench["stats"].get("data")
     if rounds_data:
         for pct, header in PERCENTILE_HEADERS.items():
