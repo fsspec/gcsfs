@@ -1580,30 +1580,30 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         auto_enabled = auto_max_gap or (
             isinstance(max_gap, str) and max_gap.lower() == "auto"
         )
-        if auto_enabled:
-            all_lengths = [
-                e - s
-                for items in valid_items_per_file.values()
-                for s, e, _ in items
-                if s is not None and e is not None and e > s
-            ]
-            effective_max_gap = _compute_adaptive_max_gap(all_lengths)
-        else:
-            effective_max_gap = max_gap
 
         merged_paths = []
         merged_starts = []
         merged_ends = []
-        merged_slice_maps = []  # list of [(orig_idx, rel_start, rel_end), ...]
+        merged_slice_maps = []  # list of (slice_list, file_max_gap)
 
         for p, items in valid_items_per_file.items():
-            merged_ranges = _merge_file_ranges(items, effective_max_gap)
+            if auto_enabled:
+                file_lengths = [
+                    e - s
+                    for s, e, _ in items
+                    if s is not None and e is not None and e > s
+                ]
+                file_max_gap = _compute_adaptive_max_gap(file_lengths)
+            else:
+                file_max_gap = max_gap
+
+            merged_ranges = _merge_file_ranges(items, file_max_gap)
 
             for m_s, m_e, slice_list in merged_ranges:
                 merged_paths.append(p)
                 merged_starts.append(m_s)
                 merged_ends.append(m_e)
-                merged_slice_maps.append(slice_list)
+                merged_slice_maps.append((slice_list, file_max_gap))
 
         if merged_paths:
             merged_coros = [
@@ -1621,7 +1621,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             )
 
             # Unpack merged chunks back into original caller positions
-            for chunk, slice_list in zip(merged_chunks, merged_slice_maps):
+            for chunk, (slice_list, file_max_gap) in zip(
+                merged_chunks, merged_slice_maps
+            ):
                 if asyn.is_exception(chunk):
                     if on_error != "return":
                         raise chunk
@@ -1629,7 +1631,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                         results[orig_idx] = chunk
                     continue
 
-                _unpack_range_results(chunk, slice_list, results, effective_max_gap)
+                _unpack_range_results(chunk, slice_list, results, file_max_gap)
 
         return results
 

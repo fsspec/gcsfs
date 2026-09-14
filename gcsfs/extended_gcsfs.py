@@ -724,7 +724,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         results[idx] = exc
 
         try:
-            file_plans = []
             for path, items in file_groups.items():
                 bucket, object_name, generation = self.split_path(path)
                 is_zonal = bucket_zonal_map[bucket]
@@ -768,21 +767,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if not valid_items:
                     continue
 
-                file_plans.append((path, is_zonal, mrd_pool, valid_items))
+                if auto_enabled:
+                    file_lengths = [
+                        e - s
+                        for s, e, _ in valid_items
+                        if s is not None and e is not None and e > s
+                    ]
+                    file_max_gap = _compute_adaptive_max_gap(file_lengths)
+                else:
+                    file_max_gap = max_gap
 
-            if auto_enabled:
-                all_lengths = [
-                    e - s
-                    for _, _, _, valid_items in file_plans
-                    for s, e, _ in valid_items
-                    if s is not None and e is not None and e > s
-                ]
-                effective_max_gap = _compute_adaptive_max_gap(all_lengths)
-            else:
-                effective_max_gap = max_gap
-
-            for path, is_zonal, mrd_pool, valid_items in file_plans:
-                merged_ranges = _merge_file_ranges(valid_items, effective_max_gap)
+                merged_ranges = _merge_file_ranges(valid_items, file_max_gap)
 
                 if is_zonal:
                     effective_range_batch_size = self._compute_effective_batch_size(
@@ -796,15 +791,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     ]
                     for batch_merged in batches:
                         coros.append(
-                            _fetch_zonal_batch(
-                                batch_merged, mrd_pool, effective_max_gap
-                            )
+                            _fetch_zonal_batch(batch_merged, mrd_pool, file_max_gap)
                         )
                 else:
                     for m_s, m_e, slice_list in merged_ranges:
                         coros.append(
                             _fetch_non_zonal_range(
-                                path, m_s, m_e, slice_list, effective_max_gap
+                                path, m_s, m_e, slice_list, file_max_gap
                             )
                         )
 

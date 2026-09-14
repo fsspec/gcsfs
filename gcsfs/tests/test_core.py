@@ -3989,6 +3989,56 @@ async def test_gcsfs_cat_ranges_adaptive():
 
 
 @pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_per_file_adaptive():
+    fs = GCSFileSystem(token="anon")
+    small_data = b"a" * 10000
+    large_data = b"b" * 100000
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        data = small_data if path == "b/small" else large_data
+        s = start or 0
+        e = end if end is not None else len(data)
+        return data[s:e]
+
+    with mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat:
+        # Scenario 1: Small file dominates request count (10 small chunks of 100B with 400B gaps,
+        # 2 large chunks of 10,000B with 300B gap).
+        # Global median would be 100B (max_gap=5B), which would fail to coalesce the large file's 300B gap.
+        # Per-file max_gap:
+        # - b/small: median 100B -> max_gap=5B -> 400B gaps NOT coalesced (10 calls)
+        # - b/large: median 10,000B -> max_gap=500B -> 300B gap IS coalesced into [0, 20300) (1 call)
+        paths_s1 = ["b/small"] * 10 + ["b/large"] * 2
+        starts_s1 = [i * 500 for i in range(10)] + [0, 10300]
+        ends_s1 = [i * 500 + 100 for i in range(10)] + [10000, 20300]
+
+        mock_cat.reset_mock()
+        res_s1 = await fs._cat_ranges(paths_s1, starts_s1, ends_s1, max_gap="auto")
+        assert len(res_s1) == 12
+        assert all(bytes(r) == b"a" * 100 for r in res_s1[:10])
+        assert all(bytes(r) == b"b" * 10000 for r in res_s1[10:])
+        # 10 uncoalesced calls for b/small + 1 coalesced call for b/large = 11 calls
+        assert mock_cat.call_count == 11
+
+        # Scenario 2: Large file dominates request count (2 small chunks of 100B with 400B gap,
+        # 6 large chunks of 10,000B with 300B gaps).
+        # Global median would be 10,000B (max_gap=500B), which would coalesce b/small's 400B gap (read amplification).
+        # Per-file max_gap:
+        # - b/small: median 100B -> max_gap=5B -> 400B gap NOT coalesced (2 calls)
+        # - b/large: median 10,000B -> max_gap=500B -> 300B gaps coalesced into 1 call
+        paths_s2 = ["b/small"] * 2 + ["b/large"] * 6
+        starts_s2 = [0, 500] + [i * 10300 for i in range(6)]
+        ends_s2 = [100, 600] + [i * 10300 + 10000 for i in range(6)]
+
+        mock_cat.reset_mock()
+        res_s2 = await fs._cat_ranges(paths_s2, starts_s2, ends_s2, max_gap="auto")
+        assert len(res_s2) == 8
+        assert all(bytes(r) == b"a" * 100 for r in res_s2[:2])
+        assert all(bytes(r) == b"b" * 10000 for r in res_s2[2:])
+        # 2 uncoalesced calls for b/small + 1 coalesced call for b/large = 3 calls
+        assert mock_cat.call_count == 3
+
+
+@pytest.mark.asyncio
 async def test_gcsfs_cat_ranges_normalization():
     fs = GCSFileSystem(token="anon")
     f_data = b"0123456789"

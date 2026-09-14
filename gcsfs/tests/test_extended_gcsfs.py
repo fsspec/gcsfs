@@ -1702,6 +1702,55 @@ async def test_extended_gcsfs_cat_ranges_adaptive():
 
 
 @pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_per_file_adaptive():
+    fs = ExtendedGcsFileSystem(token="anon")
+    zonal_data = b"x" * 100000
+    captured_specs = []
+
+    class MockMRD:
+        async def download_ranges(self, mrd_spec):
+            captured_specs.append([(s, length) for s, length, _ in mrd_spec])
+            for s, length, buf in mrd_spec:
+                buf.write(zonal_data[s : s + length])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_mrd_instance = MockMRD()
+    mock_pool = mock.AsyncMock()
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_size", return_value=len(zonal_data)
+        ):
+            with mock.patch(
+                "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+                return_value=mock_mrd_instance,
+            ):
+                # Mix small slices (100B, gap 400B > 5B adaptive max_gap) and
+                # large slices (10,000B, gap 300B <= 500B adaptive max_gap)
+                paths = ["zonal-bucket/small", "zonal-bucket/small"] + [
+                    "zonal-bucket/large"
+                ] * 6
+                starts = [0, 500] + [i * 10300 for i in range(6)]
+                ends = [100, 600] + [i * 10300 + 10000 for i in range(6)]
+
+                captured_specs.clear()
+                res = await fs._cat_ranges(paths, starts, ends, max_gap="auto")
+                assert len(res) == 8
+                # small file must NOT coalesce (gap 400 > 5)
+                assert [(0, 100), (500, 100)] in captured_specs
+                # large file MUST coalesce into a single range (gap 300 <= 500)
+                assert [(0, 61500)] in captured_specs
+
+
+@pytest.mark.asyncio
 async def test_extended_gcsfs_cat_ranges_zonal_coalescing():
     fs = ExtendedGcsFileSystem(token="anon")
     zonal_data = b"0123456789abcdefghijklmnopqrstuvwxyz"
