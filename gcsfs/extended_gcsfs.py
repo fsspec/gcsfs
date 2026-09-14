@@ -35,7 +35,9 @@ from gcsfs.core import (
     GCSFile,
     GCSFileSystem,
     _compute_adaptive_max_gap,
+    _compute_max_coalesce_span,
     _get_prefetcher_and_cache_config,
+    _is_coalesce_enabled,
     _merge_file_ranges,
     _unpack_range_results,
     _validate_cat_ranges_input,
@@ -724,21 +726,29 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         results[idx] = exc
 
         try:
+            # Pass 1: provision per-file MRD pools and normalize requested
+            # ranges. Merging is deferred to pass 2 because the block size cap
+            # depends on the byte total across every file in the request.
+            file_plans = []  # (path, is_zonal, mrd_pool, valid_items)
             for path, items in file_groups.items():
                 bucket, object_name, generation = self.split_path(path)
                 is_zonal = bucket_zonal_map[bucket]
                 mrd_pool = None
 
                 if is_zonal:
-                    concurrency = kwargs.get(
-                        "concurrency", zb_hns_utils.DEFAULT_CONCURRENCY
-                    )
                     effective_batch_size = self._compute_effective_batch_size(
                         batch_size, self.batch_size, len(items)
                     )
                     max_batches = (
                         len(items) + effective_batch_size - 1
                     ) // effective_batch_size
+                    # The outer scheduler releases up to effective_batch_size
+                    # batch coroutines at once and each one holds an MRD for a
+                    # whole batch, so a pool smaller than that forces the
+                    # batches to queue up behind one another.
+                    concurrency = kwargs.get("concurrency") or max(
+                        zb_hns_utils.DEFAULT_CONCURRENCY, effective_batch_size
+                    )
                     pool_size = min(max_batches, max(1, concurrency))
 
                     try:
@@ -767,6 +777,30 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if not valid_items:
                     continue
 
+                file_plans.append((path, is_zonal, mrd_pool, valid_items))
+
+            # Bound how large a merged block may grow, using the global byte
+            # total so that files contributing only a handful of ranges are
+            # still merged while the overall request count stays near the
+            # scheduler budget.
+            max_span = None
+            if file_plans and (auto_enabled or _is_coalesce_enabled(max_gap)):
+                total_items = sum(len(plan[3]) for plan in file_plans)
+                total_bytes = sum(
+                    e - s
+                    for plan in file_plans
+                    for s, e, _ in plan[3]
+                    if s is not None and e is not None
+                )
+                max_span = _compute_max_coalesce_span(
+                    total_bytes,
+                    self._compute_effective_batch_size(
+                        batch_size, self.batch_size, total_items
+                    ),
+                )
+
+            # Pass 2: merge each file's ranges and build the fetch coroutines.
+            for path, is_zonal, mrd_pool, valid_items in file_plans:
                 if auto_enabled:
                     file_lengths = [
                         e - s
@@ -777,7 +811,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 else:
                     file_max_gap = max_gap
 
-                merged_ranges = _merge_file_ranges(valid_items, file_max_gap)
+                merged_ranges = _merge_file_ranges(
+                    valid_items, file_max_gap, max_span=max_span
+                )
 
                 if is_zonal:
                     effective_range_batch_size = self._compute_effective_batch_size(

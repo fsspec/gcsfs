@@ -1751,6 +1751,115 @@ async def test_extended_gcsfs_cat_ranges_per_file_adaptive():
 
 
 @pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_pool_size_matches_batch_budget():
+    """The MRD pool must be able to serve every concurrently scheduled batch.
+
+    The outer scheduler releases up to `batch_size` batch coroutines at once
+    and each one holds an MRD for the duration of its batch, so a pool capped
+    at DEFAULT_CONCURRENCY serializes the batches behind one another.
+    """
+    fs = ExtendedGcsFileSystem(token="anon")
+    zonal_data = b"x" * 10000
+
+    class MockMRD:
+        async def download_ranges(self, mrd_spec):
+            for s, length, buf in mrd_spec:
+                buf.write(zonal_data[s : s + length])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock.AsyncMock())
+    fs._mrd_pool_cache = mock_pool_cache
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_size", return_value=len(zonal_data)
+        ):
+            with mock.patch(
+                "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+                return_value=MockMRD(),
+            ):
+                # 200 scattered ranges at batch_size 20 -> 10 batch coroutines,
+                # all of which the outer scheduler releases at once.
+                paths = ["zonal-bucket/f"] * 200
+                starts = [i * 20 for i in range(200)]
+                ends = [s + 10 for s in starts]
+
+                await fs._cat_ranges(paths, starts, ends, batch_size=20)
+                # Previously min(10, DEFAULT_CONCURRENCY) == 4.
+                assert mock_pool_cache.get.call_args.kwargs["pool_size"] == 10
+
+                # An explicit concurrency still wins.
+                mock_pool_cache.get.reset_mock()
+                await fs._cat_ranges(paths, starts, ends, batch_size=20, concurrency=2)
+                assert mock_pool_cache.get.call_args.kwargs["pool_size"] == 2
+
+                # pool_size never exceeds the number of batches.
+                mock_pool_cache.get.reset_mock()
+                await fs._cat_ranges(paths[:20], starts[:20], ends[:20], batch_size=20)
+                assert mock_pool_cache.get.call_args.kwargs["pool_size"] == 1
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_cat_ranges_span_cap():
+    """Zonal merged blocks are capped so batches stay parallel."""
+    fs = ExtendedGcsFileSystem(token="anon")
+    zonal_data = b"x" * 1000
+    captured_specs = []
+
+    class MockMRD:
+        async def download_ranges(self, mrd_spec):
+            captured_specs.append([(s, length) for s, length, _ in mrd_spec])
+            for s, length, buf in mrd_spec:
+                buf.write(zonal_data[s : s + length])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_pool_cache = mock.AsyncMock()
+    mock_pool_cache.get = mock.AsyncMock(return_value=mock.AsyncMock())
+    fs._mrd_pool_cache = mock_pool_cache
+
+    paths = ["zonal-bucket/f"] * 10
+    starts = [i * 100 for i in range(10)]
+    ends = [s + 100 for s in starts]
+
+    with mock.patch.object(fs, "_is_zonal_bucket", return_value=True):
+        with mock.patch(
+            "gcsfs.extended_gcsfs._get_mrd_size", return_value=len(zonal_data)
+        ):
+            with mock.patch(
+                "gcsfs.extended_gcsfs._get_mrd_from_pool_or_mrd",
+                return_value=MockMRD(),
+            ):
+                # Real floor: 1000 contiguous bytes stay a single merged read.
+                captured_specs.clear()
+                res = await fs._cat_ranges(paths, starts, ends, max_gap=0, batch_size=5)
+                assert len(res) == 10
+                assert captured_specs == [[(0, 1000)]]
+
+                # With the floor shrunk, 1000 bytes over a budget of 5 yields
+                # 200 byte blocks instead of one 1000 byte read.
+                with mock.patch("gcsfs.core._MIN_COALESCE_SPAN", 1):
+                    captured_specs.clear()
+                    res = await fs._cat_ranges(
+                        paths, starts, ends, max_gap=0, batch_size=5
+                    )
+                    assert [bytes(r) for r in res] == [b"x" * 100] * 10
+                    assert captured_specs == [
+                        [(0, 200), (200, 200), (400, 200), (600, 200), (800, 200)]
+                    ]
+
+
+@pytest.mark.asyncio
 async def test_extended_gcsfs_cat_ranges_zonal_coalescing():
     fs = ExtendedGcsFileSystem(token="anon")
     zonal_data = b"0123456789abcdefghijklmnopqrstuvwxyz"

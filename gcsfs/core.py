@@ -198,7 +198,7 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
-def _coalesce_ranges(items, max_gap, file_size=None):
+def _coalesce_ranges(items, max_gap, file_size=None, max_span=None):
     """
     Helper to coalesce contiguous or near-contiguous ranges for a single file.
 
@@ -209,6 +209,12 @@ def _coalesce_ranges(items, max_gap, file_size=None):
         Maximum allowed gap between ranges to be coalesced.
     file_size: int, optional
         If known, used to resolve end=None.
+    max_span: int, optional
+        Upper bound on the byte span of a single merged block. Without it a
+        fully contiguous request set collapses into one enormous GET, which
+        serializes a workload that would otherwise be fetched in parallel.
+        An individual range is never split, so a range larger than max_span
+        still forms a block of its own.
 
     Returns
     -------
@@ -219,7 +225,7 @@ def _coalesce_ranges(items, max_gap, file_size=None):
     if not items:
         return []
 
-    items.sort(key=lambda x: x[0])
+    items = sorted(items, key=lambda x: x[0])
     merged_ranges = []
 
     cur_s, cur_e, cur_idx = items[0]
@@ -237,7 +243,11 @@ def _coalesce_ranges(items, max_gap, file_size=None):
         if e is None and file_size is not None:
             e = file_size
 
-        if cur_e is not None and e is not None and s <= cur_e + max_gap:
+        fits = cur_e is not None and e is not None and s <= cur_e + max_gap
+        if fits and max_span is not None:
+            fits = (max(cur_e, e) - cur_s) <= max_span
+
+        if fits:
             rel_s = s - cur_s
             rel_e = rel_s + (e - s)
             cur_slices.append((idx, rel_s, rel_e))
@@ -296,10 +306,33 @@ def _compute_adaptive_max_gap(lengths, max_cap=1048576, ratio=0.05):
     return min(max_cap, max(0, int(median_length * ratio)))
 
 
-def _merge_file_ranges(valid_items, max_gap):
+_MIN_COALESCE_SPAN = 8 * 2**20
+_MAX_COALESCE_SPAN = 128 * 2**20
+
+
+def _compute_max_coalesce_span(total_bytes, batch_size, min_span=None, max_cap=None):
+    """Derive the largest merged block that still saturates the request scheduler.
+
+    Coalescing trades round trips for parallelism. A single GET stream has a
+    bounded throughput, so merging every contiguous range into one request
+    turns a parallel fetch into a serial one. Targeting ``batch_size`` blocks
+    keeps every scheduler slot busy while still eliminating most round trips.
+
+    The result is floored at ``min_span``: below that size a block transfers in
+    less time than the round trip it saves, so merging is a pure win and the
+    cap should not interfere.
+    """
+    min_span = _MIN_COALESCE_SPAN if min_span is None else min_span
+    max_cap = _MAX_COALESCE_SPAN if max_cap is None else max_cap
+    if not batch_size or batch_size <= 0:
+        return max_cap
+    return min(max_cap, max(min_span, total_bytes // batch_size))
+
+
+def _merge_file_ranges(valid_items, max_gap, max_span=None):
     """Merge adjacent ranges if coalescing is active, or preserve 1-to-1 mappings."""
     if _is_coalesce_enabled(max_gap):
-        return _coalesce_ranges(valid_items, max_gap)
+        return _coalesce_ranges(valid_items, max_gap, max_span=max_span)
     return [(s, e, [(idx, 0, e - s)]) for s, e, idx in valid_items]
 
 
@@ -1581,6 +1614,26 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             isinstance(max_gap, str) and max_gap.lower() == "auto"
         )
 
+        # Bound how large a merged block may grow. The cap is derived from the
+        # global byte total rather than per-file, so that files contributing
+        # only a handful of ranges are still merged aggressively while the
+        # overall request count stays near the scheduler budget.
+        max_span = None
+        if auto_enabled or _is_coalesce_enabled(max_gap):
+            total_items = sum(len(items) for items in valid_items_per_file.values())
+            total_bytes = sum(
+                e - s
+                for items in valid_items_per_file.values()
+                for s, e, _ in items
+                if s is not None and e is not None
+            )
+            max_span = _compute_max_coalesce_span(
+                total_bytes,
+                self._compute_effective_batch_size(
+                    batch_size, self.batch_size, total_items
+                ),
+            )
+
         merged_paths = []
         merged_starts = []
         merged_ends = []
@@ -1597,7 +1650,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             else:
                 file_max_gap = max_gap
 
-            merged_ranges = _merge_file_ranges(items, file_max_gap)
+            merged_ranges = _merge_file_ranges(items, file_max_gap, max_span=max_span)
 
             for m_s, m_e, slice_list in merged_ranges:
                 merged_paths.append(p)

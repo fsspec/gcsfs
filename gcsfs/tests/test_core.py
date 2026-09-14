@@ -3800,7 +3800,12 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
 
 
-from gcsfs.core import _coalesce_ranges
+from gcsfs.core import (
+    _MAX_COALESCE_SPAN,
+    _MIN_COALESCE_SPAN,
+    _coalesce_ranges,
+    _compute_max_coalesce_span,
+)
 
 
 @pytest.mark.parametrize(
@@ -3871,6 +3876,80 @@ from gcsfs.core import _coalesce_ranges
 def test_coalesce_ranges(items, max_gap, file_size, expected):
     merged = _coalesce_ranges(items, max_gap=max_gap, file_size=file_size)
     assert merged == expected
+
+
+def test_coalesce_ranges_does_not_mutate_input():
+    items = [(20, 30, 0), (0, 10, 1)]
+    _coalesce_ranges(list(items), max_gap=0)
+    _coalesce_ranges(items, max_gap=0)
+    assert items == [(20, 30, 0), (0, 10, 1)]
+
+
+@pytest.mark.parametrize(
+    "items, max_span, expected",
+    [
+        # Cap splits a contiguous run into equally sized blocks instead of one
+        # oversized request.
+        (
+            [(0, 10, 0), (10, 20, 1), (20, 30, 2), (30, 40, 3)],
+            20,
+            [
+                (0, 20, [(0, 0, 10), (1, 10, 20)]),
+                (20, 40, [(2, 0, 10), (3, 10, 20)]),
+            ],
+        ),
+        # A single range wider than the cap is never split.
+        (
+            [(0, 100, 0), (100, 110, 1)],
+            20,
+            [(0, 100, [(0, 0, 100)]), (100, 110, [(1, 0, 10)])],
+        ),
+        # A cap wide enough for everything behaves like no cap at all.
+        (
+            [(0, 10, 0), (10, 20, 1)],
+            1000,
+            [(0, 20, [(0, 0, 10), (1, 10, 20)])],
+        ),
+        # Cap is measured on the merged span, so an overlapping range that does
+        # not widen the block past the cap still merges.
+        (
+            [(0, 20, 0), (10, 20, 1)],
+            20,
+            [(0, 20, [(0, 0, 20), (1, 10, 20)])],
+        ),
+    ],
+    ids=[
+        "splits_contiguous_run",
+        "never_splits_single_range",
+        "cap_wider_than_data",
+        "overlap_within_cap",
+    ],
+)
+def test_coalesce_ranges_max_span(items, max_span, expected):
+    assert _coalesce_ranges(items, max_gap=0, max_span=max_span) == expected
+
+
+def test_coalesce_ranges_max_span_none_is_unbounded():
+    items = [(i * 10, (i + 1) * 10, i) for i in range(50)]
+    merged = _coalesce_ranges(items, max_gap=0, max_span=None)
+    assert len(merged) == 1
+    assert merged[0][0] == 0
+    assert merged[0][1] == 500
+
+
+def test_compute_max_coalesce_span():
+    # Targets one block per scheduler slot.
+    assert _compute_max_coalesce_span(2 * 2**30, 64) == (2 * 2**30) // 64
+    # Never exceeds the hard cap.
+    assert _compute_max_coalesce_span(100 * 2**30, 64) == _MAX_COALESCE_SPAN
+    assert _compute_max_coalesce_span(100 * 2**30, 64, max_cap=2**20) == 2**20
+    # Small transfers stay fully coalesced: the floor wins.
+    assert _compute_max_coalesce_span(1024, 64) == _MIN_COALESCE_SPAN
+    assert _compute_max_coalesce_span(1024, 64, min_span=256) == 256
+    # An unusable batch size disables the cap.
+    assert _compute_max_coalesce_span(1024, 0) == _MAX_COALESCE_SPAN
+    assert _compute_max_coalesce_span(1024, None) == _MAX_COALESCE_SPAN
+    assert _compute_max_coalesce_span(1024, -1) == _MAX_COALESCE_SPAN
 
 
 @pytest.mark.asyncio
@@ -3959,6 +4038,62 @@ async def test_gcsfs_cat_ranges_coalesced():
         ]
         # 3 merged calls: f1 [0, 10), f1 [30, 35), f2 [0, 9)
         assert mock_cat.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_cat_ranges_span_cap():
+    """Contiguous ranges must not collapse into a single serial request."""
+    fs = GCSFileSystem(token="anon")
+    data = bytes(i % 256 for i in range(1000))
+
+    async def mock_cat_file(path, start=None, end=None, **kwargs):
+        return data[(start or 0) : (end if end is not None else len(data))]
+
+    async def mock_info(path, **kwargs):
+        return {"size": len(data)}
+
+    starts = [i * 100 for i in range(10)]
+    ends = [s + 100 for s in starts]
+    paths = ["b/f1"] * 10
+
+    with (
+        mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat,
+        mock.patch.object(fs, "_info", side_effect=mock_info),
+        # Shrink the floor so the cap binds on this small fixture.
+        mock.patch("gcsfs.core._MIN_COALESCE_SPAN", 1),
+    ):
+        # 1000 bytes over a batch budget of 5 -> 200 byte blocks -> 5 requests.
+        res = await fs._cat_ranges(paths, starts, ends, max_gap=0, batch_size=5)
+        assert [bytes(r) for r in res] == [data[s:e] for s, e in zip(starts, ends)]
+        assert mock_cat.call_count == 5
+        assert sorted(c.kwargs["start"] for c in mock_cat.call_args_list) == [
+            0,
+            200,
+            400,
+            600,
+            800,
+        ]
+
+        mock_cat.reset_mock()
+
+        # A narrower batch budget merges everything into a single request.
+        res = await fs._cat_ranges(paths, starts, ends, max_gap=0, batch_size=1)
+        assert [bytes(r) for r in res] == [data[s:e] for s, e in zip(starts, ends)]
+        assert mock_cat.call_count == 1
+
+        mock_cat.reset_mock()
+
+        # Coalescing off means one request per range regardless of the cap.
+        await fs._cat_ranges(paths, starts, ends, max_gap=None, batch_size=5)
+        assert mock_cat.call_count == 10
+
+    # With the real floor in place, a small fixture stays fully coalesced.
+    with (
+        mock.patch.object(fs, "_cat_file", side_effect=mock_cat_file) as mock_cat,
+        mock.patch.object(fs, "_info", side_effect=mock_info),
+    ):
+        await fs._cat_ranges(paths, starts, ends, max_gap=0, batch_size=5)
+        assert mock_cat.call_count == 1
 
 
 def test_compute_adaptive_max_gap():
