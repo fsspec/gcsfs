@@ -4,7 +4,6 @@ import contextlib
 import dataclasses
 import os
 import time
-import uuid
 
 import ray
 import ray.train
@@ -33,7 +32,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common impor
 )
 
 
-@ray.remote
+@ray.remote(num_cpus=1)
 class RayCheckpointSetupWorker:
     """Ray Actor that creates the initial checkpoint on storage for load benchmarks."""
 
@@ -64,7 +63,7 @@ class RayCheckpointSetupWorker:
             dist.destroy_process_group()
 
 
-@ray.remote
+@ray.remote(num_cpus=1)
 class RayCheckpointLoadWorker:
     """Ray Actor executing distributed checkpoint load operations on CPU."""
 
@@ -89,18 +88,24 @@ class RayCheckpointLoadWorker:
                 "model_parallel_sharded",
             )
             for round_idx in range(self.params.rounds):
+                # Broadcast the Checkpoint instance from rank 0 so all workers on the host
+                # share the same Checkpoint and UUID. Ray's as_directory() uses this UUID to
+                # coordinate file-locking and deduplicate the download across workers on the
+                # same host, and clean up the directory after all workers exit.
+                ckpt_list = [
+                    (
+                        ray.train.Checkpoint(
+                            path=self.destination_ckpt, filesystem=self.arrow_fs
+                        )
+                        if self.rank == 0
+                        else None
+                    )
+                ]
+                dist.broadcast_object_list(ckpt_list, src=0)
+                checkpoint = ckpt_list[0]
+
                 dist.barrier()
                 t_start = time.perf_counter()
-
-                checkpoint = ray.train.Checkpoint(
-                    path=self.destination_ckpt, filesystem=self.arrow_fs
-                )
-                # Ensure all workers on the host share the same UUID for this round
-                # so Ray's built-in file locking deduplicates the download across workers
-                # and cleans up the shared temporary directory after all workers exit.
-                checkpoint._uuid = uuid.uuid5(
-                    uuid.NAMESPACE_URL, f"{self.destination_ckpt}-round-{round_idx}"
-                )
 
                 directory_context = (
                     checkpoint.as_directory()
@@ -227,3 +232,7 @@ class RayCheckpointReadDriver(CheckpointDriver):
         finally:
             if ray.is_initialized():
                 ray.shutdown()
+
+    def read_count(self, params) -> int:
+        """Ray transfers a single copy of the checkpoint from storage per node."""
+        return 1

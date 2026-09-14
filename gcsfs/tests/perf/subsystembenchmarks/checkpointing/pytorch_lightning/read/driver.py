@@ -161,3 +161,8 @@ class PLCheckpointReadDriver(CheckpointDriver):
             durations.append(end - begin)
 
         return CheckpointResult(durations=durations)
+
+    def read_count(self, params) -> int:
+        if params.strategy in ("ddp", "fsdp_full", "model_parallel_full"):
+            return min(params.world_size, 8)
+        return 1
