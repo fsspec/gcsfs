@@ -1847,16 +1847,24 @@ async def test_extended_gcsfs_cat_ranges_span_cap():
                 assert captured_specs == [[(0, 1000)]]
 
                 # With the floor shrunk, 1000 bytes over a budget of 5 yields
-                # 200 byte blocks instead of one 1000 byte read.
+                # 200 byte blocks instead of one 1000 byte read, spread across
+                # the pool rather than packed into a single batch.
                 with mock.patch("gcsfs.core._MIN_COALESCE_SPAN", 1):
                     captured_specs.clear()
                     res = await fs._cat_ranges(
                         paths, starts, ends, max_gap=0, batch_size=5
                     )
                     assert [bytes(r) for r in res] == [b"x" * 100] * 10
-                    assert captured_specs == [
-                        [(0, 200), (200, 200), (400, 200), (600, 200), (800, 200)]
+                    flat = sorted(s for batch in captured_specs for s in batch)
+                    assert flat == [
+                        (0, 200),
+                        (200, 200),
+                        (400, 200),
+                        (600, 200),
+                        (800, 200),
                     ]
+                    # pool_size is 2 here, so the 5 blocks span 2 batches.
+                    assert len(captured_specs) == 2
 
 
 @pytest.mark.asyncio

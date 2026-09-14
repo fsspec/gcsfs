@@ -244,7 +244,11 @@ def _coalesce_ranges(items, max_gap, file_size=None, max_span=None):
             e = file_size
 
         fits = cur_e is not None and e is not None and s <= cur_e + max_gap
-        if fits and max_span is not None:
+        if fits and max_span is not None and s >= cur_e:
+            # The cap only applies to ranges that sit past the end of the
+            # current block. Splitting an OVERLAPPING range would re-fetch the
+            # shared bytes in both blocks, which costs more than the extra
+            # parallelism the split buys.
             fits = (max(cur_e, e) - cur_s) <= max_span
 
         if fits:
