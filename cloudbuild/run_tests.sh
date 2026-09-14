@@ -24,6 +24,52 @@ if ! [[ "${PYTEST_XDIST_WORKERS}" =~ ^[0-9]+$ ]] || (( PYTEST_XDIST_WORKERS <= 0
 fi
 ARGS+=(-n "${PYTEST_XDIST_WORKERS}")
 
+# Full pytest output goes to files instead of the build log. GitHub shows only the first ~65k chars
+# of the Cloud Build log, so the test-report step prints a summary from the JUnit XML before these logs.
+RESULTS_DIR="${HOME}/test-results"
+RESULTS_LOG="${RESULTS_DIR}/${TEST_SUITE}.log"
+mkdir -p "${RESULTS_DIR}"
+ARGS+=("--junitxml=${RESULTS_DIR}/${TEST_SUITE}.xml")
+
+# While pytest runs, print the tests still in progress every HEARTBEAT_SECS. A hung test is failed by
+# pytest-timeout and a killed pytest leaves its log tail for test-report, but if the whole build times out
+# (or the VM is lost) test-report never runs, so these lines keep a stuck test visible in the step log.
+HEARTBEAT_SECS="${HEARTBEAT_SECS:-300}"
+if ! [[ "${HEARTBEAT_SECS}" =~ ^[0-9]+$ ]] || (( HEARTBEAT_SECS <= 0 )); then
+  HEARTBEAT_SECS=300
+fi
+
+in_progress_tests() {
+  # With -vv, xdist logs "<nodeid>" when a test starts and "[gwN] <OUTCOME> <nodeid>" when it finishes.
+  awk '
+    { sub(/ <- .*/, ""); sub(/[ \t]+$/, "") }
+    /^\[gw[0-9]+\] [A-Z]+ / { sub(/^\[gw[0-9]+\] [A-Z]+ /, ""); delete running[$0]; next }
+    /^[^ ]+\.py::/ { running[$0] = 1 }
+    END { for (t in running) printf "%s%s", (n++ ? ", " : ""), t; if (!n) printf "none" }
+  ' "${RESULTS_LOG}" 2>/dev/null | cut -c1-500
+}
+
+heartbeat() {
+  local elapsed=0
+  # Sleep in 1s steps so stopping the heartbeat never leaves a long sleep holding the ssh session open.
+  while sleep 1; do
+    elapsed=$((elapsed + 1))
+    if (( elapsed % HEARTBEAT_SECS == 0 )); then
+      echo "--- ${TEST_SUITE}: still running after $((elapsed / 60))m; in progress: $(in_progress_tests) ---"
+    fi
+  done
+}
+
+run_pytest() {
+  local status=0
+  heartbeat &
+  local heartbeat_pid=$!
+  pytest "$@" > "${RESULTS_LOG}" 2>&1 || status=$?
+  { kill "${heartbeat_pid}" && wait "${heartbeat_pid}"; } 2>/dev/null
+  return "${status}"
+}
+STATUS=0
+
 echo "--- Running Test Suite: ${TEST_SUITE} ---"
 
 case "$TEST_SUITE" in
@@ -31,7 +77,7 @@ case "$TEST_SUITE" in
     export GCSFS_TEST_BUCKET="gcsfs-test-standard-${SHORT_BUILD_ID}"
     export GCSFS_TEST_VERSIONED_BUCKET="gcsfs-test-versioned-${SHORT_BUILD_ID}"
     export GCSFS_TEST_REQ_PAYS_BUCKET="gcsfs-test-standard-req-pay-${SHORT_BUILD_ID}"
-    pytest "${ARGS[@]}" gcsfs/ --deselect gcsfs/tests/test_core.py::test_sign
+    run_pytest "${ARGS[@]}" gcsfs/ --deselect gcsfs/tests/test_core.py::test_sign || STATUS=$?
     ;;
 
   "zonal")
@@ -44,13 +90,13 @@ case "$TEST_SUITE" in
     export GCSFS_RUN_RAPID_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
     # Excludes tests related to requster pays as Zonal buckets do not support requester pays feature
-    pytest "${ARGS[@]}" \
+    run_pytest "${ARGS[@]}" \
       gcsfs/tests/test_extended_gcsfs.py \
       gcsfs/tests/test_zonal_file.py \
       gcsfs/tests/integration/test_async_gcsfs.py \
       gcsfs/tests/integration/test_extended_hns.py \
       --deselect gcsfs/tests/integration/test_extended_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_mkdir_fails_without_quota_project \
-      --deselect gcsfs/tests/integration/test_extended_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays
+      --deselect gcsfs/tests/integration/test_extended_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays || STATUS=$?
     ;;
 
   "hns")
@@ -68,14 +114,14 @@ case "$TEST_SUITE" in
     # - test_core.py::test_sign: Current Cloud Build auth setup does not support this.
     # - test_core.py::test_mv_file_cache: Integration test only applicable for regional buckets.
     # - test_core.py::test_rm_wildcards_non_recursive: HNS buckets have different behavior for non-recursive wildcard deletion.
-    pytest "${ARGS[@]}" gcsfs/ \
+    run_pytest "${ARGS[@]}" gcsfs/ \
       --deselect gcsfs/tests/test_extended_gcsfs.py \
       --deselect gcsfs/tests/test_zonal_file.py \
       --deselect gcsfs/tests/test_extended_gcsfs_unit.py \
       --deselect gcsfs/tests/test_core_versioned.py \
       --deselect gcsfs/tests/test_core.py::test_sign \
       --deselect gcsfs/tests/test_core.py::test_mv_file_cache \
-      --deselect gcsfs/tests/test_core.py::test_rm_wildcards_non_recursive
+      --deselect gcsfs/tests/test_core.py::test_rm_wildcards_non_recursive || STATUS=$?
     ;;
 
   "zonal-core")
@@ -158,6 +204,11 @@ case "$TEST_SUITE" in
       "--deselect=gcsfs/tests/test_core.py::test_requester_pays_fails_without_user_project"
     )
 
-    pytest "${ARGS[@]}" "${ZONAL_DESELECTS[@]}" gcsfs/tests/test_core.py
+    run_pytest "${ARGS[@]}" "${ZONAL_DESELECTS[@]}" gcsfs/tests/test_core.py || STATUS=$?
     ;;
 esac
+
+# Pytest's final "=== N passed, M skipped in Xs ===" line, so the step log still shows the counts.
+RESULT_LINE=$(grep -E '^=+ .* in [0-9.]+s' "${RESULTS_LOG}" 2>/dev/null | tail -n 1 | sed -E 's/^=+ | =+$//g')
+echo "--- ${TEST_SUITE}: pytest exit ${STATUS} ${RESULT_LINE} ---"
+exit "${STATUS}"

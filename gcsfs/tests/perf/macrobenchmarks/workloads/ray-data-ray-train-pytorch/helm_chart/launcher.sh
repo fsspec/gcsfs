@@ -216,7 +216,11 @@ if [[ -n "${REQUIREMENTS:-}" ]]; then
   # the one thing that must never be served from a previous pod's download, so a
   # re-pushed artifact at an unchanged URL can never go stale here.
   # shellcheck disable=SC2086
-  pip3 install --no-cache-dir --force-reinstall $REQUIREMENTS
+  pip3 install --no-cache-dir $REQUIREMENTS
+  # Reinstall only the requested packages so their dependency graph is not
+  # unnecessarily reinstalled after the normal resolution pass above.
+  # shellcheck disable=SC2086
+  pip3 install --no-cache-dir --no-deps --force-reinstall $REQUIREMENTS
 fi
 
 python3 - <<'PY'
