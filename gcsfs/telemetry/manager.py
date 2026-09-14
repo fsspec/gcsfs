@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 from typing import Any, Callable, Dict, List, Optional
@@ -117,9 +118,6 @@ def _setup_file_telemetry(file_obj) -> Optional[Any]:
     tokens_map = get_telemetry_context()
     tokens_map[Dimension.FRAMEWORK.value] = fw
     return set_telemetry_context(tokens_map)
-
-
-import contextlib
 
 
 @contextlib.contextmanager

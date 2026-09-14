@@ -59,7 +59,10 @@ class FrameworkDetector(BaseDetector):
         except (ValueError, AttributeError, RuntimeError, PermissionError):
             return None
 
-        return self._walk_top_down(start_frame)
+        try:
+            return self._walk_top_down(start_frame)
+        finally:
+            del start_frame
 
     def _walk_top_down(self, start_frame) -> Optional[str]:
         """
@@ -70,13 +73,17 @@ class FrameworkDetector(BaseDetector):
         frame = start_frame
         depth = 0
 
-        while frame is not None and depth < self.max_depth:
-            f_globals = getattr(frame, "f_globals", None) or {}
-            mod_name = f_globals.get("__name__", "")
-            if mod_name:
-                module_names.append(mod_name)
-            frame = frame.f_back
-            depth += 1
+        try:
+            while frame is not None and depth < self.max_depth:
+                f_globals = getattr(frame, "f_globals", None) or {}
+                mod_name = f_globals.get("__name__", "")
+                if mod_name:
+                    module_names.append(mod_name)
+                frame = frame.f_back
+                depth += 1
+        finally:
+            del frame
+            del start_frame
 
         # Scan in call order (outermost root -> innermost) to match the initiating framework first
         for mod_name in reversed(module_names):
