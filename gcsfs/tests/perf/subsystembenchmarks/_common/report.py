@@ -24,16 +24,21 @@ PERCENTILE_HEADERS = {
 def _process_benchmark_result(bench, extra_info_headers):
     row = {}
     row["benchmark_case_id"] = bench["name"]
-    row["benchmark_group"] = bench.get("group", "")
+    row["benchmark_group"] = bench.get("group", "N/A")
     extra_info = bench.get("extra_info", {})
     for key in extra_info_headers:
-        row[key] = extra_info.get(key)
+        val = extra_info.get(key)
+        row[key] = val if (val is not None and val != "") else "N/A"
     for stat, header in STATS_HEADERS.items():
-        row[header] = bench["stats"].get(stat)
+        val = bench["stats"].get(stat)
+        row[header] = val if (val is not None and val != "") else "N/A"
     rounds_data = bench["stats"].get("data")
     if rounds_data:
         for pct, header in PERCENTILE_HEADERS.items():
             row[header] = np.percentile(rounds_data, pct)
+    else:
+        for header in PERCENTILE_HEADERS.values():
+            row[header] = "N/A"
     return row
 
 
@@ -73,7 +78,7 @@ def generate_csv(json_path: str, results_dir: str):
         writer.writerow(headers)
         for bench in data["benchmarks"]:
             row = _process_benchmark_result(bench, extra_info_headers)
-            writer.writerow([row.get(h, "") for h in headers])
+            writer.writerow([row.get(h, "N/A") for h in headers])
     logging.info("CSV report generated at %s", report_path)
     return report_path
 
