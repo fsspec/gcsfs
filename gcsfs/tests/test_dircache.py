@@ -5,12 +5,12 @@ These cover the base ``dircache`` update behavior mixed into
 moves, and the single-level shortcut (invalidate only an already-cached parent)
 for writes. The HNS-specific overrides for deletes and moves live in
 :class:`gcsfs._dircache.HnsDirCacheUpdater` and are exercised in
-``test_extended_hns_gcsfs.py``.
+``test_hns_unit.py``.
 
 Test placement: keep pure in-memory dircache strategy tests here. Filesystem
 integration and bucket-specific routing tests belong in test_core.py,
-test_extended_hns_gcsfs.py, integration/test_extended_hns.py, or
-test_zonal_file.py according to the bucket type they exercise.
+test_hns_unit.py, test_hns.py, or
+test_zonal.py / test_zonal_file.py according to the bucket type they exercise.
 
 The methods under test are pure in-memory operations on ``self.dircache`` (via
 ``invalidate_cache`` / ``_parent``), so no GCS backend is required.
