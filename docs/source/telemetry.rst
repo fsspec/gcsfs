@@ -56,11 +56,13 @@ Telemetry collection is enabled by default, but you can opt out at any time by s
 Using Environment Variables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Set ``GCSFS_NO_TELEMETRY=true`` in your shell environment:
+Set ``GCSFS_NO_TELEMETRY=true`` or the standard ``DO_NOT_TRACK=1`` in your shell environment:
 
 .. code-block:: bash
 
    export GCSFS_NO_TELEMETRY=true
+   # or
+   export DO_NOT_TRACK=1
 
 In Python Code
 ~~~~~~~~~~~~~~
@@ -70,7 +72,8 @@ Set the environment variable before importing ``gcsfs`` or executing storage cal
 .. code-block:: python
 
    import os
-   os.environ["GCSFS_NO_TELEMETRY"] = "true"
+   os.environ["DO_NOT_TRACK"] = "1"
+   # or os.environ["GCSFS_NO_TELEMETRY"] = "true"
 
    import gcsfs
 

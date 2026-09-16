@@ -167,6 +167,17 @@ def test_framework_detector_opt_out(monkeypatch):
     # With GCSFS_NO_TELEMETRY=true
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "true")
     assert not detector.is_enabled()
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+
+    # With DO_NOT_TRACK=1
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    assert not detector.is_enabled()
+    assert detector.detect() is None
+
+    # With DO_NOT_TRACK=true
+    monkeypatch.setenv("DO_NOT_TRACK", "true")
+    assert not detector.is_enabled()
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
 
 
 # ============================================================================
