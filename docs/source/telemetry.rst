@@ -18,7 +18,7 @@ Example Header
 
 .. code-block:: text
 
-   User-Agent: gcsfs/2026.3.0 fsspec/2026.3.0 fw/pandas
+   User-Agent: python-gcsfs/2026.3.0 fw/pandas
 
 Recognized Frameworks
 ~~~~~~~~~~~~~~~~~~~~~
@@ -77,4 +77,4 @@ Set the environment variable before importing ``gcsfs`` or executing storage cal
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- Outgoing requests contain only standard ``gcsfs/<version>`` and ``fsspec/<version>`` headers.
+- Outgoing requests contain only standard ``python-gcsfs/<version>`` headers.
