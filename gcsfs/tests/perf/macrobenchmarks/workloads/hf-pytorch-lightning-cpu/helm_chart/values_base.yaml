@@ -45,6 +45,13 @@ workload:
   # Batches to prefetch per dataloader worker.
   dataloaderPrefetchFactor: 2
   modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
+  # Node-local directory (hostPath) shared by every pod generation in one build.
+  # The seed-checkpoint release and the measured release run on the same nodes,
+  # so without this the measured run re-downloads the ~16GB model, the gcloud
+  # CLI, and every wheel the seed run already staged. Nothing survives the build:
+  # the cluster is created and deleted per run. Set to "" to disable and have
+  # every pod bootstrap from scratch.
+  hostCachePath: /var/lib/gcsfs-macrobench
   # ddp (default), fsdp_sharded, fsdp_full, model_parallel_sharded, or
   # model_parallel_full. model_parallel_* uses the TP/DP knobs below.
   trainingStrategy: ddp

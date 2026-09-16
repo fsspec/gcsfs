@@ -12,8 +12,19 @@ from typing import Any, List
 import pytest
 
 from gcsfs.tests.perf._common.resource_monitor import ResourceMonitor
+from gcsfs.tests.perf.microbenchmarks.request_counter import (
+    DOWNLOAD,
+    LIST,
+    OBJECT_GET,
+    OTHER,
+)
 
 MB = 1024 * 1024
+
+# Objects at or below this size are uploaded with a single batched pipe() call.
+# Spinning up the process pool below to write a few bytes per file costs far
+# more than the upload itself.
+SMALL_FILE_UPLOAD_LIMIT = 1 * MB
 
 
 def _format_mb(value):
@@ -135,9 +146,10 @@ def _prepare_files_gcloud(file_paths, file_size):
 
 
 def _prepare_files(gcs, file_paths, file_size=0):
-    if file_size == 0:
+    if file_size <= SMALL_FILE_UPLOAD_LIMIT:
+        content = os.urandom(file_size) if file_size else b""
         try:
-            gcs.pipe({path: b"" for path in file_paths})
+            gcs.pipe({path: content for path in file_paths})
             return
         except Exception as e:
             pytest.fail(f"Failed to pipe files: {e}")
@@ -254,6 +266,21 @@ def gcsfs_benchmark_write(extended_gcs_factory, request):
 
 
 @pytest.fixture
+def gcsfs_benchmark_cat(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a cat benchmark run.
+    It creates the objects to be read whole via cat_file()/cat().
+    """
+    params = request.param
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-cat",
+        create_files=True,
+    )
+
+
+@pytest.fixture
 def gcsfs_benchmark_pipe(extended_gcs_factory, request):
     """
     A fixture that sets up the environment for a pipe benchmark run.
@@ -265,6 +292,21 @@ def gcsfs_benchmark_pipe(extended_gcs_factory, request):
         params,
         "benchmark-pipe",
         create_files=False,
+    )
+
+
+@pytest.fixture
+def gcsfs_benchmark_cat_ranges(extended_gcs_factory, request):
+    """
+    A fixture that sets up the environment for a cat_ranges benchmark run.
+    It creates the test file(s) and cleans them up afterward.
+    """
+    params = request.param
+    yield from _benchmark_io_fixture_helper(
+        extended_gcs_factory,
+        params,
+        "benchmark-cat-ranges",
+        create_files=True,
     )
 
 
@@ -537,7 +579,10 @@ def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info
 
 
 def publish_benchmark_extra_info(
-    benchmark: Any, params: Any, benchmark_group: str
+    benchmark: Any,
+    params: Any,
+    benchmark_group: str,
+    total_bytes: int | None = None,
 ) -> None:
     """
     Helper function to publish benchmark parameters to the extra_info property.
@@ -558,7 +603,18 @@ def publish_benchmark_extra_info(
 
     benchmark.extra_info["block_size"] = getattr(params, "block_size_bytes", "N/A")
     benchmark.extra_info["pattern"] = getattr(params, "pattern", "N/A")
+    benchmark.extra_info["num_ranges"] = getattr(params, "num_ranges", "N/A")
+    benchmark.extra_info["max_gap"] = getattr(params, "max_gap", "N/A")
+    benchmark.extra_info["batch_size"] = getattr(params, "batch_size", "N/A")
     benchmark.extra_info["runtime"] = getattr(params, "runtime", "N/A")
+    if total_bytes is None:
+        file_size = getattr(params, "file_size_bytes", None)
+        files = getattr(params, "files", 1)
+        if file_size is not None and file_size != "N/A":
+            total_bytes = file_size * files
+    benchmark.extra_info["total_bytes"] = (
+        total_bytes if total_bytes is not None else "N/A"
+    )
     benchmark.extra_info["threads"] = params.threads
     benchmark.extra_info["rounds"] = params.rounds
     benchmark.extra_info["bucket_name"] = params.bucket_name
@@ -573,6 +629,17 @@ def publish_benchmark_extra_info(
     benchmark.extra_info["mrd_pool_size"] = getattr(params, "mrd_pool_size", "N/A")
     benchmark.extra_info["engine"] = getattr(params, "engine", "N/A")
     benchmark.extra_info["method"] = getattr(params, "method", "N/A")
+    benchmark.extra_info["concurrency"] = getattr(params, "concurrency", "N/A")
+
+    # run.py derives the CSV headers from the first benchmark's extra_info, so
+    # every group has to declare the request-count columns even when it does
+    # not measure them.
+    benchmark.extra_info["requests_total"] = "N/A"
+    benchmark.extra_info["requests_per_op"] = "N/A"
+    benchmark.extra_info["requests_download"] = "N/A"
+    benchmark.extra_info["requests_object_get"] = "N/A"
+    benchmark.extra_info["requests_list"] = "N/A"
+    benchmark.extra_info["requests_other"] = "N/A"
 
     benchmark.group = benchmark_group
 
@@ -587,6 +654,31 @@ def publish_resource_metrics(benchmark: Any, monitor: ResourceMonitor) -> None:
             "mem_max": f"{monitor.max_mem:.2f}",
             "net_throughput_s": f"{monitor.throughput_s:.2f}",
             "vcpus": monitor.vcpus,
+        }
+    )
+
+
+def publish_request_metrics(benchmark: Any, counter: Any, operations: int) -> None:
+    """
+    Publish the HTTP calls gcsfs issued during the timed region.
+
+    ``operations`` is the number of filesystem operations those calls served,
+    which makes ``requests_per_op`` comparable across object sizes: it is the
+    round-trip cost of a single read. A whole-object read should cost 1; see
+    request_counter.py and fsspec/gcsfs#1048 for why this is worth reporting.
+    """
+    if counter is None or not operations:
+        return
+
+    counts = counter.counts
+    benchmark.extra_info.update(
+        {
+            "requests_total": counter.total,
+            "requests_per_op": round(counter.per_operation(operations), 3),
+            "requests_download": counts[DOWNLOAD],
+            "requests_object_get": counts[OBJECT_GET],
+            "requests_list": counts[LIST],
+            "requests_other": counts[OTHER],
         }
     )
 
