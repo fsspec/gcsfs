@@ -3,6 +3,7 @@
 import contextlib
 import dataclasses
 import os
+import shutil
 import time
 
 import ray
@@ -26,9 +27,10 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common impor
     ensure_ray_initialized,
     find_free_port,
     resolve_storage,
-    save_checkpoint_step,
     setup_distributed_env,
     setup_model_and_optimizer,
+    stage_checkpoint_locally,
+    upload_checkpoint,
 )
 
 
@@ -44,22 +46,33 @@ class RayCheckpointSetupWorker:
         self.params = params
 
     def setup_and_save(self):
+        local_dir = None
         try:
             setup_distributed_env(self.rank, self.world_size, self.port)
             model, optimizer = setup_model_and_optimizer(self.params)
             fs, arrow_fs, base_path = resolve_storage(self.prefix)
             destination_ckpt = f"{base_path.rstrip('/')}/model.ckpt"
-            save_checkpoint_step(
+
+            local_dir = stage_checkpoint_locally(
                 model,
                 optimizer,
+                self.params,
+                self.rank,
+                staging_prefix="ray-setup-ckpt",
+            )
+            if local_dir is not None:
+                arrow_fs.create_dir(destination_ckpt)
+            upload_checkpoint(
+                local_dir,
                 self.params,
                 self.rank,
                 arrow_fs,
                 fs,
                 destination_ckpt,
-                staging_prefix="ray-setup-ckpt",
             )
         finally:
+            if local_dir and os.path.exists(local_dir):
+                shutil.rmtree(local_dir, ignore_errors=True)
             dist.destroy_process_group()
 
 

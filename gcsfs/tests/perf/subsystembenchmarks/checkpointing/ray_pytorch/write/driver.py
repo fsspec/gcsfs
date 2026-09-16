@@ -1,5 +1,7 @@
 """Driver for Ray checkpoint save benchmark."""
 
+import os
+import shutil
 import time
 
 import ray
@@ -13,9 +15,10 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common impor
     ensure_ray_initialized,
     find_free_port,
     resolve_storage,
-    save_checkpoint_step,
     setup_distributed_env,
     setup_model_and_optimizer,
+    stage_checkpoint_locally,
+    upload_checkpoint,
 )
 
 
@@ -41,23 +44,35 @@ class RayCheckpointSaveWorker:
         try:
             durations = []
             for round_idx in range(self.params.rounds):
-                # Timed GCS window: bounded by barriers so every rank reports
-                # the same interval, whether or not it owns data to upload.
-                dist.barrier()
-                t_start = time.perf_counter()
-                save_checkpoint_step(
-                    self.model,
-                    self.optimizer,
-                    self.params,
-                    self.rank,
-                    self.arrow_fs,
-                    self.fs,
-                    self.destination_ckpt,
-                    staging_prefix=f"ray-ckpt-r{round_idx}",
-                )
-                dist.barrier()
-                t_end = time.perf_counter()
-                durations.append((t_start, t_end))
+                local_dir = None
+                try:
+                    local_dir = stage_checkpoint_locally(
+                        self.model,
+                        self.optimizer,
+                        self.params,
+                        self.rank,
+                        staging_prefix=f"ray-ckpt-r{round_idx}",
+                    )
+                    if local_dir is not None:
+                        self.arrow_fs.create_dir(self.destination_ckpt)
+
+                    # Timed GCS window: bounded by barriers so every rank reports
+                    # the same interval, whether or not it owns data to upload.
+                    dist.barrier()
+                    t_start = time.perf_counter()
+                    upload_checkpoint(
+                        local_dir,
+                        self.params,
+                        self.rank,
+                        self.arrow_fs,
+                        self.fs,
+                        self.destination_ckpt,
+                    )
+                    t_end = time.perf_counter()
+                    durations.append((t_start, t_end))
+                finally:
+                    if local_dir and os.path.exists(local_dir):
+                        shutil.rmtree(local_dir, ignore_errors=True)
             return durations
         finally:
             dist.destroy_process_group()

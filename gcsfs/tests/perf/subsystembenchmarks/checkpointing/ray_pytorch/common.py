@@ -2,7 +2,6 @@
 
 import logging
 import os
-import shutil
 import socket
 import tempfile
 
@@ -49,6 +48,11 @@ def setup_distributed_env(rank, world_size, port):
 def is_distributed_strategy(strategy: str) -> bool:
     """Returns True if the strategy requires multi-process coordination."""
     return strategy != "single"
+
+
+def is_sharded_strategy(strategy: str) -> bool:
+    """Returns True if each rank owns a shard of the checkpoint."""
+    return strategy in ("fsdp_sharded", "model_parallel_sharded")
 
 
 def _llama_tp_plan():
@@ -219,59 +223,54 @@ def _get_staging_dir(prefix: str, min_free_gb: float = 50.0) -> str:
     return tempfile.mkdtemp(prefix=prefix)
 
 
-def save_checkpoint_step(
+def stage_checkpoint_locally(
     model,
     optimizer,
     params,
     rank: int,
-    arrow_fs,
-    fs,
-    destination_ckpt: str,
     staging_prefix: str = "ray-ckpt",
 ):
-    """Performs a single distributed or single-node checkpoint save to storage."""
-    is_sharded = params.strategy in (
-        "fsdp_sharded",
-        "model_parallel_sharded",
-    )
+    """Gathers the state dict and writes it to a local staging directory."""
+    is_sharded = is_sharded_strategy(params.strategy)
     options = StateDictOptions(
         full_state_dict=not is_sharded,
         cpu_offload=not is_sharded,
     )
 
     local_dir = None
+    model_state, opt_state = get_state_dict(model, optimizer, options=options)
+    app_state = {"model": model_state, "optimizer": opt_state}
     try:
-        model_state, opt_state = get_state_dict(model, optimizer, options=options)
-        app_state = {"model": model_state, "optimizer": opt_state}
-
         if is_sharded:
             local_dir = _get_staging_dir(f"{staging_prefix}-rank{rank}-")
             dcp.save(
                 {"app": app_state},
                 storage_writer=dcp.FileSystemWriter(local_dir),
             )
-            arrow_fs.create_dir(destination_ckpt)
-            _pyarrow_fs_copy_files(
-                local_dir,
-                destination_ckpt,
-                destination_filesystem=arrow_fs,
-            )
-        else:
-            if rank == 0:
-                local_dir = _get_staging_dir(f"{staging_prefix}-rank0-")
-                ckpt_file = os.path.join(local_dir, "checkpoint.pt")
-                torch.save(app_state, ckpt_file)
-                arrow_fs.create_dir(destination_ckpt)
-                _pyarrow_fs_copy_files(
-                    local_dir,
-                    destination_ckpt,
-                    destination_filesystem=arrow_fs,
-                )
-
-        del app_state, model_state, opt_state
-        dist.barrier()
-        if is_sharded and rank == 0:
-            fs.touch(f"{destination_ckpt.rstrip('/')}/_SUCCESS")
+        elif rank == 0:
+            local_dir = _get_staging_dir(f"{staging_prefix}-rank0-")
+            ckpt_file = os.path.join(local_dir, "checkpoint.pt")
+            torch.save(app_state, ckpt_file)
     finally:
-        if local_dir and os.path.exists(local_dir):
-            shutil.rmtree(local_dir, ignore_errors=True)
+        del app_state, model_state, opt_state
+    return local_dir
+
+
+def upload_checkpoint(
+    local_dir,
+    params,
+    rank: int,
+    arrow_fs,
+    fs,
+    destination_ckpt: str,
+):
+    """Copies the staged checkpoint to storage."""
+    if local_dir is not None:
+        _pyarrow_fs_copy_files(
+            local_dir,
+            destination_ckpt,
+            destination_filesystem=arrow_fs,
+        )
+    dist.barrier()
+    if is_sharded_strategy(params.strategy) and rank == 0:
+        fs.touch(f"{destination_ckpt.rstrip('/')}/_SUCCESS")
