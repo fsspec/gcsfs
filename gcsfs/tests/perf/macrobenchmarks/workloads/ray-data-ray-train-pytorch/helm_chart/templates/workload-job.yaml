@@ -71,6 +71,15 @@ spec:
               emptyDir:
                 medium: Memory
                 sizeLimit: {{ $root.Values.workload.sharedMemorySize }}
+            {{- if $root.Values.workload.hostCachePath }}
+            # Node-local, survives pod deletion, so the measured release reuses
+            # what the seed release staged. DirectoryOrCreate because the node
+            # pool is created fresh by the run pipeline and nothing pre-seeds it.
+            - name: host-cache
+              hostPath:
+                path: {{ $root.Values.workload.hostCachePath | quote }}
+                type: DirectoryOrCreate
+            {{- end }}
             containers:
             - name: workload
               image: "{{ $root.Values.workload.image }}"
@@ -127,6 +136,10 @@ spec:
                 value: "{{ $root.Values.workload.overwriteExistingRun }}"
               - name: MODEL_ID
                 value: "{{ $root.Values.workload.modelId }}"
+              {{- if $root.Values.workload.hostCachePath }}
+              - name: HOST_CACHE_PATH
+                value: "/workload/cache"
+              {{- end }}
               - name: TRAINING_STRATEGY
                 value: "{{ $root.Values.workload.trainingStrategy }}"
               - name: TENSOR_PARALLEL_SIZE
@@ -192,3 +205,10 @@ spec:
                 mountPath: /dev/shm
               - name: shared-memory
                 mountPath: /tmp
+              {{- if $root.Values.workload.hostCachePath }}
+              # Deliberately not under /tmp: that path is the memory-backed
+              # emptyDir above, so staging the model there would charge ~16GB
+              # against the pod's memory instead of the node's disk.
+              - name: host-cache
+                mountPath: /workload/cache
+              {{- end }}

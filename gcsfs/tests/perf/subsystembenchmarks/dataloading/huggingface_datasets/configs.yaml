@@ -4,7 +4,7 @@ common:
   batch_size: 8
   baseline:
     fmt: "text_parquet"
-    file_count: 64
+    file_count: 256
     rows_per_file: 10920
     # Keeps uncompressed pretokenized Parquet row groups below about 30 MB.
     row_group_size: 1800
@@ -32,6 +32,6 @@ scenarios:
 
       - {axis: "climbmix", fmt: "pretok_jsonl", file_count: 100, rows_per_file: 6988}
 
-      - {axis: "scale", file_count: 512, rows_per_file: 1365}
+      - {axis: "scale", file_count: 2048, rows_per_file: 1365}
 
       - {axis: "prefetch", prefetch_factor: 4}

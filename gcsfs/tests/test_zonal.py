@@ -1,4 +1,7 @@
-# Integration tests for ExtendedGcsFileSystem
+"""Integration tests for Zonal bucket support in ExtendedGcsFileSystem.
+These tests exercise gRPC rapid plane features (MRD, AAOW) and require a live Zonal bucket.
+"""
+
 import asyncio
 import contextlib
 import io
@@ -398,6 +401,10 @@ def test_default_cache_is_none_with_prefetcher(extended_gcsfs, gcs_bucket_mocks)
         # 3. Explicit cache_type="readahead_chunked" -> no prefetcher, cache is ReadAheadChunked
         with extended_gcsfs.open(b, "rb", cache_type="readahead_chunked") as f:
             assert isinstance(f.cache, caching.ReadAheadChunked)
+            assert (
+                isinstance(f.cache, caching.ReadAheadChunked)
+                or type(f.cache).__name__ == "ReadAheadChunked"
+            )
             assert f._prefetch_engine is None
 
 

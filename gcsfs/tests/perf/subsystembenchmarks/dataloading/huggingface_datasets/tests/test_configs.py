@@ -55,10 +55,10 @@ def test_case_ids_unique_and_named():
 def test_macrobenchmark_baseline_present():
     baseline = next(c for c in _cases() if c.sweep_axis == "baseline")
     assert baseline.name == (
-        "read-hf-txpq-shuf-nw4-rg1800-fc64x10920-" "splitws8div-mbis10-reg"
+        "read-hf-txpq-shuf-nw4-rg1800-fc256x10920-" "splitws8div-mbis10-reg"
     )
     assert baseline.fmt == "text_parquet"
-    assert baseline.file_count == 64
+    assert baseline.file_count == 256
     assert baseline.rows_per_file == 10920
     assert baseline.row_group_size == 1800
     assert baseline.access == "shuffled"
@@ -101,7 +101,7 @@ def test_scale_axis_present():
     """Verify scale axis sweeps shard count holding total rows fixed."""
     cases = _cases()
     scale = [c for c in cases if c.sweep_axis == "scale"]
-    assert {c.file_count for c in scale} == {512}
+    assert {c.file_count for c in scale} == {2048}
     base = next(c for c in cases if c.sweep_axis == "baseline")
     base_rows = base.file_count * base.rows_per_file
     for c in scale:

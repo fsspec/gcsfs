@@ -262,7 +262,7 @@ steps:
           echo '--- Installing pip packages ---'
           pip install --upgrade pip > /dev/null
           pip install pytest pytest-timeout pytest-subtests pytest-asyncio fusepy google-cloud-storage > /dev/null
-          pip install --upgrade 'git+https://github.com/googleapis/google-cloud-python.git@main#subdirectory=packages/google-cloud-storage'
+
           echo '--- Installing GCSFS packages ---'
           # Manual builds via 'gcloud builds submit' don't upload .git directory,
           # causing hatch-vcs to fail. We use a dummy version in that case.

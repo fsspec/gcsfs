@@ -41,9 +41,9 @@ TEST_REQUESTER_PAYS_BUCKET = gcsfs.tests.settings.TEST_REQUESTER_PAYS_BUCKET
 TEST_KMS_KEY = gcsfs.tests.settings.TEST_KMS_KEY
 
 # Test placement: keep common behavior and standard-bucket coverage in this
-# file. HNS-specific filesystem behavior belongs in test_extended_hns_gcsfs.py
-# or integration/test_extended_hns.py; zonal-specific behavior belongs in
-# test_zonal_file.py.
+# file. HNS-specific filesystem behavior belongs in test_hns_unit.py
+# or test_hns.py; zonal-specific behavior belongs in
+# test_zonal.py or test_zonal_file.py.
 
 
 def test_simple(gcs, monkeypatch):
@@ -623,6 +623,32 @@ def test_rm_chunked_batch(gcs):
     files_removed = gcs.find(TEST_BUCKET)
     for fn in files:
         assert fn not in files_removed
+
+
+@pytest.mark.asyncio
+async def test_delete_files_with_exception(gcs):
+    # Arrange
+    files = [f"{TEST_BUCKET}/file_{i}" for i in range(3)]
+    exc = RuntimeError("batch failed")
+
+    async def mock_rm_files(batch):
+        if files[2] in batch:
+            raise exc
+        return [True] * len(batch)
+
+    with (
+        mock.patch.object(
+            type(gcs),
+            "on_google",
+            new_callable=mock.PropertyMock(return_value=True),
+        ),
+        mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
+    ):
+        # Act
+        result = await gcs._delete_files(files, batchsize=2)
+
+        # Assert
+        assert result == [True, True, exc]
 
 
 def test_rm_wildcards_in_directory(gcs):
@@ -1923,6 +1949,45 @@ def test_content_type_put_guess(gcs):
     assert gcs.info(dst)["contentType"] == "text/plain"
 
 
+def test_content_type_lazy_evaluation():
+    from gcsfs.core import GCSFile
+
+    fs_mock = mock.MagicMock(spec=GCSFileSystem)
+    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fs_mock.info.return_value = {
+        "name": "test-bucket/test-key.txt",
+        "size": 10,
+        "contentType": "application/json",
+        "type": "file",
+    }
+    with mock.patch("mimetypes.guess_type") as mock_guess:
+        f = GCSFile(
+            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+        )
+        assert f.content_type == "application/json"
+        mock_guess.assert_not_called()
+
+
+def test_content_type_lazy_evaluation_fallback():
+    from gcsfs.core import GCSFile
+
+    fs_mock = mock.MagicMock(spec=GCSFileSystem)
+    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fs_mock.info.return_value = {
+        "name": "test-bucket/test-key.txt",
+        "size": 10,
+        "type": "file",
+    }
+    with mock.patch(
+        "mimetypes.guess_type", return_value=("text/plain", None)
+    ) as mock_guess:
+        f = GCSFile(
+            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+        )
+        assert f.content_type == "text/plain"
+        mock_guess.assert_called_once()
+
+
 def test_attrs(gcs):
     if not gcs.on_google:
         # https://github.com/fsspec/gcsfs/pull/479
@@ -2705,7 +2770,7 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
         gcs.version_aware = original_version_aware
 
 
-def test_cat_file_routing_and_thresholds(gcs, monkeypatch):
+def test_cat_file_routing_and_thresholds(gcs, skip_if_zonal, monkeypatch):
     monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
     fn = f"{TEST_BUCKET}/core_routing.txt"
     data = b"0123456789abcdefghijk"
@@ -2758,13 +2823,13 @@ def test_cat_file_concurrent_data_integrity(gcs):
     gcs.pipe(fn, data)
 
     res = fsspec.asyn.sync(
-        gcs.loop, gcs._cat_file_concurrent, fn, start=0, end=file_size, concurrency=7
+        gcs.loop, gcs._cat_file, fn, start=0, end=file_size, concurrency=7
     )
     assert len(res) == file_size
     assert res == data
 
 
-def test_cat_file_concurrent_caps_tasks(gcs, monkeypatch):
+def test_cat_file_concurrent_caps_tasks(gcs, skip_if_zonal, monkeypatch):
     monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
     fn = f"{TEST_BUCKET}/core_capped_concurrency.txt"
     data = b"0123456789abcdefghij"
@@ -2789,7 +2854,7 @@ def test_cat_file_concurrent_caps_tasks(gcs, monkeypatch):
         ] == [(0, 5), (5, 10), (10, 15), (15, 20)]
 
 
-def test_cat_file_concurrent_exception_cancellation(gcs):
+def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
     fn = f"{TEST_BUCKET}/core_exception.txt"
     data = b"0123456789" * 6000000  # ~6MB
     gcs.pipe(fn, data)
@@ -2855,6 +2920,54 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.cache_type == "none"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
+
+
+def test_cat_file_default_concurrency(gcs, skip_if_zonal):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_default_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+
+    # Act
+    with mock.patch.object(
+        gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+    ) as mock_conc:
+        data = gcs.cat_file(fn)
+
+    # Assert
+    assert data == b"cat test data"
+    assert mock_conc.call_count == 0
+
+
+def test_cat_file_explicit_concurrency(gcs, skip_if_zonal):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_cat_explicit_concurrency.txt"
+    gcs.pipe(fn, b"cat test data")
+
+    # Act
+    with mock.patch.object(
+        gcs, "_cat_file_concurrent", wraps=gcs._cat_file_concurrent
+    ) as mock_conc:
+        data = gcs.cat_file(fn, concurrency=2)
+
+    # Assert
+    assert data == b"cat test data"
+    assert mock_conc.call_count == 1
+    assert mock_conc.call_args.kwargs["concurrency"] == 2
+
+
+def test_prefetcher_default_concurrency(gcs):
+    # Arrange
+    fn = f"{TEST_BUCKET}/test_prefetcher_concurrency.txt"
+    gcs.pipe(fn, b"prefetcher test data")
+
+    # Act
+    with gcs.open(fn, "rb") as f:
+        file_concurrency = f.concurrency
+        prefetch_engine_concurrency = f._prefetch_engine.concurrency
+
+    # Assert
+    assert file_concurrency == 4
+    assert prefetch_engine_concurrency == 4
 
 
 def test_gcsfile_prefetch_sequential_integrity(gcs):
@@ -3710,3 +3823,97 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:d" in ua for ua in user_agents)
+
+
+def test_process_object_structure(gcs):
+    bucket = "my-bucket"
+    metadata = {
+        "kind": "storage#object",
+        "id": "my-bucket/nested/file.txt/12345",
+        "name": "nested/file.txt",
+        "bucket": "my-bucket",
+        "generation": "12345",
+        "metageneration": "2",
+        "contentType": "text/plain",
+        "timeCreated": "2024-01-15T10:30:00.000Z",
+        "updated": "2024-01-15T11:45:00.123456Z",
+        "storageClass": "STANDARD",
+        "size": "4096",
+        "md5Hash": "dummyHash==",
+    }
+
+    processed = gcs._process_object(bucket, metadata)
+
+    assert processed["name"] == "my-bucket/nested/file.txt"
+    assert processed["size"] == 4096
+    assert processed["type"] == "file"
+    assert processed["ctime"] == datetime(
+        2024, 1, 15, 10, 30, 0, 0, tzinfo=timezone.utc
+    )
+    assert processed["mtime"] == datetime(
+        2024, 1, 15, 11, 45, 0, 123456, tzinfo=timezone.utc
+    )
+    assert processed["generation"] == "12345"
+    assert processed["metageneration"] == "2"
+
+
+def test_process_object_leading_slash(gcs):
+    bucket = "my-bucket"
+    metadata = {
+        "name": "/leading_slash_file.txt",
+        "size": "100",
+    }
+
+    processed = gcs._process_object(bucket, metadata)
+    parsed_bucket, parsed_key, _ = gcs.split_path(processed["name"])
+
+    assert processed["name"] == "my-bucket//leading_slash_file.txt"
+    assert parsed_bucket == "my-bucket"
+    assert parsed_key == "/leading_slash_file.txt"
+
+
+def test_get_dirs_and_update_cache_nested(gcs):
+    bucket = "test-bucket"
+    objects = [
+        {"name": f"{bucket}/dir1/sub1/file1.txt", "size": 100, "type": "file"},
+        {"name": f"{bucket}/dir1/sub1/file2.txt", "size": 200, "type": "file"},
+        {"name": f"{bucket}/dir1/sub2/file3.txt", "size": 300, "type": "file"},
+        {"name": f"{bucket}/dir2/file4.txt", "size": 400, "type": "file"},
+    ]
+
+    gcs.dircache.clear()
+    dirs = gcs._get_dirs_and_update_cache(bucket, objects, prefix="", update_cache=True)
+
+    assert f"{bucket}/dir1" in dirs
+    assert f"{bucket}/dir1/sub1" in dirs
+    assert f"{bucket}/dir1/sub2" in dirs
+    assert f"{bucket}/dir2" in dirs
+    assert f"{bucket}" in gcs.dircache
+    assert f"{bucket}/dir1" in gcs.dircache
+    assert f"{bucket}/dir1/sub1" in gcs.dircache
+    assert f"{bucket}/dir1/sub2" in gcs.dircache
+    assert f"{bucket}/dir2" in gcs.dircache
+    root_children = [c["name"] for c in gcs.dircache[bucket]]
+    assert f"{bucket}/dir1" in root_children
+    assert f"{bucket}/dir2" in root_children
+    sub1_children = [c["name"] for c in gcs.dircache[f"{bucket}/dir1/sub1"]]
+    assert f"{bucket}/dir1/sub1/file1.txt" in sub1_children
+    assert f"{bucket}/dir1/sub1/file2.txt" in sub1_children
+
+
+def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
+    bucket = "test-bucket"
+    objects = [
+        {"name": f"{bucket}/a/b/c/file1.txt", "size": 100, "type": "file"},
+        {"name": f"{bucket}/a/b/empty_folder", "size": 0, "type": "directory"},
+    ]
+
+    gcs.dircache.clear()
+    dirs = gcs._get_dirs_and_update_cache(
+        bucket, objects, prefix="a/b", update_cache=False
+    )
+
+    assert f"{bucket}/a/b" in dirs
+    assert f"{bucket}/a/b/c" in dirs
+    # Cache should remain empty because update_cache=False and prefix is used
+    assert len(gcs.dircache) == 0

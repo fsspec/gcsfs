@@ -231,20 +231,35 @@ def _create_table_row(row):
         except (ValueError, TypeError):
             pass
     else:
+        if row.get("group") == "cat_ranges":
+            total_bytes_val = row.get("total_bytes")
+            if total_bytes_val is None or total_bytes_val in ("N/A", ""):
+                raise ValueError(
+                    "Missing 'total_bytes' for cat_ranges benchmark; "
+                    "logical throughput cannot be calculated."
+                )
+            total_bytes = float(total_bytes_val)
+        else:
+            total_bytes_val = row.get("total_bytes")
+            if total_bytes_val not in (None, "N/A", ""):
+                total_bytes = float(total_bytes_val)
+            else:
+                file_size_str = row.get("file_size", "N/A")
+                if file_size_str not in (None, "N/A", ""):
+                    file_size = float(file_size_str)
+                    files = float(row.get("files", 1))
+                    total_bytes = file_size * files
+                else:
+                    total_bytes = 0
+
         try:
             mean_latency = float(row.get("mean", 0))
             latency = f"{mean_latency:.4f}"
-
-            file_size_str = row.get("file_size", "N/A")
-            if file_size_str != "N/A":
-                file_size = float(file_size_str)
-                files = float(row.get("files", 1))
-                total_bytes = file_size * files
-                throughput_val = (
-                    total_bytes / mean_latency
-                    if mean_latency > MIN_TIME_THRESHOLD
-                    else 0
-                )
+            throughput_val = (
+                total_bytes / mean_latency
+                if mean_latency > MIN_TIME_THRESHOLD and total_bytes > 0
+                else 0
+            )
         except (ValueError, TypeError):
             pass
 
@@ -266,6 +281,8 @@ def _create_table_row(row):
         _format_mb(row.get("block_size", 0)),
         row.get("mrd_pool_cache_size", "N/A"),
         row.get("mrd_pool_size", "N/A"),
+        row.get("concurrency", "N/A"),
+        row.get("requests_per_op", "N/A"),
         latency,
         _format_mb(throughput_val),
         f"{float(row.get('cpu_max_global', 0)):.2f}",
@@ -308,6 +325,10 @@ def _print_csv_to_shell(report_path):
             "Block Size (MiB)",
             "MRD Pool Cache Size",
             "MRD Pool Size",
+            "Concurrency",
+            # Round-trips per filesystem operation. A whole-object read should
+            # cost 1; anything higher is request amplification (gcsfs#1048).
+            "Requests/Op",
             "Mean Latency (s)",
             "Mean Throughput (MiB/s)",
             "Max CPU (%)",

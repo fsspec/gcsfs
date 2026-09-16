@@ -12,6 +12,7 @@ of a training workload.
 The currently runnable groups are:
 
 - `dataloading/huggingface_datasets`: Measures full-corpus streaming reads of a synthetic dataset through Hugging Face Datasets, `fsspec`, and `gcsfs`, with a PyTorch `DataLoader` consuming the stream.
+- `dataloading/ray_data`: Measures full-corpus streaming reads of a synthetic Parquet dataset through Ray Data, `pyarrow.fs`, `fsspec`, and `gcsfs` on CPU.
 - `checkpointing/pytorch_lightning`: Measures checkpoint write and read performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
 
 > **This README describes the workload: what it runs, what is timed, and how to
@@ -104,13 +105,13 @@ or fail on a performance regression.
 
 Each case produces one flat result row. The main metric families are:
 
-| Family | Meaning |
-| :--- | :--- |
-| Logical read performance | Mean stored bytes and samples consumed per second across full-corpus rounds. |
-| Latency and duration | Dataset initialization time, time to first batch, and full-corpus duration statistics. |
-| Resource use | Peak process-tree CPU and resident memory, plus mean host network receive and send rates. |
+| Family                       | Meaning                                                                                                                                          |
+| :--------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Logical read performance     | Mean stored bytes and samples consumed per second across full-corpus rounds.                                                                     |
+| Latency and duration         | Dataset initialization time, time to first batch, and full-corpus duration statistics.                                                           |
+| Resource use                 | Peak process-tree CPU and resident memory, plus mean host network receive and send rates.                                                        |
 | Configuration and provenance | Case identity, selected sweep axis, dataset shape, rank/worker settings, machine environment, source revision, and resolved Python requirements. |
-| GCS read behavior | Server-observed read bytes, read requests, and logical-to-physical read amplification. |
+| GCS read behavior            | Server-observed read bytes, read requests, and logical-to-physical read amplification.                                                           |
 
 The authoritative CSV and BigQuery column inventory is
 [`subsystembenchmarks_schema.json`](../../../../cloudbuild/subsystembenchmarks/subsystembenchmarks_schema.json).
