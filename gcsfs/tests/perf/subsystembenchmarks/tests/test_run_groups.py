@@ -105,3 +105,8 @@ def test_webdataset_group_is_discoverable():
 def test_ray_data_group_is_discoverable():
     """Verifies dataloading/ray_data is discovered from its requirements.txt."""
     assert "dataloading/ray_data" in run.discover_groups()
+
+
+def test_ray_checkpointing_group_is_discoverable():
+    """Verifies checkpointing/ray_pytorch is discovered from its requirements.txt."""
+    assert "checkpointing/ray_pytorch" in run.discover_groups()
