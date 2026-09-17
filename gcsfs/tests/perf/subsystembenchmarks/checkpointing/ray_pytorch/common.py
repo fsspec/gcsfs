@@ -10,6 +10,8 @@ import pyarrow.fs
 import ray
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
@@ -46,6 +48,11 @@ def setup_distributed_env(rank, world_size, port):
 def is_distributed_strategy(strategy: str) -> bool:
     """Returns True if the strategy requires multi-process coordination."""
     return strategy != "single"
+
+
+def is_sharded_strategy(strategy: str) -> bool:
+    """Returns True if each rank owns a shard of the checkpoint."""
+    return strategy in ("fsdp_sharded", "model_parallel_sharded")
 
 
 def _llama_tp_plan():
@@ -163,6 +170,15 @@ def parallelize_model(model, params):
     raise ValueError(f"Unknown strategy: {strategy}")
 
 
+def setup_model_and_optimizer(params):
+    """Loads, parallelizes the benchmark model and materializes AdamW optimizer states."""
+    model = load_benchmark_model(params)
+    model = parallelize_model(model, params)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    materialize_adamw_states(optimizer)
+    return model, optimizer
+
+
 def resolve_storage(prefix: str):
     """Resolves fsspec and PyArrow filesystems for checkpoint storage."""
     fs, base_path = fsspec.core.url_to_fs(prefix)
@@ -198,6 +214,63 @@ def _get_staging_dir(prefix: str, min_free_gb: float = 50.0) -> str:
                 avail_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
                 if avail_gb >= min_free_gb:
                     return tempfile.mkdtemp(prefix=prefix, dir=candidate)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(
+                    "Could not use staging directory candidate %s: %s",
+                    candidate,
+                    e,
+                )
     return tempfile.mkdtemp(prefix=prefix)
+
+
+def stage_checkpoint_locally(
+    model,
+    optimizer,
+    params,
+    rank: int,
+    staging_prefix: str = "ray-ckpt",
+):
+    """Gathers the state dict and writes it to a local staging directory."""
+    is_sharded = is_sharded_strategy(params.strategy)
+    options = StateDictOptions(
+        full_state_dict=not is_sharded,
+        cpu_offload=not is_sharded,
+    )
+
+    local_dir = None
+    model_state, opt_state = get_state_dict(model, optimizer, options=options)
+    app_state = {"model": model_state, "optimizer": opt_state}
+    try:
+        if is_sharded:
+            local_dir = _get_staging_dir(f"{staging_prefix}-rank{rank}-")
+            dcp.save(
+                {"app": app_state},
+                storage_writer=dcp.FileSystemWriter(local_dir),
+            )
+        elif rank == 0:
+            local_dir = _get_staging_dir(f"{staging_prefix}-rank0-")
+            ckpt_file = os.path.join(local_dir, "checkpoint.pt")
+            torch.save(app_state, ckpt_file)
+    finally:
+        del app_state, model_state, opt_state
+    return local_dir
+
+
+def upload_checkpoint(
+    local_dir,
+    params,
+    rank: int,
+    arrow_fs,
+    fs,
+    destination_ckpt: str,
+):
+    """Copies the staged checkpoint to storage."""
+    if local_dir is not None:
+        _pyarrow_fs_copy_files(
+            local_dir,
+            destination_ckpt,
+            destination_filesystem=arrow_fs,
+        )
+    dist.barrier()
+    if is_sharded_strategy(params.strategy) and rank == 0:
+        fs.touch(f"{destination_ckpt.rstrip('/')}/_SUCCESS")
