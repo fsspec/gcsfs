@@ -128,15 +128,19 @@ def _process_benchmark_result(bench, headers, extra_info_headers, stats_headers)
         stats_headers (list): Headers from the 'stats' section.
 
     """
-    row = {h: "" for h in headers}
+    row = {h: "N/A" for h in headers}
     row["name"] = bench["name"]
-    row["group"] = bench.get("group", "")
+    row["group"] = bench.get("group", "N/A")
 
     # Populate extra_info and stats
     for key in extra_info_headers:
-        row[key] = bench["extra_info"].get(key)
+        val = bench["extra_info"].get(key)
+        if val not in (None, ""):
+            row[key] = val
     for key in stats_headers:
-        row[key] = bench["stats"].get(key)
+        val = bench["stats"].get(key)
+        if val not in (None, ""):
+            row[key] = val
 
     # Calculate percentiles
     rounds_data = bench["stats"].get("data")
