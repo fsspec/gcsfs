@@ -11,7 +11,6 @@
 ### Run Command
 
 ```bash
-GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/application_default_credentials.json \
 GCSFS_TEST_PROJECT="$PROJECT" GOOGLE_CLOUD_PROJECT="$PROJECT" PYTHONPATH=. \
 python gcsfs/tests/perf/microbenchmarks/run.py \
     --group=<group> --config=<scenario_name> \
@@ -39,8 +38,16 @@ Chain the benchmark run and the extractor with `&&`:
 ```bash
 python3 -c "
 import csv, glob, os, sys
-d = max(glob.glob('gcsfs/tests/perf/microbenchmarks/__run__/*/'), key=os.path.getmtime)
-r = next(x for x in csv.DictReader(open(os.path.join(d, 'results.csv'))) if sys.argv[1] in x['name'])
+runs = glob.glob('gcsfs/tests/perf/microbenchmarks/__run__/*/')
+if not runs:
+    sys.exit('Error: No microbenchmark runs found')
+csv_path = os.path.join(max(runs, key=os.path.getmtime), 'results.csv')
+if not os.path.exists(csv_path):
+    sys.exit(f'Error: {csv_path} does not exist')
+with open(csv_path, newline='') as f:
+    r = next((x for x in csv.DictReader(f) if sys.argv[1] in x.get('name', '')), None)
+if r is None:
+    sys.exit(f'Error: No benchmark matching {sys.argv[1]!r} in {csv_path}')
 col = sys.argv[2]
 if col == 'throughput_fixed_duration_mibs':
     print(float(r['mean']) / float(r['runtime']) / 1048576)
@@ -88,10 +95,26 @@ python -m gcsfs.tests.perf.subsystembenchmarks.run \
 ```bash
 python3 -c "
 import csv, glob, os, sys
-d = max(glob.glob('gcsfs/tests/perf/subsystembenchmarks/__run__/*/'), key=os.path.getmtime)
-r = next(x for x in csv.DictReader(open(os.path.join(d, 'results.csv'))) if x['config_sweep_axis'] == 'baseline')
+runs = glob.glob('gcsfs/tests/perf/subsystembenchmarks/__run__/*/')
+if not runs:
+    sys.exit('Error: No subsystembenchmark runs found')
+csv_path = os.path.join(max(runs, key=os.path.getmtime), 'results.csv')
+if not os.path.exists(csv_path):
+    sys.exit(f'Error: {csv_path} does not exist')
+case_filter = sys.argv[2] if len(sys.argv) > 2 else ''
+with open(csv_path, newline='') as f:
+    r = next(
+        (
+            x for x in csv.DictReader(f)
+            if x.get('config_sweep_axis') == 'baseline'
+            and case_filter in x.get('benchmark_case_id', '')
+        ),
+        None,
+    )
+if r is None:
+    sys.exit(f'Error: No baseline row matching {case_filter!r} in {csv_path}')
 print(float(r[sys.argv[1]]))
-" <column_name>
+" <column_name> [case_id_substring]
 ```
 
 ---

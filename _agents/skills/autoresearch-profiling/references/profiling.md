@@ -105,7 +105,7 @@ py-spy record -o profile.raw -f raw --subprocesses --idle -- \
 
 ### Attach to running workers (including Ray workers)
 
-Ray workers (`ray::*`) are children of `raylet`, not `pytest`, so `--subprocesses` on `run.py` will miss them. Attach by PID:
+Ray workers (`ray::*`) are children of `raylet`, not `pytest`, so `--subprocesses` on `run.py` will miss them. Attach by PID (note: while spawning a child via `py-spy record -- <cmd>` works unprivileged under Linux default `kernel.yama.ptrace_scope=1`, attaching to an existing non-child PID `-p <pid>` requires `CAP_SYS_PTRACE` or `sudo sysctl kernel.yama.ptrace_scope=0` with user approval):
 
 ```bash
 pgrep -af 'ray::'   # Locate active Ray worker PID
