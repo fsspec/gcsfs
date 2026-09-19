@@ -80,10 +80,12 @@ run_calculate() {
 # run_calculate exits non-zero when metrics are incomplete; running it as an
 # `if` condition keeps `set -e`/the ERR trap from aborting the step on a
 # not-yet-complete attempt.
+SCRAPE_MAX_ATTEMPTS="${SCRAPE_MAX_ATTEMPTS:-10}"
+SCRAPE_RETRY_SLEEP_SECONDS="${SCRAPE_RETRY_SLEEP_SECONDS:-90}"
 sleep 60
 SCRAPE_OK=false
-for attempt in $(seq 1 5); do
-  echo "Scrape attempt $attempt of 5..."
+for attempt in $(seq 1 "$SCRAPE_MAX_ATTEMPTS"); do
+  echo "Scrape attempt $attempt of $SCRAPE_MAX_ATTEMPTS..."
   rm -rf "$RAW_DIR"
   # The parser hits the Cloud Logging API; a transient API error should fall
   # through to the backoff like the ingestion-lag case, not abort the step via
@@ -94,7 +96,7 @@ for attempt in $(seq 1 5); do
       --checkpoint-location "gs://$CHECKPOINT_BUCKET/checkpoints" \
       --out-dir "$RAW_DIR"; then
     echo "Scrape failed (transient?); waiting before retry..."
-    sleep 60
+    sleep "$SCRAPE_RETRY_SLEEP_SECONDS"
     continue
   fi
   if run_calculate "$SUMMARY"; then
@@ -102,7 +104,7 @@ for attempt in $(seq 1 5); do
     break
   fi
   echo "Required metrics incomplete; waiting for Cloud Logging ingestion..."
-  sleep 60
+  sleep "$SCRAPE_RETRY_SLEEP_SECONDS"
 done
 if [ "$SCRAPE_OK" != "true" ]; then
   echo "Metrics still incomplete after retries."
@@ -116,7 +118,7 @@ fi
 # (not per attempt, to avoid re-du'ing the dataset bucket). Settle for GCS
 # metric lag, then fold into the summary; a failure here must not lose the
 # metrics-complete summary already written above, so it's `|| true`/warn-only.
-sleep "${SYSTEM_METRICS_SETTLE_SECONDS:-600}"
+sleep "${SYSTEM_METRICS_SETTLE_SECONDS:-900}"
 python3 -m metrics.monitoring \
   --project "${PROJECT_ID}" --run-id "$RUN_ID" \
   --start-time "$START_TIME" --end-time "$END_TIME" \
