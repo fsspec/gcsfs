@@ -756,6 +756,21 @@ def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
     assert zf_bytes.cache_type == "bytes"
     zf_bytes.close()
 
+    # 6. Explicit cache_type="all" -> cache_type="all"
+    mock_pool = mock.Mock()
+    mock_pool.persisted_size = 1000
+    mock_pool.details = None
+    mock_sync.return_value = mock_pool
+    mock_gcsfs._cat_file = mock.AsyncMock(return_value=b"hello world")
+    zf_all = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        cache_type="all",
+    )
+    assert zf_all.cache_type == "all"
+    zf_all.close()
+
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
 def test_zonal_file_fetch_range_mutually_exclusive(mock_sync, mock_gcsfs):

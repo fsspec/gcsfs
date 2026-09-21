@@ -35,7 +35,8 @@ from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import HttpError, errs, retry_request, validate_response
-from .zb_hns_utils import DEFAULT_CONCURRENCY, _on_loop_thread
+from .utils import is_empty_range
+from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
 
@@ -1218,10 +1219,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
-        # if start and end are both provided and valid, but start >= end, return empty bytes
-        # Otherwise, _process_limits would generate an invalid HTTP range (e.g. "bytes=5-4"
-        # for start=5, end=5), causing the server to return the whole file instead of nothing.
-        if start is not None and end is not None and start >= end >= 0:
+        if is_empty_range(start, end):
             return b""
 
         u2 = self.url(path, generation=kwargs.get("generation"))
@@ -2486,15 +2484,19 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         cache_type, use_prefetch_reader, self.cache_source = (
             _get_prefetcher_and_cache_config(cache_type, kwargs)
         )
+        self.cache_type = cache_type
+        self.bucket = bucket
+        self.key = key
         cache_options = dict(cache_options or {})
         if cache_type == "adaptive":
             if "concurrency" not in cache_options:
                 cache_options["concurrency"] = self.concurrency
-            if (
-                "max_prefetch_size" not in cache_options
-                and "max_prefetch_size" in kwargs
-            ):
-                cache_options["max_prefetch_size"] = kwargs.pop("max_prefetch_size")
+            if "max_prefetch_size" not in cache_options:
+                cache_options["max_prefetch_size"] = kwargs.pop(
+                    "max_prefetch_size", MAX_PREFETCH_SIZE
+                )
+            else:
+                kwargs.pop("max_prefetch_size", None)
 
         super().__init__(
             gcsfs,
@@ -2506,10 +2508,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             cache_options=cache_options,
             **kwargs,
         )
-        self.cache_type = cache_type
         self.gcsfs = gcsfs
-        self.bucket = bucket
-        self.key = key
         self.acl = acl
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
@@ -2706,9 +2705,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         start, end : None or integers
             if not both None, fetch only given range
         """
-        if start is not None and self.size is not None and start >= self.size:
-            return b""
-        if start is not None and end is not None and start >= end:
+        if is_empty_range(start, end, self.size):
             return b""
         try:
             return self.fs.cat_file(
