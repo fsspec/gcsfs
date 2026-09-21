@@ -2,11 +2,9 @@
 GCSFS Adaptive Concurrent Prefetching: Architecture & Usage Guide
 =================================================================
 
-Prefetcher is enabled by default when cache_type is not set explicitly with `DEFAULT_GCSFS_CONCURRENCY=4`. To disable, you can pass the environment variable `USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'` or pass `use_experimental_adaptive_prefetching=False` when opening a file. As currently written, this implementation is
-separate from the fsspec-style caching layer, but the intent is to eventually make this available to all
-asynchronous filesystems using the standard `cache_type=` argument. How it interacts with the
-existing cache types ("readahead", "first", etc.) remains to be decided, and in the meantime, use at your own risk.
-We intend to develop more sophisticated caching strategies, perhaps specialised to file types.
+**Note:** The adaptive prefetching engine, originally developed in ``gcsfs``, has been upstreamed directly into ``fsspec`` (starting in ``fsspec>=2026.9.0``) as ``fsspec.caching.AdaptiveReadaheadCache``. In ``gcsfs``, it is enabled by default via the ``"adaptive"`` cache type whenever ``cache_type`` is not explicitly set, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
+
+To select an alternative cache or disable prefetching, pass the standard ``cache_type=`` argument (e.g., ``cache_type="readahead"``, ``cache_type="readahead_chunked"``, or ``cache_type="none"``). Standard caching options can be passed via ``cache_options`` (e.g., ``cache_options={"max_prefetch_size": 32 * 1024 * 1024}``).
 
 Additional caveats:
 - the bytes slicing/copying code uses low level (`ctypes`) calls and offloads to a dedicated thread for
@@ -73,36 +71,20 @@ The prefetcher is integrated into the ``GCSFile`` and replaces the standard sequ
 Feature Configuration & Disabling
 ---------------------------------
 
-Adaptive prefetching is enabled by default when ``cache_type`` is not explicitly set by the user, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
+Adaptive prefetching is enabled by default as the ``adaptive`` cache type when ``cache_type`` is not explicitly set by the user, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
 
-Prefetching can be disabled in three ways:
-
-1. Explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or ``cache_type="none"`` or any other cache_type):
+To use a different cache or disable prefetching, explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or ``cache_type="none"``):
 
 .. code-block:: python
 
     gcs.open("bucket/file.txt", "rb", cache_type="readahead")
 
-2. Set the environment variable:
-
-.. code-block:: bash
-
-    export USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'
-
-3. Pass ``use_experimental_adaptive_prefetching=False`` directly when opening a file:
-
-.. code-block:: python
-
-    gcs.open("bucket/file.txt", "rb", use_experimental_adaptive_prefetching=False)
-
 Under the Hood Lifecycle
 ------------------------
 
-* During ``GCSFile.__init__``, if the feature is enabled, a ``BackgroundPrefetcher`` is instantiated and attached to ``self._prefetch_engine``.
-* ``GCSFile._async_fetch_range`` is mapped directly to the prefetcher.
-* When ``file.read(size)`` is called, it delegates to ``self._prefetch_engine._fetch(start, end)``.
-* The prefetcher returns requested bytes from its local queue while the producer continues pulling chunks from GCS.
-* Calling ``file.close()`` triggers ``_prefetch_engine.close()``, safely canceling pending network tasks and clearing memory buffers to prevent memory leaks.
+* During ``GCSFile.__init__``, if ``cache_type`` is unspecified or set to ``"adaptive"``, an ``AdaptiveReadaheadCache`` from ``fsspec`` is initialized.
+* When ``file.read(size)`` is called, reads are served from the adaptive cache buffer while background tasks prefetch upcoming chunks concurrently.
+* Calling ``file.close()`` safely tears down any active prefetch tasks and releases buffer memory.
 
 Standard Buckets Benchmarking with No Cache
 -------------------------------------------
