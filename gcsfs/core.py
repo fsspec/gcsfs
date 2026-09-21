@@ -2514,13 +2514,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.checker = get_consistency_checker(consistency)
 
         cache = getattr(self, "cache", None)
-        if getattr(cache, "_prefetcher", None) is not None and hasattr(cache, "close"):
-            # TODO: Remove this disarm once fsspec adds native support for deferred or
-            # non-blocking cache teardown during GC (or accepts an async closer).
-            # Disarm standalone cache GC/close so that it does not execute sync_teardown
-            # synchronously on the GC thread (which would undermine GCSFile._defer_close).
-            # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
-            cache.close = lambda: None
         prefetcher = getattr(cache, "_prefetcher", None)
         if prefetcher is not None:
             # Wire GCSFile/ZonalFile's native async range fetcher into the prefetcher producer.
