@@ -687,6 +687,18 @@ async def test_zonal_file_async_fetch_range(mock_sync, mock_gcsfs):
     zf.close()
 
 
+def test_zonal_file_prefetcher_producer_fetcher_integration(mock_gcsfs):
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    mock_pool = mock.Mock(persisted_size=1000, details=None)
+    mock_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
+    prefetcher = getattr(zf.cache, "_prefetcher", None)
+    assert prefetcher is not None
+    assert prefetcher.fetcher == zf._async_fetch_range
+    assert prefetcher.producer.fetcher == zf._async_fetch_range
+    zf.close()
+
+
 @mock.patch("gcsfs.zonal_file.asyn.sync")
 def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
     """Tests that pool_size is correctly set based on kwargs and env vars."""
