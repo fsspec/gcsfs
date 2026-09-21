@@ -2521,6 +2521,23 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             # synchronously on the GC thread (which would undermine GCSFile._defer_close).
             # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
             cache.close = lambda: None
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None:
+            # Wire GCSFile/ZonalFile's native async range fetcher into the prefetcher producer.
+            # Otherwise, _async_fetch_range is bypassed, split_factor is ignored, and
+            # fsspec's default fetcher performs an unnecessary asyncio.to_thread round-trip.
+            # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
+            prefetcher.fetcher = self._async_fetch_range
+            if getattr(prefetcher, "producer", None) is not None:
+                prefetcher.producer.fetcher = self._async_fetch_range
+
+            if hasattr(cache, "close"):
+                # TODO: Remove this disarm once fsspec adds native support for deferred or
+                # non-blocking cache teardown during GC (or accepts an async closer).
+                # Disarm standalone cache GC/close so that it does not execute sync_teardown
+                # synchronously on the GC thread (which would undermine GCSFile._defer_close).
+                # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
+                cache.close = lambda: None
 
         # _supports_append is an internal argument not meant to be used directly.
         # If True, allows opening file in append mode. This is generally not supported

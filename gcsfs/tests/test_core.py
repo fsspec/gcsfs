@@ -2999,6 +2999,18 @@ def test_prefetcher_config_options():
         )
 
 
+def test_gcsfile_prefetcher_producer_fetcher_integration():
+    fake_fs = mock.MagicMock()
+    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
+    fake_fs.info.return_value = {"size": 100}
+
+    with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
+        prefetcher = getattr(f.cache, "_prefetcher", None)
+        assert prefetcher is not None
+        assert prefetcher.fetcher == f._async_fetch_range
+        assert prefetcher.producer.fetcher == f._async_fetch_range
+
+
 def test_gcsfile_prefetch_sequential_integrity(gcs):
     fn = f"{TEST_BUCKET}/integrated_seq.txt"
     file_size = 10 * 1024 * 1024
