@@ -23,7 +23,9 @@ import gcsfs.checkers
 import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
+from gcsfs.core import GCSFile
 from gcsfs.credentials import GoogleCredentials
+from gcsfs.retry import HttpError
 from gcsfs.tests.conftest import (
     a,
     allfiles,
@@ -2879,44 +2881,24 @@ def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
 
 
 def test_gcsfile_prefetch_and_cache_type_rules(gcs):
-    """Verify that prefetcher is only used when cache_type is not set by user, and default cache_type is 'none'."""
+    """Verify that adaptive cache is default when cache_type is not set, and explicit cache_type is respected."""
     fn = f"{TEST_BUCKET}/cache_rules.txt"
     gcs.pipe(fn, b"HelloWorld")
 
-    # 1. Default: cache_type is not set -> prefetcher active, cache_type is "none", cache_source is "default"
+    # 1. Default: cache_type is not set -> cache_type is "adaptive", cache_source is "default"
     with gcs.open(fn, "rb") as f:
-        assert getattr(f, "_prefetch_engine", None) is not None
-        assert f.cache_type == "none"
+        assert f.cache_type == "adaptive"
         assert f.cache_source == "default"
         assert f.read() == b"HelloWorld"
 
-    # 2. Prefetcher disabled, no cache_type set -> no prefetcher, cache_type falls back to "readahead",
-    # cache_source is "default"
-    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
-        assert getattr(f, "_prefetch_engine", None) is None
-        assert f.cache_type == "readahead"
-        assert f.cache_source == "default"
-        assert f.read() == b"HelloWorld"
-
-    # 3. User sets cache_type="readahead" -> prefetcher NOT used, cache_type is "readahead", cache_source is "explicit"
+    # 2. User sets cache_type="readahead" -> cache_type is "readahead", cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="readahead") as f:
-        assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "readahead"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
-    # 4. User sets cache_type="readahead" even with prefetcher=True -> prefetcher NOT used, cache_source is "explicit"
-    with gcs.open(
-        fn, "rb", cache_type="readahead", use_experimental_adaptive_prefetching=True
-    ) as f:
-        assert getattr(f, "_prefetch_engine", None) is None
-        assert f.cache_type == "readahead"
-        assert f.cache_source == "explicit"
-        assert f.read() == b"HelloWorld"
-
-    # 5. User explicitly sets cache_type="none" -> prefetcher NOT used, cache_source is "explicit"
+    # 3. User explicitly sets cache_type="none" -> cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="none") as f:
-        assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "none"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
@@ -2963,11 +2945,31 @@ def test_prefetcher_default_concurrency(gcs):
     # Act
     with gcs.open(fn, "rb") as f:
         file_concurrency = f.concurrency
-        prefetch_engine_concurrency = f._prefetch_engine.concurrency
+        cache_concurrency = getattr(
+            getattr(f.cache, "_prefetcher", None), "concurrency", None
+        )
 
     # Assert
     assert file_concurrency == 4
-    assert prefetch_engine_concurrency == 4
+    assert cache_concurrency == 4
+
+
+def test_prefetcher_config_options():
+    fake_fs = mock.MagicMock()
+    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
+    fake_fs.info.return_value = {"size": 100}
+
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        max_prefetch_size=1024 * 1024,
+    ) as f:
+        assert (
+            getattr(getattr(f.cache, "_prefetcher", None), "max_prefetch_size", None)
+            == 1024 * 1024
+        )
 
 
 def test_gcsfile_prefetch_sequential_integrity(gcs):
@@ -2976,11 +2978,7 @@ def test_gcsfile_prefetch_sequential_integrity(gcs):
     data = os.urandom(file_size)
     gcs.pipe(fn, data)
 
-    with gcs.open(
-        fn, "rb", use_experimental_adaptive_prefetching=True, block_size=2 * 1024 * 1024
-    ) as f:
-        assert f._prefetch_engine is not None
-
+    with gcs.open(fn, "rb", block_size=2 * 1024 * 1024) as f:
         chunks = []
         while True:
             chunk = f.read(1024 * 1024)  # Read 1MB at a time
@@ -3001,9 +2999,7 @@ def test_gcsfile_prefetch_random_seek_integrity(gcs):
 
     random.seed(42)
 
-    with gcs.open(
-        fn, "rb", use_experimental_adaptive_prefetching=True, block_size=1024 * 1024
-    ) as f:
+    with gcs.open(fn, "rb", block_size=1024 * 1024) as f:
         for _ in range(50):
             start = random.randint(0, file_size - 1000)
             length = random.randint(1, 1000)
@@ -3021,9 +3017,7 @@ def test_gcsfile_multithreaded_read_integrity(gcs):
     data = os.urandom(file_size)
     gcs.pipe(fn, data)
 
-    with gcs.open(
-        fn, "rb", use_experimental_adaptive_prefetching=True, block_size=2 * 1024 * 1024
-    ) as f:
+    with gcs.open(fn, "rb", block_size=2 * 1024 * 1024) as f:
 
         def thread_worker(start, size):
             return f._fetch_range(start, start + size)
@@ -3046,9 +3040,34 @@ def test_gcsfile_not_satisfiable_range(gcs):
     fn = f"{TEST_BUCKET}/integrated_eof.txt"
     gcs.pipe(fn, b"12345")
 
-    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=True) as f:
+    with gcs.open(fn, "rb") as f:
         res = f._fetch_range(100, 200)
         assert res == b""
+
+        # Inverted range
+        assert f._fetch_range(3, 1) == b""
+
+
+def test_gcsfile_fetch_range_error_handling():
+    fake_fs = mock.MagicMock()
+    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
+    fake_fs.info.return_value = {"size": 100}
+    f = GCSFile(fake_fs, "bucket/file.txt", mode="rb", cache_type="none", size=100)
+
+    # Boundary checks
+    assert f._fetch_range(100, 200) == b""
+    assert f._fetch_range(3, 1) == b""
+
+    # Exception handling
+    fake_fs.cat_file.side_effect = RuntimeError("Request range not satisfiable")
+    assert f._fetch_range(0, 5) == b""
+
+    fake_fs.cat_file.side_effect = HttpError({"code": 416, "message": "InvalidRange"})
+    assert f._fetch_range(0, 5) == b""
+
+    fake_fs.cat_file.side_effect = RuntimeError("Some other error")
+    with pytest.raises(RuntimeError, match="Some other error"):
+        f._fetch_range(0, 5)
 
 
 def test_tree(gcs):
@@ -3548,7 +3567,7 @@ def test_get_file_concurrent_early_eof(gcs):
                 return_value=-1,
             ),
             mock.patch(
-                "gcsfs.prefetcher.BackgroundPrefetcher.afetch",
+                "fsspec.prefetcher.BackgroundPrefetcher.afetch",
                 new_callable=mock.AsyncMock,
             ) as mock_afetch,
         ):
@@ -3785,7 +3804,7 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         expected_ua = f"python-gcsfs/{version} cache_type/mmap:e"
         assert expected_ua in user_agents
 
-    # 2. Default open (prefetcher active) -> User-Agent contains cache_type/none:d
+    # 2. Default open (adaptive cache active) -> User-Agent contains cache_type/adaptive:d
     with mock.patch.object(
         gcs.session, "request", wraps=gcs.session.request
     ) as mock_session_request:
@@ -3796,7 +3815,7 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             call.kwargs.get("headers", {}).get("User-Agent", "")
             for call in mock_session_request.call_args_list
         ]
-        assert any("cache_type/none:d" in ua for ua in user_agents)
+        assert any("cache_type/adaptive:d" in ua for ua in user_agents)
 
     # 3. Explicit cache_type="none" -> User-Agent contains cache_type/none:e
     with mock.patch.object(
@@ -3811,18 +3830,18 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         ]
         assert any("cache_type/none:e" in ua for ua in user_agents)
 
-    # 4. Prefetcher disabled fallback -> User-Agent contains cache_type/readahead:d
+    # 4. Explicit cache_type="readahead" -> User-Agent contains cache_type/readahead:e
     with mock.patch.object(
         gcs.session, "request", wraps=gcs.session.request
     ) as mock_session_request:
-        with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+        with gcs.open(fn, "rb", cache_type="readahead") as f:
             _ = f.read(10)
 
         user_agents = [
             call.kwargs.get("headers", {}).get("User-Agent", "")
             for call in mock_session_request.call_args_list
         ]
-        assert any("cache_type/readahead:d" in ua for ua in user_agents)
+        assert any("cache_type/readahead:e" in ua for ua in user_agents)
 
 
 def test_process_object_structure(gcs):

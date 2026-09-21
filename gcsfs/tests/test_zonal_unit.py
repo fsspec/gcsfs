@@ -359,7 +359,10 @@ def test_zonal_prefetcher_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
             # Assert
             assert f.pool_size == 4
             assert f.concurrency == 4
-            assert f._prefetch_engine.concurrency == 4
+            cache_concurrency = getattr(
+                getattr(f.cache, "_prefetcher", None), "concurrency", None
+            )
+            assert cache_concurrency == 4
 
 
 def test_resolve_cache_config():
@@ -382,12 +385,12 @@ def test_resolve_cache_config():
 
     # 3. Neither provided (defaults resolved via _get_prefetcher_and_cache_config)
     c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config({})
-    assert c_type in ("none", "readahead")
+    assert c_type in ("adaptive", "readahead")
     assert c_source == "default"
 
     # 4. kwargs is None
     c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(None)
-    assert c_type in ("none", "readahead")
+    assert c_type in ("adaptive", "readahead")
     assert c_source == "default"
 
 

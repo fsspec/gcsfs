@@ -167,3 +167,39 @@ def test_checker_validate_json_response(checker, data, actual_data, raises):
             checker.validate_json_response(response)
     else:
         checker.validate_json_response(response)
+
+
+def test_get_consistency_checker():
+    from gcsfs.checkers import ConsistencyChecker, get_consistency_checker
+
+    assert isinstance(get_consistency_checker("size"), SizeChecker)
+    assert isinstance(get_consistency_checker("md5"), MD5Checker)
+    assert isinstance(get_consistency_checker(None), ConsistencyChecker)
+    assert isinstance(get_consistency_checker("unknown"), ConsistencyChecker)
+
+    if crcmod is not None:
+        assert isinstance(get_consistency_checker("crc32c"), Crc32cChecker)
+
+
+def test_consistency_checker_base():
+    from gcsfs.checkers import ConsistencyChecker
+
+    base = ConsistencyChecker()
+    base.update(b"abc")
+    base.validate_json_response({})
+    base.validate_headers({})
+    base.validate_http_response(None)
+
+
+def test_checker_missing_headers():
+    md5_checker = MD5Checker()
+    md5_checker.update(b"test")
+    # Headers present but without md5
+    with pytest.raises(NotImplementedError, match="No md5 checksum"):
+        md5_checker.validate_headers({"X-Goog-Hash": "crc32c=12345"})
+
+    if crcmod is not None:
+        crc_checker = Crc32cChecker()
+        crc_checker.update(b"test")
+        with pytest.raises(NotImplementedError, match="No crc32c checksum"):
+            crc_checker.validate_headers({"X-Goog-Hash": "md5=12345"})

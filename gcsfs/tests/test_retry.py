@@ -269,3 +269,103 @@ def test_metadata_read_permissions(
         with pytest.raises(expected_error):
             gcs.info(TEST_BUCKET + file_path)
         assert gcs.exists(TEST_BUCKET + file_path) is False
+
+
+def test_http_error_empty_and_bytes():
+    e_empty = HttpError()
+    assert e_empty.code is None
+    assert e_empty.message == ""
+
+    e_bytes = HttpError({"code": 404, "message": b"not found"})
+    assert e_bytes.code == 404
+    assert e_bytes.message == b"not found, 404"
+
+
+def test_is_retriable_extra():
+    from gcsfs.retry import NonRetryableError
+
+    assert not is_retriable(NonRetryableError())
+
+    e_401_valid = HttpError({"code": 401, "message": "Invalid Credentials"})
+    assert is_retriable(e_401_valid)
+
+    e_401_other = HttpError({"code": 401, "message": "Other Auth Error"})
+    assert not is_retriable(e_401_other)
+
+
+def test_validate_response_extra():
+    with pytest.raises(FileExistsError):
+        validate_response(412, b"", "/path")
+
+    with pytest.raises(FileNotFoundError, match="/bucket/my%20key"):
+        validate_response(404, b"", "/bucket/{}", args=["my key"])
+
+    with pytest.raises(ValueError, match="Bad Request: /path\ninvalid argument"):
+        validate_response(400, b'{"error": {"message": "invalid argument"}}', "/path")
+
+
+def test_is_transient_exception():
+    from google.api_core import exceptions as api_exceptions
+
+    from gcsfs.retry import _is_transient_exception
+
+    assert _is_transient_exception(api_exceptions.DeadlineExceeded("timeout"))
+    assert _is_transient_exception(api_exceptions.ServiceUnavailable("unavailable"))
+    assert _is_transient_exception(api_exceptions.InternalServerError("internal"))
+    assert _is_transient_exception(api_exceptions.TooManyRequests("too many"))
+    assert _is_transient_exception(api_exceptions.ResourceExhausted("exhausted"))
+    assert _is_transient_exception(api_exceptions.Unknown("unknown"))
+    assert _is_transient_exception(
+        api_exceptions.Unauthenticated("Invalid Credentials")
+    )
+    assert not _is_transient_exception(api_exceptions.Unauthenticated("Other Auth"))
+    assert not _is_transient_exception(api_exceptions.NotFound("not found"))
+
+
+@pytest.mark.asyncio
+async def test_retry_request_outcomes():
+    from gcsfs.retry import retry_request
+
+    async def raise_requester_pays():
+        raise HttpError({"code": 400, "message": "Bucket is requester pays."})
+
+    wrapped = retry_request(raise_requester_pays, retries=2)
+    with pytest.raises(ValueError, match="Bucket is requester pays"):
+        await wrapped()
+
+    call_count = 0
+
+    async def raise_404():
+        nonlocal call_count
+        call_count += 1
+        raise HttpError({"code": 404, "message": "Not Found"})
+
+    wrapped_404 = retry_request(raise_404, retries=3)
+    with pytest.raises(HttpError):
+        await wrapped_404()
+    assert call_count == 1
+
+    call_count_non_retriable = 0
+
+    async def raise_non_retriable():
+        nonlocal call_count_non_retriable
+        call_count_non_retriable += 1
+        raise HttpError({"code": 400, "message": "Bad Request"})
+
+    wrapped_nr = retry_request(raise_non_retriable, retries=3)
+    with pytest.raises(HttpError):
+        await wrapped_nr()
+    assert call_count_non_retriable == 1
+
+    call_count_retriable = 0
+
+    async def raise_500():
+        nonlocal call_count_retriable
+        call_count_retriable += 1
+        raise HttpError({"code": 500, "message": "Internal Error"})
+
+    with mock.patch("asyncio.sleep", new_callable=mock.AsyncMock):
+        wrapped_500 = retry_request(raise_500, retries=3)
+        with pytest.raises(HttpError):
+            await wrapped_500()
+        assert call_count_retriable == 3

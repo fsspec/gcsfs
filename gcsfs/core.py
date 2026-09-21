@@ -34,8 +34,8 @@ from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
-from .retry import errs, retry_request, validate_response
-from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
+from .retry import HttpError, errs, retry_request, validate_response
+from .zb_hns_utils import DEFAULT_CONCURRENCY, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
 
@@ -2083,7 +2083,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
             fetcher_fn = default_fetcher
 
-        from .prefetcher import BackgroundPrefetcher
+        from fsspec.prefetcher import BackgroundPrefetcher
 
         prefetcher = BackgroundPrefetcher(
             fetcher=fetcher_fn,
@@ -2339,38 +2339,19 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type, kwargs):
+def _get_prefetcher_and_cache_config(cache_type, kwargs=None):
     """
     Resolves effective cache_type, whether prefetch reader should be enabled,
     and cache_source ("explicit" vs "default").
 
     Rules:
-    - If user explicitly sets cache_type (cache_type is not None), prefetcher is disabled,
+    - If user explicitly sets cache_type (cache_type is not None),
       cache_type is used, and cache_source is "explicit".
-    - If cache_type is None and prefetcher is enabled (default), cache_type is "none",
-      prefetcher is active, and cache_source is "default".
-    - If cache_type is None and prefetcher is disabled, fallback to default_cache_type ("readahead"),
-      and cache_source is "default".
+    - If cache_type is None, default to "adaptive" and cache_source is "default".
     """
     if cache_type is not None:
-        use_prefetch_reader = False
-        cache_source = "explicit"
-    else:
-        cache_source = "default"
-        if "use_experimental_adaptive_prefetching" in kwargs:
-            val = kwargs["use_experimental_adaptive_prefetching"]
-            use_prefetch_reader = (
-                val.lower() in ("true", "1") if isinstance(val, str) else bool(val)
-            )
-        else:
-            use_prefetch_reader = os.environ.get(
-                "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
-            ).lower() in (
-                "true",
-                "1",
-            )
-        cache_type = "none" if use_prefetch_reader else "readahead"
-    return cache_type, use_prefetch_reader, cache_source
+        return cache_type, False, "explicit"
+    return "adaptive", False, "default"
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2505,6 +2486,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         cache_type, use_prefetch_reader, self.cache_source = (
             _get_prefetcher_and_cache_config(cache_type, kwargs)
         )
+        cache_options = dict(cache_options or {})
+        if cache_type == "adaptive":
+            if "concurrency" not in cache_options:
+                cache_options["concurrency"] = self.concurrency
+            if (
+                "max_prefetch_size" not in cache_options
+                and "max_prefetch_size" in kwargs
+            ):
+                cache_options["max_prefetch_size"] = kwargs.pop("max_prefetch_size")
 
         super().__init__(
             gcsfs,
@@ -2557,20 +2547,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
-
-        if "r" in mode and use_prefetch_reader:
-            max_prefetch_size = kwargs.get("max_prefetch_size", MAX_PREFETCH_SIZE)
-            from .prefetcher import BackgroundPrefetcher
-
-            self._prefetch_engine = BackgroundPrefetcher(
-                self._async_fetch_range,
-                self.size,
-                max_prefetch_size=max_prefetch_size,
-                concurrency=self.concurrency,
-                loop=self.gcsfs.loop,
-            )
-        else:
-            self._prefetch_engine = None
 
     @property
     def details(self):
@@ -2730,9 +2706,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         start, end : None or integers
             if not both None, fetch only given range
         """
+        if start is not None and self.size is not None and start >= self.size:
+            return b""
+        if start is not None and end is not None and start >= end:
+            return b""
         try:
-            if getattr(self, "_prefetch_engine", None):
-                return self._prefetch_engine.fetch(start=start, end=end)
             return self.fs.cat_file(
                 self.path,
                 start=start,
@@ -2741,8 +2719,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
             )
-        except RuntimeError as e:
-            if "not satisfiable" in str(e):
+        except (RuntimeError, HttpError) as e:
+            if "not satisfiable" in str(e) or "InvalidRange" in str(e):
                 return b""
             raise
 
@@ -2774,8 +2752,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     def _close_impl(self):
         super().close()
-        if getattr(self, "_prefetch_engine", None):
-            self._prefetch_engine.close()
 
 
 def _convert_fixed_key_metadata(metadata, *, from_google=False):
