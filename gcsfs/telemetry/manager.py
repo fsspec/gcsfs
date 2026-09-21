@@ -137,13 +137,17 @@ def _file_async_gen_wrapper(func):
     @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
         gen = func(self, *args, **kwargs)
-        while True:
-            with _file_telemetry_context(self):
-                try:
-                    item = await gen.__anext__()
-                except StopAsyncIteration:
-                    break
-            yield item
+        try:
+            while True:
+                with _file_telemetry_context(self):
+                    try:
+                        item = await gen.__anext__()
+                    except StopAsyncIteration:
+                        break
+                yield item
+        finally:
+            if hasattr(gen, "aclose"):
+                await gen.aclose()
 
     return wrapper
 
@@ -152,13 +156,17 @@ def _file_sync_gen_wrapper(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
         gen = func(self, *args, **kwargs)
-        while True:
-            with _file_telemetry_context(self):
-                try:
-                    item = next(gen)
-                except StopIteration:
-                    break
-            yield item
+        try:
+            while True:
+                with _file_telemetry_context(self):
+                    try:
+                        item = next(gen)
+                    except StopIteration:
+                        break
+                yield item
+        finally:
+            if hasattr(gen, "close"):
+                gen.close()
 
     return wrapper
 
