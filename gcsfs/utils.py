@@ -18,4 +18,3 @@ def is_empty_range(start: int | None, end: int | None, size: int | None = None) 
         return False
 
     return start >= end
-
