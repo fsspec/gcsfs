@@ -2513,6 +2513,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
 
+        cache = getattr(self, "cache", None)
+        if getattr(cache, "_prefetcher", None) is not None and hasattr(cache, "close"):
+            # TODO: Remove this disarm once fsspec adds native support for deferred or
+            # non-blocking cache teardown during GC (or accepts an async closer).
+            # Disarm standalone cache GC/close so that it does not execute sync_teardown
+            # synchronously on the GC thread (which would undermine GCSFile._defer_close).
+            # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
+            cache.close = lambda: None
+
         # _supports_append is an internal argument not meant to be used directly.
         # If True, allows opening file in append mode. This is generally not supported
         # by GCS, but may be supported by subclasses (e.g. ZonalFile). This flag should
@@ -2748,6 +2757,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self._close_impl()
 
     def _close_impl(self):
+        # TODO: Remove explicit prefetcher cleanup once fsspec handles deferred cache teardown.
+        cache = getattr(self, "cache", None)
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None:
+            prefetcher.close()
+            cache._prefetcher = None
         super().close()
 
 

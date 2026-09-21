@@ -258,7 +258,7 @@ def test_gcsfile_cache_del_does_not_block_gc(fake_fs):
     cache = f.cache
     assert getattr(cache, "_prefetcher", None) is not None
 
-    with mock.patch("gcsfs.zb_hns_utils.sync_teardown") as mock_teardown:
+    with mock.patch("fsspec.prefetcher.sync_teardown") as mock_teardown:
         cache.__del__()
         mock_teardown.assert_not_called()
 
