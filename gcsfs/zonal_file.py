@@ -13,6 +13,7 @@ from gcsfs.core import (
     _get_prefetcher_and_cache_config,
 )
 from gcsfs.retry import HttpError
+from gcsfs.utils import is_empty_range
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS, sync_teardown
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
@@ -202,10 +203,8 @@ class ZonalFile(GCSFile):
                 "The end and chunk_lengths arguments are mutually exclusive and cannot be used together."
             )
 
-        if start is not None and self.size is not None and start >= self.size:
+        if is_empty_range(start, end, self.size):
             return b"" if chunk_lengths is None else [b""]
-        if start is not None and end is not None and start >= end:
-            return b""
 
         async def _do_fetch():
             if chunk_lengths is not None:

@@ -36,6 +36,7 @@ from gcsfs.tests.conftest import (
     text_files,
 )
 from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.zb_hns_utils import MAX_PREFETCH_SIZE
 
 TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
 TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
@@ -2959,6 +2960,19 @@ def test_prefetcher_config_options():
     fake_fs.split_path.return_value = ("bucket", "file.txt", None)
     fake_fs.info.return_value = {"size": 100}
 
+    # 1. Default without explicit max_prefetch_size -> MAX_PREFETCH_SIZE (256 MiB)
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+    ) as f:
+        assert (
+            getattr(getattr(f.cache, "_prefetcher", None), "max_prefetch_size", None)
+            == MAX_PREFETCH_SIZE
+        )
+
+    # 2. Explicit kwarg max_prefetch_size
     with GCSFile(
         fake_fs,
         "bucket/file.txt",
@@ -2969,6 +2983,19 @@ def test_prefetcher_config_options():
         assert (
             getattr(getattr(f.cache, "_prefetcher", None), "max_prefetch_size", None)
             == 1024 * 1024
+        )
+
+    # 3. Explicit cache_options["max_prefetch_size"]
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_options={"max_prefetch_size": 2048 * 1024},
+    ) as f:
+        assert (
+            getattr(getattr(f.cache, "_prefetcher", None), "max_prefetch_size", None)
+            == 2048 * 1024
         )
 
 
@@ -3052,11 +3079,23 @@ def test_gcsfile_fetch_range_error_handling():
     fake_fs = mock.MagicMock()
     fake_fs.split_path.return_value = ("bucket", "file.txt", None)
     fake_fs.info.return_value = {"size": 100}
+    fake_fs.cat_file.return_value = b"data"
     f = GCSFile(fake_fs, "bucket/file.txt", mode="rb", cache_type="none", size=100)
 
     # Boundary checks
     assert f._fetch_range(100, 200) == b""
     assert f._fetch_range(3, 1) == b""
+
+    # Negative end offset (e.g. read all except last byte)
+    assert f._fetch_range(0, -1) == b"data"
+    fake_fs.cat_file.assert_called_with(
+        "bucket/file.txt",
+        start=0,
+        end=-1,
+        concurrency=4,
+        cache_type="none",
+        cache_source="explicit",
+    )
 
     # Exception handling
     fake_fs.cat_file.side_effect = RuntimeError("Request range not satisfiable")
