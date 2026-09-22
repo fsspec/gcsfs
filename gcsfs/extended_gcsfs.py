@@ -418,9 +418,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         cache_type = kwargs.get("cache_type")
         cache_source = kwargs.get("cache_source")
         if not cache_type or not cache_source:
-            cache_type, _, cache_source = _get_prefetcher_and_cache_config(
-                cache_type, kwargs
-            )
+            cache_type, cache_source = _get_prefetcher_and_cache_config(cache_type)
         return cache_type, cache_source
 
     async def _fetch_range_split(

@@ -3056,12 +3056,13 @@ def test_gcsfile_multithreaded_read_integrity(gcs):
     data = os.urandom(file_size)
     gcs.pipe(fn, data)
 
+    chunk_size = 3 * 1024 * 1024
+
     with gcs.open(fn, "rb", block_size=2 * 1024 * 1024) as f:
 
         def thread_worker(start, size):
-            return f._fetch_range(start, start + size)
+            return f.cache._fetch(start, start + size)
 
-        chunk_size = 3 * 1024 * 1024
         futures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             for i in range(5):
@@ -3080,11 +3081,11 @@ def test_gcsfile_not_satisfiable_range(gcs):
     gcs.pipe(fn, b"12345")
 
     with gcs.open(fn, "rb") as f:
-        res = f._fetch_range(100, 200)
+        res = f.cache._fetch(100, 200)
         assert res == b""
 
         # Inverted range
-        assert f._fetch_range(3, 1) == b""
+        assert f.cache._fetch(3, 1) == b""
 
 
 def test_gcsfile_fetch_range_error_handling():
