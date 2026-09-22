@@ -195,3 +195,28 @@ def test_run_read_case_rejects_unsupported_format(tmp_path):
             _JsonOnly(rows=10),
             bucket_ctx=_local_bucket_ctx(tmp_path),
         )
+
+
+def test_run_read_case_invokes_warm_if_needed_before_timing(tmp_path, monkeypatch):
+    monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
+    order = []
+
+    def fake_warm(prefix, bucket_type):
+        order.append(("warm", bucket_type))
+        return 0
+
+    monkeypatch.setattr(read_case.rapid_cache, "warm_if_needed", fake_warm)
+
+    class _OrderDriver(_FakeDriver):
+        def run_read(self, prefix, params, manifest):
+            order.append(("run_read", params.bucket_type))
+            return super().run_read(prefix, params, manifest)
+
+    read_case.run_read_case(
+        _Bench(),
+        _Monitor(),
+        _params(bucket_type="rapid_cache_warm"),
+        _OrderDriver(rows=10),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert order == [("warm", "rapid_cache_warm"), ("run_read", "rapid_cache_warm")]
