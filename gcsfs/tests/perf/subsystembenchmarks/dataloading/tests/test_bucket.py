@@ -17,6 +17,7 @@ def _spec(**over):
 class _FakeFS:
     def __init__(self, fail_rm=False):
         self.made, self.removed, self.rmdirs = [], [], []
+        self.api_calls = []
         self.fail_rm = fail_rm
 
     def mkdir(self, name, **kwargs):
@@ -29,6 +30,10 @@ class _FakeFS:
 
     def rmdir(self, name):
         self.rmdirs.append(name)
+
+    def call(self, method, path, *, json=None, json_out=False):
+        self.api_calls.append((method, path, json))
+        return {"state": "RUNNING"}
 
 
 def test_regional_body_is_plain():
@@ -129,3 +134,24 @@ def test_empty_bucket_still_gets_dropped():
     with bucket.case_bucket(_spec(), "read-hf-x", fs=fs) as prefix:
         pass
     assert fs.rmdirs == [bucket.bucket_name_of(prefix)]
+
+
+@pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
+def test_rapid_cache_types_require_zone_and_use_regional_bucket_body(bucket_type):
+    with pytest.raises(ValueError, match="GCSFS_SUBSYSTEM_ZONE"):
+        _spec(bucket_type=bucket_type).validate()
+    spec = _spec(bucket_type=bucket_type, zone="us-central1-a")
+    spec.validate()
+    assert bucket.bucket_kwargs(spec) == {}
+
+
+def test_case_bucket_creates_waits_and_disables_rapid_cache(monkeypatch):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", "30")
+    fs = _FakeFS()
+    spec = _spec(bucket_type="rapid_cache_warm", zone="us-central1-a")
+    with bucket.case_bucket(spec, "read-wds-x", fs=fs) as prefix:
+        name = bucket.bucket_name_of(prefix)
+        assert ("POST", f"b/{name}/anywhereCaches", {"zone": "us-central1-a", "ingestOnWrite": True}) in fs.api_calls
+        assert ("GET", f"b/{name}/anywhereCaches/us-central1-a", None) in fs.api_calls
+    assert ("POST", f"b/{name}/anywhereCaches/us-central1-a/disable", None) in fs.api_calls
+    assert fs.removed == [f"{name}/"]

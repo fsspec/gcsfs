@@ -5,6 +5,7 @@ import math
 import statistics
 import time
 
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
 
@@ -66,6 +67,7 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         params.bucket_name = bucket_name_of(prefix)
         assert_fsspec_gcsfs(prefix)
         manifest = params.ingest(prefix)
+        rapid_cache.warm_if_needed(prefix, params.bucket_type)
 
         expected_rows = manifest["sample_count"]
         window_start = time.time()
