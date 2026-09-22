@@ -78,8 +78,8 @@ class ZonalFile(GCSFile):
         self.pool_size = pool_size
         object_size = None
         if "r" in self.mode:
-            resolved_cache_type, _, resolved_cache_source = (
-                _get_prefetcher_and_cache_config(cache_type, kwargs)
+            resolved_cache_type, resolved_cache_source = (
+                _get_prefetcher_and_cache_config(cache_type)
             )
             self.mrd_pool = asyn.sync(
                 self.gcsfs.loop,

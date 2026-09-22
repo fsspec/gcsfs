@@ -4,17 +4,24 @@ from __future__ import annotations
 
 
 def is_empty_range(start: int | None, end: int | None, size: int | None = None) -> bool:
-    """Returns True if the requested byte range represents zero bytes or falls beyond EOF.
-
-    Handles negative offsets following Python slice semantics when size is known.
-    """
+    """Returns True if the requested byte range represents zero bytes or falls beyond EOF."""
     if size is not None:
-        start = max(0, size + start) if (start is not None and start < 0) else start
-        end = max(0, size + end) if (end is not None and end < 0) else end
-        if start is not None and start >= size:
-            return True
+        start_idx, end_idx, _ = slice(start, end).indices(size)
+        return start_idx >= end_idx
 
-    if start is None or end is None or start < 0 or end < 0:
+    # A slice ending at index 0 is always empty (e.g. [:0] or [0:0])
+    if end == 0:
+        return True
+
+    # Reading to EOF without known size cannot be proven empty
+    if end is None:
+        return False
+
+    # In Python slicing, omitting start (start is None) defaults to index 0 (e.g. [:end])
+    start = start or 0
+
+    # Negative offsets without known size cannot be evaluated yet
+    if start < 0 or end < 0:
         return False
 
     return start >= end

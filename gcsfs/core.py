@@ -2337,10 +2337,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type, kwargs=None):
+def _get_prefetcher_and_cache_config(cache_type=None):
     """
-    Resolves effective cache_type, whether prefetch reader should be enabled,
-    and cache_source ("explicit" vs "default").
+    Resolves effective cache_type and cache_source ("explicit" vs "default").
 
     Rules:
     - If user explicitly sets cache_type (cache_type is not None),
@@ -2348,8 +2347,8 @@ def _get_prefetcher_and_cache_config(cache_type, kwargs=None):
     - If cache_type is None, default to "adaptive" and cache_source is "default".
     """
     if cache_type is not None:
-        return cache_type, False, "explicit"
-    return "adaptive", False, "default"
+        return cache_type, "explicit"
+    return "adaptive", "default"
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2481,10 +2480,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
-        cache_type, use_prefetch_reader, self.cache_source = (
-            _get_prefetcher_and_cache_config(cache_type, kwargs)
+        self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
+            cache_type
         )
-        self.cache_type = cache_type
+        cache_type = self.cache_type
         self.bucket = bucket
         self.key = key
         cache_options = dict(cache_options or {})
