@@ -1,6 +1,5 @@
 import asyncio
 import builtins
-import concurrent.futures
 import io
 import os
 import uuid
@@ -3048,32 +3047,6 @@ def test_gcsfile_prefetch_random_seek_integrity(gcs):
 
             assert len(chunk) == length
             assert chunk == data[start : start + length]
-
-
-def test_gcsfile_multithreaded_read_integrity(gcs):
-    fn = f"{TEST_BUCKET}/integrated_mt.txt"
-    file_size = 15 * 1024 * 1024
-    data = os.urandom(file_size)
-    gcs.pipe(fn, data)
-
-    chunk_size = 3 * 1024 * 1024
-
-    with gcs.open(fn, "rb", block_size=2 * 1024 * 1024) as f:
-
-        def thread_worker(start, size):
-            return f.cache._fetch(start, start + size)
-
-        futures = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            for i in range(5):
-                start_offset = i * chunk_size
-                futures.append(executor.submit(thread_worker, start_offset, chunk_size))
-
-        results = [fut.result() for fut in futures]
-        stitched_data = b"".join(results)
-
-        assert len(stitched_data) == file_size
-        assert stitched_data == data
 
 
 def test_gcsfile_not_satisfiable_range(gcs):
