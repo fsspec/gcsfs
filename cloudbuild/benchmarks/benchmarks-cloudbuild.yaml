@@ -26,15 +26,13 @@ steps:
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
 
         # Registering the key mutates the OS Login profile of the *shared* build
-        # service account. Concurrent builds (triggers can start in the same
-        # second) race here and the loser gets:
-        #   "is the subject of a conflict: Multiple concurrent mutations were
-        #    attempted. Please retry the request."
-        # This step has no allowFailure, so that previously killed the whole
-        # build before any benchmark ran, silently leaving a one-day hole in the
-        # results dataset. Retry with jittered backoff.
+        # service account, so builds that start concurrently race here and the
+        # loser fails with "Multiple concurrent mutations were attempted".
+        # This step has no allowFailure, so that killed the whole build before
+        # any benchmark ran. Retry, with jitter so racing builds do not retry
+        # in lockstep.
         MAX_ATTEMPTS=5
-        for attempt in $$(seq 1 $$MAX_ATTEMPTS); do
+        for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
           if gcloud compute os-login ssh-keys add \
                --key-file=/workspace/gcb_ssh_key.pub \
                --ttl=4h > /dev/null 2> /workspace/oslogin_err.txt; then
@@ -45,16 +43,20 @@ steps:
           echo "--- os-login ssh-keys add failed (attempt $$attempt/$$MAX_ATTEMPTS) ---"
           cat /workspace/oslogin_err.txt || true
 
-          if [ "$$attempt" -eq "$$MAX_ATTEMPTS" ]; then
-            echo "ERROR: could not register SSH key after $$MAX_ATTEMPTS attempts."
+          # Only the concurrency conflict is retryable; fail fast on anything
+          # else (bad key, missing permission, API outage).
+          if ! grep -qiE "conflict|concurrent" /workspace/oslogin_err.txt; then
+            echo "ERROR: not a concurrency conflict; not retrying."
             exit 1
           fi
 
-          # Jitter is essential: without it, racing builds retry in lockstep.
           BACKOFF=$$(( attempt * 5 + RANDOM % 10 ))
           echo "Retrying in $${BACKOFF}s..."
           sleep "$$BACKOFF"
         done
+
+        echo "ERROR: could not register SSH key after $$MAX_ATTEMPTS attempts."
+        exit 1
     waitFor: ["-"]
 
   # 2. Initialize shared variables.
@@ -373,30 +375,19 @@ steps:
           sleep 30
         done
 
-        # --- Report benchmark failures before uploading ---
-        # Surfacing this first matters: if every benchmark failed, the results
-        # directory is empty and the upload below becomes the only thing that
-        # errors, masking the real cause behind a confusing
-        # "matched no objects or files" message from gcloud storage cp.
-        if [ "$${failures:-0}" -ne 0 ]; then
-          echo "WARNING: $$failures benchmark job(s) failed in this run; results may be incomplete."
-        fi
-
         # --- Upload results ---
-        # Exit code 42 is reserved by UPLOAD_SCRIPT to mean "benchmarks produced
-        # no output", as distinct from a genuine upload/transport failure.
+        # UPLOAD_SCRIPT exits 42 to mean "benchmarks produced no output", as
+        # distinct from a genuine upload failure: an empty results directory
+        # would otherwise surface as a confusing "matched no objects or files"
+        # error from gcloud storage cp, masking the real cause.
         UPLOAD_SCRIPT="
             set -e
             cd gcsfs
             echo '--- Uploading Results ---'
             DATE_DIR=\$(date +%d%m%Y)
             RESULTS_DIR='gcsfs/tests/perf/microbenchmarks/__run__'
-            if [ ! -d \"\$$RESULTS_DIR\" ]; then
-              echo \"ERROR: no results directory at \$$RESULTS_DIR - benchmarks produced no output.\"
-              exit 42
-            fi
-            if [ -z \"\$$(find \$$RESULTS_DIR -type f -print -quit)\" ]; then
-              echo \"ERROR: results directory \$$RESULTS_DIR is empty - benchmarks produced no output.\"
+            if [ -z \"\$$(find \$$RESULTS_DIR -type f -print -quit 2>/dev/null)\" ]; then
+              echo \"ERROR: no benchmark output found at \$$RESULTS_DIR.\"
               exit 42
             fi
             echo \"Uploading from \$$RESULTS_DIR to gs://$${RESULTS_BUCKET}/branch=$${BRANCH_NAME}/\$${DATE_DIR}/$${RUN_ID}/\"
@@ -413,11 +404,8 @@ steps:
         if [ "$$UPLOAD_RC" -eq 0 ]; then
           echo "Results uploaded successfully."
         elif [ "$$UPLOAD_RC" -eq 42 ]; then
-          echo "ERROR: benchmarks produced no results to upload."
-          echo "This leaves a one-day hole in the BigQuery history, which the"
-          echo "downstream PLX alert renders as throughput 0 and files as a"
-          echo "bogus performance regression (see b/563762443)."
-          echo "Check the run-benchmarks output above for the real failure."
+          echo "ERROR: benchmarks produced no results to upload ($${failures:-0} job(s) failed)."
+          echo "Check the benchmark output above for the underlying failure."
           record_failure
           exit 1
         else
