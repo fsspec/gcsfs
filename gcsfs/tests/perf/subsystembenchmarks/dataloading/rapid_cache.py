@@ -26,11 +26,20 @@ def ingest_on_write_for(bucket_type):
 
 def timeout_from_env():
     """Return Rapid Cache creation timeout in seconds from env or default."""
-    return int(
-        os.environ.get(
-            "GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS)
-        )
+    raw = os.environ.get(
+        "GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS)
     )
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT must be a positive integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT must be > 0, got {value}"
+        )
+    return value
 
 
 def create(fs, bucket, zone, *, ingest_on_write):
@@ -57,9 +66,18 @@ def wait_running(
     deadline = clock() + timeout
     last_state = "UNKNOWN"
     while True:
-        resp = fs.call("GET", f"b/{bucket}/anywhereCaches/{zone}", json_out=True) or {}
-        state = str(resp.get("state", "")).upper()
-        last_state = state or last_state
+        try:
+            resp = (
+                fs.call("GET", f"b/{bucket}/anywhereCaches/{zone}", json_out=True)
+                or {}
+            )
+            state = str(resp.get("state", "")).upper()
+        except FileNotFoundError:
+            resp = {}
+            state = "CREATING"
+            last_state = "NOT_FOUND"
+        else:
+            last_state = state or last_state
         if state == "RUNNING":
             return resp
         if state not in _PENDING_STATES:
@@ -92,12 +110,22 @@ def warm_if_needed(prefix, bucket_type, *, fs=None):
     if fs is None:
         import gcsfs
 
-        fs = gcsfs.GCSFileSystem()
+        fs = gcsfs.GCSFileSystem(skip_instance_cache=True)
     objects = sorted(fs.find(prefix))
     if not objects:
         raise RuntimeError(f"no objects found to warm under {prefix!r}")
-    total_bytes = 0
-    for obj in objects:
+
+    import concurrent.futures
+
+    def _warm_one(obj):
         url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
-        total_bytes += len(fs.cat_file(url))
+        return len(fs.cat_file(url))
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(16, len(objects))
+    ) as pool:
+        total_bytes = sum(pool.map(_warm_one, objects))
+    if hasattr(fs, "invalidate_cache"):
+        fs.invalidate_cache()
     return total_bytes
+

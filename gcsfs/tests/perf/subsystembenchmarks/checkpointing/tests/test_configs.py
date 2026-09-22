@@ -83,3 +83,21 @@ def test_is_distributed_strategy():
     assert is_distributed_strategy("fsdp_full")
     assert is_distributed_strategy("model_parallel_full")
     assert is_distributed_strategy("model_parallel_sharded")
+
+
+@pytest.mark.parametrize(
+    "bucket_type,expected_token",
+    [
+        ("rapid_cache_cold", "rccold"),
+        ("rapid_cache_warm", "rcwarm"),
+    ],
+)
+def test_rapid_cache_bucket_types_produce_expected_id_tokens(
+    monkeypatch, bucket_type, expected_token
+):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", bucket_type)
+    cases = _cases()
+    assert cases
+    assert all(c.bucket_type == bucket_type for c in cases)
+    assert all(c.name.endswith(f"-{expected_token}") for c in cases)
+

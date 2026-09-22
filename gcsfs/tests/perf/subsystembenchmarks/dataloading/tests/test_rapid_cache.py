@@ -17,6 +17,8 @@ class _FakeCacheFS:
             return {"state": "CREATING", "zone": json["zone"]}
         if method == "GET" and "/anywhereCaches/" in path:
             state = self._states.pop(0) if len(self._states) > 1 else self._states[0]
+            if isinstance(state, Exception):
+                raise state
             return {"state": state}
         if method == "POST" and path.endswith("/disable"):
             if self._fail_disable:
@@ -147,3 +149,46 @@ def test_warm_if_needed_raises_when_warm_prefix_has_no_objects():
     fs = _FakeCacheFS(files={})
     with pytest.raises(RuntimeError, match="no objects found to warm"):
         rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_warm", fs=fs)
+
+
+def test_wait_running_tolerates_initial_file_not_found_before_running():
+    fs = _FakeCacheFS(states=[FileNotFoundError("404 Not Found"), "CREATING", "RUNNING"])
+    sleeps = []
+    resp = rapid_cache.wait_running(
+        fs,
+        "my-bucket",
+        "us-central1-a",
+        timeout=60,
+        poll=5,
+        sleep=sleeps.append,
+        clock=lambda: 0.0,
+    )
+    assert resp["state"] == "RUNNING"
+    assert sleeps == [5, 5]
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-10", "not-an-int"])
+def test_timeout_from_env_rejects_nonpositive_or_invalid_values(monkeypatch, bad_value):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", bad_value)
+    with pytest.raises(ValueError, match="GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT"):
+        rapid_cache.timeout_from_env()
+
+
+def test_warm_if_needed_constructs_gcsfs_with_skip_instance_cache(monkeypatch):
+    import gcsfs
+
+    constructed_kwargs = []
+    invalidated = []
+    fake_fs = _FakeCacheFS(files={"my-bucket/data/shard_00000.tar": b"abc"})
+    fake_fs.invalidate_cache = lambda: invalidated.append(True)
+
+    def fake_gcs_filesystem(**kwargs):
+        constructed_kwargs.append(kwargs)
+        return fake_fs
+
+    monkeypatch.setattr(gcsfs, "GCSFileSystem", fake_gcs_filesystem)
+    total = rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_warm")
+    assert total == 3
+    assert constructed_kwargs == [{"skip_instance_cache": True}]
+    assert invalidated == [True]
+

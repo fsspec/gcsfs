@@ -159,3 +159,45 @@ def test_parse_args_accepts_rapid_cache_with_zone_and_timeout(monkeypatch, bucke
     assert os.environ["GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT"] == "900"
 
 
+@pytest.mark.parametrize("bad_timeout", ["0", "-5"])
+def test_parse_args_rejects_nonpositive_rapid_cache_timeout(capsys, bad_timeout):
+    with pytest.raises(SystemExit):
+        run.parse_args(
+            [
+                "--group=dataloading/webdataset",
+                f"--rapid-cache-timeout={bad_timeout}",
+            ]
+            + _REQUIRED
+        )
+    assert "--rapid-cache-timeout must be > 0" in capsys.readouterr().err
+
+
+def test_cloudbuild_and_runner_script_wire_rapid_cache_timeout_and_disable_leaked_caches():
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
+    )
+    cb_path = os.path.join(
+        repo_root,
+        "cloudbuild",
+        "subsystembenchmarks",
+        "subsystembenchmarks-cloudbuild.yaml",
+    )
+    sh_path = os.path.join(
+        repo_root,
+        "cloudbuild",
+        "subsystembenchmarks",
+        "scripts",
+        "run-benchmarks.sh",
+    )
+    with open(cb_path) as f:
+        cb_yaml = f.read()
+    with open(sh_path) as f:
+        sh_text = f.read()
+
+    assert "_RAPID_CACHE_TIMEOUT" in cb_yaml
+    assert "export RAPID_CACHE_TIMEOUT=" in cb_yaml
+    assert "--rapid-cache-timeout=" in sh_text
+    assert cb_yaml.count("/anywhereCaches/") >= 2
+
+
+
