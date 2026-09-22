@@ -121,3 +121,41 @@ def test_ray_data_group_is_discoverable():
 def test_ray_checkpointing_group_is_discoverable():
     """Verifies checkpointing/ray_pytorch is discovered from its requirements.txt."""
     assert "checkpointing/ray_pytorch" in run.discover_groups()
+
+
+@pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
+def test_parse_args_requires_zone_for_rapid_cache_bucket_types(capsys, bucket_type):
+    with pytest.raises(SystemExit):
+        run.parse_args(
+            [
+                "--group=dataloading/webdataset",
+                f"--bucket-type={bucket_type}",
+            ]
+            + _REQUIRED
+        )
+    assert "--zone is required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
+def test_parse_args_accepts_rapid_cache_with_zone_and_timeout(monkeypatch, bucket_type):
+    for key in (
+        "GCSFS_SUBSYSTEM_BUCKET_TYPE",
+        "GCSFS_SUBSYSTEM_ZONE",
+        "GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    args = run.parse_args(
+        [
+            "--group=dataloading/webdataset",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+            "--rapid-cache-timeout=900",
+        ]
+        + _REQUIRED
+    )
+    run._setup_environment(args)
+    assert os.environ["GCSFS_SUBSYSTEM_BUCKET_TYPE"] == bucket_type
+    assert os.environ["GCSFS_SUBSYSTEM_ZONE"] == "us-central1-a"
+    assert os.environ["GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT"] == "900"
+
+

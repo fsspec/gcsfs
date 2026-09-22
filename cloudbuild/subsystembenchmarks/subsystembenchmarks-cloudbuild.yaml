@@ -3,7 +3,7 @@ substitutions:
   _INFRA_PREFIX: ""
   _VM_SERVICE_ACCOUNT: ""
   _GROUP: "dataloading/huggingface_datasets"
-  _BUCKET_TYPE: "regional"  # regional | zonal | hns (one type per run, like macrobenchmarks)
+  _BUCKET_TYPE: "regional"  # regional | zonal | hns | rapid_cache_cold | rapid_cache_warm (one type per run, like macrobenchmarks)
   _MACHINE_TYPE: "c4-standard-192"  # CPU now; point at a GPU type later (auto-detect handles backend)
   _REQUIREMENTS: ""
   _SWEEP_AXES: ""
@@ -62,7 +62,7 @@ steps:
         fi
 
         case "$${_BUCKET_TYPE}" in
-          regional|zonal|hns) ;;
+          regional|zonal|hns|rapid_cache_cold|rapid_cache_warm) ;;
           *) echo "ERROR: unknown _BUCKET_TYPE '$${_BUCKET_TYPE}'"; exit 1;;
         esac
 
@@ -124,8 +124,28 @@ steps:
             echo "Skipping VM: $$name (Age: $$AGE seconds)"
           fi
         done
+
+        gcloud storage buckets list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-'" --format="value(name,creation_time)" | while read -r name creation_time; do
+          if [ -z "$$name" ]; then continue; fi
+          CLEAN_NAME="$${name#gs://}"
+          CLEAN_NAME="$${CLEAN_NAME%/}"
+          if [ "$$CLEAN_NAME" = "$${RESULTS_BUCKET}" ] || [ "$$CLEAN_NAME" = "${_INFRA_PREFIX}-run-results" ]; then continue; fi
+          if [[ ! "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}- ]]; then continue; fi
+
+          CREATION_SECONDS=$$(date -d "$$creation_time" +%s 2>/dev/null) || continue
+          AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
+
+          if [ $$AGE -gt $$THRESHOLD ]; then
+            echo "Deleting leaked bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
+            gcloud storage rm --recursive "gs://$$CLEAN_NAME" || true
+          else
+            echo "Skipping bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
+          fi
+        done
+
     waitFor: ["init-variables"]
     allowFailure: true
+
 
   # 3. Ensure the persistent results bucket exists (the benchmark buckets are the run's own).
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"

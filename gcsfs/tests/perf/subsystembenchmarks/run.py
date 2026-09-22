@@ -24,6 +24,7 @@ def _setup_environment(args):
     os.environ["GCSFS_SUBSYSTEM_LOCATION"] = args.location
     os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
     os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
+    os.environ["GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT"] = str(args.rapid_cache_timeout)
     if args.model_id:
         os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
@@ -58,12 +59,25 @@ def _build_parser():
     )
     parser.add_argument(
         "--bucket-type",
-        choices=("regional", "zonal", "hns"),
+        choices=(
+            "regional",
+            "zonal",
+            "hns",
+            "rapid_cache_cold",
+            "rapid_cache_warm",
+        ),
         default="regional",
         help="storage tier used by every case in the run",
     )
     parser.add_argument(
-        "--zone", help="placement zone; required when --bucket-type=zonal"
+        "--zone",
+        help="placement zone; required when --bucket-type in (zonal, rapid_cache_cold, rapid_cache_warm)",
+    )
+    parser.add_argument(
+        "--rapid-cache-timeout",
+        type=int,
+        default=1800,
+        help="seconds to wait for Rapid Cache to reach RUNNING status",
     )
     parser.add_argument(
         "--model-id",
@@ -93,8 +107,13 @@ def _build_parser():
 def parse_args(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.bucket_type == "zonal" and not args.zone:
-        parser.error("--zone is required when --bucket-type=zonal")
+    if (
+        args.bucket_type in ("zonal", "rapid_cache_cold", "rapid_cache_warm")
+        and not args.zone
+    ):
+        parser.error(f"--zone is required when --bucket-type={args.bucket_type}")
+    if args.rapid_cache_timeout <= 0:
+        parser.error("--rapid-cache-timeout must be > 0")
     if args.amplification_wait < 0:
         parser.error("--amplification-wait must be >= 0")
     if args.amplification_retry_wait < 0:
@@ -103,6 +122,7 @@ def parse_args(argv=None):
     if args.group not in groups:
         parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
     return args
+
 
 
 _AMPLIFICATION_COLS = (
