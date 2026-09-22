@@ -82,3 +82,21 @@ def test_extra_columns_and_id_hooks_default_empty(tmp_path):
     cases = _write(tmp_path, text).generate_cases()
     assert cases[0].extra_columns() == {}
     assert cases[0]._id_extra_tokens() == []
+
+
+@pytest.mark.parametrize(
+    ("bucket_type", "token"),
+    [("rapid_cache_cold", "rccold"), ("rapid_cache_warm", "rcwarm")],
+)
+def test_rapid_cache_bucket_types_produce_expected_id_tokens(
+    tmp_path, monkeypatch, bucket_type, token
+):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", bucket_type)
+    text = _YAML.replace(
+        '      - {axis: "bucket_type", bucket_type: "hns"}   # run-level key -> must reject\n',
+        "",
+    )
+    cases = _write(tmp_path, text).generate_cases()
+    assert cases[0].name == f"read-fk-ptpq-seq-nw8-fc8x4096-{token}"
+    assert cases[0].rounds == 3
+
