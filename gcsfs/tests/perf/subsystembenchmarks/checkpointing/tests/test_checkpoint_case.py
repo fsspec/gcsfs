@@ -232,3 +232,53 @@ def test_checkpoint_case_prefix_generation(monkeypatch):
     )
 
     assert driver_name.run_prefix == "gs://my-bucket-name/checkpoint/"
+
+
+def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    warm_calls = []
+    monkeypatch.setattr(
+        rapid_cache,
+        "warm_if_needed",
+        lambda prefix, bucket_type, **kw: warm_calls.append((prefix, bucket_type)) or 0,
+    )
+
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            mem_url = url.replace("gs://", "memory://")
+            fs, path = original_url_to_fs(mem_url)
+            model_file = os.path.join(path, "model.ckpt")
+            fs.makedirs(os.path.dirname(model_file), exist_ok=True)
+            with fs.open(model_file, "wb") as f:
+                f.write(b"0" * 500)
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+
+    # Read case on rapid_cache_warm must call warm_if_needed
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _Monitor(),
+        _params(scenario="checkpoint_read", bucket_type="rapid_cache_warm"),
+        _FakeReadDriver(durations=[1.0]),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert len(warm_calls) == 1
+    assert warm_calls[0][1] == "rapid_cache_warm"
+
+    # Write case must not call warm_if_needed
+    warm_calls.clear()
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _Monitor(),
+        _params(scenario="checkpoint_write", bucket_type="rapid_cache_warm"),
+        _FakeWriteDriver(durations=[1.0]),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert warm_calls == []
+

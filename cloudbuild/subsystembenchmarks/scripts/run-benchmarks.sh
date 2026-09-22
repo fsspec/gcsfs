@@ -16,5 +16,6 @@ python gcsfs/tests/perf/subsystembenchmarks/run.py \
   "--project=$PROJECT_ID" \
   "--location=$REGION" \
   "--zone=$ZONE" \
+  "--rapid-cache-timeout=${RAPID_CACHE_TIMEOUT:-1800}" \
   "--model-id=${MODEL_ID:-}" \
   --require-amplification

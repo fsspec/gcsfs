@@ -136,6 +136,11 @@ def enrich_csv(csv_path, project, *, client):
             rounds = int(float(row.get("measurement_round_count") or 1))
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
             reqs = bucket_read_requests(client, project, bucket, ws, we)
+            if row.get("bucket_type") == "rapid_cache_warm":
+                if egress is None:
+                    egress = 0.0
+                if reqs is None:
+                    reqs = 0.0
             if egress is not None:
                 row[f"{prefix}_read_bytes"] = str(int(egress))
                 ideal = physical_size * rounds

@@ -11,6 +11,7 @@ substitutions:
   _HF_TOKEN: ""
   _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
   _BOOT_DISK_SIZE: "200GB"
+  _RAPID_CACHE_TIMEOUT: "1800"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -45,6 +46,7 @@ steps:
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_BOOT_DISK_SIZE=${_BOOT_DISK_SIZE}"
+      - "_RAPID_CACHE_TIMEOUT=${_RAPID_CACHE_TIMEOUT}"
       - "PROJECT_ID=${PROJECT_ID}"
     args:
       - "-c"
@@ -94,6 +96,7 @@ steps:
           printf 'export HF_TOKEN=%q\n' "$${_HF_TOKEN}"
           printf 'export MODEL_ID=%q\n' "$${_MODEL_ID}"
           printf 'export BOOT_DISK_SIZE=%q\n' "$${_BOOT_DISK_SIZE}"
+          printf 'export RAPID_CACHE_TIMEOUT=%q\n' "$${_RAPID_CACHE_TIMEOUT}"
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
@@ -137,6 +140,11 @@ steps:
 
           if [ $$AGE -gt $$THRESHOLD ]; then
             echo "Deleting leaked bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
+            TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
+            for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+              echo "Disabling leaked anywhere-cache on gs://$$CLEAN_NAME in zone $$z"
+              curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" >/dev/null || true
+            done
             gcloud storage rm --recursive "gs://$$CLEAN_NAME" || true
           else
             echo "Skipping bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
@@ -287,6 +295,13 @@ steps:
           | grep "^gs://$${BUCKET_PREFIX}-" || true)
         for b in $$LEAKED; do
           echo "sweeping leaked benchmark bucket $$b"
+          CLEAN_NAME="$${b#gs://}"
+          CLEAN_NAME="$${CLEAN_NAME%/}"
+          TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
+          for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+            echo "Disabling leaked anywhere-cache on $$b in zone $$z"
+            curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" >/dev/null || true
+          done
           gcloud storage rm --recursive "$$b" || true
         done
     waitFor: ["run-subsystembenchmarks"]

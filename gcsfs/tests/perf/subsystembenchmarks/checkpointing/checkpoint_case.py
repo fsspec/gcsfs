@@ -50,6 +50,11 @@ def run_checkpoint_case(
         if p.exitcode != 0:
             raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
 
+        if "read" in params.scenario:
+            from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
+            rapid_cache.warm_if_needed(prefix, params.bucket_type)
+
         window_start = time.time()
         with monitor() as m:
             result = driver.run(prefix, params)
