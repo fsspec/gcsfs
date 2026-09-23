@@ -198,6 +198,12 @@ def test_cloudbuild_and_runner_script_wire_rapid_cache_timeout_and_disable_leake
     assert "export RAPID_CACHE_TIMEOUT=" in cb_yaml
     assert "--rapid-cache-timeout=" in sh_text
     assert cb_yaml.count("/anywhereCaches/") >= 2
+    # TOKEN should be fetched once before the bucket loop in each cleanup step, not inside the loop
+    assert (
+        cb_yaml.index("TOKEN=$$(gcloud auth print-access-token")
+        < cb_yaml.index("gcloud storage buckets list")
+    )
+
 
 
 

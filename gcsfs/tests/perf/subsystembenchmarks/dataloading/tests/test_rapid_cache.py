@@ -120,6 +120,7 @@ def test_disable_suppresses_errors():
 def test_warm_if_needed_reads_all_objects_only_for_warm_gcs_prefix():
     fs = _FakeCacheFS(
         files={
+            "my-bucket/data/": b"",
             "my-bucket/data/shard_00000.tar": b"abc",
             "my-bucket/data/shard_00001.tar": b"defg",
         }
@@ -139,7 +140,7 @@ def test_warm_if_needed_reads_all_objects_only_for_warm_gcs_prefix():
         "gs://my-bucket/data/", "rapid_cache_warm", fs=fs
     )
     assert total == 7
-    assert fs.cat_calls == [
+    assert sorted(fs.cat_calls) == [
         "gs://my-bucket/data/shard_00000.tar",
         "gs://my-bucket/data/shard_00001.tar",
     ]
@@ -191,4 +192,14 @@ def test_warm_if_needed_constructs_gcsfs_with_skip_instance_cache(monkeypatch):
     assert total == 3
     assert constructed_kwargs == [{"skip_instance_cache": True}]
     assert invalidated == [True]
+
+
+@pytest.mark.parametrize("timeout,poll", [(0, 5), (-1, 5), (60, 0), (60, -2)])
+def test_wait_running_rejects_nonpositive_timeout_or_poll(timeout, poll):
+    fs = _FakeCacheFS()
+    with pytest.raises(ValueError, match="must be > 0"):
+        rapid_cache.wait_running(
+            fs, "my-bucket", "us-central1-a", timeout=timeout, poll=poll
+        )
+
 

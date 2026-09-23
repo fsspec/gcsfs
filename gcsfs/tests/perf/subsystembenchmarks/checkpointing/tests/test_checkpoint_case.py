@@ -238,12 +238,20 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 
     monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    # Even when GCSFS_SUBSYSTEM_BUCKET_TYPE=rapid_cache_warm is set without GCSFS_SUBSYSTEM_ZONE,
+    # a custom bucket_ctx should not fail BucketSpec.from_env() validation, and warm_if_needed
+    # must receive the fs resolved by fsspec.core.url_to_fs(prefix).
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", "rapid_cache_warm")
+    monkeypatch.delenv("GCSFS_SUBSYSTEM_ZONE", raising=False)
+
     warm_calls = []
-    monkeypatch.setattr(
-        rapid_cache,
-        "warm_if_needed",
-        lambda prefix, bucket_type, **kw: warm_calls.append((prefix, bucket_type)) or 0,
-    )
+    orig_warm = rapid_cache.warm_if_needed
+
+    def spy_warm(prefix, bucket_type, *, fs=None):
+        warm_calls.append((prefix, bucket_type, fs))
+        return orig_warm(prefix, bucket_type, fs=fs)
+
+    monkeypatch.setattr(rapid_cache, "warm_if_needed", spy_warm)
 
     original_url_to_fs = fsspec.core.url_to_fs
 
@@ -260,7 +268,7 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
 
     monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
 
-    # Read case on rapid_cache_warm must call warm_if_needed
+    # Read case on rapid_cache_warm must call warm_if_needed with the memory fs
     checkpoint_case.run_checkpoint_case(
         _Bench(),
         _Monitor(),
@@ -270,6 +278,7 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
     )
     assert len(warm_calls) == 1
     assert warm_calls[0][1] == "rapid_cache_warm"
+    assert warm_calls[0][2] is not None
 
     # Write case must not call warm_if_needed
     warm_calls.clear()
@@ -281,4 +290,5 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
     assert warm_calls == []
+
 

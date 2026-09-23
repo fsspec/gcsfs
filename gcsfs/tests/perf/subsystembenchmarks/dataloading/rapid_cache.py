@@ -63,6 +63,10 @@ def wait_running(
     clock=time.monotonic,
 ):
     """Poll GET anywhereCaches/{zone} until state == 'RUNNING'."""
+    if timeout <= 0:
+        raise ValueError(f"timeout must be > 0, got {timeout}")
+    if poll <= 0:
+        raise ValueError(f"poll must be > 0, got {poll}")
     deadline = clock() + timeout
     last_state = "UNKNOWN"
     while True:
@@ -111,14 +115,27 @@ def warm_if_needed(prefix, bucket_type, *, fs=None):
         import gcsfs
 
         fs = gcsfs.GCSFileSystem(skip_instance_cache=True)
-    objects = sorted(fs.find(prefix))
+    protocols = getattr(fs, "protocol", ("gs", "gcs"))
+    if isinstance(protocols, str):
+        protocols = (protocols,)
+    uses_gs_protocol = "gs" in protocols or "gcs" in protocols
+    find_target = prefix if uses_gs_protocol else str(prefix)[len("gs://") :]
+    objects = sorted(
+        obj
+        for obj in fs.find(find_target)
+        if not str(obj).endswith("/")
+        and not (hasattr(fs, "isdir") and fs.isdir(obj))
+    )
     if not objects:
         raise RuntimeError(f"no objects found to warm under {prefix!r}")
 
     import concurrent.futures
 
     def _warm_one(obj):
-        url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
+        if uses_gs_protocol:
+            url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
+        else:
+            url = obj
         return len(fs.cat_file(url))
 
     with concurrent.futures.ThreadPoolExecutor(

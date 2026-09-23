@@ -5,6 +5,10 @@ import os
 from datetime import datetime
 
 from gcsfs.tests.perf.subsystembenchmarks._common import cli, report
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
+    RAPID_CACHE_BUCKET_TYPES,
+)
 
 
 def discover_groups():
@@ -59,13 +63,7 @@ def _build_parser():
     )
     parser.add_argument(
         "--bucket-type",
-        choices=(
-            "regional",
-            "zonal",
-            "hns",
-            "rapid_cache_cold",
-            "rapid_cache_warm",
-        ),
+        choices=BUCKET_TYPES,
         default="regional",
         help="storage tier used by every case in the run",
     )
@@ -108,7 +106,7 @@ def parse_args(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
     if (
-        args.bucket_type in ("zonal", "rapid_cache_cold", "rapid_cache_warm")
+        args.bucket_type in ("zonal", *RAPID_CACHE_BUCKET_TYPES)
         and not args.zone
     ):
         parser.error(f"--zone is required when --bucket-type={args.bucket_type}")
