@@ -43,6 +43,27 @@ def _gcs_async_wrapper(func: Callable, obj: Any = None) -> Callable:
     return wrapper
 
 
+def _resolve_target_method(
+    func: Callable, obj: Any, args: tuple
+) -> tuple[Any, Callable, tuple]:
+    """Dynamically resolve `func` on `self` to preserve subclass overrides and mocks."""
+    self = obj or args[0]
+    method_name = getattr(func, "__name__", None)
+    actual_func = getattr(self, method_name, None) if method_name else None
+    if actual_func is not None:
+        return self, actual_func, (args if obj is not None else args[1:])
+    return self, func, args
+
+
+def _run_sync(self: Any, func: Callable, *args, **kwargs) -> Any:
+    """Execute `func` synchronously via `self._sync` or fallback to `fsspec.asyn.sync`."""
+    if hasattr(self, "_sync"):
+        return self._sync(func, *args, **kwargs)
+    import fsspec.asyn
+
+    return fsspec.asyn.sync(self.loop, func, *args, **kwargs)
+
+
 def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
     """
     GCS-specific sync wrapper that captures caller thread telemetry
@@ -53,13 +74,8 @@ def _gcs_sync_wrapper(func: Callable, obj: Any = None) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        self = obj or args[0]
-        if hasattr(self, "_sync"):
-            return self._sync(func, *args, **kwargs)
-        # Fallback if unbound
-        import fsspec.asyn
-
-        return fsspec.asyn.sync(self.loop, func, *args, **kwargs)
+        self, actual_func, pass_args = _resolve_target_method(func, obj, args)
+        return _run_sync(self, actual_func, *pass_args, **kwargs)
 
     wrapper._is_gcs_sync_wrapped = True
     return wrapper
@@ -75,27 +91,18 @@ def _gcs_async_gen_wrapper(func: Callable, obj: Any = None) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        self = obj or args[0]
-        gen = func(*args, **kwargs)
+        self, actual_func, pass_args = _resolve_target_method(func, obj, args)
+        gen = actual_func(*pass_args, **kwargs)
         try:
             while True:
                 try:
-                    if hasattr(self, "_sync"):
-                        yield self._sync(gen.__anext__)
-                    else:
-                        import fsspec.asyn
-
-                        yield fsspec.asyn.sync(self.loop, gen.__anext__)
+                    yield _run_sync(self, gen.__anext__)
                 except StopAsyncIteration:
                     break
         finally:
             if hasattr(gen, "aclose"):
-                try:
-                    import fsspec.asyn
-
-                    fsspec.asyn.sync(self.loop, gen.aclose)
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    _run_sync(self, gen.aclose)
 
     wrapper._is_gcs_gen_wrapped = True
     return wrapper

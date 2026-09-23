@@ -756,3 +756,32 @@ def test_defer_close_propagates_caller_framework():
 
     assert captured_context.get(Dimension.FRAMEWORK.value) == "fw/ray"
     f.closed = True
+
+
+def test_subclass_polymorphism_and_mocking(monkeypatch):
+    """Verify that class-level sync wrappers dynamically dispatch to subclass overrides and monkeypatches."""
+    from gcsfs.core import GCSFileSystem
+
+    class CustomGCSFileSystem(GCSFileSystem):
+        async def _ls(self, path, detail=False, **kwargs):
+            return [f"subclass:{path}"]
+
+        async def _walk(self, path, maxdepth=None, **kwargs):
+            yield (f"subclass_walk:{path}", [], ["file.txt"])
+
+    sub_fs = CustomGCSFileSystem(
+        token="anon", project="test-project", skip_instance_cache=True
+    )
+    assert sub_fs.ls("my-bucket") == ["subclass:my-bucket"]
+    assert list(sub_fs.walk("my-bucket")) == [
+        ("subclass_walk:my-bucket", [], ["file.txt"])
+    ]
+
+    # Verify monkeypatch on GCSFileSystem._cat_file intercepts fs.cat_file()
+    fs = GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+
+    async def mocked_cat_file(self, path, start=None, end=None, **kwargs):
+        return f"mocked:{path}".encode()
+
+    monkeypatch.setattr(GCSFileSystem, "_cat_file", mocked_cat_file)
+    assert fs.cat_file("my-bucket/obj.txt") == b"mocked:my-bucket/obj.txt"
