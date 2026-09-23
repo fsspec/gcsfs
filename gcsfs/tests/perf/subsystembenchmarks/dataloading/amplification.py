@@ -138,11 +138,13 @@ def enrich_csv(csv_path, project, *, client):
 
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
             reqs = bucket_read_requests(client, project, bucket, ws, we)
-            if rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type")):
-                if egress is None:
-                    egress = 0.0
-                if reqs is None:
-                    reqs = 0.0
+            if (
+                rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
+                and egress is None
+                and reqs is None
+            ):
+                egress = 0.0
+                reqs = 0.0
             if egress is not None:
                 row[f"{prefix}_read_bytes"] = str(int(egress))
                 ideal = physical_size * rounds

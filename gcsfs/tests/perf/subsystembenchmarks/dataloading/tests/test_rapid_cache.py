@@ -155,17 +155,40 @@ def test_warm_if_needed_raises_when_warm_prefix_has_no_objects():
 def test_wait_running_tolerates_initial_file_not_found_before_running():
     fs = _FakeCacheFS(states=[FileNotFoundError("404 Not Found"), "CREATING", "RUNNING"])
     sleeps = []
+    t = [0.0]
+
+    def sleep(dt):
+        sleeps.append(dt)
+        t[0] += dt
+
     resp = rapid_cache.wait_running(
         fs,
         "my-bucket",
         "us-central1-a",
         timeout=60,
         poll=5,
-        sleep=sleeps.append,
-        clock=lambda: 0.0,
+        sleep=sleep,
+        clock=lambda: t[0],
     )
     assert resp["state"] == "RUNNING"
     assert sleeps == [5, 5]
+
+
+def test_wait_running_times_out_with_last_state_not_found():
+    fs = _FakeCacheFS(states=[FileNotFoundError("404 Not Found")])
+    ticks = iter([0.0, 10.0, 25.0])
+    with pytest.raises(
+        TimeoutError, match="my-bucket.*us-central1-a.*last state: 'NOT_FOUND'"
+    ):
+        rapid_cache.wait_running(
+            fs,
+            "my-bucket",
+            "us-central1-a",
+            timeout=20,
+            poll=10,
+            sleep=lambda _: None,
+            clock=lambda: next(ticks),
+        )
 
 
 @pytest.mark.parametrize("bad_value", ["0", "-10", "not-an-int"])
@@ -194,6 +217,25 @@ def test_warm_if_needed_constructs_gcsfs_with_skip_instance_cache(monkeypatch):
     assert invalidated == [True]
 
 
+def test_warm_if_needed_streams_with_fs_open_when_available():
+    import io
+
+    fs = _FakeCacheFS(files={"my-bucket/data/shard_00000.tar": b"abcdef"})
+    opened = []
+
+    def fake_open(url, mode="rb"):
+        opened.append((url, mode))
+        return io.BytesIO(b"abcdef")
+
+    fs.open = fake_open
+    total = rapid_cache.warm_if_needed(
+        "gs://my-bucket/data/", "rapid_cache_warm", fs=fs
+    )
+    assert total == 6
+    assert opened == [("gs://my-bucket/data/shard_00000.tar", "rb")]
+    assert fs.cat_calls == []
+
+
 @pytest.mark.parametrize("timeout,poll", [(0, 5), (-1, 5), (60, 0), (60, -2)])
 def test_wait_running_rejects_nonpositive_timeout_or_poll(timeout, poll):
     fs = _FakeCacheFS()
@@ -201,5 +243,6 @@ def test_wait_running_rejects_nonpositive_timeout_or_poll(timeout, poll):
         rapid_cache.wait_running(
             fs, "my-bucket", "us-central1-a", timeout=timeout, poll=poll
         )
+
 
 

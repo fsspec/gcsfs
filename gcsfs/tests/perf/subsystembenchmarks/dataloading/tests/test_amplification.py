@@ -269,3 +269,40 @@ def test_enrich_csv_rapid_cache_treats_empty_series_as_zero_origin_egress(
     assert float(row["dataset_read_amplification_ratio"]) == 0.0
 
 
+def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry(tmp_path):
+    """If reqs is present (>0) while egress is None due to ingestion lag, do not coerce egress to 0."""
+    csv_path = tmp_path / "results.csv"
+    fields = _FIELDS + ["bucket_type"]
+    _write_csv(
+        csv_path,
+        [
+            {
+                "benchmark_case_id": "case-cold",
+                "gcs_bucket_name": "b-cold",
+                "bucket_type": "rapid_cache_cold",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "dataset_size_bytes": "500",
+                "measurement_round_count": "3",
+            }
+        ],
+        fields,
+    )
+    egress_series = [_TimeSeries([_point(1500.0)])]
+    req_series = [_TimeSeries([_point(10.0)])]
+    # Pass 1: egress is empty ([]), reqs has landed (10.0). Pass 2: both present.
+    client = _SequencedClient([[], req_series, egress_series, req_series])
+
+    first = amplification.enrich_csv(str(csv_path), "proj", client=client)
+    assert first.missing_buckets == ("b-cold",)
+
+    second = amplification.enrich_csv(str(csv_path), "proj", client=client)
+    assert second.missing_buckets == ()
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+    assert row["dataset_read_bytes"] == "1500"
+    assert row["dataset_read_request_count"] == "10"
+    assert float(row["dataset_read_amplification_ratio"]) == 1.0
+
+
+

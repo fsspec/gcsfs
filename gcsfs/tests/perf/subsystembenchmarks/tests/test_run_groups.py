@@ -203,6 +203,8 @@ def test_cloudbuild_and_runner_script_wire_rapid_cache_timeout_and_disable_leake
         cb_yaml.index("TOKEN=$$(gcloud auth print-access-token")
         < cb_yaml.index("gcloud storage buckets list")
     )
+    assert 'gcloud storage rm --recursive "gs://$$CLEAN_NAME" < /dev/null' in cb_yaml
+
 
 
 
