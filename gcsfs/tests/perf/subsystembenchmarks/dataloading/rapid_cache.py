@@ -136,6 +136,12 @@ def warm_if_needed(prefix, bucket_type, *, fs=None):
             url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
         else:
             url = obj
+        if hasattr(fs, "open"):
+            total = 0
+            with fs.open(url, "rb") as f:
+                while chunk := f.read(16 * 1024 * 1024):
+                    total += len(chunk)
+            return total
         return len(fs.cat_file(url))
 
     with concurrent.futures.ThreadPoolExecutor(

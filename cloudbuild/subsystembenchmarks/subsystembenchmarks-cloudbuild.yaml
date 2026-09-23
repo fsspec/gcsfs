@@ -122,7 +122,7 @@ steps:
 
           if [ $$AGE -gt $$THRESHOLD ]; then
             echo "Deleting leaked VM: $$name in zone $$zone (Age: $$AGE seconds)"
-            gcloud compute instances delete "$$name" --project="${PROJECT_ID}" --zone="$$zone" --quiet || true
+            gcloud compute instances delete "$$name" --project="${PROJECT_ID}" --zone="$$zone" --quiet < /dev/null || true
           else
             echo "Skipping VM: $$name (Age: $$AGE seconds)"
           fi
@@ -141,11 +141,11 @@ steps:
 
           if [ $$AGE -gt $$THRESHOLD ]; then
             echo "Deleting leaked bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
-            for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+            for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" < /dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
               echo "Disabling leaked anywhere-cache on gs://$$CLEAN_NAME in zone $$z"
-              curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" >/dev/null || true
+              curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
             done
-            gcloud storage rm --recursive "gs://$$CLEAN_NAME" || true
+            gcloud storage rm --recursive "gs://$$CLEAN_NAME" < /dev/null || true
           else
             echo "Skipping bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
           fi
