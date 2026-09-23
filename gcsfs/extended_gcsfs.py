@@ -404,7 +404,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return offset, length
 
-    sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
+    sync_process_limits_to_offset_and_length = _gcs_sync_wrapper(
         _process_limits_to_offset_and_length
     )
 
