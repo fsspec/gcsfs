@@ -114,6 +114,9 @@ def _delete(fs, name, spec=None):
         pass
     except Exception as exc:
         logging.warning("could not empty benchmark bucket %s: %s", name, exc)
+    # GCS enforces a 1-hour grace period after disabling an Anywhere Cache during which
+    # buckets.delete returns HTTP 400; objects are already removed above, and Cloud Build's
+    # cleanup-leaked-resources sweeps the empty bucket once the grace period elapses.
     with contextlib.suppress(Exception):
         fs.rmdir(name)
 

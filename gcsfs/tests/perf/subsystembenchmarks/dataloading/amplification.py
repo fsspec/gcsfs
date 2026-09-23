@@ -134,9 +134,11 @@ def enrich_csv(csv_path, project, *, client):
             )
             # Normalize GCS bytes sent by stored bytes times measured rounds.
             rounds = int(float(row.get("measurement_round_count") or 1))
+            from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
             reqs = bucket_read_requests(client, project, bucket, ws, we)
-            if row.get("bucket_type") == "rapid_cache_warm":
+            if rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type")):
                 if egress is None:
                     egress = 0.0
                 if reqs is None:

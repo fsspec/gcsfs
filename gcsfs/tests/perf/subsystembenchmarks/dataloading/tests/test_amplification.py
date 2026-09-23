@@ -2,6 +2,8 @@ import csv
 import logging
 import types
 
+import pytest
+
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import amplification
 
 
@@ -234,17 +236,20 @@ def test_enrich_csv_checkpoint_read_and_write(tmp_path):
     assert rows[1]["checkpoint_read_bytes"] == ""
 
 
-def test_enrich_csv_rapid_cache_warm_treats_empty_series_as_zero_origin_egress(tmp_path):
-    """When rapid_cache_warm serves 100% of reads from zonal cache, 0 origin egress emits no time series."""
+@pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
+def test_enrich_csv_rapid_cache_treats_empty_series_as_zero_origin_egress(
+    tmp_path, bucket_type
+):
+    """When Rapid Cache serves reads from zonal cache, 0 origin egress emits no time series."""
     csv_path = tmp_path / "results.csv"
     fields = _FIELDS + ["bucket_type"]
     _write_csv(
         csv_path,
         [
             {
-                "benchmark_case_id": "case-warm",
-                "gcs_bucket_name": "b-warm",
-                "bucket_type": "rapid_cache_warm",
+                "benchmark_case_id": f"case-{bucket_type}",
+                "gcs_bucket_name": f"b-{bucket_type}",
+                "bucket_type": bucket_type,
                 "measurement_window_start_unix_seconds": "1000",
                 "measurement_window_end_unix_seconds": "1060",
                 "dataset_size_bytes": "500",
@@ -262,4 +267,5 @@ def test_enrich_csv_rapid_cache_warm_treats_empty_series_as_zero_origin_egress(t
     assert row["dataset_read_bytes"] == "0"
     assert row["dataset_read_request_count"] == "0"
     assert float(row["dataset_read_amplification_ratio"]) == 0.0
+
 

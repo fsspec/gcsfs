@@ -128,6 +128,7 @@ steps:
           fi
         done
 
+        TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
         gcloud storage buckets list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-'" --format="value(name,creation_time)" | while read -r name creation_time; do
           if [ -z "$$name" ]; then continue; fi
           CLEAN_NAME="$${name#gs://}"
@@ -140,7 +141,6 @@ steps:
 
           if [ $$AGE -gt $$THRESHOLD ]; then
             echo "Deleting leaked bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
-            TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
             for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
               echo "Disabling leaked anywhere-cache on gs://$$CLEAN_NAME in zone $$z"
               curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" >/dev/null || true
@@ -293,11 +293,11 @@ steps:
         source /workspace/build_vars.env
         LEAKED=$(gcloud storage ls --project=${PROJECT_ID} \
           | grep "^gs://$${BUCKET_PREFIX}-" || true)
+        TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
         for b in $$LEAKED; do
           echo "sweeping leaked benchmark bucket $$b"
           CLEAN_NAME="$${b#gs://}"
           CLEAN_NAME="$${CLEAN_NAME%/}"
-          TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
           for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
             echo "Disabling leaked anywhere-cache on $$b in zone $$z"
             curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" >/dev/null || true
