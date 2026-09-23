@@ -11,10 +11,7 @@ from gcsfs.telemetry.context import Dimension
 class BaseDetector:
     """Base interface for extracting telemetry tokens."""
 
-    @property
-    def name(self) -> Dimension | str:
-        """Unique telemetry dimension identifier for this detector."""
-        raise NotImplementedError
+    name: Dimension | str = ""
 
     def detect(self) -> Optional[str]:
         """

@@ -11,11 +11,11 @@ from gcsfs.telemetry.context import (
     Dimension,
     get_telemetry_context,
     reset_telemetry_context,
+    sanitize_token,
     set_telemetry_context,
 )
 from gcsfs.telemetry.detectors.base import BaseDetector
 from gcsfs.telemetry.detectors.framework import FrameworkDetector
-from gcsfs.telemetry.sanitizer import sanitize_token
 
 
 def _gcs_async_wrapper(func: Callable, obj: Any = None) -> Callable:
@@ -114,17 +114,11 @@ def _setup_file_telemetry(file_obj) -> Optional[Any]:
     if not isinstance(fw, str):
         return None
 
-    from gcsfs.telemetry.context import Dimension, get_dimension_context
-
     # O(1) zero-allocation fast path check
-    if get_dimension_context(Dimension.FRAMEWORK) == fw:
+    if get_telemetry_context(Dimension.FRAMEWORK) == fw:
         return None
 
-    from gcsfs.telemetry.context import get_telemetry_context, set_telemetry_context
-
-    tokens_map = get_telemetry_context()
-    tokens_map[Dimension.FRAMEWORK.value] = fw
-    return set_telemetry_context(tokens_map)
+    return set_telemetry_context(Dimension.FRAMEWORK, fw)
 
 
 @contextlib.contextmanager
@@ -288,10 +282,6 @@ class UsageMetricsTracker:
         self.detectors: List[BaseDetector] = (
             list(detectors) if detectors is not None else []
         )
-
-    def register_detector(self, detector: BaseDetector) -> None:
-        """Register a new detector for a telemetry dimension (e.g. env, op)."""
-        self.detectors.append(detector)
 
     def collect_tokens_map(self) -> Dict[str, str]:
         """

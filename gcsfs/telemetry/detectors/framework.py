@@ -5,9 +5,8 @@ from __future__ import annotations
 import sys
 from typing import Dict, Optional
 
-from gcsfs.telemetry.context import Dimension
+from gcsfs.telemetry.context import Dimension, sanitize_token
 from gcsfs.telemetry.detectors.base import BaseDetector
-from gcsfs.telemetry.sanitizer import sanitize_framework
 
 
 class FrameworkDetector(BaseDetector):
@@ -17,6 +16,8 @@ class FrameworkDetector(BaseDetector):
     Traverses frames from outermost (closest to __main__) down to innermost (gcsfs)
     to attribute high-level orchestrators (e.g., Dask, Ray) over lower-level serialization layers (PyArrow).
     """
+
+    name = Dimension.FRAMEWORK
 
     # Canonical mapping of top-level package name -> standard brand token
     KNOWN_FRAMEWORKS: Dict[str, str] = {
@@ -45,10 +46,6 @@ class FrameworkDetector(BaseDetector):
 
     def __init__(self, max_depth: int = 64):
         self.max_depth = max_depth
-
-    @property
-    def name(self) -> Dimension:
-        return Dimension.FRAMEWORK
 
     def detect(self) -> Optional[str]:
         if not self.is_enabled():
@@ -90,8 +87,6 @@ class FrameworkDetector(BaseDetector):
             top_pkg = mod_name.partition(".")[0]
             if top_pkg in self.KNOWN_FRAMEWORKS:
                 framework_name = self.KNOWN_FRAMEWORKS[top_pkg]
-                clean_name = sanitize_framework(framework_name)
-                if clean_name:
-                    return f"fw/{clean_name}"
+                return sanitize_token(f"fw/{framework_name}")
 
         return None

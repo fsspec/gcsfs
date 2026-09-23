@@ -3716,7 +3716,7 @@ def test_user_agent_telemetry_integration(gcs):
     from gcsfs.telemetry.context import (
         Dimension,
         reset_telemetry_context,
-        set_dimension_context,
+        set_telemetry_context,
     )
 
     # 1. Default headers
@@ -3734,7 +3734,7 @@ def test_user_agent_telemetry_integration(gcs):
     assert "cache_type/none:d" in headers_default["User-Agent"]
 
     # 3. ContextVar caller framework
-    token = set_dimension_context(Dimension.FRAMEWORK, "fw/torch")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/torch")
     try:
         headers_caller = gcs._get_headers(None)
         assert "fw/torch" in headers_caller["User-Agent"]
@@ -3743,7 +3743,7 @@ def test_user_agent_telemetry_integration(gcs):
         reset_telemetry_context(token)
 
     # 4. Preset User-Agent is preserved
-    token = set_dimension_context(Dimension.FRAMEWORK, "fw/pandas")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/pandas")
     try:
         headers_preset = gcs._get_headers({"User-Agent": "my-custom-agent"})
         assert headers_preset["User-Agent"] == "my-custom-agent"

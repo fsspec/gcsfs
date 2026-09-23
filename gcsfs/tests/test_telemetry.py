@@ -10,69 +10,50 @@ import pytest
 
 from gcsfs.telemetry.context import (
     Dimension,
-    get_dimension_context,
+    get_telemetry_context,
     reset_telemetry_context,
-    set_dimension_context,
+    sanitize_token,
+    set_telemetry_context,
 )
 from gcsfs.telemetry.detectors.base import BaseDetector
 from gcsfs.telemetry.detectors.framework import FrameworkDetector
 from gcsfs.telemetry.manager import UsageMetricsTracker
-from gcsfs.telemetry.sanitizer import sanitize_framework, sanitize_token
 
 # ============================================================================
 # 1. Sanitizer Tests
 # ============================================================================
 
 
-def test_sanitize_framework_empty_and_none():
-    assert sanitize_framework(None) == ""
-    assert sanitize_framework("") == ""
-    assert sanitize_framework("   ") == ""
-    assert sanitize_framework(123) == ""  # Non-string input
-
-
-def test_sanitize_framework_valid_characters():
-    assert sanitize_framework("pandas") == "pandas"
-    assert sanitize_framework("datasets") == "datasets"
-    assert sanitize_framework("scikit-learn") == "scikit-learn"
-    assert sanitize_framework("version.1.2.3") == "version.1.2.3"
-    assert sanitize_framework("my_custom_framework-v2") == "my_custom_framework-v2"
-
-
-def test_sanitize_framework_forbidden_chars_and_crlf():
-    # CRLF injection attempt (\r\n replaced, delimiters like ':' and '/' sanitized)
-    assert (
-        sanitize_framework("pandas\r\nInjected-Header: bad")
-        == "pandas__Injected-Header__bad"
-    )
-    # Slashes and colons are sanitized to prevent malformed tokens
-    assert sanitize_framework("fw/torch") == "fw_torch"
-    assert sanitize_framework("host:8080") == "host_8080"
-    # Special characters & Unicode
-    assert sanitize_framework("my@framework#1$2%3^4*5") == "my_framework_1_2_3_4_5"
-    assert sanitize_framework("  spaced framework  ") == "spaced_framework"
-
-
-def test_sanitize_framework_length_truncation():
-    long_str = "a" * 100
-    assert len(sanitize_framework(long_str, max_len=64)) == 64
-    assert len(sanitize_framework(long_str, max_len=10)) == 10
-
-
 def test_sanitize_token_valid_and_edge_cases():
-    # Valid tokens
+    # Valid single-segment and multi-segment tokens
+    assert sanitize_token("pandas") == "pandas"
+    assert sanitize_token("datasets") == "datasets"
+    assert sanitize_token("scikit-learn") == "scikit-learn"
+    assert sanitize_token("version.1.2.3") == "version.1.2.3"
+    assert sanitize_token("my_custom_framework-v2") == "my_custom_framework-v2"
     assert sanitize_token("fw/pandas") == "fw/pandas"
     assert sanitize_token("env/gke") == "env/gke"
-    assert sanitize_token("pandas") == "pandas"
 
     # Multi-slash values sanitized to single slash
     assert sanitize_token("fw/my/custom/lib") == "fw/my_custom_lib"
 
     # CRLF and forbidden characters sanitized
     assert (
+        sanitize_token("pandas\r\nInjected-Header: bad")
+        == "pandas__Injected-Header__bad"
+    )
+    assert (
         sanitize_token("fw/custom\r\nInjected-Header: injected_val")
         == "fw/custom__Injected-Header__injected_val"
     )
+    assert sanitize_token("host:8080") == "host_8080"
+    assert sanitize_token("my@framework#1$2%3^4*5") == "my_framework_1_2_3_4_5"
+    assert sanitize_token("  spaced framework  ") == "spaced_framework"
+
+    # Length truncation
+    long_str = "a" * 100
+    assert len(sanitize_token(long_str, max_len=64)) == 64
+    assert len(sanitize_token(long_str, max_len=10)) == 10
 
     # Empty, none, non-string, or malformed tokens
     assert sanitize_token(None) is None
@@ -185,17 +166,17 @@ def test_framework_detector_opt_out(monkeypatch):
 # ============================================================================
 
 
-def test_set_and_get_dimension_context():
+def test_set_and_get_telemetry_context():
     # Initial state
-    assert get_dimension_context(Dimension.FRAMEWORK) is None
+    assert get_telemetry_context(Dimension.FRAMEWORK) is None
 
     # Set caller framework
-    token = set_dimension_context(Dimension.FRAMEWORK, "fw/custom-engine")
-    assert get_dimension_context(Dimension.FRAMEWORK) == "fw/custom-engine"
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/custom-engine")
+    assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-engine"
 
     # Reset
     reset_telemetry_context(token)
-    assert get_dimension_context(Dimension.FRAMEWORK) is None
+    assert get_telemetry_context(Dimension.FRAMEWORK) is None
 
 
 # ============================================================================
@@ -205,9 +186,7 @@ def test_set_and_get_dimension_context():
 
 def test_multidimensional_telemetry_registration():
     class DummyEnvDetector(BaseDetector):
-        @property
-        def name(self) -> str:
-            return "env"
+        name = "env"
 
         def detect(self):
             return "env/gke"
@@ -216,7 +195,7 @@ def test_multidimensional_telemetry_registration():
     assert "env/gke" in tracker.get_tokens()
 
     # When framework is active in context
-    token = set_dimension_context(Dimension.FRAMEWORK, "fw/pandas")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/pandas")
     try:
         tokens = tracker.get_tokens()
         assert "env/gke" in tokens
@@ -231,7 +210,7 @@ def test_get_tokens_sanitization_user_controlled_context():
     tracker = UsageMetricsTracker()
 
     # User sets context with CRLF and custom headers
-    token = set_dimension_context(
+    token = set_telemetry_context(
         Dimension.FRAMEWORK, "fw/custom\r\nInjected-Header: injected_val"
     )
     try:
@@ -245,7 +224,7 @@ def test_get_tokens_sanitization_user_controlled_context():
         reset_telemetry_context(token)
 
     # Extra slashes in value (e.g. fw/my/custom/lib -> fw/my_custom_lib)
-    token = set_dimension_context(Dimension.FRAMEWORK, "fw/my/custom/lib")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/my/custom/lib")
     try:
         tokens = tracker.get_tokens()
         assert tokens == ["fw/my_custom_lib"]
@@ -255,7 +234,7 @@ def test_get_tokens_sanitization_user_controlled_context():
 
     # Dangling / leading slash or empty should not produce invalid tokens like 'fw/'
     for malformed in ["fw/", "/pandas", "   ", ""]:
-        token = set_dimension_context(Dimension.FRAMEWORK, malformed)
+        token = set_telemetry_context(Dimension.FRAMEWORK, malformed)
         try:
             assert tracker.get_tokens() == []
             assert tracker.get_dimension(Dimension.FRAMEWORK) is None
@@ -268,9 +247,7 @@ def test_collect_tokens_map_caches_detector_exception():
     call_count = 0
 
     class FailingDetector(BaseDetector):
-        @property
-        def name(self):
-            return Dimension.FRAMEWORK
+        name = Dimension.FRAMEWORK
 
         def detect(self):
             nonlocal call_count
@@ -312,18 +289,18 @@ def test_nested_method_calls_telemetry():
     fs = GCSFileSystem(token="anon", project="test-project")
 
     # Set outer framework context
-    token = set_dimension_context(Dimension.FRAMEWORK, "fw/custom-pipeline")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/custom-pipeline")
     try:
         # Outermost level
-        assert get_dimension_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
+        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
 
         # Simulate nested async execution across bridged sync
         async def inner_coro():
-            assert get_dimension_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
+            assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
 
             # Simulate innermost async method (Level 2)
             async def innermost_coro():
-                return get_dimension_context(Dimension.FRAMEWORK)
+                return get_telemetry_context(Dimension.FRAMEWORK)
 
             return await innermost_coro()
 
@@ -331,12 +308,12 @@ def test_nested_method_calls_telemetry():
         assert res == "fw/custom-pipeline"
 
         # Context at outer level is still intact
-        assert get_dimension_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
+        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
     finally:
         reset_telemetry_context(token)
 
     # After outer method completes, context is completely clean
-    assert get_dimension_context(Dimension.FRAMEWORK) is None
+    assert get_telemetry_context(Dimension.FRAMEWORK) is None
 
 
 def test_multithreaded_context_isolation():
@@ -354,18 +331,18 @@ def test_multithreaded_context_isolation():
     def worker(framework_name: str):
         try:
             # 1. Verify clean initial state in this thread
-            if get_dimension_context(Dimension.FRAMEWORK) is not None:
+            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
                 errors.append(f"{framework_name}: initial context not None")
 
             # 2. Set thread-local context
-            token = set_dimension_context(Dimension.FRAMEWORK, f"fw/{framework_name}")
+            token = set_telemetry_context(Dimension.FRAMEWORK, f"fw/{framework_name}")
             try:
                 # 3. Synchronize all threads so all 4 contexts are simultaneously active
                 barrier.wait(timeout=5)
 
                 # 4. Repeatedly verify context during concurrent overlap
                 for _ in range(5):
-                    current = get_dimension_context(Dimension.FRAMEWORK)
+                    current = get_telemetry_context(Dimension.FRAMEWORK)
                     if current != f"fw/{framework_name}":
                         errors.append(
                             f"{framework_name}: expected fw/{framework_name}, got {current}"
@@ -375,7 +352,7 @@ def test_multithreaded_context_isolation():
                 reset_telemetry_context(token)
 
             # 5. Verify thread context is cleanly reset
-            if get_dimension_context(Dimension.FRAMEWORK) is not None:
+            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
                 errors.append(f"{framework_name}: post-reset context not None")
         except Exception as e:
             errors.append(f"{framework_name} exception: {e}")
@@ -448,7 +425,7 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
         fs.dircache.clear()
         captured.clear()
         expected_token = f"fw/test-{name}"
-        token = set_dimension_context(Dimension.FRAMEWORK, expected_token)
+        token = set_telemetry_context(Dimension.FRAMEWORK, expected_token)
         try:
             op()
             assert (
@@ -474,13 +451,12 @@ def test_post_fork_telemetry_reset():
     import multiprocessing
 
     from gcsfs.telemetry.context import (
-        get_dimension_context,
         get_telemetry_context,
         reset_telemetry_context,
-        set_dimension_context,
+        set_telemetry_context,
     )
 
-    token = set_dimension_context(Dimension.FRAMEWORK, "fw/parent-process")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/parent-process")
     try:
         assert get_telemetry_context() == {"fw": "fw/parent-process"}
 
@@ -500,7 +476,7 @@ def test_post_fork_telemetry_reset():
         assert child_result == {}, f"Child telemetry was not reset! Got: {child_result}"
 
         # Parent process still retains its original telemetry context
-        assert get_dimension_context(Dimension.FRAMEWORK) == "fw/parent-process"
+        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/parent-process"
     finally:
         reset_telemetry_context(token)
 
@@ -545,9 +521,7 @@ def test_collect_tokens_map_records_empty_for_none_detection():
     call_count = 0
 
     class DummyNoneDetector(BaseDetector):
-        @property
-        def name(self):
-            return Dimension.FRAMEWORK
+        name = Dimension.FRAMEWORK
 
         def detect(self):
             nonlocal call_count
@@ -585,9 +559,7 @@ async def test_gcs_async_wrapper_scopes_context(monkeypatch):
     detect_count = 0
 
     class MockDetector(BaseDetector):
-        @property
-        def name(self):
-            return Dimension.FRAMEWORK
+        name = Dimension.FRAMEWORK
 
         def detect(self):
             nonlocal detect_count
@@ -660,9 +632,7 @@ def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkey
     detect_count = 0
 
     class DummyNoneDetector(BaseDetector):
-        @property
-        def name(self):
-            return Dimension.FRAMEWORK
+        name = Dimension.FRAMEWORK
 
         def detect(self):
             nonlocal detect_count
@@ -684,6 +654,7 @@ def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkey
     for _ in range(10):
         assert f.caller_framework == ""
     assert detect_count == 1
+    f.closed = True
 
 
 @pytest.mark.asyncio
