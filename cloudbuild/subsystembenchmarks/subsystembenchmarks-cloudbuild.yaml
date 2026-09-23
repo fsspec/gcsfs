@@ -146,6 +146,7 @@ steps:
               curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
             done
             gcloud storage rm --recursive "gs://$$CLEAN_NAME" < /dev/null || true
+            gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null || true
           else
             echo "Skipping bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
           fi
@@ -282,8 +283,9 @@ steps:
         gcloud compute instances delete "$$VM_NAME" --project="${PROJECT_ID}" --zone="$$ZONE" --quiet || true
     waitFor: ["run-subsystembenchmarks"]
 
-  # Safety net: each case deletes its own bucket, so this normally finds nothing. It exists
-  # for the run that crashed (or was cancelled) between creating a bucket and dropping it.
+  # Safety net: each case deletes its own objects and (for non-Rapid-Cache buckets) its bucket.
+  # For Rapid Cache runs, empty buckets remain in a 1-hour DISABLED grace period and are reaped
+  # by cleanup-leaked-resources on subsequent builds.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-buckets"
     entrypoint: "bash"
@@ -295,14 +297,21 @@ steps:
           | grep "^gs://$${BUCKET_PREFIX}-" || true)
         TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
         for b in $$LEAKED; do
-          echo "sweeping leaked benchmark bucket $$b"
           CLEAN_NAME="$${b#gs://}"
           CLEAN_NAME="$${CLEAN_NAME%/}"
-          for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
-            echo "Disabling leaked anywhere-cache on $$b in zone $$z"
-            curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" >/dev/null || true
+          CACHES_JSON=$$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" < /dev/null || echo "{}")
+          for z in $$(printf '%s' "$$CACHES_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+            echo "Disabling active anywhere-cache on $$b in zone $$z"
+            curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
           done
-          gcloud storage rm --recursive "$$b" || true
+          gcloud storage rm --recursive "$$b/**" < /dev/null 2>/dev/null || true
+          HAS_CACHE=$$(printf '%s' "$$CACHES_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if d.get('items') else 'no')" 2>/dev/null || echo "no")
+          if [ "$$HAS_CACHE" = "yes" ]; then
+            echo "Objects removed from $$b; retaining empty bucket during 1-hour Rapid Cache disable grace period (will be reaped by cleanup-leaked-resources)"
+          else
+            echo "sweeping leaked benchmark bucket $$b"
+            gcloud storage rm --recursive "$$b" < /dev/null || gcloud storage buckets delete "$$b" --quiet < /dev/null || true
+          fi
         done
     waitFor: ["run-subsystembenchmarks"]
 

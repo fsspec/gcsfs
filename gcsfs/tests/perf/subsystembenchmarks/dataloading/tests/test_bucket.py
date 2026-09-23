@@ -155,3 +155,17 @@ def test_case_bucket_creates_waits_and_disables_rapid_cache(monkeypatch):
         assert ("GET", f"b/{name}/anywhereCaches/us-central1-a", None) in fs.api_calls
     assert ("POST", f"b/{name}/anywhereCaches/us-central1-a/disable", None) in fs.api_calls
     assert fs.removed == [f"{name}/"]
+
+
+def test_case_bucket_validates_rapid_cache_timeout_before_mkdir(monkeypatch):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", "0")
+    fs = _FakeFS()
+    spec = _spec(bucket_type="rapid_cache_warm", zone="us-central1-a")
+    with pytest.raises(ValueError, match="GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT"):
+        spec.validate()
+    with pytest.raises(ValueError, match="GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT"):
+        with bucket.case_bucket(spec, "read-wds-x", fs=fs):
+            pass
+    assert fs.made == []
+    assert fs.api_calls == []
+

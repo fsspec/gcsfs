@@ -7,7 +7,7 @@ import time
 RAPID_CACHE_BUCKET_TYPES = ("rapid_cache_cold", "rapid_cache_warm")
 DEFAULT_TIMEOUT_SECONDS = 1800
 DEFAULT_POLL_SECONDS = 10
-_PENDING_STATES = ("CREATING", "PROVISIONING", "")
+_PENDING_STATES = ("CREATING", "PROVISIONING", "PENDING", "")
 
 
 def is_rapid_cache_bucket_type(bucket_type):
@@ -71,11 +71,12 @@ def wait_running(
     last_state = "UNKNOWN"
     while True:
         try:
-            resp = (
-                fs.call("GET", f"b/{bucket}/anywhereCaches/{zone}", json_out=True)
-                or {}
+            raw = fs.call(
+                "GET", f"b/{bucket}/anywhereCaches/{zone}", json_out=True
             )
-            state = str(resp.get("state", "")).upper()
+            resp = raw if isinstance(raw, dict) else {}
+            raw_state = resp.get("state")
+            state = str(raw_state if raw_state is not None else "").strip().upper()
         except FileNotFoundError:
             resp = {}
             state = "CREATING"
@@ -112,43 +113,52 @@ def warm_if_needed(prefix, bucket_type, *, fs=None):
     if bucket_type != "rapid_cache_warm" or not str(prefix).startswith("gs://"):
         return 0
     if fs is None:
+        import fsspec
         import gcsfs
 
-        fs = gcsfs.GCSFileSystem(skip_instance_cache=True)
-    protocols = getattr(fs, "protocol", ("gs", "gcs"))
-    if isinstance(protocols, str):
-        protocols = (protocols,)
-    uses_gs_protocol = "gs" in protocols or "gcs" in protocols
-    find_target = prefix if uses_gs_protocol else str(prefix)[len("gs://") :]
-    objects = sorted(
-        obj
-        for obj in fs.find(find_target)
-        if not str(obj).endswith("/")
-        and not (hasattr(fs, "isdir") and fs.isdir(obj))
-    )
-    if not objects:
-        raise RuntimeError(f"no objects found to warm under {prefix!r}")
-
-    import concurrent.futures
-
-    def _warm_one(obj):
-        if uses_gs_protocol:
-            url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
+        if not hasattr(gcsfs.GCSFileSystem, "_get_kwargs_from_urls"):
+            fs = gcsfs.GCSFileSystem(skip_instance_cache=True)
         else:
-            url = obj
-        if hasattr(fs, "open"):
-            total = 0
-            with fs.open(url, "rb") as f:
-                while chunk := f.read(16 * 1024 * 1024):
-                    total += len(chunk)
-            return total
-        return len(fs.cat_file(url))
+            try:
+                fs, _ = fsspec.core.url_to_fs(prefix, skip_instance_cache=True)
+            except TypeError:
+                fs, _ = fsspec.core.url_to_fs(prefix)
+    try:
+        protocols = getattr(fs, "protocol", ("gs", "gcs"))
+        if isinstance(protocols, str):
+            protocols = (protocols,)
+        uses_gs_protocol = "gs" in protocols or "gcs" in protocols
+        find_target = prefix if uses_gs_protocol else str(prefix)[len("gs://") :]
+        objects = sorted(
+            obj
+            for obj in fs.find(find_target)
+            if not str(obj).endswith("/")
+            and not (hasattr(fs, "isdir") and fs.isdir(obj))
+        )
+        if not objects:
+            raise RuntimeError(f"no objects found to warm under {prefix!r}")
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(16, len(objects))
-    ) as pool:
-        total_bytes = sum(pool.map(_warm_one, objects))
-    if hasattr(fs, "invalidate_cache"):
-        fs.invalidate_cache()
-    return total_bytes
+        import concurrent.futures
+
+        def _warm_one(obj):
+            if uses_gs_protocol:
+                url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
+            else:
+                url = obj
+            if hasattr(fs, "open"):
+                total = 0
+                with fs.open(url, "rb") as f:
+                    while chunk := f.read(16 * 1024 * 1024):
+                        total += len(chunk)
+                return total
+            return len(fs.cat_file(url))
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(16, len(objects))
+        ) as pool:
+            return sum(pool.map(_warm_one, objects))
+    finally:
+        if hasattr(fs, "invalidate_cache"):
+            fs.invalidate_cache()
+
 
