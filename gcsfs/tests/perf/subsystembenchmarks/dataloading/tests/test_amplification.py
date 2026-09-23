@@ -237,10 +237,18 @@ def test_enrich_csv_checkpoint_read_and_write(tmp_path):
 
 
 @pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
-def test_enrich_csv_rapid_cache_treats_empty_series_as_zero_origin_egress(
-    tmp_path, bucket_type
+@pytest.mark.parametrize(
+    "egress_series,req_series",
+    [
+        ([], []),
+        ([_TimeSeries([_point(0.0)])], []),
+        ([], [_TimeSeries([_point(0.0)])]),
+    ],
+)
+def test_enrich_csv_rapid_cache_treats_empty_or_zero_series_as_zero_origin_egress(
+    tmp_path, bucket_type, egress_series, req_series
 ):
-    """When Rapid Cache serves reads from zonal cache, 0 origin egress emits no time series."""
+    """When Rapid Cache serves reads from zonal cache, 0 origin egress/reqs emits empty or 0.0 series."""
     csv_path = tmp_path / "results.csv"
     fields = _FIELDS + ["bucket_type"]
     _write_csv(
@@ -258,7 +266,8 @@ def test_enrich_csv_rapid_cache_treats_empty_series_as_zero_origin_egress(
         ],
         fields,
     )
-    result = amplification.enrich_csv(str(csv_path), "proj", client=_FakeClient([]))
+    client = _SequencedClient([egress_series, req_series])
+    result = amplification.enrich_csv(str(csv_path), "proj", client=client)
     assert result.eligible == 1
     assert result.enriched == 1
     assert result.missing_buckets == ()
@@ -269,8 +278,17 @@ def test_enrich_csv_rapid_cache_treats_empty_series_as_zero_origin_egress(
     assert float(row["dataset_read_amplification_ratio"]) == 0.0
 
 
-def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry(tmp_path):
-    """If reqs is present (>0) while egress is None due to ingestion lag, do not coerce egress to 0."""
+@pytest.mark.parametrize(
+    "pass1_egress,pass1_reqs",
+    [
+        ([], [_TimeSeries([_point(10.0)])]),
+        ([_TimeSeries([_point(1500.0)])], []),
+    ],
+)
+def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry_without_torn_row(
+    tmp_path, pass1_egress, pass1_reqs
+):
+    """If one metric is >0 while the other is None due to ingestion lag, keep row blank and retry."""
     csv_path = tmp_path / "results.csv"
     fields = _FIELDS + ["bucket_type"]
     _write_csv(
@@ -290,11 +308,15 @@ def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry(tmp_path):
     )
     egress_series = [_TimeSeries([_point(1500.0)])]
     req_series = [_TimeSeries([_point(10.0)])]
-    # Pass 1: egress is empty ([]), reqs has landed (10.0). Pass 2: both present.
-    client = _SequencedClient([[], req_series, egress_series, req_series])
+    client = _SequencedClient([pass1_egress, pass1_reqs, egress_series, req_series])
 
     first = amplification.enrich_csv(str(csv_path), "proj", client=client)
     assert first.missing_buckets == ("b-cold",)
+    with open(csv_path, newline="") as f:
+        row_pass1 = next(csv.DictReader(f))
+    assert row_pass1["dataset_read_bytes"] == ""
+    assert row_pass1["dataset_read_request_count"] == ""
+    assert row_pass1["dataset_read_amplification_ratio"] == ""
 
     second = amplification.enrich_csv(str(csv_path), "proj", client=client)
     assert second.missing_buckets == ()
@@ -303,6 +325,7 @@ def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry(tmp_path):
     assert row["dataset_read_bytes"] == "1500"
     assert row["dataset_read_request_count"] == "10"
     assert float(row["dataset_read_amplification_ratio"]) == 1.0
+
 
 
 

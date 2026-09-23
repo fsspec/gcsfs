@@ -51,11 +51,10 @@ def run_checkpoint_case(
         if p.exitcode != 0:
             raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
 
-        if "read" in params.scenario and params.bucket_type == "rapid_cache_warm":
+        if "read" in params.scenario:
             from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 
-            warm_fs, _ = fsspec.core.url_to_fs(prefix, skip_instance_cache=True)
-            rapid_cache.warm_if_needed(prefix, params.bucket_type, fs=warm_fs)
+            rapid_cache.warm_if_needed(prefix, params.bucket_type)
 
         window_start = time.time()
         with monitor() as m:

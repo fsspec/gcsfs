@@ -73,3 +73,15 @@ def test_cross_size_cases():
         assert c.setup_world_size != c.world_size or (
             c.setup_tensor_parallel_size != c.tensor_parallel_size
         )
+
+
+def test_rapid_cache_bucket_types_produce_expected_id_tokens(monkeypatch):
+    for bucket_type, token in (
+        ("rapid_cache_cold", "-rccold"),
+        ("rapid_cache_warm", "-rcwarm"),
+    ):
+        monkeypatch.setenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", bucket_type)
+        cases = _cases()
+        assert all(c.bucket_type == bucket_type for c in cases)
+        assert all(c.name.endswith(token) for c in cases)
+

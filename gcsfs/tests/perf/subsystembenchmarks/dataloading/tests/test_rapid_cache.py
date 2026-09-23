@@ -245,4 +245,54 @@ def test_wait_running_rejects_nonpositive_timeout_or_poll(timeout, poll):
         )
 
 
+def test_warm_if_needed_resolves_fs_via_url_to_fs_and_invalidates_on_error(monkeypatch):
+    import fsspec
+
+    url_to_fs_calls = []
+    invalidated = []
+    empty_fs = _FakeCacheFS(files={})
+    empty_fs.invalidate_cache = lambda: invalidated.append(True)
+
+    def fake_url_to_fs(url, **kwargs):
+        url_to_fs_calls.append((url, kwargs))
+        return empty_fs, url
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", fake_url_to_fs)
+    with pytest.raises(RuntimeError, match="no objects found to warm"):
+        rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_warm")
+    assert url_to_fs_calls == [
+        ("gs://my-bucket/data/", {"skip_instance_cache": True})
+    ]
+    assert invalidated == [True]
+
+
+def test_wait_running_tolerates_none_and_pending_states():
+    responses = iter(
+        [
+            {"state": None},
+            {},
+            {"state": "PENDING"},
+            {"state": "RUNNING", "zone": "us-central1-a"},
+        ]
+    )
+
+    class _CustomStateFS:
+        def call(self, method, path, **kwargs):
+            return next(responses)
+
+    sleeps = []
+    resp = rapid_cache.wait_running(
+        _CustomStateFS(),
+        "my-bucket",
+        "us-central1-a",
+        timeout=60,
+        poll=5,
+        sleep=sleeps.append,
+        clock=lambda: 0.0,
+    )
+    assert resp["state"] == "RUNNING"
+    assert sleeps == [5, 5, 5]
+
+
+
 

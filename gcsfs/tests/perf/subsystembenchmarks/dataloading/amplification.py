@@ -140,18 +140,16 @@ def enrich_csv(csv_path, project, *, client):
             reqs = bucket_read_requests(client, project, bucket, ws, we)
             if (
                 rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
-                and egress is None
-                and reqs is None
+                and egress in (None, 0.0)
+                and reqs in (None, 0.0)
             ):
                 egress = 0.0
                 reqs = 0.0
-            if egress is not None:
+            ideal = physical_size * rounds
+            if egress is not None and reqs is not None and ideal > 0:
                 row[f"{prefix}_read_bytes"] = str(int(egress))
-                ideal = physical_size * rounds
-                if ideal:
-                    row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
-            if reqs is not None:
                 row[f"{prefix}_read_request_count"] = str(int(reqs))
+                row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
         except Exception as exc:
             logging.warning("amplification scrape failed for %s: %s", bucket, exc)
 

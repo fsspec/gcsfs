@@ -73,6 +73,8 @@ class BucketSpec:
             raise ValueError(
                 f"{self.bucket_type} buckets need GCSFS_SUBSYSTEM_ZONE (the placement zone)"
             )
+        if rapid_cache.is_rapid_cache_bucket_type(self.bucket_type):
+            rapid_cache.timeout_from_env()
         if self.prefix != self.prefix.lower():
             # Bucket prefix must be lowercase (GCS bucket names cannot contain uppercase).
             raise ValueError(
@@ -124,6 +126,8 @@ def _delete(fs, name, spec=None):
 @contextlib.contextmanager
 def case_bucket(spec, case_id, *, fs=None):
     """Create this case's bucket, yield its corpus prefix, delete it on the way out."""
+    is_rapid_cache = rapid_cache.is_rapid_cache_bucket_type(spec.bucket_type)
+    timeout = rapid_cache.timeout_from_env() if is_rapid_cache else None
     if fs is None:
         import gcsfs
 
@@ -131,7 +135,7 @@ def case_bucket(spec, case_id, *, fs=None):
     name = case_bucket_name(spec.prefix, case_id)
     fs.mkdir(name, location=spec.location, **bucket_kwargs(spec))
     try:
-        if rapid_cache.is_rapid_cache_bucket_type(spec.bucket_type):
+        if is_rapid_cache:
             rapid_cache.create(
                 fs,
                 name,
@@ -142,7 +146,7 @@ def case_bucket(spec, case_id, *, fs=None):
                 fs,
                 name,
                 spec.zone,
-                timeout=rapid_cache.timeout_from_env(),
+                timeout=timeout,
             )
         yield f"gs://{name}/data/"
     finally:
