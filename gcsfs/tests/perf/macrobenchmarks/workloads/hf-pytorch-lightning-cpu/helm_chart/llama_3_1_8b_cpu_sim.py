@@ -71,6 +71,7 @@ from lightning.pytorch.strategies import (
 )
 from torch.distributed.fsdp import FullyShardedDataParallel, fully_shard
 from torch.distributed.fsdp.wrap import wrap
+from torch.distributed.tensor import Replicate
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     RowwiseParallel,
@@ -365,6 +366,7 @@ def _validate_tp_divisibility(config, tp):
         "num_key_value_heads": config.num_key_value_heads,
         "intermediate_size": config.intermediate_size,
         "hidden_size": config.hidden_size,
+        "vocab_size": config.vocab_size,
     }
     bad = {name: val for name, val in checks.items() if val % tp != 0}
     if bad:
@@ -374,15 +376,19 @@ def _validate_tp_divisibility(config, tp):
         )
 
 
-def _llama_tp_plan():
-    """Tensor-parallel plan for one LlamaDecoderLayer.
-
-    Attention q/k/v and MLP gate/up are column-parallel; the output o_proj and
-    MLP down_proj are row-parallel. tensor_parallel_size must divide the model's
-    head/dim counts; _validate_tp_divisibility enforces that before this plan is
-    applied (Llama 3.1 8B has 32 heads / 8 KV heads, divisible by the default 4).
-    """
-    return {
+def apply_llama_tp(model, tp_mesh):
+    """Applies tensor parallelism to a LLaMA model: shards embed_tokens, lm_head, and decoder layers."""
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "model.embed_tokens": RowwiseParallel(
+                input_layouts=Replicate(), output_layouts=Replicate()
+            ),
+            "lm_head": ColwiseParallel(output_layouts=Replicate()),
+        },
+    )
+    layer_plan = {
         "self_attn.q_proj": ColwiseParallel(),
         "self_attn.k_proj": ColwiseParallel(),
         "self_attn.v_proj": ColwiseParallel(),
@@ -391,6 +397,8 @@ def _llama_tp_plan():
         "mlp.up_proj": ColwiseParallel(),
         "mlp.down_proj": RowwiseParallel(),
     }
+    for layer in model.model.layers:
+        parallelize_module(layer, tp_mesh, layer_plan)
 
 
 class LlamaLitModel(pl.LightningModule):
@@ -450,9 +458,7 @@ class LlamaLitModel(pl.LightningModule):
         mesh = self.device_mesh
         if self._tensor_parallel and mesh["tensor_parallel"].size() > 1:
             _validate_tp_divisibility(self.model.config, tensor_parallel_size)
-            tp_mesh = mesh["tensor_parallel"]
-            for layer in self.model.model.layers:
-                parallelize_module(layer, tp_mesh, _llama_tp_plan())
+            apply_llama_tp(self.model, mesh["tensor_parallel"])
         dp_mesh = mesh["data_parallel"]
         for layer in self.model.model.layers:
             fully_shard(layer, mesh=dp_mesh)
