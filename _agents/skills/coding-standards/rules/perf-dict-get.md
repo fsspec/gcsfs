@@ -34,15 +34,17 @@ config: dict[str, int] = {"timeout": 30}
 # Simple: get() with default value
 retries = config.get("retries", 3)
 
-# setdefault() sets value if missing and returns it
-cache: dict[str, list[int]] = {}
-cache.setdefault("results", []).append(42)
+# collections.defaultdict is more efficient for grouping/appending
+from collections import defaultdict
+
+cache: defaultdict[str, list[int]] = defaultdict(list)
+cache["results"].append(42)
 ```
 
 ## Notes
 - Omitting the second argument to `get()` returns `None`
 - Chain for nested dicts: `dict.get("key1", {}).get("key2", default)`
-- Use `setdefault()` when the default is a mutable object (like list)
+- Prefer `collections.defaultdict` over `setdefault()` for grouping/appending to collections
 - Python 3.8+ allows combining with `:=` (walrus operator)
 
 ## References

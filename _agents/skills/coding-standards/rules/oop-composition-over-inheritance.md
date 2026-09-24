@@ -40,6 +40,7 @@ class TechnicalSeniorManager(SeniorManager):  # Explosion of classes
 
 ## Good Example
 ```python
+from dataclasses import dataclass
 from typing import Protocol
 
 # Define behaviors as protocols

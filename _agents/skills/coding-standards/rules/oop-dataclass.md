@@ -33,6 +33,7 @@ class User:
 ## Good Example
 ```python
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 @dataclass
 class User:
@@ -51,12 +52,12 @@ class Cart:
 class Order:
     items: list[Item]
     customer_id: str
-    discount: float = 0.0
+    discount: Decimal = Decimal("0.0")
     # init=False keeps it out of __init__; repr=False hides the internal field
-    _total: float = field(init=False, repr=False)
+    _total: Decimal = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._total = sum(item.price for item in self.items) * (1 - self.discount)
+        self._total = sum(item.price for item in self.items) * (Decimal("1") - self.discount)
 
 # Immutable dataclass
 @dataclass(frozen=True)
