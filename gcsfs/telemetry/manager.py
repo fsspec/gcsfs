@@ -129,77 +129,26 @@ def _file_telemetry_context(file_obj):
         yield
     finally:
         if token is not None:
-            from gcsfs.telemetry.context import reset_telemetry_context
-
             reset_telemetry_context(token)
 
 
-def _file_async_gen_wrapper(func):
+def _file_telemetry_wrapper(func):
+    """Wraps a GCSFile sync or async method to propagate self.caller_framework."""
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def async_wrapper(self, *args, **kwargs):
+            with _file_telemetry_context(self):
+                return await func(self, *args, **kwargs)
+
+        return async_wrapper
+
     @functools.wraps(func)
-    async def wrapper(self, *args, **kwargs):
-        gen = func(self, *args, **kwargs)
-        try:
-            while True:
-                with _file_telemetry_context(self):
-                    try:
-                        item = await gen.__anext__()
-                    except StopAsyncIteration:
-                        break
-                yield item
-        finally:
-            if hasattr(gen, "aclose"):
-                await gen.aclose()
-
-    return wrapper
-
-
-def _file_sync_gen_wrapper(func):
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
-        gen = func(self, *args, **kwargs)
-        try:
-            while True:
-                with _file_telemetry_context(self):
-                    try:
-                        item = next(gen)
-                    except StopIteration:
-                        break
-                yield item
-        finally:
-            if hasattr(gen, "close"):
-                gen.close()
-
-    return wrapper
-
-
-def _file_async_wrapper(func):
-    @functools.wraps(func)
-    async def wrapper(self, *args, **kwargs):
-        with _file_telemetry_context(self):
-            return await func(self, *args, **kwargs)
-
-    return wrapper
-
-
-def _file_sync_wrapper(func):
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
+    def sync_wrapper(self, *args, **kwargs):
         with _file_telemetry_context(self):
             return func(self, *args, **kwargs)
 
-    return wrapper
-
-
-def _file_telemetry_wrapper(func):
-    """Routes a GCSFile method to the correct telemetry wrapper based on its type."""
-    if inspect.isasyncgenfunction(func):
-        return _file_async_gen_wrapper(func)
-    elif inspect.isgeneratorfunction(func):
-        return _file_sync_gen_wrapper(func)
-    elif inspect.iscoroutinefunction(func):
-        return _file_async_wrapper(func)
-    else:
-        return _file_sync_wrapper(func)
+    return sync_wrapper
 
 
 def wrap_file_methods():
