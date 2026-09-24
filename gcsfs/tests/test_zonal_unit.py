@@ -1,4 +1,7 @@
-# Unit tests for ExtendedGCSFileSystem.
+"""Unit tests for ExtendedGcsFileSystem with mocked backends.
+Focuses on Zonal bucket logic, MRD pool caching, and parameter validation.
+"""
+
 import asyncio
 import io
 import logging
@@ -21,7 +24,7 @@ from gcsfs.extended_gcsfs import (
 )
 from gcsfs.tests.conftest import csv_files, files, requires_rapid
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.test_extended_gcsfs import gcs_bucket_mocks  # noqa: F401
+from gcsfs.tests.test_zonal import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
 from gcsfs.zb_hns_utils import MRDPoolCache
 
@@ -291,6 +294,72 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
                 cache_type="readahead",
                 cache_source="explicit",
             )
+
+
+@pytest.mark.asyncio
+async def test_cat_file_zonal_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
+    """Tests that cat_file defaults to pool_size=1 on zonal buckets."""
+    # Arrange
+    from gcsfs.zb_hns_utils import MRDPool
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        with mock.patch.object(
+            extended_gcsfs._mrd_pool_cache, "get", new_callable=mock.AsyncMock
+        ) as mock_get:
+            mock_mrd = mock.AsyncMock(spec=MRDPool)
+            mock_mrd.get_mrd.return_value.__aenter__.return_value.persisted_size = len(
+                json_data
+            )
+            mock_get.return_value = mock_mrd
+
+            with mock.patch.object(
+                extended_gcsfs, "_concurrent_mrd_fetch", new_callable=mock.AsyncMock
+            ):
+                # Act
+                await extended_gcsfs._cat_file(file_path, start=0, end=10)
+
+                # Assert
+                assert mock_get.call_args.kwargs["pool_size"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cat_file_zonal_explicit_concurrency(extended_gcsfs, gcs_bucket_mocks):
+    """Tests that cat_file propagates explicit concurrency to pool_size on zonal buckets."""
+    # Arrange
+    from gcsfs.zb_hns_utils import MRDPool
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        with mock.patch.object(
+            extended_gcsfs._mrd_pool_cache, "get", new_callable=mock.AsyncMock
+        ) as mock_get:
+            mock_mrd = mock.AsyncMock(spec=MRDPool)
+            mock_mrd.get_mrd.return_value.__aenter__.return_value.persisted_size = len(
+                json_data
+            )
+            mock_get.return_value = mock_mrd
+
+            with mock.patch.object(
+                extended_gcsfs, "_concurrent_mrd_fetch", new_callable=mock.AsyncMock
+            ):
+                # Act
+                await extended_gcsfs._cat_file(
+                    file_path, start=0, end=10, concurrency=3
+                )
+
+                # Assert
+                assert mock_get.call_args.kwargs["pool_size"] == 3
+
+
+def test_zonal_prefetcher_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
+    """Tests that ZonalFile streaming prefetcher defaults to concurrency=4 and pool_size=4."""
+    # Arrange
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
+        # Act
+        with extended_gcsfs.open(file_path, "rb") as f:
+            # Assert
+            assert f.pool_size == 4
+            assert f.concurrency == 4
+            assert f._prefetch_engine.concurrency == 4
 
 
 def test_resolve_cache_config():

@@ -1,6 +1,7 @@
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import time
 import uuid
@@ -137,6 +138,8 @@ def _mock_get_bucket_type_on_emulator():
 
 
 def stop_docker(container):
+    if not shutil.which("docker"):
+        return
     cmd = shlex.split('docker ps -a -q --filter "name=%s"' % container)
     cid = subprocess.check_output(cmd).strip().decode()
     if cid:
@@ -153,6 +156,15 @@ def docker_gcs():
 
         yield _location()
         return
+
+    if not shutil.which("docker"):
+        pytest.skip(
+            "Docker is not available and STORAGE_EMULATOR_HOST is not set. "
+            "To run tests, set STORAGE_EMULATOR_HOST (e.g. "
+            "export STORAGE_EMULATOR_HOST=https://storage.googleapis.com) "
+            "or run a fake-gcs-server emulator."
+        )
+
     container = "gcsfs_test"
     cmd = (
         "docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme "
@@ -371,17 +383,17 @@ def gcs_versioned(gcs_factory, buckets_to_delete):
     gcs.version_aware = True
     try:  # ensure we're empty.
         # The versioned bucket might be created by `is_versioning_enabled`
-        # in test_core_versioned.py. We must register it for cleanup only if
+        # in test_flat_versioned.py. We must register it for cleanup only if
         # it was created by this test run.
         try:
-            from gcsfs.tests.test_core_versioned import (
+            from gcsfs.tests.test_flat_versioned import (
                 _VERSIONED_BUCKET_CREATED_BY_TESTS,
             )
 
             if _VERSIONED_BUCKET_CREATED_BY_TESTS:
                 buckets_to_delete.add(TEST_VERSIONED_BUCKET)
         except ImportError:
-            pass  # test_core_versioned is not being run
+            pass  # test_flat_versioned is not being run
         if is_real_gcs():
             cleanup_versioned_bucket(gcs, TEST_VERSIONED_BUCKET)
         else:
@@ -608,6 +620,18 @@ async def async_gcs():
 
 
 @pytest.fixture
+def skip_if_zonal(gcs):
+    """Skips tests that validate HTTP REST mechanics specific to standard regional buckets."""
+    if (
+        hasattr(gcs, "_sync_lookup_bucket_type")
+        and gcs._sync_lookup_bucket_type(TEST_BUCKET) == BucketType.ZONAL_HIERARCHICAL
+    ):
+        pytest.skip(
+            "Test validates HTTP REST mechanics specific to standard regional buckets"
+        )
+
+
+@pytest.fixture
 def mock_gcs_harness(monkeypatch):
     """
     Harness that mocks GCSFileSystem HTTP transport and records the exact
@@ -724,6 +748,7 @@ def pytest_ignore_collect(collection_path, config):
             return True
 
         benchmark_subdirs = {
+            "cat",
             "delete",
             "listing",
             "read",
@@ -735,6 +760,7 @@ def pytest_ignore_collect(collection_path, config):
             "glob",
             "put",
             "comparison",
+            "cat_ranges",
         }
 
         path_parts = set(path_str.replace(os.sep, "/").split("/"))

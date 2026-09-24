@@ -16,8 +16,12 @@ class CheckpointDriver(Protocol):
 
     def setup(self, prefix: str, params) -> None:
         """Optional setup phase executed before the monitored run block."""
-        ...
+        pass
 
     def run(self, prefix: str, params) -> CheckpointResult:
         """Run the checkpoint scenario and return durations."""
-        ...
+        pass
+
+    def read_count(self, params) -> int:
+        """Returns how many times the checkpoint is transferred from storage across ranks."""
+        return 1

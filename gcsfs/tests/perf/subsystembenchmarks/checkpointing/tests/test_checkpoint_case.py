@@ -85,11 +85,15 @@ class _FakeReadDriver:
     def setup(self, prefix, params):
         pass
 
-    def __init__(self, durations=None):
+    def __init__(self, durations=None, read_count=1):
         self._durations = durations or [0.8, 1.2]
+        self._read_count = read_count
 
     def run(self, prefix, params):
         return _FakeWriteResult(durations=self._durations)
+
+    def read_count(self, params):
+        return self._read_count
 
 
 def test_run_checkpoint_write_case(tmp_path, monkeypatch):
@@ -132,7 +136,8 @@ def test_run_checkpoint_write_case(tmp_path, monkeypatch):
     assert bench.extra_info["data_parallel_size"] == 1
 
 
-def test_run_checkpoint_read_case(tmp_path, monkeypatch):
+@pytest.mark.parametrize("read_count", [1, 8])
+def test_run_checkpoint_read_case(tmp_path, monkeypatch, read_count):
     monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
 
     original_url_to_fs = fsspec.core.url_to_fs
@@ -153,7 +158,7 @@ def test_run_checkpoint_read_case(tmp_path, monkeypatch):
 
     bench = _Bench()
     params = _params(scenario="checkpoint_read")
-    driver = _FakeReadDriver()
+    driver = _FakeReadDriver(durations=[1.0], read_count=read_count)
 
     checkpoint_case.run_checkpoint_case(
         bench,
@@ -166,7 +171,10 @@ def test_run_checkpoint_read_case(tmp_path, monkeypatch):
     assert bench.group == "checkpoint_read"
     assert bench.extra_info["workload_implementation"] == "fake"
     assert bench.extra_info["checkpoint_physical_size_bytes"] == 500
-    assert bench.extra_info["checkpoint_read_throughput_mean_bytes_per_second"] > 0
+    assert (
+        bench.extra_info["checkpoint_read_throughput_mean_bytes_per_second"]
+        == 500 * read_count
+    )
 
 
 def test_checkpoint_case_prefix_generation(monkeypatch):

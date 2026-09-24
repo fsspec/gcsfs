@@ -1306,10 +1306,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    async def _cat_file(
-        self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
-    ):
+    async def _cat_file(self, path, start=None, end=None, **kwargs):
         """Simple one-shot, or concurrent get of file data"""
+        concurrency = kwargs.pop("concurrency", 1)
         if concurrency > 1:
             return await self._cat_file_concurrent(
                 path, start=start, end=end, concurrency=concurrency, **kwargs
@@ -1652,16 +1651,20 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """Helper to delete files in batches."""
         if self.on_google:
             # emulators do not support batch
-            return sum(
-                await asyn._run_coros_in_chunks(
-                    [
-                        self._rm_files(files[i : i + batchsize])
-                        for i in range(0, len(files), batchsize)
-                    ],
-                    return_exceptions=True,
-                ),
-                [],
+            chunk_results = await asyn._run_coros_in_chunks(
+                [
+                    self._rm_files(files[i : i + batchsize])
+                    for i in range(0, len(files), batchsize)
+                ],
+                return_exceptions=True,
             )
+            out = []
+            for r in chunk_results:
+                if isinstance(r, Exception):
+                    out.append(r)
+                else:
+                    out.extend(r)
+            return out
         else:
             return await asyn._run_coros_in_chunks(
                 [self._rm_file(f) for f in files], return_exceptions=True, batch_size=5
@@ -1941,46 +1944,58 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if prefix:
             full_prefix = path.rstrip("/") + "/" + prefix
 
+        root_len = len(path.rstrip("/"))
+        should_update_cache = bool(not prefix and update_cache)
+
         for obj in objects:
             # For native HNS empty folders, which are returned as directory types
             # but are not placeholders, we need to ensure they have an entry in the cache.
-            if not prefix and update_cache and obj.get("type") == "directory":
+            if should_update_cache and obj.get("type") == "directory":
                 cache_entries.setdefault(obj["name"], {})
 
             parent = self._parent(obj["name"])
             previous = obj
 
             while parent:
-                dir_key = self.split_path(parent)[1]
-                if len(parent) < len(path.rstrip("/")):
+                if len(parent) < root_len:
                     break
 
                 if prefix and not parent.startswith(full_prefix):
                     # If this parent doesn't match the prefix, neither will its parents.
                     break
 
-                if dir_key:
-                    dirs[parent] = {
-                        "Key": dir_key,
-                        "Size": 0,
-                        "name": parent,
-                        "StorageClass": "DIRECTORY",
-                        "type": "directory",
-                        "size": 0,
-                    }
+                parent_already_seen = parent in dirs
+                if not parent_already_seen:
+                    dir_key = self.split_path(parent)[1]
+                    if dir_key:
+                        dirs[parent] = {
+                            "Key": dir_key,
+                            "Size": 0,
+                            "name": parent,
+                            "StorageClass": "DIRECTORY",
+                            "type": "directory",
+                            "size": 0,
+                        }
 
-                if not prefix and update_cache:
+                if should_update_cache:
                     listing = cache_entries.setdefault(parent, {})
                     name = previous["name"]
                     if name not in listing:
                         listing[name] = previous
+                    elif parent_already_seen:
+                        break
+                elif parent_already_seen:
+                    # When cache is not updated or prefix is used, once parent is in dirs,
+                    # all ancestors are already guaranteed to be in dirs. Break immediately.
+                    break
 
                 if parent in dirs:
                     previous = dirs[parent]
                 parent = self._parent(parent)
-        if not prefix and update_cache:
-            cache_entries_list = {k: list(v.values()) for k, v in cache_entries.items()}
-            self.dircache.update(cache_entries_list)
+        if should_update_cache:
+            self.dircache.update(
+                {k: list(v.values()) for k, v in cache_entries.items()}
+            )
         return dirs
 
     @retry_request(retries=retries)
@@ -2562,9 +2577,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             det = self.details
         else:
             det = {}
-        self.content_type = content_type or det.get(
-            "contentType",
-            mimetypes.guess_type(self.path)[0] or "application/octet-stream",
+        self.content_type = (
+            content_type
+            or det.get("contentType")
+            or mimetypes.guess_type(self.path)[0]
+            or "application/octet-stream"
         )
         self.metadata = metadata or det.get("metadata", {})
         self.fixed_key_metadata = _convert_fixed_key_metadata(det, from_google=True)

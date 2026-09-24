@@ -10,6 +10,7 @@ substitutions:
   _FILTER: ""
   _HF_TOKEN: ""
   _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
+  _BOOT_DISK_SIZE: "200GB"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -43,6 +44,7 @@ steps:
       - "_FILTER=${_FILTER}"
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_MODEL_ID=${_MODEL_ID}"
+      - "_BOOT_DISK_SIZE=${_BOOT_DISK_SIZE}"
       - "PROJECT_ID=${PROJECT_ID}"
     args:
       - "-c"
@@ -91,6 +93,7 @@ steps:
           printf 'export FILTER=%q\n' "$${_FILTER}"
           printf 'export HF_TOKEN=%q\n' "$${_HF_TOKEN}"
           printf 'export MODEL_ID=%q\n' "$${_MODEL_ID}"
+          printf 'export BOOT_DISK_SIZE=%q\n' "$${_BOOT_DISK_SIZE}"
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
@@ -166,7 +169,7 @@ steps:
             --machine-type="$$MACHINE_TYPE" \
             --image-family="ubuntu-2404-lts-amd64" \
             --image-project="ubuntu-os-cloud" \
-            --boot-disk-size="50GB" \
+            --boot-disk-size="$${BOOT_DISK_SIZE:-200GB}" \
             --boot-disk-type="hyperdisk-balanced" \
             --network-interface=network-tier=PREMIUM,nic-type=GVNIC \
             --network-performance-configs=total-egress-bandwidth-tier=TIER_1 \

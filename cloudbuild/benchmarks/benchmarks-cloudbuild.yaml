@@ -447,12 +447,13 @@ steps:
     args:
       - "-c"
       - |
+        source /workspace/build_vars.env
         if [[ -f /workspace/FAILED ]]; then
-          echo "GCSFS Microbenchmark Build failed. The following steps reported failures:"
+          echo "GCSFS Microbenchmark Build failed on branch $${BRANCH_NAME}. The following steps reported failures:"
           sort -u /workspace/FAILED | sed 's/^/ - /'
           exit 1
         fi
-        echo "Build successful."
+        echo "Build successful on branch $${BRANCH_NAME}."
     waitFor:
       - "cleanup-vm"
       - "delete-buckets"

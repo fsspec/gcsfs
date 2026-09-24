@@ -186,6 +186,45 @@ steps:
     waitFor: ["setup-vm", "create-buckets"]
     allowFailure: true
 
+  # Test Report
+  # GitHub shows only the first ~65k chars of the build log, so the test steps write their full output to
+  # files on the VM. This step prints a size-capped summary (counts + failure tracebacks) first, then the
+  # full logs. It always exits 0 so that cleanup still runs.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "test-report"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        mkdir -p /workspace/test-results
+        if gcloud compute instances describe gcsfs-test-vm-${_SHORT_BUILD_ID} --zone=${_ZONE} &>/dev/null; then
+          gcloud compute scp --recurse gcsfs-test-vm-${_SHORT_BUILD_ID}:~/test-results /workspace/ \
+            --zone=${_ZONE} \
+            --internal-ip \
+            --ssh-key-file=/workspace/.ssh/google_compute_engine > /dev/null || echo "⚠️ Could not copy test results from the VM"
+        fi
+
+        python3 cloudbuild/summarize_test_results.py /workspace/test-results \
+          --suites standard zonal zonal-core hns \
+          --failed-steps /workspace/FAILED \
+          --max-chars 30000 || echo "⚠️ Could not summarize test results"
+
+        for suite in standard zonal zonal-core hns; do
+          if [[ -f /workspace/test-results/$${suite}.log ]]; then
+            echo "===== FULL LOG: $${suite} ====="
+            cat /workspace/test-results/$${suite}.log
+          fi
+        done
+        exit 0
+    waitFor:
+      [
+        "run-standard-tests",
+        "run-zonal-tests",
+        "run-hns-tests",
+        "run-zonal-core-tests",
+      ]
+    allowFailure: true
+
   # Cleanup
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup"
@@ -202,13 +241,7 @@ steps:
       - "WORKERS_HNS=${_WORKERS_HNS}"
       - "WORKERS_ZONAL=${_WORKERS_ZONAL}"
       - "WORKERS_ZONAL_CORE=${_WORKERS_ZONAL_CORE}"
-    waitFor:
-      [
-        "run-standard-tests",
-        "run-zonal-tests",
-        "run-hns-tests",
-        "run-zonal-core-tests",
-      ]
+    waitFor: ["test-report"]
 
   # Fail the build if any previous step failed
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"

@@ -1365,6 +1365,8 @@ class CheckpointManager:
         rank = ray.train.get_context().get_world_rank()
         sharded = self.config.checkpoint_format == "sharded"
         app_state = self._app_state(restoring=True)
+        if self.optimizer is not None:
+            _initialize_missing_optimizer_state_for_restore(self.optimizer)
         directory_context = (
             checkpoint.as_directory()
             if sharded or rank == 0
@@ -1374,8 +1376,6 @@ class CheckpointManager:
             if sharded:
                 if not Path(local_directory, "_SUCCESS").is_file():
                     raise FileNotFoundError("incomplete sharded checkpoint")
-                if self.optimizer is not None:
-                    _initialize_missing_optimizer_state_for_restore(self.optimizer)
                 dcp.load(
                     {"app": app_state},
                     storage_reader=dcp.FileSystemReader(local_directory),

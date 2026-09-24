@@ -1,3 +1,5 @@
+"""Integration tests for object versioning on Standard (Flat) buckets."""
+
 import logging
 import os
 import posixpath
