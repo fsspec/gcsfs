@@ -14,7 +14,9 @@ from gcsfs.poller import (
 class TestPollStatus:
     """Unit tests for PollStatus validation."""
 
-    @pytest.mark.parametrize("bad_elapsed", [-0.1, math.nan, math.inf, -math.inf])
+    @pytest.mark.parametrize(
+        "bad_elapsed", [-0.1, math.nan, math.inf, -math.inf, True, False]
+    )
     def test_poll_status_rejects_invalid_elapsed(self, bad_elapsed):
         with pytest.raises(
             ValueError, match="total_elapsed must be a non-negative finite number"
@@ -35,7 +37,9 @@ class TestPollSchedule:
         with pytest.raises(TypeError, match="schedule_fn must be callable"):
             PollSchedule(bad_fn)
 
-    @pytest.mark.parametrize("bad_delay", [-0.1, -10.0, math.nan, math.inf, -math.inf])
+    @pytest.mark.parametrize(
+        "bad_delay", [-0.1, -10.0, math.nan, math.inf, -math.inf, True, False]
+    )
     def test_call_rejects_invalid_calculated_delay(self, bad_delay):
         sched = PollSchedule(lambda s: bad_delay)
         with pytest.raises(

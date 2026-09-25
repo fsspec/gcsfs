@@ -33,7 +33,11 @@ class PollStatus:
     attempt: int = 1
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.total_elapsed) or self.total_elapsed < 0.0:
+        if (
+            isinstance(self.total_elapsed, bool)
+            or not math.isfinite(self.total_elapsed)
+            or self.total_elapsed < 0.0
+        ):
             raise ValueError(
                 f"total_elapsed must be a non-negative finite number, got {self.total_elapsed}"
             )
@@ -74,7 +78,7 @@ class PollSchedule:
         """Computes the delay in seconds for the next poll attempt, or None to abort."""
         delay = self._fn(status)
         if delay is not None:
-            if not math.isfinite(delay) or delay < 0.0:
+            if isinstance(delay, bool) or not math.isfinite(delay) or delay < 0.0:
                 raise ValueError(
                     f"Calculated delay must be a non-negative finite number, got {delay}"
                 )
@@ -85,6 +89,11 @@ class PollSchedule:
         """Linear schedule where delay grows relative to elapsed wall-clock time:
 
         delay(t) = slope * t.
+
+        Warning:
+            At t=0 (the first poll attempt), the calculated delay is 0.0.
+            To prevent a busy loop, this schedule should typically be chained
+            with a floor, e.g., floor(min_delay).
 
         Example:
             >>> sched = PollSchedule.linear_elapsed(slope=1.0)
@@ -115,7 +124,7 @@ class PollSchedule:
 
         def _schedule(s: PollStatus) -> Optional[float]:
             d = self._fn(s)
-            if d is None or not math.isfinite(d):
+            if d is None or isinstance(d, bool) or not math.isfinite(d):
                 return d
             return max(d, min_delay)
 
@@ -141,7 +150,7 @@ class PollSchedule:
 
         def _schedule(s: PollStatus) -> Optional[float]:
             d = self._fn(s)
-            if d is None or not math.isfinite(d):
+            if d is None or isinstance(d, bool) or not math.isfinite(d):
                 return d
             return min(d, max_delay)
 
@@ -173,7 +182,7 @@ class PollSchedule:
 
         def _schedule(s: PollStatus) -> Optional[float]:
             d = self._fn(s)
-            if d is None or not math.isfinite(d):
+            if d is None or isinstance(d, bool) or not math.isfinite(d):
                 return d
             return d * random_fn(min_factor, max_factor)
 
@@ -199,7 +208,7 @@ class PollSchedule:
             if remaining <= 0:
                 return None
             d = self._fn(s)
-            if d is None or not math.isfinite(d):
+            if d is None or isinstance(d, bool) or not math.isfinite(d):
                 return d
             return min(d, remaining)
 
