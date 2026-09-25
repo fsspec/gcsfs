@@ -636,7 +636,9 @@ class MRDPool:
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
+        self._creating_count = 0
         self._lock = asyncio.Lock()
+        self._cond = asyncio.Condition(self._lock)
         self.details = None
         self.persisted_size = None
         self.finalized = finalized
@@ -695,7 +697,7 @@ class MRDPool:
 
     async def initialize(self):
         """Initializes the MRDPool by creating the first downloader instance."""
-        async with self._lock:
+        async with self._cond:
             if self._closed:
                 raise RuntimeError("Cannot initialize a closed MRDPool.")
 
@@ -729,37 +731,77 @@ class MRDPool:
             Exception: Bubbles up any exceptions encountered during MRD creation.
         """
         mrd = None
+        create_new = False
 
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("MRDPool is closed.")
+        async with self._cond:
+            while True:
+                if self._closed:
+                    raise RuntimeError("MRDPool is closed.")
 
-            if self._free_mrds.empty():
+                if not self._free_mrds.empty():
+                    mrd = self._free_mrds.get_nowait()
+                    break
+
                 if self._active_count < self.pool_size:
+                    if self._cache is not None:
+                        mrd = self._cache.get_idle_mrd(self._key)
+                    if mrd is not None:
+                        self._active_count += 1
+                        self._all_mrds.append(mrd)
+                        break
+                    # Reserve a slot now; the network stream open happens
+                    # below, outside the lock, so concurrent callers open
+                    # their bidi streams in parallel instead of serially.
                     self._active_count += 1
-                    try:
-                        mrd = await self._get_or_create_mrd()
-                    except BaseException as e:
-                        self._active_count -= 1
-                        raise e
-                elif self._all_mrds:
+                    self._creating_count += 1
+                    create_new = True
+                    break
+
+                if self._all_mrds:
                     # Pool is full and the queue is empty: share a busy MRD in
                     # round-robin fashion. The MRD now has multiple holders;
                     # refcounting ensures it is requeued/closed only once the
                     # LAST holder is done with it.
-                    mrd = self._all_mrds[self._rr_index]
+                    mrd = self._all_mrds[self._rr_index % len(self._all_mrds)]
                     self._rr_index = (self._rr_index + 1) % len(self._all_mrds)
+                    break
 
-            if mrd is None:
-                # If the queue was non-empty, this gets an MRD immediately without blocking.
+                if self._creating_count > 0:
+                    # All pool_size slots are currently being created outside
+                    # the lock; wait until one finishes or fails.
+                    await self._cond.wait()
+                    continue
+
                 # If the queue was empty (pool is full and sharing is disabled), this blocks
                 # until a holder returns an MRD.
                 # NOTE: the lock is intentionally held across this await -- get_mrd's finally
                 # returns MRDs via put_nowait WITHOUT the lock, so a waiter blocked
                 # here is still unblocked by a concurrent release (no deadlock).
                 mrd = await self._free_mrds.get()
+                break
 
-            self._mark_inflight(mrd)
+            if mrd is not None:
+                self._mark_inflight(mrd)
+
+        if create_new:
+            try:
+                mrd = await self._create_mrd()
+            except BaseException:
+                async with self._cond:
+                    self._active_count -= 1
+                    self._creating_count -= 1
+                    self._cond.notify_all()
+                raise
+            async with self._cond:
+                self._creating_count -= 1
+                if self._closed:
+                    self._active_count -= 1
+                    self._cond.notify_all()
+                    await close_mrd(mrd)
+                    raise RuntimeError("MRDPool is closed.")
+                self._all_mrds.append(mrd)
+                self._mark_inflight(mrd)
+                self._cond.notify_all()
 
         try:
             yield mrd
@@ -782,10 +824,11 @@ class MRDPool:
 
         In-flight MRDs are not touched here; the last get_mrd() holder closes them on return once _closed is set.
         """
-        async with self._lock:
+        async with self._cond:
             if self._closed:
                 return
             self._closed = True
+            self._cond.notify_all()
 
             free_mrds = []
             while not self._free_mrds.empty():

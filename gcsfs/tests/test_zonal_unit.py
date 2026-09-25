@@ -362,6 +362,54 @@ def test_zonal_prefetcher_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
             assert f._prefetch_engine.concurrency == 4
 
 
+@pytest.mark.asyncio
+async def test_mrd_pool_get_mrd_close_during_create_and_failure_recovery():
+    from gcsfs.zb_hns_utils import MRDPool
+
+    fs = mock.MagicMock()
+    pool = MRDPool(fs, "b", "o", "1", True, pool_size=1)
+    gate = asyncio.Event()
+    created_mrd = mock.AsyncMock()
+
+    async def slow_create():
+        await gate.wait()
+        return created_mrd
+
+    pool._create_mrd = slow_create
+    task = asyncio.create_task(pool.get_mrd().__aenter__())
+    await asyncio.sleep(0.01)
+    await pool.close()
+    gate.set()
+    with pytest.raises(RuntimeError, match="closed"):
+        await task
+    created_mrd.close.assert_awaited_once()
+    assert pool._all_mrds == []
+
+    # Uninitialized pool_size=1 where caller 1 fails _create_mrd while caller 2 waits:
+    # caller 2 must wake up and succeed instead of deadlocking.
+    pool2 = MRDPool(fs, "b", "o", "1", True, pool_size=1)
+    calls = 0
+    good_mrd = mock.AsyncMock()
+
+    async def flaky_create():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        if calls == 1:
+            raise ValueError("transient open failure")
+        return good_mrd
+
+    pool2._create_mrd = flaky_create
+
+    async def use_mrd():
+        async with pool2.get_mrd() as m:
+            return m
+
+    r1, r2 = await asyncio.gather(use_mrd(), use_mrd(), return_exceptions=True)
+    assert isinstance(r1, ValueError)
+    assert r2 is good_mrd
+
+
 def test_resolve_cache_config():
     """Tests _resolve_cache_config logic under various kwargs configurations."""
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
