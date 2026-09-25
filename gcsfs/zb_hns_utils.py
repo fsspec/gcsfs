@@ -985,6 +985,7 @@ class MRDPoolCache:
         pool_size,
         cache_type=None,
         cache_source=None,
+        info=None,
     ):
         """
         Gets an MRDPool for the specified object.
@@ -996,6 +997,8 @@ class MRDPoolCache:
             pool_size (int): Requested pool size.
             cache_type (str, optional): The cache type string.
             cache_source (str, optional): The cache source string.
+            info (dict, optional): Object metadata already known to the
+                caller. When given, the metadata lookup is skipped.
 
         Returns:
             MRDPool: An initialized MRDPool instance.
@@ -1006,7 +1009,8 @@ class MRDPoolCache:
         if fs is None:
             raise RuntimeError("ExtendedGcsFileSystem has been garbage collected.")
 
-        info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
+        if info is None:
+            info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
         if generation is None:
             generation = info.get("generation")
         key = (bucket_name, object_name, generation, cache_type)
