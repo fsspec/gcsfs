@@ -1495,9 +1495,9 @@ async def test_mrd_pool_finalized_reuses_cached_mrd_on_init(
 async def test_mrd_pool_unfinalized_reuses_cached_mrd_after_init(
     init_mrd_mock, mock_cache, mock_gcsfs
 ):
-    # Cached MRD
+    # Cached MRD, opened when the object already had its current size
     cached_mrd = mock.AsyncMock()
-    cached_mrd.persisted_size = 100
+    cached_mrd.persisted_size = 200
     mock_cache.queue.append(cached_mrd)
 
     # New MRD for initialization
@@ -1531,6 +1531,76 @@ async def test_mrd_pool_unfinalized_reuses_cached_mrd_after_init(
 
     # init_mrd should not have been called again
     assert init_mrd_mock.await_count == 1
+
+
+def _mrd_with_size(persisted_size):
+    mrd = mock.AsyncMock()
+    mrd.persisted_size = persisted_size
+    return mrd
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_unfinalized_scale_up_skips_stale_idle_mrd(
+    init_mrd_mock, mock_cache, mock_gcsfs
+):
+    # Appends keep the generation, so idle MRDs opened before an append share
+    # the pool's cache key but carry an older persisted_size.
+    stale_mrd = _mrd_with_size(100)
+    current_mrd = _mrd_with_size(200)
+    mock_cache.queue.extend([stale_mrd, current_mrd])
+    init_mrd = _mrd_with_size(200)
+    created_mrd = _mrd_with_size(200)
+    init_mrd_mock.side_effect = [init_mrd, created_mrd]
+
+    pool = MRDPool(
+        mock_gcsfs,
+        "bucket",
+        "obj",
+        "123",
+        finalized=False,
+        pool_size=3,
+        cache=mock_cache,
+    )
+    await pool.initialize()
+    assert pool.persisted_size == 200
+
+    async with pool.get_mrd() as mrd1, pool.get_mrd() as mrd2:
+        async with pool.get_mrd() as mrd3:
+            assert mrd1 is init_mrd
+            # Scale-up skips the stale idle MRD and takes the current one...
+            assert mrd2 is current_mrd
+            # ...then opens a new stream once the cache has nothing usable.
+            assert mrd3 is created_mrd
+    assert stale_mrd not in pool._all_mrds
+    stale_mrd.close.assert_not_awaited()
+
+    await pool.close()
+    stale_mrd.close.assert_awaited_once()
+    released = mock_cache.release.call_args.args[1]
+    assert sorted(map(id, released)) == sorted(
+        map(id, [init_mrd, current_mrd, created_mrd])
+    )
+
+
+@pytest.mark.asyncio
+async def test_mrd_pool_finalized_scale_up_reuses_any_idle_mrd(mock_cache):
+    idle_mrd = _mrd_with_size(100)
+    mock_cache.queue.append(idle_mrd)
+    pool = MRDPool(
+        mock.Mock(),
+        "bucket",
+        "obj",
+        "123",
+        finalized=True,
+        pool_size=1,
+        cache=mock_cache,
+    )
+    pool.persisted_size = 200
+
+    async with pool.get_mrd() as mrd:
+        assert mrd is idle_mrd
+    assert pool._stale_mrds == []
 
 
 @mock.patch("gcsfs.zb_hns_utils.HAS_CPYTHON_API", False)

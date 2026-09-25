@@ -653,6 +653,10 @@ class MRDPool:
         # MRD still being driven by a round-robin sharer is never closed/requeued
         # out from under it.
         self._inflight = {}
+        # Idle cached MRDs skipped by scale-up because they were opened before
+        # an append (see _is_stale). close() closes them; closing them in
+        # get_mrd() would need an await, and a cancellation there leaks them.
+        self._stale_mrds = []
 
     def _mark_inflight(self, mrd):
         """Record one more holder of `mrd`. Called under self._lock while the MRD
@@ -694,6 +698,30 @@ class MRDPool:
         )
         return mrd
 
+    def _is_stale(self, mrd):
+        """True if an idle cached MRD was opened before the object grew.
+
+        Appends keep an unfinalized object's generation, so the cache can hold
+        idle MRDs under this pool's key whose persisted_size is older than the
+        one this pool was initialized with.
+        """
+        return (
+            not self.finalized
+            and isinstance(self.persisted_size, int)
+            and isinstance(mrd.persisted_size, int)
+            and mrd.persisted_size < self.persisted_size
+        )
+
+    def _take_idle_mrd(self):
+        """Pops the first idle cached MRD that is not stale, or returns None."""
+        if self._cache is None:
+            return None
+        while True:
+            mrd = self._cache.get_idle_mrd(self._key)
+            if mrd is None or not self._is_stale(mrd):
+                return mrd
+            self._stale_mrds.append(mrd)
+
     async def _get_or_create_mrd(self):
         """Gets an MRD from the cache or creates a new one."""
         mrd = None
@@ -730,8 +758,9 @@ class MRDPool:
 
         If a downloader is available in the pool, it is yielded immediately. If the
         pool is empty but hasn't reached `pool_size`, a new downloader is spawned
-        on demand or fetched from the cache. Automatically returns the downloader
-        to the free queue upon exit.
+        on demand or fetched from the cache. For unfinalized objects, cached
+        downloaders opened before the object grew are skipped. Automatically
+        returns the downloader to the free queue upon exit.
 
         Yields:
             AsyncMultiRangeDownloader: An active downloader ready for requests.
@@ -752,8 +781,7 @@ class MRDPool:
                     break
 
                 if self._active_count < self.pool_size:
-                    if self._cache is not None:
-                        mrd = self._cache.get_idle_mrd(self._key)
+                    mrd = self._take_idle_mrd()
                     if mrd is not None:
                         self._active_count += 1
                         self._all_mrds.append(mrd)
@@ -849,6 +877,7 @@ class MRDPool:
             free_mrds = []
             while not self._free_mrds.empty():
                 free_mrds.append(self._free_mrds.get_nowait())
+            stale_mrds, self._stale_mrds = self._stale_mrds, []
 
             try:
                 if self._cache is not None:
@@ -857,6 +886,7 @@ class MRDPool:
                     await _close_mrds(free_mrds, raise_exception=True)
             finally:
                 self._all_mrds.clear()
+                await _close_mrds(stale_mrds, raise_exception=False)
 
 
 def _drain_queue(q):
