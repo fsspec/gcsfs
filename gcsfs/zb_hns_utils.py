@@ -636,7 +636,12 @@ class MRDPool:
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
+        # Slots whose stream is still being opened outside the lock. They are
+        # already counted in _active_count.
+        self._creating_count = 0
         self._lock = asyncio.Lock()
+        # Shares _lock. get_mrd() callers wait on it while streams are opening.
+        self._cond = asyncio.Condition(self._lock)
         self.details = None
         self.persisted_size = None
         self.finalized = finalized
@@ -651,6 +656,10 @@ class MRDPool:
         # MRD still being driven by a round-robin sharer is never closed/requeued
         # out from under it.
         self._inflight = {}
+        # Idle cached MRDs skipped by scale-up because they were opened before
+        # an append (see _is_stale). close() closes them; closing them in
+        # get_mrd() would need an await, and a cancellation there leaks them.
+        self._stale_mrds = []
 
     def _mark_inflight(self, mrd):
         """Record one more holder of `mrd`. Called under self._lock while the MRD
@@ -671,6 +680,15 @@ class MRDPool:
         self._inflight.pop(mrd, None)
         return True
 
+    async def _notify_all(self):
+        """Wake every get_mrd() caller waiting for a stream to finish opening.
+
+        Callers wrap this in asyncio.shield() so that a cancellation while
+        waiting for the lock cannot drop the wakeup.
+        """
+        async with self._cond:
+            self._cond.notify_all()
+
     async def _create_mrd(self):
         await self.gcsfs._get_grpc_client()
         mrd = await init_mrd(
@@ -682,6 +700,33 @@ class MRDPool:
             cache_source=self.cache_source,
         )
         return mrd
+
+    def _is_stale(self, mrd):
+        """True if an idle cached MRD was opened before the object grew.
+
+        Appends keep an unfinalized object's generation, so the cache can hold
+        idle MRDs under this pool's key whose persisted_size is older than the
+        one this pool was initialized with.
+        """
+        return (
+            not self.finalized
+            and isinstance(self.persisted_size, int)
+            and isinstance(mrd.persisted_size, int)
+            and mrd.persisted_size < self.persisted_size
+        )
+
+    def _take_idle_mrd(self):
+        """Pops the first idle cached MRD that is not stale, or returns None.
+
+        Stale MRDs are parked in _stale_mrds until close().
+        """
+        if self._cache is None:
+            return None
+        while True:
+            mrd = self._cache.get_idle_mrd(self._key)
+            if mrd is None or not self._is_stale(mrd):
+                return mrd
+            self._stale_mrds.append(mrd)
 
     async def _get_or_create_mrd(self):
         """Gets an MRD from the cache or creates a new one."""
@@ -695,7 +740,7 @@ class MRDPool:
 
     async def initialize(self):
         """Initializes the MRDPool by creating the first downloader instance."""
-        async with self._lock:
+        async with self._cond:
             if self._closed:
                 raise RuntimeError("Cannot initialize a closed MRDPool.")
 
@@ -719,8 +764,9 @@ class MRDPool:
 
         If a downloader is available in the pool, it is yielded immediately. If the
         pool is empty but hasn't reached `pool_size`, a new downloader is spawned
-        on demand or fetched from the cache. Automatically returns the downloader
-        to the free queue upon exit.
+        on demand or fetched from the cache. For unfinalized objects, cached
+        downloaders opened before the object grew are skipped. Automatically
+        returns the downloader to the free queue upon exit.
 
         Yields:
             AsyncMultiRangeDownloader: An active downloader ready for requests.
@@ -729,39 +775,87 @@ class MRDPool:
             Exception: Bubbles up any exceptions encountered during MRD creation.
         """
         mrd = None
+        create_new = False
 
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("MRDPool is closed.")
+        async with self._cond:
+            while True:
+                if self._closed:
+                    raise RuntimeError("MRDPool is closed.")
 
-            if self._free_mrds.empty():
+                if not self._free_mrds.empty():
+                    mrd = self._free_mrds.get_nowait()
+                    break
+
                 if self._active_count < self.pool_size:
+                    # Scale up: reuse an idle stream from the cache if there
+                    # is one, otherwise open a new one.
+                    mrd = self._take_idle_mrd()
+                    if mrd is not None:
+                        self._active_count += 1
+                        self._all_mrds.append(mrd)
+                        break
+                    # Reserve the slot now and open the stream below, outside
+                    # the lock, so concurrent callers open streams in parallel.
                     self._active_count += 1
-                    try:
-                        mrd = await self._get_or_create_mrd()
-                    except BaseException as e:
-                        self._active_count -= 1
-                        raise e
-                elif self._all_mrds:
+                    self._creating_count += 1
+                    create_new = True
+                    break
+
+                if self._creating_count > 0:
+                    # Every slot is taken and some streams are still opening.
+                    # Wait for them so the round-robin below can spread
+                    # callers over all pool_size streams.
+                    await self._cond.wait()
+                    continue
+
+                if self._all_mrds:
                     # Pool is full and the queue is empty: share a busy MRD in
                     # round-robin fashion. The MRD now has multiple holders;
                     # refcounting ensures it is requeued/closed only once the
                     # LAST holder is done with it.
-                    mrd = self._all_mrds[self._rr_index]
+                    mrd = self._all_mrds[self._rr_index % len(self._all_mrds)]
                     self._rr_index = (self._rr_index + 1) % len(self._all_mrds)
+                    break
 
-            if mrd is None:
-                # If the queue was non-empty, this gets an MRD immediately without blocking.
                 # If the queue was empty (pool is full and sharing is disabled), this blocks
                 # until a holder returns an MRD.
                 # NOTE: the lock is intentionally held across this await -- get_mrd's finally
                 # returns MRDs via put_nowait WITHOUT the lock, so a waiter blocked
                 # here is still unblocked by a concurrent release (no deadlock).
                 mrd = await self._free_mrds.get()
+                break
 
+            # mrd is None only when this caller is opening a new stream. That
+            # stream is marked in flight below, once it is open.
+            if mrd is not None:
+                self._mark_inflight(mrd)
+
+        if create_new:
+            # Open the stream outside the lock. The bookkeeping after it has no
+            # await, so a cancellation cannot land between the stream opening
+            # and the pool tracking it (or giving the slot back).
+            try:
+                mrd = await self._create_mrd()
+            except BaseException:
+                self._active_count -= 1
+                self._creating_count -= 1
+                # Let a waiter retry the freed slot.
+                await asyncio.shield(self._notify_all())
+                raise
+            self._creating_count -= 1
+            if self._closed:
+                # close() already woke every waiter.
+                self._active_count -= 1
+                await close_mrd(mrd)
+                raise RuntimeError("MRDPool is closed.")
+            self._all_mrds.append(mrd)
             self._mark_inflight(mrd)
 
         try:
+            if create_new:
+                # Inside the try so a cancellation here still requeues the new
+                # MRD via the finally below.
+                await asyncio.shield(self._notify_all())
             yield mrd
         finally:
             # Intentionally lock-free (see note above). Only the holder that
@@ -782,14 +876,17 @@ class MRDPool:
 
         In-flight MRDs are not touched here; the last get_mrd() holder closes them on return once _closed is set.
         """
-        async with self._lock:
+        async with self._cond:
             if self._closed:
                 return
             self._closed = True
+            # Waiters in get_mrd() wake up, see _closed and raise.
+            self._cond.notify_all()
 
             free_mrds = []
             while not self._free_mrds.empty():
                 free_mrds.append(self._free_mrds.get_nowait())
+            stale_mrds, self._stale_mrds = self._stale_mrds, []
 
             try:
                 if self._cache is not None:
@@ -798,6 +895,9 @@ class MRDPool:
                     await _close_mrds(free_mrds, raise_exception=True)
             finally:
                 self._all_mrds.clear()
+                # Stale MRDs never go back to the cache. Errors closing them
+                # are only logged so they cannot hide an error from above.
+                await _close_mrds(stale_mrds, raise_exception=False)
 
 
 def _drain_queue(q):
@@ -885,6 +985,7 @@ class MRDPoolCache:
         pool_size,
         cache_type=None,
         cache_source=None,
+        info=None,
     ):
         """
         Gets an MRDPool for the specified object.
@@ -896,6 +997,10 @@ class MRDPoolCache:
             pool_size (int): Requested pool size.
             cache_type (str, optional): The cache type string.
             cache_source (str, optional): The cache source string.
+            info (dict, optional): Object metadata already known to the
+                caller. When given, the metadata lookup is skipped and the
+                caller vouches for it: the pool's generation (if not passed)
+                and finalized state come from it unchecked.
 
         Returns:
             MRDPool: An initialized MRDPool instance.
@@ -906,7 +1011,8 @@ class MRDPoolCache:
         if fs is None:
             raise RuntimeError("ExtendedGcsFileSystem has been garbage collected.")
 
-        info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
+        if info is None:
+            info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
         if generation is None:
             generation = info.get("generation")
         key = (bucket_name, object_name, generation, cache_type)

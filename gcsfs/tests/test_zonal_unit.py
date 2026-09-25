@@ -362,6 +362,468 @@ def test_zonal_prefetcher_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
             assert f._prefetch_engine.concurrency == 4
 
 
+def test_split_ranges_across_streams_balances_bytes():
+    reqs = [(0, 0, 16), (1, 100, 1), (2, 200, 1), (3, 300, 16), (4, 400, 2)]
+    groups = ExtendedGcsFileSystem._split_ranges_across_streams(reqs, 2)
+    assert len(groups) == 2
+    assert sorted(r for g in groups for r in g) == sorted(reqs)
+    loads = sorted(sum(r[2] for r in g) for g in groups)
+    assert loads == [18, 18]
+    for g in groups:
+        assert [r[1] for r in g] == sorted(r[1] for r in g)
+
+
+def test_split_ranges_across_streams_edge_cases():
+    split = ExtendedGcsFileSystem._split_ranges_across_streams
+    assert split([], 4) == []
+    assert split([(0, 5, 1), (1, 0, 1)], 1) == [[(1, 0, 1), (0, 5, 1)]]
+    # Never more groups than requests.
+    assert len(split([(0, 0, 1), (1, 1, 1)], 64)) == 2
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_uses_one_pool_and_splits_across_mrds(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    starts = [0, 10, 20, 30, 40, 50, file_size - 5, 5]
+    ends = [5, 15, 25, 35, 45, 55, file_size + 100, 5]
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges(
+            [file_path] * len(starts), starts, ends, batch_size=3
+        )
+
+        assert res == [json_data[s:e] for s, e in zip(starts, ends)]
+        mocks["pool_cache_get"].assert_awaited_once()
+        # 7 non-empty ranges across 3 streams -> 3 multi-range calls.
+        assert mocks["pool_cache_get"].call_args.kwargs["pool_size"] == 3
+        assert mocks["downloader"].download_ranges.await_count == 3
+        n_sent = sum(
+            len(c.args[0]) for c in mocks["downloader"].download_ranges.await_args_list
+        )
+        assert n_sent == 7
+        mocks["pool"].close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_multi_file_shares_stream_budget(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    other = f"{TEST_ZONAL_BUCKET}/test/accounts.2.json"
+    paths = [file_path, other] * 4
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges(paths, 0, 10, batch_size=4)
+
+        assert res == [json_data[:10]] * len(paths)
+        assert mocks["pool_cache_get"].await_count == 2
+        sizes = [c.kwargs["pool_size"] for c in mocks["pool_cache_get"].await_args_list]
+        assert sizes == [2, 2]
+
+
+def test_allocate_streams_stays_within_budget():
+    alloc = ExtendedGcsFileSystem._allocate_streams
+    # 5 objects x 40 ranges, budget 64, cap 16 -> sums to exactly 64.
+    a = alloc([40] * 5, 64, 16)
+    assert sum(a) == 64 and max(a) <= 16 and min(a) >= 1
+    # Caps bind: 2 objects cannot use more than 2 x 16 streams.
+    assert alloc([100, 100], 64, 16) == [16, 16]
+    # Few ranges on an object never get more streams than ranges.
+    assert alloc([1, 99], 64, 16) == [1, 16]
+    # Skewed counts with the at-least-one floor stay within budget.
+    a = alloc([1, 1, 1, 197], 8, 16)
+    assert sum(a) == 8 and a[:3] == [1, 1, 1]
+    # More objects than streams -> one each (caller bounds concurrency).
+    assert alloc([3] * 10, 4, 16) == [1] * 10
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_many_objects_bounded_by_batch_size(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/obj{i}" for i in range(10)]
+    in_flight = 0
+    peak = 0
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        pool = mocks["pool"]
+
+        async def tracking_get(*args, **kwargs):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            return pool
+
+        async def tracking_close():
+            nonlocal in_flight
+            in_flight -= 1
+
+        mocks["pool_cache_get"].side_effect = tracking_get
+        pool.close.side_effect = tracking_close
+
+        res = await extended_gcsfs._cat_ranges(paths, 0, 10, batch_size=4)
+
+        assert res == [json_data[:10]] * len(paths)
+        assert mocks["pool_cache_get"].await_count == 10
+        assert peak <= 4
+        assert all(
+            c.kwargs["pool_size"] == 1 for c in mocks["pool_cache_get"].await_args_list
+        )
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_returns_group_exceptions(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = ValueError("boom")
+        res = await extended_gcsfs._cat_ranges([file_path] * 2, [0, 10], [5, 15])
+        assert all(isinstance(r, ValueError) for r in res)
+        mocks["pool"].close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_reuses_finalized_info_speculatively(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    info = {"generation": "1", "size": file_size, "timeFinalized": "t"}
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["pool"].finalized = True
+        mocks["pool"].details = info
+        with mock.patch.object(
+            extended_gcsfs, "_info", new_callable=mock.AsyncMock, return_value=info
+        ) as info_mock:
+            res1 = await extended_gcsfs._cat_ranges([file_path], [0], [10])
+            res2 = await extended_gcsfs._cat_ranges([file_path], [0], [10])
+        assert res1 == res2 == [json_data[:10]]
+        calls = mocks["pool_cache_get"].await_args_list
+        assert calls[0].kwargs["info"] is None
+        assert calls[1].kwargs["info"] is info
+        info_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change", [{"generation": "2"}, {"size": file_size + 1}], ids=["generation", "size"]
+)
+async def test_cat_ranges_zonal_speculation_retries_on_metadata_change(
+    extended_gcsfs, gcs_bucket_mocks, change
+):
+    old = {"generation": "1", "size": file_size, "timeFinalized": "t"}
+    new = {**old, **change}
+    bucket, obj, _ = extended_gcsfs.split_path(file_path)
+    extended_gcsfs._zonal_info_hints[(bucket, obj)] = old
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with mock.patch.object(
+            extended_gcsfs, "_info", new_callable=mock.AsyncMock, return_value=new
+        ) as info_mock:
+            res = await extended_gcsfs._cat_ranges([file_path], [0], [10])
+        assert res == [json_data[:10]]
+        calls = mocks["pool_cache_get"].await_args_list
+        # The redo opens with the metadata the validation already fetched.
+        assert [c.kwargs["info"] for c in calls] == [old, new]
+        info_mock.assert_awaited_once()
+        assert (bucket, obj) not in extended_gcsfs._zonal_info_hints
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_failed_speculative_open_retries_with_fresh_info(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    old = {"generation": "1", "size": file_size, "timeFinalized": "t"}
+    new = {"generation": "2", "size": file_size, "timeFinalized": "t"}
+    bucket, obj, _ = extended_gcsfs.split_path(file_path)
+    extended_gcsfs._zonal_info_hints[(bucket, obj)] = old
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["pool"].finalized = True
+        mocks["pool"].details = new
+        mocks["pool_cache_get"].side_effect = [
+            FileNotFoundError("generation 1 is gone"),
+            mocks["pool"],
+        ]
+        with mock.patch.object(
+            extended_gcsfs, "_info", new_callable=mock.AsyncMock, return_value=new
+        ) as info_mock:
+            res = await extended_gcsfs._cat_ranges([file_path], [0], [10])
+        assert res == [json_data[:10]]
+        calls = mocks["pool_cache_get"].await_args_list
+        assert [c.kwargs["info"] for c in calls] == [old, new]
+        info_mock.assert_awaited_once()
+        assert extended_gcsfs._zonal_info_hints[(bucket, obj)] is new
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_failed_validation_is_returned_and_evicts_hint(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    info = {"generation": "1", "size": file_size, "timeFinalized": "t"}
+    bucket, obj, _ = extended_gcsfs.split_path(file_path)
+    extended_gcsfs._zonal_info_hints[(bucket, obj)] = info
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with mock.patch.object(
+            extended_gcsfs,
+            "_info",
+            new_callable=mock.AsyncMock,
+            side_effect=FileNotFoundError(file_path),
+        ):
+            res = await extended_gcsfs._cat_ranges([file_path] * 2, [0, 5], [5, 10])
+        assert all(isinstance(r, FileNotFoundError) for r in res)
+        mocks["pool_cache_get"].assert_awaited_once()
+        assert (bucket, obj) not in extended_gcsfs._zonal_info_hints
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_during_speculative_open_propagates(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    info = {"generation": "1", "size": file_size, "timeFinalized": "t"}
+    bucket, obj, _ = extended_gcsfs.split_path(file_path)
+    extended_gcsfs._zonal_info_hints[(bucket, obj)] = info
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        opening = asyncio.Event()
+
+        async def slow_open(*args, **kwargs):
+            opening.set()
+            await asyncio.sleep(10)
+
+        mocks["pool_cache_get"].side_effect = slow_open
+        with mock.patch.object(
+            extended_gcsfs, "_info", new_callable=mock.AsyncMock, return_value=info
+        ):
+            task = asyncio.create_task(
+                extended_gcsfs._cat_ranges_zonal_file(file_path, [0], [10], 1)
+            )
+            await opening.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+        # No non-speculative redo, and a cancel says nothing about the hint.
+        mocks["pool_cache_get"].assert_awaited_once()
+        assert extended_gcsfs._zonal_info_hints[(bucket, obj)] is info
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_propagates_callers_cancellation():
+    release = asyncio.Event()
+
+    async def slow_to_cancel():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+
+    task = asyncio.create_task(slow_to_cancel())
+    await asyncio.sleep(0)
+    caller = asyncio.create_task(ExtendedGcsFileSystem._cancel_task(task))
+    await asyncio.sleep(0.01)
+    # The caller is cancelled while it waits for the task to wind down.
+    caller.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=1)
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_non_zonal_delegates_to_fsspec(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.NON_HIERARCHICAL):
+        with mock.patch(
+            "fsspec.asyn.AsyncFileSystem._cat_ranges", new_callable=mock.AsyncMock
+        ) as mock_super:
+            mock_super.return_value = [b"x"]
+            res = await extended_gcsfs._cat_ranges([file_path], [0], [1])
+            assert res == [b"x"]
+            mock_super.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_with_max_gap_delegates_to_fsspec(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with pytest.raises(NotImplementedError):
+            await extended_gcsfs._cat_ranges([file_path], [0], [1], max_gap=0)
+        mocks["pool_cache_get"].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_on_error_raise(extended_gcsfs, gcs_bucket_mocks):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = ValueError("boom")
+        with pytest.raises(ValueError, match="boom"):
+            await extended_gcsfs._cat_ranges(
+                [file_path] * 2, [0, 10], [5, 15], on_error="raise"
+            )
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_respects_concurrency_and_mrd_kwargs(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges(
+            [file_path] * 20, 0, 5, batch_size=64, concurrency=3
+        )
+        assert res == [json_data[:5]] * 20
+        assert mocks["pool_cache_get"].call_args.kwargs["pool_size"] == 3
+
+        mocks["pool_cache_get"].reset_mock()
+        mocks["pool"].close.reset_mock()
+        res2 = await extended_gcsfs._cat_ranges(
+            [file_path] * 2, [0, 5], [5, 10], mrd=mocks["pool"]
+        )
+        assert res2 == [json_data[:5], json_data[5:10]]
+        mocks["pool_cache_get"].assert_not_called()
+        mocks["pool"].close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_batch_size_minus_one_is_unbounded(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges([file_path] * 20, 0, 5, batch_size=-1)
+        assert res == [json_data[:5]] * 20
+        # fsspec's -1 means "no limit": only the per-object cap applies.
+        assert (
+            mocks["pool_cache_get"].call_args.kwargs["pool_size"]
+            == ExtendedGcsFileSystem.MAX_ZONAL_STREAMS_PER_OBJECT
+        )
+        with pytest.raises(ValueError, match="batch_size"):
+            await extended_gcsfs._cat_ranges([file_path] * 2, 0, 5, batch_size=-2)
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_mixed_zonal_and_regional_paths(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    regional = f"{TEST_BUCKET}/regional.json"
+    paths = [file_path, regional, file_path, regional]
+
+    async def is_zonal(bucket):
+        return bucket == TEST_ZONAL_BUCKET
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with (
+            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", side_effect=is_zonal),
+            mock.patch(
+                "fsspec.asyn.AsyncFileSystem._cat_ranges",
+                new_callable=mock.AsyncMock,
+                return_value=[b"r1", b"r3"],
+            ) as mock_super,
+        ):
+            res = await extended_gcsfs._cat_ranges(paths, [0, 1, 5, 3], [5, 2, 10, 4])
+        assert res == [json_data[:5], b"r1", json_data[5:10], b"r3"]
+        assert mock_super.await_args.args == ([regional, regional], [1, 3], [2, 4])
+        mocks["pool_cache_get"].assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_chunks_download_ranges_at_mrd_max_ranges(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    starts = list(range(0, 70, 10))
+    ends = [s + 5 for s in starts]
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with mock.patch("gcsfs.extended_gcsfs.MRD_MAX_RANGES", 3):
+            res = await extended_gcsfs._cat_ranges(
+                [file_path] * len(starts), starts, ends, batch_size=1
+            )
+        assert res == [json_data[s:e] for s, e in zip(starts, ends)]
+        calls = mocks["downloader"].download_ranges.await_args_list
+        assert [len(c.args[0]) for c in calls] == [3, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_short_read_is_an_error(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    async def short_read(read_requests, metadata=None):
+        for offset, length, view in read_requests:
+            view.write(json_data[offset : offset + length - 1])
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = short_read
+        res = await extended_gcsfs._cat_ranges(
+            [file_path] * 2, [0, 10], [5, 15], batch_size=1
+        )
+        assert all(isinstance(r, BufferError) for r in res)
+
+
+@pytest.mark.asyncio
+async def test_zonal_info_hints_eviction_is_exact(extended_gcsfs):
+    b = TEST_ZONAL_BUCKET
+    hints = extended_gcsfs._zonal_info_hints
+    for name in ["dir/a", "dir/b", "dir/c", "dir/d", "dir/e", "dir/f"]:
+        hints[(b, name)] = {"generation": "1"}
+    hints[("other-bucket", "dir/a")] = {"generation": "1"}
+
+    # Each hook drops only the objects it touched, although the inherited
+    # dircache logic invalidates their parent directory.
+    with mock.patch.object(
+        extended_gcsfs,
+        "_is_bucket_hns_enabled",
+        new_callable=mock.AsyncMock,
+        return_value=True,
+    ):
+        await extended_gcsfs._write_file_cache_update(f"{b}/dir/a")
+        await extended_gcsfs._rm_files_cache_update([f"{b}/dir/b"])
+        await extended_gcsfs._mv_file_cache_update(f"{b}/dir/c", f"{b}/dir/d")
+    extended_gcsfs.invalidate_cache(f"{b}/dir/e")
+    extended_gcsfs.invalidate_cache(f"{b}/dir")
+    assert list(hints) == [(b, "dir/f"), ("other-bucket", "dir/a")]
+
+    extended_gcsfs.invalidate_cache(b)
+    assert list(hints) == [("other-bucket", "dir/a")]
+    extended_gcsfs.invalidate_cache()
+    assert not hints
+
+
+def test_zonal_info_hints_are_capped_lru(extended_gcsfs, monkeypatch):
+    monkeypatch.setattr(extended_gcsfs, "MAX_ZONAL_INFO_HINTS", 2)
+    store = extended_gcsfs._store_zonal_info_hint
+    store(("b", "x"), {"generation": "1"})
+    store(("b", "y"), {"generation": "1"})
+    store(("b", "x"), {"generation": "2"})  # refreshes x
+    store(("b", "z"), {"generation": "1"})  # evicts y, the least recent
+    assert list(extended_gcsfs._zonal_info_hints) == [("b", "x"), ("b", "z")]
+    assert extended_gcsfs._zonal_info_hints[("b", "x")] == {"generation": "2"}
+
+
 def test_resolve_cache_config():
     """Tests _resolve_cache_config logic under various kwargs configurations."""
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
