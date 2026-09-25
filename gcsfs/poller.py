@@ -113,7 +113,7 @@ class PollSchedule:
                 f"(50ms minimum to prevent server overload), got {min_delay}"
             )
         return type(self)(
-            lambda s: max(min_delay, d) if (d := self(s)) is not None else None
+            lambda s: max(d, min_delay) if (d := self._fn(s)) is not None else None
         )
 
     def cap(self, max_delay: float) -> "PollSchedule":
@@ -127,14 +127,14 @@ class PollSchedule:
             30.0
         """
         # Because .cap() is typically chained after .floor() and computes
-        # min(max_delay, d), max_delay must also be >= MIN_SAFE_LRO_POLL_FLOOR (50ms)
+        # min(d, max_delay), max_delay must also be >= MIN_SAFE_LRO_POLL_FLOOR (50ms)
         # so a downstream .cap() cannot override an upstream .floor() below 50ms.
         if not math.isfinite(max_delay) or max_delay < MIN_SAFE_LRO_POLL_FLOOR:
             raise ValueError(
                 f"max_delay must be a finite number >= {MIN_SAFE_LRO_POLL_FLOOR}, got {max_delay}"
             )
         return type(self)(
-            lambda s: min(max_delay, d) if (d := self(s)) is not None else None
+            lambda s: min(d, max_delay) if (d := self._fn(s)) is not None else None
         )
 
     def with_jitter(
@@ -163,7 +163,7 @@ class PollSchedule:
         return type(self)(
             lambda s: (
                 (d * random_fn(min_factor, max_factor))
-                if (d := self(s)) is not None
+                if (d := self._fn(s)) is not None
                 else None
             )
         )
@@ -187,7 +187,7 @@ class PollSchedule:
             remaining = max_seconds - s.total_elapsed
             if remaining <= 0:
                 return None
-            delay = self(s)
+            delay = self._fn(s)
             return min(delay, remaining) if delay is not None else None
 
         return type(self)(_schedule)

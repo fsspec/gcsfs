@@ -70,6 +70,16 @@ class TestPollSchedule:
             )
             is None
         )
+        # Chaining .floor(0.2) onto a schedule that produces a negative raw value
+        # calls self._fn(s) directly and clamps to 0.2 before outer __call__ validation.
+        assert PollSchedule(lambda s: -1.0).floor(0.2)(
+            PollStatus(total_elapsed=1.0)
+        ) == pytest.approx(0.2)
+        # NaN raw delays propagate through .floor() and fail outer __call__ validation.
+        with pytest.raises(
+            ValueError, match="Calculated delay must be a non-negative finite number"
+        ):
+            PollSchedule(lambda s: math.nan).floor(0.2)(PollStatus(total_elapsed=1.0))
 
         # Chaining .with_jitter(0.75, 1.25) after .floor(0.05) randomizes the
         # 50ms floor across [37.5ms, 62.5ms] to prevent synchronized polling spikes.
@@ -96,6 +106,10 @@ class TestPollSchedule:
             PollSchedule(lambda s: None).cap(10.0)(PollStatus(total_elapsed=5.0))
             is None
         )
+        with pytest.raises(
+            ValueError, match="Calculated delay must be a non-negative finite number"
+        ):
+            PollSchedule(lambda s: math.nan).cap(10.0)(PollStatus(total_elapsed=5.0))
 
     @pytest.mark.parametrize(
         "min_f, max_f", [(-0.1, 1.0), (1.2, 0.8), (math.nan, 1.0), (0.8, math.inf)]
