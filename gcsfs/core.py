@@ -34,7 +34,8 @@ from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
-from .retry import errs, retry_request, validate_response
+from .retry import HttpError, errs, retry_request, validate_response
+from .utils import is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
@@ -1218,10 +1219,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
-        # if start and end are both provided and valid, but start >= end, return empty bytes
-        # Otherwise, _process_limits would generate an invalid HTTP range (e.g. "bytes=5-4"
-        # for start=5, end=5), causing the server to return the whole file instead of nothing.
-        if start is not None and end is not None and start >= end >= 0:
+        if is_empty_range(start, end):
             return b""
 
         u2 = self.url(path, generation=kwargs.get("generation"))
@@ -2083,7 +2081,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
             fetcher_fn = default_fetcher
 
-        from .prefetcher import BackgroundPrefetcher
+        from fsspec.prefetcher import BackgroundPrefetcher
 
         prefetcher = BackgroundPrefetcher(
             fetcher=fetcher_fn,
@@ -2339,38 +2337,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type, kwargs):
+def _get_prefetcher_and_cache_config(cache_type=None):
     """
-    Resolves effective cache_type, whether prefetch reader should be enabled,
-    and cache_source ("explicit" vs "default").
+    Resolves effective cache_type and cache_source ("explicit" vs "default").
 
     Rules:
-    - If user explicitly sets cache_type (cache_type is not None), prefetcher is disabled,
+    - If user explicitly sets cache_type (cache_type is not None),
       cache_type is used, and cache_source is "explicit".
-    - If cache_type is None and prefetcher is enabled (default), cache_type is "none",
-      prefetcher is active, and cache_source is "default".
-    - If cache_type is None and prefetcher is disabled, fallback to default_cache_type ("readahead"),
-      and cache_source is "default".
+    - If cache_type is None, default to "adaptive" and cache_source is "default".
     """
     if cache_type is not None:
-        use_prefetch_reader = False
-        cache_source = "explicit"
-    else:
-        cache_source = "default"
-        if "use_experimental_adaptive_prefetching" in kwargs:
-            val = kwargs["use_experimental_adaptive_prefetching"]
-            use_prefetch_reader = (
-                val.lower() in ("true", "1") if isinstance(val, str) else bool(val)
-            )
-        else:
-            use_prefetch_reader = os.environ.get(
-                "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
-            ).lower() in (
-                "true",
-                "1",
-            )
-        cache_type = "none" if use_prefetch_reader else "readahead"
-    return cache_type, use_prefetch_reader, cache_source
+        return cache_type, "explicit"
+    return "adaptive", "default"
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2502,9 +2480,22 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
-        cache_type, use_prefetch_reader, self.cache_source = (
-            _get_prefetcher_and_cache_config(cache_type, kwargs)
+        self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
+            cache_type
         )
+        cache_type = self.cache_type
+        self.bucket = bucket
+        self.key = key
+        cache_options = dict(cache_options or {})
+        if cache_type == "adaptive":
+            if "concurrency" not in cache_options:
+                cache_options["concurrency"] = self.concurrency
+            if "max_prefetch_size" not in cache_options:
+                cache_options["max_prefetch_size"] = kwargs.pop(
+                    "max_prefetch_size", MAX_PREFETCH_SIZE
+                )
+            else:
+                kwargs.pop("max_prefetch_size", None)
 
         super().__init__(
             gcsfs,
@@ -2516,13 +2507,29 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             cache_options=cache_options,
             **kwargs,
         )
-        self.cache_type = cache_type
         self.gcsfs = gcsfs
-        self.bucket = bucket
-        self.key = key
         self.acl = acl
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
+
+        cache = getattr(self, "cache", None)
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None:
+            # Wire GCSFile/ZonalFile's native async range fetcher into the prefetcher producer.
+            # Otherwise, _async_fetch_range is bypassed, split_factor is ignored, and
+            # fsspec's default fetcher performs an unnecessary asyncio.to_thread round-trip.
+            # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
+            prefetcher.fetcher = self._async_fetch_range
+            if getattr(prefetcher, "producer", None) is not None:
+                prefetcher.producer.fetcher = self._async_fetch_range
+
+            if hasattr(cache, "close"):
+                # TODO: Remove this disarm once fsspec adds native support for deferred or
+                # non-blocking cache teardown during GC (or accepts an async closer).
+                # Disarm standalone cache GC/close so that it does not execute sync_teardown
+                # synchronously on the GC thread (which would undermine GCSFile._defer_close).
+                # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
+                cache.close = lambda: None
 
         # _supports_append is an internal argument not meant to be used directly.
         # If True, allows opening file in append mode. This is generally not supported
@@ -2557,20 +2564,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
-
-        if "r" in mode and use_prefetch_reader:
-            max_prefetch_size = kwargs.get("max_prefetch_size", MAX_PREFETCH_SIZE)
-            from .prefetcher import BackgroundPrefetcher
-
-            self._prefetch_engine = BackgroundPrefetcher(
-                self._async_fetch_range,
-                self.size,
-                max_prefetch_size=max_prefetch_size,
-                concurrency=self.concurrency,
-                loop=self.gcsfs.loop,
-            )
-        else:
-            self._prefetch_engine = None
 
     @property
     def details(self):
@@ -2730,9 +2723,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         start, end : None or integers
             if not both None, fetch only given range
         """
+        if is_empty_range(start, end, self.size):
+            return b""
         try:
-            if getattr(self, "_prefetch_engine", None):
-                return self._prefetch_engine.fetch(start=start, end=end)
             return self.fs.cat_file(
                 self.path,
                 start=start,
@@ -2741,8 +2734,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
             )
-        except RuntimeError as e:
-            if "not satisfiable" in str(e):
+        except (RuntimeError, HttpError) as e:
+            if "not satisfiable" in str(e) or "InvalidRange" in str(e):
                 return b""
             raise
 
@@ -2773,9 +2766,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self._close_impl()
 
     def _close_impl(self):
+        # TODO: Remove explicit prefetcher cleanup once fsspec handles deferred cache teardown.
+        cache = getattr(self, "cache", None)
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None:
+            prefetcher.close()
+            cache._prefetcher = None
         super().close()
-        if getattr(self, "_prefetch_engine", None):
-            self._prefetch_engine.close()
 
 
 def _convert_fixed_key_metadata(metadata, *, from_google=False):

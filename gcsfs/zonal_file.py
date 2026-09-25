@@ -12,6 +12,8 @@ from gcsfs.core import (
     _coalesce_generation,
     _get_prefetcher_and_cache_config,
 )
+from gcsfs.retry import HttpError
+from gcsfs.utils import is_empty_range
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS, sync_teardown
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
@@ -76,8 +78,8 @@ class ZonalFile(GCSFile):
         self.pool_size = pool_size
         object_size = None
         if "r" in self.mode:
-            resolved_cache_type, _, resolved_cache_source = (
-                _get_prefetcher_and_cache_config(cache_type, kwargs)
+            resolved_cache_type, resolved_cache_source = (
+                _get_prefetcher_and_cache_config(cache_type)
             )
             self.mrd_pool = asyn.sync(
                 self.gcsfs.loop,
@@ -201,33 +203,9 @@ class ZonalFile(GCSFile):
                 "The end and chunk_lengths arguments are mutually exclusive and cannot be used together."
             )
 
-        if self._prefetch_engine:
-            # This block is basically where caches and prefetch engines may overlap.
-            # We plan to remove this behaviour in future.
+        if is_empty_range(start, end, self.size):
+            return b"" if chunk_lengths is None else [b""]
 
-            try:
-                if chunk_lengths is None:
-                    return self._prefetch_engine.fetch(start, end)
-
-                # Fetch chunks sequentially through the prefetch engine
-                # Spawning concurrent task is worst here, because that would act as seek for prefetcher.
-                results = []
-                current_offset = start if start is not None else 0
-                for length in chunk_lengths:
-                    data = self._prefetch_engine.fetch(
-                        current_offset, current_offset + length
-                    )
-                    results.append(data)
-                    current_offset += length
-                    if length != len(data):
-                        raise RuntimeError("not satisfiable")
-                return results
-            except RuntimeError as e:
-                if "not satisfiable" in str(e):
-                    return b"" if chunk_lengths is None else [b""]
-                raise
-
-        # non-prefetch route
         async def _do_fetch():
             if chunk_lengths is not None:
                 return await self.gcsfs._fetch_range_split(
@@ -253,8 +231,8 @@ class ZonalFile(GCSFile):
 
         try:
             return asyn.sync(self.fs.loop, _do_fetch)
-        except RuntimeError as e:
-            if "not satisfiable" in str(e):
+        except (RuntimeError, HttpError) as e:
+            if "not satisfiable" in str(e) or "InvalidRange" in str(e):
                 return b"" if chunk_lengths is None else [b""]
             raise
 
