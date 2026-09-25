@@ -30,6 +30,19 @@ class TestPollStatus:
 class TestPollSchedule:
     """Unit tests for PollSchedule combinators and default HNS cadence."""
 
+    @pytest.mark.parametrize("bad_fn", [None, 42, "not_callable", 3.14])
+    def test_init_rejects_non_callable(self, bad_fn):
+        with pytest.raises(TypeError, match="schedule_fn must be callable"):
+            PollSchedule(bad_fn)
+
+    @pytest.mark.parametrize("bad_delay", [-0.1, -10.0, math.nan, math.inf, -math.inf])
+    def test_call_rejects_invalid_calculated_delay(self, bad_delay):
+        sched = PollSchedule(lambda s: bad_delay)
+        with pytest.raises(
+            ValueError, match="Calculated delay must be a non-negative finite number"
+        ):
+            sched(PollStatus(total_elapsed=1.0))
+
     @pytest.mark.parametrize("bad_slope", [0.0, -0.05, math.nan, math.inf])
     def test_linear_elapsed_rejects_invalid_slope(self, bad_slope):
         with pytest.raises(ValueError, match="slope must be a positive finite number"):
@@ -51,6 +64,12 @@ class TestPollSchedule:
         assert sched(PollStatus(total_elapsed=0.0)) == pytest.approx(
             MIN_SAFE_LRO_POLL_FLOOR
         )
+        assert (
+            PollSchedule(lambda s: None).floor(MIN_SAFE_LRO_POLL_FLOOR)(
+                PollStatus(total_elapsed=0.0)
+            )
+            is None
+        )
 
         # Chaining .with_jitter(0.75, 1.25) after .floor(0.05) randomizes the
         # 50ms floor across [37.5ms, 62.5ms] to prevent synchronized polling spikes.
@@ -69,6 +88,15 @@ class TestPollSchedule:
         ):
             sched.cap(bad_cap)
 
+    def test_cap_behavior(self):
+        sched = PollSchedule.linear_elapsed(slope=1.0).cap(10.0)
+        assert sched(PollStatus(total_elapsed=5.0)) == pytest.approx(5.0)
+        assert sched(PollStatus(total_elapsed=15.0)) == pytest.approx(10.0)
+        assert (
+            PollSchedule(lambda s: None).cap(10.0)(PollStatus(total_elapsed=5.0))
+            is None
+        )
+
     @pytest.mark.parametrize(
         "min_f, max_f", [(-0.1, 1.0), (1.2, 0.8), (math.nan, 1.0), (0.8, math.inf)]
     )
@@ -77,6 +105,18 @@ class TestPollSchedule:
         with pytest.raises(ValueError, match="Invalid jitter bounds"):
             sched.with_jitter(min_f, max_f)
 
+    def test_with_jitter_behavior(self):
+        sched = PollSchedule.linear_elapsed(slope=1.0).with_jitter(
+            min_factor=0.5, max_factor=1.5, random_fn=lambda a, b: b
+        )
+        assert sched(PollStatus(total_elapsed=10.0)) == pytest.approx(15.0)
+        assert (
+            PollSchedule(lambda s: None).with_jitter(
+                min_factor=0.5, max_factor=1.5, random_fn=lambda a, b: b
+            )(PollStatus(total_elapsed=10.0))
+            is None
+        )
+
     @pytest.mark.parametrize("bad_max", [0.0, -5.0, math.nan, math.inf])
     def test_max_duration_rejects_invalid_seconds(self, bad_max):
         sched = PollSchedule.linear_elapsed()
@@ -84,6 +124,19 @@ class TestPollSchedule:
             ValueError, match="max_seconds must be a positive finite number"
         ):
             sched.max_duration(bad_max)
+
+    def test_max_duration_behavior(self):
+        base_sched = PollSchedule(lambda s: 5.0)
+        sched = base_sched.max_duration(10.0)
+        assert sched(PollStatus(total_elapsed=8.0)) == pytest.approx(2.0)
+        assert sched(PollStatus(total_elapsed=10.0)) is None
+        assert sched(PollStatus(total_elapsed=12.0)) is None
+        assert (
+            PollSchedule(lambda s: None).max_duration(10.0)(
+                PollStatus(total_elapsed=5.0)
+            )
+            is None
+        )
 
     def test_default_cadence_initial_delay_and_linear_growth(self):
         sched = get_default_hns_lro_cadence()

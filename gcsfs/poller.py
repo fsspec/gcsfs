@@ -66,11 +66,19 @@ class PollSchedule:
 
     def __init__(self, schedule_fn: Callable[[PollStatus], Optional[float]]):
         """Initializes schedule with underlying delay calculation function."""
+        if not callable(schedule_fn):
+            raise TypeError("schedule_fn must be callable")
         self._fn = schedule_fn
 
     def __call__(self, status: PollStatus) -> Optional[float]:
         """Computes the delay in seconds for the next poll attempt, or None to abort."""
-        return self._fn(status)
+        delay = self._fn(status)
+        if delay is not None:
+            if not math.isfinite(delay) or delay < 0.0:
+                raise ValueError(
+                    f"Calculated delay must be a non-negative finite number, got {delay}"
+                )
+        return delay
 
     @classmethod
     def linear_elapsed(cls, slope: float = DEFAULT_LRO_POLL_SLOPE) -> "PollSchedule":
