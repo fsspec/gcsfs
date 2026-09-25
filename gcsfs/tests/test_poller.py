@@ -47,12 +47,14 @@ class TestPollSchedule:
         ):
             sched(PollStatus(total_elapsed=1.0))
 
-    @pytest.mark.parametrize("bad_slope", [0.0, -0.05, math.nan, math.inf])
+    @pytest.mark.parametrize("bad_slope", [0.0, -0.05, math.nan, math.inf, True, False])
     def test_linear_elapsed_rejects_invalid_slope(self, bad_slope):
         with pytest.raises(ValueError, match="slope must be a positive finite number"):
             PollSchedule.linear_elapsed(slope=bad_slope)
 
-    @pytest.mark.parametrize("bad_floor", [0.01, 0.0, -0.01, math.nan, math.inf])
+    @pytest.mark.parametrize(
+        "bad_floor", [0.01, 0.0, -0.01, math.nan, math.inf, True, False]
+    )
     def test_floor_rejects_invalid_min_delay(self, bad_floor):
         sched = PollSchedule.linear_elapsed()
         with pytest.raises(
@@ -97,7 +99,9 @@ class TestPollSchedule:
             assert delay is not None
             assert 0.0375 <= delay <= 0.0625
 
-    @pytest.mark.parametrize("bad_cap", [0.01, 0.0, -1.0, math.nan, math.inf])
+    @pytest.mark.parametrize(
+        "bad_cap", [0.01, 0.0, -1.0, math.nan, math.inf, True, False]
+    )
     def test_cap_rejects_invalid_max_delay(self, bad_cap):
         sched = PollSchedule.linear_elapsed()
         with pytest.raises(
@@ -124,7 +128,15 @@ class TestPollSchedule:
                 )
 
     @pytest.mark.parametrize(
-        "min_f, max_f", [(-0.1, 1.0), (1.2, 0.8), (math.nan, 1.0), (0.8, math.inf)]
+        "min_f, max_f",
+        [
+            (-0.1, 1.0),
+            (1.2, 0.8),
+            (math.nan, 1.0),
+            (0.8, math.inf),
+            (False, 1.0),
+            (0.5, True),
+        ],
     )
     def test_with_jitter_rejects_invalid_bounds(self, min_f, max_f):
         sched = PollSchedule.linear_elapsed()
@@ -151,7 +163,7 @@ class TestPollSchedule:
                     min_factor=0.5, max_factor=1.5, random_fn=lambda a, b: b
                 )(PollStatus(total_elapsed=10.0))
 
-    @pytest.mark.parametrize("bad_max", [0.0, -5.0, math.nan, math.inf])
+    @pytest.mark.parametrize("bad_max", [0.0, -5.0, math.nan, math.inf, True, False])
     def test_max_duration_rejects_invalid_seconds(self, bad_max):
         sched = PollSchedule.linear_elapsed()
         with pytest.raises(

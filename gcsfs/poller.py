@@ -78,6 +78,9 @@ class PollSchedule:
         """Computes the delay in seconds for the next poll attempt, or None to abort."""
         delay = self._fn(status)
         if delay is not None:
+            # 0.0 is intentionally permitted here because unfloored schedules (such as
+            # linear_elapsed at t=0 or with_jitter when min_factor=0.0) legitimately
+            # produce a 0.0s delay before .floor() is chained.
             if isinstance(delay, bool) or not math.isfinite(delay) or delay < 0.0:
                 raise ValueError(
                     f"Calculated delay must be a non-negative finite number, got {delay}"
@@ -100,7 +103,7 @@ class PollSchedule:
             >>> sched(PollStatus(total_elapsed=10.0))
             10.0
         """
-        if not math.isfinite(slope) or slope <= 0.0:
+        if isinstance(slope, bool) or not math.isfinite(slope) or slope <= 0.0:
             raise ValueError(f"slope must be a positive finite number, got {slope}")
         return cls(lambda s: slope * max(0.0, s.total_elapsed))
 
@@ -116,7 +119,11 @@ class PollSchedule:
         """
         # Enforce a 50ms hard minimum floor so a caller cannot configure a near-zero
         # delay that would busy-loop and overwhelm (DoS) the Storage Control server.
-        if not math.isfinite(min_delay) or min_delay < MIN_SAFE_LRO_POLL_FLOOR:
+        if (
+            isinstance(min_delay, bool)
+            or not math.isfinite(min_delay)
+            or min_delay < MIN_SAFE_LRO_POLL_FLOOR
+        ):
             raise ValueError(
                 f"min_delay must be a finite number >= {MIN_SAFE_LRO_POLL_FLOOR} "
                 f"(50ms minimum to prevent server overload), got {min_delay}"
@@ -143,7 +150,11 @@ class PollSchedule:
         # Because .cap() is typically chained after .floor() and computes
         # min(d, max_delay), max_delay must also be >= MIN_SAFE_LRO_POLL_FLOOR (50ms)
         # so a downstream .cap() cannot override an upstream .floor() below 50ms.
-        if not math.isfinite(max_delay) or max_delay < MIN_SAFE_LRO_POLL_FLOOR:
+        if (
+            isinstance(max_delay, bool)
+            or not math.isfinite(max_delay)
+            or max_delay < MIN_SAFE_LRO_POLL_FLOOR
+        ):
             raise ValueError(
                 f"max_delay must be a finite number >= {MIN_SAFE_LRO_POLL_FLOOR}, got {max_delay}"
             )
@@ -170,10 +181,14 @@ class PollSchedule:
             >>> 7.5 <= delay <= 12.5
             True
         """
-        if not (
-            math.isfinite(min_factor)
-            and math.isfinite(max_factor)
-            and 0.0 <= min_factor <= max_factor
+        if (
+            isinstance(min_factor, bool)
+            or isinstance(max_factor, bool)
+            or not (
+                math.isfinite(min_factor)
+                and math.isfinite(max_factor)
+                and 0.0 <= min_factor <= max_factor
+            )
         ):
             raise ValueError(
                 f"Invalid jitter bounds: [{min_factor}, {max_factor}] "
@@ -198,7 +213,11 @@ class PollSchedule:
             >>> sched(PollStatus(total_elapsed=10.0)) is None  # budget exhausted -> stop polling
             True
         """
-        if not math.isfinite(max_seconds) or max_seconds <= 0.0:
+        if (
+            isinstance(max_seconds, bool)
+            or not math.isfinite(max_seconds)
+            or max_seconds <= 0.0
+        ):
             raise ValueError(
                 f"max_seconds must be a positive finite number, got {max_seconds}"
             )
