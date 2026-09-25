@@ -636,8 +636,11 @@ class MRDPool:
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
+        # Slots whose stream is still being opened outside the lock. They are
+        # already counted in _active_count.
         self._creating_count = 0
         self._lock = asyncio.Lock()
+        # Shares _lock. get_mrd() callers wait on it while streams are opening.
         self._cond = asyncio.Condition(self._lock)
         self.details = None
         self.persisted_size = None
@@ -713,7 +716,10 @@ class MRDPool:
         )
 
     def _take_idle_mrd(self):
-        """Pops the first idle cached MRD that is not stale, or returns None."""
+        """Pops the first idle cached MRD that is not stale, or returns None.
+
+        Stale MRDs are parked in _stale_mrds until close().
+        """
         if self._cache is None:
             return None
         while True:
@@ -781,23 +787,23 @@ class MRDPool:
                     break
 
                 if self._active_count < self.pool_size:
+                    # Scale up: reuse an idle stream from the cache if there
+                    # is one, otherwise open a new one.
                     mrd = self._take_idle_mrd()
                     if mrd is not None:
                         self._active_count += 1
                         self._all_mrds.append(mrd)
                         break
-                    # Reserve a slot now; the network stream open happens
-                    # below, outside the lock, so concurrent callers open
-                    # their bidi streams in parallel instead of serially.
+                    # Reserve the slot now and open the stream below, outside
+                    # the lock, so concurrent callers open streams in parallel.
                     self._active_count += 1
                     self._creating_count += 1
                     create_new = True
                     break
 
                 if self._creating_count > 0:
-                    # Every slot is taken and some streams are still opening
-                    # outside the lock. Wait for them rather than sharing the
-                    # first one to open, so the round-robin below spreads
+                    # Every slot is taken and some streams are still opening.
+                    # Wait for them so the round-robin below can spread
                     # callers over all pool_size streams.
                     await self._cond.wait()
                     continue
@@ -819,13 +825,15 @@ class MRDPool:
                 mrd = await self._free_mrds.get()
                 break
 
+            # mrd is None only when this caller is opening a new stream. That
+            # stream is marked in flight below, once it is open.
             if mrd is not None:
                 self._mark_inflight(mrd)
 
         if create_new:
-            # The bookkeeping below runs without awaiting the lock, so a
-            # cancellation cannot land between the stream opening and the pool
-            # tracking it (or giving the slot back).
+            # Open the stream outside the lock. The bookkeeping after it has no
+            # await, so a cancellation cannot land between the stream opening
+            # and the pool tracking it (or giving the slot back).
             try:
                 mrd = await self._create_mrd()
             except BaseException:
@@ -872,6 +880,7 @@ class MRDPool:
             if self._closed:
                 return
             self._closed = True
+            # Waiters in get_mrd() wake up, see _closed and raise.
             self._cond.notify_all()
 
             free_mrds = []
@@ -886,6 +895,8 @@ class MRDPool:
                     await _close_mrds(free_mrds, raise_exception=True)
             finally:
                 self._all_mrds.clear()
+                # Stale MRDs never go back to the cache. Errors closing them
+                # are only logged so they cannot hide an error from above.
                 await _close_mrds(stale_mrds, raise_exception=False)
 
 
