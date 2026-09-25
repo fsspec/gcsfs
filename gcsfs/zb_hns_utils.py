@@ -673,6 +673,15 @@ class MRDPool:
         self._inflight.pop(mrd, None)
         return True
 
+    async def _notify_all(self):
+        """Wake every get_mrd() caller waiting for a stream to finish opening.
+
+        Callers wrap this in asyncio.shield() so that a cancellation while
+        waiting for the lock cannot drop the wakeup.
+        """
+        async with self._cond:
+            self._cond.notify_all()
+
     async def _create_mrd(self):
         await self.gcsfs._get_grpc_client()
         mrd = await init_mrd(
@@ -757,6 +766,14 @@ class MRDPool:
                     create_new = True
                     break
 
+                if self._creating_count > 0:
+                    # Every slot is taken and some streams are still opening
+                    # outside the lock. Wait for them rather than sharing the
+                    # first one to open, so the round-robin below spreads
+                    # callers over all pool_size streams.
+                    await self._cond.wait()
+                    continue
+
                 if self._all_mrds:
                     # Pool is full and the queue is empty: share a busy MRD in
                     # round-robin fashion. The MRD now has multiple holders;
@@ -765,12 +782,6 @@ class MRDPool:
                     mrd = self._all_mrds[self._rr_index % len(self._all_mrds)]
                     self._rr_index = (self._rr_index + 1) % len(self._all_mrds)
                     break
-
-                if self._creating_count > 0:
-                    # All pool_size slots are currently being created outside
-                    # the lock; wait until one finishes or fails.
-                    await self._cond.wait()
-                    continue
 
                 # If the queue was empty (pool is full and sharing is disabled), this blocks
                 # until a holder returns an MRD.
@@ -784,26 +795,31 @@ class MRDPool:
                 self._mark_inflight(mrd)
 
         if create_new:
+            # The bookkeeping below runs without awaiting the lock, so a
+            # cancellation cannot land between the stream opening and the pool
+            # tracking it (or giving the slot back).
             try:
                 mrd = await self._create_mrd()
             except BaseException:
-                async with self._cond:
-                    self._active_count -= 1
-                    self._creating_count -= 1
-                    self._cond.notify_all()
-                raise
-            async with self._cond:
+                self._active_count -= 1
                 self._creating_count -= 1
-                if self._closed:
-                    self._active_count -= 1
-                    self._cond.notify_all()
-                    await close_mrd(mrd)
-                    raise RuntimeError("MRDPool is closed.")
-                self._all_mrds.append(mrd)
-                self._mark_inflight(mrd)
-                self._cond.notify_all()
+                # Let a waiter retry the freed slot.
+                await asyncio.shield(self._notify_all())
+                raise
+            self._creating_count -= 1
+            if self._closed:
+                # close() already woke every waiter.
+                self._active_count -= 1
+                await close_mrd(mrd)
+                raise RuntimeError("MRDPool is closed.")
+            self._all_mrds.append(mrd)
+            self._mark_inflight(mrd)
 
         try:
+            if create_new:
+                # Inside the try so a cancellation here still requeues the new
+                # MRD via the finally below.
+                await asyncio.shield(self._notify_all())
             yield mrd
         finally:
             # Intentionally lock-free (see note above). Only the holder that
