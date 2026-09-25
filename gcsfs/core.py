@@ -29,6 +29,7 @@ from fsspec.implementations.http import get_client
 from fsspec.utils import other_paths, setup_logging, stringify_path
 
 from . import __version__ as version
+from . import rust_backend
 from ._dircache import DirCacheUpdater
 from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed, split_range
@@ -310,6 +311,13 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     version_aware: bool
         Whether to support object versioning. If enabled this will require the
         user to have the necessary permissions for dealing with versioned objects.
+    read_backend: 'http' or 'rust'
+        Which implementation to use for object reads. 'http' (default) uses
+        gcsfs's built-in aiohttp-based client. 'rust' delegates reads to the
+        optional Rust google-cloud-storage SDK backend (see
+        ``gcsfs.rust_backend``); it requires the ``gcsfs-rust-backend``
+        package to be installed. Defaults to the ``GCSFS_READ_BACKEND``
+        environment variable if set.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -338,6 +346,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
+        read_backend=None,
+        rust_transport=None,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -364,6 +374,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
+        self.read_backend = read_backend or os.getenv("GCSFS_READ_BACKEND", "http")
+        self.rust_transport = rust_transport or os.getenv("GCSFS_RUST_TRANSPORT", "grpc")
 
         if check_connection:
             warnings.warn(
@@ -1223,6 +1235,20 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         # for start=5, end=5), causing the server to return the whole file instead of nothing.
         if start is not None and end is not None and start >= end >= 0:
             return b""
+
+        if self.read_backend == "rust":
+            bucket, object, generation = self.split_path(path)
+            generation = _coalesce_generation(kwargs.get("generation"), generation)
+            return await rust_backend.cat_file_range(
+                bucket,
+                object,
+                start=start,
+                end=end,
+                generation=generation,
+                transport=getattr(self, "rust_transport", None),
+            )
+
+
 
         u2 = self.url(path, generation=kwargs.get("generation"))
         if start is not None or end is not None:
