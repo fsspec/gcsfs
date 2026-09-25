@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import contextlib
 import heapq
 import logging
@@ -91,7 +92,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     """
 
     # Upper bound on concurrent MRD bidi streams per object in zonal cat_ranges.
+    # Matches the max_mrd_pool_cache_queue_size default so that MRDPoolCache
+    # can keep all of an object's streams idle for the next call to reuse.
     MAX_ZONAL_STREAMS_PER_OBJECT = 16
+    # Upper bound on remembered finalized-object metadata (LRU).
+    MAX_ZONAL_INFO_HINTS = 1024
 
     def __init__(
         self,
@@ -129,8 +134,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # By default, files in zonal buckets are left unfinalized to allow appends.
         self.finalize_on_close = finalize_on_close
         self._grpc_client = None
-        # (bucket, object) -> last metadata seen for a finalized zonal object.
-        self._zonal_info_hints = {}
+        # (bucket, object) -> last metadata seen for a finalized zonal object,
+        # least recently stored first.
+        self._zonal_info_hints = collections.OrderedDict()
         self._storage_control_client = None
         # Adds user-passed credentials to ExtendedGcsFileSystem to pass to gRPC/Storage Control clients.
         # We unwrap the nested credentials here because self.credentials is a GCSFS wrapper,
@@ -773,26 +779,36 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         raise
         return [buf.get_value() for buf in buffers]
 
+    def _store_zonal_info_hint(self, hint_key, info):
+        """Remember ``info`` as the latest metadata for a finalized object."""
+        hints = self._zonal_info_hints
+        hints.pop(hint_key, None)
+        hints[hint_key] = info
+        if len(hints) > self.MAX_ZONAL_INFO_HINTS:
+            # invalidate_cache() may run on another thread and empty it.
+            with contextlib.suppress(KeyError):
+                hints.popitem(last=False)
+
     def _evict_zonal_info_hint(self, path=None):
-        """Drop cached finalized-object metadata hints for ``path`` (or all)."""
-        if not self._zonal_info_hints:
+        """Drop the cached metadata hint for the object at ``path``.
+
+        ``None`` drops every hint and a bare bucket drops that bucket's hints.
+        Any other path only drops its own entry: the dircache hooks call this
+        with parent directories, and every speculative read validates its hint
+        anyway, so descendants are not scanned for.
+        """
+        hints = self._zonal_info_hints
+        if not hints:
             return
         if path is None:
-            self._zonal_info_hints.clear()
+            hints.clear()
             return
         bucket, key, _ = self.split_path(path)
-        if not key:
-            for k in [k for k in self._zonal_info_hints if k[0] == bucket]:
-                self._zonal_info_hints.pop(k, None)
-        else:
-            self._zonal_info_hints.pop((bucket, key), None)
-            prefix = f"{key.rstrip('/')}/"
-            for k in [
-                k
-                for k in self._zonal_info_hints
-                if k[0] == bucket and k[1].startswith(prefix)
-            ]:
-                self._zonal_info_hints.pop(k, None)
+        if key:
+            hints.pop((bucket, key), None)
+        elif bucket:
+            for k in [k for k in list(hints) if k[0] == bucket]:
+                hints.pop(k, None)
 
     def invalidate_cache(self, path=None):
         super().invalidate_cache(path=path)
@@ -814,20 +830,27 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     @staticmethod
     async def _cancel_task(task):
+        """Cancel ``task`` and wait for it, discarding its result or error.
+
+        A cancellation of the caller while waiting still propagates.
+        """
         if task is not None:
             task.cancel()
-            with contextlib.suppress(BaseException):
-                await task
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _cat_ranges_zonal_file(
-        self, path, starts, ends, num_streams, mrd=None, _speculate=True, **kwargs
+        self, path, starts, ends, num_streams, mrd=None, _known_info=None, **kwargs
     ):
         """Fetch many ranges of a single zonal object over a shared MRD pool.
 
         For finalized objects read without an explicit generation, the last
         metadata seen for the object is reused so the downloads start at once.
         A metadata lookup runs concurrently, and the result is only returned
-        if it confirms the same generation; otherwise the read is redone.
+        if it confirms the same generation and size; otherwise the read is
+        redone with the metadata that lookup returned.
+
+        ``_known_info`` is internal: fresh metadata for a redone read. It is
+        used as is and disables speculation.
 
         Returns:
             list: One entry per input range: ``bytes`` or the exception raised
@@ -843,8 +866,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if mrd is not None:
             pool = mrd
         else:
-            if _speculate and generation is None:
-                spec_info = self._zonal_info_hints.get(hint_key)
+            info = _known_info
+            if info is None and generation is None:
+                info = spec_info = self._zonal_info_hints.get(hint_key)
                 if spec_info is not None:
                     validate = asyncio.ensure_future(self._info(path))
             try:
@@ -855,24 +879,26 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     pool_size=num_streams,
                     cache_type=cache_type,
                     cache_source=cache_source,
-                    info=spec_info,
+                    info=info,
                 )
                 pool_created_here = True
-            except BaseException:
-                self._zonal_info_hints.pop(hint_key, None)
+            except Exception:
                 if validate is None:
                     raise
-                await self._cancel_task(validate)
+                # The hinted generation may be gone: redo the open with the
+                # metadata the concurrent lookup returns (or raise its error).
+                self._zonal_info_hints.pop(hint_key, None)
+                fresh = await validate
                 return await self._cat_ranges_zonal_file(
-                    path, starts, ends, num_streams, _speculate=False, **kwargs
+                    path, starts, ends, num_streams, _known_info=fresh, **kwargs
                 )
+            except BaseException:
+                await self._cancel_task(validate)
+                raise
         try:
             details = getattr(pool, "details", None)
             if generation is None and getattr(pool, "finalized", False) and details:
-                self._zonal_info_hints.pop(hint_key, None)
-                self._zonal_info_hints[hint_key] = details
-                if len(self._zonal_info_hints) > 1024:
-                    self._zonal_info_hints.pop(next(iter(self._zonal_info_hints)))
+                self._store_zonal_info_hint(hint_key, details)
             file_size = getattr(pool, "persisted_size", None)
             if file_size is None:
                 file_size = await _get_mrd_size(pool)
@@ -914,7 +940,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if validate is not None:
             try:
                 fresh = await validate
-            except BaseException:
+            except Exception:
                 self._zonal_info_hints.pop(hint_key, None)
                 raise
             if fresh.get("generation") != spec_info.get("generation") or fresh.get(
@@ -922,7 +948,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             ) != spec_info.get("size"):
                 self._zonal_info_hints.pop(hint_key, None)
                 return await self._cat_ranges_zonal_file(
-                    path, starts, ends, num_streams, _speculate=False, **kwargs
+                    path, starts, ends, num_streams, _known_info=fresh, **kwargs
                 )
         return out
 
@@ -942,8 +968,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         MRD pool per object. Each object's ranges are split into byte-balanced
         groups, one per pooled MRD, and every group is sent as one multi-range
         ``download_ranges`` call. ``batch_size`` bounds the total number of
-        concurrent MRD streams across all objects. Non-zonal paths, and any
-        call with ``max_gap`` set, use the default fsspec implementation.
+        concurrent MRD streams across all objects (``-1`` means one per
+        range). Non-zonal paths, and any call with ``max_gap`` set, use the
+        default fsspec implementation.
+
+        Zonal-only keyword arguments:
+            concurrency (int, optional): Maximum MRD streams per object,
+                instead of ``MAX_ZONAL_STREAMS_PER_OBJECT``. Also forwarded to
+                the fsspec path for non-zonal files.
+            mrd (MRDPool or AsyncMultiRangeDownloader, optional): Serve every
+                zonal range from this pool or downloader. It is not closed.
+
+        With ``on_error="return"``, a failure while downloading a group of
+        ranges is returned for every range in that group, and a failure to
+        open an object is returned for all of that object's ranges.
         """
         if max_gap is not None:
             return await super()._cat_ranges(
@@ -995,7 +1033,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         )
         batch_size = batch_size or self.batch_size or asyn._get_batch_size(True)
         n_zonal = sum(len(idxs) for idxs in zonal.values())
-        total_streams = max(1, min(batch_size, n_zonal))
+        if batch_size == -1:
+            # fsspec's "no limit": at most one stream per range.
+            stream_budget = n_zonal
+        elif batch_size > 0:
+            stream_budget = min(batch_size, n_zonal)
+        else:
+            raise ValueError(f"batch_size must be positive or -1, got {batch_size}")
+        total_streams = max(1, stream_budget)
 
         results = [None] * len(paths)
         coros, owners = [], []

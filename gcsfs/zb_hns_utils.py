@@ -998,7 +998,9 @@ class MRDPoolCache:
             cache_type (str, optional): The cache type string.
             cache_source (str, optional): The cache source string.
             info (dict, optional): Object metadata already known to the
-                caller. When given, the metadata lookup is skipped.
+                caller. When given, the metadata lookup is skipped and the
+                caller vouches for it: the pool's generation (if not passed)
+                and finalized state come from it unchecked.
 
         Returns:
             MRDPool: An initialized MRDPool instance.
