@@ -112,9 +112,14 @@ class PollSchedule:
                 f"min_delay must be a finite number >= {MIN_SAFE_LRO_POLL_FLOOR} "
                 f"(50ms minimum to prevent server overload), got {min_delay}"
             )
-        return type(self)(
-            lambda s: max(d, min_delay) if (d := self._fn(s)) is not None else None
-        )
+
+        def _schedule(s: PollStatus) -> Optional[float]:
+            d = self._fn(s)
+            if d is None or not math.isfinite(d):
+                return d
+            return max(d, min_delay)
+
+        return type(self)(_schedule)
 
     def cap(self, max_delay: float) -> "PollSchedule":
         """Clamps any calculated delay above max_delay down to max_delay.
@@ -133,9 +138,14 @@ class PollSchedule:
             raise ValueError(
                 f"max_delay must be a finite number >= {MIN_SAFE_LRO_POLL_FLOOR}, got {max_delay}"
             )
-        return type(self)(
-            lambda s: min(d, max_delay) if (d := self._fn(s)) is not None else None
-        )
+
+        def _schedule(s: PollStatus) -> Optional[float]:
+            d = self._fn(s)
+            if d is None or not math.isfinite(d):
+                return d
+            return min(d, max_delay)
+
+        return type(self)(_schedule)
 
     def with_jitter(
         self,
@@ -160,13 +170,14 @@ class PollSchedule:
                 f"Invalid jitter bounds: [{min_factor}, {max_factor}] "
                 "(must be finite numbers satisfying 0 <= min <= max)"
             )
-        return type(self)(
-            lambda s: (
-                (d * random_fn(min_factor, max_factor))
-                if (d := self._fn(s)) is not None
-                else None
-            )
-        )
+
+        def _schedule(s: PollStatus) -> Optional[float]:
+            d = self._fn(s)
+            if d is None or not math.isfinite(d):
+                return d
+            return d * random_fn(min_factor, max_factor)
+
+        return type(self)(_schedule)
 
     def max_duration(self, max_seconds: float) -> "PollSchedule":
         """Aborts (returns None) once total elapsed time exceeds max_seconds.
@@ -187,8 +198,10 @@ class PollSchedule:
             remaining = max_seconds - s.total_elapsed
             if remaining <= 0:
                 return None
-            delay = self._fn(s)
-            return min(delay, remaining) if delay is not None else None
+            d = self._fn(s)
+            if d is None or not math.isfinite(d):
+                return d
+            return min(d, remaining)
 
         return type(self)(_schedule)
 

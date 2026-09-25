@@ -75,11 +75,15 @@ class TestPollSchedule:
         assert PollSchedule(lambda s: -1.0).floor(0.2)(
             PollStatus(total_elapsed=1.0)
         ) == pytest.approx(0.2)
-        # NaN raw delays propagate through .floor() and fail outer __call__ validation.
-        with pytest.raises(
-            ValueError, match="Calculated delay must be a non-negative finite number"
-        ):
-            PollSchedule(lambda s: math.nan).floor(0.2)(PollStatus(total_elapsed=1.0))
+        # Non-finite raw delays propagate through .floor() and fail outer __call__ validation.
+        for bad_raw in (math.nan, math.inf, -math.inf):
+            with pytest.raises(
+                ValueError,
+                match="Calculated delay must be a non-negative finite number",
+            ):
+                PollSchedule(lambda s, val=bad_raw: val).floor(0.2)(
+                    PollStatus(total_elapsed=1.0)
+                )
 
         # Chaining .with_jitter(0.75, 1.25) after .floor(0.05) randomizes the
         # 50ms floor across [37.5ms, 62.5ms] to prevent synchronized polling spikes.
@@ -106,10 +110,14 @@ class TestPollSchedule:
             PollSchedule(lambda s: None).cap(10.0)(PollStatus(total_elapsed=5.0))
             is None
         )
-        with pytest.raises(
-            ValueError, match="Calculated delay must be a non-negative finite number"
-        ):
-            PollSchedule(lambda s: math.nan).cap(10.0)(PollStatus(total_elapsed=5.0))
+        for bad_raw in (math.nan, math.inf, -math.inf):
+            with pytest.raises(
+                ValueError,
+                match="Calculated delay must be a non-negative finite number",
+            ):
+                PollSchedule(lambda s, val=bad_raw: val).cap(10.0)(
+                    PollStatus(total_elapsed=5.0)
+                )
 
     @pytest.mark.parametrize(
         "min_f, max_f", [(-0.1, 1.0), (1.2, 0.8), (math.nan, 1.0), (0.8, math.inf)]
@@ -130,6 +138,14 @@ class TestPollSchedule:
             )(PollStatus(total_elapsed=10.0))
             is None
         )
+        for bad_raw in (math.nan, math.inf, -math.inf):
+            with pytest.raises(
+                ValueError,
+                match="Calculated delay must be a non-negative finite number",
+            ):
+                PollSchedule(lambda s, val=bad_raw: val).with_jitter(
+                    min_factor=0.5, max_factor=1.5, random_fn=lambda a, b: b
+                )(PollStatus(total_elapsed=10.0))
 
     @pytest.mark.parametrize("bad_max", [0.0, -5.0, math.nan, math.inf])
     def test_max_duration_rejects_invalid_seconds(self, bad_max):
@@ -151,6 +167,27 @@ class TestPollSchedule:
             )
             is None
         )
+        for bad_raw in (math.nan, math.inf, -math.inf):
+            with pytest.raises(
+                ValueError,
+                match="Calculated delay must be a non-negative finite number",
+            ):
+                PollSchedule(lambda s, val=bad_raw: val).max_duration(10.0)(
+                    PollStatus(total_elapsed=5.0)
+                )
+            with pytest.raises(
+                ValueError,
+                match="Calculated delay must be a non-negative finite number",
+            ):
+                (
+                    PollSchedule(lambda s, val=bad_raw: val)
+                    .floor(0.2)
+                    .cap(10.0)
+                    .with_jitter(
+                        min_factor=0.75, max_factor=1.25, random_fn=lambda a, b: 1.0
+                    )
+                    .max_duration(30.0)
+                )(PollStatus(total_elapsed=5.0))
 
     def test_default_cadence_initial_delay_and_linear_growth(self):
         sched = get_default_hns_lro_cadence()
