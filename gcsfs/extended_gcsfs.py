@@ -685,6 +685,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         n = sum(counts)
         if len(counts) >= total_streams:
             return [1] * len(counts)
+        # Start each object at the whole part of its proportional share,
+        # clamped to [1, cap]. An object never needs more streams than ranges.
         caps = [max(1, min(c, per_object_cap)) for c in counts]
         shares = [total_streams * c / n for c in counts]
         alloc = [min(cap, max(1, int(s))) for cap, s in zip(caps, shares)]
@@ -729,6 +731,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return [sorted(requests, key=lambda r: r[1])] if requests else []
 
         groups = [[] for _ in range(num_streams)]
+        # Hand each range, largest first, to the group with the fewest bytes.
         heap = [(0, g) for g in range(num_streams)]
         for req in sorted(requests, key=lambda r: r[2], reverse=True):
             load, g = heapq.heappop(heap)
@@ -746,6 +749,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         Returns:
             list[bytes]: One payload per request in ``group``, in the same order.
         """
+        # One buffer per range. download_ranges writes each range's bytes into
+        # its view as they arrive.
         buffers = [
             DirectMemmoveBuffer(length, self._memmove_executor)
             for _, _, length in group
@@ -765,12 +770,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     await mrd.download_ranges(
                         [(group[k][1], group[k][2], views[k]) for k in chunk]
                     )
+            # Raises BufferError if a range came back short.
             for view in views:
                 view.close()
         except BaseException:
             has_error = True
             raise
         finally:
+            # Always close the buffers, but don't let a close error replace
+            # the error that stopped the download.
             for buf in buffers:
                 try:
                     buf.close()
@@ -782,6 +790,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     def _store_zonal_info_hint(self, hint_key, info):
         """Remember ``info`` as the latest metadata for a finalized object."""
         hints = self._zonal_info_hints
+        # Re-insert so this key becomes the most recent one.
         hints.pop(hint_key, None)
         hints[hint_key] = info
         if len(hints) > self.MAX_ZONAL_INFO_HINTS:
@@ -810,6 +819,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             for k in [k for k in list(hints) if k[0] == bucket]:
                 hints.pop(k, None)
 
+    # The four overrides below drop a path's metadata hint whenever the
+    # dircache is invalidated or updated for that path.
     def invalidate_cache(self, path=None):
         super().invalidate_cache(path=path)
         self._evict_zonal_info_hint(path)
@@ -864,10 +875,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         pool_created_here = False
 
         if mrd is not None:
+            # Caller-supplied pool or downloader: use it as is and leave it open.
             pool = mrd
         else:
             info = _known_info
             if info is None and generation is None:
+                # Open with the last metadata seen for this object, and check it
+                # with a real lookup that runs in parallel with the read.
                 info = spec_info = self._zonal_info_hints.get(hint_key)
                 if spec_info is not None:
                     validate = asyncio.ensure_future(self._info(path))
@@ -893,9 +907,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     path, starts, ends, num_streams, _known_info=fresh, **kwargs
                 )
             except BaseException:
+                # Cancelled: stop the lookup as well.
                 await self._cancel_task(validate)
                 raise
         try:
+            # Only finalized objects are remembered. An unfinalized one can
+            # still grow, which would make its hint stale.
             details = getattr(pool, "details", None)
             if generation is None and getattr(pool, "finalized", False) and details:
                 self._store_zonal_info_hint(hint_key, details)
@@ -909,6 +926,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 )
                 file_size = (await self._info(path))["size"]
 
+            # Empty ranges keep b"" and are not sent to the server.
             out = [b""] * len(starts)
             requests = []
             for i, (start, end) in enumerate(zip(starts, ends)):
@@ -918,6 +936,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if length > 0:
                     requests.append((i, offset, length))
 
+            # Each group runs on its own MRD, all groups at once. A failed
+            # group only fails its own ranges.
             groups = self._split_ranges_across_streams(requests, num_streams)
             results = await asyncio.gather(
                 *(self._download_range_group(pool, g) for g in groups),
@@ -938,6 +958,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 await pool.close()
 
         if validate is not None:
+            # The read used the hinted metadata. Keep its data only if the
+            # lookup shows the same generation and size; otherwise read again
+            # with the fresh metadata.
             try:
                 fresh = await validate
             except Exception:
@@ -993,6 +1016,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 on_error=on_error,
                 **kwargs,
             )
+        # Same argument checks as fsspec's _cat_ranges.
         if not isinstance(paths, list):
             raise TypeError
         if not isinstance(starts, Iterable):
@@ -1003,6 +1027,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError
 
+        # Group range indices by path so each object is opened once.
         by_path = {}
         for i, p in enumerate(paths):
             by_path.setdefault(p, []).append(i)
@@ -1031,6 +1056,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if concurrency is not None
             else self.MAX_ZONAL_STREAMS_PER_OBJECT
         )
+        # Same default as fsspec when batch_size is not given.
         batch_size = batch_size or self.batch_size or asyn._get_batch_size(True)
         n_zonal = sum(len(idxs) for idxs in zonal.values())
         if batch_size == -1:
@@ -1043,6 +1069,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         total_streams = max(1, stream_budget)
 
         results = [None] * len(paths)
+        # coros[k] produces the results for the indices in owners[k].
         coros, owners = [], []
         zonal_items = list(zonal.items())
         allocs = self._allocate_streams(
@@ -1077,6 +1104,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 )
             owners.append(idxs)
         if other:
+            # Non-zonal paths run through fsspec in the same gather. Their
+            # errors come back per range; on_error is applied once at the end.
             other_kwargs = dict(kwargs)
             if concurrency is not None:
                 other_kwargs["concurrency"] = concurrency
@@ -1093,6 +1122,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             owners.append(other)
 
         outs = await asyncio.gather(*coros, return_exceptions=True)
+        # A coroutine that failed as a whole (for example, the object could not
+        # be opened) fails every range it owns.
         for idxs, out in zip(owners, outs):
             if isinstance(out, BaseException):
                 for i in idxs:
@@ -1100,6 +1131,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             else:
                 for i, r in zip(idxs, out):
                     results[i] = r
+        # Like fsspec, raise the first error in input order.
         if on_error != "return":
             for r in results:
                 if isinstance(r, BaseException):
