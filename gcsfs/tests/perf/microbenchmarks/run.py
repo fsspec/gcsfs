@@ -47,6 +47,9 @@ def _setup_environment(args):
     if args.config:
         os.environ["GCSFS_BENCHMARK_FILTER"] = ",".join(args.config)
 
+    if getattr(args, "reuse_data", False):
+        os.environ["GCSFS_BENCHMARK_REUSE_DATA"] = "true"
+
 
 def _run_benchmarks(results_dir, args):
     """Execute the benchmark suite using pytest.
@@ -378,6 +381,11 @@ def main():
     parser.add_argument(
         "--hns-bucket",
         help="Name of the HNS GCS bucket to use for benchmarks.",
+    )
+    parser.add_argument(
+        "--reuse-data",
+        action="store_true",
+        help="Reuse static benchmark data across runs without teardown. Creates data under 'benchmark-static' on first run if not present.",
     )
     parser.add_argument(
         "--log",
