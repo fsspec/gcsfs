@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import time
 
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
     measure_epochs,
@@ -104,7 +105,7 @@ def build_dataset(prefix, params, *, split_by_node, cache_dir=None):
     return dataset.map(collect_sample)
 
 
-def build_loader(dataset, params):
+def build_loader(dataset, params, pin_memory=False):
     """Constructs a PyTorch DataLoader over the WebDataset pipeline."""
     from torch.utils.data import DataLoader
 
@@ -112,6 +113,8 @@ def build_loader(dataset, params):
         batch_size=params.batch_size,
         num_workers=params.num_workers,
         collate_fn=identity_collate,
+        # Pins decoded image tensors for GPU copies; bytes and strings pass through.
+        pin_memory=pin_memory,
     )
     if params.num_workers > 0:
         kwargs["prefetch_factor"] = params.prefetch_factor
@@ -169,6 +172,7 @@ def run_rank_epochs(
             f"budget, got {sample_count!r}; run_read passes it from the manifest"
         )
     with case_read_env(params):
+        device = device_lib.rank_device(rank)
         build_start = time.perf_counter()
         dataset = build_dataset(
             prefix,
@@ -176,7 +180,7 @@ def run_rank_epochs(
             split_by_node=params.split_by_node,
             cache_dir=rank_cache_dir(cache_root, rank),
         )
-        loader = build_loader(dataset, params)
+        loader = build_loader(dataset, params, pin_memory=device is not None)
         build_seconds = time.perf_counter() - build_start
 
         target = None
@@ -185,7 +189,7 @@ def run_rank_epochs(
 
         # Barrier synchronizes rank start times across rounds.
         per_epoch, ttfb = measure_epochs(
-            loader,
+            device_lib.feed(loader, device),
             params.rounds,
             len,
             barrier=barrier,
