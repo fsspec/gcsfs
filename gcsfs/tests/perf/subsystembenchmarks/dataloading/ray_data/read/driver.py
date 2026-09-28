@@ -8,6 +8,7 @@ import pyarrow.fs
 import ray
 import torch
 
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
     assert_fsspec_gcsfs,
@@ -94,8 +95,37 @@ def _rows_in_batch(batch):
     return len(v)
 
 
+def _torch_batch_kwargs(params, shuffle_seed, collate_fn, device):
+    """iter_torch_batches arguments; on GPU, Ray copies (and pins) natively."""
+    shuffled = params.access == "shuffled" and params.shuffle_buffer_size > 0
+    return dict(
+        batch_size=params.batch_size,
+        prefetch_batches=params.prefetch_factor,
+        local_shuffle_buffer_size=params.shuffle_buffer_size if shuffled else None,
+        local_shuffle_seed=shuffle_seed,
+        collate_fn=collate_fn,
+        device=device if device is not None else torch.device("cpu"),
+        # Ray pins only pure-tensor batches, i.e. without a custom collate.
+        pin_memory=device is not None and collate_fn is None,
+        drop_last=False,
+    )
+
+
+def _iter_batches(source, params, shuffle_seed, collate_fn, device):
+    """Batches from a Dataset or streaming split, delivered to ``device``.
+
+    ``feed`` adds the per-round sync and moves tensors Ray leaves on the host
+    (text_parquet's custom collate); already-moved tensors are untouched.
+    """
+    batches = source.iter_torch_batches(
+        **_torch_batch_kwargs(params, shuffle_seed, collate_fn, device)
+    )
+    return device_lib.feed(batches, device)
+
+
 def run_single_rank(dataset, params):
     """Iterates dataset on single consumer rank across rounds."""
+    device = device_lib.rank_device(0)
     per_epoch = []
     ttfb = None
     collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
@@ -107,23 +137,7 @@ def run_single_rank(dataset, params):
             if params.access == "shuffled" and params.shuffle_buffer_size > 0
             else None
         )
-        batch_iter = iter(
-            dataset.iter_torch_batches(
-                batch_size=params.batch_size,
-                prefetch_batches=params.prefetch_factor,
-                local_shuffle_buffer_size=(
-                    params.shuffle_buffer_size
-                    if params.access == "shuffled" and params.shuffle_buffer_size > 0
-                    else None
-                ),
-                local_shuffle_seed=shuffle_seed,
-                collate_fn=collate_fn,
-                device=torch.device("cpu"),
-                pin_memory=False,
-                drop_last=False,
-            )
-        )
-        for batch in batch_iter:
+        for batch in _iter_batches(dataset, params, shuffle_seed, collate_fn, device):
             if epoch == 0 and ttfb is None:
                 ttfb = timestamp() - begin
             rows += _rows_in_batch(batch)
@@ -138,23 +152,9 @@ def _consume_shard(shard, params, shuffle_seed, collate_fn):
     """Consumes one streaming split, returning (first_batch, end, rows) timestamps."""
     first_batch = None
     rows = 0
-    batch_iter = iter(
-        shard.iter_torch_batches(
-            batch_size=params.batch_size,
-            prefetch_batches=params.prefetch_factor,
-            local_shuffle_buffer_size=(
-                params.shuffle_buffer_size
-                if params.access == "shuffled" and params.shuffle_buffer_size > 0
-                else None
-            ),
-            local_shuffle_seed=shuffle_seed,
-            collate_fn=collate_fn,
-            device=torch.device("cpu"),
-            pin_memory=False,
-            drop_last=False,
-        )
-    )
-    for batch in batch_iter:
+    # Ray sets CUDA_VISIBLE_DEVICES from num_gpus, so rank 0 is this task's GPU.
+    device = device_lib.rank_device(0)
+    for batch in _iter_batches(shard, params, shuffle_seed, collate_fn, device):
         if first_batch is None:
             first_batch = timestamp()
         rows += _rows_in_batch(batch)
@@ -166,6 +166,7 @@ def run_multi_rank(dataset, params):
     world_size = params.world_size
     epoch_records = []
     collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
+    num_gpus = device_lib.ray_task_num_gpus(world_size)
     for epoch in range(params.rounds):
         splits = dataset.streaming_split(n=world_size, equal=False)
         shuffle_seed = (
@@ -178,7 +179,9 @@ def run_multi_rank(dataset, params):
         # consumer tasks is charged to the epoch instead of being invisible.
         begin = timestamp()
         futures = [
-            _consume_shard.remote(split, params, shuffle_seed, collate_fn)
+            _consume_shard.options(num_gpus=num_gpus).remote(
+                split, params, shuffle_seed, collate_fn
+            )
             for split in splits
         ]
         epoch_records.append(
