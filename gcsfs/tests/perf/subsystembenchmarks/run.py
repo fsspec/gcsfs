@@ -7,6 +7,7 @@ from datetime import datetime
 from gcsfs.tests.perf.subsystembenchmarks._common import cli, report
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
+    DEFAULT_TIMEOUT_SECONDS,
     RAPID_CACHE_BUCKET_TYPES,
 )
 
@@ -74,7 +75,7 @@ def _build_parser():
     parser.add_argument(
         "--rapid-cache-timeout",
         type=int,
-        default=1800,
+        default=DEFAULT_TIMEOUT_SECONDS,
         help="seconds to wait for Rapid Cache to reach RUNNING status",
     )
     parser.add_argument(

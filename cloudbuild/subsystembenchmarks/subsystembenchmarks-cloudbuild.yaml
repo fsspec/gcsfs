@@ -11,7 +11,7 @@ substitutions:
   _HF_TOKEN: ""
   _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
   _BOOT_DISK_SIZE: "200GB"
-  _RAPID_CACHE_TIMEOUT: "1800"
+  _RAPID_CACHE_TIMEOUT: "3600"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -24,7 +24,7 @@ steps:
         mkdir -p /workspace/.ssh
         ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
-        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=5h
     waitFor: ["-"]
 
   # 2. Initialize shared variables.
@@ -329,7 +329,7 @@ steps:
         echo "Build successful."
     waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key"]
 
-timeout: "14400s"
+timeout: "18000s"
 options:
   logging: CLOUD_LOGGING_ONLY
   pool:
