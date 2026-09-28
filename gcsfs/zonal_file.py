@@ -203,7 +203,8 @@ class ZonalFile(GCSFile):
                 "The end and chunk_lengths arguments are mutually exclusive and cannot be used together."
             )
 
-        if is_empty_range(start, end, self.size):
+        # Size can be stale for zonal buckets, hence not passing as part of is_empty_range check.
+        if is_empty_range(start, end):
             return b"" if chunk_lengths is None else [b""]
 
         async def _do_fetch():

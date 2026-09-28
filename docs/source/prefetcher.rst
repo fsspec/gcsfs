@@ -7,9 +7,6 @@ GCSFS Adaptive Concurrent Prefetching: Architecture & Usage Guide
 To select an alternative cache or disable prefetching, pass the standard ``cache_type=`` argument (e.g., ``cache_type="readahead"``, ``cache_type="readahead_chunked"``, or ``cache_type="none"``). Standard caching options can be passed via ``cache_options`` (e.g., ``cache_options={"max_prefetch_size": 32 * 1024 * 1024}``).
 
 Additional caveats:
-- the bytes slicing/copying code uses low level (`ctypes`) calls and offloads to a dedicated thread for
-performance. We intend to upstream some version of this to CPython, either in the slicing of `bytes.join()`
-code, but in the meantime we are using this ad-hoc implementation. More work on zero-copy methods on bytes buffers is expected.
 - the concurrent fetching code in `_cat_file_concurrent` is expected to be eventually upstreamed to the
 google SDKs, since low-level connection management should be the concern of the communication layer.
 

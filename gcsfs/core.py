@@ -2483,11 +2483,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
             cache_type
         )
-        cache_type = self.cache_type
         self.bucket = bucket
         self.key = key
         cache_options = dict(cache_options or {})
-        if cache_type == "adaptive":
+        if self.cache_type == "adaptive":
             if "concurrency" not in cache_options:
                 cache_options["concurrency"] = self.concurrency
             if "max_prefetch_size" not in cache_options:
@@ -2503,25 +2502,27 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             mode,
             block_size,
             autocommit=autocommit,
-            cache_type=cache_type,
+            cache_type=self.cache_type,
             cache_options=cache_options,
             **kwargs,
         )
         self.gcsfs = gcsfs
+        self.bucket = bucket
+        self.key = key
         self.acl = acl
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
 
         cache = getattr(self, "cache", None)
         prefetcher = getattr(cache, "_prefetcher", None)
-        if prefetcher is not None:
+        if prefetcher is not None and prefetcher.producer is not None:
             # Wire GCSFile/ZonalFile's native async range fetcher into the prefetcher producer.
             # Otherwise, _async_fetch_range is bypassed, split_factor is ignored, and
             # fsspec's default fetcher performs an unnecessary asyncio.to_thread round-trip.
             # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
-            prefetcher.fetcher = self._async_fetch_range
-            if getattr(prefetcher, "producer", None) is not None:
-                prefetcher.producer.fetcher = self._async_fetch_range
+            # Only producer uses the fetcher and producer will always be there for a prefetcher hence
+            # fetcher attributes check is not required.
+            prefetcher.producer.fetcher = self._async_fetch_range
 
             if hasattr(cache, "close"):
                 # TODO: Remove this disarm once fsspec adds native support for deferred or
