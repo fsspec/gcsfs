@@ -684,7 +684,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         caps = [max(1, min(c, per_object_cap)) for c in counts]
         shares = [total_streams * c / n for c in counts]
         alloc = [min(cap, max(1, int(s))) for cap, s in zip(caps, shares)]
-        # Trim if the at-least-one floor pushed us over budget.
+        # Trim if the at-least-one floor pushed us over budget. Since
+        # len(alloc) < total_streams < sum(alloc), max(alloc) is >= 2, so no
+        # object ever drops below 1 stream.
         while sum(alloc) > total_streams:
             j = max(range(len(alloc)), key=lambda k: alloc[k])
             alloc[j] -= 1
@@ -784,62 +786,98 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 raise first_close_error
         return [buf.get_value() for buf in buffers]
 
-    async def _cat_ranges_zonal_file(self, path, starts, ends, num_streams, **kwargs):
-        """Fetch many ranges of a single zonal object over a shared MRD pool.
+    def _zonal_file_stream_coros(
+        self, path, idxs, starts, ends, num_streams, results, open_pools, **kwargs
+    ):
+        """Build ``num_streams`` coroutines that share one MRD pool for ``path``.
 
-        Returns:
-            list: One entry per input range: ``bytes`` or the exception raised
-            while fetching it.
+        The first coroutine to run opens the pool and splits the object's
+        non-empty ranges across streams; the last coroutine to finish closes
+        the pool. Each coroutine writes its assigned ranges into ``results``.
         """
         cache_type, cache_source = self._resolve_cache_config(kwargs)
         bucket, object_name, generation = self.split_path(path)
-        pool = await self._mrd_pool_cache.get(
-            bucket,
-            object_name,
-            generation,
-            pool_size=num_streams,
-            cache_type=cache_type,
-            cache_source=cache_source,
-        )
-        try:
-            file_size = getattr(pool, "persisted_size", None)
-            if file_size is None:
-                file_size = await _get_mrd_size(pool)
-            if file_size is None:
-                logger.warning(
-                    f"AsyncMultiRangeDownloader (MRD) for {path} has no "
-                    "'persisted_size'. Falling back to _info() to get the file size."
-                )
-                file_size = (await self._info(path))["size"]
+        init_lock = asyncio.Lock()
+        initialized = False
+        pool = None
+        groups = []
+        remaining = num_streams
 
-            # Empty ranges keep b"" and are not sent to the server.
-            out = [b""] * len(starts)
-            requests = []
-            for i, (start, end) in enumerate(zip(starts, ends)):
-                offset, length = await self._process_limits_to_offset_and_length(
-                    path, start, end, file_size
-                )
-                if length > 0:
-                    requests.append((i, offset, length))
+        async def _init():
+            nonlocal initialized, pool, groups
+            if initialized:
+                return
+            async with init_lock:
+                if initialized:
+                    return
+                try:
+                    pool = await self._mrd_pool_cache.get(
+                        bucket,
+                        object_name,
+                        generation,
+                        pool_size=num_streams,
+                        cache_type=cache_type,
+                        cache_source=cache_source,
+                    )
+                    open_pools.add(pool)
+                    file_size = getattr(pool, "persisted_size", None)
+                    if file_size is None:
+                        file_size = await _get_mrd_size(pool)
+                    if file_size is None:
+                        logger.warning(
+                            f"AsyncMultiRangeDownloader (MRD) for {path} has no "
+                            "'persisted_size'. Falling back to _info() to get the file size."
+                        )
+                        file_size = (await self._info(path))["size"]
 
-            # Each group runs on its own MRD, all groups at once. A failed
-            # group only fails its own ranges.
-            groups = self._split_ranges_across_streams(requests, num_streams)
-            results = await asyncio.gather(
-                *(self._download_range_group(pool, g) for g in groups),
-                return_exceptions=True,
-            )
-            for group, res in zip(groups, results):
-                if isinstance(res, BaseException):
-                    for i, _, _ in group:
-                        out[i] = res
-                else:
-                    for (i, _, _), data in zip(group, res):
-                        out[i] = data
-        finally:
-            await pool.close()
+                    # Empty ranges keep b"" and are not sent to the server.
+                    requests = []
+                    for i in idxs:
+                        offset, length = (
+                            await self._process_limits_to_offset_and_length(
+                                path, starts[i], ends[i], file_size
+                            )
+                        )
+                        if length > 0:
+                            requests.append((i, offset, length))
+                        else:
+                            results[i] = b""
 
-        return out
+                    groups = self._split_ranges_across_streams(requests, num_streams)
+                except BaseException as e:
+                    if pool is not None:
+                        open_pools.discard(pool)
+                        await pool.close()
+                        pool = None
+                    if not isinstance(e, Exception):
+                        raise
+                    for i in idxs:
+                        results[i] = e
+                finally:
+                    initialized = True
+
+        async def _run_stream(group_idx):
+            nonlocal remaining, pool
+            try:
+                await _init()
+                if pool is not None and group_idx < len(groups):
+                    group = groups[group_idx]
+                    try:
+                        data_list = await self._download_range_group(pool, group)
+                    except Exception as e:
+                        for i, _, _ in group:
+                            results[i] = e
+                    else:
+                        for (i, _, _), data in zip(group, data_list):
+                            results[i] = data
+            finally:
+                remaining -= 1
+                if remaining == 0 and pool is not None:
+                    p, pool = pool, None
+                    open_pools.discard(p)
+                    await p.close()
+
+        return [_run_stream(g) for g in range(num_streams)]
 
     async def _cat_ranges(
         self,
@@ -891,7 +929,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError
 
-        # Group range indices by path so each object is opened once.
+        # Group range indices by path so ranges for the same object share one MRD pool.
         by_path = {}
         for i, p in enumerate(paths):
             by_path.setdefault(p, []).append(i)
@@ -939,56 +977,51 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             total_streams,
             per_object_cap,
         )
-        zonal_coros = [
-            self._cat_ranges_zonal_file(
-                p,
-                [starts[i] for i in idxs],
-                [ends[i] for i in idxs],
-                num_streams,
-                **kwargs,
+        coros = []
+        open_pools = set()
+        for (p, idxs), num_streams in zip(zonal_items, allocs):
+            coros.extend(
+                self._zonal_file_stream_coros(
+                    p,
+                    idxs,
+                    starts,
+                    ends,
+                    num_streams,
+                    results,
+                    open_pools,
+                    **kwargs,
+                )
             )
-            for (p, idxs), num_streams in zip(zonal_items, allocs)
-        ]
-        # With more objects than streams each object gets one stream, so
-        # batch_size=total_streams caps in-flight objects to the stream budget.
-        zonal_outs = await asyn._run_coros_in_chunks(
-            zonal_coros,
-            batch_size=total_streams,
-            nofiles=True,
-            return_exceptions=True,
-        )
-        # A coroutine that failed as a whole (for example, the object could not
-        # be opened) fails every range it owns.
-        for (_, idxs), out in zip(zonal_items, zonal_outs):
-            if isinstance(out, BaseException):
-                for i in idxs:
-                    results[i] = out
-            else:
-                for i, r in zip(idxs, out):
-                    results[i] = r
-
         if other:
-            # super()._cat_ranges fans out up to batch_size coroutines of its
-            # own, so run it as a separate batch rather than counting it as one
-            # coroutine alongside zonal_coros.
+            # Same per-range _cat_file implementation as fsspec's _cat_ranges,
+            # combined into the same _run_coros_in_chunks batch.
             other_kwargs = dict(kwargs)
             if concurrency is not None:
                 other_kwargs["concurrency"] = concurrency
-            try:
-                other_outs = await super()._cat_ranges(
-                    [paths[i] for i in other],
-                    [starts[i] for i in other],
-                    [ends[i] for i in other],
-                    batch_size=batch_size,
-                    on_error="return",
-                    **other_kwargs,
-                )
-            except Exception as e:
-                for i in other:
+
+            async def _cat_other(i):
+                try:
+                    results[i] = await self._cat_file(
+                        paths[i], start=starts[i], end=ends[i], **other_kwargs
+                    )
+                except Exception as e:
                     results[i] = e
-            else:
-                for i, r in zip(other, other_outs):
-                    results[i] = r
+
+            for i in other:
+                coros.append(_cat_other(i))
+
+        try:
+            await asyn._run_coros_in_chunks(
+                coros,
+                batch_size=batch_size,
+                nofiles=True,
+                return_exceptions=True,
+            )
+        finally:
+            for c in coros:
+                c.close()
+            for pool in list(open_pools):
+                await pool.close()
 
         # Like fsspec, raise the first error in input order.
         if on_error != "return":

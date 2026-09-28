@@ -574,15 +574,23 @@ async def test_cat_ranges_mixed_zonal_and_regional_paths(
     ) as mocks:
         with (
             mock.patch.object(extended_gcsfs, "_is_zonal_bucket", side_effect=is_zonal),
-            mock.patch(
-                "fsspec.asyn.AsyncFileSystem._cat_ranges",
+            mock.patch.object(
+                extended_gcsfs,
+                "_cat_file",
                 new_callable=mock.AsyncMock,
-                return_value=[b"r1", b"r3"],
-            ) as mock_super,
+                side_effect=[b"r1", b"r3"],
+            ) as mock_cat_file,
         ):
             res = await extended_gcsfs._cat_ranges(paths, [0, 1, 5, 3], [5, 2, 10, 4])
         assert res == [json_data[:5], b"r1", json_data[5:10], b"r3"]
-        assert mock_super.await_args.args == ([regional, regional], [1, 3], [2, 4])
+        assert [c.args for c in mock_cat_file.await_args_list] == [
+            (regional,),
+            (regional,),
+        ]
+        assert [c.kwargs for c in mock_cat_file.await_args_list] == [
+            {"start": 1, "end": 2},
+            {"start": 3, "end": 4},
+        ]
         mocks["pool_cache_get"].assert_awaited_once()
 
 
