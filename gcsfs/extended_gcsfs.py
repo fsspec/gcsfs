@@ -784,9 +784,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 raise first_close_error
         return [buf.get_value() for buf in buffers]
 
-    async def _cat_ranges_zonal_file(
-        self, path, starts, ends, num_streams, **kwargs
-    ):
+    async def _cat_ranges_zonal_file(self, path, starts, ends, num_streams, **kwargs):
         """Fetch many ranges of a single zonal object over a shared MRD pool.
 
         Returns:
