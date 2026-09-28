@@ -31,18 +31,37 @@ def on_gpu(monkeypatch):
     return configure
 
 
+@pytest.fixture
+def warmups(monkeypatch):
+    """Record the context warm-up allocation instead of touching a real GPU."""
+    devices = []
+    monkeypatch.setattr(torch.cuda, "set_device", lambda index: None)
+    monkeypatch.setattr(
+        torch, "zeros", lambda *shape, device=None: devices.append(device)
+    )
+    return devices
+
+
 def test_rank_device_is_none_on_cpu(monkeypatch):
     monkeypatch.setattr(device_lib.env, "detect_accelerator", lambda: "cpu")
     assert device_lib.rank_device(3) is None
 
 
-def test_rank_device_binds_rank_modulo_device_count(on_gpu, monkeypatch):
+def test_rank_device_binds_rank_modulo_device_count(on_gpu, warmups, monkeypatch):
     bound = []
     on_gpu(4)
     monkeypatch.setattr(torch.cuda, "set_device", bound.append)
 
     assert device_lib.rank_device(6) == torch.device("cuda", 2)
     assert bound == [2]
+
+
+def test_rank_device_creates_the_cuda_context_before_timed_rounds(on_gpu, warmups):
+    on_gpu(4)
+
+    device = device_lib.rank_device(6)
+
+    assert warmups == [device]
 
 
 def test_to_device_moves_nested_tensors_and_passes_other_values_through():

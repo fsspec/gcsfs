@@ -101,6 +101,12 @@ in loader worker processes, as PyTorch recommends.
 
 When ranks outnumber GPUs, ranks share GPUs.
 
+Each rank creates its CUDA context before timing starts, as a training job
+already has by the time its data loop runs. The exception is Ray Data with
+`split_by_node`: consumer tasks are dispatched inside the round, so creating
+the context is charged to the round in which a Ray worker first runs
+(normally round 1, since Ray reuses workers).
+
 ## Configuration
 
 The group's

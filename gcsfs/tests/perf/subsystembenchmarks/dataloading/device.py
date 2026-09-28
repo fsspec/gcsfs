@@ -17,14 +17,20 @@ _RAY_RESOURCE_DECIMALS = 4
 
 
 def rank_device(rank):
-    """Bind this rank to GPU ``rank % device_count``; return None on CPU."""
+    """Bind this rank to GPU ``rank % device_count``; return None on CPU.
+
+    Also creates the CUDA context, which a training job has already paid for
+    by the time its data loop starts, so timed rounds never include it.
+    """
     if env.detect_accelerator() != "gpu":
         return None
     import torch
 
     index = rank % torch.cuda.device_count()
     torch.cuda.set_device(index)
-    return torch.device("cuda", index)
+    device = torch.device("cuda", index)
+    torch.zeros(1, device=device)
+    return device
 
 
 def to_device(batch, device):
