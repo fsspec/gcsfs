@@ -2958,6 +2958,52 @@ def test_mtls_concurrent_set_session(client_cert_config):
         fs._session = None
 
 
+def test_mtls_set_session_cancel_one_caller(client_cert_config):
+    """Cancelling one caller must not cancel the shared cert load."""
+    import time
+
+    fs = GCSFileSystem(token="anon")
+    real_load = gcsfs.core._client_cert_ssl_context
+
+    def slow_load():
+        time.sleep(0.2)
+        return real_load()
+
+    async def run():
+        tasks = [asyncio.ensure_future(fs._set_session()) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        tasks[0].cancel()
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context", side_effect=slow_load
+    ) as load:
+        results = sync(fs.loop, run)
+    try:
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert isinstance(results[1], aiohttp.ClientSession)
+        assert results[1] is results[2]
+        assert load.call_count == 1
+    finally:
+        sync(fs.loop, results[1].close)
+        fs._session = None
+
+
+def test_mtls_set_session_retries_after_failed_load(client_cert_config):
+    fs = GCSFileSystem(token="anon")
+    real_load = gcsfs.core._client_cert_ssl_context
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context",
+        side_effect=[OSError("cert provider failed"), real_load()],
+    ):
+        with pytest.raises(OSError, match="cert provider failed"):
+            sync(fs.loop, fs._set_session)
+        session = sync(fs.loop, fs._set_session)
+    assert isinstance(session, aiohttp.ClientSession)
+    sync(fs.loop, session.close)
+    fs._session = None
+
+
 def test_mtls_empty_client_cert_source(client_cert_config):
     from google.auth.exceptions import MutualTLSChannelError
 

@@ -530,14 +530,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             ):
                 # Loading the cert yields to the event loop, so concurrent
                 # callers share one load and then the session it creates.
-                if self._ssl_context_task is None:
-                    self._ssl_context_task = asyncio.ensure_future(
+                # shield() keeps one cancelled caller from cancelling the
+                # load for the others.
+                task = self._ssl_context_task
+                if task is None:
+                    task = self._ssl_context_task = asyncio.ensure_future(
                         asyncio.to_thread(_client_cert_ssl_context)
                     )
                 try:
-                    ssl_context = await self._ssl_context_task
+                    ssl_context = await asyncio.shield(task)
                 finally:
-                    self._ssl_context_task = None
+                    if task.done() and self._ssl_context_task is task:
+                        self._ssl_context_task = None
                 if self._session is not None:
                     return self._session
                 kwargs = {**kwargs, "connector": aiohttp.TCPConnector(ssl=ssl_context)}
