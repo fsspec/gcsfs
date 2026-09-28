@@ -528,7 +528,7 @@ async def test_cat_ranges_zonal_on_error_raise(extended_gcsfs, gcs_bucket_mocks)
 
 
 @pytest.mark.asyncio
-async def test_cat_ranges_zonal_respects_concurrency_and_mrd_kwargs(
+async def test_cat_ranges_zonal_respects_concurrency_kwarg(
     extended_gcsfs, gcs_bucket_mocks
 ):
     with gcs_bucket_mocks(
@@ -539,15 +539,6 @@ async def test_cat_ranges_zonal_respects_concurrency_and_mrd_kwargs(
         )
         assert res == [json_data[:5]] * 20
         assert mocks["pool_cache_get"].call_args.kwargs["pool_size"] == 3
-
-        mocks["pool_cache_get"].reset_mock()
-        mocks["pool"].close.reset_mock()
-        res2 = await extended_gcsfs._cat_ranges(
-            [file_path] * 2, [0, 5], [5, 10], mrd=mocks["pool"]
-        )
-        assert res2 == [json_data[:5], json_data[5:10]]
-        mocks["pool_cache_get"].assert_not_called()
-        mocks["pool"].close.assert_not_called()
 
 
 @pytest.mark.asyncio

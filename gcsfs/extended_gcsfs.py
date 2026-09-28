@@ -785,7 +785,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return [buf.get_value() for buf in buffers]
 
     async def _cat_ranges_zonal_file(
-        self, path, starts, ends, num_streams, mrd=None, **kwargs
+        self, path, starts, ends, num_streams, **kwargs
     ):
         """Fetch many ranges of a single zonal object over a shared MRD pool.
 
@@ -795,21 +795,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         cache_type, cache_source = self._resolve_cache_config(kwargs)
         bucket, object_name, generation = self.split_path(path)
-        pool_created_here = False
-
-        if mrd is not None:
-            # Caller-supplied pool or downloader: use it as is and leave it open.
-            pool = mrd
-        else:
-            pool = await self._mrd_pool_cache.get(
-                bucket,
-                object_name,
-                generation,
-                pool_size=num_streams,
-                cache_type=cache_type,
-                cache_source=cache_source,
-            )
-            pool_created_here = True
+        pool = await self._mrd_pool_cache.get(
+            bucket,
+            object_name,
+            generation,
+            pool_size=num_streams,
+            cache_type=cache_type,
+            cache_source=cache_source,
+        )
         try:
             file_size = getattr(pool, "persisted_size", None)
             if file_size is None:
@@ -846,8 +839,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     for (i, _, _), data in zip(group, res):
                         out[i] = data
         finally:
-            if pool_created_here:
-                await pool.close()
+            await pool.close()
 
         return out
 
@@ -875,8 +867,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             concurrency (int, optional): Maximum MRD streams per object,
                 instead of ``MAX_ZONAL_STREAMS_PER_OBJECT``. Also forwarded to
                 the fsspec path for non-zonal files.
-            mrd (MRDPool or AsyncMultiRangeDownloader, optional): Serve every
-                zonal range from this pool or downloader. It is not closed.
 
         With ``on_error="return"``, a failure while downloading a group of
         ranges is returned for every range in that group, and a failure to
@@ -945,48 +935,49 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         total_streams = max(1, stream_budget)
 
         results = [None] * len(paths)
-        # coros[k] produces the results for the indices in owners[k].
-        coros, owners = [], []
         zonal_items = list(zonal.items())
         allocs = self._allocate_streams(
             [len(idxs) for _, idxs in zonal_items],
             total_streams,
             per_object_cap,
         )
-        # With more objects than streams each object gets one stream, so cap
-        # how many objects are in flight to keep total streams <= budget.
-        object_sem = (
-            asyncio.Semaphore(total_streams)
-            if len(zonal_items) > total_streams
-            else None
+        zonal_coros = [
+            self._cat_ranges_zonal_file(
+                p,
+                [starts[i] for i in idxs],
+                [ends[i] for i in idxs],
+                num_streams,
+                **kwargs,
+            )
+            for (p, idxs), num_streams in zip(zonal_items, allocs)
+        ]
+        # With more objects than streams each object gets one stream, so
+        # batch_size=total_streams caps in-flight objects to the stream budget.
+        zonal_outs = await asyn._run_coros_in_chunks(
+            zonal_coros,
+            batch_size=total_streams,
+            nofiles=True,
+            return_exceptions=True,
         )
-
-        async def _bounded(p, starts_p, ends_p, num_streams):
-            async with object_sem:
-                return await self._cat_ranges_zonal_file(
-                    p, starts_p, ends_p, num_streams, **kwargs
-                )
-
-        for (p, idxs), num_streams in zip(zonal_items, allocs):
-            starts_p = [starts[i] for i in idxs]
-            ends_p = [ends[i] for i in idxs]
-            if object_sem is not None:
-                coros.append(_bounded(p, starts_p, ends_p, num_streams))
+        # A coroutine that failed as a whole (for example, the object could not
+        # be opened) fails every range it owns.
+        for (_, idxs), out in zip(zonal_items, zonal_outs):
+            if isinstance(out, BaseException):
+                for i in idxs:
+                    results[i] = out
             else:
-                coros.append(
-                    self._cat_ranges_zonal_file(
-                        p, starts_p, ends_p, num_streams, **kwargs
-                    )
-                )
-            owners.append(idxs)
+                for i, r in zip(idxs, out):
+                    results[i] = r
+
         if other:
-            # Non-zonal paths run through fsspec in the same gather. Their
-            # errors come back per range; on_error is applied once at the end.
+            # super()._cat_ranges fans out up to batch_size coroutines of its
+            # own, so run it as a separate batch rather than counting it as one
+            # coroutine alongside zonal_coros.
             other_kwargs = dict(kwargs)
             if concurrency is not None:
                 other_kwargs["concurrency"] = concurrency
-            coros.append(
-                super()._cat_ranges(
+            try:
+                other_outs = await super()._cat_ranges(
                     [paths[i] for i in other],
                     [starts[i] for i in other],
                     [ends[i] for i in other],
@@ -994,19 +985,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     on_error="return",
                     **other_kwargs,
                 )
-            )
-            owners.append(other)
-
-        outs = await asyncio.gather(*coros, return_exceptions=True)
-        # A coroutine that failed as a whole (for example, the object could not
-        # be opened) fails every range it owns.
-        for idxs, out in zip(owners, outs):
-            if isinstance(out, BaseException):
-                for i in idxs:
-                    results[i] = out
+            except Exception as e:
+                for i in other:
+                    results[i] = e
             else:
-                for i, r in zip(idxs, out):
+                for i, r in zip(other, other_outs):
                     results[i] = r
+
         # Like fsspec, raise the first error in input order.
         if on_error != "return":
             for r in results:
