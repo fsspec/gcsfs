@@ -10,7 +10,9 @@ import mimetypes
 import os
 import queue
 import re
+import ssl
 import sys
+import tempfile
 import threading
 import uuid
 import warnings
@@ -131,11 +133,70 @@ def _gcp_universe_domain():
     return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "googleapis.com")
 
 
-def _location():
+_MTLS_HOST = "storage.mtls.googleapis.com"
+
+
+def _use_client_cert():
+    """
+    Whether to use mutual TLS, presenting google-auth's default client cert
+
+    True when google-auth says a client certificate should be used
+    (``GOOGLE_API_USE_CLIENT_CERTIFICATE=true``, or a certificate config with a
+    "workload" section), a default client certificate source exists, and
+    ``GOOGLE_API_USE_MTLS_ENDPOINT`` is not "never". Workloads whose access
+    tokens are bound to their client certificate (e.g. Agent Identity) need
+    this, since such tokens are only accepted over mTLS.
+    """
+    try:
+        from google.auth.transport import mtls
+    except ImportError:
+        return False
+    should_use_client_cert = getattr(mtls, "should_use_client_cert", None)
+    if should_use_client_cert is None or not should_use_client_cert():
+        return False
+    if not mtls.has_default_client_cert_source():
+        return False
+    mode = os.getenv("GOOGLE_API_USE_MTLS_ENDPOINT", "auto").lower()
+    if mode not in {"never", "auto", "always"}:
+        raise ValueError(
+            "GOOGLE_API_USE_MTLS_ENDPOINT must be one of 'never', 'auto' or "
+            f"'always', got {mode!r}"
+        )
+    return mode != "never"
+
+
+def _client_cert_ssl_context():
+    """
+    SSL context that verifies the server like aiohttp's default context does,
+    and presents google-auth's default client certificate
+    """
+    from google.auth.transport import mtls
+
+    cert, key = mtls.default_client_cert_source()()
+    ctx = ssl.create_default_context()
+    ctx.set_alpn_protocols(("http/1.1",))
+    # load_cert_chain only reads files; the directory is private to this user
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cert_path = os.path.join(tmpdir, "cert.pem")
+        key_path = os.path.join(tmpdir, "key.pem")
+        for path, data in ((cert_path, cert), (key_path, key)):
+            with open(path, "wb") as f:
+                f.write(data)
+        ctx.load_cert_chain(cert_path, key_path)
+    return ctx
+
+
+def _location(use_client_cert=False):
     """
     Resolves GCS HTTP location as http[s]://host
 
     Enables storage emulation for integration tests.
+
+    Parameters
+    ----------
+    use_client_cert: bool
+        If True and no emulator is set, return the mTLS endpoint (only exists
+        for the default "googleapis.com" universe).
 
     Returns
     -------
@@ -149,7 +210,10 @@ def _location():
             _emulator_location = f"http://{_emulator_location}"
         return _emulator_location
 
-    return f"https://storage.{_gcp_universe_domain()}"
+    universe = _gcp_universe_domain()
+    if use_client_cert and universe == "googleapis.com":
+        return f"https://{_MTLS_HOST}"
+    return f"https://storage.{universe}"
 
 
 def _chunks(lst, n):
@@ -302,7 +366,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         If given, use this URL (format protocol://host:port , *without* any
         path part) for communication. If not given, defaults to the value
         of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
-        either, will use the standard Google endpoint.
+        either, will use the standard Google endpoint, or its mutual TLS
+        variant when google-auth is configured to use a client certificate
+        (see ``google.auth.transport.mtls.should_use_client_cert``) and
+        ``GOOGLE_API_USE_MTLS_ENDPOINT`` is not "never". In that case the
+        client certificate is also presented on the HTTP session, unless
+        ``session_kwargs`` provides its own ``connector``.
     default_location: str
         Default location where buckets are created, like 'US' or 'EUROPE-WEST3'.
         You can find a list of all available locations here:
@@ -364,6 +433,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
+        self._use_client_cert = _use_client_cert()
 
         if check_connection:
             warnings.warn(
@@ -377,7 +447,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     @property
     def _location(self):
-        return self._endpoint or _location()
+        return self._endpoint or _location(self._use_client_cert)
 
     @property
     def base(self):
@@ -438,7 +508,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     async def _set_session(self):
         if self._session is None:
-            self._session = await get_client(**self.session_kwargs)
+            kwargs = self.session_kwargs
+            if (
+                self._use_client_cert
+                and "connector" not in kwargs
+                and self._location.startswith("https://")
+            ):
+                ssl_context = await asyncio.to_thread(_client_cert_ssl_context)
+                kwargs = {**kwargs, "connector": aiohttp.TCPConnector(ssl=ssl_context)}
+            self._session = await get_client(**kwargs)
             weakref.finalize(
                 self, self.close_session, self.loop, self._session, self.asynchronous
             )
@@ -1612,7 +1690,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     @property
     def on_google(self):
         # match "torage" to handle both "storage" and "Storage"
-        return f"torage.{_gcp_universe_domain()}" in self._location
+        return (
+            f"torage.{_gcp_universe_domain()}" in self._location
+            or _MTLS_HOST in self._location.lower()
+        )
 
     async def _delete_files(self, files, batchsize):
         """Helper to delete files in batches."""

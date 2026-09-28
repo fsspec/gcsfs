@@ -29,7 +29,12 @@ from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
-from gcsfs.core import GCSFile, GCSFileSystem, _get_prefetcher_and_cache_config
+from gcsfs.core import (
+    GCSFile,
+    GCSFileSystem,
+    _get_prefetcher_and_cache_config,
+    _location,
+)
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -204,12 +209,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             self._grpc_client = asyn.sync(self.loop, self._get_grpc_client)
         return self._grpc_client
 
+    @property
+    def _grpc_location(self):
+        # The gRPC clients do not present a client certificate yet, so keep them
+        # off the mTLS endpoint that the HTTP path may use.
+        return self._endpoint or _location()
+
     async def _get_grpc_client(self):
         if self._grpc_client is None:
             client_options = ClientOptions(quota_project_id=self._user_project)
-            if self._location:
+            if self._grpc_location:
                 # client_options expects only the host:port, without any protocol or path components.
-                endpoint = self._location.split("://")[-1].split("/")[0]
+                endpoint = self._grpc_location.split("://")[-1].split("/")[0]
                 client_options.api_endpoint = endpoint
             self._grpc_client = AsyncGrpcClient(
                 credentials=self.credential,
@@ -233,9 +244,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "options": [("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
                 "quota_project_id": self._user_project,
             }
-            if self._location:
+            if self._grpc_location:
                 # Extract host:port safely (strips protocol and trailing URL paths if any).
-                endpoint = self._location.split("://")[-1].split("/")[0]
+                endpoint = self._grpc_location.split("://")[-1].split("/")[0]
                 channel_kwargs["host"] = endpoint
 
             channel = transport_cls.create_channel(**channel_kwargs)
