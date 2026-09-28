@@ -2,7 +2,9 @@ import asyncio
 import builtins
 import concurrent.futures
 import io
+import json
 import os
+import ssl
 import uuid
 from builtins import FileNotFoundError
 from datetime import datetime, timezone
@@ -2724,7 +2726,7 @@ def test_get_error(gcs):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
 
 
-def test_custom_gcp_universe(monkeypatch):
+def test_custom_gcp_universe(monkeypatch, mtls_env):
     # Make sure we simulate a mock less connection
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
@@ -2740,7 +2742,7 @@ def test_custom_gcp_universe(monkeypatch):
     assert fs.batch_url_base == "https://storage.s3nsapis.fr/batch/storage/v1"
 
 
-def test_default_gcp_universe(monkeypatch):
+def test_default_gcp_universe(monkeypatch, mtls_env):
     # Make sure we simulate a mock less connection
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
@@ -2754,6 +2756,339 @@ def test_default_gcp_universe(monkeypatch):
         == "https://storage.googleapis.com/download/storage/v1/b/test/o/path?alt=media"
     )
     assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
+
+
+def _write_test_pki(directory):
+    """Write a throwaway CA plus server and client certs signed by it."""
+    import datetime as dt
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def issue(name, issuer=None, issuer_key=None, san=None, usage=None):
+        key = ec.generate_private_key(ec.SECP256R1())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer or subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(hours=1))
+            .add_extension(
+                x509.BasicConstraints(ca=issuer is None, path_length=None),
+                critical=True,
+            )
+        )
+        # Key identifiers and CA key usage are required by the strict X.509
+        # checks that Python 3.13+ enables in ssl.create_default_context().
+        builder = builder.add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()), False
+        ).add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                (issuer_key or key).public_key()
+            ),
+            False,
+        )
+        if issuer is None:
+            builder = builder.add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+        if san:
+            builder = builder.add_extension(x509.SubjectAlternativeName(san), False)
+        if usage:
+            builder = builder.add_extension(x509.ExtendedKeyUsage([usage]), False)
+        cert = builder.sign(issuer_key or key, hashes.SHA256())
+        return cert, key
+
+    def write(name, cert, key):
+        paths = os.path.join(directory, f"{name}.pem"), os.path.join(
+            directory, f"{name}-key.pem"
+        )
+        with open(paths[0], "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(paths[1], "wb") as f:
+            f.write(
+                key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+            )
+        return paths
+
+    ca, ca_key = issue("gcsfs test CA")
+    server = issue(
+        "localhost",
+        ca.subject,
+        ca_key,
+        san=[
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+        ],
+        usage=ExtendedKeyUsageOID.SERVER_AUTH,
+    )
+    client = issue(
+        "gcsfs test client", ca.subject, ca_key, usage=ExtendedKeyUsageOID.CLIENT_AUTH
+    )
+    return {
+        "ca": write("ca", ca, ca_key)[0],
+        "server": write("server", *server),
+        "client": write("client", *client),
+    }
+
+
+@pytest.fixture
+def mtls_env(monkeypatch, tmp_path):
+    """Environment without an emulator or credentials; cert config not yet set."""
+    for var in (
+        "STORAGE_EMULATOR_HOST",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_UNIVERSE_DOMAIN",
+        "GOOGLE_API_USE_CLIENT_CERTIFICATE",
+        "GOOGLE_API_USE_MTLS_ENDPOINT",
+        "GOOGLE_API_CERTIFICATE_CONFIG",
+        "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE",
+        "CLOUDSDK_CONTEXT_AWARE_CERTIFICATE_CONFIG_FILE_PATH",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    # keep google-auth from finding a gcloud certificate_config.json
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(tmp_path / "gcloud"))
+    GCSFileSystem.clear_instance_cache()
+    yield monkeypatch
+    GCSFileSystem.clear_instance_cache()
+
+
+@pytest.fixture
+def client_cert_config(mtls_env, tmp_path):
+    """Configure google-auth's default client cert source (workload config)."""
+    pki = _write_test_pki(str(tmp_path))
+    cert_path, key_path = pki["client"]
+    config = tmp_path / "certificate_config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "cert_configs": {
+                    "workload": {"cert_path": cert_path, "key_path": key_path}
+                }
+            }
+        )
+    )
+    mtls_env.setenv("GOOGLE_API_CERTIFICATE_CONFIG", str(config))
+    mtls_env.setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "true")
+    return pki
+
+
+def _session_kwargs(fs):
+    """Return the kwargs gcsfs passes to aiohttp.ClientSession."""
+    with mock.patch("gcsfs.core.get_client", mock.AsyncMock()) as get_client:
+        sync(fs.loop, fs._set_session)
+    fs._session = None
+    return get_client.call_args.kwargs
+
+
+def test_mtls_not_used_without_client_cert(mtls_env):
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert fs.on_google is True
+    assert "connector" not in _session_kwargs(fs)
+
+
+def test_mtls_not_used_when_client_cert_disabled(client_cert_config, mtls_env):
+    # a cert config exists, but the env var turns client certs off
+    mtls_env.setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert "connector" not in _session_kwargs(fs)
+
+
+@pytest.mark.parametrize("mode", [None, "auto", "always", "ALWAYS"])
+def test_mtls_endpoint_with_client_cert(client_cert_config, mtls_env, mode):
+    if mode:
+        mtls_env.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", mode)
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.mtls.googleapis.com/storage/v1/"
+    assert fs.batch_url_base == "https://storage.mtls.googleapis.com/batch/storage/v1"
+    assert fs.on_google is True
+    connector = _session_kwargs(fs)["connector"]
+    assert isinstance(connector._ssl, ssl.SSLContext)
+
+
+def test_mtls_endpoint_never(client_cert_config, mtls_env):
+    # like google-cloud-storage: regular endpoint, but the cert is still used
+    mtls_env.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "never")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert "connector" in _session_kwargs(fs)
+
+
+def test_mtls_concurrent_set_session(client_cert_config):
+    fs = GCSFileSystem(token="anon")
+
+    async def set_sessions():
+        return await asyncio.gather(*(fs._set_session() for _ in range(10)))
+
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context",
+        wraps=gcsfs.core._client_cert_ssl_context,
+    ) as load:
+        sessions = sync(fs.loop, set_sessions)
+    try:
+        assert len({id(session) for session in sessions}) == 1
+        assert load.call_count == 1
+    finally:
+        sync(fs.loop, sessions[0].close)
+        fs._session = None
+
+
+def test_mtls_set_session_cancel_one_caller(client_cert_config):
+    """Cancelling one caller must not cancel the shared cert load."""
+    import time
+
+    fs = GCSFileSystem(token="anon")
+    real_load = gcsfs.core._client_cert_ssl_context
+
+    def slow_load():
+        time.sleep(0.2)
+        return real_load()
+
+    async def run():
+        tasks = [asyncio.ensure_future(fs._set_session()) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        tasks[0].cancel()
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context", side_effect=slow_load
+    ) as load:
+        results = sync(fs.loop, run)
+    try:
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert isinstance(results[1], aiohttp.ClientSession)
+        assert results[1] is results[2]
+        assert load.call_count == 1
+    finally:
+        sync(fs.loop, results[1].close)
+        fs._session = None
+
+
+def test_mtls_set_session_retries_after_failed_load(client_cert_config):
+    fs = GCSFileSystem(token="anon")
+    real_load = gcsfs.core._client_cert_ssl_context
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context",
+        side_effect=[OSError("cert provider failed"), real_load()],
+    ):
+        with pytest.raises(OSError, match="cert provider failed"):
+            sync(fs.loop, fs._set_session)
+        session = sync(fs.loop, fs._set_session)
+    assert isinstance(session, aiohttp.ClientSession)
+    sync(fs.loop, session.close)
+    fs._session = None
+
+
+def test_mtls_empty_client_cert_source(client_cert_config):
+    from google.auth.exceptions import MutualTLSChannelError
+
+    with mock.patch(
+        "google.auth.transport.mtls.default_client_cert_source",
+        return_value=lambda: (None, None),
+    ):
+        with pytest.raises(MutualTLSChannelError, match="no certificate or key"):
+            gcsfs.core._client_cert_ssl_context()
+
+
+def test_mtls_endpoint_invalid(client_cert_config, mtls_env):
+    mtls_env.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "sometimes")
+    with pytest.raises(ValueError, match="GOOGLE_API_USE_MTLS_ENDPOINT"):
+        GCSFileSystem(token="anon")
+
+
+def test_mtls_explicit_endpoint_kept(client_cert_config):
+    fs = GCSFileSystem(token="anon", endpoint_url="https://example.com:8443")
+    assert fs.base == "https://example.com:8443/storage/v1/"
+    assert "connector" in _session_kwargs(fs)
+
+
+def test_mtls_emulator_kept(client_cert_config, mtls_env):
+    mtls_env.setenv("STORAGE_EMULATOR_HOST", "http://localhost:4443")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "http://localhost:4443/storage/v1/"
+    assert "connector" not in _session_kwargs(fs)
+
+
+def test_mtls_custom_universe(client_cert_config, mtls_env):
+    mtls_env.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "s3nsapis.fr")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.s3nsapis.fr/storage/v1/"
+    assert "connector" in _session_kwargs(fs)
+
+
+def test_mtls_user_connector_kept(client_cert_config):
+    connector = object()
+    fs = GCSFileSystem(token="anon", session_kwargs={"connector": connector})
+    assert _session_kwargs(fs)["connector"] is connector
+
+
+def test_mtls_session_presents_client_cert(client_cert_config, mtls_env):
+    """End to end: a server that requires a client cert accepts gcsfs."""
+    import http.server
+    import threading
+
+    peers = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            peers.append(self.connection.getpeercert())
+            body = json.dumps(
+                {"kind": "storage#object", "name": "obj", "bucket": "bkt", "size": "3"}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(*client_cert_config["server"])
+    server_ctx.load_verify_locations(client_cert_config["ca"])
+    server_ctx.verify_mode = ssl.CERT_REQUIRED
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    httpd.socket = server_ctx.wrap_socket(httpd.socket, server_side=True)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    # trust the test CA for server verification
+    mtls_env.setenv("SSL_CERT_FILE", client_cert_config["ca"])
+    try:
+        fs = GCSFileSystem(
+            token="anon", endpoint_url=f"https://localhost:{httpd.server_port}"
+        )
+        assert fs.info("bkt/obj")["size"] == 3
+        subject = dict(x[0] for x in peers[0]["subject"])
+        assert subject["commonName"] == "gcsfs test client"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_mv_file_raises_error_for_specific_generation(gcs):

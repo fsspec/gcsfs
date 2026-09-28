@@ -7,6 +7,15 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* Use mutual TLS when google-auth is configured with a client certificate
+  (``GOOGLE_API_USE_CLIENT_CERTIFICATE`` or a certificate config with a
+  ``workload`` section): requests default to ``storage.mtls.googleapis.com`` and
+  present the client certificate, as ``google-cloud-storage`` does. Needed for
+  certificate-bound access tokens (e.g. Agent Identity).
+  ``GOOGLE_API_USE_MTLS_ENDPOINT=never`` keeps the regular endpoint; ``endpoint_url`` and
+  ``STORAGE_EMULATOR_HOST`` still take precedence. No change without a
+  configured client certificate.
+
 * Default ``cat_file`` concurrency to 1 (#1048).
   Restores single-request sequential reads without range headers or extra round-trips
   for small objects (e.g. Zarr, Xarray, Parquet metadata). Callers can still explicitly
