@@ -2786,6 +2786,31 @@ def _write_test_pki(directory):
                 critical=True,
             )
         )
+        # Key identifiers and CA key usage are required by the strict X.509
+        # checks that Python 3.13+ enables in ssl.create_default_context().
+        builder = builder.add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()), False
+        ).add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                (issuer_key or key).public_key()
+            ),
+            False,
+        )
+        if issuer is None:
+            builder = builder.add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
         if san:
             builder = builder.add_extension(x509.SubjectAlternativeName(san), False)
         if usage:
