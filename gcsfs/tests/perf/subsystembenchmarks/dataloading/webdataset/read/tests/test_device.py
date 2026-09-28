@@ -103,6 +103,27 @@ def test_run_rank_epochs_feeds_its_rank_device_with_pinned_loader(
     assert sync_calls == [FAKE_GPU, FAKE_GPU]
 
 
+@pytest.mark.parametrize("decode", [False, True])
+def test_feed_moves_decoded_images_and_leaves_raw_bytes_on_host(
+    prefix, sync_calls, decode
+):
+    params = _params(decode=decode)
+    with driver.case_read_env(params):
+        dataset = driver.build_dataset(prefix, params, split_by_node=False)
+        loader = driver.build_loader(dataset, params)
+        batches = list(driver.device_lib.feed(loader, FAKE_GPU))
+
+    samples = [sample for batch in batches for sample in batch]
+    images = [image for sample in samples for image in sample["images"]]
+    assert len(samples) == _FILES * _ROWS
+    assert images
+    if decode:
+        assert all(image.device == FAKE_GPU for image in images)
+    else:
+        assert all(isinstance(image, bytes) for image in images)
+    assert sync_calls == [FAKE_GPU]
+
+
 def test_resampled_rounds_still_synchronize_after_stopping_at_target(
     prefix, sync_calls, ranks_on_fake_gpu, loader_kwargs
 ):

@@ -4,12 +4,17 @@ The ``meta`` device stands in for a GPU so copy paths run on CPU-only hosts;
 ``torch.cuda`` calls that need a real device are replaced with recorders.
 """
 
+import itertools
+
 import pytest
 
 torch = pytest.importorskip("torch")
 
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import (  # noqa: E402
     device as device_lib,
+)
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import (  # noqa: E402
+    driver as dl_driver,
 )
 
 FAKE_GPU = torch.device("meta")
@@ -115,6 +120,27 @@ def test_feed_synchronizes_when_iterator_is_closed_early(sync_calls):
     iterator.close()
 
     assert sync_calls == [FAKE_GPU]
+
+
+def test_rounds_stopped_at_a_target_synchronize_before_their_end_timestamp(
+    monkeypatch,
+):
+    """measure_epochs breaks at the target; the feed must sync before the end
+    timestamp (CPython closes the abandoned generator at the break)."""
+    clock = itertools.count()
+    synced_at = []
+    monkeypatch.setattr(dl_driver, "timestamp", lambda: next(clock))
+    monkeypatch.setattr(
+        torch.cuda, "synchronize", lambda device: synced_at.append(next(clock))
+    )
+    feed = device_lib.feed([{"label": torch.ones(2)}] * 10, FAKE_GPU)
+
+    per_epoch, _ = dl_driver.measure_epochs(feed, 2, lambda batch: 2, target=4)
+
+    assert [rows for _, _, rows in per_epoch] == [4, 4]
+    assert len(synced_at) == 2
+    for (begin, end, _), sync in zip(per_epoch, synced_at):
+        assert begin < sync < end
 
 
 def test_ray_task_num_gpus_is_zero_on_cpu(monkeypatch):

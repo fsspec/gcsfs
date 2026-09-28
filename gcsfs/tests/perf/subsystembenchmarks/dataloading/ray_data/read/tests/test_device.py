@@ -66,7 +66,7 @@ def sync_calls(monkeypatch):
 
 @pytest.fixture
 def cpu_batches_from_ray(monkeypatch):
-    """Ray itself stays on CPU (it cannot pin/copy to the meta device)."""
+    """Ray itself stays on CPU: pinning pretok batches needs a real GPU."""
     real_kwargs = driver._torch_batch_kwargs
 
     def kwargs(params, shuffle_seed, collate_fn, device):
@@ -98,8 +98,10 @@ def test_torch_batch_kwargs_on_gpu_skip_pinning_with_custom_collate():
 
 
 def test_text_parquet_labels_reach_device_and_strings_survive(
-    ray_cluster, tmp_path, sync_calls, cpu_batches_from_ray
+    ray_cluster, tmp_path, sync_calls
 ):
+    # Unmocked: Ray gets device=FAKE_GPU but no pinning, and leaves this
+    # non-tensor batch on the host for feed to move.
     params = _params(fmt="text_parquet")
     arrow_fs, paths = driver.resolve_parquet_source(
         _write_shards(tmp_path, "text_parquet")
@@ -137,6 +139,29 @@ def test_single_rank_binds_rank0_and_synchronizes_each_round(
     assert rows == [20, 20]
     assert ranks == [0]
     assert sync_calls == [FAKE_GPU, FAKE_GPU]
+
+
+def test_consume_shard_binds_its_gpu_and_synchronizes(
+    ray_cluster, tmp_path, monkeypatch, sync_calls, cpu_batches_from_ray
+):
+    """The task body, run locally: Ray's num_gpus scoping makes rank 0 its GPU."""
+    ranks = []
+    monkeypatch.setattr(
+        driver.device_lib, "rank_device", lambda rank: ranks.append(rank) or FAKE_GPU
+    )
+    params = _params()
+    arrow_fs, paths = driver.resolve_parquet_source(
+        _write_shards(tmp_path, "pretok_parquet")
+    )
+    (split,) = driver.build_dataset(arrow_fs, paths, params).streaming_split(
+        n=1, equal=False
+    )
+
+    _, _, rows = driver._consume_shard._function(split, params, None, None)
+
+    assert rows == 20
+    assert ranks == [0]
+    assert sync_calls == [FAKE_GPU]
 
 
 def test_multi_rank_tasks_request_their_gpu_share(ray_cluster, tmp_path, monkeypatch):
