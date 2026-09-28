@@ -29,38 +29,40 @@ common:
 scenarios:
   - name: "read"
     scenario: "read"
+    # `enabled: false` parks a variant: it is still validated but not run. The default
+    # sweep keeps only storage-bound axes; flip a variant to true to run it again.
     variants:
       # Image preparation.
-      - {axis: "pixel_budget", pixel_budget: 50176}
-      - {axis: "pixel_budget", pixel_budget: 4014080}
-      - {axis: "encoding", jpeg_quality: 95}
-      - {axis: "encoding", image_encoding: "png"}
-      - {axis: "compression", fmt: "image_tar_gz"}
+      - {axis: "pixel_budget", pixel_budget: 50176, enabled: false}
+      - {axis: "pixel_budget", pixel_budget: 4014080, enabled: false}
+      - {axis: "encoding", jpeg_quality: 95, enabled: false}
+      - {axis: "encoding", image_encoding: "png", enabled: false}
+      - {axis: "compression", fmt: "image_tar_gz", enabled: false}
 
       # Single-image pairs vs. multi-image interleaved documents.
-      - {axis: "sample_shape", sample_shape: "interleaved"}
+      - {axis: "sample_shape", sample_shape: "interleaved", enabled: false}
 
       # Shard size variations at constant total image count.
       - {axis: "shard_size", file_count: 32, rows_per_file: 1568}
       - {axis: "shard_size", file_count: 256, rows_per_file: 196}
-      - {axis: "shard_size", file_count: 1024, rows_per_file: 49}
-      - {axis: "shard_divisibility", file_count: 40, rows_per_file: 1254}
+      - {axis: "shard_size", file_count: 1024, rows_per_file: 49, enabled: false}
+      - {axis: "shard_divisibility", file_count: 40, rows_per_file: 1254, enabled: false}
 
       # PyTorch DataLoader settings.
-      - {axis: "workers", num_workers: 2}
+      - {axis: "workers", num_workers: 2, enabled: false}
       - {axis: "workers", num_workers: 8}
-      - {axis: "prefetch", prefetch_factor: 4}
+      - {axis: "prefetch", prefetch_factor: 4, enabled: false}
 
       # Shuffle and local caching.
-      - {axis: "access", access: "sequential"}
+      - {axis: "access", access: "sequential", enabled: false}
       # Evaluated at 1024 shards (32/split) because baseline (2/split) is too small
       # to measure shard shuffle. Compare against the 1024-shard shard_size variant.
-      - {axis: "shard_shuffle", file_count: 1024, rows_per_file: 49, shard_shuffle: false}
-      - {axis: "shuffle_buffer", shuffle_buffer_size: 10000}
-      - {axis: "cache", cache_dir_enabled: true}
+      - {axis: "shard_shuffle", file_count: 1024, rows_per_file: 49, shard_shuffle: false, enabled: false}
+      - {axis: "shuffle_buffer", shuffle_buffer_size: 10000, enabled: false}
+      - {axis: "cache", cache_dir_enabled: true, enabled: false}
 
       # Exact epochs vs. resampled streaming.
-      - {axis: "resampled", resampled: true}
+      - {axis: "resampled", resampled: true, enabled: false}
 
       # gcsfs read strategy.
       - {axis: "gcs_read_mode", gcs_read_mode: "readahead_32mb"}
@@ -77,4 +79,4 @@ scenarios:
       - {axis: "gcs_read_concurrency", read_buffer_bytes: 33554432, gcs_read_concurrency: 16}
 
       # Image decode overhead.
-      - {axis: "decode", decode: true}
+      - {axis: "decode", decode: true, enabled: false}

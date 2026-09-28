@@ -99,6 +99,48 @@ def test_baseline_clashing_with_shared_keys_is_rejected(tmp_path):
         _configurator(tmp_path, text).generate_cases()
 
 
+_YAML_DISABLED_SHADE = _YAML_TWO_AXES.replace(
+    '{axis: "shade", color: "green"}', '{axis: "shade", color: "green", enabled: false}'
+)
+
+
+def test_disabled_variant_is_skipped_unless_explicitly_included(tmp_path):
+    configurator = _configurator(tmp_path, _YAML_DISABLED_SHADE)
+    assert [c.sweep_axis for c in configurator.generate_cases()] == [
+        "baseline",
+        "color",
+    ]
+    assert [
+        c.sweep_axis for c in configurator.generate_cases(include_disabled=True)
+    ] == [
+        "baseline",
+        "color",
+        "shade",
+    ]
+
+
+def test_disabled_variant_is_still_validated(tmp_path):
+    # A disabled variant must not rot silently: re-enabling it later should just work.
+    text = _YAML_DISABLED_SHADE.replace('color: "green"', 'colour: "green"')
+    with pytest.raises(ValueError, match="unknown key"):
+        _configurator(tmp_path, text).generate_cases()
+
+
+def test_disabled_variant_still_counts_toward_duplicate_ids(tmp_path):
+    text = _YAML_DISABLED_SHADE.replace('color: "green"', 'color: "blue"')
+    with pytest.raises(ValueError, match="share the benchmark id"):
+        _configurator(tmp_path, text).generate_cases()
+
+
+def test_non_boolean_enabled_is_rejected(tmp_path):
+    text = _YAML.replace(
+        '{axis: "color", color: "blue"}',
+        '{axis: "color", color: "blue", enabled: "no"}',
+    )
+    with pytest.raises(ValueError, match="enabled: must be true or false"):
+        _configurator(tmp_path, text).generate_cases()
+
+
 @pytest.mark.parametrize(
     ("requested", "expected"),
     [
