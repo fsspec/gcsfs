@@ -779,12 +779,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         finally:
             # Always close the buffers, but don't let a close error replace
             # the error that stopped the download.
+            first_close_error = None
             for buf in buffers:
                 try:
                     buf.close()
-                except Exception:
-                    if not has_error:
-                        raise
+                except Exception as e:
+                    if first_close_error is None:
+                        first_close_error = e
+            if not has_error and first_close_error is not None:
+                raise first_close_error
         return [buf.get_value() for buf in buffers]
 
     def _store_zonal_info_hint(self, hint_key, info):

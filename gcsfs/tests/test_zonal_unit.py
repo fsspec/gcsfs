@@ -26,7 +26,7 @@ from gcsfs.tests.conftest import csv_files, files, requires_rapid
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.test_zonal import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
-from gcsfs.zb_hns_utils import MRDPoolCache
+from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPoolCache
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -782,6 +782,45 @@ async def test_cat_ranges_zonal_short_read_is_an_error(
             [file_path] * 2, [0, 10], [5, 15], batch_size=1
         )
         assert all(isinstance(r, BufferError) for r in res)
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_closes_all_buffers_when_close_raises(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    created = []
+    real_buf = DirectMemmoveBuffer
+
+    def make_buf(length, executor):
+        buf = real_buf(length, executor)
+        idx = len(created)
+        created.append(buf)
+        orig_close = buf.close
+
+        def close():
+            orig_close()
+            if idx == 0:
+                raise RuntimeError("buf0 close failed")
+            if idx == 1:
+                raise RuntimeError("buf1 close failed")
+
+        buf.close = mock.Mock(side_effect=close)
+        return buf
+
+    with (
+        gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL),
+        mock.patch("gcsfs.extended_gcsfs.DirectMemmoveBuffer", side_effect=make_buf),
+        pytest.raises(RuntimeError, match="buf0 close failed"),
+    ):
+        await extended_gcsfs._cat_ranges(
+            [file_path] * 3,
+            [0, 5, 10],
+            [5, 10, 15],
+            batch_size=1,
+            on_error="raise",
+        )
+    assert len(created) == 3
+    assert all(b.close.call_count == 1 for b in created)
 
 
 @pytest.mark.asyncio
