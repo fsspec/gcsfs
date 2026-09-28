@@ -1,5 +1,4 @@
 import asyncio
-import collections
 import contextlib
 import heapq
 import logging
@@ -95,8 +94,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     # Matches the max_mrd_pool_cache_queue_size default so that MRDPoolCache
     # can keep all of an object's streams idle for the next call to reuse.
     MAX_ZONAL_STREAMS_PER_OBJECT = 16
-    # Upper bound on remembered finalized-object metadata (LRU).
-    MAX_ZONAL_INFO_HINTS = 1024
 
     def __init__(
         self,
@@ -134,9 +131,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # By default, files in zonal buckets are left unfinalized to allow appends.
         self.finalize_on_close = finalize_on_close
         self._grpc_client = None
-        # (bucket, object) -> last metadata seen for a finalized zonal object,
-        # least recently stored first.
-        self._zonal_info_hints = collections.OrderedDict()
         self._storage_control_client = None
         # Adds user-passed credentials to ExtendedGcsFileSystem to pass to gRPC/Storage Control clients.
         # We unwrap the nested credentials here because self.credentials is a GCSFS wrapper,
@@ -790,81 +784,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 raise first_close_error
         return [buf.get_value() for buf in buffers]
 
-    def _store_zonal_info_hint(self, hint_key, info):
-        """Remember ``info`` as the latest metadata for a finalized object."""
-        hints = self._zonal_info_hints
-        # Re-insert so this key becomes the most recent one.
-        hints.pop(hint_key, None)
-        hints[hint_key] = info
-        if len(hints) > self.MAX_ZONAL_INFO_HINTS:
-            # invalidate_cache() may run on another thread and empty it.
-            with contextlib.suppress(KeyError):
-                hints.popitem(last=False)
-
-    def _evict_zonal_info_hint(self, path=None):
-        """Drop the cached metadata hint for the object at ``path``.
-
-        ``None`` drops every hint and a bare bucket drops that bucket's hints.
-        Any other path only drops its own entry: the dircache hooks call this
-        with parent directories, and every speculative read validates its hint
-        anyway, so descendants are not scanned for.
-        """
-        hints = self._zonal_info_hints
-        if not hints:
-            return
-        if path is None:
-            hints.clear()
-            return
-        bucket, key, _ = self.split_path(path)
-        if key:
-            hints.pop((bucket, key), None)
-        elif bucket:
-            for k in [k for k in list(hints) if k[0] == bucket]:
-                hints.pop(k, None)
-
-    # The four overrides below drop a path's metadata hint whenever the
-    # dircache is invalidated or updated for that path.
-    def invalidate_cache(self, path=None):
-        super().invalidate_cache(path=path)
-        self._evict_zonal_info_hint(path)
-
-    async def _write_file_cache_update(self, path):
-        self._evict_zonal_info_hint(path)
-        await super()._write_file_cache_update(path)
-
-    async def _rm_files_cache_update(self, paths):
-        for p in paths:
-            self._evict_zonal_info_hint(p)
-        await super()._rm_files_cache_update(paths)
-
-    async def _mv_file_cache_update(self, path1, path2, response=None):
-        self._evict_zonal_info_hint(path1)
-        self._evict_zonal_info_hint(path2)
-        await super()._mv_file_cache_update(path1, path2, response=response)
-
-    @staticmethod
-    async def _cancel_task(task):
-        """Cancel ``task`` and wait for it, discarding its result or error.
-
-        A cancellation of the caller while waiting still propagates.
-        """
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
     async def _cat_ranges_zonal_file(
-        self, path, starts, ends, num_streams, mrd=None, _known_info=None, **kwargs
+        self, path, starts, ends, num_streams, mrd=None, **kwargs
     ):
         """Fetch many ranges of a single zonal object over a shared MRD pool.
-
-        For finalized objects read without an explicit generation, the last
-        metadata seen for the object is reused so the downloads start at once.
-        A metadata lookup runs concurrently, and the result is only returned
-        if it confirms the same generation and size; otherwise the read is
-        redone with the metadata that lookup returned.
-
-        ``_known_info`` is internal: fresh metadata for a redone read. It is
-        used as is and disables speculation.
 
         Returns:
             list: One entry per input range: ``bytes`` or the exception raised
@@ -872,53 +795,22 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         cache_type, cache_source = self._resolve_cache_config(kwargs)
         bucket, object_name, generation = self.split_path(path)
-        hint_key = (bucket, object_name)
-        spec_info = None
-        validate = None
         pool_created_here = False
 
         if mrd is not None:
             # Caller-supplied pool or downloader: use it as is and leave it open.
             pool = mrd
         else:
-            info = _known_info
-            if info is None and generation is None:
-                # Open with the last metadata seen for this object, and check it
-                # with a real lookup that runs in parallel with the read.
-                info = spec_info = self._zonal_info_hints.get(hint_key)
-                if spec_info is not None:
-                    validate = asyncio.ensure_future(self._info(path))
-            try:
-                pool = await self._mrd_pool_cache.get(
-                    bucket,
-                    object_name,
-                    generation,
-                    pool_size=num_streams,
-                    cache_type=cache_type,
-                    cache_source=cache_source,
-                    info=info,
-                )
-                pool_created_here = True
-            except Exception:
-                if validate is None:
-                    raise
-                # The hinted generation may be gone: redo the open with the
-                # metadata the concurrent lookup returns (or raise its error).
-                self._zonal_info_hints.pop(hint_key, None)
-                fresh = await validate
-                return await self._cat_ranges_zonal_file(
-                    path, starts, ends, num_streams, _known_info=fresh, **kwargs
-                )
-            except BaseException:
-                # Cancelled: stop the lookup as well.
-                await self._cancel_task(validate)
-                raise
+            pool = await self._mrd_pool_cache.get(
+                bucket,
+                object_name,
+                generation,
+                pool_size=num_streams,
+                cache_type=cache_type,
+                cache_source=cache_source,
+            )
+            pool_created_here = True
         try:
-            # Only finalized objects are remembered. An unfinalized one can
-            # still grow, which would make its hint stale.
-            details = getattr(pool, "details", None)
-            if generation is None and getattr(pool, "finalized", False) and details:
-                self._store_zonal_info_hint(hint_key, details)
             file_size = getattr(pool, "persisted_size", None)
             if file_size is None:
                 file_size = await _get_mrd_size(pool)
@@ -953,29 +845,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 else:
                     for (i, _, _), data in zip(group, res):
                         out[i] = data
-        except BaseException:
-            await self._cancel_task(validate)
-            raise
         finally:
             if pool_created_here:
                 await pool.close()
 
-        if validate is not None:
-            # The read used the hinted metadata. Keep its data only if the
-            # lookup shows the same generation and size; otherwise read again
-            # with the fresh metadata.
-            try:
-                fresh = await validate
-            except Exception:
-                self._zonal_info_hints.pop(hint_key, None)
-                raise
-            if fresh.get("generation") != spec_info.get("generation") or fresh.get(
-                "size"
-            ) != spec_info.get("size"):
-                self._zonal_info_hints.pop(hint_key, None)
-                return await self._cat_ranges_zonal_file(
-                    path, starts, ends, num_streams, _known_info=fresh, **kwargs
-                )
         return out
 
     async def _cat_ranges(
