@@ -2483,8 +2483,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
             cache_type
         )
-        self.bucket = bucket
-        self.key = key
         cache_options = dict(cache_options or {})
         if self.cache_type == "adaptive":
             if "concurrency" not in cache_options:

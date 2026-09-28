@@ -1086,13 +1086,22 @@ def test_zonal_file_fetch_range_bounds_and_invalid_range(mock_gcsfs):
         # Boundary checks
         assert zf._fetch_range(start=100, end=200) == b""
         assert zf._fetch_range(start=100, end=None, chunk_lengths=[10]) == [b""]
+        # Boundary checks handled locally
         assert zf._fetch_range(start=10, end=5) == b""
+        assert zf._fetch_range(start=0, end=0) == b""
 
         # HttpError handling
+        # Out-of-bounds / InvalidRange handling via server error
         mock_gcsfs._cat_file = mock.AsyncMock(
             side_effect=HttpError({"code": 416, "message": "InvalidRange"})
         )
         assert zf._fetch_range(start=0, end=10) == b""
+        assert zf._fetch_range(start=100, end=200) == b""
+
+        mock_gcsfs._fetch_range_split = mock.AsyncMock(
+            side_effect=RuntimeError("Request not satisfiable.")
+        )
+        assert zf._fetch_range(start=100, end=None, chunk_lengths=[10]) == [b""]
 
         zf.close()
 
