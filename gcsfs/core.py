@@ -138,14 +138,13 @@ _MTLS_HOST = "storage.mtls.googleapis.com"
 
 def _use_client_cert():
     """
-    Whether to use mutual TLS, presenting google-auth's default client cert
+    Whether to present google-auth's default client certificate (mutual TLS)
 
     True when google-auth says a client certificate should be used
     (``GOOGLE_API_USE_CLIENT_CERTIFICATE=true``, or a certificate config with a
-    "workload" section), a default client certificate source exists, and
-    ``GOOGLE_API_USE_MTLS_ENDPOINT`` is not "never". Workloads whose access
-    tokens are bound to their client certificate (e.g. Agent Identity) need
-    this, since such tokens are only accepted over mTLS.
+    "workload" section) and a default client certificate source exists.
+    Workloads whose access tokens are bound to their client certificate (e.g.
+    Agent Identity) need this, since such tokens are only accepted over mTLS.
     """
     try:
         from google.auth.transport import mtls
@@ -154,8 +153,15 @@ def _use_client_cert():
     should_use_client_cert = getattr(mtls, "should_use_client_cert", None)
     if should_use_client_cert is None or not should_use_client_cert():
         return False
-    if not mtls.has_default_client_cert_source():
-        return False
+    return mtls.has_default_client_cert_source()
+
+
+def _use_mtls_endpoint():
+    """
+    Whether a client using a client certificate should switch to the mTLS
+    endpoint. Like google-cloud-storage, ``GOOGLE_API_USE_MTLS_ENDPOINT=never``
+    keeps the regular endpoint; the certificate is still presented.
+    """
     mode = os.getenv("GOOGLE_API_USE_MTLS_ENDPOINT", "auto").lower()
     if mode not in {"never", "auto", "always"}:
         raise ValueError(
@@ -170,9 +176,15 @@ def _client_cert_ssl_context():
     SSL context that verifies the server like aiohttp's default context does,
     and presents google-auth's default client certificate
     """
+    from google.auth import exceptions
     from google.auth.transport import mtls
 
     cert, key = mtls.default_client_cert_source()()
+    if not cert or not key:
+        raise exceptions.MutualTLSChannelError(
+            "google-auth is configured to use a client certificate, but its "
+            "default client certificate source returned no certificate or key"
+        )
     ctx = ssl.create_default_context()
     ctx.set_alpn_protocols(("http/1.1",))
     # load_cert_chain only reads files; the directory is private to this user
@@ -186,7 +198,7 @@ def _client_cert_ssl_context():
     return ctx
 
 
-def _location(use_client_cert=False):
+def _location(use_mtls_endpoint=False):
     """
     Resolves GCS HTTP location as http[s]://host
 
@@ -194,7 +206,7 @@ def _location(use_client_cert=False):
 
     Parameters
     ----------
-    use_client_cert: bool
+    use_mtls_endpoint: bool
         If True and no emulator is set, return the mTLS endpoint (only exists
         for the default "googleapis.com" universe).
 
@@ -211,7 +223,7 @@ def _location(use_client_cert=False):
         return _emulator_location
 
     universe = _gcp_universe_domain()
-    if use_client_cert and universe == "googleapis.com":
+    if use_mtls_endpoint and universe == "googleapis.com":
         return f"https://{_MTLS_HOST}"
     return f"https://storage.{universe}"
 
@@ -368,10 +380,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
         either, will use the standard Google endpoint, or its mutual TLS
         variant when google-auth is configured to use a client certificate
-        (see ``google.auth.transport.mtls.should_use_client_cert``) and
-        ``GOOGLE_API_USE_MTLS_ENDPOINT`` is not "never". In that case the
-        client certificate is also presented on the HTTP session, unless
-        ``session_kwargs`` provides its own ``connector``.
+        (see ``google.auth.transport.mtls.should_use_client_cert``), unless
+        ``GOOGLE_API_USE_MTLS_ENDPOINT`` is "never". Whenever a client
+        certificate is configured, it is presented on the HTTP session,
+        unless ``session_kwargs`` provides its own ``connector``.
     default_location: str
         Default location where buckets are created, like 'US' or 'EUROPE-WEST3'.
         You can find a list of all available locations here:
@@ -434,6 +446,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.default_location = default_location
         self.version_aware = version_aware
         self._use_client_cert = _use_client_cert()
+        self._use_mtls_endpoint = self._use_client_cert and _use_mtls_endpoint()
+        self._ssl_context_task = None
 
         if check_connection:
             warnings.warn(
@@ -447,7 +461,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     @property
     def _location(self):
-        return self._endpoint or _location(self._use_client_cert)
+        return self._endpoint or _location(self._use_mtls_endpoint)
 
     @property
     def base(self):
@@ -514,7 +528,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 and "connector" not in kwargs
                 and self._location.startswith("https://")
             ):
-                ssl_context = await asyncio.to_thread(_client_cert_ssl_context)
+                # Loading the cert yields to the event loop, so concurrent
+                # callers share one load and then the session it creates.
+                if self._ssl_context_task is None:
+                    self._ssl_context_task = asyncio.ensure_future(
+                        asyncio.to_thread(_client_cert_ssl_context)
+                    )
+                try:
+                    ssl_context = await self._ssl_context_task
+                finally:
+                    self._ssl_context_task = None
+                if self._session is not None:
+                    return self._session
                 kwargs = {**kwargs, "connector": aiohttp.TCPConnector(ssl=ssl_context)}
             self._session = await get_client(**kwargs)
             weakref.finalize(

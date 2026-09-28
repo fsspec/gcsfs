@@ -2932,10 +2932,41 @@ def test_mtls_endpoint_with_client_cert(client_cert_config, mtls_env, mode):
 
 
 def test_mtls_endpoint_never(client_cert_config, mtls_env):
+    # like google-cloud-storage: regular endpoint, but the cert is still used
     mtls_env.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "never")
     fs = GCSFileSystem(token="anon")
     assert fs.base == "https://storage.googleapis.com/storage/v1/"
-    assert "connector" not in _session_kwargs(fs)
+    assert "connector" in _session_kwargs(fs)
+
+
+def test_mtls_concurrent_set_session(client_cert_config):
+    fs = GCSFileSystem(token="anon")
+
+    async def set_sessions():
+        return await asyncio.gather(*(fs._set_session() for _ in range(10)))
+
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context",
+        wraps=gcsfs.core._client_cert_ssl_context,
+    ) as load:
+        sessions = sync(fs.loop, set_sessions)
+    try:
+        assert len({id(session) for session in sessions}) == 1
+        assert load.call_count == 1
+    finally:
+        sync(fs.loop, sessions[0].close)
+        fs._session = None
+
+
+def test_mtls_empty_client_cert_source(client_cert_config):
+    from google.auth.exceptions import MutualTLSChannelError
+
+    with mock.patch(
+        "google.auth.transport.mtls.default_client_cert_source",
+        return_value=lambda: (None, None),
+    ):
+        with pytest.raises(MutualTLSChannelError, match="no certificate or key"):
+            gcsfs.core._client_cert_ssl_context()
 
 
 def test_mtls_endpoint_invalid(client_cert_config, mtls_env):

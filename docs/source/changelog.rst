@@ -12,7 +12,7 @@ Unreleased
   ``workload`` section): requests default to ``storage.mtls.googleapis.com`` and
   present the client certificate, as ``google-cloud-storage`` does. Needed for
   certificate-bound access tokens (e.g. Agent Identity).
-  ``GOOGLE_API_USE_MTLS_ENDPOINT=never`` opts out; ``endpoint_url`` and
+  ``GOOGLE_API_USE_MTLS_ENDPOINT=never`` keeps the regular endpoint; ``endpoint_url`` and
   ``STORAGE_EMULATOR_HOST`` still take precedence. No change without a
   configured client certificate.
 
