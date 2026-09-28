@@ -787,7 +787,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return [buf.get_value() for buf in buffers]
 
     def _zonal_file_stream_coros(
-        self, path, idxs, starts, ends, num_streams, results, open_pools, **kwargs
+        self, path, idxs, starts, ends, num_streams, results, **kwargs
     ):
         """Build ``num_streams`` coroutines that share one MRD pool for ``path``.
 
@@ -819,7 +819,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         cache_type=cache_type,
                         cache_source=cache_source,
                     )
-                    open_pools.add(pool)
                     file_size = getattr(pool, "persisted_size", None)
                     if file_size is None:
                         file_size = await _get_mrd_size(pool)
@@ -846,7 +845,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     groups = self._split_ranges_across_streams(requests, num_streams)
                 except BaseException as e:
                     if pool is not None:
-                        open_pools.discard(pool)
                         await pool.close()
                         pool = None
                     if not isinstance(e, Exception):
@@ -874,7 +872,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 remaining -= 1
                 if remaining == 0 and pool is not None:
                     p, pool = pool, None
-                    open_pools.discard(p)
                     await p.close()
 
         return [_run_stream(g) for g in range(num_streams)]
@@ -978,7 +975,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             per_object_cap,
         )
         coros = []
-        open_pools = set()
         for (p, idxs), num_streams in zip(zonal_items, allocs):
             coros.extend(
                 self._zonal_file_stream_coros(
@@ -988,7 +984,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     ends,
                     num_streams,
                     results,
-                    open_pools,
                     **kwargs,
                 )
             )
@@ -1020,8 +1015,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         finally:
             for c in coros:
                 c.close()
-            for pool in list(open_pools):
-                await pool.close()
 
         # Like fsspec, raise the first error in input order.
         if on_error != "return":

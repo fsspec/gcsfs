@@ -572,26 +572,91 @@ async def test_cat_ranges_mixed_zonal_and_regional_paths(
     with gcs_bucket_mocks(
         json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
     ) as mocks:
+        pool = mocks["pool"]
+
+        async def slow_pool_get(*args, **kwargs):
+            await asyncio.sleep(0)
+            return pool
+
+        mocks["pool_cache_get"].side_effect = slow_pool_get
+        err = RuntimeError("regional fail")
         with (
             mock.patch.object(extended_gcsfs, "_is_zonal_bucket", side_effect=is_zonal),
             mock.patch.object(
                 extended_gcsfs,
                 "_cat_file",
                 new_callable=mock.AsyncMock,
-                side_effect=[b"r1", b"r3"],
+                side_effect=[b"r1", err],
             ) as mock_cat_file,
         ):
-            res = await extended_gcsfs._cat_ranges(paths, [0, 1, 5, 3], [5, 2, 10, 4])
-        assert res == [json_data[:5], b"r1", json_data[5:10], b"r3"]
+            res = await extended_gcsfs._cat_ranges(
+                paths, [0, 1, 5, 3], [5, 2, 10, 4], concurrency=2
+            )
+        assert res == [json_data[:5], b"r1", json_data[5:10], err]
         assert [c.args for c in mock_cat_file.await_args_list] == [
             (regional,),
             (regional,),
         ]
         assert [c.kwargs for c in mock_cat_file.await_args_list] == [
-            {"start": 1, "end": 2},
-            {"start": 3, "end": 4},
+            {"start": 1, "end": 2, "concurrency": 2},
+            {"start": 3, "end": 4, "concurrency": 2},
         ]
         mocks["pool_cache_get"].assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_init_fallbacks_and_errors(
+    extended_gcsfs, gcs_bucket_mocks, caplog
+):
+    with pytest.raises(TypeError):
+        await extended_gcsfs._cat_ranges(file_path, [0], [5])
+    with pytest.raises(ValueError):
+        await extended_gcsfs._cat_ranges([file_path], [0, 1], [5])
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["pool"].persisted_size = None
+        mocks["downloader"].persisted_size = None
+
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                extended_gcsfs,
+                "_info",
+                new_callable=mock.AsyncMock,
+                return_value={"size": len(json_data)},
+            ) as mock_info,
+        ):
+            res = await extended_gcsfs._cat_ranges([file_path], [0], [5])
+            assert res == [json_data[:5]]
+            mock_info.assert_awaited_once_with(file_path)
+            assert "Falling back to _info() to get the file size" in caplog.text
+
+        mocks["pool"].close.reset_mock()
+        with mock.patch.object(
+            extended_gcsfs,
+            "_info",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("info boom"),
+        ):
+            res = await extended_gcsfs._cat_ranges([file_path] * 2, [0, 5], [5, 10])
+            assert len(res) == 2
+            assert all(isinstance(r, RuntimeError) for r in res)
+            mocks["pool"].close.assert_awaited_once()
+
+        mocks["pool"].close.reset_mock()
+        with (
+            mock.patch.object(
+                extended_gcsfs,
+                "_info",
+                new_callable=mock.AsyncMock,
+                side_effect=asyncio.CancelledError(),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await extended_gcsfs._cat_ranges([file_path], [0], [5])
+        mocks["pool"].close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
