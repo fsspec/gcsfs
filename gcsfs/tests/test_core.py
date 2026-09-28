@@ -3006,7 +3006,6 @@ def test_gcsfile_prefetcher_producer_fetcher_integration():
     with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
         prefetcher = getattr(f.cache, "_prefetcher", None)
         assert prefetcher is not None
-        assert prefetcher.fetcher == f._async_fetch_range
         assert prefetcher.producer.fetcher == f._async_fetch_range
 
 

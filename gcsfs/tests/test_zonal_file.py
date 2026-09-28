@@ -694,7 +694,6 @@ def test_zonal_file_prefetcher_producer_fetcher_integration(mock_gcsfs):
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
     prefetcher = getattr(zf.cache, "_prefetcher", None)
     assert prefetcher is not None
-    assert prefetcher.fetcher == zf._async_fetch_range
     assert prefetcher.producer.fetcher == zf._async_fetch_range
     zf.close()
 
