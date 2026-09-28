@@ -82,6 +82,25 @@ Cloud Monitoring bytes sent by GCS are divided by the logical dataset bytes
 expected across all measured rounds. Values above 1 indicate that GCS served
 more bytes than the logical full-corpus reads required.
 
+### CPU and GPU hosts
+
+Data-loading benchmarks auto-detect CUDA (published as
+`compute_accelerator_type`); no configuration change is needed. On a CPU host,
+batches end in host memory exactly as before. On a GPU host, every loader
+delivers each rank's batches to a GPU the way training jobs do, via
+`dataloading/device.py`: batches are pinned in host memory, copied with
+`non_blocking=True`, and each round synchronizes once at its end so the round
+duration includes the host-to-device transfer. CUDA tensors are never created
+in loader worker processes, as PyTorch recommends.
+
+| Loader | GPU per rank | What is transferred |
+|---|---|---|
+| Hugging Face Datasets | `rank % device_count` | Token and label tensors; text strings stay on the host. |
+| WebDataset | `rank % device_count` | Decoded image tensors when `decode: true`; with the baseline `decode: false` samples are raw bytes and stay on the host. |
+| Ray Data | Ray assigns `num_gpus = min(1, gpus / world_size)` per consumer task (fractional when ranks outnumber GPUs) | `pretok_parquet` via Ray's native `iter_torch_batches(device=..., pin_memory=True)`; `text_parquet` labels are copied by the shared feed. |
+
+When ranks outnumber GPUs, ranks share GPUs.
+
 ## Configuration
 
 The group's
