@@ -38,9 +38,9 @@ GCSFS prefetcher adapts to workload read IO patterns. It tracks the rolling aver
 * **Multi-worker dataloader scaling.** The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
 * **Accelerate the throughput even further with Rapid Buckets.** With Rapid Buckets single node throughput reaches 21 GiB/s with  16-process sequentially reading at 16 MiB I/O compared to standard buckets with 48processes.
 
-**Adaptive prefetcher is enabled by default** when cache_type is not explicitly set and concurrency value is set at 4(DEFAULT_GCSFS_CONCURRENCY=4) for both Standard and Rapid buckets. You can disable adaptive prefetcher by setting an explicit cache_type, or by setting  USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false', or by passing use_experimental_adaptive_prefetching=False to open() call.
+**Adaptive prefetcher (cache_type="adaptive") is enabled by default** when ``cache_type`` is not explicitly set, using ``DEFAULT_GCSFS_CONCURRENCY=4`` for both Standard and Rapid buckets. Users can also explicitly specify ``cache_type="adaptive"`` or choose an alternative caching strategy (e.g., ``cache_type="readahead"``, ``cache_type="readahead_chunked"``, or ``cache_type="none"``).
 
-**(Warning) Impact on memory:** Prefetching trades memory for throughput. Peak memory rises from ~170 MB to 600 MB on single-stream reads for 16 MB IO size and varies with requested IO sizes, and would be materially more under high process counts. Please ensure that   application memory  limits accordingly to use prefetcher without any Out of Memory(OOM) issues. To put hard limit, you can also use [user_max_prefetch_size](https://github.com/fsspec/gcsfs/blob/main/gcsfs/prefetcher.py#L154)
+**(Warning) Impact on memory:** Prefetching trades memory for throughput. Peak memory rises from ~170 MB to 600 MB on single-stream reads for 16 MB IO size and varies with requested IO sizes, and would be materially more under high process counts. Please ensure that   application memory  limits accordingly to use prefetcher without any Out of Memory(OOM) issues. To put a hard limit, you can configure ``cache_options={"max_prefetch_size": <bytes>}``.
 
 For  details on architecture, tuning, full benchmark tables, along with known limitations please refer to : https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
 

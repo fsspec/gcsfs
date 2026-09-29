@@ -251,3 +251,16 @@ def test_defer_task_logs_exception(io_loop, caplog):
         "custom boom" in r.message and "custom boom error" in r.message
         for r in caplog.records
     )
+
+
+def test_gcsfile_cache_del_does_not_block_gc(fake_fs):
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="adaptive")
+    cache = f.cache
+    assert getattr(cache, "_prefetcher", None) is not None
+
+    with mock.patch("fsspec.prefetcher.sync_teardown") as mock_teardown:
+        cache.__del__()
+        mock_teardown.assert_not_called()
+
+    f.close()
+    assert getattr(cache, "_prefetcher", None) is None
