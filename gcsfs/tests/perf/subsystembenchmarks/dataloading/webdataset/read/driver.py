@@ -172,7 +172,8 @@ def run_rank_epochs(
             f"budget, got {sample_count!r}; run_read passes it from the manifest"
         )
     with case_read_env(params):
-        device = device_lib.rank_device(rank)
+        # Undecoded samples are raw bytes; there is nothing to pin or copy to a GPU.
+        device = device_lib.rank_device(rank) if params.decode else None
         build_start = time.perf_counter()
         dataset = build_dataset(
             prefix,

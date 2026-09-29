@@ -89,18 +89,30 @@ def test_build_loader_pins_memory_only_when_requested(prefix):
     assert driver.build_loader(dataset, params, pin_memory=True).pin_memory is True
 
 
-@pytest.mark.parametrize("decode", [False, True])
 def test_run_rank_epochs_feeds_its_rank_device_with_pinned_loader(
-    prefix, sync_calls, ranks_on_fake_gpu, loader_kwargs, decode
+    prefix, sync_calls, ranks_on_fake_gpu, loader_kwargs
 ):
     per_epoch, _, _ = driver.run_rank_epochs(
-        0, 1, prefix, _params(decode=decode), sample_count=_FILES * _ROWS
+        0, 1, prefix, _params(decode=True), sample_count=_FILES * _ROWS
     )
 
     assert [rows for _, _, rows in per_epoch] == [_FILES * _ROWS] * 2
     assert ranks_on_fake_gpu == [0]
     assert loader_kwargs[0]["pin_memory"] is True
     assert sync_calls == [FAKE_GPU, FAKE_GPU]
+
+
+def test_run_rank_epochs_without_decode_skips_the_gpu(
+    prefix, sync_calls, ranks_on_fake_gpu, loader_kwargs
+):
+    per_epoch, _, _ = driver.run_rank_epochs(
+        0, 1, prefix, _params(decode=False), sample_count=_FILES * _ROWS
+    )
+
+    assert [rows for _, _, rows in per_epoch] == [_FILES * _ROWS] * 2
+    assert ranks_on_fake_gpu == []
+    assert loader_kwargs[0]["pin_memory"] is False
+    assert sync_calls == []
 
 
 @pytest.mark.parametrize("decode", [False, True])
@@ -128,7 +140,11 @@ def test_resampled_rounds_still_synchronize_after_stopping_at_target(
     prefix, sync_calls, ranks_on_fake_gpu, loader_kwargs
 ):
     per_epoch, _, _ = driver.run_rank_epochs(
-        0, 1, prefix, _params(resampled=True), sample_count=_FILES * _ROWS
+        0,
+        1,
+        prefix,
+        _params(resampled=True, decode=True),
+        sample_count=_FILES * _ROWS,
     )
 
     assert [rows for _, _, rows in per_epoch] == [_FILES * _ROWS] * 2
