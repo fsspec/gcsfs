@@ -51,12 +51,19 @@ class BaseBenchmarkConfigurator:
 
         return common, scenarios
 
-    def generate_cases(self):
+    def generate_cases(self, include_disabled=False):
+        """Build benchmark cases from configs.yaml.
+
+        Variants marked `enabled: false` are always built and validated, but are only
+        returned when include_disabled is True (e.g. for unit tests guarding them).
+        """
         common_config, scenarios = self._load_config()
         all_cases = []
 
         for scenario in scenarios:
-            cases = self.build_cases(scenario, common_config)
+            cases = self.build_cases(
+                scenario, common_config, include_disabled=include_disabled
+            )
             all_cases.extend(cases)
 
         all_cases = filter_cases_by_sweep_axis(all_cases)
@@ -67,7 +74,7 @@ class BaseBenchmarkConfigurator:
             )
         return all_cases
 
-    def build_cases(self, scenario, common_config):
+    def build_cases(self, scenario, common_config, include_disabled=False):
         """
         Abstract method to be implemented by subclasses.
         Should return a list of BenchmarkParameters objects.
@@ -89,6 +96,9 @@ class OneFactorConfigurator(BaseBenchmarkConfigurator):
     pytest-benchmark compare-by-name boundary), and the mandatory `axis:` per variant --
     stamped on every case as `sweep_axis` ("baseline" for the implicit baseline case) so the
     swept axis is a queryable column, not something reverse-engineered from the id.
+
+    A variant may also set `enabled: false` to park it without deleting it: it is still
+    built, validated, and checked for duplicate ids, but benchmark runs skip it.
     """
 
     FRAMEWORK = None  # subclass pins
@@ -102,7 +112,7 @@ class OneFactorConfigurator(BaseBenchmarkConfigurator):
     def validate_case(self, params):
         """Optional family hook: raise ValueError for semantically invalid cases."""
 
-    def build_cases(self, scenario, common_config):
+    def build_cases(self, scenario, common_config, include_disabled=False):
         base = dict(common_config["baseline"])
         shared = dict(self.shared_keys(scenario, common_config))
         # A `baseline:` key colliding with a shared (common:/run-level) key would be
@@ -114,25 +124,33 @@ class OneFactorConfigurator(BaseBenchmarkConfigurator):
                 f"configs.yaml baseline: sets key(s) {clash} that common: (or the run env) "
                 "also sets; set these under common:, not baseline:"
             )
-        cases = [self._make(base, {}, shared, sweep_axis="baseline")]
+        cases = [(self._make(base, {}, shared, sweep_axis="baseline"), True)]
         for variant in scenario.get("variants", []):
             if "axis" not in variant:
                 raise ValueError(
                     f"variant {variant!r} has no axis: name; every variant must say which "
                     "axis it perturbs (published as the sweep_axis column)"
                 )
-            over = {k: v for k, v in variant.items() if k != "axis"}
-            cases.append(self._make(base, over, shared, sweep_axis=variant["axis"]))
+            # `enabled: false` parks a variant without deleting it. It is still built
+            # and validated below so it cannot rot while switched off.
+            enabled = variant.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ValueError(
+                    f"variant {variant!r} enabled: must be true or false, got {enabled!r}"
+                )
+            over = {k: v for k, v in variant.items() if k not in ("axis", "enabled")}
+            case = self._make(base, over, shared, sweep_axis=variant["axis"])
+            cases.append((case, enabled))
 
-        by_name = {}
-        for c in cases:
-            if c.name in by_name:
+        seen = set()
+        for c, _ in cases:
+            if c.name in seen:
                 raise ValueError(
                     f"two cases share the benchmark id {c.name!r}; either the variant "
                     "changes nothing, or it sweeps an axis benchmark_name() does not encode"
                 )
-            by_name[c.name] = c
-        return list(by_name.values())
+            seen.add(c.name)
+        return [c for c, enabled in cases if enabled or include_disabled]
 
     def _make(self, base, over, shared, sweep_axis):
         import dataclasses

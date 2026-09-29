@@ -13,6 +13,7 @@ The currently runnable groups are:
 
 - `dataloading/huggingface_datasets`: Measures full-corpus streaming reads of a synthetic dataset through Hugging Face Datasets, `fsspec`, and `gcsfs`, with a PyTorch `DataLoader` consuming the stream.
 - `dataloading/ray_data`: Measures full-corpus streaming reads of a synthetic Parquet dataset through Ray Data, `pyarrow.fs`, `fsspec`, and `gcsfs` on CPU.
+- `dataloading/webdataset`: Measures full-corpus streaming reads of synthetic image tar shards through WebDataset and a PyTorch `DataLoader`; `gs://` reads are routed to `gcsfs` by a registered opener. The default sweep keeps storage-bound axes; image-preparation and pipeline axes are parked with `enabled: false`.
 - `checkpointing/pytorch_lightning`: Measures checkpoint write and read performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
 
 > **This README describes the workload: what it runs, what is timed, and how to
@@ -92,10 +93,17 @@ truth for current workload values and experiments. It defines:
 - an implicit baseline configuration; and
 - variants that change one named configuration axis at a time.
 
+A variant can set `enabled: false` to park it without deleting it. Parked
+variants are still built, validated, and checked for duplicate benchmark IDs,
+so they cannot break unnoticed, but benchmark runs skip them. The value must be
+a YAML boolean; a string such as `"false"` is rejected. To run a parked variant
+again, set `enabled: true` (or remove the key) in `configs.yaml`.
+
 `--sweep-axes` accepts a whitespace-separated set of axis names. The baseline
 case is always included, which keeps each selected variant comparable within the
-same run. Leaving the option empty runs every case currently defined in the
-YAML.
+same run. Leaving the option empty runs every enabled case defined in the YAML.
+`--sweep-axes` only selects among enabled variants; it cannot bring back a
+parked one.
 
 Here, "baseline" means only the reference configuration in a one-factor run.
 The suite does not retrieve historical results, compare against an earlier run,

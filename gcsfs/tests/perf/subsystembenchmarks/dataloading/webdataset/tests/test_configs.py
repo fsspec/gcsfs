@@ -6,7 +6,10 @@ CONFIG = configs.__file__
 
 
 def _cases():
-    return configs.WebDatasetReadConfigurator(CONFIG).generate_cases()
+    """Every configured case, including variants parked with `enabled: false`."""
+    return configs.WebDatasetReadConfigurator(CONFIG).generate_cases(
+        include_disabled=True
+    )
 
 
 def _baseline():
@@ -99,6 +102,21 @@ def test_axis_names_are_complete():
         "read_buffer",
         "decode",
     }
+
+
+def test_default_run_is_the_storage_sweep():
+    """Only storage-bound variants run by default; the rest are parked."""
+    cases = configs.WebDatasetReadConfigurator(CONFIG).generate_cases()
+    assert len(cases) == 11
+    assert {c.sweep_axis for c in cases} == {
+        "baseline",
+        "shard_size",
+        "workers",
+        "gcs_read_mode",
+        "gcs_read_concurrency",
+        "read_buffer",
+    }
+    assert not any(c.decode for c in cases)
 
 
 def test_extra_columns_carry_every_swept_parameter():
