@@ -2081,6 +2081,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     ):
         rpath = self.url(rpath)
         consistency = kwargs.pop("consistency", self.consistency)
+        callback = callback or NoOpCallback()
         await self._set_session()
         async with self.session.get(
             url=rpath,
@@ -2088,7 +2089,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             headers=self._get_headers(headers),
             timeout=self.requests_timeout,
         ) as r:
-            validate_response(r.status, None, rpath)
+            if r.status >= 400:
+                validate_response(r.status, await r.read(), rpath)
             try:
                 size = int(r.headers["content-length"])
             except (KeyError, ValueError):
@@ -2107,7 +2109,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     checker.update(data)
                     callback.relative_update(len(data))
 
-            validate_response(r.status, data, rpath)  # validate http request
             checker.validate_http_response(r)  # validate file consistency
             return r.status, r.headers, r.request_info, data
 
