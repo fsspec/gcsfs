@@ -106,10 +106,7 @@ def _build_parser():
 def parse_args(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if (
-        args.bucket_type in ("zonal", *RAPID_CACHE_BUCKET_TYPES)
-        and not args.zone
-    ):
+    if args.bucket_type in ("zonal", *RAPID_CACHE_BUCKET_TYPES) and not args.zone:
         parser.error(f"--zone is required when --bucket-type={args.bucket_type}")
     if args.rapid_cache_timeout <= 0:
         parser.error("--rapid-cache-timeout must be > 0")
@@ -121,7 +118,6 @@ def parse_args(argv=None):
     if args.group not in groups:
         parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
     return args
-
 
 
 _AMPLIFICATION_COLS = (

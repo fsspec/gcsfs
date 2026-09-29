@@ -270,7 +270,8 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
 
     monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
 
-    # Read case on rapid_cache_warm must delegate to warm_if_needed (with fs=None), which calls url_to_fs(skip_instance_cache=True)
+    # Read case on rapid_cache_warm must delegate to warm_if_needed (with fs=None),
+    # which calls url_to_fs(skip_instance_cache=True).
     checkpoint_case.run_checkpoint_case(
         _Bench(),
         _Monitor(),
@@ -308,6 +309,3 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
     assert warm_calls == []
-
-
-

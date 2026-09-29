@@ -260,4 +260,3 @@ def test_run_read_case_forces_single_round_for_rapid_cache_cold(tmp_path, monkey
     assert seen_rounds == [("rapid_cache_cold", 1), ("rapid_cache_warm", 3)]
     assert cold_bench.extra_info["measurement_round_count"] == 1
     assert warm_bench.extra_info["measurement_round_count"] == 3
-

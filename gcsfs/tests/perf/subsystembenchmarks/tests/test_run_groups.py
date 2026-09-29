@@ -198,20 +198,16 @@ def test_cloudbuild_and_runner_script_wire_rapid_cache_timeout_and_disable_leake
     assert "export RAPID_CACHE_TIMEOUT=" in cb_yaml
     assert "--rapid-cache-timeout=" in sh_text
     assert cb_yaml.count("/anywhereCaches/") >= 2
-    assert (
-        cb_yaml.index("TOKEN=$$(gcloud auth print-access-token")
-        < cb_yaml.index("gcloud storage buckets list")
+    assert cb_yaml.index("TOKEN=$$(gcloud auth print-access-token") < cb_yaml.index(
+        "gcloud storage buckets list"
     )
     assert 'gcloud storage rm --recursive "gs://$$CLEAN_NAME" < /dev/null' in cb_yaml
-    assert 'gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null' in cb_yaml
-    assert 'HAS_CACHE=' in cb_yaml
+    assert (
+        'gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null'
+        in cb_yaml
+    )
+    assert "HAS_CACHE=" in cb_yaml
     assert (
         "^${_INFRA_PREFIX}-(regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
         in cb_yaml
     )
-
-
-
-
-
-

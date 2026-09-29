@@ -73,9 +73,7 @@ def wait_running(
     last_state = "UNKNOWN"
     while True:
         try:
-            raw = fs.call(
-                "GET", f"b/{bucket}/anywhereCaches/{zone}", json_out=True
-            )
+            raw = fs.call("GET", f"b/{bucket}/anywhereCaches/{zone}", json_out=True)
             resp = raw if isinstance(raw, dict) else {}
             raw_state = resp.get("state")
             state = str(raw_state if raw_state is not None else "").strip().upper()
@@ -136,6 +134,7 @@ def warm_if_needed(
         return 0
     if fs is None:
         import fsspec
+
         import gcsfs
 
         if not hasattr(gcsfs.GCSFileSystem, "_get_kwargs_from_urls"):

@@ -169,7 +169,9 @@ def test_warm_if_needed_raises_when_warm_prefix_has_no_objects():
 
 
 def test_wait_running_tolerates_initial_file_not_found_before_running():
-    fs = _FakeCacheFS(states=[FileNotFoundError("404 Not Found"), "CREATING", "RUNNING"])
+    fs = _FakeCacheFS(
+        states=[FileNotFoundError("404 Not Found"), "CREATING", "RUNNING"]
+    )
     sleeps = []
     t = [0.0]
 
@@ -282,9 +284,7 @@ def test_warm_if_needed_resolves_fs_via_url_to_fs_and_invalidates_on_error(monke
     monkeypatch.setattr(fsspec.core, "url_to_fs", fake_url_to_fs)
     with pytest.raises(RuntimeError, match="no objects found to warm"):
         rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_warm")
-    assert url_to_fs_calls == [
-        ("gs://my-bucket/data/", {"skip_instance_cache": True})
-    ]
+    assert url_to_fs_calls == [("gs://my-bucket/data/", {"skip_instance_cache": True})]
     assert invalidated == [True]
 
 
@@ -330,4 +330,3 @@ def test_warm_if_needed_rejects_invalid_passes_or_settle_seconds(
             settle_seconds=settle_seconds,
             sleep=lambda _: None,
         )
-
