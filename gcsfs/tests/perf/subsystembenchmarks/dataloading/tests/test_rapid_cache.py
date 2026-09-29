@@ -125,31 +125,47 @@ def test_warm_if_needed_reads_all_objects_only_for_warm_gcs_prefix():
             "my-bucket/data/shard_00001.tar": b"defg",
         }
     )
+    sleeps = []
     assert (
-        rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_cold", fs=fs)
+        rapid_cache.warm_if_needed(
+            "gs://my-bucket/data/", "rapid_cache_cold", fs=fs, sleep=sleeps.append
+        )
         == 0
     )
     assert fs.cat_calls == []
+    assert sleeps == []
 
     assert (
-        rapid_cache.warm_if_needed("/tmp/local/data/", "rapid_cache_warm", fs=fs) == 0
+        rapid_cache.warm_if_needed(
+            "/tmp/local/data/", "rapid_cache_warm", fs=fs, sleep=sleeps.append
+        )
+        == 0
     )
     assert fs.cat_calls == []
+    assert sleeps == []
 
     total = rapid_cache.warm_if_needed(
-        "gs://my-bucket/data/", "rapid_cache_warm", fs=fs
+        "gs://my-bucket/data/", "rapid_cache_warm", fs=fs, sleep=sleeps.append
     )
     assert total == 7
     assert sorted(fs.cat_calls) == [
         "gs://my-bucket/data/shard_00000.tar",
+        "gs://my-bucket/data/shard_00000.tar",
         "gs://my-bucket/data/shard_00001.tar",
+        "gs://my-bucket/data/shard_00001.tar",
+    ]
+    assert sleeps == [
+        rapid_cache.DEFAULT_WARMUP_SETTLE_SECONDS,
+        rapid_cache.DEFAULT_WARMUP_SETTLE_SECONDS,
     ]
 
 
 def test_warm_if_needed_raises_when_warm_prefix_has_no_objects():
     fs = _FakeCacheFS(files={})
     with pytest.raises(RuntimeError, match="no objects found to warm"):
-        rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_warm", fs=fs)
+        rapid_cache.warm_if_needed(
+            "gs://my-bucket/data/", "rapid_cache_warm", fs=fs, sleep=lambda _: None
+        )
 
 
 def test_wait_running_tolerates_initial_file_not_found_before_running():
@@ -211,7 +227,9 @@ def test_warm_if_needed_constructs_gcsfs_with_skip_instance_cache(monkeypatch):
         return fake_fs
 
     monkeypatch.setattr(gcsfs, "GCSFileSystem", fake_gcs_filesystem)
-    total = rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_warm")
+    total = rapid_cache.warm_if_needed(
+        "gs://my-bucket/data/", "rapid_cache_warm", sleep=lambda _: None
+    )
     assert total == 3
     assert constructed_kwargs == [{"skip_instance_cache": True}]
     assert invalidated == [True]
@@ -229,7 +247,11 @@ def test_warm_if_needed_streams_with_fs_open_when_available():
 
     fs.open = fake_open
     total = rapid_cache.warm_if_needed(
-        "gs://my-bucket/data/", "rapid_cache_warm", fs=fs
+        "gs://my-bucket/data/",
+        "rapid_cache_warm",
+        fs=fs,
+        passes=1,
+        settle_seconds=0,
     )
     assert total == 6
     assert opened == [("gs://my-bucket/data/shard_00000.tar", "rb")]
@@ -294,5 +316,18 @@ def test_wait_running_tolerates_none_and_pending_states():
     assert sleeps == [5, 5, 5]
 
 
-
+@pytest.mark.parametrize("passes,settle_seconds", [(0, 0), (-1, 0), (1, -5)])
+def test_warm_if_needed_rejects_invalid_passes_or_settle_seconds(
+    passes, settle_seconds
+):
+    fs = _FakeCacheFS(files={"my-bucket/data/shard_00000.tar": b"abc"})
+    with pytest.raises(ValueError):
+        rapid_cache.warm_if_needed(
+            "gs://my-bucket/data/",
+            "rapid_cache_warm",
+            fs=fs,
+            passes=passes,
+            settle_seconds=settle_seconds,
+            sleep=lambda _: None,
+        )
 
