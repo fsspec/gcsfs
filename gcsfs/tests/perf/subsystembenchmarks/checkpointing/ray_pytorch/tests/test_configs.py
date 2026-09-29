@@ -84,4 +84,3 @@ def test_rapid_cache_bucket_types_produce_expected_id_tokens(monkeypatch):
         cases = _cases()
         assert all(c.bucket_type == bucket_type for c in cases)
         assert all(c.name.endswith(token) for c in cases)
-

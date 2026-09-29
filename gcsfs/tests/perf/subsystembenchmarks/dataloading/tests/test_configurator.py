@@ -99,4 +99,3 @@ def test_rapid_cache_bucket_types_produce_expected_id_tokens(
     cases = _write(tmp_path, text).generate_cases()
     assert cases[0].name == f"read-fk-ptpq-seq-nw8-fc8x4096-{token}"
     assert cases[0].rounds == 3
-
