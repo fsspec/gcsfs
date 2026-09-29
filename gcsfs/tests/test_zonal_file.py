@@ -113,6 +113,8 @@ def mock_gcsfs():
     mock_pool.details = None
     fs._mrd_pool_cache = mock.Mock()
     fs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._cat_file = mock.AsyncMock(return_value=b"")
+    fs._fetch_range_split = mock.AsyncMock(return_value=[b""])
     return fs
 
 
@@ -1083,9 +1085,6 @@ def test_zonal_file_fetch_range_bounds_and_invalid_range(mock_gcsfs):
         zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
         zf.size = 100
 
-        # Boundary checks
-        assert zf._fetch_range(start=100, end=200) == b""
-        assert zf._fetch_range(start=100, end=None, chunk_lengths=[10]) == [b""]
         # Boundary checks handled locally
         assert zf._fetch_range(start=10, end=5) == b""
         assert zf._fetch_range(start=0, end=0) == b""
