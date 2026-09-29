@@ -83,6 +83,31 @@ Cloud Monitoring bytes sent by GCS are divided by the logical dataset bytes
 expected across all measured rounds. Values above 1 indicate that GCS served
 more bytes than the logical full-corpus reads required.
 
+### CPU and GPU hosts
+
+Data-loading benchmarks auto-detect CUDA (published as
+`compute_accelerator_type`); no configuration change is needed. On a CPU host,
+batches end in host memory exactly as before. On a GPU host, every loader
+delivers each rank's batches to a GPU the way training jobs do, via
+`dataloading/device.py`: batches are pinned in host memory, copied with
+`non_blocking=True`, and each round synchronizes once at its end so the round
+duration includes the host-to-device transfer. CUDA tensors are never created
+in loader worker processes, as PyTorch recommends.
+
+| Loader | GPU per rank | What is transferred |
+|---|---|---|
+| Hugging Face Datasets | `rank % device_count` | Token and label tensors; text strings stay on the host. |
+| WebDataset | `rank % device_count` when `decode: true`; none with the baseline `decode: false` | Decoded image tensors when `decode: true`. With `decode: false` samples are raw bytes with nothing to copy, so the rank neither binds a GPU nor pins, and runs as on a CPU host. |
+| Ray Data | Ray assigns `num_gpus = min(1, gpus / world_size)` per consumer task (fractional when ranks outnumber GPUs) | `pretok_parquet` via Ray's native `iter_torch_batches(device=..., pin_memory=True)`; `text_parquet` labels are copied by the shared feed. |
+
+When ranks outnumber GPUs, ranks share GPUs.
+
+Each rank creates its CUDA context before timing starts, as a training job
+already has by the time its data loop runs. The exception is Ray Data with
+`split_by_node`: consumer tasks are dispatched inside the round, so creating
+the context is charged to the round in which a Ray worker first runs
+(normally round 1, since Ray reuses workers).
+
 ## Configuration
 
 The group's
