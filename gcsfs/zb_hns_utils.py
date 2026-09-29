@@ -776,6 +776,7 @@ class MRDPool:
         """
         mrd = None
         create_new = False
+        notify_waiters = False
 
         async with self._cond:
             while True:
@@ -843,6 +844,10 @@ class MRDPool:
                 await asyncio.shield(self._notify_all())
                 raise
             self._creating_count -= 1
+            # Waiters wait for every in-flight open, so only the last one to
+            # finish wakes them. No await between the decrement and this check,
+            # so exactly one creator sees zero.
+            notify_waiters = self._creating_count == 0
             if self._closed:
                 # close() already woke every waiter.
                 self._active_count -= 1
@@ -852,7 +857,7 @@ class MRDPool:
             self._mark_inflight(mrd)
 
         try:
-            if create_new:
+            if notify_waiters:
                 # Inside the try so a cancellation here still requeues the new
                 # MRD via the finally below.
                 await asyncio.shield(self._notify_all())
