@@ -1,5 +1,6 @@
 """Per-case benchmark lifecycle runner: bucket management, corpus ingestion, driver timing, and metric publishing."""
 
+import dataclasses
 import functools
 import math
 import statistics
@@ -68,11 +69,16 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         assert_fsspec_gcsfs(prefix)
         manifest = params.ingest(prefix)
         rapid_cache.warm_if_needed(prefix, params.bucket_type)
+        run_params = (
+            dataclasses.replace(params, rounds=1)
+            if params.bucket_type == "rapid_cache_cold"
+            else params
+        )
 
         expected_rows = manifest["sample_count"]
         window_start = time.time()
         with monitor() as m:
-            result = driver.run_read(prefix, params, manifest)
+            result = driver.run_read(prefix, run_params, manifest)
         window_end = time.time()
 
         for rows in result.rows_per_epoch:
@@ -82,7 +88,7 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
                 )
         publish_common(
             benchmark,
-            params,
+            run_params,
             manifest,
             result.ttfb_seconds,
             (window_start, window_end),

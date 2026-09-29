@@ -7,6 +7,8 @@ import time
 RAPID_CACHE_BUCKET_TYPES = ("rapid_cache_cold", "rapid_cache_warm")
 DEFAULT_TIMEOUT_SECONDS = 3600
 DEFAULT_POLL_SECONDS = 10
+DEFAULT_WARMUP_PASSES = 2
+DEFAULT_WARMUP_SETTLE_SECONDS = 65
 _PENDING_STATES = ("CREATING", "PROVISIONING", "PENDING", "")
 
 
@@ -108,8 +110,28 @@ def disable(fs, bucket, zone):
         )
 
 
-def warm_if_needed(prefix, bucket_type, *, fs=None):
-    """Read every object under prefix once (untimed) when bucket_type is rapid_cache_warm."""
+def warm_if_needed(
+    prefix,
+    bucket_type,
+    *,
+    fs=None,
+    passes=DEFAULT_WARMUP_PASSES,
+    settle_seconds=DEFAULT_WARMUP_SETTLE_SECONDS,
+    sleep=time.sleep,
+):
+    """Read every object under prefix (untimed) and settle when bucket_type is rapid_cache_warm.
+
+    Under high concurrent write load (e.g. 64 workers closing ~95 MiB shards
+    simultaneously), ``ingestOnWrite=True`` only finishes admitting ~75% of the
+    corpus immediately after ``ingest()`` returns. Running multiple warmup
+    passes with a post-pass settle delay ensures asynchronous admit-on-miss
+    completes for every shard and separates warmup reads from the timed Cloud
+    Monitoring minute bucket.
+    """
+    if passes <= 0:
+        raise ValueError(f"passes must be > 0, got {passes}")
+    if settle_seconds < 0:
+        raise ValueError(f"settle_seconds must be >= 0, got {settle_seconds}")
     if bucket_type != "rapid_cache_warm" or not str(prefix).startswith("gs://"):
         return 0
     if fs is None:
@@ -153,12 +175,15 @@ def warm_if_needed(prefix, bucket_type, *, fs=None):
                 return total
             return len(fs.cat_file(url))
 
+        total = 0
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(16, len(objects))
         ) as pool:
-            return sum(pool.map(_warm_one, objects))
+            for _ in range(passes):
+                total = sum(pool.map(_warm_one, objects))
+                if settle_seconds > 0:
+                    sleep(settle_seconds)
+        return total
     finally:
         if hasattr(fs, "invalidate_cache"):
             fs.invalidate_cache()
-
-
