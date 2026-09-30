@@ -13,9 +13,10 @@ fi
 if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_GKE_SERVICE_ACCOUNT}" ] || [ -z "${_DATASET_PATH}" ] || [ -z "${_REQUIREMENTS}" ]; then
   echo "ERROR: required substitution missing (_INFRA_PREFIX,_ZONE,_GKE_SERVICE_ACCOUNT,_DATASET_PATH,_REQUIREMENTS)."; exit 1
 fi
-# Reject an unknown workload before provisioning anything (legacy
-# hf-pytorch-lightning-cpu is normalized to hf-datasets-pytorch-lightning in lib.sh).
-case "${_WORKLOAD:-hf-datasets-pytorch-lightning}" in
+# Reject an unknown workload before provisioning anything (lib.sh defaults
+# _WORKLOAD and normalizes legacy hf-pytorch-lightning-cpu to
+# hf-datasets-pytorch-lightning).
+case "${_WORKLOAD}" in
   hf-datasets-pytorch-lightning|ray-data-ray-train-pytorch) ;;
   *) echo "ERROR: _WORKLOAD must be hf-datasets-pytorch-lightning or ray-data-ray-train-pytorch (got '${_WORKLOAD}')."; exit 1 ;;
 esac
