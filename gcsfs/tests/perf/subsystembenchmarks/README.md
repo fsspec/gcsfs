@@ -131,7 +131,7 @@ For checkpointing groups:
 
 - `--model-id` also accepts a Hugging Face repo ID or a local path.
 - These groups need a very large-memory host. A code comment in
-  `checkpoint_case.py` targets a 732 GB VM.
+  `checkpointing/checkpoint_case.py` targets a 732 GB VM.
 
 | Flag | Default | Meaning |
 | :-- | :-- | :-- |
