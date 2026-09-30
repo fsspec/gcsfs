@@ -1,3 +1,6 @@
+import json
+import pathlib
+
 import pytest
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import configs
@@ -92,3 +95,22 @@ def test_extra_columns():
         assert "pipeline_parallel_size" in extra
         assert extra["data_parallel_replicate_size"] == c.data_parallel_replicate_size
         assert extra["pipeline_parallel_size"] == c.pipeline_parallel_size
+
+
+def test_columns_in_schema():
+    root = pathlib.Path(__file__).resolve().parents[7]
+    schema_path = (
+        root / "cloudbuild/subsystembenchmarks/subsystembenchmarks_schema.json"
+    )
+    with open(schema_path) as f:
+        schema_fields = {f["name"] for f in json.load(f)["schema"]["fields"]}
+
+    cases = _cases()
+    for c in cases:
+        for col in c.extra_columns():
+            assert col in schema_fields, f"param column {col} missing from schema"
+
+    # Columns emitted by PyTorchCheckpointReadDriver.run result
+    driver_cols = ["dcp_read_items_per_rank_max"]
+    for col in driver_cols:
+        assert col in schema_fields, f"driver column {col} missing from schema"
