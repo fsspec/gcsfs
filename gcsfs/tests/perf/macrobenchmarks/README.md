@@ -15,7 +15,7 @@ contracts:
 
 | Workload | Execution model | Default use |
 | :-- | :-- | :-- |
-| `hf-pytorch-lightning-cpu` | PyTorch-Lightning CPU simulation with frozen Llama weights and sleep-based compute. | Existing CPU storage-I/O benchmark. |
+| `hf-datasets-pytorch-lightning` | HuggingFace Datasets + PyTorch-Lightning CPU simulation (with frozen weights and sleep-based compute) or real GPU training. | Existing storage-I/O benchmark. |
 | `ray-data-ray-train-pytorch` | Ray Data packed input and Ray Train PyTorch DDP, FSDP2, or DP+TP. | GPU reference training or a CPU translation of that same data, distributed, checkpoint, and metric path. |
 
 The Ray workload's GPU mode trains the real Llama model. Its CPU mode retains
