@@ -41,10 +41,18 @@ def materialize(model: nn.Module, seed: int) -> None:
         torch.nn.init.normal_(p.to_local() if isinstance(p, DTensor) else p, std=0.02)
 
 
-def build_optimizer(model: nn.Module) -> torch.optim.AdamW:
+def build_optimizer(model: nn.Module, seed: int) -> torch.optim.AdamW:
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    generator = torch.Generator().manual_seed(seed)
     for p in model.parameters():
-        optimizer.state[p]["step"] = torch.tensor(0, dtype=torch.int64)
-        optimizer.state[p]["exp_avg"] = torch.zeros_like(p)
-        optimizer.state[p]["exp_avg_sq"] = torch.zeros_like(p)
+        state = optimizer.state[p]
+        state["step"] = torch.tensor(seed, dtype=torch.int64)
+        state["exp_avg"] = torch.empty_like(p)
+        state["exp_avg_sq"] = torch.empty_like(p)
+        exp_avg, exp_avg_sq = (
+            t.to_local() if isinstance(t, DTensor) else t
+            for t in (state["exp_avg"], state["exp_avg_sq"])
+        )
+        exp_avg.normal_(generator=generator)
+        exp_avg_sq.uniform_(generator=generator)
     return optimizer

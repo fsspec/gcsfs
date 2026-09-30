@@ -74,21 +74,23 @@ def test_build_materialize_optimizer(tmp_path):
     assert all(not p.is_meta and p.device.type == "cpu" for p in model.parameters())
     assert all(p.requires_grad for p in model.parameters())
 
-    # 4. Optimizer: AdamW with exp_avg/exp_avg_sq populated for every parameter
-    optimizer = build_optimizer(model)
+    # 4. Optimizer: AdamW with seed-dependent exp_avg/exp_avg_sq for every parameter
+    before = [p.detach().clone() for p in model.parameters()]
+    optimizer = build_optimizer(model, seed=42)
+    other = build_optimizer(model, seed=7)
     assert len(optimizer.state) == len(list(model.parameters()))
-    for p in model.parameters():
+    for p, p_before in zip(model.parameters(), before):
+        assert torch.equal(p, p_before)
         assert p in optimizer.state
         state = optimizer.state[p]
-        assert "exp_avg" in state
-        assert "exp_avg_sq" in state
-        assert "step" in state
-        assert state["exp_avg"].shape == p.shape
-        assert state["exp_avg_sq"].shape == p.shape
-        assert state["exp_avg"].device == p.device
-        assert state["exp_avg_sq"].device == p.device
-        assert torch.all(state["exp_avg"] == 0)
-        assert torch.all(state["exp_avg_sq"] == 0)
+        assert set(state) == {"step", "exp_avg", "exp_avg_sq"}
+        assert state["step"].item() == 42
+        for key in ("exp_avg", "exp_avg_sq"):
+            assert state[key].shape == p.shape
+            assert state[key].dtype == p.dtype
+            assert state[key].device == p.device
+            assert torch.any(state[key] != 0)
+            assert not torch.equal(state[key], other.state[p][key])
 
 
 def test_materialize_seed_determinism(tmp_path):
@@ -198,17 +200,17 @@ def fake_pg():
     dist.destroy_process_group()
 
 
-def _params(config_dir, strategy, dpr=1, dp=1, tp=1):
+def _params(config_dir, strategy, dpr=1, dp=1, tp=1, world_size=8, rounds=1):
     return PyTorchCheckpointParameters(
         name="test-case",
         bucket_name="test-bucket",
-        rounds=1,
+        rounds=rounds,
         framework="pytorch",
         scenario="checkpoint_read",
         strategy=strategy,
         bucket_type="regional",
         model_id=config_dir,
-        world_size=8,
+        world_size=world_size,
         data_parallel_replicate_size=dpr,
         data_parallel_size=dp,
         tensor_parallel_size=tp,
@@ -315,7 +317,7 @@ def _parallel_state(tmp_path, **sizes):
     params = _params(_create_tiny_llama_config_dir(tmp_path), **sizes)
     model = parallelize(build_model(params), build_mesh(params), params)
     materialize(model, seed=0)
-    optim = build_optimizer(model)
+    optim = build_optimizer(model, seed=0)
     return model, get_fqn_state_dict(model, optim)
 
 
