@@ -28,6 +28,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.test_parallelize import (
     _create_tiny_llama_config_dir,
+    _create_tiny_olmoe_config_dir,
     _params,
 )
 
@@ -74,8 +75,9 @@ def _roundtrip_rank(rank, world_size, port, prefix, params, q):
         dist.destroy_process_group()
 
 
-def _run_roundtrip(tmp_path, world_size, sizes):
-    config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=8)
+def _run_roundtrip(tmp_path, world_size, sizes, config_dir=None):
+    if config_dir is None:
+        config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=8)
     params = _params(config_dir, world_size=world_size, **sizes)
     prefix = (tmp_path / "ckpt").as_uri()
     assert run_split(prefix, params, _roundtrip_rank, world_size) == []
@@ -109,6 +111,12 @@ def test_roundtrip_8rank(tmp_path, sizes):
 )
 def test_roundtrip_16rank(tmp_path, sizes):
     _run_roundtrip(tmp_path, 16, sizes)
+
+
+def test_roundtrip_ep(tmp_path):
+    # 16 experts over 4 ranks: each rank saves and loads 4 whole experts per layer.
+    config_dir = _create_tiny_olmoe_config_dir(tmp_path)
+    _run_roundtrip(tmp_path, 4, dict(strategy="ep", dp=4, ep=4), config_dir)
 
 
 def _n_bytes_entries(prefix):
@@ -191,3 +199,28 @@ def test_checksum_mismatch_raises(tmp_path):
 
     with pytest.raises(ProcessRaisedException, match="checksum mismatch"):
         driver.run(prefix, params)
+
+
+def test_driver_local_fs_olmoe_ep_vs_fsdp(tmp_path):
+    config_dir = _create_tiny_olmoe_config_dir(tmp_path)
+    model = build_model(_params(config_dir, "fsdp", dp=4, world_size=4))
+    n_params = len(list(model.parameters()))
+    n_expert_params = sum(".experts." in n for n, _ in model.named_parameters())
+    n_dense_params = n_params - n_expert_params
+    items = {}
+    for strategy, ep in (("fsdp", 1), ("ep", 4)):
+        params = _params(config_dir, strategy, dp=4, ep=ep, world_size=4)
+        prefix = (tmp_path / strategy).as_uri()
+        driver = PyTorchCheckpointReadDriver()
+        driver.setup(prefix, params)
+        items[strategy] = driver.run(prefix, params).extra_columns[
+            "dcp_read_items_per_rank_max"
+        ]
+
+    n_bytes_entries = _n_bytes_entries((tmp_path / "ep").as_uri())
+    assert n_bytes_entries == _n_bytes_entries((tmp_path / "fsdp").as_uri())
+    items_per_param = 4 + n_bytes_entries // n_params
+    assert items["fsdp"] == items_per_param * n_params
+    n_ep_local = n_dense_params + n_expert_params // 4
+    assert items["ep"] == items_per_param * n_ep_local
+    assert items["ep"] < items["fsdp"]

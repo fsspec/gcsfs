@@ -18,6 +18,7 @@ STRATEGY_MESH_DIMS = {
     "pp_fsdp": ("pp", "dp_shard"),
     "pp_fsdp_tp": ("pp", "dp_shard", "tp"),
     "pp_hsdp_tp": ("pp", "dp_replicate", "dp_shard", "tp"),
+    "ep": ("dp_shard",),
 }
 
 
@@ -27,6 +28,7 @@ class PyTorchCheckpointParameters(CheckpointParameters):
 
     data_parallel_replicate_size: int = 1
     pipeline_parallel_size: int = 1
+    expert_parallel_size: int = 1
 
     def extra_columns(self):
         cols = super().extra_columns()
@@ -34,6 +36,7 @@ class PyTorchCheckpointParameters(CheckpointParameters):
             {
                 "data_parallel_replicate_size": self.data_parallel_replicate_size,
                 "pipeline_parallel_size": self.pipeline_parallel_size,
+                "expert_parallel_size": self.expert_parallel_size,
             }
         )
         return cols
@@ -65,6 +68,8 @@ class PyTorchCheckpointParameters(CheckpointParameters):
                 size_tokens.append(f"dp{self.data_parallel_size}")
             if self.tensor_parallel_size > 1:
                 size_tokens.append(f"tp{self.tensor_parallel_size}")
+            if self.expert_parallel_size > 1:
+                size_tokens.append(f"ep{self.expert_parallel_size}")
             if size_tokens:
                 parts.append("".join(size_tokens))
 

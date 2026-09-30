@@ -88,6 +88,7 @@
       {"name": "setup_data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree used to save the checkpoint initially. Defaults to data_parallel_size."},
       {"name": "data_parallel_replicate_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of data parallelism replication across ranks (HSDP replicate dim); 1 for non-replicated strategies."},
       {"name": "pipeline_parallel_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of pipeline parallelism (PP stage count); 1 for non-pipelined strategies."},
+      {"name": "expert_parallel_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of expert parallelism (EP); 1 for non-expert parallel strategies."},
       {"name": "dcp_read_items_per_rank_max", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Maximum count of DCP ReadItem objects requested on the busiest rank, counting every ReadItem (tensor items plus BYTE_IO items)."}
     ]
   }

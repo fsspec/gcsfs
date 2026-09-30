@@ -38,6 +38,13 @@ class PyTorchCheckpointConfigurator(OneFactorCheckpointConfigurator):
                 f"pp={p.pipeline_parallel_size}) = {mesh_product} "
                 f"must equal world_size={p.world_size}"
             )
+        # EP is not a mesh factor: it reuses the dp_shard ranks.
+        ep_size = p.data_parallel_size if p.strategy == "ep" else 1
+        if p.expert_parallel_size != ep_size:
+            raise ValueError(
+                f"expert_parallel_size={p.expert_parallel_size} must be {ep_size} "
+                f"for strategy {p.strategy!r}"
+            )
         # run_split clamps to MAX_RANKS; fail here rather than in
         # init_device_mesh after the per-case bucket exists.
         if p.world_size > MAX_RANKS:

@@ -47,6 +47,23 @@ def _create_tiny_llama_config_dir(tmp_path, num_layers=2):
     return str(tmp_path)
 
 
+def _create_tiny_olmoe_config_dir(tmp_path, num_experts=16):
+    config = {
+        "model_type": "olmoe",
+        "hidden_size": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 8,
+        "intermediate_size": 32,
+        "num_experts": num_experts,
+        "num_experts_per_tok": 2,
+        "vocab_size": 256,
+        "max_position_embeddings": 512,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    return str(tmp_path)
+
+
 def test_build_materialize_optimizer(tmp_path):
     config_dir = _create_tiny_llama_config_dir(tmp_path)
     params = PyTorchCheckpointParameters(
@@ -201,7 +218,9 @@ def fake_pg():
     dist.destroy_process_group()
 
 
-def _params(config_dir, strategy, dpr=1, dp=1, tp=1, pp=1, world_size=8, rounds=1):
+def _params(
+    config_dir, strategy, dpr=1, dp=1, tp=1, pp=1, ep=1, world_size=8, rounds=1
+):
     return PyTorchCheckpointParameters(
         name="test-case",
         bucket_name="test-bucket",
@@ -216,6 +235,7 @@ def _params(config_dir, strategy, dpr=1, dp=1, tp=1, pp=1, world_size=8, rounds=
         data_parallel_size=dp,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+        expert_parallel_size=ep,
     )
 
 
@@ -467,3 +487,88 @@ def test_split_stage_rejects_uneven_layers(tmp_path):
     params = _params(_create_tiny_llama_config_dir(tmp_path, num_layers=6), "pp")
     with pytest.raises(ValueError, match="6 layers"):
         split_stage(build_model(params), 0, 4)
+
+
+def _expert_index(fqn):
+    parts = fqn.split(".")
+    return int(parts[parts.index("experts") + 1]) if "experts" in parts else None
+
+
+def test_fsdp_olmoe_slices_every_expert(tmp_path, fake_pg):
+    params = _params(_create_tiny_olmoe_config_dir(tmp_path), "fsdp", dp=8)
+    model = parallelize(build_model(params), build_mesh(params), params)
+    names = [name for name, _ in model.named_parameters()]
+    assert "model.layers.0.self_attn.q_norm.weight" in names
+    assert "model.layers.0.mlp.gate.weight" in names
+    assert sum(_expert_index(n) is not None for n in names) == 2 * 16 * 3
+    for name, p in model.named_parameters():
+        assert p.placements == (Shard(0),), name
+        assert p.device_mesh.mesh_dim_names == ("dp_shard",)
+    down = model.model.layers[1].mlp.experts[15].down_proj.weight
+    assert down.to_local().shape == (64 // 8, 32)
+
+
+def test_ep_ranks_own_disjoint_experts(tmp_path):
+    params = _params(_create_tiny_olmoe_config_dir(tmp_path), "ep", dp=8, ep=8)
+    full = build_model(params)
+    full_experts = {
+        n for n, _ in full.named_parameters() if _expert_index(n) is not None
+    }
+    full_dense = {n for n, _ in full.named_parameters()} - full_experts
+    param_bytes = {n: p.numel() * p.element_size() for n, p in full.named_parameters()}
+    expert_fqns = []
+    for rank in range(8):
+        dist.init_process_group("fake", store=FakeStore(), rank=rank, world_size=8)
+        try:
+            mesh = build_mesh(params)
+            # EP reuses the dp_shard ranks; it is not a mesh dim of its own.
+            assert mesh.mesh_dim_names == ("dp_shard",)
+            model = parallelize(build_model(params), mesh, params)
+            materialize(model, seed=0)
+            state = get_fqn_state_dict(model, build_optimizer(model, seed=0))
+        finally:
+            dist.destroy_process_group()
+
+        local = {
+            fqn: t
+            for fqn, t in state["model"].items()
+            if _expert_index(fqn) is not None
+        }
+        assert set(state["model"]) - set(local) == full_dense
+        for fqn in full_dense:
+            t = state["model"][fqn]
+            assert t.placements == (Shard(0),), fqn
+            assert t.device_mesh.mesh_dim_names == ("dp_shard",)
+        for fqn, t in local.items():
+            assert not isinstance(t, DTensor), fqn
+            assert model.get_parameter(fqn).requires_grad, fqn
+            assert not isinstance(state["optim"][f"state.{fqn}.exp_avg"], DTensor)
+        for layer in range(2):
+            owned = {
+                _expert_index(fqn)
+                for fqn in local
+                if fqn.startswith(f"model.layers.{layer}.")
+            }
+            assert owned == {2 * rank, 2 * rank + 1}
+        assert len(local) == 2 * 2 * 3
+        optim_fqns = {
+            key[len("state.") :].rsplit(".", 1)[0]
+            for key in state["optim"]
+            if key.startswith("state.")
+        }
+        assert optim_fqns == set(state["model"])
+        expected = sum(3 * param_bytes[f] // 8 + 8 for f in full_dense)
+        expected += sum(3 * param_bytes[f] + 8 for f in local)
+        assert expected_bytes_requested(state) == expected
+        expert_fqns.append(set(local))
+
+    assert sum(len(f) for f in expert_fqns) == len(set().union(*expert_fqns))
+    assert set().union(*expert_fqns) == full_experts
+
+
+def test_ep_rejects_uneven_experts(tmp_path, fake_pg):
+    params = _params(
+        _create_tiny_olmoe_config_dir(tmp_path, num_experts=12), "ep", dp=8, ep=8
+    )
+    with pytest.raises(ValueError, match="12 experts"):
+        parallelize(build_model(params), build_mesh(params), params)
