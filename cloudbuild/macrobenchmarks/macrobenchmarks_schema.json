@@ -9,7 +9,7 @@
   "schema": {
     "fields": [
       {"name": "run_id", "type": "STRING", "description": "Cloud Build run id (prefixed buildid-)."},
-      {"name": "workload_name", "type": "STRING", "description": "Benchmark workload name (e.g. hf-pytorch-lightning-cpu)."},
+      {"name": "workload_name", "type": "STRING", "description": "Benchmark workload identifier in BigQuery (e.g. hf-pytorch-lightning-cpu as the stable historical ID for hf-datasets-pytorch-lightning, or ray-data-ray-train-pytorch)."},
       {"name": "requirements", "type": "STRING", "description": "Packages installed/overridden for the run -- git refs and/or pkg==<version> specs (e.g. gcsfs under test, a custom lightning build)."},
       {"name": "image", "type": "STRING", "description": "Container base image the workload ran in (e.g. nvcr.io/nvidia/pytorch:26.05-py3)."},
       {"name": "bucket_type", "type": "STRING", "description": "Storage tier of the run's buckets: regional, zonal (RAPID), or hns."},

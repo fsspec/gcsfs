@@ -31,6 +31,7 @@ if [ -n "${_CHECKPOINT_LOAD_PATH}" ] || [ "${_SEED_CHECKPOINT}" = "true" ]; then
 fi
 case "${_WORKLOAD}" in
   ray-data-ray-train-pytorch)
+    WORKLOAD_ID="${_WORKLOAD}"
     PARSER_MODULE=metrics.parsers.ray_train
     PROFILE_ARGS=(--require-ray-metrics)
     # The strict profile derives exact write/restore sets from the observed
@@ -40,6 +41,10 @@ case "${_WORKLOAD}" in
     MIN_RESTORE_DATAPOINTS=0
     ;;
   *)
+    # Preserve 'hf-pytorch-lightning-cpu' as the stable workload_name ID in
+    # BigQuery so historical time-series queries remain contiguous across the
+    # directory rename to hf-datasets-pytorch-lightning.
+    WORKLOAD_ID="hf-pytorch-lightning-cpu"
     PARSER_MODULE=metrics.parsers.hf
     PROFILE_ARGS=(--require-data-loading-metrics --require-data-wait-metrics)
     ;;
@@ -47,7 +52,7 @@ esac
 # Run the calculator over the current raw metrics into the summary file $1.
 run_calculate() {
   python3 -m metrics.calculate \
-      --run-id "$RUN_ID" --workload-name "${_WORKLOAD}" \
+      --run-id "$RUN_ID" --workload-name "$WORKLOAD_ID" \
       --requirements "${_REQUIREMENTS}" --in-dir "$RAW_DIR" --out-file "$1" \
       --expected-steps "${_STEPS}" \
       --min-write-datapoints "$MIN_WRITE_DATAPOINTS" \
