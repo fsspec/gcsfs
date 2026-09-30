@@ -14,6 +14,10 @@ STRATEGY_MESH_DIMS = {
     "tp": ("tp",),
     "fsdp_tp": ("dp_shard", "tp"),
     "hsdp_tp": ("dp_replicate", "dp_shard", "tp"),
+    "pp": ("pp",),
+    "pp_fsdp": ("pp", "dp_shard"),
+    "pp_fsdp_tp": ("pp", "dp_shard", "tp"),
+    "pp_hsdp_tp": ("pp", "dp_replicate", "dp_shard", "tp"),
 }
 
 

@@ -22,6 +22,10 @@ _STRATEGY = {
     "tp": "tp",
     "fsdp_tp": "fsdp-tp",
     "hsdp_tp": "hsdp-tp",
+    "pp": "pp",
+    "pp_fsdp": "pp-fsdp",
+    "pp_fsdp_tp": "pp-fsdp-tp",
+    "pp_hsdp_tp": "pp-hsdp-tp",
 }
 
 _RUN_LEVEL_KEYS = ("bucket_type",)

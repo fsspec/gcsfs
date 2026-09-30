@@ -15,7 +15,7 @@ The currently runnable groups are:
 - `dataloading/ray_data`: Measures full-corpus streaming reads of a synthetic Parquet dataset through Ray Data, `pyarrow.fs`, `fsspec`, and `gcsfs` on CPU.
 - `dataloading/webdataset`: Measures full-corpus streaming reads of synthetic image tar shards through WebDataset and a PyTorch `DataLoader`; `gs://` reads are routed to `gcsfs` by a registered opener. The default sweep keeps storage-bound axes; image-preparation and pipeline axes are parked with `enabled: false`.
 - `checkpointing/pytorch_lightning`: Measures checkpoint write and read performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
-- `checkpointing/pytorch`: Measures `torch.distributed.checkpoint.load` from GCS via `FsspecReader` and `gcsfs` across PyTorch parallelism strategies (FSDP2, HSDP, TP, FSDP+TP, HSDP+TP) with identical save and load topology on CPU gloo, using Llama-3.1-8B built from config on meta.
+- `checkpointing/pytorch`: Measures `torch.distributed.checkpoint.load` from GCS via `FsspecReader` and `gcsfs` across PyTorch parallelism strategies (FSDP2, HSDP, TP, FSDP+TP, HSDP+TP, PP, PP+FSDP, PP+FSDP+TP, PP+HSDP+TP) with identical save and load topology on CPU gloo, using Llama-3.1-8B built from config on meta.
 
 > **This README describes the workload: what it runs, what is timed, and how to
 > debug it directly.** The normal way to provision the benchmark VM, run the

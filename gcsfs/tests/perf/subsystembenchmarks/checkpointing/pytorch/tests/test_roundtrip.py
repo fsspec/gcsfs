@@ -4,6 +4,7 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader, FsspecWriter
 from torch.distributed.checkpoint.metadata import TensorStorageMetadata
+from torch.distributed.checkpoint.state_dict import set_state_dict
 from torch.multiprocessing.spawn import ProcessRaisedException
 
 pytest.importorskip("transformers")
@@ -21,6 +22,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.read.driver impo
     _build,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
+    STATE_DICT_OPTIONS,
     get_fqn_state_dict,
     state_checksum,
 )
@@ -55,14 +57,26 @@ def _roundtrip_rank(rank, world_size, port, prefix, params, q):
 
         loaded = get_fqn_state_dict(model, optim)
         assert state_checksum(loaded) == saved
-        assert len(loaded["optim"]["state"]) == len(list(model.parameters()))
+        n_exp_avg = sum(k.endswith(".exp_avg") for k in loaded["optim"])
+        assert n_exp_avg == len(list(model.parameters()))
+
+        groups = [dict(g) for g in optim.param_groups]
+        set_state_dict(
+            model,
+            optim,
+            model_state_dict=state["model"],
+            optim_state_dict=state["optim"],
+            options=STATE_DICT_OPTIONS,
+        )
+        assert optim.param_groups == groups
         q.put(None)
     finally:
         dist.destroy_process_group()
 
 
 def _run_roundtrip(tmp_path, world_size, sizes):
-    params = _params(_create_tiny_llama_config_dir(tmp_path), **sizes)
+    config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=8)
+    params = _params(config_dir, world_size=world_size, **sizes)
     prefix = (tmp_path / "ckpt").as_uri()
     assert run_split(prefix, params, _roundtrip_rank, world_size) == []
 
@@ -74,10 +88,27 @@ def test_roundtrip(tmp_path, sizes):
 
 @pytest.mark.parametrize(
     "sizes",
-    [pytest.param(dict(strategy="hsdp_tp", dpr=2, dp=2, tp=2), id="hsdp_tp")],
+    [
+        pytest.param(dict(strategy="hsdp_tp", dpr=2, dp=2, tp=2), id="hsdp_tp"),
+        pytest.param(dict(strategy="pp", pp=8), id="pp"),
+        pytest.param(dict(strategy="pp_fsdp", pp=2, dp=4), id="pp_fsdp"),
+        pytest.param(dict(strategy="pp_fsdp_tp", pp=2, dp=2, tp=2), id="pp_fsdp_tp"),
+    ],
 )
 def test_roundtrip_8rank(tmp_path, sizes):
     _run_roundtrip(tmp_path, 8, sizes)
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        pytest.param(
+            dict(strategy="pp_hsdp_tp", pp=2, dpr=2, dp=2, tp=2), id="pp_hsdp_tp"
+        )
+    ],
+)
+def test_roundtrip_16rank(tmp_path, sizes):
+    _run_roundtrip(tmp_path, 16, sizes)
 
 
 def _n_bytes_entries(prefix):
@@ -119,6 +150,26 @@ def test_driver_local_fs(tmp_path, sizes):
     assert sum(f.endswith(".distcp") for f in ckpt_files) == 4
     assert sum("checksums" in f for f in files) == 4
     assert not any("checksums" in f for f in ckpt_files)
+
+
+def test_driver_local_fs_pp(tmp_path):
+    params = _params(
+        _create_tiny_llama_config_dir(tmp_path, num_layers=8), "pp", pp=8, world_size=8
+    )
+    prefix = (tmp_path / "ckpt").as_uri()
+    driver = PyTorchCheckpointReadDriver()
+
+    driver.setup(prefix, params)
+    result = driver.run(prefix, params)
+
+    # The last stage owns one layer plus norm and lm_head. Each param has 3
+    # tensors, a step, and its own BYTE_IO param_groups entries.
+    model = build_model(params)
+    n_last_stage_params = len(list(model.model.layers[0].parameters())) + 2
+    n_bytes_per_param = _n_bytes_entries(prefix) // len(list(model.parameters()))
+    n_items = (4 + n_bytes_per_param) * n_last_stage_params
+    assert result.extra_columns["dcp_read_items_per_rank_max"] == n_items
+    assert driver.read_count(params) == 1
 
 
 def test_checksum_mismatch_raises(tmp_path):

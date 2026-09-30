@@ -1,12 +1,16 @@
 import hashlib
 
 import torch
-from torch.distributed.checkpoint.state_dict import get_state_dict
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 from torch.distributed.tensor import DTensor
+
+# Keys param_groups by FQN. Unflattened, it is one list per rank that differs across
+# PP stages, and DCP saves only one rank's copy of it.
+STATE_DICT_OPTIONS = StateDictOptions(flatten_optimizer_state_dict=True)
 
 
 def get_fqn_state_dict(model, optim) -> dict:
-    model_state, optim_state = get_state_dict(model, optim)
+    model_state, optim_state = get_state_dict(model, optim, options=STATE_DICT_OPTIONS)
     return {"model": model_state, "optim": optim_state}
 
 

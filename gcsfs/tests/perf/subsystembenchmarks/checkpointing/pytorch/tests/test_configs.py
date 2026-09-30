@@ -28,13 +28,17 @@ def test_case_names():
         "load-llama_3_1_8b-tp-tp8-ws8-reg",
         "load-llama_3_1_8b-fsdp-tp-dp2tp4-ws8-reg",
         "load-llama_3_1_8b-hsdp-tp-dpr2dp2tp2-ws8-reg",
+        "load-llama_3_1_8b-pp-pp8-ws8-reg",
+        "load-llama_3_1_8b-pp-fsdp-pp2dp4-ws8-reg",
+        "load-llama_3_1_8b-pp-fsdp-tp-pp2dp2tp2-ws8-reg",
+        "load-llama_3_1_8b-pp-hsdp-tp-pp2dpr2dp2tp2-ws16-reg",
     ]
     assert names == expected_names
 
 
 def test_mesh_product_equals_world_size():
     cases = _cases()
-    assert len(cases) == 6
+    assert len(cases) == 10
     for c in cases:
         mesh_product = (
             c.data_parallel_replicate_size
@@ -43,7 +47,7 @@ def test_mesh_product_equals_world_size():
             * c.pipeline_parallel_size
         )
         assert mesh_product == c.world_size
-        assert c.world_size == 8
+        assert c.world_size == (16 if c.strategy == "pp_hsdp_tp" else 8)
 
 
 @pytest.mark.parametrize(
@@ -82,7 +86,7 @@ def test_baseline_is_fsdp():
     assert baseline.scenario == "checkpoint_read"
 
     strategy_cases = [c for c in cases if c.sweep_axis == "strategy"]
-    assert len(strategy_cases) == 5
+    assert len(strategy_cases) == 9
     for c in strategy_cases:
         assert c.scenario == "checkpoint_read"
 

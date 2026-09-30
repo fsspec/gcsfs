@@ -18,6 +18,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize import (
     build_mesh,
     parallelize,
+    split_stage,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
     PyTorchCheckpointParameters,
@@ -29,11 +30,11 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
 )
 
 
-def _create_tiny_llama_config_dir(tmp_path):
+def _create_tiny_llama_config_dir(tmp_path, num_layers=2):
     config = {
         "model_type": "llama",
         "hidden_size": 64,
-        "num_hidden_layers": 2,
+        "num_hidden_layers": num_layers,
         "num_attention_heads": 8,
         "num_key_value_heads": 8,
         "intermediate_size": 128,
@@ -200,7 +201,7 @@ def fake_pg():
     dist.destroy_process_group()
 
 
-def _params(config_dir, strategy, dpr=1, dp=1, tp=1, world_size=8, rounds=1):
+def _params(config_dir, strategy, dpr=1, dp=1, tp=1, pp=1, world_size=8, rounds=1):
     return PyTorchCheckpointParameters(
         name="test-case",
         bucket_name="test-bucket",
@@ -214,6 +215,7 @@ def _params(config_dir, strategy, dpr=1, dp=1, tp=1, world_size=8, rounds=1):
         data_parallel_replicate_size=dpr,
         data_parallel_size=dp,
         tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
     )
 
 
@@ -327,8 +329,9 @@ def test_get_fqn_state_dict_is_sharded_and_fqn_keyed(tmp_path, fake_pg):
     assert set(state) == {"model", "optim"}
     assert isinstance(state["model"][fqn], DTensor)
     assert state["model"][fqn].to_local().shape == (8, 64)
-    assert set(state["optim"]["state"][fqn]) == {"step", "exp_avg", "exp_avg_sq"}
-    assert fqn in state["optim"]["param_groups"][0]["params"]
+    for key in ("step", "exp_avg", "exp_avg_sq"):
+        assert f"state.{fqn}.{key}" in state["optim"]
+    assert state["optim"][f"param_groups.{fqn}.lr"] == 1e-3
 
 
 @pytest.mark.parametrize(
@@ -379,3 +382,88 @@ def test_state_checksum_detects_permutation():
     a = state_checksum({"x": torch.tensor([1.0, 2.0])})
     b = state_checksum({"x": torch.tensor([2.0, 1.0])})
     assert a != b
+
+
+_PP_STRATEGIES = [
+    pytest.param(dict(strategy="pp", pp=8), 8, None, id="pp"),
+    pytest.param(dict(strategy="pp_fsdp", pp=2, dp=4), 8, (Shard(0),), id="pp_fsdp"),
+    pytest.param(
+        dict(strategy="pp_fsdp_tp", pp=2, dp=2, tp=2),
+        8,
+        (_StridedShard(0, split_factor=2), Shard(0)),
+        id="pp_fsdp_tp",
+    ),
+    pytest.param(
+        dict(strategy="pp_hsdp_tp", pp=2, dpr=2, dp=2, tp=2),
+        16,
+        (Replicate(), _StridedShard(0, split_factor=2), Shard(0)),
+        id="pp_hsdp_tp",
+    ),
+]
+
+
+@pytest.mark.parametrize("sizes, world_size, q_placements", _PP_STRATEGIES)
+def test_pp_stages_partition_state(tmp_path, sizes, world_size, q_placements):
+    params = _params(
+        _create_tiny_llama_config_dir(tmp_path, num_layers=8),
+        world_size=world_size,
+        **sizes,
+    )
+    num_stages = sizes["pp"]
+    layers_per_stage = 8 // num_stages
+    full_fqns = set(build_model(params).state_dict())
+    stage_fqns = []
+    for stage in range(num_stages):
+        rank = stage * world_size // num_stages
+        dist.init_process_group(
+            "fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        try:
+            mesh = build_mesh(params)
+            assert mesh.mesh_dim_names[0] == "pp"
+            assert mesh["pp"].get_local_rank() == stage
+            model = parallelize(build_model(params), mesh, params)
+            materialize(model, seed=0)
+            state = get_fqn_state_dict(model, build_optimizer(model, seed=0))
+        finally:
+            dist.destroy_process_group()
+
+        model_fqns = set(state["model"])
+        for kind in ("state", "param_groups"):
+            optim_fqns = {
+                key[len(kind) + 1 :].rsplit(".", 1)[0]
+                for key in state["optim"]
+                if key.startswith(f"{kind}.")
+            }
+            assert optim_fqns == model_fqns
+        first = stage * layers_per_stage
+        q_fqn = f"model.layers.{first}.self_attn.q_proj.weight"
+        q = state["model"][q_fqn]
+        if q_placements is None:
+            assert not isinstance(q, DTensor)
+        else:
+            assert q.placements == q_placements
+        layers = {fqn.split(".")[2] for fqn in model_fqns if ".layers." in fqn}
+        assert layers == {str(i) for i in range(first, first + layers_per_stage)}
+        assert ("model.embed_tokens.weight" in model_fqns) == (stage == 0)
+        is_last = stage == num_stages - 1
+        assert ("model.norm.weight" in model_fqns) == is_last
+        assert ("lm_head.weight" in model_fqns) == is_last
+        stage_fqns.append(model_fqns)
+
+    assert sum(len(f) for f in stage_fqns) == len(set().union(*stage_fqns))
+    assert set().union(*stage_fqns) == full_fqns
+
+
+def test_split_stage_rejects_tied_embeddings(tmp_path):
+    params = _params(_create_tiny_llama_config_dir(tmp_path, num_layers=8), "pp")
+    model = build_model(params)
+    model.config.tie_word_embeddings = True
+    with pytest.raises(ValueError, match="tie_word_embeddings"):
+        split_stage(model, 0, 2)
+
+
+def test_split_stage_rejects_uneven_layers(tmp_path):
+    params = _params(_create_tiny_llama_config_dir(tmp_path, num_layers=6), "pp")
+    with pytest.raises(ValueError, match="6 layers"):
+        split_stage(build_model(params), 0, 4)
