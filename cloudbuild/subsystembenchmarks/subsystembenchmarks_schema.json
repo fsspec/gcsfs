@@ -10,7 +10,7 @@
     "fields": [
       {"name": "benchmark_case_id", "type": "STRING", "description": "Stable benchmark case identifier encoding every swept parameter."},
       {"name": "benchmark_group", "type": "STRING", "description": "pytest-benchmark's group label, which publish_case_metadata sets to the case scenario: read for dataloading, checkpoint_write for checkpointing. Same value as workload_scenario; filter on workload_family and workload_implementation to tell the loaders within a subsystem apart."},
-      {"name": "workload_implementation", "type": "STRING", "description": "Library or integration executing the workload, matching the run.py --group suffix: huggingface_datasets, webdataset, pytorch_lightning, or ray_data."},
+      {"name": "workload_implementation", "type": "STRING", "description": "Library or integration executing the workload, matching the run.py --group suffix: huggingface_datasets, webdataset, pytorch_lightning, pytorch, or ray_data."},
       {"name": "workload_scenario", "type": "STRING", "description": "Operation exercised within the workload implementation, named by the scenario in the group's configs.yaml: read for dataloading, checkpoint_write for checkpointing."},
       {"name": "config_sweep_axis", "type": "STRING", "description": "Configuration axis that produced this case, or baseline for the implicit baseline case."},
       {"name": "workload_family", "type": "STRING", "description": "Broad benchmark row family: data_loading or checkpointing. With workload_implementation it identifies the runnable group, which benchmark_group also carries verbatim (note data_loading here against the dataloading directory the group name uses)."},
@@ -81,11 +81,15 @@
       {"name": "checkpoint_write_throughput_mean_bytes_per_second", "type": "FLOAT", "description": "Mean write throughput in bytes per second for the checkpoint save operation."},
       {"name": "checkpoint_read_throughput_mean_bytes_per_second", "type": "FLOAT", "description": "Mean read throughput in bytes per second for the checkpoint load operation."},
       {"name": "model_id", "type": "STRING", "description": "Hugging Face model ID or path used for the benchmark."},
-      {"name": "tensor_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy tensor-parallel degree (TP). N/A for non-model_parallel runs."},
-      {"name": "data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree (DP). N/A for non-model_parallel runs."},
+      {"name": "tensor_parallel_size", "type": "INTEGER", "description": "Tensor-parallel degree (TP): the ModelParallelStrategy TP size for pytorch_lightning model_parallel runs, or the tp mesh dim for checkpointing/pytorch. 1 or N/A otherwise."},
+      {"name": "data_parallel_size", "type": "INTEGER", "description": "Data-parallel degree (DP): the ModelParallelStrategy DP size for pytorch_lightning model_parallel runs, or the FSDP2 shard degree (dp_shard mesh dim) for checkpointing/pytorch. 1 or N/A otherwise."},
       {"name": "setup_world_size", "type": "INTEGER", "description": "Number of distributed ranks used to save the checkpoint initially. Defaults to world_size."},
       {"name": "setup_tensor_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy tensor-parallel degree used to save the checkpoint initially. Defaults to tensor_parallel_size."},
-      {"name": "setup_data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree used to save the checkpoint initially. Defaults to data_parallel_size."}
+      {"name": "setup_data_parallel_size", "type": "INTEGER", "description": "ModelParallelStrategy data-parallel degree used to save the checkpoint initially. Defaults to data_parallel_size."},
+      {"name": "data_parallel_replicate_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of data parallelism replication across ranks (HSDP replicate dim); 1 for non-replicated strategies."},
+      {"name": "pipeline_parallel_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of pipeline parallelism (PP stage count); 1 for non-pipelined strategies."},
+      {"name": "expert_parallel_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of expert parallelism (EP); 1 for non-expert parallel strategies."},
+      {"name": "dcp_read_items_per_rank_max", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Maximum count of DCP ReadItem objects requested on the busiest rank, counting every ReadItem (tensor items plus BYTE_IO items)."}
     ]
   }
 }

@@ -7,12 +7,26 @@ from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
 
 _BUCKET = {"regional": "reg", "zonal": "zon", "hns": "hns"}
 _STRATEGY = {
+    # pytorch_lightning and ray_pytorch: fsdp_* is FSDP1 (FSDPStrategy),
+    # model_parallel_* is FSDP2 + TP (ModelParallelStrategy).
     "single": "sgl",
     "ddp": "ddp",
     "fsdp_sharded": "fsdp-shd",
     "fsdp_full": "fsdp-full",
     "model_parallel_full": "mp-full",
     "model_parallel_sharded": "mp-shd",
+    # pytorch (native torch.distributed): fsdp/hsdp always mean FSDP2
+    # (fully_shard), and checkpoints are always sharded DCP.
+    "fsdp": "fsdp",
+    "hsdp": "hsdp",
+    "tp": "tp",
+    "fsdp_tp": "fsdp-tp",
+    "hsdp_tp": "hsdp-tp",
+    "pp": "pp",
+    "pp_fsdp": "pp-fsdp",
+    "pp_fsdp_tp": "pp-fsdp-tp",
+    "pp_hsdp_tp": "pp-hsdp-tp",
+    "ep": "ep",
 }
 
 _RUN_LEVEL_KEYS = ("bucket_type",)
@@ -35,7 +49,7 @@ class CheckpointParameters:
     framework: str
 
     model_id: str
-    strategy: str  # single, ddp, fsdp, model_parallel_*
+    strategy: str  # a key of _STRATEGY
     world_size: int = 1
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1

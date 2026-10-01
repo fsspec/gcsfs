@@ -6,6 +6,10 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    run_split,
+    setup_distributed_env,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
@@ -15,8 +19,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.common
     DummyModel,
     get_strategy,
     is_distributed_strategy,
-    run_split,
-    setup_distributed_env,
 )
 
 
