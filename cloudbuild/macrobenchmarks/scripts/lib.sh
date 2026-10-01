@@ -13,6 +13,14 @@
 FAILED_FILE="${FAILED_FILE:-/workspace/FAILED}"
 BUILD_VARS_FILE="${BUILD_VARS_FILE:-/workspace/build_vars.env}"
 
+# Default the workload in one place so every step script agrees when it is
+# unset/empty, then normalize the legacy name so existing callers or triggers
+# passing _WORKLOAD=hf-pytorch-lightning-cpu continue to work without breaking.
+_WORKLOAD="${_WORKLOAD:-hf-datasets-pytorch-lightning}"
+if [[ "${_WORKLOAD}" == "hf-pytorch-lightning-cpu" ]]; then
+  _WORKLOAD="hf-datasets-pytorch-lightning"
+fi
+
 # Record a step id in the failure ledger. The allowFailure provisioning steps
 # append here on error so the final check-failure step can fail the build with
 # the list of culprits.

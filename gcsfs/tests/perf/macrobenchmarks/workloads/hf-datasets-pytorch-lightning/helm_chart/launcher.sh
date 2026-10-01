@@ -194,7 +194,7 @@ fi
 
 # If MODEL_ID is a GCS path, pull the ~16GB of weights once per *node* (not
 # once per pod) into the bootstrap cache, so the measured release reuses what
-# the seed release already staged. cpu_sim.py loads it from $LOCAL_MODEL_PATH
+# the seed release already staged. train_pytorch_lightning.py loads it from $LOCAL_MODEL_PATH
 # with local_files_only=True, so the ranks on this node do not race on the
 # HuggingFace API. This download is deliberately outside the measurement
 # boundary (gcloud, not gcsfs) so caching it moves no metric -- it only removes
@@ -213,7 +213,7 @@ if [[ "${MODEL_ID:-}" == gs://* ]]; then
   mkdir -p "$MODEL_ROOT"
   LOCAL_MODEL_PATH="$MODEL_ROOT/$DIR_NAME"
   stage_once "$LOCAL_MODEL_PATH" fetch_model_from_gcs
-  # cpu_sim.py reads this to find the staged weights; it falls back to
+  # train_pytorch_lightning.py reads this to find the staged weights; it falls back to
   # /tmp/<basename> when unset, which is where they used to land.
   export LOCAL_MODEL_PATH
 fi
@@ -260,7 +260,7 @@ export HYDRA_FULL_ERROR=1
 
 echo "Launching Torch distributed as node rank $NODE_RANK out of $NNODES nodes"
 
-# Gloo (the CPU collective backend used by DDPStrategy in cpu_sim.py) does not
+# Gloo (the CPU collective backend used by DDPStrategy in train_pytorch_lightning.py) does not
 # auto-discover the right NIC across pods reliably; pin it to the pod's
 # primary interface. With hostNetwork: false this is always eth0 inside the
 # pod regardless of the c4 host's underlying NIC name (ens4/etc.).
