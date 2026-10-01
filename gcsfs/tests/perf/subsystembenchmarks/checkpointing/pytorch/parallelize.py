@@ -18,6 +18,8 @@ def build_mesh(params) -> DeviceMesh:
 
 
 def split_stage(model: nn.Module, stage: int, num_stages: int) -> None:
+    """Keeps only this stage's modules. State-dict layout only: the ModuleDict
+    below breaks HF forward, which iterates layers as a list."""
     if model.config.tie_word_embeddings:
         raise ValueError("split_stage does not support tie_word_embeddings")
     layers = model.model.layers

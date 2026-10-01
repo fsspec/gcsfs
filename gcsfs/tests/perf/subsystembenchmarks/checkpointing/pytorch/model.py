@@ -35,6 +35,9 @@ def build_model(params) -> nn.Module:
 
 def materialize(model: nn.Module, seed: int) -> None:
     model.to_empty(device="cpu")
+    # Same seed on every rank, so evenly sharded tensors hold identical bytes
+    # on each rank. The per-rank checksum cannot tell one rank's shard from
+    # another's; seeding by shard offset would close that gap.
     torch.manual_seed(seed)
     for p in model.parameters():
         p.requires_grad_(True)

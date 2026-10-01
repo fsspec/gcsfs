@@ -36,6 +36,8 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
     state_checksum,
 )
 
+# Run seeds differently from setup so every tensor starts with known-wrong
+# bytes; a reader that skips items would otherwise pass the checksum.
 _SETUP_SEED = 0
 _RUN_SEED = 1
 
@@ -74,7 +76,7 @@ def _checksum_path(prefix: str, rank: int):
 def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
-        torch.set_num_threads(max(1, os.cpu_count() // world_size))
+        torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
         model, optim = _build(params, build_mesh(params), _SETUP_SEED)
         state = get_fqn_state_dict(model, optim)
         dcp.save(state, storage_writer=FsspecWriter(prefix))
@@ -90,7 +92,7 @@ def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
 def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
     setup_distributed_env(rank, world_size, port)
     try:
-        torch.set_num_threads(max(1, os.cpu_count() // world_size))
+        torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
         model, optim = _build(params, build_mesh(params), _RUN_SEED)
         state = get_fqn_state_dict(model, optim)
         bytes_expected = expected_bytes_requested(state)
@@ -107,6 +109,9 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
             dist.barrier()
             durations.append((begin, time.perf_counter()))
 
+        # Outside the timed window. The planner check catches wrong shapes;
+        # the checksum catches wrong or missing bytes, which DCP does not
+        # verify (no CRC), so a bad reader would otherwise just look faster.
         if planner.bytes_requested != bytes_expected:
             raise RuntimeError(
                 f"rank {rank}: DCP requested {planner.bytes_requested} tensor bytes, "

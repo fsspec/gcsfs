@@ -76,6 +76,23 @@ def test_validate_case_rejects_sizes_unused_by_strategy(sizes):
         PyTorchCheckpointConfigurator(CONFIG).validate_case(p)
 
 
+def test_validate_case_rejects_world_size_exceeding_max_ranks():
+    p = PyTorchCheckpointParameters(
+        name="c",
+        bucket_name="",
+        bucket_type="regional",
+        rounds=1,
+        scenario="checkpoint_read",
+        framework="pytorch",
+        model_id="m",
+        strategy="fsdp",
+        data_parallel_size=32,
+        world_size=32,
+    )
+    with pytest.raises(ValueError, match="MAX_RANKS"):
+        PyTorchCheckpointConfigurator(CONFIG).validate_case(p)
+
+
 def test_baseline_is_fsdp():
     cases = _cases()
     baseline_cases = [c for c in cases if c.sweep_axis == "baseline"]
