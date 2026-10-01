@@ -4,17 +4,47 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
-Unreleased
-----------
+2026.10.0
+---------
 
-* Use mutual TLS when google-auth is configured with a client certificate
-  (``GOOGLE_API_USE_CLIENT_CERTIFICATE`` or a certificate config with a
-  ``workload`` section): requests default to ``storage.mtls.googleapis.com`` and
-  present the client certificate, as ``google-cloud-storage`` does. Needed for
-  certificate-bound access tokens (e.g. Agent Identity).
-  ``GOOGLE_API_USE_MTLS_ENDPOINT=never`` keeps the regular endpoint; ``endpoint_url`` and
-  ``STORAGE_EMULATOR_HOST`` still take precedence. No change without a
-  configured client certificate.
+**New Features**
+
+**Mutual TLS (mTLS) for HTTP requests when a client certificate is configured.** When ``google-auth`` is configured to use a client certificate (``GOOGLE_API_USE_CLIENT_CERTIFICATE=true``, or a certificate config with a ``workload`` section) and a default client certificate source exists, GCSFS now presents that certificate on its HTTP session and, for the default ``googleapis.com`` universe, defaults to ``https://storage.mtls.googleapis.com``, as ``google-cloud-storage`` does. This is needed for access tokens bound to a client certificate (e.g. Agent Identity), which GCS accepts only over mTLS.
+
+* ``endpoint_url``, ``STORAGE_EMULATOR_HOST``, and a ``connector`` passed via ``session_kwargs`` still take precedence.
+* Set ``GOOGLE_API_USE_MTLS_ENDPOINT=never`` to keep the regular endpoint (the certificate is still presented).
+* No behavior change when no client certificate is configured.
+* **Known limitations:** gRPC connections (used for Rapid bucket reads/writes and bucket-type detection) do not present the client certificate and stay on the regular endpoint. The certificate is loaded when the HTTP session is created and is not reloaded if it rotates.
+
+(#1080)
+
+**Migrate adaptive prefetcher to native fsspec** ``AdaptiveReadaheadCache``: As an internal refactoring with no change in prefetcher usage for end customers, the internal ``gcsfs.prefetcher`` module has been upstreamed into ``fsspec>=2026.9.0``, and GCSFS now uses ``cache_type="adaptive"`` as its default streaming read caching policy. To use a different cache or disable prefetching, pass ``cache_type`` explicitly (e.g. ``cache_type="none"``). For configuration options (including ``max_prefetch_size``), architecture, and benchmarks, see https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
+
+* Removed experimental configuration flags ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`` and ``use_experimental_adaptive_prefetching``. **(Warning)** They are now silently ignored: if you used them to turn prefetching off, set ``cache_type`` explicitly instead.
+* Bumped minimum ``fsspec`` dependency to ``>=2026.9.0``.
+
+(#993)
+
+**Bug Fixes & Improvements**
+
+* **401 Invalid Credentials responses are now retried in single-request** ``get_file()`` **downloads.** The error body was previously not read before validation, so the retry check never saw the "Invalid Credentials" message. Additionally, for all requests, 401 responses whose message contains lowercase "invalid" (e.g. ``invalid_token``) now raise ``HttpError`` instead of ``ValueError``, so they are retried when the message contains "Invalid Credentials". (#1084)
+* **Fixed hangs and deadlocks when files are closed from the event loop thread or by the garbage collector.** Files closed in those situations are now torn down on a dedicated background worker thread instead of blocking the fsspec I/O event loop; errors during these deferred closes are logged rather than raised. ``ZonalFile`` read-pool and write-stream teardown now run independently, each bounded by a timeout (default 60 s), so a read-side failure no longer skips write finalization. Files should still be closed explicitly (e.g. ``with fs.open(...)``): a file still open at interpreter shutdown is marked closed without being flushed. (#1009, #1025, #1031, #1040)
+* **Fixed paths for objects whose names start with** ``/``. Listing and ``info()`` results previously dropped the bucket name for such objects (returning ``/name``); they now return ``bucket//name``. (#1044)
+* ``rm()`` **now raises the original error when a whole delete batch fails**, instead of an unrelated ``TypeError``. Aggregation of batch results is also linear instead of quadratic. (#1060)
+* **Lower CPU overhead in recursive** ``find()`` (also used by ``glob()``, ``du()``, and recursive ``rm()``/``get()``/``copy()`` path expansion): directory entries are now built once per unique directory. In an in-memory benchmark that excludes network time, this step was up to 14x faster on deep hierarchies. (#1046)
+* **Opening an existing object for reading no longer calls** ``mimetypes.guess_type()`` when GCS metadata already provides ``contentType``. (#1059)
+* **Rapid (zonal) bucket gRPC reads now report the cache type** in request metadata (``x-goog-api-client``), as HTTP reads already do in the ``User-Agent``. (#1019)
+* **Bumped minimum** ``google-cloud-storage`` **dependency to** ``>=3.14.1``. (#1039, #1050)
+
+**Contributor Tooling: Agent Skills**
+
+The repository now includes AI coding-agent skills under ``_agents/skills/`` (https://github.com/fsspec/gcsfs/tree/main/_agents/skills) for performance work on GCSFS:
+
+* ``create-microbenchmark``: instructions for scaffolding a new microbenchmark for a given method under ``gcsfs/tests/perf/microbenchmarks``. It first checks that no benchmark for that method exists yet, and asks for confirmation if a method it calls is already benchmarked. (#1012)
+* ``autoresearch-profiling``: profile-guided performance optimization. It picks a profiler (py-spy, cProfile, or memory_profiler) to find bottlenecks, then drives modify → verify → keep/discard iterations against microbenchmark or subsystem-benchmark metrics. The iteration loop requires the separate ``autoresearch`` skill, which is not included in this repository. (#1071)
+
+2026.8.1
+--------
 
 * Default ``cat_file`` concurrency to 1 (#1048).
   Restores single-request sequential reads without range headers or extra round-trips
