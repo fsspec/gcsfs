@@ -22,6 +22,12 @@ _NEW_COLS = [
     "checkpoint_read_request_count",
     "checkpoint_read_amplification_ratio",
 ]
+# report.generate_csv writes "N/A" for extra_info keys a case did not publish.
+_MISSING_VALUES = (None, "", "N/A")
+
+
+def _has_value(value):
+    return value not in _MISSING_VALUES
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,12 +110,12 @@ def enrich_csv(csv_path, project, *, client):
 
         # Check if this row is for dataset or checkpoint read
         prefix = None
-        if "dataset_size_bytes" in row and row["dataset_size_bytes"]:
+        if _has_value(row.get("dataset_size_bytes")):
             prefix = "dataset"
         elif (
             row.get("workload_scenario") == "checkpoint_read"
-            or row.get("checkpoint_read_throughput_mean_bytes_per_second")
-        ) and row.get("checkpoint_physical_size_bytes"):
+            or _has_value(row.get("checkpoint_read_throughput_mean_bytes_per_second"))
+        ) and _has_value(row.get("checkpoint_physical_size_bytes")):
             prefix = "checkpoint"
 
         if not prefix:
