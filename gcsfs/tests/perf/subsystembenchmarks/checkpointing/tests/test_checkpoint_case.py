@@ -8,6 +8,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing import checkpoint_case
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.configurator import (
     CheckpointParameters,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointDriver
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +24,7 @@ class _FakeWriteResult:
         self.extra_columns = extra_columns or {}
 
 
-class _FakeWriteDriver:
+class _FakeWriteDriver(CheckpointDriver):
     def __init__(self, durations=None):
         self._durations = durations or [1.0, 1.5]
         self.setup_prefix = None
@@ -81,7 +82,7 @@ def _local_bucket_ctx(tmp_path):
     return ctx
 
 
-class _FakeReadDriver:
+class _FakeReadDriver(CheckpointDriver):
     def setup(self, prefix, params):
         pass
 
@@ -232,3 +233,46 @@ def test_checkpoint_case_prefix_generation(monkeypatch):
     )
 
     assert driver_name.run_prefix == "gs://my-bucket-name/checkpoint/"
+
+
+class _FakeDcpDriver(_FakeWriteDriver):
+    def is_checkpoint_file(self, path: str) -> bool:
+        return path.endswith(".distcp") or path.endswith(".metadata")
+
+
+def test_physical_size_uses_driver_filter(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            mem_url = url.replace("gs://", "memory://")
+            fs, path = original_url_to_fs(mem_url)
+            # Create files: .distcp (300 B), .metadata (100 B), and a model.ckpt decoy (999 B)
+            fs.makedirs(path, exist_ok=True)
+            for fname, size in [
+                ("shard_0.distcp", 300),
+                (".metadata", 100),
+                ("model.ckpt", 999),
+            ]:
+                with fs.open(os.path.join(path, fname), "wb") as f:
+                    f.write(b"x" * size)
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+
+    bench = _Bench()
+    params = _params()
+    driver = _FakeDcpDriver()
+
+    checkpoint_case.run_checkpoint_case(
+        bench,
+        _Monitor(),
+        params,
+        driver,
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+
+    assert bench.extra_info["checkpoint_physical_size_bytes"] == 400
