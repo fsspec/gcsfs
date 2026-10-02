@@ -59,3 +59,67 @@ scenarios:
       - 64
     chunk_sizes_mb:
       - [0.0625, 1, 4, 16]
+
+  # Many 1 MB ranges on a 10 GB file: 1000 / 2000 / 5000 ranges
+  # (1 / 2 / 5 GB per call).
+  - name: "cat_ranges_many_ranges_sweep"
+    pattern: "rand"
+    files: 1
+    file_sizes_mb:
+      - 10240 # 10 GB
+    num_ranges_list:
+      - 1000
+      - 2000
+      - 5000
+    chunk_sizes_mb:
+      - [1]
+
+  # Many small mixed ranges on a 50 GB file: 1000 / 2000 / 5000 ranges of
+  # 64 KB, 1 MB and 4 MB (~1.7 / 3.4 / 8.4 GB per call).
+  - name: "cat_ranges_many_mixed_ranges"
+    pattern: "rand"
+    files: 1
+    file_sizes_mb:
+      - 51200 # 50 GB
+    num_ranges_list:
+      - 1000
+      - 2000
+      - 5000
+    chunk_sizes_mb:
+      - [0.0625, 1, 4]
+
+  # Few large ranges on a 10 GB file: 8 x 64 MB (0.5 GB), 8 x 256 MB (2 GB)
+  # and 8 x 1 GB (8 GB) per call.
+  - name: "cat_ranges_large_ranges_sweep"
+    pattern: "rand"
+    files: 1
+    file_sizes_mb:
+      - 10240 # 10 GB
+    num_ranges_list:
+      - 8
+    chunk_sizes_mb:
+      - [64]
+      - [256]
+      - [1024]
+
+  # One 1 GB range out of a 10 GB file: exercises the single-range path.
+  - name: "cat_ranges_single_1gb_range"
+    pattern: "rand"
+    files: 1
+    file_sizes_mb:
+      - 10240 # 10 GB
+    num_ranges_list:
+      - 1
+    chunk_sizes_mb:
+      - [1024]
+
+  # 50 GB file with ranges spanning 1 MB to 1 GB (~10 GB per call).
+  - name: "cat_ranges_huge_file_mixed"
+    pattern: "rand"
+    files: 1
+    file_sizes_mb:
+      - 51200 # 50 GB
+    num_ranges_list:
+      - 32
+    chunk_sizes_mb:
+      - [1, 16, 256, 1024]
