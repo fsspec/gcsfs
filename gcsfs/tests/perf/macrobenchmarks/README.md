@@ -1,210 +1,195 @@
 # GCSFS Macrobenchmarks
 
-## Introduction
+A macrobenchmark is an end-to-end, training-shaped run on GKE that measures
+one `gcsfs` build under realistic storage I/O:
 
-The GCSFS macrobenchmark is an end-to-end, training-shaped performance test.
-It measures a specific `gcsfs` build under streaming Parquet reads and
-periodic model-state checkpoint writes and restores. Every `gs://` data or
-checkpoint transfer uses `gcsfs`/`fsspec`, not a PyArrow native-GCS client.
-Ray Train checkpoints pass through Ray-managed local staging before upload or
-after download; the staged payload is the complete native checkpoint, not a
-smaller substitute for the measured GCS transfer.
+- streaming Parquet dataset reads,
+- periodic checkpoint writes,
+- checkpoint restore, and
+- deletion of old checkpoints.
 
-Two selectable workloads share the existing Cloud Build, metrics, and BigQuery
-contracts:
+Dataset reads and checkpoint transfers to and from `gs://` go through
+`gcsfs`/`fsspec`.
 
-| Workload | Execution model | Default use |
+To run it, use Cloud Build; see
+[`cloudbuild/macrobenchmarks/README.md`](../../../../cloudbuild/macrobenchmarks/README.md).
+
+## Workloads
+
+Choose a workload with the Cloud Build substitution `_WORKLOAD`.
+
+| `_WORKLOAD` | Stack | Compute |
 | :-- | :-- | :-- |
-| `hf-datasets-pytorch-lightning` | HuggingFace Datasets + PyTorch-Lightning CPU simulation (with frozen weights and sleep-based compute) or real GPU training. | Existing storage-I/O benchmark. |
-| `ray-data-ray-train-pytorch` | Ray Data packed input and Ray Train PyTorch DDP, FSDP2, or DP+TP. | GPU reference training or a CPU translation of that same data, distributed, checkpoint, and metric path. |
+| `hf-datasets-pytorch-lightning` (default) | Hugging Face Datasets streaming → PyTorch Lightning, launched with `torchrun` | CPU only. See below. |
+| `ray-data-ray-train-pytorch` | Ray Data → Ray Train `TorchTrainer` | CPU by default. GPU with `workload.gpu=true`. |
 
-The Ray workload's GPU mode trains the real Llama model. Its CPU mode retains
-the complete Llama model and AdamW state, Ray Data graph, Ray Train
-orchestration, distributed wrappers, optimizer/scheduler lifecycle, gcsfs
-checkpoint transfer, and metric/failure flow. A small token-derived probe and
-`SIMULATED_STEP_COMPUTE_SECONDS` replace accelerator-only decoder compute. CPU
-results therefore measure realistic I/O behavior, not Llama compute throughput.
+**Lightning workload**
 
-> **This README describes the workload itself (what it is and what it
-> measures).** To actually run the benchmark and collect metrics, use the Cloud
-> Build automation documented in
-> [`cloudbuild/macrobenchmarks/README.md`](../../../../cloudbuild/macrobenchmarks/README.md).
-> The Ray-specific event and strict-failure contract is documented
-> in [`workloads/ray-data-ray-train-pytorch/README.md`](workloads/ray-data-ray-train-pytorch/README.md).
+- The chart requests no GPUs, so training runs on CPU. The script uses a GPU
+  only when `torch.cuda.is_available()` is true.
+- Llama-3.1-8B is loaded and frozen. A small `Linear(8, 8)` layer provides
+  the loss.
+- With `ddp` (the default), the optimizer holds only the frozen model, so no
+  weights change.
+- Each step sleeps for `SIMULATED_STEP_COMPUTE_SECONDS` in place of real
+  compute.
+- The legacy name `hf-pytorch-lightning-cpu` is still accepted for
+  `_WORKLOAD`, and it is still the `workload_name` recorded in BigQuery.
 
-## Workload architecture
+**Ray workload**
 
-A run is a Kubernetes JobSet on a GKE cluster, deployed by the selected Helm
-chart. The existing Lightning workload follows its `torchrun` chain. The Ray
-workload follows this chain from the outside in:
+- CPU mode (the default): Llama-3.1-8B is loaded and frozen. A small probe
+  model provides the loss. Each step sleeps for
+  `SIMULATED_STEP_COMPUTE_SECONDS`.
+- GPU mode (`workload.gpu=true`): real Llama training.
 
-1. **Helm chart** (`workloads/ray-data-ray-train-pytorch/helm_chart/`) renders the
-   Kubernetes objects and injects the run's configuration (steps, checkpoint
-   interval, batch size, training strategy, gs:// paths, ...) from
-   `values_base.yaml` plus `--set` overrides.
-2. **JobSet** schedules one pod per node onto the dedicated node pool (pinned
-   via `nodeSelector`). Pod 0 has stable headless-Service DNS and starts the Ray
-   head; the remaining indexed pods start Ray workers.
-3. **`launcher.sh`** runs inside each pod: it installs the requested Python
-   packages (including the `gcsfs` build under test), pre-downloads the model if
-   `MODEL_ID` is a `gs://` path, and starts Ray.
-4. **Ray Train** uses fixed `train_slot` resources to place one training worker
-   per intended rank, then supplies the train loop's worker environment and
-   process groups.
-5. **Ray Data** projects the Parquet `text` column through a gcsfs-backed
-   `fsspec` filesystem, tokenizes and packs fixed-length examples, does bounded
-   shuffling, and splits data by data-parallel replica. Tensor-parallel
-   followers receive their leader's batch by collective broadcast.
-6. **`llama_3_1_8b_ray_train.py`** applies DDP, FSDP2, or FSDP2 plus tensor
-   parallelism; serializes or restores full and distributed checkpoints with
-   native PyTorch APIs; and publishes or downloads them through Ray Train's
-   gcsfs-backed storage filesystem.
+CPU results measure I/O behavior, not model compute speed.
+
+## How a run executes
+
+Cloud Build runs these steps:
+
+1. Validate the substitutions.
+2. In parallel:
+   - clean up resources leaked by earlier builds,
+   - create the per-run buckets and copy the dataset into one of them, and
+   - create a GKE cluster.
+3. Optionally make a seed checkpoint (see below).
+4. Install the workload's Helm chart.
+5. Scrape the metrics.
+6. Clean up. Fail the build if an earlier step recorded a failure.
+
+Inside the cluster:
+
+1. **Helm chart**: renders an indexed JobSet from `values_base.yaml` plus
+   `--set` overrides.
+2. **`launcher.sh`** (in every pod):
+   - installs the requirements, including the `gcsfs` build under test;
+   - stages the model (the order and the supported model sources differ per
+     chart);
+   - then starts training:
+     - Lightning: `torchrun` starts `ranksPerNode` processes per pod.
+     - Ray: pod 0 starts the Ray head and the driver, and the other pods join
+       as Ray workers. Ray Train starts `nodes × ranksPerNode` training
+       workers.
+
+The defaults are `nodes: 2` and `ranksPerNode: 4`, which gives 8 ranks.
 
 ## Training strategies
 
-`TRAINING_STRATEGY` selects the parallel-training strategy, which changes the
-checkpoint I/O shape. The Ray workload uses native PyTorch DDP and FSDP2; a
-configured initial checkpoint must come from the same strategy --
-cross-strategy restore is unsupported.
+`_TRAINING_STRATEGY` selects the parallelism, which sets the checkpoint shape.
 
-| Strategy       | Model sharding | Checkpoint IO exercised |
-| :------------- | :------------- | :---------------------- |
-| `ddp`          | Replicated on every rank | Single consolidated checkpoint written by rank 0. |
-| `fsdp_sharded` | Sharded across ranks | Per-rank sharded/distributed checkpoint (every rank writes its shard). |
-| `fsdp_full`    | Sharded across ranks | Consolidated to a single rank-0-written checkpoint at save time, like `ddp`. |
-| `model_parallel_sharded` | Sharded across ranks (2D mesh) | Per-rank sharded/distributed checkpoint (every rank writes its shard). |
-| `model_parallel_full` | Sharded across ranks (2D mesh) | Consolidated to a single rank-0-written checkpoint at save time. |
+| Strategy | Lightning | Ray | Checkpoint |
+| :-- | :-- | :-- | :-- |
+| `ddp` | DDP | DDP | One file, written by rank 0 |
+| `fsdp_full` | FSDP (`FSDPStrategy`) | FSDP2 | One file, written by rank 0 |
+| `fsdp_sharded` | FSDP (`FSDPStrategy`) | FSDP2 | One shard per rank |
+| `model_parallel_full` | `ModelParallelStrategy` | FSDP2 + tensor parallel | One file, written by rank 0 |
+| `model_parallel_sharded` | `ModelParallelStrategy` | FSDP2 + tensor parallel | One shard per rank |
 
-## Checkpoint I/O and warm starts
+## Checkpoints
 
-Every save contains model, optimizer, scheduler, precision-scaler, per-rank
-random-number-generator, and compatibility state. It is serialized in
-native PyTorch full or distributed-checkpoint format in Ray-managed local staging.
-Ray Train then uploads that complete file or shard directory through the
-PyArrow FSSpec adapter around `gcsfs.GCSFileSystem`. Uploads remain asynchronous
-during training, and every worker waits for the final report to be committed
-before the JobSet can succeed.
+The following Cloud Build settings apply to both workloads:
 
-When `CKPT_TO_KEEP` is exceeded, Ray retention deletes the actual superseded
-GCS object or sharded prefix after the replacement checkpoint is committed.
-Deleting only a local staging directory does not satisfy the benchmark's
-retention path.
+- `_CHECKPOINT_INTERVAL` sets how often a checkpoint is saved.
+- `_CKPT_TO_KEEP` sets how many checkpoints are kept. Older ones are deleted
+  from GCS.
+- `_SEED_CHECKPOINT=true` (the default) first runs a 1-step seed job that
+  writes a checkpoint, and the measured run then restores from it.
+- `_CHECKPOINT_LOAD_PATH`, if set, is restored instead of the seed checkpoint.
 
-An explicitly configured initial checkpoint is a warm start for a new
-benchmark run. The complete training state is restored before the new data
-iterator is created, but it does not restore the producer's data cursor,
-epoch, or step counter. The consumer begins at epoch zero and run-local step
-zero, and `MAX_STEPS` counts only new optimizer steps in the consumer run.
-Automatic Ray trial recovery is disabled.
+The two workloads save and restore differently:
 
-Model download is separate setup work and may continue to use the launcher's
-`gcloud storage cp` staging step. Dataset reads, checkpoint uploads, checkpoint
-downloads, and retention deletion remain the GCS I/O paths under test.
+| | Lightning | Ray |
+| :-- | :-- | :-- |
+| Save | Synchronous, through Lightning `ModelCheckpoint`. | Written to a local temp directory, then uploaded asynchronously by Ray Train. At most one upload is in flight at a time. |
+| Restore | Full resume through `trainer.fit(ckpt_path=...)`. | Warm start: model, optimizer, and scheduler state are restored, but step and epoch restart at 0. |
+| Compatibility | No explicit check. | These must match the new run: schema version, format, strategy, world size, TP/DP sizes, and SHA-256 hashes of the model `config.json` and tokenizer files. |
 
-## What this benchmark measures
+## Metrics
 
-The run emits one flat summary row per execution. Metrics are grouped into the
-families below. (MFU/TFLOPs are intentionally **excluded** -- this benchmark is
-about storage IO, not compute efficiency.) The concrete BigQuery column names
-for each family live in the automation README's schema section.
+Each run produces one summary row. For column names, see
+[`macrobenchmarks_schema.json`](../../../../cloudbuild/macrobenchmarks/macrobenchmarks_schema.json).
 
-| Metric family        | What it captures | What it isolates about GCS |
-| :------------------- | :--------------- | :------------------------- |
-| **Step time**        | Mean per-step duration, plus total/average over a "training window" (all steps) and a "stable window" (after warm-up). | End-to-end training throughput, which folds in dataloader stalls. |
-| **Checkpoint write** | Wall-time to persist the full state dict, aggregated across the run (min/avg/percentiles/p100). | Write throughput of large sequential objects to GCS. |
-| **Checkpoint restore** | Wall-time to restore checkpoint state during the initial load. | Read throughput / latency of the restore path. |
-| **Checkpoint delete** | Wall-time to prune old checkpoints when `checkpoints_to_keep` is exceeded. | Delete / object-lifecycle latency. |
-| **Data loading**     | Accelerator-blocked time and percentage -- how long the trainer stalled waiting on the dataloader. | Whether GCS dataset reads keep up with the training loop. |
-| **System / resource** | Per-pod peak/mean CPU cores, memory bytes, and network send/receive rates. | Host-side pressure the IO path generates. |
-| **Read amplification** | Bytes actually read from GCS vs. logical checkpoint/dataset size (amplification ratio). | Read-efficiency of `gcsfs` -- redundant or over-fetched bytes. |
+| Family | Covers |
+| :-- | :-- |
+| Step time | Per-step duration, over all steps and over a stable window that skips the first 10 steps. |
+| Checkpoint write / restore / delete | Duration statistics for each, checkpoint size, and write and restore throughput. |
+| Data loading | Time the trainer waited for input batches. |
+| System | The highest per-pod peak and mean CPU, memory, and network, plus peak CPU and memory as a fraction of node allocatable capacity. |
+| Read amplification | GCS bytes served ÷ ideal bytes (see below). |
 
-## Ray workload layout
+- **Ray checkpoint write time** covers only the upload to GCS, taking the
+  slowest rank. It does not include serializing to local staging.
+- **Dataset read amplification** = GCS bytes read from the dataset bucket ÷
+  (steps × global batch size × dataset bytes per sample).
+- **Checkpoint read amplification** = GCS bytes read from the per-run
+  checkpoint bucket ÷ size of the restored checkpoint. Reads from an external
+  `_CHECKPOINT_LOAD_PATH` bucket are not counted.
+- These columns are best effort and can be empty: system,
+  read-amplification, and restore-throughput.
+- MFU/TFLOPs are not reported.
 
-```
-workloads/ray-data-ray-train-pytorch/helm_chart/
-├── Chart.yaml
-├── values_base.yaml            # Default knobs; overridden per run via `--set`.
-├── llama_3_1_8b_ray_train.py   # Ray Data, Ray Train, parallelism, and checkpoints.
-├── launcher.sh                 # Per-pod entrypoint: installs deps and starts Ray.
-├── requirements.txt            # Ray and userspace deps; deliberately torch-free.
-├── requirements-cpu.txt        # CPU-only PyTorch source and exact pin.
-└── templates/
-    ├── workload-job.yaml                    # Indexed JobSet and optional GPUs.
-    ├── workload-svc.yaml                    # Headless service for the Ray head.
-    ├── workload-config-configmap.yaml       # Mounts Python and both requirements files.
-    └── workload-launcher-configmap.yaml     # Mounts launcher.sh.
-```
+## Inputs
 
-## Dataset and model requirements
+- **`_DATASET_PATH`**: a `gs://` directory with `*.parquet` files, each with a
+  `text` column.
+  - Only top-level `*.parquet` files are read.
+  - The whole directory is copied into a per-run bucket.
+  - Dataset read amplification estimates bytes per sample from the largest
+    object in that bucket, so keep only the Parquet files there.
+- **`_MODEL_ID`**: defaults to `gs://huggingface-model-weights/Llama-3.1-8B`.
+  - A `gs://` model is copied to the pod with `gcloud storage cp`, not
+    `gcsfs`.
+  - A Hugging Face repo ID also works, together with `_HF_TOKEN`.
+- **`_REQUIREMENTS`**: the `gcsfs` build under test. This is required. It is
+  installed with `--no-cache-dir`.
 
-The pipeline copies your inputs into per-run buckets, but you must stage them
-first:
+## Node-local cache
 
-* **Dataset** (`_DATASET_PATH`): a GCS directory of `*.parquet` shards, each
-  containing a `text` column. The Ray workload resolves the URI through
-  `fsspec.core.url_to_fs`, verifies `gcsfs.GCSFileSystem`, and passes its
-  PyArrow fsspec adapter to `ray.data.read_parquet` before tokenizing and
-  packing the `text` field.
-* **Model** (`_MODEL_ID`): the gated Llama 3.1 8B weights, supplied either as a
-  HuggingFace repo id (requires `_HF_TOKEN`) or -- to avoid the gated download on
-  every rank -- a `gs://` directory holding a pre-staged copy of the weights and
-  tokenizer files.
+Both charts mount the node directory `workload.hostCachePath` (default
+`/var/lib/gcsfs-macrobench`) at `/workload/cache` in each pod. The measured
+run on a node can then reuse what the seed run on that node downloaded. It
+caches:
 
-## Node-local bootstrap cache
+- pip wheels,
+- the model, when the launcher stages it, and
+- the gcloud SDK, when the image lacks `gcloud`.
 
-A run with `_SEED_CHECKPOINT=true` (the default) starts two pod generations on
-the same nodes: the `seed-checkpoint` release, then the measured release. Both
-run the same `launcher.sh`, so without a cache the measured run re-fetches the
-~16 GB of model weights, the gcloud CLI, and every wheel the seed run already
-staged -- roughly 32 GB of redundant transfer per run while the node pool sits
-idle.
+Cloud Build deletes the cluster at the end of each build (unless
+`_SKIP_CLEANUP=true`), and the cache is deleted with it.
 
-Both charts therefore mount a `hostPath` at `/workload/cache`, controlled by
-`workload.hostCachePath` (default `/var/lib/gcsfs-macrobench`), and stage the
-model, the gcloud SDK, and the pip wheel cache into it. The directory is
-node-local and the benchmark cluster is created and deleted per build, so
-nothing survives a run and no state carries between builds.
+To turn the cache off, set the Helm value `workload.hostCachePath=""`. Cloud
+Build does not expose this setting.
 
-* **It moves no metric.** The model download deliberately goes through `gcloud`,
-  not `gcsfs`, precisely so it stays out of the bucket-level read counters that
-  feed `dataset_read_bytes` and the amplification ratios. The build under test is
-  always installed with `--no-cache-dir`, so a re-pushed artifact at an unchanged
-  URL can never be served stale from the pip cache.
-* **Cache entries are published atomically.** Each is staged into a sibling
-  directory and renamed into place only after a `.complete` marker is written, so
-  a pod killed mid-download cannot leave a partial directory that the next pod
-  mistakes for a hit. Two pods staging the same entry on one node is also safe:
-  whoever finishes second sees the other's marker and keeps their copy rather
-  than replacing a directory that is already being read. (The `podAntiAffinity`
-  only excludes pods of the *same* release, so this is reachable whenever
-  `singlePodPerNode` is off or two releases are installed onto a shared pool.)
-* **Set `workload.hostCachePath=""` to disable it.** The volume, mount, and
-  `HOST_CACHE_PATH` env var all disappear and every pod bootstraps from scratch,
-  which is the behaviour to fall back to if a cluster policy disallows `hostPath`.
+## GPU
 
-## Running it
+Cloud Build never sets `workload.gpu`, so Cloud Build runs are CPU only.
 
-Standing up the GKE cluster, running the workload, scraping the metrics, and
-ingesting them into BigQuery is all driven by Cloud Build. See
-[`cloudbuild/macrobenchmarks/README.md`](../../../../cloudbuild/macrobenchmarks/README.md)
-for prerequisites, the full substitutions reference, trigger setup, and where
-the metrics land. Select the Ray workload through the retained trigger setting:
+The Ray chart supports `workload.gpu=true` when you deploy it with Helm
+directly onto a GPU node pool. It then requests `ranksPerNode` GPUs per pod and
+adds a `nvidia.com/gpu` `NoSchedule` toleration.
+
+## Layout
 
 ```text
-_WORKLOAD=ray-data-ray-train-pytorch
+workloads/
+├── hf-datasets-pytorch-lightning/helm_chart/
+│   ├── Chart.yaml
+│   ├── values_base.yaml
+│   ├── train_pytorch_lightning.py
+│   ├── launcher.sh
+│   ├── requirements.txt
+│   └── templates/          # JobSet, headless Service, ConfigMaps
+└── ray-data-ray-train-pytorch/
+    ├── helm_chart/
+    │   ├── Chart.yaml
+    │   ├── values_base.yaml
+    │   ├── llama_3_1_8b_ray_train.py
+    │   ├── metric_logging.py
+    │   ├── launcher.sh
+    │   ├── requirements.txt
+    │   ├── requirements-cpu.txt
+    │   └── templates/      # JobSet, headless Service, ConfigMaps
+    └── tests/
 ```
-
-The Cloud Build run pipeline remains CPU-default. GPU runs are direct Helm
-deployments to an already provisioned GPU-capable node pool; they do not add a
-Cloud Build accelerator substitution. For example:
-
-```bash
-helm install ray-train-gpu \
-  gcsfs/tests/perf/macrobenchmarks/workloads/ray-data-ray-train-pytorch/helm_chart \
-  -f gcsfs/tests/perf/macrobenchmarks/workloads/ray-data-ray-train-pytorch/helm_chart/values_base.yaml \
-  --set workload.gpu=true \
-  --set 'nodeSelector.cloud\.google\.com/gke-nodepool=<gpu-node-pool>'
-```
-
-`workload.gpu=true` requests one `nvidia.com/gpu` per `ranksPerNode` and adds
-the NVIDIA `NoSchedule` toleration. Leave it unset for the CPU translation.
