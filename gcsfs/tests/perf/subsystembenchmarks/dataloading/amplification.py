@@ -140,15 +140,22 @@ def enrich_csv(csv_path, project, *, client):
             )
             # Normalize GCS bytes sent by stored bytes times measured rounds.
             rounds = int(float(row.get("measurement_round_count") or 1))
+            from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
             reqs = bucket_read_requests(client, project, bucket, ws, we)
-            if egress is not None:
+            if (
+                rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
+                and egress in (None, 0.0)
+                and reqs in (None, 0.0)
+            ):
+                egress = 0.0
+                reqs = 0.0
+            ideal = physical_size * rounds
+            if egress is not None and reqs is not None and ideal > 0:
                 row[f"{prefix}_read_bytes"] = str(int(egress))
-                ideal = physical_size * rounds
-                if ideal:
-                    row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
-            if reqs is not None:
                 row[f"{prefix}_read_request_count"] = str(int(reqs))
+                row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
         except Exception as exc:
             logging.warning("amplification scrape failed for %s: %s", bucket, exc)
 

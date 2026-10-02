@@ -1,0 +1,188 @@
+"""Per-case GCS Rapid Cache (Anywhere Cache) lifecycle and warmup helpers."""
+
+import logging
+import os
+import time
+
+RAPID_CACHE_BUCKET_TYPES = ("rapid_cache_cold", "rapid_cache_warm")
+DEFAULT_TIMEOUT_SECONDS = 3600
+DEFAULT_POLL_SECONDS = 10
+DEFAULT_WARMUP_PASSES = 2
+DEFAULT_WARMUP_SETTLE_SECONDS = 65
+_PENDING_STATES = ("CREATING", "PROVISIONING", "PENDING", "")
+
+
+def is_rapid_cache_bucket_type(bucket_type):
+    """Return True if bucket_type provisions a per-case Rapid Cache."""
+    return bucket_type in RAPID_CACHE_BUCKET_TYPES
+
+
+def ingest_on_write_for(bucket_type):
+    """Return True if the Rapid Cache should enable ingestOnWrite."""
+    if bucket_type == "rapid_cache_warm":
+        return True
+    if bucket_type == "rapid_cache_cold":
+        return False
+    raise ValueError(f"not a Rapid Cache bucket_type: {bucket_type!r}")
+
+
+def timeout_from_env():
+    """Return Rapid Cache creation timeout in seconds from env or default."""
+    raw = os.environ.get(
+        "GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS)
+    )
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT must be a positive integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT must be > 0, got {value}"
+        )
+    return value
+
+
+def create(fs, bucket, zone, *, ingest_on_write):
+    """Initiate Rapid Cache creation on bucket in zone via GCS JSON API."""
+    return fs.call(
+        "POST",
+        f"b/{bucket}/anywhereCaches",
+        json={"zone": zone, "ingestOnWrite": bool(ingest_on_write)},
+        json_out=True,
+    )
+
+
+def wait_running(
+    fs,
+    bucket,
+    zone,
+    *,
+    timeout=DEFAULT_TIMEOUT_SECONDS,
+    poll=DEFAULT_POLL_SECONDS,
+    sleep=time.sleep,
+    clock=time.monotonic,
+):
+    """Poll GET anywhereCaches/{zone} until state == 'RUNNING'."""
+    if timeout <= 0:
+        raise ValueError(f"timeout must be > 0, got {timeout}")
+    if poll <= 0:
+        raise ValueError(f"poll must be > 0, got {poll}")
+    deadline = clock() + timeout
+    last_state = "UNKNOWN"
+    while True:
+        try:
+            raw = fs.call("GET", f"b/{bucket}/anywhereCaches/{zone}", json_out=True)
+            resp = raw if isinstance(raw, dict) else {}
+            raw_state = resp.get("state")
+            state = str(raw_state if raw_state is not None else "").strip().upper()
+        except FileNotFoundError:
+            resp = {}
+            state = "CREATING"
+            last_state = "NOT_FOUND"
+        else:
+            last_state = state or last_state
+        if state == "RUNNING":
+            return resp
+        if state not in _PENDING_STATES:
+            raise RuntimeError(
+                f"Rapid Cache for bucket {bucket!r} in zone {zone!r} entered "
+                f"unexpected state {state!r}: {resp}"
+            )
+        if clock() >= deadline:
+            raise TimeoutError(
+                f"Timed out after {timeout}s waiting for Rapid Cache on bucket "
+                f"{bucket!r} in zone {zone!r} to reach RUNNING (last state: {last_state!r})"
+            )
+        sleep(poll)
+
+
+def disable(fs, bucket, zone):
+    """Best-effort disable of the Rapid Cache on bucket in zone."""
+    try:
+        fs.call("POST", f"b/{bucket}/anywhereCaches/{zone}/disable", json_out=True)
+    except Exception as exc:
+        logging.warning(
+            "could not disable Rapid Cache on bucket %s (%s): %s", bucket, zone, exc
+        )
+
+
+def warm_if_needed(
+    prefix,
+    bucket_type,
+    *,
+    fs=None,
+    passes=DEFAULT_WARMUP_PASSES,
+    settle_seconds=DEFAULT_WARMUP_SETTLE_SECONDS,
+    sleep=time.sleep,
+):
+    """Read every object under prefix (untimed) and settle when bucket_type is rapid_cache_warm.
+
+    Under high concurrent write load (e.g. 64 workers closing ~95 MiB shards
+    simultaneously), ``ingestOnWrite=True`` only finishes admitting ~75% of the
+    corpus immediately after ``ingest()`` returns. Running multiple warmup
+    passes with a post-pass settle delay ensures asynchronous admit-on-miss
+    completes for every shard and separates warmup reads from the timed Cloud
+    Monitoring minute bucket.
+    """
+    if passes <= 0:
+        raise ValueError(f"passes must be > 0, got {passes}")
+    if settle_seconds < 0:
+        raise ValueError(f"settle_seconds must be >= 0, got {settle_seconds}")
+    if bucket_type != "rapid_cache_warm" or not str(prefix).startswith("gs://"):
+        return 0
+    if fs is None:
+        import fsspec
+
+        import gcsfs
+
+        if not hasattr(gcsfs.GCSFileSystem, "_get_kwargs_from_urls"):
+            fs = gcsfs.GCSFileSystem(skip_instance_cache=True)
+        else:
+            try:
+                fs, _ = fsspec.core.url_to_fs(prefix, skip_instance_cache=True)
+            except TypeError:
+                fs, _ = fsspec.core.url_to_fs(prefix)
+    try:
+        protocols = getattr(fs, "protocol", ("gs", "gcs"))
+        if isinstance(protocols, str):
+            protocols = (protocols,)
+        uses_gs_protocol = "gs" in protocols or "gcs" in protocols
+        find_target = prefix if uses_gs_protocol else str(prefix)[len("gs://") :]
+        objects = sorted(
+            obj
+            for obj in fs.find(find_target)
+            if not str(obj).endswith("/")
+            and not (hasattr(fs, "isdir") and fs.isdir(obj))
+        )
+        if not objects:
+            raise RuntimeError(f"no objects found to warm under {prefix!r}")
+
+        import concurrent.futures
+
+        def _warm_one(obj):
+            if uses_gs_protocol:
+                url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
+            else:
+                url = obj
+            if hasattr(fs, "open"):
+                total = 0
+                with fs.open(url, "rb") as f:
+                    while chunk := f.read(16 * 1024 * 1024):
+                        total += len(chunk)
+                return total
+            return len(fs.cat_file(url))
+
+        total = 0
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(16, len(objects))
+        ) as pool:
+            for _ in range(passes):
+                total = sum(pool.map(_warm_one, objects))
+                if settle_seconds > 0:
+                    sleep(settle_seconds)
+        return total
+    finally:
+        if hasattr(fs, "invalidate_cache"):
+            fs.invalidate_cache()

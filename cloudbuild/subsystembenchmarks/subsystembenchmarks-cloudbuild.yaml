@@ -3,7 +3,7 @@ substitutions:
   _INFRA_PREFIX: ""
   _VM_SERVICE_ACCOUNT: ""
   _GROUP: "dataloading/huggingface_datasets"
-  _BUCKET_TYPE: "regional"  # regional | zonal | hns (one type per run, like macrobenchmarks)
+  _BUCKET_TYPE: "regional"  # regional | zonal | hns | rapid_cache_cold | rapid_cache_warm (one type per run, like macrobenchmarks)
   _MACHINE_TYPE: "c4-standard-192"  # CPU now; point at a GPU type later (auto-detect handles backend)
   _REQUIREMENTS: ""
   _SWEEP_AXES: ""
@@ -11,6 +11,7 @@ substitutions:
   _HF_TOKEN: ""
   _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
   _BOOT_DISK_SIZE: "200GB"
+  _RAPID_CACHE_TIMEOUT: "3600"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -23,7 +24,7 @@ steps:
         mkdir -p /workspace/.ssh
         ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
-        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h
+        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=5h
     waitFor: ["-"]
 
   # 2. Initialize shared variables.
@@ -45,6 +46,7 @@ steps:
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_BOOT_DISK_SIZE=${_BOOT_DISK_SIZE}"
+      - "_RAPID_CACHE_TIMEOUT=${_RAPID_CACHE_TIMEOUT}"
       - "PROJECT_ID=${PROJECT_ID}"
     args:
       - "-c"
@@ -62,7 +64,7 @@ steps:
         fi
 
         case "$${_BUCKET_TYPE}" in
-          regional|zonal|hns) ;;
+          regional|zonal|hns|rapid_cache_cold|rapid_cache_warm) ;;
           *) echo "ERROR: unknown _BUCKET_TYPE '$${_BUCKET_TYPE}'"; exit 1;;
         esac
 
@@ -94,6 +96,7 @@ steps:
           printf 'export HF_TOKEN=%q\n' "$${_HF_TOKEN}"
           printf 'export MODEL_ID=%q\n' "$${_MODEL_ID}"
           printf 'export BOOT_DISK_SIZE=%q\n' "$${_BOOT_DISK_SIZE}"
+          printf 'export RAPID_CACHE_TIMEOUT=%q\n' "$${_RAPID_CACHE_TIMEOUT}"
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
@@ -119,13 +122,39 @@ steps:
 
           if [ $$AGE -gt $$THRESHOLD ]; then
             echo "Deleting leaked VM: $$name in zone $$zone (Age: $$AGE seconds)"
-            gcloud compute instances delete "$$name" --project="${PROJECT_ID}" --zone="$$zone" --quiet || true
+            gcloud compute instances delete "$$name" --project="${PROJECT_ID}" --zone="$$zone" --quiet < /dev/null || true
           else
             echo "Skipping VM: $$name (Age: $$AGE seconds)"
           fi
         done
+
+        TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
+        gcloud storage buckets list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-'" --format="value(name,creation_time)" | while read -r name creation_time; do
+          if [ -z "$$name" ]; then continue; fi
+          CLEAN_NAME="$${name#gs://}"
+          CLEAN_NAME="$${CLEAN_NAME%/}"
+          if [ "$$CLEAN_NAME" = "$${RESULTS_BUCKET}" ] || [ "$$CLEAN_NAME" = "${_INFRA_PREFIX}-run-results" ]; then continue; fi
+          if [[ ! "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}-(regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}- ]]; then continue; fi
+
+          CREATION_SECONDS=$$(date -d "$$creation_time" +%s 2>/dev/null) || continue
+          AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
+
+          if [ $$AGE -gt $$THRESHOLD ]; then
+            echo "Deleting leaked bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
+            for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" < /dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+              echo "Disabling leaked anywhere-cache on gs://$$CLEAN_NAME in zone $$z"
+              curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
+            done
+            gcloud storage rm --recursive "gs://$$CLEAN_NAME" < /dev/null || true
+            gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null || true
+          else
+            echo "Skipping bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
+          fi
+        done
+
     waitFor: ["init-variables"]
     allowFailure: true
+
 
   # 3. Ensure the persistent results bucket exists (the benchmark buckets are the run's own).
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -254,8 +283,9 @@ steps:
         gcloud compute instances delete "$$VM_NAME" --project="${PROJECT_ID}" --zone="$$ZONE" --quiet || true
     waitFor: ["run-subsystembenchmarks"]
 
-  # Safety net: each case deletes its own bucket, so this normally finds nothing. It exists
-  # for the run that crashed (or was cancelled) between creating a bucket and dropping it.
+  # Safety net: each case deletes its own objects and (for non-Rapid-Cache buckets) its bucket.
+  # For Rapid Cache runs, empty buckets remain in a 1-hour DISABLED grace period and are reaped
+  # by cleanup-leaked-resources on subsequent builds.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-buckets"
     entrypoint: "bash"
@@ -265,9 +295,23 @@ steps:
         source /workspace/build_vars.env
         LEAKED=$(gcloud storage ls --project=${PROJECT_ID} \
           | grep "^gs://$${BUCKET_PREFIX}-" || true)
+        TOKEN=$$(gcloud auth print-access-token 2>/dev/null || true)
         for b in $$LEAKED; do
-          echo "sweeping leaked benchmark bucket $$b"
-          gcloud storage rm --recursive "$$b" || true
+          CLEAN_NAME="$${b#gs://}"
+          CLEAN_NAME="$${CLEAN_NAME%/}"
+          CACHES_JSON=$$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" < /dev/null || echo "{}")
+          for z in $$(printf '%s' "$$CACHES_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+            echo "Disabling active anywhere-cache on $$b in zone $$z"
+            curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
+          done
+          gcloud storage rm --recursive "$$b/**" < /dev/null 2>/dev/null || true
+          HAS_CACHE=$$(printf '%s' "$$CACHES_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if d.get('items') else 'no')" 2>/dev/null || echo "no")
+          if [ "$$HAS_CACHE" = "yes" ]; then
+            echo "Objects removed from $$b; retaining empty bucket during 1-hour Rapid Cache disable grace period (will be reaped by cleanup-leaked-resources)"
+          else
+            echo "sweeping leaked benchmark bucket $$b"
+            gcloud storage rm --recursive "$$b" < /dev/null || gcloud storage buckets delete "$$b" --quiet < /dev/null || true
+          fi
         done
     waitFor: ["run-subsystembenchmarks"]
 
@@ -285,7 +329,7 @@ steps:
         echo "Build successful."
     waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key"]
 
-timeout: "14400s"
+timeout: "18000s"
 options:
   logging: CLOUD_LOGGING_ONLY
   pool:

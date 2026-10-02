@@ -195,3 +195,68 @@ def test_run_read_case_rejects_unsupported_format(tmp_path):
             _JsonOnly(rows=10),
             bucket_ctx=_local_bucket_ctx(tmp_path),
         )
+
+
+def test_run_read_case_invokes_warm_if_needed_before_timing(tmp_path, monkeypatch):
+    monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
+    order = []
+
+    def fake_warm(prefix, bucket_type):
+        order.append(("warm", bucket_type))
+        return 0
+
+    monkeypatch.setattr(read_case.rapid_cache, "warm_if_needed", fake_warm)
+
+    class _OrderDriver(_FakeDriver):
+        def run_read(self, prefix, params, manifest):
+            order.append(("run_read", params.bucket_type))
+            return super().run_read(prefix, params, manifest)
+
+    read_case.run_read_case(
+        _Bench(),
+        _Monitor(),
+        _params(bucket_type="rapid_cache_warm"),
+        _OrderDriver(rows=10),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert order == [("warm", "rapid_cache_warm"), ("run_read", "rapid_cache_warm")]
+
+
+def test_run_read_case_forces_single_round_for_rapid_cache_cold(tmp_path, monkeypatch):
+    monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
+    monkeypatch.setattr(read_case.rapid_cache, "warm_if_needed", lambda *a, **kw: 0)
+    seen_rounds = []
+
+    class _RoundDriver(_FakeDriver):
+        def run_read(self, prefix, params, manifest):
+            from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
+                ReadResult,
+            )
+
+            seen_rounds.append((params.bucket_type, params.rounds))
+            return ReadResult(
+                durations=[1.0] * params.rounds,
+                rows_per_epoch=[self._rows] * params.rounds,
+                ttfb_seconds=0.25,
+                build_seconds=self._build,
+            )
+
+    cold_bench = _Bench()
+    read_case.run_read_case(
+        cold_bench,
+        _Monitor(),
+        _params(bucket_type="rapid_cache_cold", rounds=3),
+        _RoundDriver(rows=10),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    warm_bench = _Bench()
+    read_case.run_read_case(
+        warm_bench,
+        _Monitor(),
+        _params(bucket_type="rapid_cache_warm", rounds=3),
+        _RoundDriver(rows=10),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert seen_rounds == [("rapid_cache_cold", 1), ("rapid_cache_warm", 3)]
+    assert cold_bench.extra_info["measurement_round_count"] == 1
+    assert warm_bench.extra_info["measurement_round_count"] == 3

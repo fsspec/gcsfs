@@ -11,7 +11,9 @@ import re
 import uuid
 from dataclasses import dataclass
 
-BUCKET_TYPES = ("regional", "zonal", "hns")
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
+BUCKET_TYPES = ("regional", "zonal", "hns", *rapid_cache.RAPID_CACHE_BUCKET_TYPES)
 _MAX_BUCKET_NAME = 63
 _SUFFIX_LEN = 8
 
@@ -64,10 +66,15 @@ class BucketSpec:
             raise ValueError(
                 f"unknown bucket_type {self.bucket_type!r}; expected one of {BUCKET_TYPES}"
             )
-        if self.bucket_type == "zonal" and not self.zone:
+        if (
+            self.bucket_type in ("zonal", *rapid_cache.RAPID_CACHE_BUCKET_TYPES)
+            and not self.zone
+        ):
             raise ValueError(
-                "zonal buckets need GCSFS_SUBSYSTEM_ZONE (the placement zone)"
+                f"{self.bucket_type} buckets need GCSFS_SUBSYSTEM_ZONE (the placement zone)"
             )
+        if rapid_cache.is_rapid_cache_bucket_type(self.bucket_type):
+            rapid_cache.timeout_from_env()
         if self.prefix != self.prefix.lower():
             # Bucket prefix must be lowercase (GCS bucket names cannot contain uppercase).
             raise ValueError(
@@ -78,7 +85,7 @@ class BucketSpec:
 
 def bucket_kwargs(spec):
     """buckets.insert body for this bucket type (gcsfs.mkdir forwards these verbatim)."""
-    if spec.bucket_type == "regional":
+    if spec.bucket_type in ("regional", *rapid_cache.RAPID_CACHE_BUCKET_TYPES):
         return {}
     body = {
         # HNS requires uniform bucket-level access.
@@ -99,14 +106,19 @@ def case_bucket_name(prefix, case_id):
     return f"{head}-{suffix}"
 
 
-def _delete(fs, name):
+def _delete(fs, name, spec=None):
     """Best-effort teardown; cloudbuild sweeps the prefix at the end as the safety net."""
+    if spec is not None and rapid_cache.is_rapid_cache_bucket_type(spec.bucket_type):
+        rapid_cache.disable(fs, name, spec.zone)
     try:
         fs.rm(f"{name}/", recursive=True)
     except FileNotFoundError:
         pass
     except Exception as exc:
         logging.warning("could not empty benchmark bucket %s: %s", name, exc)
+    # GCS enforces a 1-hour grace period after disabling an Anywhere Cache during which
+    # buckets.delete returns HTTP 400; objects are already removed above, and Cloud Build's
+    # cleanup-leaked-resources sweeps the empty bucket once the grace period elapses.
     with contextlib.suppress(Exception):
         fs.rmdir(name)
 
@@ -114,6 +126,8 @@ def _delete(fs, name):
 @contextlib.contextmanager
 def case_bucket(spec, case_id, *, fs=None):
     """Create this case's bucket, yield its corpus prefix, delete it on the way out."""
+    is_rapid_cache = rapid_cache.is_rapid_cache_bucket_type(spec.bucket_type)
+    timeout = rapid_cache.timeout_from_env() if is_rapid_cache else None
     if fs is None:
         import gcsfs
 
@@ -121,9 +135,22 @@ def case_bucket(spec, case_id, *, fs=None):
     name = case_bucket_name(spec.prefix, case_id)
     fs.mkdir(name, location=spec.location, **bucket_kwargs(spec))
     try:
+        if is_rapid_cache:
+            rapid_cache.create(
+                fs,
+                name,
+                spec.zone,
+                ingest_on_write=rapid_cache.ingest_on_write_for(spec.bucket_type),
+            )
+            rapid_cache.wait_running(
+                fs,
+                name,
+                spec.zone,
+                timeout=timeout,
+            )
         yield f"gs://{name}/data/"
     finally:
-        _delete(fs, name)
+        _delete(fs, name, spec=spec)
 
 
 def local_case_bucket(root):
