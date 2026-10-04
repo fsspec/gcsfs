@@ -206,10 +206,13 @@ def test_run_read_case_invokes_warm_if_needed_before_timing(tmp_path, monkeypatc
         return 0
 
     monkeypatch.setattr(read_case.rapid_cache, "warm_if_needed", fake_warm)
+    monkeypatch.setattr(
+        read_case.rapid_cache, "settle", lambda *a, **kw: order.append(("settle",))
+    )
 
     class _OrderDriver(_FakeDriver):
         def run_read(self, prefix, params, manifest):
-            order.append(("run_read", params.bucket_type))
+            order.append(("run_read", params.bucket_type, params.rounds))
             return super().run_read(prefix, params, manifest)
 
     read_case.run_read_case(
@@ -219,12 +222,18 @@ def test_run_read_case_invokes_warm_if_needed_before_timing(tmp_path, monkeypatc
         _OrderDriver(rows=10),
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
-    assert order == [("warm", "rapid_cache_warm"), ("run_read", "rapid_cache_warm")]
+    assert order == [
+        ("run_read", "rapid_cache_warm", 1),
+        ("settle",),
+        ("warm", "rapid_cache_warm"),
+        ("run_read", "rapid_cache_warm", 2),
+    ]
 
 
 def test_run_read_case_forces_single_round_for_rapid_cache_cold(tmp_path, monkeypatch):
     monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
     monkeypatch.setattr(read_case.rapid_cache, "warm_if_needed", lambda *a, **kw: 0)
+    monkeypatch.setattr(read_case.rapid_cache, "settle", lambda *a, **kw: None)
     seen_rounds = []
 
     class _RoundDriver(_FakeDriver):
@@ -257,6 +266,66 @@ def test_run_read_case_forces_single_round_for_rapid_cache_cold(tmp_path, monkey
         _RoundDriver(rows=10),
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
-    assert seen_rounds == [("rapid_cache_cold", 1), ("rapid_cache_warm", 3)]
+    assert seen_rounds == [
+        ("rapid_cache_cold", 1),
+        ("rapid_cache_warm", 1),
+        ("rapid_cache_warm", 3),
+    ]
     assert cold_bench.extra_info["measurement_round_count"] == 1
     assert warm_bench.extra_info["measurement_round_count"] == 3
+    assert not any(k.startswith("rapid_cache_paired") for k in cold_bench.extra_info)
+
+
+def test_run_read_case_publishes_paired_cold_for_rapid_cache_warm(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
+    monkeypatch.setattr(read_case.rapid_cache, "warm_if_needed", lambda *a, **kw: 0)
+    monkeypatch.setattr(read_case.rapid_cache, "settle", lambda *a, **kw: None)
+
+    class _ColdSlowDriver(_FakeDriver):
+        def run_read(self, prefix, params, manifest):
+            from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
+                ReadResult,
+            )
+
+            # The single-round call is the paired cold epoch: make it 4x slower.
+            seconds = 4.0 if params.rounds == 1 else 1.0
+            return ReadResult(
+                durations=[seconds] * params.rounds,
+                rows_per_epoch=[self._rows] * params.rounds,
+                ttfb_seconds=0.25,
+                build_seconds=self._build,
+            )
+
+    bench = _Bench()
+    read_case.run_read_case(
+        bench,
+        _Monitor(),
+        _params(bucket_type="rapid_cache_warm", rounds=3),
+        _ColdSlowDriver(rows=10),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    info = bench.extra_info
+    assert info["dataset_read_throughput_mean_bytes_per_second"] == 1000.0
+    assert info["rapid_cache_paired_cold_read_throughput_bytes_per_second"] == 250.0
+    assert info["rapid_cache_paired_cold_round_duration_seconds"] == 4.0
+    assert info["rapid_cache_warm_over_paired_cold_speedup"] == 4.0
+    assert (
+        info["rapid_cache_paired_cold_window_start_unix_seconds"]
+        <= info["rapid_cache_paired_cold_window_end_unix_seconds"]
+        <= info["measurement_window_start_unix_seconds"]
+    )
+
+
+def test_run_read_case_rejects_partial_paired_cold_epoch(tmp_path, monkeypatch):
+    monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
+    monkeypatch.setattr(read_case.rapid_cache, "settle", lambda *a, **kw: None)
+    with pytest.raises(ValueError, match="partial read"):
+        read_case.run_read_case(
+            _Bench(),
+            _Monitor(),
+            _params(bucket_type="rapid_cache_warm"),
+            _FakeDriver(rows=3),
+            bucket_ctx=_local_bucket_ctx(tmp_path),
+        )

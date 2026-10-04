@@ -18,12 +18,24 @@ def is_rapid_cache_bucket_type(bucket_type):
 
 
 def ingest_on_write_for(bucket_type):
-    """Return True if the Rapid Cache should enable ingestOnWrite."""
-    if bucket_type == "rapid_cache_warm":
-        return True
-    if bucket_type == "rapid_cache_cold":
+    """Return True if the Rapid Cache should enable ingestOnWrite.
+
+    Neither type ingests on write: a warm case first times a paired cold epoch over
+    the uncached corpus on the same bucket, then fills the cache with explicit
+    warmup passes (ingestOnWrite only admitted ~75% of a concurrently written
+    corpus anyway).
+    """
+    if bucket_type in RAPID_CACHE_BUCKET_TYPES:
         return False
     raise ValueError(f"not a Rapid Cache bucket_type: {bucket_type!r}")
+
+
+def settle(seconds=DEFAULT_WARMUP_SETTLE_SECONDS, sleep=time.sleep):
+    """Idle long enough that adjacent phases fall in separate Cloud Monitoring minutes."""
+    if seconds < 0:
+        raise ValueError(f"seconds must be >= 0, got {seconds}")
+    if seconds:
+        sleep(seconds)
 
 
 def timeout_from_env():
@@ -119,12 +131,10 @@ def warm_if_needed(
 ):
     """Read every object under prefix (untimed) and settle when bucket_type is rapid_cache_warm.
 
-    Under high concurrent write load (e.g. 64 workers closing ~95 MiB shards
-    simultaneously), ``ingestOnWrite=True`` only finishes admitting ~75% of the
-    corpus immediately after ``ingest()`` returns. Running multiple warmup
-    passes with a post-pass settle delay ensures asynchronous admit-on-miss
-    completes for every shard and separates warmup reads from the timed Cloud
-    Monitoring minute bucket.
+    The cache is created with ``ingestOnWrite=False`` (see ``ingest_on_write_for``),
+    so the corpus is admitted asynchronously on read miss. Running multiple warmup
+    passes with a post-pass settle delay ensures admit-on-miss completes for every
+    shard and separates warmup reads from the timed Cloud Monitoring minute bucket.
     """
     if passes <= 0:
         raise ValueError(f"passes must be > 0, got {passes}")

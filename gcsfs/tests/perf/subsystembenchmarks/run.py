@@ -10,6 +10,9 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
     DEFAULT_TIMEOUT_SECONDS,
     RAPID_CACHE_BUCKET_TYPES,
 )
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache_hits import (
+    DEFAULT_MIN_WARM_HIT_RATIO,
+)
 
 
 def discover_groups():
@@ -100,6 +103,15 @@ def _build_parser():
         action="store_true",
         help="fail when eligible rows still lack amplification metrics",
     )
+    parser.add_argument(
+        "--min-warm-hit-ratio",
+        type=float,
+        default=DEFAULT_MIN_WARM_HIT_RATIO,
+        help=(
+            "fail a rapid_cache_warm run whose timed reads were not at least this "
+            "fraction Rapid Cache hits (0 disables the check)"
+        ),
+    )
     return parser
 
 
@@ -114,6 +126,8 @@ def parse_args(argv=None):
         parser.error("--amplification-wait must be >= 0")
     if args.amplification_retry_wait < 0:
         parser.error("--amplification-retry-wait must be >= 0")
+    if not 0.0 <= args.min_warm_hit_ratio <= 1.0:
+        parser.error("--min-warm-hit-ratio must be within [0, 1]")
     groups = discover_groups()
     if args.group not in groups:
         parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
@@ -203,6 +217,67 @@ def _scrape_amplification(csv_path, args):
         return None
 
 
+def enrich_rapid_cache_hits_with_retry(
+    csv_path, project, client, *, retry_wait, sleep
+):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache_hits
+
+    missing = rapid_cache_hits.enrich_csv(csv_path, project, client=client)
+    if missing:
+        if retry_wait:
+            sleep(retry_wait)
+        missing = rapid_cache_hits.enrich_csv(csv_path, project, client=client)
+    return missing
+
+
+def _scrape_rapid_cache_hits(csv_path, args, *, client=None, sleep=None):
+    """Record Rapid Cache hit/miss bytes per case (Rapid Cache runs only)."""
+    if args.bucket_type not in RAPID_CACHE_BUCKET_TYPES:
+        return None
+
+    try:
+        import time
+
+        if client is None:
+            from google.cloud import monitoring_v3
+
+            client = monitoring_v3.MetricServiceClient()
+        missing = enrich_rapid_cache_hits_with_retry(
+            csv_path,
+            args.project,
+            client,
+            retry_wait=args.amplification_retry_wait,
+            sleep=sleep or time.sleep,
+        )
+    except Exception as exc:
+        logging.warning("rapid cache hit scrape skipped: %s", exc)
+        return None
+    if missing:
+        logging.warning("rapid cache hit ratio missing for buckets: %s", missing)
+    return missing
+
+
+
+def require_warm_cache_hits(csv_path, args):
+    """Fail a rapid_cache_warm run whose timed reads were not served from the cache."""
+    if args.bucket_type != "rapid_cache_warm" or args.min_warm_hit_ratio <= 0:
+        return
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache_hits
+
+    failures = rapid_cache_hits.warm_rows_below_hit_ratio(
+        csv_path, args.min_warm_hit_ratio
+    )
+    if failures:
+        raise RuntimeError(
+            f"rapid_cache_warm cases below the {args.min_warm_hit_ratio:.0%} Rapid "
+            "Cache hit ratio, so they measured the bucket, not the cache: "
+            + ", ".join(
+                f"{case} ({'unknown' if ratio is None else f'{ratio:.1%}'})"
+                for case, ratio in failures
+            )
+        )
+
+
 def main(argv=None):
     args = parse_args(argv)
     _setup_environment(args)
@@ -217,8 +292,10 @@ def main(argv=None):
         logging.error("no benchmark results produced by group %s", args.group)
         raise SystemExit(rc or 1)
     _scrape_amplification(csv_path, args)
+    _scrape_rapid_cache_hits(csv_path, args)
     report.print_csv_to_shell(csv_path)
     logging.info("subsystembenchmarks run rc=%s csv=%s", rc, csv_path)
+    require_warm_cache_hits(csv_path, args)
     raise SystemExit(rc)
 
 

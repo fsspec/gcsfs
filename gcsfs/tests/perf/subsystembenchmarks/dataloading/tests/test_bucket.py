@@ -154,7 +154,7 @@ def test_case_bucket_creates_waits_and_disables_rapid_cache(monkeypatch):
         assert (
             "POST",
             f"b/{name}/anywhereCaches",
-            {"zone": "us-central1-a", "ingestOnWrite": True},
+            {"zone": "us-central1-a", "ingestOnWrite": False},
         ) in fs.api_calls
         assert ("GET", f"b/{name}/anywhereCaches/us-central1-a", None) in fs.api_calls
     assert (

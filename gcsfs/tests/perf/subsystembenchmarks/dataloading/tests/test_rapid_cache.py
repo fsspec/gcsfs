@@ -40,7 +40,18 @@ def test_is_rapid_cache_and_ingest_on_write():
     assert rapid_cache.is_rapid_cache_bucket_type("rapid_cache_warm") is True
     assert rapid_cache.is_rapid_cache_bucket_type("regional") is False
     assert rapid_cache.ingest_on_write_for("rapid_cache_cold") is False
-    assert rapid_cache.ingest_on_write_for("rapid_cache_warm") is True
+    assert rapid_cache.ingest_on_write_for("rapid_cache_warm") is False
+    with pytest.raises(ValueError):
+        rapid_cache.ingest_on_write_for("regional")
+
+
+def test_settle_sleeps_requested_seconds():
+    slept = []
+    rapid_cache.settle(7, sleep=slept.append)
+    rapid_cache.settle(0, sleep=slept.append)
+    assert slept == [7]
+    with pytest.raises(ValueError):
+        rapid_cache.settle(-1, sleep=slept.append)
 
 
 def test_create_posts_anywhere_cache_body():
