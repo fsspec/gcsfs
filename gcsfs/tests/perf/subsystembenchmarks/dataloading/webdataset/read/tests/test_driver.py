@@ -383,3 +383,84 @@ def test_loader_yields_list_batches_for_variable_shape_samples(tmp_path):
     assert all(isinstance(b, list) for b in batches)
     assert sorted(len(b) for b in batches) == [2, 5, 5]
     assert sum(len(batch) for batch in batches) == 12
+
+
+# Worker start-up (spawn, imports, gcsfs auth/connection) is held outside the
+# timed rounds so a first round measures storage reads, not process start-up.
+class _FakeEvent:
+    def __init__(self, log):
+        self._log = log
+        self.is_set = False
+
+    def set(self):
+        self._log.append("go")
+        self.is_set = True
+
+    def wait(self, timeout=None):
+        self._log.append("wait")
+        return True
+
+
+class _FakeSemaphore:
+    def __init__(self, log):
+        self._log = log
+
+    def release(self):
+        self._log.append("ready")
+
+
+def test_gated_dataset_primes_once_signals_ready_then_waits_before_reading():
+    log = []
+    primed = []
+    gated = driver._GatedDataset(
+        [1, 2],
+        go=_FakeEvent(log),
+        ready=_FakeSemaphore(log),
+        prime=lambda: primed.append(True) or log.append("prime"),
+    )
+    assert list(gated) == [1, 2]
+    assert log == ["prime", "ready", "wait"]
+    # A persistent worker re-enters __iter__ every epoch: no second prime.
+    assert list(gated) == [1, 2]
+    assert primed == [True]
+    assert log == ["prime", "ready", "wait", "wait"]
+
+
+def test_started_loader_releases_gate_on_first_round_then_reiterates_loader():
+    log = []
+    go = _FakeEvent(log)
+    prestarted = iter(["a", "b"])
+    started = driver._StartedLoader(["x", "y"], prestarted, go)
+    first = iter(started)
+    assert go.is_set and first is prestarted
+    assert list(first) == ["a", "b"]
+    assert list(started) == ["x", "y"]
+    assert log == ["go"]
+
+
+def test_multi_worker_rank_reads_every_row_each_round_with_gated_start(tmp_path):
+    file_count, rows_per_file = 4, 3
+    prefix = str(tmp_path) + "/data/"
+    imagegen.ingest_tar_shards(
+        prefix,
+        fmt="image_tar",
+        file_count=file_count,
+        rows_per_file=rows_per_file,
+        pixel_budget=_TINY_PIXEL_BUDGET,
+        image_encoding="jpeg",
+        jpeg_quality=75,
+        sample_shape="pairs",
+    )
+    params = _read_env_case()
+    params.file_count = file_count
+    params.rows_per_file = rows_per_file
+    params.num_workers = 2
+    params.prefetch_factor = 2
+    params.rounds = 2
+    params.gcs_read_mode = "default"
+    params.gcs_read_concurrency = 4
+
+    per_epoch, ttfb, build_seconds = driver.run_rank_epochs(0, 1, prefix, params)
+
+    assert [rows for _, _, rows in per_epoch] == [file_count * rows_per_file] * 2
+    assert ttfb >= 0 and build_seconds > 0

@@ -1,6 +1,7 @@
 """WebDataset image read driver for subsystem benchmarks."""
 
 import contextlib
+import functools
 import os
 import shutil
 import tempfile
@@ -18,6 +19,72 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset.imagegen import
 )
 
 _IMAGE_EXTS = ("jpg", "png", "npy")
+
+# Seconds a rank waits for its DataLoader workers to finish start-up.
+WORKER_STARTUP_TIMEOUT_SECONDS = 600
+
+try:
+    from torch.utils.data import IterableDataset as _IterableBase
+except ImportError:  # Torch-less tooling (e.g. case listing) never builds loaders.
+    _IterableBase = object
+
+
+class _GatedDataset(_IterableBase):
+    """Holds each DataLoader worker at the start line until the first timed round.
+
+    On its first ``__iter__`` a worker primes gcsfs, signals ``ready`` and blocks on
+    ``go``; the rank starts the clock and sets ``go`` together. Worker spawn,
+    imports and auth/connection set-up therefore land in dataset build time rather
+    than in round 1, which (unlike later rounds of persistent workers) would
+    otherwise carry seconds of start-up unrelated to storage.
+    """
+
+    def __init__(self, dataset, go, ready, prime):
+        self.dataset = dataset
+        self.go = go
+        self.ready = ready
+        self.prime = prime
+        self._primed = False
+
+    def __iter__(self):
+        if not self._primed:
+            self.prime()
+            self._primed = True
+            self.ready.release()
+        self.go.wait()
+        yield from self.dataset
+
+
+class _StartedLoader:
+    """Iterable whose first round reuses the pre-started iterator and opens the gate."""
+
+    def __init__(self, loader, iterator, go):
+        self._loader = loader
+        self._iterator = iterator
+        self._go = go
+
+    def __iter__(self):
+        if self._iterator is None:
+            return iter(self._loader)
+        iterator, self._iterator = self._iterator, None
+        self._go.set()
+        return iterator
+
+
+def _start_workers(loader, go, ready, num_workers):
+    """Spawn ``loader``'s workers and wait until each has primed and parked at ``go``.
+
+    Creating the iterator hands every worker a prefetch request, which runs the
+    gated ``__iter__``: prime, signal ``ready``, block. No object bytes are read
+    until the returned iterable's first round sets ``go``.
+    """
+    iterator = iter(loader)
+    for _ in range(num_workers):
+        if not ready.acquire(timeout=WORKER_STARTUP_TIMEOUT_SECONDS):
+            raise TimeoutError(
+                f"DataLoader workers not ready after {WORKER_STARTUP_TIMEOUT_SECONDS}s"
+            )
+    return _StartedLoader(loader, iterator, go)
 
 
 def shard_urls(prefix, params):
@@ -181,7 +248,19 @@ def run_rank_epochs(
             split_by_node=params.split_by_node,
             cache_dir=rank_cache_dir(cache_root, rank),
         )
+        gate = None
+        if params.num_workers > 0:
+            import torch.multiprocessing as torch_mp
+
+            gate = torch_mp.Event(), torch_mp.Semaphore(0)
+            dataset = _GatedDataset(
+                dataset,
+                *gate,
+                functools.partial(gcsfs_opener.prime, shard_urls(prefix, params)[0]),
+            )
         loader = build_loader(dataset, params, pin_memory=device is not None)
+        if gate is not None:
+            loader = _start_workers(loader, *gate, params.num_workers)
         build_seconds = time.perf_counter() - build_start
 
         target = None
