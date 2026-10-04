@@ -289,10 +289,14 @@ def test_run_read_case_publishes_paired_cold_for_rapid_cache_warm(
                 ReadResult,
             )
 
-            # The single-round call is the paired cold epoch: make it 4x slower.
-            seconds = 4.0 if params.rounds == 1 else 1.0
+            # The single-round call is the paired cold epoch: make it 4x slower than a
+            # warm steady-state round. Warm round 1 pays fresh-loader setup (2s).
+            if params.rounds == 1:
+                durations = [4.0]
+            else:
+                durations = [2.0] + [1.0] * (params.rounds - 1)
             return ReadResult(
-                durations=[seconds] * params.rounds,
+                durations=durations,
                 rows_per_epoch=[self._rows] * params.rounds,
                 ttfb_seconds=0.25,
                 build_seconds=self._build,
@@ -307,10 +311,14 @@ def test_run_read_case_publishes_paired_cold_for_rapid_cache_warm(
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
     info = bench.extra_info
-    assert info["dataset_read_throughput_mean_bytes_per_second"] == 1000.0
+    assert info["dataset_read_throughput_mean_bytes_per_second"] == pytest.approx(
+        (500.0 + 1000.0 + 1000.0) / 3
+    )
     assert info["rapid_cache_paired_cold_read_throughput_bytes_per_second"] == 250.0
     assert info["rapid_cache_paired_cold_round_duration_seconds"] == 4.0
-    assert info["rapid_cache_warm_over_paired_cold_speedup"] == 4.0
+    assert info["rapid_cache_warm_first_round_duration_seconds"] == 2.0
+    # Like-for-like: cold epoch vs warm round 1, never vs the steady-state mean.
+    assert info["rapid_cache_warm_over_paired_cold_speedup"] == 2.0
     assert (
         info["rapid_cache_paired_cold_window_start_unix_seconds"]
         <= info["rapid_cache_paired_cold_window_end_unix_seconds"]

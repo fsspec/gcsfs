@@ -111,7 +111,7 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         )
         if paired_cold is not None:
             benchmark.extra_info.update(
-                _paired_cold_columns(paired_cold, manifest, throughput)
+                _paired_cold_columns(paired_cold, manifest, durations)
             )
         publish_round_stats(benchmark, durations)
         publish_resource_metrics(benchmark, m)
@@ -138,17 +138,26 @@ def _timed_cold_epoch(prefix, params, driver, manifest):
     return result, (start, time.time())
 
 
-def _paired_cold_columns(paired_cold, manifest, warm_throughput):
+def _paired_cold_columns(paired_cold, manifest, warm_durations):
+    """Columns comparing the paired cold epoch against warm round 1.
+
+    Both are the first round of a fresh DataLoader, so both pay worker spawn and
+    gcsfs session/connection setup. Later warm rounds reuse persistent workers, so
+    comparing the cold epoch against the warm mean would credit the cache with
+    setup savings it did not earn.
+    """
     result, (start, end) = paired_cold
-    cold_throughput = _throughput(manifest, result.durations)
+    cold_seconds = result.durations[0] if result.durations else None
+    warm_first = warm_durations[0] if warm_durations else None
     return {
-        "rapid_cache_paired_cold_read_throughput_bytes_per_second": cold_throughput,
-        "rapid_cache_paired_cold_round_duration_seconds": (
-            result.durations[0] if result.durations else None
+        "rapid_cache_paired_cold_read_throughput_bytes_per_second": _throughput(
+            manifest, result.durations
         ),
+        "rapid_cache_paired_cold_round_duration_seconds": cold_seconds,
         "rapid_cache_paired_cold_window_start_unix_seconds": int(start),
         "rapid_cache_paired_cold_window_end_unix_seconds": int(end),
+        "rapid_cache_warm_first_round_duration_seconds": warm_first,
         "rapid_cache_warm_over_paired_cold_speedup": (
-            warm_throughput / cold_throughput if cold_throughput else None
+            cold_seconds / warm_first if cold_seconds and warm_first else None
         ),
     }
