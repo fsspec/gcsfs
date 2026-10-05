@@ -214,6 +214,90 @@ def test_validate_response_invalid_json():
     assert e.value.message == "This is a raw plain-text error, 400"
 
 
+def test_validate_response_401_and_json_edge_cases():
+    # Non-401 statuses with "invalid" still raise ValueError (backward compatible)
+    for status in (400, 409, 416):
+        with pytest.raises(ValueError, match="Bad Request"):
+            validate_response(
+                status, '{"error": {"message": "invalid argument"}}', "/path"
+            )
+
+    # 401 with lowercase "invalid" in message should raise HttpError (not ValueError)
+    # and remain retriable when "Invalid Credentials" is present.
+    with pytest.raises(HttpError) as e:
+        validate_response(
+            401,
+            '{"error": {"message": "Invalid Credentials: invalid_token"}}',
+            "/path",
+        )
+    assert e.value.code == 401
+    assert is_retriable(e.value)
+
+    # JSON without "error" key should not raise KeyError
+    with pytest.raises(HttpError) as e:
+        validate_response(503, '{"error_description": "transient"}', "/path")
+    assert e.value.code == 503
+    assert is_retriable(e.value)
+
+
+@pytest.mark.asyncio
+async def test_get_file_request_retries_401_invalid_credentials(tmp_path):
+    from gcsfs.core import GCSFileSystem
+
+    class Response:
+        def __init__(self, status, body):
+            self.status = status
+            self.body = body
+            self.headers = {"content-length": str(len(body))}
+            self.request_info = None
+            self.content = self
+            self.reads = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def read(self, *_):
+            self.reads += 1
+            body, self.body = self.body, b""
+            return body
+
+    class Session:
+        def __init__(self):
+            self.responses = [
+                Response(
+                    401,
+                    b'{"error":{"code":401,"message":"Invalid Credentials"}}',
+                ),
+                Response(200, b"ok"),
+            ]
+            self.calls = 0
+
+        def get(self, **_):
+            response = self.responses[self.calls]
+            self.calls += 1
+            return response
+
+    fs = GCSFileSystem(
+        token="anon",
+        asynchronous=True,
+        consistency="none",
+        skip_instance_cache=True,
+    )
+    session = Session()
+    fs._session = session
+    local = tmp_path / "object"
+
+    with mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock):
+        await fs._get_file_request("example-bucket/object", str(local))
+
+    assert session.calls == 2
+    assert session.responses[0].reads == 1
+    assert local.read_bytes() == b"ok"
+
+
 @pytest.mark.parametrize(
     ["file_path", "validate_get_error", "validate_list_error", "expected_error"],
     [
@@ -269,3 +353,103 @@ def test_metadata_read_permissions(
         with pytest.raises(expected_error):
             gcs.info(TEST_BUCKET + file_path)
         assert gcs.exists(TEST_BUCKET + file_path) is False
+
+
+def test_http_error_empty_and_bytes():
+    e_empty = HttpError()
+    assert e_empty.code is None
+    assert e_empty.message == ""
+
+    e_bytes = HttpError({"code": 404, "message": b"not found"})
+    assert e_bytes.code == 404
+    assert e_bytes.message == b"not found, 404"
+
+
+def test_is_retriable_extra():
+    from gcsfs.retry import NonRetryableError
+
+    assert not is_retriable(NonRetryableError())
+
+    e_401_valid = HttpError({"code": 401, "message": "Invalid Credentials"})
+    assert is_retriable(e_401_valid)
+
+    e_401_other = HttpError({"code": 401, "message": "Other Auth Error"})
+    assert not is_retriable(e_401_other)
+
+
+def test_validate_response_extra():
+    with pytest.raises(FileExistsError):
+        validate_response(412, b"", "/path")
+
+    with pytest.raises(FileNotFoundError, match="/bucket/my%20key"):
+        validate_response(404, b"", "/bucket/{}", args=["my key"])
+
+    with pytest.raises(ValueError, match="Bad Request: /path\ninvalid argument"):
+        validate_response(400, b'{"error": {"message": "invalid argument"}}', "/path")
+
+
+def test_is_transient_exception():
+    from google.api_core import exceptions as api_exceptions
+
+    from gcsfs.retry import _is_transient_exception
+
+    assert _is_transient_exception(api_exceptions.DeadlineExceeded("timeout"))
+    assert _is_transient_exception(api_exceptions.ServiceUnavailable("unavailable"))
+    assert _is_transient_exception(api_exceptions.InternalServerError("internal"))
+    assert _is_transient_exception(api_exceptions.TooManyRequests("too many"))
+    assert _is_transient_exception(api_exceptions.ResourceExhausted("exhausted"))
+    assert _is_transient_exception(api_exceptions.Unknown("unknown"))
+    assert _is_transient_exception(
+        api_exceptions.Unauthenticated("Invalid Credentials")
+    )
+    assert not _is_transient_exception(api_exceptions.Unauthenticated("Other Auth"))
+    assert not _is_transient_exception(api_exceptions.NotFound("not found"))
+
+
+@pytest.mark.asyncio
+async def test_retry_request_outcomes():
+    from gcsfs.retry import retry_request
+
+    async def raise_requester_pays():
+        raise HttpError({"code": 400, "message": "Bucket is requester pays."})
+
+    wrapped = retry_request(raise_requester_pays, retries=2)
+    with pytest.raises(ValueError, match="Bucket is requester pays"):
+        await wrapped()
+
+    call_count = 0
+
+    async def raise_404():
+        nonlocal call_count
+        call_count += 1
+        raise HttpError({"code": 404, "message": "Not Found"})
+
+    wrapped_404 = retry_request(raise_404, retries=3)
+    with pytest.raises(HttpError):
+        await wrapped_404()
+    assert call_count == 1
+
+    call_count_non_retriable = 0
+
+    async def raise_non_retriable():
+        nonlocal call_count_non_retriable
+        call_count_non_retriable += 1
+        raise HttpError({"code": 400, "message": "Bad Request"})
+
+    wrapped_nr = retry_request(raise_non_retriable, retries=3)
+    with pytest.raises(HttpError):
+        await wrapped_nr()
+    assert call_count_non_retriable == 1
+
+    call_count_retriable = 0
+
+    async def raise_500():
+        nonlocal call_count_retriable
+        call_count_retriable += 1
+        raise HttpError({"code": 500, "message": "Internal Error"})
+
+    with mock.patch("asyncio.sleep", new_callable=mock.AsyncMock):
+        wrapped_500 = retry_request(raise_500, retries=3)
+        with pytest.raises(HttpError):
+            await wrapped_500()
+        assert call_count_retriable == 3

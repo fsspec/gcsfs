@@ -2986,6 +2986,30 @@ async def test_get_control_plane_client_endpoint(
         assert kwargs.get("host") == expected_host
 
 
+@pytest.mark.asyncio
+async def test_grpc_clients_stay_off_mtls_endpoint(monkeypatch):
+    """The HTTP path may switch to mTLS; gRPC clients don't present a cert yet."""
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", raising=False)
+    mock_transport_cls = mock.Mock()
+    with (
+        mock.patch("gcsfs.core._use_client_cert", return_value=True),
+        mock.patch.object(
+            storage_control_v2.StorageControlAsyncClient,
+            "get_transport_class",
+            return_value=mock_transport_cls,
+        ),
+    ):
+        ExtendedGcsFileSystem.clear_instance_cache()
+        fs = ExtendedGcsFileSystem(token="anon")
+        assert fs.base == "https://storage.mtls.googleapis.com/storage/v1/"
+
+        await fs._get_control_plane_client()
+        kwargs = mock_transport_cls.create_channel.call_args.kwargs
+        assert kwargs.get("host") == "storage.googleapis.com"
+    ExtendedGcsFileSystem.clear_instance_cache()
+
+
 def test_extended_gcsfs_retry_init():
     fs = ExtendedGcsFileSystem(token="anon", retry_timeout=20.0, retry_initial=4.0)
     assert fs.retry_config["timeout"] == 20.0

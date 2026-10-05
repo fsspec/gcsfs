@@ -10,7 +10,9 @@ import mimetypes
 import os
 import queue
 import re
+import ssl
 import sys
+import tempfile
 import threading
 import uuid
 import warnings
@@ -34,7 +36,8 @@ from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
-from .retry import errs, retry_request, validate_response
+from .retry import HttpError, errs, retry_request, validate_response
+from .utils import is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
@@ -131,11 +134,82 @@ def _gcp_universe_domain():
     return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "googleapis.com")
 
 
-def _location():
+_MTLS_HOST = "storage.mtls.googleapis.com"
+
+
+def _use_client_cert():
+    """
+    Whether to present google-auth's default client certificate (mutual TLS)
+
+    True when google-auth says a client certificate should be used
+    (``GOOGLE_API_USE_CLIENT_CERTIFICATE=true``, or a certificate config with a
+    "workload" section) and a default client certificate source exists.
+    Workloads whose access tokens are bound to their client certificate (e.g.
+    Agent Identity) need this, since such tokens are only accepted over mTLS.
+    """
+    try:
+        from google.auth.transport import mtls
+    except ImportError:
+        return False
+    should_use_client_cert = getattr(mtls, "should_use_client_cert", None)
+    if should_use_client_cert is None or not should_use_client_cert():
+        return False
+    return mtls.has_default_client_cert_source()
+
+
+def _use_mtls_endpoint():
+    """
+    Whether a client using a client certificate should switch to the mTLS
+    endpoint. Like google-cloud-storage, ``GOOGLE_API_USE_MTLS_ENDPOINT=never``
+    keeps the regular endpoint; the certificate is still presented.
+    """
+    mode = os.getenv("GOOGLE_API_USE_MTLS_ENDPOINT", "auto").lower()
+    if mode not in {"never", "auto", "always"}:
+        raise ValueError(
+            "GOOGLE_API_USE_MTLS_ENDPOINT must be one of 'never', 'auto' or "
+            f"'always', got {mode!r}"
+        )
+    return mode != "never"
+
+
+def _client_cert_ssl_context():
+    """
+    SSL context that verifies the server like aiohttp's default context does,
+    and presents google-auth's default client certificate
+    """
+    from google.auth import exceptions
+    from google.auth.transport import mtls
+
+    cert, key = mtls.default_client_cert_source()()
+    if not cert or not key:
+        raise exceptions.MutualTLSChannelError(
+            "google-auth is configured to use a client certificate, but its "
+            "default client certificate source returned no certificate or key"
+        )
+    ctx = ssl.create_default_context()
+    ctx.set_alpn_protocols(("http/1.1",))
+    # load_cert_chain only reads files; the directory is private to this user
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cert_path = os.path.join(tmpdir, "cert.pem")
+        key_path = os.path.join(tmpdir, "key.pem")
+        for path, data in ((cert_path, cert), (key_path, key)):
+            with open(path, "wb") as f:
+                f.write(data)
+        ctx.load_cert_chain(cert_path, key_path)
+    return ctx
+
+
+def _location(use_mtls_endpoint=False):
     """
     Resolves GCS HTTP location as http[s]://host
 
     Enables storage emulation for integration tests.
+
+    Parameters
+    ----------
+    use_mtls_endpoint: bool
+        If True and no emulator is set, return the mTLS endpoint (only exists
+        for the default "googleapis.com" universe).
 
     Returns
     -------
@@ -149,7 +223,10 @@ def _location():
             _emulator_location = f"http://{_emulator_location}"
         return _emulator_location
 
-    return f"https://storage.{_gcp_universe_domain()}"
+    universe = _gcp_universe_domain()
+    if use_mtls_endpoint and universe == "googleapis.com":
+        return f"https://{_MTLS_HOST}"
+    return f"https://storage.{universe}"
 
 
 def _chunks(lst, n):
@@ -302,7 +379,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         If given, use this URL (format protocol://host:port , *without* any
         path part) for communication. If not given, defaults to the value
         of environment variable "STORAGE_EMULATOR_HOST"; if that is not set
-        either, will use the standard Google endpoint.
+        either, will use the standard Google endpoint, or its mutual TLS
+        variant when google-auth is configured to use a client certificate
+        (see ``google.auth.transport.mtls.should_use_client_cert``), unless
+        ``GOOGLE_API_USE_MTLS_ENDPOINT`` is "never". Whenever a client
+        certificate is configured, it is presented on the HTTP session,
+        unless ``session_kwargs`` provides its own ``connector``.
     default_location: str
         Default location where buckets are created, like 'US' or 'EUROPE-WEST3'.
         You can find a list of all available locations here:
@@ -364,6 +446,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.session_kwargs = session_kwargs or {}
         self.default_location = default_location
         self.version_aware = version_aware
+        self._use_client_cert = _use_client_cert()
+        self._use_mtls_endpoint = self._use_client_cert and _use_mtls_endpoint()
+        self._ssl_context_task = None
 
         if check_connection:
             warnings.warn(
@@ -377,7 +462,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     @property
     def _location(self):
-        return self._endpoint or _location()
+        return self._endpoint or _location(self._use_mtls_endpoint)
 
     @property
     def base(self):
@@ -438,7 +523,30 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     async def _set_session(self):
         if self._session is None:
-            self._session = await get_client(**self.session_kwargs)
+            kwargs = self.session_kwargs
+            if (
+                self._use_client_cert
+                and "connector" not in kwargs
+                and self._location.startswith("https://")
+            ):
+                # Loading the cert yields to the event loop, so concurrent
+                # callers share one load and then the session it creates.
+                # shield() keeps one cancelled caller from cancelling the
+                # load for the others.
+                task = self._ssl_context_task
+                if task is None:
+                    task = self._ssl_context_task = asyncio.ensure_future(
+                        asyncio.to_thread(_client_cert_ssl_context)
+                    )
+                try:
+                    ssl_context = await asyncio.shield(task)
+                finally:
+                    if task.done() and self._ssl_context_task is task:
+                        self._ssl_context_task = None
+                if self._session is not None:
+                    return self._session
+                kwargs = {**kwargs, "connector": aiohttp.TCPConnector(ssl=ssl_context)}
+            self._session = await get_client(**kwargs)
             weakref.finalize(
                 self, self.close_session, self.loop, self._session, self.asynchronous
             )
@@ -1218,10 +1326,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
-        # if start and end are both provided and valid, but start >= end, return empty bytes
-        # Otherwise, _process_limits would generate an invalid HTTP range (e.g. "bytes=5-4"
-        # for start=5, end=5), causing the server to return the whole file instead of nothing.
-        if start is not None and end is not None and start >= end >= 0:
+        if is_empty_range(start, end):
             return b""
 
         u2 = self.url(path, generation=kwargs.get("generation"))
@@ -1612,7 +1717,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     @property
     def on_google(self):
         # match "torage" to handle both "storage" and "Storage"
-        return f"torage.{_gcp_universe_domain()}" in self._location
+        return (
+            f"torage.{_gcp_universe_domain()}" in self._location
+            or _MTLS_HOST in self._location.lower()
+        )
 
     async def _delete_files(self, files, batchsize):
         """Helper to delete files in batches."""
@@ -1971,6 +2079,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     ):
         rpath = self.url(rpath)
         consistency = kwargs.pop("consistency", self.consistency)
+        callback = callback or NoOpCallback()
         await self._set_session()
         async with self.session.get(
             url=rpath,
@@ -1978,7 +2087,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             headers=self._get_headers(headers),
             timeout=self.requests_timeout,
         ) as r:
-            validate_response(r.status, None, rpath)
+            if r.status >= 400:
+                validate_response(r.status, await r.read(), rpath)
             try:
                 size = int(r.headers["content-length"])
             except (KeyError, ValueError):
@@ -1997,7 +2107,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     checker.update(data)
                     callback.relative_update(len(data))
 
-            validate_response(r.status, data, rpath)  # validate http request
             checker.validate_http_response(r)  # validate file consistency
             return r.status, r.headers, r.request_info, data
 
@@ -2083,7 +2192,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
             fetcher_fn = default_fetcher
 
-        from .prefetcher import BackgroundPrefetcher
+        from fsspec.prefetcher import BackgroundPrefetcher
 
         prefetcher = BackgroundPrefetcher(
             fetcher=fetcher_fn,
@@ -2339,38 +2448,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type, kwargs):
+def _get_prefetcher_and_cache_config(cache_type=None):
     """
-    Resolves effective cache_type, whether prefetch reader should be enabled,
-    and cache_source ("explicit" vs "default").
+    Resolves effective cache_type and cache_source ("explicit" vs "default").
 
     Rules:
-    - If user explicitly sets cache_type (cache_type is not None), prefetcher is disabled,
+    - If user explicitly sets cache_type (cache_type is not None),
       cache_type is used, and cache_source is "explicit".
-    - If cache_type is None and prefetcher is enabled (default), cache_type is "none",
-      prefetcher is active, and cache_source is "default".
-    - If cache_type is None and prefetcher is disabled, fallback to default_cache_type ("readahead"),
-      and cache_source is "default".
+    - If cache_type is None, default to "adaptive" and cache_source is "default".
     """
     if cache_type is not None:
-        use_prefetch_reader = False
-        cache_source = "explicit"
-    else:
-        cache_source = "default"
-        if "use_experimental_adaptive_prefetching" in kwargs:
-            val = kwargs["use_experimental_adaptive_prefetching"]
-            use_prefetch_reader = (
-                val.lower() in ("true", "1") if isinstance(val, str) else bool(val)
-            )
-        else:
-            use_prefetch_reader = os.environ.get(
-                "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
-            ).lower() in (
-                "true",
-                "1",
-            )
-        cache_type = "none" if use_prefetch_reader else "readahead"
-    return cache_type, use_prefetch_reader, cache_source
+        return cache_type, "explicit"
+    return "adaptive", "default"
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2502,9 +2591,19 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
-        cache_type, use_prefetch_reader, self.cache_source = (
-            _get_prefetcher_and_cache_config(cache_type, kwargs)
+        self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
+            cache_type
         )
+        cache_options = dict(cache_options or {})
+        if self.cache_type == "adaptive":
+            if "concurrency" not in cache_options:
+                cache_options["concurrency"] = self.concurrency
+            if "max_prefetch_size" not in cache_options:
+                cache_options["max_prefetch_size"] = kwargs.pop(
+                    "max_prefetch_size", MAX_PREFETCH_SIZE
+                )
+            else:
+                kwargs.pop("max_prefetch_size", None)
 
         super().__init__(
             gcsfs,
@@ -2512,17 +2611,35 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             mode,
             block_size,
             autocommit=autocommit,
-            cache_type=cache_type,
+            cache_type=self.cache_type,
             cache_options=cache_options,
             **kwargs,
         )
-        self.cache_type = cache_type
         self.gcsfs = gcsfs
         self.bucket = bucket
         self.key = key
         self.acl = acl
         self.consistency = consistency
         self.checker = get_consistency_checker(consistency)
+
+        cache = getattr(self, "cache", None)
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None and prefetcher.producer is not None:
+            # Wire GCSFile/ZonalFile's native async range fetcher into the prefetcher producer.
+            # Otherwise, _async_fetch_range is bypassed, split_factor is ignored, and
+            # fsspec's default fetcher performs an unnecessary asyncio.to_thread round-trip.
+            # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
+            # Only producer uses the fetcher and producer will always be there for a prefetcher hence
+            # fetcher attributes check is not required.
+            prefetcher.producer.fetcher = self._async_fetch_range
+
+            if hasattr(cache, "close"):
+                # TODO: Remove this disarm once fsspec adds native support for deferred or
+                # non-blocking cache teardown during GC (or accepts an async closer).
+                # Disarm standalone cache GC/close so that it does not execute sync_teardown
+                # synchronously on the GC thread (which would undermine GCSFile._defer_close).
+                # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
+                cache.close = lambda: None
 
         # _supports_append is an internal argument not meant to be used directly.
         # If True, allows opening file in append mode. This is generally not supported
@@ -2557,20 +2674,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
-
-        if "r" in mode and use_prefetch_reader:
-            max_prefetch_size = kwargs.get("max_prefetch_size", MAX_PREFETCH_SIZE)
-            from .prefetcher import BackgroundPrefetcher
-
-            self._prefetch_engine = BackgroundPrefetcher(
-                self._async_fetch_range,
-                self.size,
-                max_prefetch_size=max_prefetch_size,
-                concurrency=self.concurrency,
-                loop=self.gcsfs.loop,
-            )
-        else:
-            self._prefetch_engine = None
 
     @property
     def details(self):
@@ -2730,9 +2833,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         start, end : None or integers
             if not both None, fetch only given range
         """
+        if is_empty_range(start, end, self.size):
+            return b""
         try:
-            if getattr(self, "_prefetch_engine", None):
-                return self._prefetch_engine.fetch(start=start, end=end)
             return self.fs.cat_file(
                 self.path,
                 start=start,
@@ -2741,8 +2844,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
             )
-        except RuntimeError as e:
-            if "not satisfiable" in str(e):
+        except (RuntimeError, HttpError) as e:
+            if "not satisfiable" in str(e) or "InvalidRange" in str(e):
                 return b""
             raise
 
@@ -2773,9 +2876,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         self._close_impl()
 
     def _close_impl(self):
+        # TODO: Remove explicit prefetcher cleanup once fsspec handles deferred cache teardown.
+        cache = getattr(self, "cache", None)
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None:
+            prefetcher.close()
+            cache._prefetcher = None
         super().close()
-        if getattr(self, "_prefetch_engine", None):
-            self._prefetch_engine.close()
 
 
 def _convert_fixed_key_metadata(metadata, *, from_google=False):

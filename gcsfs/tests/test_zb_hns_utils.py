@@ -583,6 +583,42 @@ async def test_mrd_pool_opens_streams_in_parallel_and_spreads_waiters(mock_gcsfs
 
 
 @pytest.mark.asyncio
+async def test_mrd_pool_waiters_wake_once_after_last_stream_opens(mock_gcsfs):
+    pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 4)
+    pool._create_mrd, created, gates = _gated_mrd_factory(4)
+    done = asyncio.Event()
+    wait_calls = 0
+    orig_wait = pool._cond.wait
+
+    async def counting_wait():
+        nonlocal wait_calls
+        wait_calls += 1
+        return await orig_wait()
+
+    pool._cond.wait = counting_wait
+
+    async def worker():
+        async with pool.get_mrd():
+            await done.wait()
+
+    tasks = [asyncio.create_task(worker()) for _ in range(8)]
+    await asyncio.sleep(0.01)
+    assert wait_calls == 4
+
+    # Waiters stay asleep while other streams are still opening.
+    for gate in gates[:3]:
+        gate.set()
+        await asyncio.sleep(0.01)
+    assert wait_calls == 4
+
+    gates[3].set()
+    await asyncio.sleep(0.01)
+    done.set()
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+    assert wait_calls == 4
+
+
+@pytest.mark.asyncio
 async def test_mrd_pool_close_during_create(mock_gcsfs):
     pool = MRDPool(mock_gcsfs, "bucket", "obj", "123", True, 1)
     pool._create_mrd, created, gates = _gated_mrd_factory(1)

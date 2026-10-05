@@ -117,15 +117,16 @@ def validate_response(status, content, path, args=None):
         msg = ""
         if content:
             if hasattr(content, "decode"):
-                content = content.decode()
+                content = content.decode("utf-8", errors="replace")
             try:
                 error = json.loads(content)["error"]
                 # Sometimes the error message is a string.
                 if isinstance(error, str):
                     msg = error
                 else:
-                    msg = error["message"]
-            except json.decoder.JSONDecodeError:
+                    msg = error.get("message", "")
+            except (json.decoder.JSONDecodeError, KeyError, TypeError, AttributeError):
+                error = None
                 msg = content
 
         if status == 403:
@@ -134,10 +135,12 @@ def validate_response(status, content, path, args=None):
             raise FileExistsError(path)
         elif status == 502:
             raise requests.exceptions.ProxyError()
-        elif "invalid" in str(msg):
+        elif status != 401 and "invalid" in str(msg):
+            # 401 is excluded so auth errors like "Invalid Credentials: invalid_token"
+            # surface as HttpError and remain retriable via is_retriable().
             raise ValueError(f"Bad Request: {path}\n{msg}")
-        elif error and not isinstance(error, str):
-            raise HttpError(error)
+        elif error and isinstance(error, dict):
+            raise HttpError({"code": status, **error})
         elif status:
             raise HttpError({"code": status, "message": msg})  # text-like
         else:

@@ -8,7 +8,7 @@ selected CPU workload as a Kubernetes JobSet, scrapes the resulting metrics from
 Cloud Logging and Cloud Monitoring into a single summary CSV, uploads it to a
 results bucket, and (via a second pipeline) ingests it into BigQuery for
 historical analysis. `_WORKLOAD` selects either the existing
-`hf-pytorch-lightning-cpu` simulation or the `ray-data-ray-train-pytorch` Ray
+`hf-datasets-pytorch-lightning` simulation or the `ray-data-ray-train-pytorch` Ray
 Data/Ray Train workload.
 
 The retained Cloud Build flow is CPU-default: it creates the existing CPU node
@@ -140,7 +140,7 @@ Before creating the triggers, set up the following in your GCP project.
 
 | Substitution | Default | Description |
 | :----------- | :------ | :---------- |
-| `_WORKLOAD` | `hf-pytorch-lightning-cpu` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`: `hf-pytorch-lightning-cpu` or `ray-data-ray-train-pytorch`. The retained Cloud Build path is CPU-default for both. |
+| `_WORKLOAD` | `hf-datasets-pytorch-lightning` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`: `hf-datasets-pytorch-lightning` or `ray-data-ray-train-pytorch`. The retained Cloud Build path is CPU-default for both. |
 | `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, or `hns`. Must match the dataset bucket. |
 | `_MACHINE_TYPE` | `c4-standard-192` | Node machine type for the workload pool. |
 | `_ENABLE_TIER1_NETWORKING` | `true` | Enable TIER_1 high-bandwidth egress (requires gVNIC / C-series). |

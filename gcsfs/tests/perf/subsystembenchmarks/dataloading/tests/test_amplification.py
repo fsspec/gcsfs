@@ -2,6 +2,8 @@ import csv
 import logging
 import types
 
+import pytest
+
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import amplification
 
 
@@ -181,7 +183,11 @@ def test_enrich_csv_retry_completes_only_the_missing_row(tmp_path):
     assert client.calls == 4
 
 
-def test_enrich_csv_checkpoint_read_and_write(tmp_path):
+# report.generate_csv fills keys a case did not publish with "N/A", so a mixed
+# write/read checkpointing CSV carries "N/A" (not "") in the other scenario's
+# throughput column.
+@pytest.mark.parametrize("missing", ["", "N/A"])
+def test_enrich_csv_checkpoint_read_and_write(tmp_path, missing):
     csv_path = tmp_path / "results.csv"
     fields = [
         "benchmark_case_id",
@@ -205,7 +211,7 @@ def test_enrich_csv_checkpoint_read_and_write(tmp_path):
                 "measurement_window_end_unix_seconds": "1060",
                 "checkpoint_physical_size_bytes": "500",
                 "checkpoint_read_throughput_mean_bytes_per_second": "250",
-                "checkpoint_write_throughput_mean_bytes_per_second": "",
+                "checkpoint_write_throughput_mean_bytes_per_second": missing,
                 "measurement_round_count": "1",
             },
             {
@@ -215,7 +221,7 @@ def test_enrich_csv_checkpoint_read_and_write(tmp_path):
                 "measurement_window_start_unix_seconds": "1000",
                 "measurement_window_end_unix_seconds": "1060",
                 "checkpoint_physical_size_bytes": "500",
-                "checkpoint_read_throughput_mean_bytes_per_second": "",
+                "checkpoint_read_throughput_mean_bytes_per_second": missing,
                 "checkpoint_write_throughput_mean_bytes_per_second": "250",
                 "measurement_round_count": "1",
             },

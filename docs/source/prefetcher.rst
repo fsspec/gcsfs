@@ -2,16 +2,11 @@
 GCSFS Adaptive Concurrent Prefetching: Architecture & Usage Guide
 =================================================================
 
-Prefetcher is enabled by default when cache_type is not set explicitly with `DEFAULT_GCSFS_CONCURRENCY=4`. To disable, you can pass the environment variable `USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'` or pass `use_experimental_adaptive_prefetching=False` when opening a file. As currently written, this implementation is
-separate from the fsspec-style caching layer, but the intent is to eventually make this available to all
-asynchronous filesystems using the standard `cache_type=` argument. How it interacts with the
-existing cache types ("readahead", "first", etc.) remains to be decided, and in the meantime, use at your own risk.
-We intend to develop more sophisticated caching strategies, perhaps specialised to file types.
+**Note:** The adaptive prefetching engine, originally developed in ``gcsfs``, has been upstreamed directly into ``fsspec`` (starting in ``fsspec>=2026.9.0``) as ``fsspec.caching.AdaptiveReadaheadCache``. In ``gcsfs``, it is enabled by default via the ``"adaptive"`` cache type whenever ``cache_type`` is not explicitly set, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
+
+To select an alternative cache or disable prefetching, pass the standard ``cache_type=`` argument (e.g., ``cache_type="readahead"``, ``cache_type="readahead_chunked"``, or ``cache_type="none"``). Standard caching options can be passed via ``cache_options`` (e.g., ``cache_options={"max_prefetch_size": 32 * 1024 * 1024}``).
 
 Additional caveats:
-- the bytes slicing/copying code uses low level (`ctypes`) calls and offloads to a dedicated thread for
-performance. We intend to upstream some version of this to CPython, either in the slicing of `bytes.join()`
-code, but in the meantime we are using this ad-hoc implementation. More work on zero-copy methods on bytes buffers is expected.
 - the concurrent fetching code in `_cat_file_concurrent` is expected to be eventually upstreamed to the
 google SDKs, since low-level connection management should be the concern of the communication layer.
 
@@ -73,36 +68,32 @@ The prefetcher is integrated into the ``GCSFile`` and replaces the standard sequ
 Feature Configuration & Disabling
 ---------------------------------
 
-Adaptive prefetching is enabled by default when ``cache_type`` is not explicitly set by the user, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
+Adaptive prefetching is enabled by default as the ``adaptive`` cache type when ``cache_type`` is not explicitly set by the user, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
 
-Prefetching can be disabled in three ways:
-
-1. Explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or ``cache_type="none"`` or any other cache_type):
+To use a different cache or disable prefetching, explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or ``cache_type="none"``):
 
 .. code-block:: python
 
     gcs.open("bucket/file.txt", "rb", cache_type="readahead")
 
-2. Set the environment variable:
+Limiting Prefetch Memory
+------------------------
 
-.. code-block:: bash
+With the ``adaptive`` cache type, ``max_prefetch_size`` sets an upper bound on how many bytes are fetched ahead of the current read position. The GCSFS default is 256 MiB per open file. It is a limit, not a target: the prefetcher sizes its read-ahead window from recent read sizes and can stay well below the limit. It does not limit the size of an individual ``read()`` call.
 
-    export USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false'
-
-3. Pass ``use_experimental_adaptive_prefetching=False`` directly when opening a file:
+Lowering ``max_prefetch_size`` lowers the cap on read-ahead data held by each open file, which adds up when many files are read at once, for example across many worker processes. It can be set through ``cache_options`` or passed directly to ``open()``. If both are given, the ``cache_options`` value is used:
 
 .. code-block:: python
 
-    gcs.open("bucket/file.txt", "rb", use_experimental_adaptive_prefetching=False)
+    gcs.open("bucket/file.bin", "rb", cache_options={"max_prefetch_size": 64 * 1024 * 1024})
+    gcs.open("bucket/file.bin", "rb", max_prefetch_size=64 * 1024 * 1024)
 
 Under the Hood Lifecycle
 ------------------------
 
-* During ``GCSFile.__init__``, if the feature is enabled, a ``BackgroundPrefetcher`` is instantiated and attached to ``self._prefetch_engine``.
-* ``GCSFile._async_fetch_range`` is mapped directly to the prefetcher.
-* When ``file.read(size)`` is called, it delegates to ``self._prefetch_engine._fetch(start, end)``.
-* The prefetcher returns requested bytes from its local queue while the producer continues pulling chunks from GCS.
-* Calling ``file.close()`` triggers ``_prefetch_engine.close()``, safely canceling pending network tasks and clearing memory buffers to prevent memory leaks.
+* During ``GCSFile.__init__``, if ``cache_type`` is unspecified or set to ``"adaptive"``, an ``AdaptiveReadaheadCache`` from ``fsspec`` is initialized.
+* When ``file.read(size)`` is called, reads are served from the adaptive cache buffer while background tasks prefetch upcoming chunks concurrently.
+* Calling ``file.close()`` safely tears down any active prefetch tasks and releases buffer memory.
 
 Standard Buckets Benchmarking with No Cache
 -------------------------------------------

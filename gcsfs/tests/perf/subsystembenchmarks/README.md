@@ -13,6 +13,7 @@ The currently runnable groups are:
 
 - `dataloading/huggingface_datasets`: Measures full-corpus streaming reads of a synthetic dataset through Hugging Face Datasets, `fsspec`, and `gcsfs`, with a PyTorch `DataLoader` consuming the stream.
 - `dataloading/ray_data`: Measures full-corpus streaming reads of a synthetic Parquet dataset through Ray Data, `pyarrow.fs`, `fsspec`, and `gcsfs` on CPU.
+- `dataloading/webdataset`: Measures full-corpus streaming reads of synthetic image tar shards through WebDataset and a PyTorch `DataLoader`; `gs://` reads are routed to `gcsfs` by a registered opener. The default sweep keeps storage-bound axes; image-preparation and pipeline axes are parked with `enabled: false`.
 - `checkpointing/pytorch_lightning`: Measures checkpoint write and read performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
 
 > **This README describes the workload: what it runs, what is timed, and how to
@@ -82,6 +83,31 @@ Cloud Monitoring bytes sent by GCS are divided by the logical dataset bytes
 expected across all measured rounds. Values above 1 indicate that GCS served
 more bytes than the logical full-corpus reads required.
 
+### CPU and GPU hosts
+
+Data-loading benchmarks auto-detect CUDA (published as
+`compute_accelerator_type`); no configuration change is needed. On a CPU host,
+batches end in host memory exactly as before. On a GPU host, every loader
+delivers each rank's batches to a GPU the way training jobs do, via
+`dataloading/device.py`: batches are pinned in host memory, copied with
+`non_blocking=True`, and each round synchronizes once at its end so the round
+duration includes the host-to-device transfer. CUDA tensors are never created
+in loader worker processes, as PyTorch recommends.
+
+| Loader | GPU per rank | What is transferred |
+|---|---|---|
+| Hugging Face Datasets | `rank % device_count` | Token and label tensors; text strings stay on the host. |
+| WebDataset | `rank % device_count` when `decode: true`; none with the baseline `decode: false` | Decoded image tensors when `decode: true`. With `decode: false` samples are raw bytes with nothing to copy, so the rank neither binds a GPU nor pins, and runs as on a CPU host. |
+| Ray Data | Ray assigns `num_gpus = min(1, gpus / world_size)` per consumer task (fractional when ranks outnumber GPUs) | `pretok_parquet` via Ray's native `iter_torch_batches(device=..., pin_memory=True)`; `text_parquet` labels are copied by the shared feed. |
+
+When ranks outnumber GPUs, ranks share GPUs.
+
+Each rank creates its CUDA context before timing starts, as a training job
+already has by the time its data loop runs. The exception is Ray Data with
+`split_by_node`: consumer tasks are dispatched inside the round, so creating
+the context is charged to the round in which a Ray worker first runs
+(normally round 1, since Ray reuses workers).
+
 ## Configuration
 
 The group's
@@ -92,10 +118,17 @@ truth for current workload values and experiments. It defines:
 - an implicit baseline configuration; and
 - variants that change one named configuration axis at a time.
 
+A variant can set `enabled: false` to park it without deleting it. Parked
+variants are still built, validated, and checked for duplicate benchmark IDs,
+so they cannot break unnoticed, but benchmark runs skip them. The value must be
+a YAML boolean; a string such as `"false"` is rejected. To run a parked variant
+again, set `enabled: true` (or remove the key) in `configs.yaml`.
+
 `--sweep-axes` accepts a whitespace-separated set of axis names. The baseline
 case is always included, which keeps each selected variant comparable within the
-same run. Leaving the option empty runs every case currently defined in the
-YAML.
+same run. Leaving the option empty runs every enabled case defined in the YAML.
+`--sweep-axes` only selects among enabled variants; it cannot bring back a
+parked one.
 
 Here, "baseline" means only the reference configuration in a one-factor run.
 The suite does not retrieve historical results, compare against an earlier run,

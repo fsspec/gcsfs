@@ -1,7 +1,13 @@
-"""HuggingFace datasets streaming read driver for subsystem benchmarks."""
+"""HuggingFace datasets streaming read driver for subsystem benchmarks.
+
+GPU delivery (pinning, non-blocking copies, per-round sync) comes from the
+shared ``dataloading.device`` module. ``with_format("torch", device=...)`` is
+not used because it would create CUDA tensors inside DataLoader workers.
+"""
 
 import time
 
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
     measure_epochs,
@@ -48,11 +54,11 @@ def _build_dataset(
     return ds
 
 
-def _build_loader(ds, *, batch_size, num_workers, prefetch_factor):
+def _build_loader(ds, *, batch_size, num_workers, prefetch_factor, pin_memory=False):
     """DataLoader with prefetch and persistent workers."""
     from torch.utils.data import DataLoader
 
-    kwargs = dict(batch_size=batch_size, num_workers=num_workers)
+    kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
     if num_workers > 0:
         kwargs["prefetch_factor"] = prefetch_factor
         kwargs["persistent_workers"] = True
@@ -78,6 +84,7 @@ def run_epochs(
     """
     import datasets  # noqa: F401
 
+    device = device_lib.rank_device(0)
     build_start = time.perf_counter()
     ds = _build_dataset(
         prefix,
@@ -93,10 +100,11 @@ def run_epochs(
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
+        pin_memory=device is not None,
     )
     # Reseed shuffle buffer per epoch so workers iterate different orders.
     per_epoch, ttfb = measure_epochs(
-        loader,
+        device_lib.feed(loader, device),
         rounds,
         _rows_in_batch,
         on_epoch=ds.set_epoch,
@@ -119,6 +127,7 @@ def run_rank_epochs(rank, world_size, prefix, params, barrier=None):
     """
     import datasets  # noqa: F401
 
+    device = device_lib.rank_device(rank)
     build_start = time.perf_counter()
     ds = _build_dataset(
         prefix,
@@ -135,10 +144,11 @@ def run_rank_epochs(rank, world_size, prefix, params, barrier=None):
         batch_size=params.batch_size,
         num_workers=params.num_workers,
         prefetch_factor=params.prefetch_factor,
+        pin_memory=device is not None,
     )
     # Barrier absorbs dataset construction skew before round 1.
     per_epoch, ttfb = measure_epochs(
-        loader,
+        device_lib.feed(loader, device),
         params.rounds,
         _rows_in_batch,
         barrier=barrier,

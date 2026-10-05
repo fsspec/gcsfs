@@ -1,8 +1,9 @@
 import asyncio
 import builtins
-import concurrent.futures
 import io
+import json
 import os
+import ssl
 import uuid
 from builtins import FileNotFoundError
 from datetime import datetime, timezone
@@ -23,7 +24,9 @@ import gcsfs.checkers
 import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
+from gcsfs.core import GCSFile
 from gcsfs.credentials import GoogleCredentials
+from gcsfs.retry import HttpError
 from gcsfs.tests.conftest import (
     a,
     allfiles,
@@ -34,6 +37,7 @@ from gcsfs.tests.conftest import (
     text_files,
 )
 from gcsfs.tests.utils import tempdir, tmpfile
+from gcsfs.zb_hns_utils import MAX_PREFETCH_SIZE
 
 TEST_BUCKET = gcsfs.tests.settings.TEST_BUCKET
 TEST_PROJECT = gcsfs.tests.settings.TEST_PROJECT
@@ -2724,7 +2728,7 @@ def test_get_error(gcs):
         gcs.get_file(f"{TEST_BUCKET}/doesnotexist", "other")
 
 
-def test_custom_gcp_universe(monkeypatch):
+def test_custom_gcp_universe(monkeypatch, mtls_env):
     # Make sure we simulate a mock less connection
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
@@ -2740,7 +2744,7 @@ def test_custom_gcp_universe(monkeypatch):
     assert fs.batch_url_base == "https://storage.s3nsapis.fr/batch/storage/v1"
 
 
-def test_default_gcp_universe(monkeypatch):
+def test_default_gcp_universe(monkeypatch, mtls_env):
     # Make sure we simulate a mock less connection
     monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
@@ -2754,6 +2758,339 @@ def test_default_gcp_universe(monkeypatch):
         == "https://storage.googleapis.com/download/storage/v1/b/test/o/path?alt=media"
     )
     assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
+
+
+def _write_test_pki(directory):
+    """Write a throwaway CA plus server and client certs signed by it."""
+    import datetime as dt
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def issue(name, issuer=None, issuer_key=None, san=None, usage=None):
+        key = ec.generate_private_key(ec.SECP256R1())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer or subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(hours=1))
+            .add_extension(
+                x509.BasicConstraints(ca=issuer is None, path_length=None),
+                critical=True,
+            )
+        )
+        # Key identifiers and CA key usage are required by the strict X.509
+        # checks that Python 3.13+ enables in ssl.create_default_context().
+        builder = builder.add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()), False
+        ).add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                (issuer_key or key).public_key()
+            ),
+            False,
+        )
+        if issuer is None:
+            builder = builder.add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+        if san:
+            builder = builder.add_extension(x509.SubjectAlternativeName(san), False)
+        if usage:
+            builder = builder.add_extension(x509.ExtendedKeyUsage([usage]), False)
+        cert = builder.sign(issuer_key or key, hashes.SHA256())
+        return cert, key
+
+    def write(name, cert, key):
+        paths = os.path.join(directory, f"{name}.pem"), os.path.join(
+            directory, f"{name}-key.pem"
+        )
+        with open(paths[0], "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(paths[1], "wb") as f:
+            f.write(
+                key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+            )
+        return paths
+
+    ca, ca_key = issue("gcsfs test CA")
+    server = issue(
+        "localhost",
+        ca.subject,
+        ca_key,
+        san=[
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+        ],
+        usage=ExtendedKeyUsageOID.SERVER_AUTH,
+    )
+    client = issue(
+        "gcsfs test client", ca.subject, ca_key, usage=ExtendedKeyUsageOID.CLIENT_AUTH
+    )
+    return {
+        "ca": write("ca", ca, ca_key)[0],
+        "server": write("server", *server),
+        "client": write("client", *client),
+    }
+
+
+@pytest.fixture
+def mtls_env(monkeypatch, tmp_path):
+    """Environment without an emulator or credentials; cert config not yet set."""
+    for var in (
+        "STORAGE_EMULATOR_HOST",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_UNIVERSE_DOMAIN",
+        "GOOGLE_API_USE_CLIENT_CERTIFICATE",
+        "GOOGLE_API_USE_MTLS_ENDPOINT",
+        "GOOGLE_API_CERTIFICATE_CONFIG",
+        "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE",
+        "CLOUDSDK_CONTEXT_AWARE_CERTIFICATE_CONFIG_FILE_PATH",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    # keep google-auth from finding a gcloud certificate_config.json
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(tmp_path / "gcloud"))
+    GCSFileSystem.clear_instance_cache()
+    yield monkeypatch
+    GCSFileSystem.clear_instance_cache()
+
+
+@pytest.fixture
+def client_cert_config(mtls_env, tmp_path):
+    """Configure google-auth's default client cert source (workload config)."""
+    pki = _write_test_pki(str(tmp_path))
+    cert_path, key_path = pki["client"]
+    config = tmp_path / "certificate_config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "cert_configs": {
+                    "workload": {"cert_path": cert_path, "key_path": key_path}
+                }
+            }
+        )
+    )
+    mtls_env.setenv("GOOGLE_API_CERTIFICATE_CONFIG", str(config))
+    mtls_env.setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "true")
+    return pki
+
+
+def _session_kwargs(fs):
+    """Return the kwargs gcsfs passes to aiohttp.ClientSession."""
+    with mock.patch("gcsfs.core.get_client", mock.AsyncMock()) as get_client:
+        sync(fs.loop, fs._set_session)
+    fs._session = None
+    return get_client.call_args.kwargs
+
+
+def test_mtls_not_used_without_client_cert(mtls_env):
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert fs.on_google is True
+    assert "connector" not in _session_kwargs(fs)
+
+
+def test_mtls_not_used_when_client_cert_disabled(client_cert_config, mtls_env):
+    # a cert config exists, but the env var turns client certs off
+    mtls_env.setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert "connector" not in _session_kwargs(fs)
+
+
+@pytest.mark.parametrize("mode", [None, "auto", "always", "ALWAYS"])
+def test_mtls_endpoint_with_client_cert(client_cert_config, mtls_env, mode):
+    if mode:
+        mtls_env.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", mode)
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.mtls.googleapis.com/storage/v1/"
+    assert fs.batch_url_base == "https://storage.mtls.googleapis.com/batch/storage/v1"
+    assert fs.on_google is True
+    connector = _session_kwargs(fs)["connector"]
+    assert isinstance(connector._ssl, ssl.SSLContext)
+
+
+def test_mtls_endpoint_never(client_cert_config, mtls_env):
+    # like google-cloud-storage: regular endpoint, but the cert is still used
+    mtls_env.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "never")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+    assert "connector" in _session_kwargs(fs)
+
+
+def test_mtls_concurrent_set_session(client_cert_config):
+    fs = GCSFileSystem(token="anon")
+
+    async def set_sessions():
+        return await asyncio.gather(*(fs._set_session() for _ in range(10)))
+
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context",
+        wraps=gcsfs.core._client_cert_ssl_context,
+    ) as load:
+        sessions = sync(fs.loop, set_sessions)
+    try:
+        assert len({id(session) for session in sessions}) == 1
+        assert load.call_count == 1
+    finally:
+        sync(fs.loop, sessions[0].close)
+        fs._session = None
+
+
+def test_mtls_set_session_cancel_one_caller(client_cert_config):
+    """Cancelling one caller must not cancel the shared cert load."""
+    import time
+
+    fs = GCSFileSystem(token="anon")
+    real_load = gcsfs.core._client_cert_ssl_context
+
+    def slow_load():
+        time.sleep(0.2)
+        return real_load()
+
+    async def run():
+        tasks = [asyncio.ensure_future(fs._set_session()) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        tasks[0].cancel()
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context", side_effect=slow_load
+    ) as load:
+        results = sync(fs.loop, run)
+    try:
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert isinstance(results[1], aiohttp.ClientSession)
+        assert results[1] is results[2]
+        assert load.call_count == 1
+    finally:
+        sync(fs.loop, results[1].close)
+        fs._session = None
+
+
+def test_mtls_set_session_retries_after_failed_load(client_cert_config):
+    fs = GCSFileSystem(token="anon")
+    real_load = gcsfs.core._client_cert_ssl_context
+    with mock.patch(
+        "gcsfs.core._client_cert_ssl_context",
+        side_effect=[OSError("cert provider failed"), real_load()],
+    ):
+        with pytest.raises(OSError, match="cert provider failed"):
+            sync(fs.loop, fs._set_session)
+        session = sync(fs.loop, fs._set_session)
+    assert isinstance(session, aiohttp.ClientSession)
+    sync(fs.loop, session.close)
+    fs._session = None
+
+
+def test_mtls_empty_client_cert_source(client_cert_config):
+    from google.auth.exceptions import MutualTLSChannelError
+
+    with mock.patch(
+        "google.auth.transport.mtls.default_client_cert_source",
+        return_value=lambda: (None, None),
+    ):
+        with pytest.raises(MutualTLSChannelError, match="no certificate or key"):
+            gcsfs.core._client_cert_ssl_context()
+
+
+def test_mtls_endpoint_invalid(client_cert_config, mtls_env):
+    mtls_env.setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "sometimes")
+    with pytest.raises(ValueError, match="GOOGLE_API_USE_MTLS_ENDPOINT"):
+        GCSFileSystem(token="anon")
+
+
+def test_mtls_explicit_endpoint_kept(client_cert_config):
+    fs = GCSFileSystem(token="anon", endpoint_url="https://example.com:8443")
+    assert fs.base == "https://example.com:8443/storage/v1/"
+    assert "connector" in _session_kwargs(fs)
+
+
+def test_mtls_emulator_kept(client_cert_config, mtls_env):
+    mtls_env.setenv("STORAGE_EMULATOR_HOST", "http://localhost:4443")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "http://localhost:4443/storage/v1/"
+    assert "connector" not in _session_kwargs(fs)
+
+
+def test_mtls_custom_universe(client_cert_config, mtls_env):
+    mtls_env.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "s3nsapis.fr")
+    fs = GCSFileSystem(token="anon")
+    assert fs.base == "https://storage.s3nsapis.fr/storage/v1/"
+    assert "connector" in _session_kwargs(fs)
+
+
+def test_mtls_user_connector_kept(client_cert_config):
+    connector = object()
+    fs = GCSFileSystem(token="anon", session_kwargs={"connector": connector})
+    assert _session_kwargs(fs)["connector"] is connector
+
+
+def test_mtls_session_presents_client_cert(client_cert_config, mtls_env):
+    """End to end: a server that requires a client cert accepts gcsfs."""
+    import http.server
+    import threading
+
+    peers = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            peers.append(self.connection.getpeercert())
+            body = json.dumps(
+                {"kind": "storage#object", "name": "obj", "bucket": "bkt", "size": "3"}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(*client_cert_config["server"])
+    server_ctx.load_verify_locations(client_cert_config["ca"])
+    server_ctx.verify_mode = ssl.CERT_REQUIRED
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    httpd.socket = server_ctx.wrap_socket(httpd.socket, server_side=True)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    # trust the test CA for server verification
+    mtls_env.setenv("SSL_CERT_FILE", client_cert_config["ca"])
+    try:
+        fs = GCSFileSystem(
+            token="anon", endpoint_url=f"https://localhost:{httpd.server_port}"
+        )
+        assert fs.info("bkt/obj")["size"] == 3
+        subject = dict(x[0] for x in peers[0]["subject"])
+        assert subject["commonName"] == "gcsfs test client"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_mv_file_raises_error_for_specific_generation(gcs):
@@ -2879,44 +3216,24 @@ def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
 
 
 def test_gcsfile_prefetch_and_cache_type_rules(gcs):
-    """Verify that prefetcher is only used when cache_type is not set by user, and default cache_type is 'none'."""
+    """Verify that adaptive cache is default when cache_type is not set, and explicit cache_type is respected."""
     fn = f"{TEST_BUCKET}/cache_rules.txt"
     gcs.pipe(fn, b"HelloWorld")
 
-    # 1. Default: cache_type is not set -> prefetcher active, cache_type is "none", cache_source is "default"
+    # 1. Default: cache_type is not set -> cache_type is "adaptive", cache_source is "default"
     with gcs.open(fn, "rb") as f:
-        assert getattr(f, "_prefetch_engine", None) is not None
-        assert f.cache_type == "none"
+        assert f.cache_type == "adaptive"
         assert f.cache_source == "default"
         assert f.read() == b"HelloWorld"
 
-    # 2. Prefetcher disabled, no cache_type set -> no prefetcher, cache_type falls back to "readahead",
-    # cache_source is "default"
-    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
-        assert getattr(f, "_prefetch_engine", None) is None
-        assert f.cache_type == "readahead"
-        assert f.cache_source == "default"
-        assert f.read() == b"HelloWorld"
-
-    # 3. User sets cache_type="readahead" -> prefetcher NOT used, cache_type is "readahead", cache_source is "explicit"
+    # 2. User sets cache_type="readahead" -> cache_type is "readahead", cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="readahead") as f:
-        assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "readahead"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
-    # 4. User sets cache_type="readahead" even with prefetcher=True -> prefetcher NOT used, cache_source is "explicit"
-    with gcs.open(
-        fn, "rb", cache_type="readahead", use_experimental_adaptive_prefetching=True
-    ) as f:
-        assert getattr(f, "_prefetch_engine", None) is None
-        assert f.cache_type == "readahead"
-        assert f.cache_source == "explicit"
-        assert f.read() == b"HelloWorld"
-
-    # 5. User explicitly sets cache_type="none" -> prefetcher NOT used, cache_source is "explicit"
+    # 3. User explicitly sets cache_type="none" -> cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="none") as f:
-        assert getattr(f, "_prefetch_engine", None) is None
         assert f.cache_type == "none"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
@@ -2963,11 +3280,68 @@ def test_prefetcher_default_concurrency(gcs):
     # Act
     with gcs.open(fn, "rb") as f:
         file_concurrency = f.concurrency
-        prefetch_engine_concurrency = f._prefetch_engine.concurrency
+        cache_concurrency = getattr(
+            getattr(f.cache, "_prefetcher", None), "concurrency", None
+        )
 
     # Assert
     assert file_concurrency == 4
-    assert prefetch_engine_concurrency == 4
+    assert cache_concurrency == 4
+
+
+def test_prefetcher_config_options():
+    fake_fs = mock.MagicMock()
+    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
+    fake_fs.info.return_value = {"size": 100}
+
+    # 1. Default without explicit max_prefetch_size -> MAX_PREFETCH_SIZE (256 MiB)
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+    ) as f:
+        assert (
+            getattr(getattr(f.cache, "_prefetcher", None), "max_prefetch_size", None)
+            == MAX_PREFETCH_SIZE
+        )
+
+    # 2. Explicit kwarg max_prefetch_size
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        max_prefetch_size=1024 * 1024,
+    ) as f:
+        assert (
+            getattr(getattr(f.cache, "_prefetcher", None), "max_prefetch_size", None)
+            == 1024 * 1024
+        )
+
+    # 3. Explicit cache_options["max_prefetch_size"]
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_options={"max_prefetch_size": 2048 * 1024},
+    ) as f:
+        assert (
+            getattr(getattr(f.cache, "_prefetcher", None), "max_prefetch_size", None)
+            == 2048 * 1024
+        )
+
+
+def test_gcsfile_prefetcher_producer_fetcher_integration():
+    fake_fs = mock.MagicMock()
+    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
+    fake_fs.info.return_value = {"size": 100}
+
+    with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
+        prefetcher = getattr(f.cache, "_prefetcher", None)
+        assert prefetcher is not None
+        assert prefetcher.producer.fetcher == f._async_fetch_range
 
 
 def test_gcsfile_prefetch_sequential_integrity(gcs):
@@ -2976,11 +3350,7 @@ def test_gcsfile_prefetch_sequential_integrity(gcs):
     data = os.urandom(file_size)
     gcs.pipe(fn, data)
 
-    with gcs.open(
-        fn, "rb", use_experimental_adaptive_prefetching=True, block_size=2 * 1024 * 1024
-    ) as f:
-        assert f._prefetch_engine is not None
-
+    with gcs.open(fn, "rb", block_size=2 * 1024 * 1024) as f:
         chunks = []
         while True:
             chunk = f.read(1024 * 1024)  # Read 1MB at a time
@@ -3001,9 +3371,7 @@ def test_gcsfile_prefetch_random_seek_integrity(gcs):
 
     random.seed(42)
 
-    with gcs.open(
-        fn, "rb", use_experimental_adaptive_prefetching=True, block_size=1024 * 1024
-    ) as f:
+    with gcs.open(fn, "rb", block_size=1024 * 1024) as f:
         for _ in range(50):
             start = random.randint(0, file_size - 1000)
             length = random.randint(1, 1000)
@@ -3015,40 +3383,50 @@ def test_gcsfile_prefetch_random_seek_integrity(gcs):
             assert chunk == data[start : start + length]
 
 
-def test_gcsfile_multithreaded_read_integrity(gcs):
-    fn = f"{TEST_BUCKET}/integrated_mt.txt"
-    file_size = 15 * 1024 * 1024
-    data = os.urandom(file_size)
-    gcs.pipe(fn, data)
-
-    with gcs.open(
-        fn, "rb", use_experimental_adaptive_prefetching=True, block_size=2 * 1024 * 1024
-    ) as f:
-
-        def thread_worker(start, size):
-            return f._fetch_range(start, start + size)
-
-        chunk_size = 3 * 1024 * 1024
-        futures = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            for i in range(5):
-                start_offset = i * chunk_size
-                futures.append(executor.submit(thread_worker, start_offset, chunk_size))
-
-        results = [fut.result() for fut in futures]
-        stitched_data = b"".join(results)
-
-        assert len(stitched_data) == file_size
-        assert stitched_data == data
-
-
 def test_gcsfile_not_satisfiable_range(gcs):
     fn = f"{TEST_BUCKET}/integrated_eof.txt"
     gcs.pipe(fn, b"12345")
 
-    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=True) as f:
-        res = f._fetch_range(100, 200)
+    with gcs.open(fn, "rb") as f:
+        res = f.cache._fetch(100, 200)
         assert res == b""
+
+        # Inverted range
+        assert f.cache._fetch(3, 1) == b""
+
+
+def test_gcsfile_fetch_range_error_handling():
+    fake_fs = mock.MagicMock()
+    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
+    fake_fs.info.return_value = {"size": 100}
+    fake_fs.cat_file.return_value = b"data"
+    f = GCSFile(fake_fs, "bucket/file.txt", mode="rb", cache_type="none", size=100)
+
+    # Boundary checks
+    assert f._fetch_range(100, 200) == b""
+    assert f._fetch_range(3, 1) == b""
+
+    # Negative end offset (e.g. read all except last byte)
+    assert f._fetch_range(0, -1) == b"data"
+    fake_fs.cat_file.assert_called_with(
+        "bucket/file.txt",
+        start=0,
+        end=-1,
+        concurrency=4,
+        cache_type="none",
+        cache_source="explicit",
+    )
+
+    # Exception handling
+    fake_fs.cat_file.side_effect = RuntimeError("Request range not satisfiable")
+    assert f._fetch_range(0, 5) == b""
+
+    fake_fs.cat_file.side_effect = HttpError({"code": 416, "message": "InvalidRange"})
+    assert f._fetch_range(0, 5) == b""
+
+    fake_fs.cat_file.side_effect = RuntimeError("Some other error")
+    with pytest.raises(RuntimeError, match="Some other error"):
+        f._fetch_range(0, 5)
 
 
 def test_tree(gcs):
@@ -3548,7 +3926,7 @@ def test_get_file_concurrent_early_eof(gcs):
                 return_value=-1,
             ),
             mock.patch(
-                "gcsfs.prefetcher.BackgroundPrefetcher.afetch",
+                "fsspec.prefetcher.BackgroundPrefetcher.afetch",
                 new_callable=mock.AsyncMock,
             ) as mock_afetch,
         ):
@@ -3785,7 +4163,7 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         expected_ua = f"python-gcsfs/{version} cache_type/mmap:e"
         assert expected_ua in user_agents
 
-    # 2. Default open (prefetcher active) -> User-Agent contains cache_type/none:d
+    # 2. Default open (adaptive cache active) -> User-Agent contains cache_type/adaptive:d
     with mock.patch.object(
         gcs.session, "request", wraps=gcs.session.request
     ) as mock_session_request:
@@ -3796,7 +4174,7 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             call.kwargs.get("headers", {}).get("User-Agent", "")
             for call in mock_session_request.call_args_list
         ]
-        assert any("cache_type/none:d" in ua for ua in user_agents)
+        assert any("cache_type/adaptive:d" in ua for ua in user_agents)
 
     # 3. Explicit cache_type="none" -> User-Agent contains cache_type/none:e
     with mock.patch.object(
@@ -3811,18 +4189,18 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         ]
         assert any("cache_type/none:e" in ua for ua in user_agents)
 
-    # 4. Prefetcher disabled fallback -> User-Agent contains cache_type/readahead:d
+    # 4. Explicit cache_type="readahead" -> User-Agent contains cache_type/readahead:e
     with mock.patch.object(
         gcs.session, "request", wraps=gcs.session.request
     ) as mock_session_request:
-        with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+        with gcs.open(fn, "rb", cache_type="readahead") as f:
             _ = f.read(10)
 
         user_agents = [
             call.kwargs.get("headers", {}).get("User-Agent", "")
             for call in mock_session_request.call_args_list
         ]
-        assert any("cache_type/readahead:d" in ua for ua in user_agents)
+        assert any("cache_type/readahead:e" in ua for ua in user_agents)
 
 
 def test_process_object_structure(gcs):

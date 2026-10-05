@@ -1,7 +1,7 @@
 import pytest
 from metrics.parsers import hf
 
-# Log lines exactly as llama_3_1_8b_cpu_sim.py emits them (the strings whose
+# Log lines exactly as train_pytorch_lightning.py emits them (the strings whose
 # format these regexes must match). These double as a workload<->parser
 # compatibility guard.
 STEP_LINE = (
