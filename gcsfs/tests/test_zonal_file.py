@@ -107,12 +107,12 @@ def mock_gcsfs():
     fs.split_path.return_value = ("test-bucket", "test-key", "123")
     fs.info.return_value = {"size": 1000, "generation": "123", "name": "test-key"}
     fs.loop = mock.Mock()
-    # Stub the MRDPoolCache so ZonalFile.__init__ doesn't try real RPCs.
-    mock_pool = mock.Mock()
-    mock_pool.persisted_size = 1000
-    mock_pool.details = None
-    fs._mrd_pool_cache = mock.Mock()
-    fs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    # Stub the MRDCache so ZonalFile.__init__ doesn't try real RPCs.
+    mock_mrd = mock.Mock()
+    mock_mrd.persisted_size = 1000
+    mock_mrd.details = None
+    fs._mrd_cache = mock.Mock()
+    fs._mrd_cache.get = mock.AsyncMock(return_value=mock_mrd)
     fs._cat_file = mock.AsyncMock(return_value=b"")
     fs._fetch_range_split = mock.AsyncMock(return_value=[b""])
     return fs
@@ -131,11 +131,11 @@ def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
 
     expected_call = mock.call(
         mock_gcsfs.loop,
-        mock_gcsfs._mrd_pool_cache.get,
+        mock_gcsfs._mrd_cache.get,
         "test-bucket",
         "test-key",
         "456",
-        pool_size=mock.ANY,
+        concurrency=mock.ANY,
         cache_type=mock.ANY,
         cache_source=mock.ANY,
     )
@@ -153,11 +153,11 @@ def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
 
     expected_call = mock.call(
         mock_gcsfs.loop,
-        mock_gcsfs._mrd_pool_cache.get,
+        mock_gcsfs._mrd_cache.get,
         "test-bucket",
         "test-key",
         "123",
-        pool_size=mock.ANY,
+        concurrency=mock.ANY,
         cache_type=mock.ANY,
         cache_source=mock.ANY,
     )
@@ -651,7 +651,7 @@ def test_zonal_file_fetch_range_without_prefetch_engine(mock_gcsfs):
             start=10,
             chunk_lengths=[5],
             size=zf.size,
-            mrd=zf.mrd_pool,
+            mrd=zf.mrd,
             cache_type=mock.ANY,
             cache_source=mock.ANY,
         )
@@ -663,8 +663,8 @@ def test_zonal_file_fetch_range_without_prefetch_engine(mock_gcsfs):
             zf.path,
             start=10,
             end=20,
-            concurrency=zf.pool_size,
-            mrd=zf.mrd_pool,
+            concurrency=zf.concurrency,
+            mrd=zf.mrd,
             cache_type=mock.ANY,
             cache_source=mock.ANY,
         )
@@ -685,14 +685,14 @@ async def test_zonal_file_async_fetch_range(mock_sync, mock_gcsfs):
     mock_gcsfs._concurrent_mrd_fetch = mock.AsyncMock(return_value=b"async data")
     result = await zf._async_fetch_range(start_offset=0, total_size=100, split_factor=2)
     assert result == b"async data"
-    mock_gcsfs._concurrent_mrd_fetch.assert_awaited_once_with(0, 100, 2, zf.mrd_pool)
+    mock_gcsfs._concurrent_mrd_fetch.assert_awaited_once_with(0, 100, 2, zf.mrd)
     zf.close()
 
 
 def test_zonal_file_prefetcher_producer_fetcher_integration(mock_gcsfs):
     mock_gcsfs.loop = fsspec.asyn.get_loop()
-    mock_pool = mock.Mock(persisted_size=1000, details=None)
-    mock_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
+    mock_mrd = mock.Mock(persisted_size=1000, details=None)
+    mock_gcsfs._mrd_cache.get = mock.AsyncMock(return_value=mock_mrd)
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
     prefetcher = getattr(zf.cache, "_prefetcher", None)
     assert prefetcher is not None
@@ -702,11 +702,11 @@ def test_zonal_file_prefetcher_producer_fetcher_integration(mock_gcsfs):
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
 def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
-    """Tests that pool_size is correctly set based on kwargs and env vars."""
+    """Tests that pool_size and concurrency are correctly set based on kwargs."""
     zf1 = ZonalFile(
         gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb", pool_size=10
     )
-    assert zf1.pool_size == 10
+    assert zf1.concurrency == 10
     zf1.close()
 
     zf2 = ZonalFile(
@@ -715,7 +715,7 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
         mode="rb",
         concurrency=4,
     )
-    assert zf2.pool_size == 4
+    assert zf2.concurrency == 4
     zf2.close()
 
 
@@ -770,10 +770,10 @@ def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
     zf_bytes.close()
 
     # 6. Explicit cache_type="all" -> cache_type="all"
-    mock_pool = mock.Mock()
-    mock_pool.persisted_size = 1000
-    mock_pool.details = None
-    mock_sync.return_value = mock_pool
+    mock_mrd = mock.Mock()
+    mock_mrd.persisted_size = 1000
+    mock_mrd.details = None
+    mock_sync.return_value = mock_mrd
     mock_gcsfs._cat_file = mock.AsyncMock(return_value=b"hello world")
     zf_all = ZonalFile(
         gcsfs=mock_gcsfs,
@@ -798,18 +798,18 @@ def test_zonal_file_fetch_range_mutually_exclusive(mock_sync, mock_gcsfs):
 
 @mock.patch("gcsfs.zonal_file.sync_teardown")
 @mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_zonal_file_close_cleans_up_new_pools(mock_sync, mock_teardown, mock_gcsfs):
-    """Tests that close() properly tears down the MRD pool."""
+def test_zonal_file_close_cleans_up_mrd(mock_sync, mock_teardown, mock_gcsfs):
+    """Tests that close() properly tears down the MRD."""
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
-    mock_pool = mock.Mock()
-    zf.mrd_pool = mock_pool
+    mock_mrd = mock.Mock()
+    zf.mrd = mock_mrd
     zf.close()
 
     mock_teardown.assert_called_once_with(
         mock_gcsfs.loop,
-        mock_pool.close,
+        mock_mrd.close,
         timeout=DEFAULT_TEARDOWN_TIMEOUT_SECONDS,
-        description="closing mrd_pool for gs://test-bucket/test-key",
+        description="closing mrd for gs://test-bucket/test-key",
     )
 
 
@@ -996,15 +996,15 @@ def test_sync_teardown_accepts_coroutine_object():
 
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_close_impl_mrd_pool_failure_does_not_skip_aaow(mock_sync, mock_gcsfs):
-    """Verify that if mrd_pool.close fails, aaow teardown is still executed."""
+def test_close_impl_mrd_failure_does_not_skip_aaow(mock_sync, mock_gcsfs):
+    """Verify that if mrd.close fails, aaow teardown is still executed."""
     mock_gcsfs.loop = fsspec.asyn.get_loop()
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb")
 
     async def failing_mrd_close():
-        raise RuntimeError("mrd pool failed")
+        raise RuntimeError("mrd failed")
 
-    zf.mrd_pool = mock.Mock(close=failing_mrd_close)
+    zf.mrd = mock.Mock(close=failing_mrd_close)
     zf.aaow = mock.Mock(_is_stream_open=True)
 
     aaow_closed = []
@@ -1013,7 +1013,7 @@ def test_close_impl_mrd_pool_failure_does_not_skip_aaow(mock_sync, mock_gcsfs):
         aaow_closed.append(True)
 
     with mock.patch("gcsfs.zb_hns_utils.close_aaow", side_effect=fake_close_aaow):
-        with pytest.raises(RuntimeError, match="mrd pool failed"):
+        with pytest.raises(RuntimeError, match="mrd failed"):
             zf._close_impl()
 
     assert aaow_closed == [True]
@@ -1028,7 +1028,7 @@ def test_close_impl_aaow_failure_raises(mock_sync, mock_gcsfs):
     async def fake_mrd_close():
         pass
 
-    zf.mrd_pool = mock.Mock(close=fake_mrd_close)
+    zf.mrd = mock.Mock(close=fake_mrd_close)
     zf.aaow = mock.Mock(_is_stream_open=True)
 
     async def failing_close_aaow(aaow, finalize_on_close=False):
@@ -1127,46 +1127,36 @@ async def test_zonal_file_open_shares_idle_queue(init_mrd_mock):
         return_value={"generation": "1", "timeFinalized": "2026-06-17T00:00:00Z"}
     )
 
-    from gcsfs.zb_hns_utils import MRDPoolCache
+    from gcsfs.zb_hns_utils import MRDCache
 
-    fs._mrd_pool_cache = MRDPoolCache(fs, max_idle_pools=8)
+    fs._mrd_cache = MRDCache(fs, max_idle_mrds=8)
 
     # Drive two opens through the real cache; bypass the rest of ZonalFile/GCSFile init.
-    pool_a = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
-    pool_b = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=1)
+    mrd_a = await fs._mrd_cache.get("bucket", "key", "1", concurrency=1)
+    mrd_b = await fs._mrd_cache.get("bucket", "key", "1", concurrency=1)
 
-    assert fs._mrd_pool_cache._refcounts[("bucket", "key", "1", None)] == 2
-    assert init_mrd_mock.await_count == 2
+    assert fs._mrd_cache._active[("bucket", "key", "1")][1] == 2
+    assert init_mrd_mock.await_count == 1
+    assert mrd_b is mrd_a
 
-    a_mrd = pool_a._all_mrds[0]
-    b_mrd = pool_b._all_mrds[0]
-
-    await pool_a.close()
-    await pool_b.close()
+    await mrd_a.close()
+    await mrd_b.close()
 
     # Verify reuse after close
-    pool_c = await fs._mrd_pool_cache.get("bucket", "key", "1", pool_size=2)
+    mrd_c = await fs._mrd_cache.get("bucket", "key", "1", concurrency=2)
 
-    assert (
-        init_mrd_mock.await_count == 2
-    )  # 2 from before, pool_c init reuses from cache
+    assert init_mrd_mock.await_count == 1  # Reused from inactive cache
+    assert mrd_c is mrd_a
 
-    async with pool_c.get_mrd() as m1:
-        assert m1 is a_mrd  # Reused from cache during pool_c.initialize()
-
-        async with pool_c.get_mrd() as m2:
-            assert m2 is b_mrd  # Reused from cache during get_mrd()
-
-    assert init_mrd_mock.await_count == 2  # No new calls at all
-
-    await pool_c.close()
-    await fs._mrd_pool_cache.close()
+    await mrd_c.close()
+    await fs._mrd_cache.close()
     fs.loop.close()
 
 
 @pytest.mark.asyncio
-async def test_mrd_pool_cache_sets_pool_details():
+async def test_mrd_cache_sets_details():
     fs = mock.Mock()
+    fs._get_grpc_client = mock.AsyncMock()
     fs._info = mock.AsyncMock(
         return_value={
             "generation": "123",
@@ -1175,16 +1165,17 @@ async def test_mrd_pool_cache_sets_pool_details():
         }
     )
 
-    from gcsfs.zb_hns_utils import MRDPoolCache
+    from gcsfs.zb_hns_utils import MRDCache
 
-    cache = MRDPoolCache(fs)
+    cache = MRDCache(fs)
 
-    with mock.patch("gcsfs.zb_hns_utils.MRDPool") as mock_pool:
-        # Prevent actually calling mrd_pool.initialize() which would fail on a mock
-        mock_pool.return_value.initialize = mock.AsyncMock()
-        pool = await cache.get("bucket", "key", generation=None, pool_size=1)
+    with mock.patch(
+        "gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock
+    ) as mock_init:
+        mock_init.return_value = mock.AsyncMock(persisted_size=100)
+        mrd = await cache.get("bucket", "key", generation=None, concurrency=1)
 
-    assert pool.details == {
+    assert mrd.details == {
         "generation": "123",
         "size": 100,
         "timeFinalized": "2026-06-17T00:00:00Z",

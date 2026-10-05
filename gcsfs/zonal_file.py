@@ -76,24 +76,30 @@ class ZonalFile(GCSFile):
         self.flush_interval_bytes = flush_interval_bytes
         self.gcsfs = gcsfs
         self.pool_size = pool_size
+        self.concurrency = kwargs.get("concurrency", pool_size)
+        self.timeout = timeout
         object_size = None
         if "r" in self.mode:
             resolved_cache_type, resolved_cache_source = (
                 _get_prefetcher_and_cache_config(cache_type)
             )
-            self.mrd_pool = asyn.sync(
+            cache = getattr(self.gcsfs, "_mrd_cache", None)
+            self.mrd = asyn.sync(
                 self.gcsfs.loop,
-                self.gcsfs._mrd_pool_cache.get,
+                cache.get,
                 bucket,
                 key,
                 generation,
-                pool_size=self.pool_size,
+                concurrency=self.concurrency,
                 cache_type=resolved_cache_type,
                 cache_source=resolved_cache_source,
             )
-            if getattr(self.mrd_pool, "details", None) is not None:
-                self._details = self.mrd_pool.details
-            object_size = self.mrd_pool.persisted_size
+            details = getattr(self.mrd, "details", None)
+            if isinstance(details, dict):
+                self._details = details
+            persisted_size = getattr(self.mrd, "persisted_size", None)
+            if isinstance(persisted_size, int):
+                object_size = persisted_size
 
             if object_size is None:
                 logger.warning(
@@ -215,7 +221,7 @@ class ZonalFile(GCSFile):
                     start=start,
                     chunk_lengths=chunk_lengths,
                     size=self.size,
-                    mrd=self.mrd_pool,
+                    mrd=self.mrd,
                     cache_type=self.cache_type,
                     cache_source=self.cache_source,
                 )
@@ -225,7 +231,7 @@ class ZonalFile(GCSFile):
                 start=start,
                 end=end,
                 concurrency=self.concurrency,
-                mrd=self.mrd_pool,
+                mrd=self.mrd,
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
             )
@@ -240,7 +246,7 @@ class ZonalFile(GCSFile):
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """The native coroutine called by the BackgroundPrefetcher."""
         return await self.gcsfs._concurrent_mrd_fetch(
-            start_offset, total_size, split_factor, self.mrd_pool
+            start_offset, total_size, split_factor, self.mrd
         )
 
     def write(self, data):
@@ -380,14 +386,14 @@ class ZonalFile(GCSFile):
         timeout = self.timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
         errors = []
 
-        # Teardown the read-side MRD pool if initialized.
-        if hasattr(self, "mrd_pool") and self.mrd_pool:
+        # Teardown the read-side MRD if initialized.
+        if hasattr(self, "mrd") and self.mrd:
             try:
                 sync_teardown(
                     self.gcsfs.loop,
-                    self.mrd_pool.close,
+                    self.mrd.close,
                     timeout=timeout,
-                    description=f"closing mrd_pool for {self.path}",
+                    description=f"closing mrd for {self.path}",
                 )
             except Exception as e:
                 errors.append(e)

@@ -36,9 +36,9 @@ def fake_fs(io_loop):
     return fs
 
 
-def make_read_file(fake_fs, pool_close):
-    pool = mock.Mock(persisted_size=1000, details=None, close=pool_close)
-    fake_fs._mrd_pool_cache.get = mock.AsyncMock(return_value=pool)
+def make_read_file(fake_fs, mrd_close):
+    mrd = mock.Mock(persisted_size=1000, details=None, close=mrd_close)
+    fake_fs._mrd_cache.get = mock.AsyncMock(return_value=mrd)
     return ZonalFile(gcsfs=fake_fs, path="gs://b/test-key", mode="rb")
 
 
@@ -50,9 +50,7 @@ def finalize_on_loop(io_loop, holder):
     fsspec.asyn.sync(io_loop, _drop_and_collect)
 
 
-def test_read_file_finalized_on_loop_thread_releases_mrd_pool(
-    fake_fs, io_loop, monkeypatch
-):
+def test_read_file_finalized_on_loop_thread_releases_mrd(fake_fs, io_loop, monkeypatch):
     seen = []
     monkeypatch.setattr(sys, "unraisablehook", seen.append)
     closed = threading.Event()
@@ -60,7 +58,7 @@ def test_read_file_finalized_on_loop_thread_releases_mrd_pool(
     holder = [zf]
     del zf
     finalize_on_loop(io_loop, holder)
-    assert wait_until(closed.is_set), "mrd_pool.close() was never awaited"
+    assert wait_until(closed.is_set), "mrd.close() was never awaited"
     assert seen == [], f"exception escaped the finalizer: {seen}"
 
 
@@ -85,10 +83,10 @@ def test_write_file_finalized_on_loop_thread_flushes_and_finalizes(fake_fs, io_l
 def test_close_on_loop_thread_is_idempotent(fake_fs, io_loop):
     calls = []
 
-    async def pool_close():
+    async def mrd_close():
         calls.append(1)
 
-    zf = make_read_file(fake_fs, pool_close)
+    zf = make_read_file(fake_fs, mrd_close)
 
     async def close_twice():
         zf.close()
@@ -97,7 +95,7 @@ def test_close_on_loop_thread_is_idempotent(fake_fs, io_loop):
     fsspec.asyn.sync(io_loop, close_twice)
     assert wait_until(lambda: len(calls) == 1), "teardown did not run exactly once"
     time.sleep(0.2)
-    assert calls == [1], f"mrd_pool.close() ran {len(calls)} times"
+    assert calls == [1], f"mrd.close() ran {len(calls)} times"
 
 
 def test_deferred_closes_share_a_bounded_thread_pool(fake_fs, io_loop):
@@ -112,15 +110,15 @@ def test_deferred_closes_share_a_bounded_thread_pool(fake_fs, io_loop):
                 workers.append((current.ident, current.name))
             super()._close_impl()
 
-    async def pool_close():
+    async def mrd_close():
         pass
 
     files = []
     for _ in range(n_files):
-        pool = mock.Mock(persisted_size=1000, details=None, close=pool_close)
-        fake_fs._mrd_pool_cache.get = mock.AsyncMock(return_value=pool)
+        mrd = mock.Mock(persisted_size=1000, details=None, close=mrd_close)
+        fake_fs._mrd_cache.get = mock.AsyncMock(return_value=mrd)
         zf = RecordingZonalFile(gcsfs=fake_fs, path="gs://b/test-key", mode="rb")
-        zf.mrd_pool = pool
+        zf.mrd = mrd
         files.append(zf)
 
     async def close_all():
@@ -147,10 +145,10 @@ def test_off_loop_close_still_blocks_and_propagates_errors(fake_fs):
 
     async def failing_close():
         started.set()
-        raise RuntimeError("MRD pool teardown failed")
+        raise RuntimeError("MRD teardown failed")
 
     zf = make_read_file(fake_fs, failing_close)
-    with pytest.raises(RuntimeError, match="MRD pool teardown failed"):
+    with pytest.raises(RuntimeError, match="MRD teardown failed"):
         zf.close()
     assert started.is_set(), "close() must run the teardown synchronously"
 

@@ -26,7 +26,7 @@ from gcsfs.tests.conftest import csv_files, files, requires_rapid
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.test_zonal import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
-from gcsfs.zb_hns_utils import MRDPoolCache
+from gcsfs.zb_hns_utils import MRDCache
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -208,16 +208,16 @@ def test_mrd_created_once_for_zonal_file(extended_gcsfs, gcs_bucket_mocks):
         json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
     ) as mocks:
         with extended_gcsfs.open(file_path, "rb") as f:
-            # The MRDPoolCache.get should be called upon opening the file.
-            mocks["pool_cache_get"].assert_called_once()
+            # The MRDCache.get should be called upon opening the file.
+            mocks["mrd_cache_get"].assert_called_once()
 
             f.read(10)
             f.read(20)
             f.seek(5)
             f.read(5)
 
-        # Verify that pool_cache_get was not called again.
-        mocks["pool_cache_get"].assert_called_once()
+        # Verify that mrd_cache_get was not called again.
+        mocks["mrd_cache_get"].assert_called_once()
 
 
 def test_zonal_file_warning_on_missing_persisted_size(
@@ -230,7 +230,7 @@ def test_zonal_file_warning_on_missing_persisted_size(
         json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
     ) as mocks:
         # Force persisted_size to None to trigger the warning
-        mocks["pool"].persisted_size = None
+        mocks["mrd"].persisted_size = None
         with caplog.at_level(logging.WARNING, logger="gcsfs"):
             with extended_gcsfs.open(file_path, "rb"):
                 pass
@@ -261,18 +261,14 @@ async def test_cat_file_warning_on_missing_persisted_size(
 @pytest.mark.asyncio
 async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
     """
-    Tests that cache_type and cache_source are propagated to _mrd_pool_cache.get.
+    Tests that cache_type and cache_source are propagated to _mrd_cache.get.
     """
     with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
         with mock.patch.object(
-            extended_gcsfs._mrd_pool_cache, "get", new_callable=mock.AsyncMock
+            extended_gcsfs._mrd_cache, "get", new_callable=mock.AsyncMock
         ) as mock_get:
-            from gcsfs.zb_hns_utils import MRDPool
-
-            mock_mrd = mock.AsyncMock(spec=MRDPool)
-            mock_mrd.get_mrd.return_value.__aenter__.return_value.persisted_size = len(
-                json_data
-            )
+            mock_mrd = mock.AsyncMock()
+            mock_mrd.persisted_size = len(json_data)
             mock_get.return_value = mock_mrd
 
             with mock.patch.object(
@@ -290,7 +286,7 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
                 TEST_ZONAL_BUCKET,
                 file,
                 mock.ANY,
-                pool_size=mock.ANY,
+                concurrency=mock.ANY,
                 cache_type="readahead",
                 cache_source="explicit",
             )
@@ -298,18 +294,13 @@ async def test_cat_file_passes_cache_type(extended_gcsfs, gcs_bucket_mocks):
 
 @pytest.mark.asyncio
 async def test_cat_file_zonal_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
-    """Tests that cat_file defaults to pool_size=1 on zonal buckets."""
-    # Arrange
-    from gcsfs.zb_hns_utils import MRDPool
-
+    """Tests that cat_file defaults to concurrency=1 on zonal buckets."""
     with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
         with mock.patch.object(
-            extended_gcsfs._mrd_pool_cache, "get", new_callable=mock.AsyncMock
+            extended_gcsfs._mrd_cache, "get", new_callable=mock.AsyncMock
         ) as mock_get:
-            mock_mrd = mock.AsyncMock(spec=MRDPool)
-            mock_mrd.get_mrd.return_value.__aenter__.return_value.persisted_size = len(
-                json_data
-            )
+            mock_mrd = mock.AsyncMock()
+            mock_mrd.persisted_size = len(json_data)
             mock_get.return_value = mock_mrd
 
             with mock.patch.object(
@@ -319,23 +310,18 @@ async def test_cat_file_zonal_default_concurrency(extended_gcsfs, gcs_bucket_moc
                 await extended_gcsfs._cat_file(file_path, start=0, end=10)
 
                 # Assert
-                assert mock_get.call_args.kwargs["pool_size"] == 1
+                assert mock_get.call_args.kwargs["concurrency"] == 1
 
 
 @pytest.mark.asyncio
 async def test_cat_file_zonal_explicit_concurrency(extended_gcsfs, gcs_bucket_mocks):
-    """Tests that cat_file propagates explicit concurrency to pool_size on zonal buckets."""
-    # Arrange
-    from gcsfs.zb_hns_utils import MRDPool
-
+    """Tests that cat_file propagates explicit concurrency on zonal buckets."""
     with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
         with mock.patch.object(
-            extended_gcsfs._mrd_pool_cache, "get", new_callable=mock.AsyncMock
+            extended_gcsfs._mrd_cache, "get", new_callable=mock.AsyncMock
         ) as mock_get:
-            mock_mrd = mock.AsyncMock(spec=MRDPool)
-            mock_mrd.get_mrd.return_value.__aenter__.return_value.persisted_size = len(
-                json_data
-            )
+            mock_mrd = mock.AsyncMock()
+            mock_mrd.persisted_size = len(json_data)
             mock_get.return_value = mock_mrd
 
             with mock.patch.object(
@@ -347,17 +333,16 @@ async def test_cat_file_zonal_explicit_concurrency(extended_gcsfs, gcs_bucket_mo
                 )
 
                 # Assert
-                assert mock_get.call_args.kwargs["pool_size"] == 3
+                assert mock_get.call_args.kwargs["concurrency"] == 3
 
 
 def test_zonal_prefetcher_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
-    """Tests that ZonalFile streaming prefetcher defaults to concurrency=4 and pool_size=4."""
+    """Tests that ZonalFile streaming prefetcher defaults to concurrency=4."""
     # Arrange
     with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL):
         # Act
         with extended_gcsfs.open(file_path, "rb") as f:
             # Assert
-            assert f.pool_size == 4
             assert f.concurrency == 4
             cache_concurrency = getattr(
                 getattr(f.cache, "_prefetcher", None), "concurrency", None
@@ -916,29 +901,29 @@ async def test_process_limits_to_offset_and_length_info_calls():
         mock_info.assert_not_called()
 
 
-def test_extended_gcsfs_constructs_mrd_pool_cache(monkeypatch):
+def test_extended_gcsfs_constructs_mrd_cache(monkeypatch):
     # Avoid creating real gRPC clients
     monkeypatch.setattr(
         "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_grpc_client",
         mock.AsyncMock(),
     )
 
-    fs = ExtendedGcsFileSystem(token="anon", mrd_pool_cache_size=64)
-    assert isinstance(fs._mrd_pool_cache, MRDPoolCache)
-    assert fs._mrd_pool_cache._max_idle_pools == 64
+    fs = ExtendedGcsFileSystem(token="anon", mrd_cache_size=64)
+    assert isinstance(fs._mrd_cache, MRDCache)
+    assert fs._mrd_cache._max_idle_mrds == 64
 
     # Default applies when kwarg omitted
     fs2 = ExtendedGcsFileSystem(token="anon")
-    assert fs2._mrd_pool_cache._max_idle_pools == 16
+    assert fs2._mrd_cache._max_idle_mrds == 16
 
 
-def test_finalize_mrd_pool_cache_closed_loop(monkeypatch, caplog):
+def test_finalize_mrd_cache_closed_loop(monkeypatch, caplog):
     """
-    Tests that _finalize_mrd_pool_cache does nothing when no event loop is running.
+    Tests that _finalize_mrd_cache does nothing when no event loop is running.
     """
 
-    mock_pool = mock.MagicMock(spec=MRDPoolCache)
-    mock_pool._closed = False
+    mock_cache = mock.MagicMock(spec=MRDCache)
+    mock_cache._closed = False
 
     # Mock asyncio.get_running_loop to raise RuntimeError
     monkeypatch.setattr(
@@ -952,21 +937,21 @@ def test_finalize_mrd_pool_cache_closed_loop(monkeypatch, caplog):
     mock_loop.is_running.return_value = False
 
     with caplog.at_level(logging.WARNING, logger="gcsfs"):
-        ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+        ExtendedGcsFileSystem._finalize_mrd_cache(mock_loop, mock_cache)
 
     # Verify that close was not called (since no loop was running)
-    mock_pool.close.assert_not_called()
+    mock_cache.close.assert_not_called()
     # Verify no warnings were logged
     assert len(caplog.records) == 0
 
 
-def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
+def test_finalize_mrd_cache_current_loop_running(monkeypatch):
     """
-    Tests that _finalize_mrd_pool_cache uses asyncio.run_coroutine_threadsafe
+    Tests that _finalize_mrd_cache uses asyncio.run_coroutine_threadsafe
     when current_loop is running.
     """
-    mock_pool = mock.MagicMock(spec=MRDPoolCache)
-    mock_pool._closed = False
+    mock_cache = mock.MagicMock(spec=MRDCache)
+    mock_cache._closed = False
 
     # Mock asyncio.get_running_loop to return a running loop
     mock_current_loop = mock.MagicMock()
@@ -984,7 +969,7 @@ def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
     mock_loop = mock.MagicMock()
     mock_loop.is_running.return_value = False
 
-    ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+    ExtendedGcsFileSystem._finalize_mrd_cache(mock_loop, mock_cache)
 
     # Verify that run_coroutine_threadsafe was called
     assert mock_run_coroutine_threadsafe.call_count >= 1
@@ -994,12 +979,12 @@ def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
     )
 
 
-def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):
+def test_finalize_mrd_cache_asyn_loop_running(monkeypatch):
     """
-    Tests that _finalize_mrd_pool_cache uses asyn.sync when asyn.loop[0] is running.
+    Tests that _finalize_mrd_cache uses asyn.sync when asyn.loop[0] is running.
     """
-    mock_pool = mock.MagicMock(spec=MRDPoolCache)
-    mock_pool._closed = False
+    mock_cache = mock.MagicMock(spec=MRDCache)
+    mock_cache._closed = False
 
     # Mock asyncio.get_running_loop to raise RuntimeError
     monkeypatch.setattr(
@@ -1018,20 +1003,20 @@ def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):
     mock_loop = mock.MagicMock()
     mock_loop.is_running.return_value = False
 
-    ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+    ExtendedGcsFileSystem._finalize_mrd_cache(mock_loop, mock_cache)
 
     # Verify that asyn.sync was called
-    mock_sync.assert_called_once_with(mock_asyn_loop, mock_pool.close, timeout=5.0)
+    mock_sync.assert_called_once_with(mock_asyn_loop, mock_cache.close, timeout=5.0)
 
 
-def test_finalize_mrd_pool_cache_asyn_loop_running_timeout(monkeypatch):
+def test_finalize_mrd_cache_asyn_loop_running_timeout(monkeypatch):
     """
-    Tests that _finalize_mrd_pool_cache ignores FSTimeoutError from asyn.sync.
+    Tests that _finalize_mrd_cache ignores FSTimeoutError from asyn.sync.
     """
     import fsspec
 
-    mock_pool = mock.MagicMock(spec=MRDPoolCache)
-    mock_pool._closed = False
+    mock_cache = mock.MagicMock(spec=MRDCache)
+    mock_cache._closed = False
 
     # Mock asyncio.get_running_loop to raise RuntimeError
     monkeypatch.setattr(
@@ -1051,7 +1036,7 @@ def test_finalize_mrd_pool_cache_asyn_loop_running_timeout(monkeypatch):
     mock_loop.is_running.return_value = False
 
     # Should not raise exception
-    ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
+    ExtendedGcsFileSystem._finalize_mrd_cache(mock_loop, mock_cache)
 
     mock_sync.assert_called_once()
 
@@ -1076,17 +1061,17 @@ async def test_close_resources_with_exceptions(caplog):
     )
     fs._storage_control_client = mock_storage_control
 
-    # Mock mrd_pool_cache
+    # Mock mrd_cache
     mock_cache = mock.Mock()
     mock_cache.close = mock.AsyncMock(side_effect=Exception("cache fail"))
-    fs._mrd_pool_cache = mock_cache
+    fs._mrd_cache = mock_cache
 
     with caplog.at_level(logging.WARNING, logger="gcsfs"):
         await fs._close_resources()
 
     assert "Failed to close grpc_client: grpc fail" in caplog.text
     assert "Failed to close storage_control_client: storage control fail" in caplog.text
-    assert "Failed to close MRDPoolCache: cache fail" in caplog.text
+    assert "Failed to close MRDCache: cache fail" in caplog.text
 
     assert fs._grpc_client is None
     assert fs._storage_control_client is None
