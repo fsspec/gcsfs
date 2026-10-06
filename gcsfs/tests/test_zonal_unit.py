@@ -662,6 +662,155 @@ async def test_cat_ranges_zonal_init_fallbacks_and_errors(
         mocks["pool"].close.assert_awaited_once()
 
 
+async def _cancel_once(started, coro):
+    """Run ``coro`` as a task, cancel it once ``started`` is set, and return the
+    tasks it left behind."""
+    before = set(asyncio.all_tasks())
+    task = asyncio.ensure_future(coro)
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return asyncio.all_tasks() - before - {task}
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_closes_pool_and_tasks(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    started = asyncio.Event()
+    calls = {"downloads": 0, "cancelled": 0, "close_completed": 0}
+
+    async def blocking_download(read_requests, metadata=None):
+        calls["downloads"] += 1
+        if calls["downloads"] == 4:
+            started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            calls["cancelled"] += 1
+            raise
+
+    async def slow_close():
+        # Span multiple ticks so a second cancel (if gather cancelled tasks and
+        # the except block cancelled them again) would hit slow_close mid-body.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        calls["close_completed"] += 1
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = blocking_download
+        mocks["pool"].close.side_effect = slow_close
+
+        leftover = await _cancel_once(
+            started,
+            extended_gcsfs._cat_ranges(
+                [file_path] * 4, [0, 10, 20, 30], [5, 15, 25, 35], batch_size=4
+            ),
+        )
+        assert calls["cancelled"] == 4
+        assert calls["close_completed"] == 1
+        mocks["pool"].close.assert_awaited_once()
+        assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_while_closing_pool(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/done", f"{TEST_ZONAL_BUCKET}/in_flight"]
+    closing = asyncio.Event()
+    close_completed = 0
+
+    async def download_ranges(read_requests, metadata=None):
+        if read_requests[0][0] == 0:
+            for offset, length, view in read_requests:
+                view.write(json_data[offset : offset + length])
+            return
+        await asyncio.Event().wait()
+
+    async def slow_close():
+        nonlocal close_completed
+        closing.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        close_completed += 1
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = download_ranges
+        mocks["pool"].close.side_effect = slow_close
+
+        leftover = await _cancel_once(
+            closing,
+            extended_gcsfs._cat_ranges(paths, [0, 10], [5, 15], batch_size=2),
+        )
+        # Both objects opened a pool; even the stream cancelled while already
+        # inside pool.close() ran close() to completion.
+        assert mocks["pool"].close.await_count == 2
+        assert close_completed == 2
+        assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_many_objects_closes_open_pools(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/obj{i}" for i in range(10)]
+    started = asyncio.Event()
+    downloads = 0
+
+    async def blocking_download(read_requests, metadata=None):
+        nonlocal downloads
+        downloads += 1
+        if downloads == 4:
+            started.set()
+        await asyncio.Event().wait()
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = blocking_download
+
+        leftover = await _cancel_once(
+            started, extended_gcsfs._cat_ranges(paths, 0, 10, batch_size=4)
+        )
+        # The 4 objects in flight opened a pool each; all 4 were closed and
+        # the 6 objects still waiting for the batch never opened one.
+        assert mocks["pool_cache_get"].await_count == 4
+        assert mocks["pool"].close.await_count == 4
+        assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_while_opening_pool(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    started = asyncio.Event()
+
+    async def blocking_get(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["pool_cache_get"].side_effect = blocking_get
+
+        leftover = await _cancel_once(
+            started,
+            extended_gcsfs._cat_ranges(
+                [file_path] * 4, [0, 10, 20, 30], [5, 15, 25, 35], batch_size=4
+            ),
+        )
+        mocks["pool_cache_get"].assert_awaited_once()
+        mocks["pool"].close.assert_not_awaited()
+        assert not leftover
+
+
 @pytest.mark.asyncio
 async def test_cat_ranges_zonal_chunks_download_ranges_at_mrd_max_ranges(
     extended_gcsfs, gcs_bucket_mocks

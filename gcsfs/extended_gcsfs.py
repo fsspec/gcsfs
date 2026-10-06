@@ -87,6 +87,22 @@ async def _get_mrd_size(mrd_or_pool):
         return m.persisted_size
 
 
+async def _close_pool(pool):
+    """Close ``pool`` to completion even if the calling task is cancelled."""
+    close_task = asyncio.ensure_future(pool.close())
+    cancelled = False
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        if not close_task.cancelled():
+            close_task.exception()
+        raise asyncio.CancelledError
+    return close_task.result()
+
+
 class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     """
     This class will be used when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT env variable is set to true.
@@ -796,13 +812,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return [buf.get_value() for buf in buffers]
 
     def _zonal_file_stream_coros(
-        self, path, idxs, starts, ends, num_streams, results, **kwargs
+        self, path, idxs, starts, ends, num_streams, results, limiter, **kwargs
     ):
         """Build ``num_streams`` coroutines that share one MRD pool for ``path``.
 
-        The first coroutine to run opens the pool and splits the object's
-        non-empty ranges across streams; the last coroutine to finish closes
-        the pool. Each coroutine writes its assigned ranges into ``results``.
+        Each coroutine runs under ``limiter`` (an ``asyncio.Semaphore`` bounding
+        the call's concurrency). The first one to run opens the pool and splits
+        the object's non-empty ranges across streams; the last one to finish,
+        including when the streams are cancelled, closes the pool. Each
+        coroutine writes its assigned ranges into ``results``.
         """
         cache_type, cache_source = self._resolve_cache_config(kwargs)
         bucket, object_name, generation = self.split_path(path)
@@ -854,8 +872,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     groups = self._split_ranges_across_streams(requests, num_streams)
                 except BaseException as e:
                     if pool is not None:
-                        await pool.close()
-                        pool = None
+                        p, pool = pool, None
+                        await _close_pool(p)
                     if not isinstance(e, Exception):
                         raise
                     for i in idxs:
@@ -865,7 +883,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         async def _run_stream(group_idx):
             nonlocal remaining, pool
+            acquired = False
             try:
+                await limiter.acquire()
+                acquired = True
                 await _init()
                 if pool is not None and group_idx < len(groups):
                     group = groups[group_idx]
@@ -878,10 +899,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         for (i, _, _), data in zip(group, data_list):
                             results[i] = data
             finally:
-                remaining -= 1
-                if remaining == 0 and pool is not None:
-                    p, pool = pool, None
-                    await p.close()
+                # Also runs when the stream is cancelled while waiting for the
+                # limiter, opening the pool or downloading. _cat_ranges starts
+                # every stream as a task and awaits them all, so the pool can
+                # only be open once all of its streams have entered this try,
+                # and the last one to leave it closes the pool before releasing
+                # its limiter slot.
+                try:
+                    remaining -= 1
+                    if remaining == 0 and pool is not None:
+                        p, pool = pool, None
+                        await _close_pool(p)
+                finally:
+                    if acquired:
+                        limiter.release()
 
         return [_run_stream(g) for g in range(num_streams)]
 
@@ -983,6 +1014,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             total_streams,
             per_object_cap,
         )
+        # Bounds concurrently running coroutines (zonal streams plus non-zonal
+        # ranges), like fsspec's _run_coros_in_chunks does.
+        limiter = asyncio.Semaphore(len(paths) if batch_size == -1 else batch_size)
         coros = []
         for (p, idxs), num_streams in zip(zonal_items, allocs):
             coros.extend(
@@ -993,37 +1027,47 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     ends,
                     num_streams,
                     results,
+                    limiter,
                     **kwargs,
                 )
             )
         if other:
-            # Same per-range _cat_file implementation as fsspec's _cat_ranges,
-            # combined into the same _run_coros_in_chunks batch.
+            # Same per-range _cat_file implementation as fsspec's _cat_ranges.
             other_kwargs = dict(kwargs)
             if concurrency is not None:
                 other_kwargs["concurrency"] = concurrency
 
             async def _cat_other(i):
-                try:
-                    results[i] = await self._cat_file(
-                        paths[i], start=starts[i], end=ends[i], **other_kwargs
-                    )
-                except Exception as e:
-                    results[i] = e
+                async with limiter:
+                    try:
+                        results[i] = await self._cat_file(
+                            paths[i], start=starts[i], end=ends[i], **other_kwargs
+                        )
+                    except Exception as e:
+                        results[i] = e
 
             for i in other:
                 coros.append(_cat_other(i))
 
+        # Every coroutine runs as a task of this call. Shielding gather_fut
+        # prevents an external cancel from cancelling tasks a first time inside
+        # gather (which with return_exceptions=False resolves on the first
+        # cancelled child) and a second time in the except block while sibling
+        # tasks are awaiting pool.close() in their finally blocks.
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        gather_fut = asyncio.gather(*tasks)
         try:
-            await asyn._run_coros_in_chunks(
-                coros,
-                batch_size=batch_size,
-                nofiles=True,
-                return_exceptions=True,
-            )
-        finally:
-            for c in coros:
-                c.close()
+            await asyncio.shield(gather_fut)
+        except BaseException:
+            if not gather_fut.done():
+                gather_fut.cancel()
+            else:
+                if not gather_fut.cancelled():
+                    gather_fut.exception()
+                for t in tasks:
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         # Like fsspec, raise the first error in input order.
         if on_error != "return":
