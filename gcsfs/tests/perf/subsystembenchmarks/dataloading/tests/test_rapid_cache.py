@@ -1,3 +1,5 @@
+import io
+
 import pytest
 
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
@@ -9,7 +11,7 @@ class _FakeCacheFS:
         self._states = list(states)
         self._files = dict(files or {})
         self._fail_disable = fail_disable
-        self.cat_calls = []
+        self.opened = []
 
     def call(self, method, path, *, json=None, json_out=False):
         self.calls.append((method, path, json, json_out))
@@ -29,10 +31,9 @@ class _FakeCacheFS:
     def find(self, prefix):
         return sorted(self._files.keys())
 
-    def cat_file(self, path):
-        self.cat_calls.append(path)
-        key = path[len("gs://") :] if path.startswith("gs://") else path
-        return self._files.get(path, self._files.get(key))
+    def open(self, path, mode="rb"):
+        self.opened.append((path, mode))
+        return io.BytesIO(self._files[path])
 
 
 def test_is_rapid_cache_and_ingest_on_write():
@@ -40,18 +41,7 @@ def test_is_rapid_cache_and_ingest_on_write():
     assert rapid_cache.is_rapid_cache_bucket_type("rapid_cache_warm") is True
     assert rapid_cache.is_rapid_cache_bucket_type("regional") is False
     assert rapid_cache.ingest_on_write_for("rapid_cache_cold") is False
-    assert rapid_cache.ingest_on_write_for("rapid_cache_warm") is False
-    with pytest.raises(ValueError):
-        rapid_cache.ingest_on_write_for("regional")
-
-
-def test_settle_sleeps_requested_seconds():
-    slept = []
-    rapid_cache.settle(7, sleep=slept.append)
-    rapid_cache.settle(0, sleep=slept.append)
-    assert slept == [7]
-    with pytest.raises(ValueError):
-        rapid_cache.settle(-1, sleep=slept.append)
+    assert rapid_cache.ingest_on_write_for("rapid_cache_warm") is True
 
 
 def test_create_posts_anywhere_cache_body():
@@ -143,7 +133,7 @@ def test_warm_if_needed_reads_all_objects_only_for_warm_gcs_prefix():
         )
         == 0
     )
-    assert fs.cat_calls == []
+    assert fs.opened == []
     assert sleeps == []
 
     assert (
@@ -152,18 +142,18 @@ def test_warm_if_needed_reads_all_objects_only_for_warm_gcs_prefix():
         )
         == 0
     )
-    assert fs.cat_calls == []
+    assert fs.opened == []
     assert sleeps == []
 
     total = rapid_cache.warm_if_needed(
         "gs://my-bucket/data/", "rapid_cache_warm", fs=fs, sleep=sleeps.append
     )
     assert total == 7
-    assert sorted(fs.cat_calls) == [
-        "gs://my-bucket/data/shard_00000.tar",
-        "gs://my-bucket/data/shard_00000.tar",
-        "gs://my-bucket/data/shard_00001.tar",
-        "gs://my-bucket/data/shard_00001.tar",
+    assert sorted(fs.opened) == [
+        ("my-bucket/data/shard_00000.tar", "rb"),
+        ("my-bucket/data/shard_00000.tar", "rb"),
+        ("my-bucket/data/shard_00001.tar", "rb"),
+        ("my-bucket/data/shard_00001.tar", "rb"),
     ]
     assert sleeps == [
         rapid_cache.DEFAULT_WARMUP_SETTLE_SECONDS,
@@ -220,57 +210,6 @@ def test_wait_running_times_out_with_last_state_not_found():
         )
 
 
-@pytest.mark.parametrize("bad_value", ["0", "-10", "not-an-int"])
-def test_timeout_from_env_rejects_nonpositive_or_invalid_values(monkeypatch, bad_value):
-    monkeypatch.setenv("GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", bad_value)
-    with pytest.raises(ValueError, match="GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT"):
-        rapid_cache.timeout_from_env()
-
-
-def test_warm_if_needed_constructs_gcsfs_with_skip_instance_cache(monkeypatch):
-    import gcsfs
-
-    constructed_kwargs = []
-    invalidated = []
-    fake_fs = _FakeCacheFS(files={"my-bucket/data/shard_00000.tar": b"abc"})
-    fake_fs.invalidate_cache = lambda: invalidated.append(True)
-
-    def fake_gcs_filesystem(**kwargs):
-        constructed_kwargs.append(kwargs)
-        return fake_fs
-
-    monkeypatch.setattr(gcsfs, "GCSFileSystem", fake_gcs_filesystem)
-    total = rapid_cache.warm_if_needed(
-        "gs://my-bucket/data/", "rapid_cache_warm", sleep=lambda _: None
-    )
-    assert total == 3
-    assert constructed_kwargs == [{"skip_instance_cache": True}]
-    assert invalidated == [True]
-
-
-def test_warm_if_needed_streams_with_fs_open_when_available():
-    import io
-
-    fs = _FakeCacheFS(files={"my-bucket/data/shard_00000.tar": b"abcdef"})
-    opened = []
-
-    def fake_open(url, mode="rb"):
-        opened.append((url, mode))
-        return io.BytesIO(b"abcdef")
-
-    fs.open = fake_open
-    total = rapid_cache.warm_if_needed(
-        "gs://my-bucket/data/",
-        "rapid_cache_warm",
-        fs=fs,
-        passes=1,
-        settle_seconds=0,
-    )
-    assert total == 6
-    assert opened == [("gs://my-bucket/data/shard_00000.tar", "rb")]
-    assert fs.cat_calls == []
-
-
 @pytest.mark.parametrize("timeout,poll", [(0, 5), (-1, 5), (60, 0), (60, -2)])
 def test_wait_running_rejects_nonpositive_timeout_or_poll(timeout, poll):
     fs = _FakeCacheFS()
@@ -280,23 +219,22 @@ def test_wait_running_rejects_nonpositive_timeout_or_poll(timeout, poll):
         )
 
 
-def test_warm_if_needed_resolves_fs_via_url_to_fs_and_invalidates_on_error(monkeypatch):
+def test_warm_if_needed_lists_through_a_fresh_url_to_fs_instance(monkeypatch):
     import fsspec
 
-    url_to_fs_calls = []
-    invalidated = []
-    empty_fs = _FakeCacheFS(files={})
-    empty_fs.invalidate_cache = lambda: invalidated.append(True)
+    calls = []
+    fs = _FakeCacheFS(files={"my-bucket/data/shard_00000.tar": b"abc"})
 
     def fake_url_to_fs(url, **kwargs):
-        url_to_fs_calls.append((url, kwargs))
-        return empty_fs, url
+        calls.append((url, kwargs))
+        return fs, url
 
     monkeypatch.setattr(fsspec.core, "url_to_fs", fake_url_to_fs)
-    with pytest.raises(RuntimeError, match="no objects found to warm"):
-        rapid_cache.warm_if_needed("gs://my-bucket/data/", "rapid_cache_warm")
-    assert url_to_fs_calls == [("gs://my-bucket/data/", {"skip_instance_cache": True})]
-    assert invalidated == [True]
+    total = rapid_cache.warm_if_needed(
+        "gs://my-bucket/data/", "rapid_cache_warm", sleep=lambda _: None
+    )
+    assert total == 3
+    assert calls == [("gs://my-bucket/data/", {"skip_instance_cache": True})]
 
 
 def test_wait_running_tolerates_none_and_pending_states():
@@ -325,19 +263,3 @@ def test_wait_running_tolerates_none_and_pending_states():
     )
     assert resp["state"] == "RUNNING"
     assert sleeps == [5, 5, 5]
-
-
-@pytest.mark.parametrize("passes,settle_seconds", [(0, 0), (-1, 0), (1, -5)])
-def test_warm_if_needed_rejects_invalid_passes_or_settle_seconds(
-    passes, settle_seconds
-):
-    fs = _FakeCacheFS(files={"my-bucket/data/shard_00000.tar": b"abc"})
-    with pytest.raises(ValueError):
-        rapid_cache.warm_if_needed(
-            "gs://my-bucket/data/",
-            "rapid_cache_warm",
-            fs=fs,
-            passes=passes,
-            settle_seconds=settle_seconds,
-            sleep=lambda _: None,
-        )

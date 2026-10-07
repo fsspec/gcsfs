@@ -312,7 +312,10 @@ def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry_without_torn_row(
     )
     egress_series = [_TimeSeries([_point(1500.0)])]
     req_series = [_TimeSeries([_point(10.0)])]
-    client = _SequencedClient([pass1_egress, pass1_reqs, egress_series, req_series])
+    # Each pass ends with one (here empty) Rapid Cache hit-ratio query.
+    client = _SequencedClient(
+        [pass1_egress, pass1_reqs, [], egress_series, req_series, []]
+    )
 
     first = amplification.enrich_csv(str(csv_path), "proj", client=client)
     assert first.missing_buckets == ("b-cold",)
@@ -329,3 +332,86 @@ def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry_without_torn_row(
     assert row["dataset_read_bytes"] == "1500"
     assert row["dataset_read_request_count"] == "10"
     assert float(row["dataset_read_amplification_ratio"]) == 1.0
+
+
+class _CacheSeries(_TimeSeries):
+    def __init__(self, hit, points):
+        super().__init__(points)
+        self.metric = types.SimpleNamespace(
+            labels={"anywhere_cache_hit": "true" if hit else "false"}
+        )
+
+
+class _MetricClient:
+    """Routes each query to a canned series list by its metric type."""
+
+    def __init__(self, by_metric):
+        self.by_metric = by_metric
+
+    def list_time_series(self, request):
+        for metric, series in self.by_metric.items():
+            if f'metric.type = "{metric}"' in request["filter"]:
+                return series
+        return []
+
+
+def _rapid_cache_row(bucket_type):
+    return {
+        "benchmark_case_id": f"case-{bucket_type}",
+        "gcs_bucket_name": f"b-{bucket_type}",
+        "bucket_type": bucket_type,
+        "measurement_window_start_unix_seconds": "1000",
+        "measurement_window_end_unix_seconds": "1060",
+        "dataset_size_bytes": "500",
+        "measurement_round_count": "1",
+    }
+
+
+def test_enrich_csv_records_rapid_cache_hit_ratio(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    _write_csv(
+        csv_path,
+        [_rapid_cache_row("rapid_cache_warm")],
+        _FIELDS + ["bucket_type"],
+    )
+    client = _MetricClient(
+        {
+            amplification._CACHE_SENT: [
+                _CacheSeries(True, [_point(300.0), _point(600.0)]),
+                _CacheSeries(False, [_point(100.0)]),
+            ],
+        }
+    )
+    amplification.enrich_csv(str(csv_path), "proj", client=client)
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+    assert float(row["rapid_cache_hit_ratio"]) == 0.9
+
+
+def test_enrich_csv_leaves_hit_ratio_blank_without_data_or_for_other_buckets(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    regional = dict(_rapid_cache_row("regional"), gcs_bucket_name="b-reg")
+    _write_csv(
+        csv_path,
+        [_rapid_cache_row("rapid_cache_cold"), regional],
+        _FIELDS + ["bucket_type"],
+    )
+    hits = [_CacheSeries(True, [_point(1.0)])]
+    client = _MetricClient(
+        {
+            amplification._SENT: [_TimeSeries([_point(500.0)])],
+            amplification._REQ: [_TimeSeries([_point(5.0)])],
+        }
+    )
+    result = amplification.enrich_csv(str(csv_path), "proj", client=client)
+    # A missing hit ratio does not make the amplification columns incomplete.
+    assert result.missing_buckets == ()
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["rapid_cache_hit_ratio"] for r in rows] == ["", ""]
+
+    client.by_metric[amplification._CACHE_SENT] = hits
+    amplification.enrich_csv(str(csv_path), "proj", client=client)
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["rapid_cache_hit_ratio"] for r in rows] == ["1.0", ""]

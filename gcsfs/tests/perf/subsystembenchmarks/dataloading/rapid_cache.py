@@ -1,7 +1,7 @@
 """Per-case GCS Rapid Cache (Anywhere Cache) lifecycle and warmup helpers."""
 
+import concurrent.futures
 import logging
-import os
 import time
 
 RAPID_CACHE_BUCKET_TYPES = ("rapid_cache_cold", "rapid_cache_warm")
@@ -18,42 +18,12 @@ def is_rapid_cache_bucket_type(bucket_type):
 
 
 def ingest_on_write_for(bucket_type):
-    """Return True if the Rapid Cache should enable ingestOnWrite.
-
-    Neither type ingests on write: a warm case first times a paired cold epoch over
-    the uncached corpus on the same bucket, then fills the cache with explicit
-    warmup passes (ingestOnWrite only admitted ~75% of a concurrently written
-    corpus anyway).
-    """
-    if bucket_type in RAPID_CACHE_BUCKET_TYPES:
+    """Return True if the Rapid Cache should enable ingestOnWrite."""
+    if bucket_type == "rapid_cache_warm":
+        return True
+    if bucket_type == "rapid_cache_cold":
         return False
     raise ValueError(f"not a Rapid Cache bucket_type: {bucket_type!r}")
-
-
-def settle(seconds=DEFAULT_WARMUP_SETTLE_SECONDS, sleep=time.sleep):
-    """Idle long enough that adjacent phases fall in separate Cloud Monitoring minutes."""
-    if seconds < 0:
-        raise ValueError(f"seconds must be >= 0, got {seconds}")
-    if seconds:
-        sleep(seconds)
-
-
-def timeout_from_env():
-    """Return Rapid Cache creation timeout in seconds from env or default."""
-    raw = os.environ.get(
-        "GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS)
-    )
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(
-            f"GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT must be a positive integer, got {raw!r}"
-        ) from exc
-    if value <= 0:
-        raise ValueError(
-            f"GCSFS_SUBSYSTEM_RAPID_CACHE_TIMEOUT must be > 0, got {value}"
-        )
-    return value
 
 
 def create(fs, bucket, zone, *, ingest_on_write):
@@ -131,68 +101,36 @@ def warm_if_needed(
 ):
     """Read every object under prefix (untimed) and settle when bucket_type is rapid_cache_warm.
 
-    The cache is created with ``ingestOnWrite=False`` (see ``ingest_on_write_for``),
-    so the corpus is admitted asynchronously on read miss. Running multiple warmup
-    passes with a post-pass settle delay ensures admit-on-miss completes for every
-    shard and separates warmup reads from the timed Cloud Monitoring minute bucket.
+    Under high concurrent write load (e.g. 64 workers closing ~95 MiB shards
+    simultaneously), ``ingestOnWrite=True`` only finishes admitting ~75% of the
+    corpus immediately after ``ingest()`` returns. Running multiple warmup
+    passes with a post-pass settle delay ensures asynchronous admit-on-miss
+    completes for every shard and separates warmup reads from the timed Cloud
+    Monitoring minute bucket. A fresh filesystem instance keeps the warmup's
+    listings out of the instance the timed reads use.
     """
-    if passes <= 0:
-        raise ValueError(f"passes must be > 0, got {passes}")
-    if settle_seconds < 0:
-        raise ValueError(f"settle_seconds must be >= 0, got {settle_seconds}")
     if bucket_type != "rapid_cache_warm" or not str(prefix).startswith("gs://"):
         return 0
+    path = prefix
     if fs is None:
         import fsspec
 
-        import gcsfs
+        fs, path = fsspec.core.url_to_fs(prefix, skip_instance_cache=True)
+    objects = sorted(obj for obj in fs.find(path) if not obj.endswith("/"))
+    if not objects:
+        raise RuntimeError(f"no objects found to warm under {prefix!r}")
 
-        if not hasattr(gcsfs.GCSFileSystem, "_get_kwargs_from_urls"):
-            fs = gcsfs.GCSFileSystem(skip_instance_cache=True)
-        else:
-            try:
-                fs, _ = fsspec.core.url_to_fs(prefix, skip_instance_cache=True)
-            except TypeError:
-                fs, _ = fsspec.core.url_to_fs(prefix)
-    try:
-        protocols = getattr(fs, "protocol", ("gs", "gcs"))
-        if isinstance(protocols, str):
-            protocols = (protocols,)
-        uses_gs_protocol = "gs" in protocols or "gcs" in protocols
-        find_target = prefix if uses_gs_protocol else str(prefix)[len("gs://") :]
-        objects = sorted(
-            obj
-            for obj in fs.find(find_target)
-            if not str(obj).endswith("/")
-            and not (hasattr(fs, "isdir") and fs.isdir(obj))
-        )
-        if not objects:
-            raise RuntimeError(f"no objects found to warm under {prefix!r}")
-
-        import concurrent.futures
-
-        def _warm_one(obj):
-            if uses_gs_protocol:
-                url = obj if str(obj).startswith("gs://") else f"gs://{obj}"
-            else:
-                url = obj
-            if hasattr(fs, "open"):
-                total = 0
-                with fs.open(url, "rb") as f:
-                    while chunk := f.read(16 * 1024 * 1024):
-                        total += len(chunk)
-                return total
-            return len(fs.cat_file(url))
-
+    def _warm_one(path):
         total = 0
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(16, len(objects))
-        ) as pool:
-            for _ in range(passes):
-                total = sum(pool.map(_warm_one, objects))
-                if settle_seconds > 0:
-                    sleep(settle_seconds)
+        with fs.open(path, "rb") as f:
+            while chunk := f.read(16 * 1024 * 1024):
+                total += len(chunk)
         return total
-    finally:
-        if hasattr(fs, "invalidate_cache"):
-            fs.invalidate_cache()
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(16, len(objects))
+    ) as pool:
+        for _ in range(passes):
+            total = sum(pool.map(_warm_one, objects))
+            sleep(settle_seconds)
+    return total

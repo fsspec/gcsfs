@@ -73,8 +73,6 @@ class BucketSpec:
             raise ValueError(
                 f"{self.bucket_type} buckets need GCSFS_SUBSYSTEM_ZONE (the placement zone)"
             )
-        if rapid_cache.is_rapid_cache_bucket_type(self.bucket_type):
-            rapid_cache.timeout_from_env()
         if self.prefix != self.prefix.lower():
             # Bucket prefix must be lowercase (GCS bucket names cannot contain uppercase).
             raise ValueError(
@@ -127,7 +125,6 @@ def _delete(fs, name, spec=None):
 def case_bucket(spec, case_id, *, fs=None):
     """Create this case's bucket, yield its corpus prefix, delete it on the way out."""
     is_rapid_cache = rapid_cache.is_rapid_cache_bucket_type(spec.bucket_type)
-    timeout = rapid_cache.timeout_from_env() if is_rapid_cache else None
     if fs is None:
         import gcsfs
 
@@ -142,12 +139,7 @@ def case_bucket(spec, case_id, *, fs=None):
                 spec.zone,
                 ingest_on_write=rapid_cache.ingest_on_write_for(spec.bucket_type),
             )
-            rapid_cache.wait_running(
-                fs,
-                name,
-                spec.zone,
-                timeout=timeout,
-            )
+            rapid_cache.wait_running(fs, name, spec.zone)
         yield f"gs://{name}/data/"
     finally:
         _delete(fs, name, spec=spec)

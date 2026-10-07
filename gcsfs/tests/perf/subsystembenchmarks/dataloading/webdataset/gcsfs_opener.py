@@ -23,17 +23,6 @@ def _fs():
     return gcsfs.GCSFileSystem()
 
 
-def prime(url):
-    """Pay this process's gcsfs set-up (session, auth token, connection) up front.
-
-    Issues a metadata-only request, so no object bytes are read and no cache is
-    warmed; fsspec's instance cache hands the same primed filesystem to open_url.
-    Non-gs:// URLs (local test corpora) need no priming.
-    """
-    if str(url).startswith("gs://"):
-        _fs().info(url)
-
-
 def current_read_mode():
     return os.environ.get(READ_MODE_ENV, "default")
 

@@ -68,15 +68,6 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         params.bucket_name = bucket_name_of(prefix)
         assert_fsspec_gcsfs(prefix)
         manifest = params.ingest(prefix)
-        expected_rows = manifest["sample_count"]
-        paired_cold = None
-        if params.bucket_type == "rapid_cache_warm":
-            # Time the first (cold, admit-on-miss) epoch on this same VM, bucket and
-            # corpus before warming, so each warm row carries a paired cold baseline
-            # free of the VM-to-VM variance that dominates cross-build comparisons.
-            paired_cold = _timed_cold_epoch(prefix, params, driver, manifest)
-            _check_rows(paired_cold[0].rows_per_epoch, expected_rows)
-            rapid_cache.settle()
         rapid_cache.warm_if_needed(prefix, params.bucket_type)
         run_params = (
             dataclasses.replace(params, rounds=1)
@@ -84,12 +75,17 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
             else params
         )
 
+        expected_rows = manifest["sample_count"]
         window_start = time.time()
         with monitor() as m:
             result = driver.run_read(prefix, run_params, manifest)
         window_end = time.time()
 
-        _check_rows(result.rows_per_epoch, expected_rows)
+        for rows in result.rows_per_epoch:
+            if rows != expected_rows:
+                raise ValueError(
+                    f"partial read: got {rows} rows, expected {expected_rows}"
+                )
         publish_common(
             benchmark,
             run_params,
@@ -100,64 +96,16 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         )
         benchmark.extra_info.update(result.extra_columns)
         durations = result.durations
-        throughput = _throughput(manifest, durations)
         benchmark.extra_info["dataset_read_throughput_mean_bytes_per_second"] = (
-            throughput
+            statistics.mean(manifest["corpus_bytes"] / d for d in durations)
+            if durations and all(durations)
+            else 0.0
         )
         benchmark.extra_info["mean_samples_per_second"] = (
             statistics.mean(r / d for r, d in zip(result.rows_per_epoch, durations))
             if durations and all(durations)
             else 0.0
         )
-        if paired_cold is not None:
-            benchmark.extra_info.update(
-                _paired_cold_columns(paired_cold, manifest, durations)
-            )
         publish_round_stats(benchmark, durations)
         publish_resource_metrics(benchmark, m)
         benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)
-
-
-def _check_rows(rows_per_epoch, expected_rows):
-    for rows in rows_per_epoch:
-        if rows != expected_rows:
-            raise ValueError(f"partial read: got {rows} rows, expected {expected_rows}")
-
-
-def _throughput(manifest, durations):
-    """Mean per-round corpus bytes per second, or 0.0 if any round has no duration."""
-    if not durations or not all(durations):
-        return 0.0
-    return statistics.mean(manifest["corpus_bytes"] / d for d in durations)
-
-
-def _timed_cold_epoch(prefix, params, driver, manifest):
-    """Run one untouched-corpus epoch; return (result, (window_start, window_end))."""
-    start = time.time()
-    result = driver.run_read(prefix, dataclasses.replace(params, rounds=1), manifest)
-    return result, (start, time.time())
-
-
-def _paired_cold_columns(paired_cold, manifest, warm_durations):
-    """Columns comparing the paired cold epoch against warm round 1.
-
-    Both are the first round of a fresh DataLoader, so both pay worker spawn and
-    gcsfs session/connection setup. Later warm rounds reuse persistent workers, so
-    comparing the cold epoch against the warm mean would credit the cache with
-    setup savings it did not earn.
-    """
-    result, (start, end) = paired_cold
-    cold_seconds = result.durations[0] if result.durations else None
-    warm_first = warm_durations[0] if warm_durations else None
-    return {
-        "rapid_cache_paired_cold_read_throughput_bytes_per_second": _throughput(
-            manifest, result.durations
-        ),
-        "rapid_cache_paired_cold_round_duration_seconds": cold_seconds,
-        "rapid_cache_paired_cold_window_start_unix_seconds": int(start),
-        "rapid_cache_paired_cold_window_end_unix_seconds": int(end),
-        "rapid_cache_warm_first_round_duration_seconds": warm_first,
-        "rapid_cache_warm_over_paired_cold_speedup": (
-            cold_seconds / warm_first if cold_seconds and warm_first else None
-        ),
-    }
