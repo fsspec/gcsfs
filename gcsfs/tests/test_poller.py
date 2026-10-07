@@ -4,15 +4,28 @@ from unittest import mock
 
 import pytest
 from google.api_core import exceptions as api_exceptions
+from google.cloud import storage_control_v2
+from google.rpc import code_pb2, status_pb2
 
 from gcsfs.poller import (
+    _BACKGROUND_TASKS,
     DEFAULT_LRO_POLL_CAP,
+    DEFAULT_LRO_POLL_FLOOR,
     MIN_SAFE_LRO_POLL_FLOOR,
     PollSchedule,
     PollStatus,
+    _unwrap_operation_result,
     get_default_hns_lro_cadence,
+    poll_lro,
     poll_until,
 )
+from gcsfs.tests.lro_fakes import FakeLroFactory, operation_pb
+
+
+@pytest.fixture
+def fake_lro():
+    """Same as the conftest fixture, so this module also runs with --noconftest."""
+    return FakeLroFactory()
 
 
 class FakeVirtualClock:
@@ -248,7 +261,53 @@ class TestPollSchedule:
 
 
 class TestPollRunners:
-    """Virtual-time unit tests for poll_until."""
+    """Virtual-time unit tests for poll_until, _unwrap_operation_result, and poll_lro."""
+
+    @pytest.mark.asyncio
+    async def test_zero_rpc_in_memory_check_completes_at_t0(self, fake_lro):
+        clock = FakeVirtualClock()
+        folder = storage_control_v2.Folder(name="projects/_/buckets/b/folders/dst/")
+        lro = fake_lro.succeeded(folder, name="projects/_/buckets/b/operations/op-fast")
+
+        res = await poll_lro(
+            lro.op,
+            time_fn=clock.time,
+            sleep_fn=clock.sleep,
+        )
+
+        assert res == folder
+        assert clock.sleeps == []
+        assert clock.now == 0.0
+        lro.get_operation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_poll_lro_polls_with_virtual_clock_until_done(self, fake_lro):
+        clock = FakeVirtualClock()
+        folder = storage_control_v2.Folder(name="projects/_/buckets/b/folders/dst/")
+        # Complete on the 3rd check
+        lro = fake_lro.succeeded(
+            folder, after=3, name="projects/_/buckets/b/operations/op-1"
+        )
+
+        sched = PollSchedule.linear_elapsed(0.05).floor(DEFAULT_LRO_POLL_FLOOR)
+        res = await poll_lro(
+            lro.op,
+            schedule=sched,
+            timeout=300.0,
+            path1="b/src",
+            path2="b/dst",
+            time_fn=clock.time,
+            sleep_fn=clock.sleep,
+        )
+
+        assert res == folder
+        assert len(clock.sleeps) == 3
+        assert clock.sleeps[0] == pytest.approx(0.200)
+        assert lro.get_operation.await_count == 3
+        # Every poll bypasses the GAPIC default retry; poll_until is the only
+        # retry loop.
+        for call in lro.get_operation.await_args_list:
+            assert call.kwargs["retry"] is None
 
     @pytest.mark.asyncio
     async def test_poll_until_absorbs_transient_transport_glitches(self):
@@ -385,6 +444,218 @@ class TestPollRunners:
         assert exc_info.value.__cause__ is None
 
     @pytest.mark.asyncio
+    async def test_poll_lro_timeout_raises_timeout_error_with_operation_id(
+        self, fake_lro
+    ):
+        clock = FakeVirtualClock()
+        lro = fake_lro.pending(name="projects/_/buckets/b/operations/op-stalled")
+
+        sched = PollSchedule.linear_elapsed(0.05).floor(0.500)
+        with pytest.raises(asyncio.TimeoutError) as exc_info:
+            await poll_lro(
+                lro.op,
+                schedule=sched,
+                timeout=1.2,
+                path1="b/src",
+                path2="b/dst",
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        assert clock.now == pytest.approx(1.2)
+        # Polls at 0.5 s, 1.0 s and 1.2 s; the message names the operation
+        # once, without the paths.
+        assert lro.get_operation.await_count == 3
+        assert str(exc_info.value) == (
+            "Polling timed out for 'projects/_/buckets/b/operations/op-stalled' "
+            "after 1.20s and 3 status checks."
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_timeout", [0, 0.0, -1.0, math.inf, math.nan, True, "300"]
+    )
+    @pytest.mark.parametrize("done_at_t0", [True, False])
+    async def test_poll_lro_rejects_invalid_timeout_before_any_rpc(
+        self, fake_lro, bad_timeout, done_at_t0
+    ):
+        clock = FakeVirtualClock()
+        lro = fake_lro.succeeded() if done_at_t0 else fake_lro.pending()
+
+        with pytest.raises(ValueError, match="timeout must be a positive finite"):
+            await poll_lro(
+                lro.op,
+                timeout=bad_timeout,
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        lro.get_operation.assert_not_awaited()
+        assert clock.sleeps == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "code, expected_cls",
+        [
+            (code_pb2.ALREADY_EXISTS, api_exceptions.AlreadyExists),
+            (code_pb2.ABORTED, api_exceptions.Aborted),
+            (code_pb2.NOT_FOUND, api_exceptions.NotFound),
+        ],
+    )
+    async def test_unwrap_operation_result_maps_grpc_status_to_typed_exception(
+        self, code, expected_cls
+    ):
+        operation = mock.AsyncMock()
+        # A failed LRO carries its error as a google.rpc.Status, whose code is
+        # always an int.
+        raw_err = api_exceptions.GoogleAPICallError(
+            "LRO failed",
+            errors=[status_pb2.Status(code=code, message="LRO failed")],
+        )
+        operation.result.side_effect = raw_err
+
+        with pytest.raises(expected_cls):
+            await _unwrap_operation_result(operation)
+
+    @pytest.mark.asyncio
+    async def test_poll_lro_cancellation_dispatches_server_cancel(self, fake_lro):
+        clock = FakeVirtualClock()
+        # The 1st poll is cancelled; the real AsyncOperation.cancel() then polls
+        # once more (still pending) before sending CancelOperation.
+        name = "projects/_/buckets/b/operations/op-cancel"
+        lro = fake_lro.sequence(
+            [asyncio.CancelledError(), operation_pb(name=name)], name=name
+        )
+
+        sched = PollSchedule.linear_elapsed(0.05).floor(0.200)
+        with pytest.raises(asyncio.CancelledError):
+            await poll_lro(
+                lro.op,
+                schedule=sched,
+                path1="b/src",
+                path2="b/dst",
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        await asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True)
+        lro.cancel_operation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_lro_cancellation_bounds_hung_server_cancel(
+        self, fake_lro, monkeypatch
+    ):
+        monkeypatch.setattr("gcsfs.poller.PER_POLL_RPC_TIMEOUT", 0.01)
+        clock = FakeVirtualClock()
+        name = "projects/_/buckets/b/operations/op-cancel-hung"
+        lro = fake_lro.sequence(
+            [asyncio.CancelledError(), operation_pb(name=name)], name=name
+        )
+
+        async def hung_cancel(*_args, **_kwargs):
+            await asyncio.sleep(10.0)
+
+        lro.cancel_operation.side_effect = hung_cancel
+
+        sched = PollSchedule.linear_elapsed(0.05).floor(0.200)
+        with pytest.raises(asyncio.CancelledError):
+            await poll_lro(
+                lro.op,
+                schedule=sched,
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        await asyncio.wait_for(
+            asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True),
+            timeout=5.0,
+        )
+        lro.cancel_operation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_lro_keeps_cancel_that_races_a_finished_status_check(
+        self, fake_lro
+    ):
+        """A cancel that lands in the same loop step as a status check finishing
+        must still raise CancelledError and send CancelOperation.
+
+        asyncio.wait_for on Python 3.10 and 3.11 returns the check's result in
+        that case and drops the cancel, so polling would run on until timeout.
+        """
+        clock = FakeVirtualClock()
+        lro = fake_lro.pending(name="projects/_/buckets/b/operations/op-race")
+        replay = lro.get_operation.side_effect
+        tasks = {}
+
+        def cancel_poller_then_report_pending(*args, **kwargs):
+            if lro.get_operation.await_count == 1:
+                tasks["poller"].cancel()
+            return replay(*args, **kwargs)
+
+        async def sleep_and_yield(delay):
+            # Yield like asyncio.sleep, so a cancel still pending on the
+            # poller is delivered here, as it would be in production.
+            await clock.sleep(delay)
+            await asyncio.sleep(0)
+
+        lro.get_operation.side_effect = cancel_poller_then_report_pending
+        tasks["poller"] = asyncio.create_task(
+            poll_lro(
+                lro.op,
+                schedule=PollSchedule.linear_elapsed(0.05).floor(0.200),
+                timeout=1.0,
+                time_fn=clock.time,
+                sleep_fn=sleep_and_yield,
+            )
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await tasks["poller"]
+
+        await asyncio.wait_for(
+            asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True),
+            timeout=5.0,
+        )
+        # One status check by the poller, then the one AsyncOperation.cancel()
+        # makes before it sends CancelOperation.
+        assert lro.get_operation.await_count == 2
+        lro.cancel_operation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_lro_retries_after_per_poll_timeout(self, fake_lro, monkeypatch):
+        """A status check that exceeds the per-poll deadline is cancelled and
+        counts as a transient error, so the next poll runs."""
+        monkeypatch.setattr("gcsfs.poller.PER_POLL_RPC_TIMEOUT", 0.05)
+        clock = FakeVirtualClock()
+        lro = fake_lro.succeeded(after=1)
+        replay = lro.get_operation.side_effect
+        hung_check_cancelled = asyncio.Event()
+
+        async def first_check_hangs(*args, **kwargs):
+            if lro.get_operation.await_count == 1:
+                try:
+                    await asyncio.sleep(10.0)
+                except asyncio.CancelledError:
+                    hung_check_cancelled.set()
+                    raise
+            return replay(*args, **kwargs)
+
+        lro.get_operation.side_effect = first_check_hangs
+
+        await poll_lro(
+            lro.op,
+            schedule=PollSchedule.linear_elapsed(0.05).floor(0.200),
+            timeout=10.0,
+            time_fn=clock.time,
+            sleep_fn=clock.sleep,
+        )
+
+        await asyncio.wait_for(hung_check_cancelled.wait(), timeout=5.0)
+        assert lro.get_operation.await_count == 2
+        assert clock.sleeps == [pytest.approx(0.2), pytest.approx(0.2)]
+        lro.cancel_operation.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("bad_schedule", ["not_callable", lambda s: 0.2, None])
     async def test_poll_until_rejects_non_poll_schedule(self, bad_schedule):
         clock = FakeVirtualClock()
@@ -399,4 +670,32 @@ class TestPollRunners:
             )
 
         check.assert_not_awaited()
+        assert clock.sleeps == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "override_kwarg",
+        [
+            {"schedule": "not_callable"},
+            {"schedule": lambda s: 0.2, "timeout": 10.0},
+            {"schedule": 0, "timeout": 10.0},
+        ],
+    )
+    async def test_poll_lro_rejects_non_poll_schedule(self, fake_lro, override_kwarg):
+        clock = FakeVirtualClock()
+        # Already done at t=0: without the check, poll_lro would return its
+        # result instead of raising.
+        lro = fake_lro.succeeded(name="projects/_/buckets/b/operations/op-invalid-arg")
+
+        kwargs = {
+            "operation": lro.op,
+            "time_fn": clock.time,
+            "sleep_fn": clock.sleep,
+        }
+        kwargs.update(override_kwarg)
+
+        with pytest.raises(TypeError, match="schedule must be a PollSchedule"):
+            await poll_lro(**kwargs)  # type: ignore[arg-type]
+
+        lro.get_operation.assert_not_awaited()
         assert clock.sleeps == []

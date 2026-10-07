@@ -4,13 +4,18 @@ import math
 import random
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional, Tuple, TypeVar
+from typing import Any, Awaitable, Callable, Optional, Tuple, TypeVar
+
+from google.api_core import exceptions as api_exceptions
+from google.api_core.operation_async import AsyncOperation
 
 from gcsfs.retry import is_transient_exception
 
 logger = logging.getLogger("gcsfs")
 #: Generic return payload type for polled operations.
 T = TypeVar("T")
+#: Strong references to fire-and-forget background tasks to prevent premature garbage collection.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 #: Linear growth rate of poll delay relative to elapsed time (5% of elapsed seconds).
 DEFAULT_LRO_POLL_SLOPE: float = 0.05
@@ -24,6 +29,8 @@ DEFAULT_LRO_POLL_CAP: float = 30.0
 DEFAULT_LRO_JITTER_MIN: float = 0.75
 #: Upper multiplier bound for uniform random jitter (+25%).
 DEFAULT_LRO_JITTER_MAX: float = 1.25
+#: Per-RPC deadline in seconds for individual operation.done() status checks.
+PER_POLL_RPC_TIMEOUT: float = 15.0
 #: Elapsed duration threshold in seconds above which completed LROs log at INFO instead of DEBUG.
 SLOW_LRO_LOG_THRESHOLD: float = 2.0
 
@@ -284,9 +291,10 @@ async def poll_until(
     """Polls an async check function until it reports completion or the schedule expires.
 
     This runner follows a sleep-then-check cadence on every iteration. Callers
-    that can satisfy completion synchronously at ``t=0`` should perform that
-    initial check before invoking ``poll_until``, or else incur the overhead of
-    the first scheduled sleep.
+    that can satisfy completion synchronously at ``t=0`` (for example,
+    ``poll_lro``'s in-memory ``_is_operation_already_done_in_memory`` pre-check)
+    should perform that initial check before invoking ``poll_until``, or else
+    incur the overhead of the first scheduled sleep.
 
     Args:
         check_fn: Async callback accepting the ``PollStatus`` that the preceding
@@ -388,3 +396,250 @@ async def poll_until(
             )
 
         attempts += 1
+
+
+async def _unwrap_operation_result(
+    operation: AsyncOperation, timeout: Optional[float] = None
+) -> Any:
+    """Unpacks operation result or maps server-side error code to typed GoogleAPICallError.
+
+    Args:
+        operation: GAPIC ``AsyncOperation`` whose terminal result is ready to
+            be unpacked.
+        timeout: Optional timeout in seconds passed to ``operation.result()``.
+
+    Returns:
+        The unwrapped protobuf response payload returned by ``operation.result()``.
+
+    Raises:
+        google.api_core.exceptions.GoogleAPICallError: A specific subclass (mapped
+            via ``from_grpc_status`` when a raw ``GoogleAPICallError`` carries a
+            gRPC status code) or the original exception raised by the operation.
+    """
+    try:
+        return await operation.result(timeout=timeout)
+    except api_exceptions.GoogleAPICallError as e:
+        if type(e) is api_exceptions.GoogleAPICallError and e.errors:
+            raise api_exceptions.from_grpc_status(
+                e.errors[0].code,
+                e.message,
+                errors=e.errors,
+                response=e.response,
+            ) from e
+        raise
+
+
+def _is_operation_already_done_in_memory(operation: AsyncOperation) -> bool:
+    """Zero-RPC check inspecting the operation proto for completion at t=0.
+
+    Args:
+        operation: GAPIC ``AsyncOperation`` to inspect.
+
+    Returns:
+        Whether the ``google.longrunning.Operation`` proto the operation
+        currently holds is already marked done.
+    """
+    return operation.operation.done
+
+
+def _get_operation_name(operation: AsyncOperation) -> Optional[str]:
+    """Extracts the server-side operation name from a GAPIC AsyncOperation.
+
+    Args:
+        operation: GAPIC ``AsyncOperation`` to inspect.
+
+    Returns:
+        The server-side operation name, or ``None`` if it is empty.
+    """
+    return operation.operation.name or None
+
+
+def _validate_lro_timeout(timeout: Optional[float], name: str = "timeout") -> None:
+    """Checks an overall LRO timeout before any work starts.
+
+    Args:
+        timeout: Overall timeout in seconds, or ``None`` for no limit.
+        name: Name used for the value in the error message.
+
+    Raises:
+        ValueError: If ``timeout`` is not ``None`` and is not a positive finite
+            number (for example ``0``, a negative number, ``inf`` or NaN).
+    """
+    if timeout is None:
+        return
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError(
+            f"{name} must be a positive finite number of seconds, or None for "
+            f"no limit; got {timeout!r}"
+        )
+
+
+def _retrieve_task_outcome(task: "asyncio.Future[Any]") -> None:
+    """Reads an abandoned task's outcome so asyncio does not log it as unretrieved."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _wait_keeping_cancel(aw: Awaitable[T], timeout: float) -> T:
+    """Awaits ``aw`` for at most ``timeout`` seconds without losing a cancel.
+
+    On Python 3.10 and 3.11, ``asyncio.wait_for`` returns the result instead of
+    raising ``CancelledError`` when the calling task is cancelled in the same
+    loop step in which ``aw`` finishes, so the cancel is lost. ``asyncio.wait``
+    does not catch the cancel, so it always propagates.
+
+    Args:
+        aw: Awaitable to run as a task.
+        timeout: Maximum time to wait, in seconds.
+
+    Returns:
+        The result of ``aw``.
+
+    Raises:
+        asyncio.TimeoutError: If ``aw`` does not finish within ``timeout``. The
+            task running ``aw`` is cancelled but not awaited.
+        asyncio.CancelledError: If the calling task is cancelled. The task
+            running ``aw`` is cancelled too.
+    """
+    task = asyncio.ensure_future(aw)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_retrieve_task_outcome)
+        raise
+    if not done:
+        task.cancel()
+        task.add_done_callback(_retrieve_task_outcome)
+        raise asyncio.TimeoutError(f"Status check exceeded {timeout:.2f}s.")
+    return task.result()
+
+
+async def poll_lro(
+    operation: AsyncOperation,
+    schedule: Optional[PollSchedule] = None,
+    timeout: Optional[float] = None,
+    path1: Optional[str] = None,
+    path2: Optional[str] = None,
+    request_id: Optional[str] = None,
+    time_fn: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> Any:
+    """Awaits completion of a GAPIC AsyncOperation using a low-lag PollSchedule.
+
+    Each status check calls ``operation.done(retry=None)`` under a per-poll
+    deadline, so ``poll_until`` is the only retry loop: a transient error just
+    moves on to the next scheduled poll.
+
+    Args:
+        operation: GAPIC ``AsyncOperation`` returned by Storage Control gRPC APIs.
+        schedule: Optional custom ``PollSchedule``. Defaults to
+            ``get_default_hns_lro_cadence()`` when ``None``.
+        timeout: Optional overall timeout budget in seconds. When provided, wraps
+            the active schedule with ``.max_duration(timeout)``. ``None`` means
+            no overall limit.
+        path1: Optional source path for diagnostic logging context.
+        path2: Optional destination path for diagnostic logging context.
+        request_id: Optional fallback identifier used in logs when the operation
+            does not expose a server-side name.
+        time_fn: Monotonic clock function returning current time in seconds.
+        sleep_fn: Async sleep function accepting a delay in seconds.
+
+    Returns:
+        The unwrapped operation result returned by ``operation.result()``.
+
+    Raises:
+        TypeError: If ``schedule`` is given and is not a ``PollSchedule``.
+        ValueError: If ``timeout`` is not ``None`` or a positive finite number.
+            This is checked before any RPC, even if the operation is already
+            done.
+        asyncio.TimeoutError: If the operation does not complete before the
+            polling schedule or ``timeout`` expires.
+        asyncio.CancelledError: If the polling task is cancelled (after
+            dispatching a best-effort background ``operation.cancel()`` task).
+        google.api_core.exceptions.GoogleAPICallError: If the server-side
+            operation terminates with an error.
+    """
+    if schedule is not None and not isinstance(schedule, PollSchedule):
+        raise TypeError(
+            f"schedule must be a PollSchedule, got {type(schedule).__name__}"
+        )
+    _validate_lro_timeout(timeout)
+
+    op_name = _get_operation_name(operation)
+    op_id = op_name if op_name else (request_id or "LRO")
+    path_ctx = f"'{path1}' -> '{path2}'" if path1 and path2 else op_id
+
+    if _is_operation_already_done_in_memory(operation):
+        logger.debug(
+            "LRO %s completed synchronously in memory at t=0; skipping polling.",
+            path_ctx,
+        )
+        return await _unwrap_operation_result(operation)
+
+    base_schedule = schedule if schedule is not None else get_default_hns_lro_cadence()
+    active_schedule = (
+        base_schedule.max_duration(timeout) if timeout is not None else base_schedule
+    )
+
+    start_time = time_fn()
+
+    async def lro_complete(status: PollStatus) -> Tuple[bool, None]:
+        remaining_budget = (
+            max(0.0, timeout - (time_fn() - start_time))
+            if timeout is not None
+            else PER_POLL_RPC_TIMEOUT
+        )
+        rpc_timeout = min(PER_POLL_RPC_TIMEOUT, max(1.0, remaining_budget))
+
+        # retry=None: the GAPIC default retry would add a second, slower retry
+        # loop inside a single poll; poll_until already retries transient errors.
+        # A per-poll timeout raises asyncio.TimeoutError, which poll_until
+        # treats as transient.
+        is_done = await _wait_keeping_cancel(
+            operation.done(retry=None), timeout=rpc_timeout
+        )
+        return bool(is_done), None
+
+    try:
+        await poll_until(
+            lro_complete,
+            schedule=active_schedule,
+            operation_id=op_id,
+            time_fn=time_fn,
+            sleep_fn=sleep_fn,
+        )
+    except asyncio.CancelledError:
+        elapsed = time_fn() - start_time
+        logger.warning(
+            "LRO %s polling cancelled after %.3fs (op: %s); "
+            "dispatching server-side cancellation signal.",
+            path_ctx,
+            elapsed,
+            op_id,
+        )
+
+        async def _send_cancel() -> None:
+            # AsyncOperation.cancel() first awaits done() with api-core's
+            # default retry, so this can back off and retry; wait_for bounds
+            # the whole call, including that extra poll.
+            try:
+                await asyncio.wait_for(operation.cancel(), timeout=PER_POLL_RPC_TIMEOUT)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to send LRO cancellation signal for %s: %s",
+                    op_id,
+                    exc,
+                )
+
+        cancel_task = asyncio.create_task(_send_cancel())
+        _BACKGROUND_TASKS.add(cancel_task)
+        cancel_task.add_done_callback(_BACKGROUND_TASKS.discard)
+        raise
+
+    return await _unwrap_operation_result(operation)
