@@ -19,6 +19,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 
 from gcsfs import GCSFileSystem
 from gcsfs.extended_gcsfs import BucketType
+from gcsfs.tests.lro_fakes import FakeLroFactory
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
@@ -598,6 +599,20 @@ def zonal_write_mocks():
             "_gcsfs_info": mock_gcsfs_info,
         }
         yield mocks
+
+
+@pytest.fixture
+def fake_lro():
+    """Builds correctly shaped long-running operation doubles.
+
+    Returns a ``FakeLroFactory``: ``fake_lro.pending()``,
+    ``fake_lro.succeeded(response=None, after=0)``,
+    ``fake_lro.failed(error, after=0)`` and ``fake_lro.sequence([...])``. Each
+    returns a ``FakeLro`` with a real ``AsyncOperation`` (``.op``) and the
+    GetOperation/CancelOperation mocks behind it. See
+    ``gcsfs/tests/lro_fakes.py`` for details and pitfalls.
+    """
+    return FakeLroFactory()
 
 
 @pytest.fixture
