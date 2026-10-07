@@ -5,6 +5,10 @@ import os
 from datetime import datetime
 
 from gcsfs.tests.perf.subsystembenchmarks._common import cli, report
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
+    RAPID_CACHE_BUCKET_TYPES,
+)
 
 
 def discover_groups():
@@ -58,12 +62,13 @@ def _build_parser():
     )
     parser.add_argument(
         "--bucket-type",
-        choices=("regional", "zonal", "hns"),
+        choices=BUCKET_TYPES,
         default="regional",
         help="storage tier used by every case in the run",
     )
     parser.add_argument(
-        "--zone", help="placement zone; required when --bucket-type=zonal"
+        "--zone",
+        help="placement zone; required when --bucket-type in (zonal, rapid_cache_cold, rapid_cache_warm)",
     )
     parser.add_argument(
         "--model-id",
@@ -93,8 +98,8 @@ def _build_parser():
 def parse_args(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.bucket_type == "zonal" and not args.zone:
-        parser.error("--zone is required when --bucket-type=zonal")
+    if args.bucket_type in ("zonal", *RAPID_CACHE_BUCKET_TYPES) and not args.zone:
+        parser.error(f"--zone is required when --bucket-type={args.bucket_type}")
     if args.amplification_wait < 0:
         parser.error("--amplification-wait must be >= 0")
     if args.amplification_retry_wait < 0:
