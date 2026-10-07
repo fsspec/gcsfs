@@ -1,6 +1,9 @@
+import asyncio
 import math
+from unittest import mock
 
 import pytest
+from google.api_core import exceptions as api_exceptions
 
 from gcsfs.poller import (
     DEFAULT_LRO_POLL_CAP,
@@ -8,7 +11,23 @@ from gcsfs.poller import (
     PollSchedule,
     PollStatus,
     get_default_hns_lro_cadence,
+    poll_until,
 )
+
+
+class FakeVirtualClock:
+    """Deterministic virtual clock and sleep recorder for hermetic polling tests."""
+
+    def __init__(self, start: float = 0.0):
+        self.now = start
+        self.sleeps: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
 
 
 class TestPollStatus:
@@ -226,3 +245,158 @@ class TestPollSchedule:
             assert d_large is not None
             assert 18.0 <= d_large <= 30.0
             assert d_large <= DEFAULT_LRO_POLL_CAP
+
+
+class TestPollRunners:
+    """Virtual-time unit tests for poll_until."""
+
+    @pytest.mark.asyncio
+    async def test_poll_until_absorbs_transient_transport_glitches(self):
+        clock = FakeVirtualClock()
+        calls = 0
+
+        async def flaky_check(status: PollStatus):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise api_exceptions.ServiceUnavailable("503 backend glitch")
+            if calls == 2:
+                raise api_exceptions.TooManyRequests("429 quota spike")
+            if calls == 3:
+                raise api_exceptions.DeadlineExceeded("504 gateway deadline")
+            if calls == 4:
+                raise api_exceptions.InternalServerError("500 internal error")
+            if calls == 5:
+                raise asyncio.TimeoutError("per-RPC deadline")
+            return True, "recovered"
+
+        sched = PollSchedule.linear_elapsed(0.05).floor(0.200)
+        res = await poll_until(
+            flaky_check,
+            schedule=sched,
+            operation_id="op-flaky",
+            time_fn=clock.time,
+            sleep_fn=clock.sleep,
+        )
+
+        assert res == "recovered"
+        assert calls == 6
+        assert len(clock.sleeps) == 6
+
+    @pytest.mark.asyncio
+    async def test_poll_until_keeps_polling_after_unknown(self):
+        clock = FakeVirtualClock()
+        check = mock.AsyncMock(
+            side_effect=[api_exceptions.Unknown("transport reset"), (True, "ok")]
+        )
+
+        res = await poll_until(
+            check,
+            schedule=PollSchedule.linear_elapsed(0.05).floor(0.200),
+            time_fn=clock.time,
+            sleep_fn=clock.sleep,
+        )
+
+        assert res == "ok"
+        assert check.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_poll_until_reraises_non_transient_error(self):
+        clock = FakeVirtualClock()
+        check = mock.AsyncMock(side_effect=api_exceptions.NotFound("no such op"))
+
+        with pytest.raises(api_exceptions.NotFound, match="no such op"):
+            await poll_until(
+                check,
+                schedule=PollSchedule.linear_elapsed(0.05).floor(0.200),
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        check.assert_awaited_once()
+        assert len(clock.sleeps) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "max_seconds, expected_checks, expected_desc",
+        [
+            (0.5, 1, "1 status check"),
+            (1.0, 2, "2 status checks"),
+        ],
+    )
+    async def test_poll_until_timeout_message_counts_status_checks(
+        self, max_seconds, expected_checks, expected_desc
+    ):
+        clock = FakeVirtualClock()
+        check = mock.AsyncMock(return_value=(False, None))
+
+        with pytest.raises(asyncio.TimeoutError) as exc_info:
+            await poll_until(
+                check,
+                schedule=PollSchedule(lambda s: 0.5).max_duration(max_seconds),
+                operation_id="op-1",
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        assert check.await_count == expected_checks
+        assert str(exc_info.value) == (
+            f"Polling timed out for 'op-1' after {max_seconds:.2f}s "
+            f"and {expected_desc}."
+        )
+
+    @pytest.mark.asyncio
+    async def test_poll_until_timeout_chains_last_transient_error(self):
+        clock = FakeVirtualClock()
+        last = api_exceptions.ServiceUnavailable("still down")
+        check = mock.AsyncMock(
+            side_effect=[api_exceptions.TooManyRequests("slow down"), last, last]
+        )
+
+        with pytest.raises(asyncio.TimeoutError) as exc_info:
+            await poll_until(
+                check,
+                schedule=PollSchedule(lambda s: 0.5).max_duration(1.2),
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        assert exc_info.value.__cause__ is last
+
+    @pytest.mark.asyncio
+    async def test_poll_until_timeout_has_no_cause_after_successful_check(self):
+        clock = FakeVirtualClock()
+        check = mock.AsyncMock(
+            side_effect=[
+                api_exceptions.ServiceUnavailable("blip"),
+                (False, None),
+                (False, None),
+            ]
+        )
+
+        with pytest.raises(asyncio.TimeoutError) as exc_info:
+            await poll_until(
+                check,
+                schedule=PollSchedule(lambda s: 0.5).max_duration(1.2),
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        assert exc_info.value.__cause__ is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_schedule", ["not_callable", lambda s: 0.2, None])
+    async def test_poll_until_rejects_non_poll_schedule(self, bad_schedule):
+        clock = FakeVirtualClock()
+        check = mock.AsyncMock(return_value=(True, "ok"))
+
+        with pytest.raises(TypeError, match="schedule must be a PollSchedule"):
+            await poll_until(
+                check,
+                schedule=bad_schedule,  # type: ignore[arg-type]
+                time_fn=clock.time,
+                sleep_fn=clock.sleep,
+            )
+
+        check.assert_not_awaited()
+        assert clock.sleeps == []

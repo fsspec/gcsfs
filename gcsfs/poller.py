@@ -1,7 +1,16 @@
+import asyncio
+import logging
 import math
 import random
+import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional, Tuple, TypeVar
+
+from gcsfs.retry import is_transient_exception
+
+logger = logging.getLogger("gcsfs")
+#: Generic return payload type for polled operations.
+T = TypeVar("T")
 
 #: Linear growth rate of poll delay relative to elapsed time (5% of elapsed seconds).
 DEFAULT_LRO_POLL_SLOPE: float = 0.05
@@ -15,6 +24,8 @@ DEFAULT_LRO_POLL_CAP: float = 30.0
 DEFAULT_LRO_JITTER_MIN: float = 0.75
 #: Upper multiplier bound for uniform random jitter (+25%).
 DEFAULT_LRO_JITTER_MAX: float = 1.25
+#: Elapsed duration threshold in seconds above which completed LROs log at INFO instead of DEBUG.
+SLOW_LRO_LOG_THRESHOLD: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -251,3 +262,129 @@ def get_default_hns_lro_cadence() -> PollSchedule:
         .cap(DEFAULT_LRO_POLL_CAP / DEFAULT_LRO_JITTER_MAX)
         .with_jitter(DEFAULT_LRO_JITTER_MIN, DEFAULT_LRO_JITTER_MAX)
     )
+
+
+def _is_transient_poll_exception(exc: Exception) -> bool:
+    """Returns whether a status check error should be retried on the next poll.
+
+    Uses the same predicate as the Storage Control retry policy
+    (``gcsfs.retry.is_transient_exception``), plus ``asyncio.TimeoutError``
+    raised when a single status check exceeds its per-poll deadline.
+    """
+    return isinstance(exc, asyncio.TimeoutError) or is_transient_exception(exc)
+
+
+async def poll_until(
+    check_fn: Callable[[PollStatus], Awaitable[Tuple[bool, T]]],
+    schedule: PollSchedule,
+    operation_id: Optional[str] = None,
+    time_fn: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> T:
+    """Polls an async check function until it reports completion or the schedule expires.
+
+    This runner follows a sleep-then-check cadence on every iteration. Callers
+    that can satisfy completion synchronously at ``t=0`` should perform that
+    initial check before invoking ``poll_until``, or else incur the overhead of
+    the first scheduled sleep.
+
+    Args:
+        check_fn: Async callback accepting the ``PollStatus`` that the preceding
+            delay was computed from (its ``total_elapsed`` excludes that sleep)
+            and returning a ``(is_done, result)`` tuple. Transient errors (those
+            matched by ``gcsfs.retry.is_transient_exception``, plus
+            ``asyncio.TimeoutError``) are caught and retried on the next
+            scheduled attempt; any other exception is re-raised.
+        schedule: ``PollSchedule`` returning the delay in seconds before the
+            next attempt, or ``None`` to abort polling.
+        operation_id: Optional identifier included in debug and warning logs.
+        time_fn: Monotonic clock function returning current time in seconds.
+        sleep_fn: Async sleep function accepting a delay in seconds.
+
+    Returns:
+        The final payload ``T`` returned by ``check_fn`` when ``is_done`` is True.
+
+    Raises:
+        TypeError: If ``schedule`` is not a ``PollSchedule``.
+        asyncio.TimeoutError: If ``schedule`` returns ``None`` before ``check_fn``
+            reports completion. If the most recent status check failed with
+            a transient error, that error is chained as ``__cause__``.
+    """
+    if not isinstance(schedule, PollSchedule):
+        raise TypeError(
+            f"schedule must be a PollSchedule, got {type(schedule).__name__}"
+        )
+
+    start_time = time_fn()
+    op_desc = f" for '{operation_id}'" if operation_id else ""
+    logger.debug("Starting polling%s...", op_desc)
+
+    attempts = 1
+    # Transient error from the most recent status check, if it failed; chained
+    # onto the timeout so callers can see why polling never succeeded.
+    last_exc: Optional[Exception] = None
+
+    # Sleep before each status check; callers should perform any t=0 pre-check
+    # prior to calling poll_until to avoid an immediate redundant network RPC.
+    while True:
+        now = time_fn()
+        elapsed = now - start_time
+        status = PollStatus(
+            total_elapsed=elapsed,
+            attempt=attempts,
+        )
+
+        delay = schedule(status)
+        if delay is None:
+            # ``attempts`` is the number of the check that would have run next.
+            checks = attempts - 1
+            checks_desc = f"{checks} status check{'' if checks == 1 else 's'}"
+            logger.warning(
+                "Polling timed out%s after %.2fs and %s.",
+                op_desc,
+                elapsed,
+                checks_desc,
+            )
+            raise asyncio.TimeoutError(
+                f"Polling timed out{op_desc} after {elapsed:.2f}s and {checks_desc}."
+            ) from last_exc
+
+        logger.debug(
+            "Poll attempt #%d%s: elapsed=%.3fs, sleeping %.3fs before check",
+            attempts,
+            op_desc,
+            elapsed,
+            delay,
+        )
+        await sleep_fn(delay)
+
+        try:
+            is_done, result = await check_fn(status)
+            last_exc = None
+            if is_done:
+                final_elapsed = time_fn() - start_time
+                log_level = (
+                    logging.INFO
+                    if final_elapsed >= SLOW_LRO_LOG_THRESHOLD
+                    else logging.DEBUG
+                )
+                logger.log(
+                    log_level,
+                    "Polling completed%s in %.3fs across %d attempts.",
+                    op_desc,
+                    final_elapsed,
+                    attempts,
+                )
+                return result
+        except Exception as e:
+            if not _is_transient_poll_exception(e):
+                raise
+            last_exc = e
+            logger.debug(
+                "Transient transport error during status check #%d%s: %s",
+                attempts,
+                op_desc,
+                e,
+            )
+
+        attempts += 1
