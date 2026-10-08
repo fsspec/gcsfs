@@ -35,6 +35,7 @@ from gcsfs.core import (
     _get_prefetcher_and_cache_config,
     _location,
 )
+from gcsfs.poller import DEFAULT_HNS_LRO_TIMEOUT, _get_operation_name, poll_lro
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -43,6 +44,10 @@ logger = logging.getLogger("gcsfs")
 
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
+
+
+class _FolderRenameTimeoutError(OSError):
+    """Waiting for an HNS folder rename timed out; it may still complete."""
 
 
 class BucketType(Enum):
@@ -678,6 +683,35 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
 
+    async def _wait_for_folder_rename(self, operation, path1, path2, request_id):
+        """Waits for a RenameFolder operation to finish.
+
+        Polls with ``poll_lro`` for at most ``DEFAULT_HNS_LRO_TIMEOUT`` seconds.
+
+        Raises:
+            _FolderRenameTimeoutError: If polling times out. The server-side
+                rename is not cancelled and may still complete.
+        """
+        try:
+            await poll_lro(
+                operation,
+                timeout=DEFAULT_HNS_LRO_TIMEOUT,
+                path1=path1,
+                path2=path2,
+                request_id=request_id,
+            )
+        except asyncio.TimeoutError as e:
+            # The rename may finish later, so cached listings can't be trusted.
+            self.invalidate_cache(path1)
+            self.invalidate_cache(path2)
+            op_name = _get_operation_name(operation) or request_id
+            raise _FolderRenameTimeoutError(
+                f"HNS folder rename from '{path1}' to '{path2}' (op: {op_name}) "
+                f"did not finish within {DEFAULT_HNS_LRO_TIMEOUT:g}s. The rename "
+                "may still complete on the server; check the destination before "
+                "retrying."
+            ) from e
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
@@ -736,7 +770,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     retry=self._get_retry_config(),
                     timeout=STORAGE_CONTROL_RPC_TIMEOUT,
                 )
-                await operation.result()
+                await self._wait_for_folder_rename(
+                    operation, path1, path2, request.request_id
+                )
                 self._update_dircache_after_rename(path1, path2)
 
                 logger.debug(
@@ -747,6 +783,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 await self._mv_file(path1, path2)
                 return
         except Exception as e:
+            if isinstance(e, _FolderRenameTimeoutError):
+                # The rename may still be running on the server, so an
+                # object-level fallback could race with it.
+                raise
             if isinstance(e, FileNotFoundError):
                 # If the source doesn't exist, fail fast.
                 raise

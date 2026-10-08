@@ -31,6 +31,8 @@ DEFAULT_LRO_JITTER_MIN: float = 0.75
 DEFAULT_LRO_JITTER_MAX: float = 1.25
 #: Per-RPC deadline in seconds for individual operation.done() status checks.
 PER_POLL_RPC_TIMEOUT: float = 15.0
+#: Default overall timeout in seconds for HNS folder rename LROs.
+DEFAULT_HNS_LRO_TIMEOUT: float = 300.0
 #: Elapsed duration threshold in seconds above which completed LROs log at INFO instead of DEBUG.
 SLOW_LRO_LOG_THRESHOLD: float = 2.0
 
