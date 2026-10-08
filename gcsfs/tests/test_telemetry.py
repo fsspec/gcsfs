@@ -397,3 +397,171 @@ def test_collect_tokens_map_records_empty_for_none_detection():
         assert call_count == 1  # Still 1, no additional detect() calls!
     finally:
         reset_telemetry_context(token)
+
+
+# ============================================================================
+# 5. Method Wrappers & Context Bridging Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_gcs_async_wrapper_scopes_context(monkeypatch):
+    """Verify that _gcs_async_wrapper scopes context so inner HTTP requests skip stack detection."""
+    import gcsfs.telemetry.manager as manager_mod
+    from gcsfs.telemetry.manager import _gcs_async_wrapper
+
+    # 1. Count how many times detect() actually executes
+    detect_count = 0
+
+    class MockDetector(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal detect_count
+            detect_count += 1
+            return "fw/pandas"
+
+    tracker = UsageMetricsTracker(detectors=[MockDetector()])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    # 2. Simulate an async file operation (like _cat_file) making 5 inner HTTP requests
+    async def simulated_cat_file():
+        for _ in range(5):
+            # Each HTTP request calls tracker.get_tokens() for the User-Agent header
+            tokens = tracker.get_tokens()
+            assert tokens == ["fw/pandas"]
+        return "done"
+
+    # 3. Wrap with _gcs_async_wrapper
+    wrapped_cat_file = _gcs_async_wrapper(simulated_cat_file)
+
+    # 4. Run the operation
+    assert await wrapped_cat_file() == "done"
+
+    # 5. Check: detect() ran ONCE at entry (instead of 5 times for 5 HTTP requests)
+    assert detect_count == 1
+
+    # 6. Check: ContextVar is cleanly reset after the operation finishes
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_consecutive_native_async_calls_isolated(monkeypatch):
+    """Verify that consecutive native async calls under different frameworks are 100% isolated."""
+    import gcsfs.telemetry.manager as manager_mod
+    from gcsfs.telemetry.manager import _gcs_async_wrapper
+
+    current_fw = "pandas"
+    monkeypatch.setattr(
+        manager_mod.default_usage_tracker,
+        "collect_tokens_map",
+        lambda: {"fw": f"fw/{current_fw}"},
+    )
+
+    captured = []
+
+    async def file_operation():
+        captured.append(get_telemetry_context().get("fw"))
+
+    wrapped = _gcs_async_wrapper(file_operation)
+
+    current_fw = "pandas"
+    await wrapped()
+    assert captured[-1] == "fw/pandas"
+    assert get_telemetry_context() == {}
+
+    current_fw = "torch"
+    await wrapped()
+    assert captured[-1] == "fw/torch"
+    assert get_telemetry_context() == {}
+
+
+def test_async_gen_wrapper_aclose_on_early_exit():
+    """Verify that _gcs_async_gen_wrapper properly closes the underlying async generator on early exit."""
+    from gcsfs.core import GCSFileSystem
+    from gcsfs.telemetry.manager import _gcs_async_gen_wrapper
+
+    closed = False
+
+    async def sample_async_gen():
+        nonlocal closed
+        try:
+            yield 1
+            yield 2
+            yield 3
+        finally:
+            closed = True
+
+    fs = GCSFileSystem(token="anon")
+    wrapped_gen = _gcs_async_gen_wrapper(sample_async_gen, obj=fs)
+    gen_instance = wrapped_gen()
+    val = next(gen_instance)
+    assert val == 1
+    assert not closed
+    # Close the sync generator early (simulating break in for loop)
+    gen_instance.close()
+    assert closed
+
+
+@pytest.mark.asyncio
+async def test_file_telemetry_wrapper_sync_and_async():
+    """Verify _file_telemetry_wrapper propagates caller_framework for both sync and async methods."""
+    from gcsfs.telemetry.manager import _file_telemetry_wrapper
+
+    class DummyFile:
+        def __init__(self, caller_framework: str):
+            self.caller_framework = caller_framework
+
+        def sync_op(self):
+            return get_telemetry_context(Dimension.FRAMEWORK)
+
+        async def async_op(self):
+            return get_telemetry_context(Dimension.FRAMEWORK)
+
+    DummyFile.sync_op = _file_telemetry_wrapper(DummyFile.sync_op)
+    DummyFile.async_op = _file_telemetry_wrapper(DummyFile.async_op)
+
+    f = DummyFile("fw/pytorch")
+    assert f.sync_op() == "fw/pytorch"
+    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+
+    assert await f.async_op() == "fw/pytorch"
+    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+
+
+def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch):
+    """Verify mirror_gcs_methods binds sync/async/gen wrappers and preserves subclass overrides & mocks."""
+    import fsspec.asyn
+
+    from gcsfs.telemetry.manager import mirror_gcs_methods
+
+    class BaseDummyFS(fsspec.asyn.AsyncFileSystem):
+        async def _ls(self, path, detail=False, **kwargs):
+            return [f"base:{path}"]
+
+        async def _cat_file(self, path, start=None, end=None, **kwargs):
+            return f"base_cat:{path}".encode()
+
+        async def _walk(self, path, maxdepth=None, **kwargs):
+            yield (f"base_walk:{path}", [], ["a.txt"])
+
+    mirror_gcs_methods(BaseDummyFS)
+
+    class SubDummyFS(BaseDummyFS):
+        async def _ls(self, path, detail=False, **kwargs):
+            return [f"sub:{path}"]
+
+        async def _walk(self, path, maxdepth=None, **kwargs):
+            yield (f"sub_walk:{path}", [], ["b.txt"])
+
+    sub_fs = SubDummyFS(skip_instance_cache=True)
+    assert sub_fs.ls("bucket") == ["sub:bucket"]
+    assert list(sub_fs.walk("bucket")) == [("sub_walk:bucket", [], ["b.txt"])]
+
+    base_fs = BaseDummyFS(skip_instance_cache=True)
+
+    async def mocked_cat_file(self, path, start=None, end=None, **kwargs):
+        return f"mocked:{path}".encode()
+
+    monkeypatch.setattr(BaseDummyFS, "_cat_file", mocked_cat_file)
+    assert base_fs.cat_file("bucket/file.txt") == b"mocked:bucket/file.txt"
