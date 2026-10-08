@@ -161,8 +161,24 @@ def test_framework_detector_opt_out(monkeypatch):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
 
 
+def test_deep_stack_traversal(monkeypatch):
+    """Verify stack frame detector traverses deep stacks up to depth 64."""
+    detector = FrameworkDetector(max_depth=64)
+
+    # Build a 50-frame stack where the top frame (frame 50) is 'lightning'
+    current_frame = _create_mock_frame("lightning.pytorch.trainer")
+    for i in range(49):
+        current_frame = _create_mock_frame(
+            f"internal_module_{i}", back_frame=current_frame
+        )
+
+    monkeypatch.setattr(sys, "_getframe", lambda: current_frame)
+    detected = detector.detect()
+    assert detected == "fw/lightning"
+
+
 # ============================================================================
-# 3. Context Management Tests
+# 3. Context Management & Concurrency Tests
 # ============================================================================
 
 
@@ -179,8 +195,90 @@ def test_set_and_get_telemetry_context():
     assert get_telemetry_context(Dimension.FRAMEWORK) is None
 
 
+def test_multithreaded_context_isolation():
+    """
+    Verify that concurrent threads executing with distinct framework contexts
+    remain completely isolated without cross-thread ContextVar leakage or overlap.
+    """
+    import concurrent.futures
+    import threading
+    import time
+
+    barrier = threading.Barrier(4)
+    errors = []
+
+    def worker(framework_name: str):
+        try:
+            # 1. Verify clean initial state in this thread
+            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
+                errors.append(f"{framework_name}: initial context not None")
+
+            # 2. Set thread-local context
+            token = set_telemetry_context(Dimension.FRAMEWORK, f"fw/{framework_name}")
+            try:
+                # 3. Synchronize all threads so all 4 contexts are simultaneously active
+                barrier.wait(timeout=5)
+
+                # 4. Repeatedly verify context during concurrent overlap
+                for _ in range(5):
+                    current = get_telemetry_context(Dimension.FRAMEWORK)
+                    if current != f"fw/{framework_name}":
+                        errors.append(
+                            f"{framework_name}: expected fw/{framework_name}, got {current}"
+                        )
+                    time.sleep(0.005)
+            finally:
+                reset_telemetry_context(token)
+
+            # 5. Verify thread context is cleanly reset
+            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
+                errors.append(f"{framework_name}: post-reset context not None")
+        except Exception as e:
+            errors.append(f"{framework_name} exception: {e}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(worker, name) for name in ["pandas", "torch", "dask", "ray"]
+        ]
+        concurrent.futures.wait(futures)
+
+    assert errors == [], f"Thread isolation errors: {errors}"
+
+
+def test_post_fork_telemetry_reset():
+    """Verify os.register_at_fork automatically clears telemetry in a real forked child process."""
+    if not hasattr(os, "fork"):
+        pytest.skip("os.fork is only supported on Unix platforms")
+
+    import multiprocessing
+
+    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/parent-process")
+    try:
+        assert get_telemetry_context() == {"fw": "fw/parent-process"}
+
+        ctx = multiprocessing.get_context("fork")
+        result_queue = ctx.Queue()
+
+        def child_worker(q):
+            # In the forked child, os.register_at_fork(after_in_child=...) automatically runs
+            q.put(get_telemetry_context())
+
+        p = ctx.Process(target=child_worker, args=(result_queue,))
+        p.start()
+        p.join(timeout=5)
+
+        child_result = result_queue.get(timeout=5)
+        # Child process must have an empty telemetry context
+        assert child_result == {}, f"Child telemetry was not reset! Got: {child_result}"
+
+        # Parent process still retains its original telemetry context
+        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/parent-process"
+    finally:
+        reset_telemetry_context(token)
+
+
 # ============================================================================
-# 4. Telemetry Manager & Header Building Tests
+# 4. UsageMetricsTracker Tests
 # ============================================================================
 
 
@@ -261,8 +359,6 @@ def test_collect_tokens_map_caches_detector_exception():
     assert call_count == 1
 
     # Second call
-    from gcsfs.telemetry.context import reset_telemetry_context, set_telemetry_context
-
     t = set_telemetry_context(tokens1)
     try:
         tokens2 = tracker.collect_tokens_map()
@@ -272,8 +368,207 @@ def test_collect_tokens_map_caches_detector_exception():
     assert call_count == 1
 
 
+def test_collect_tokens_map_records_empty_for_none_detection():
+    """Verify that collect_tokens_map records empty string for None detection and avoids redundant checks."""
+    call_count = 0
+
+    class DummyNoneDetector(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal call_count
+            call_count += 1
+            return None
+
+    tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
+    tokens_map = tracker.collect_tokens_map()
+    assert tokens_map == {"fw": ""}
+    assert call_count == 1
+
+    # When the captured tokens_map is bridged into ContextVar:
+    token = set_telemetry_context(tokens_map)
+    try:
+        # All downstream operations on event loop (get_tokens, get_dimension, collect_tokens_map)
+        # must now be O(1) without re-running detect()
+        assert tracker.get_tokens() == []
+        assert tracker.get_dimension(Dimension.FRAMEWORK) is None
+        tokens_map_2 = tracker.collect_tokens_map()
+        assert tokens_map_2 == {"fw": ""}
+        assert call_count == 1  # Still 1, no additional detect() calls!
+    finally:
+        reset_telemetry_context(token)
+
+
 # ============================================================================
-# 5. GCSFS Telemetry Propagation Tests
+# 5. Method Wrappers & Context Bridging Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_gcs_async_wrapper_scopes_context(monkeypatch):
+    """Verify that _gcs_async_wrapper scopes context so inner HTTP requests skip stack detection."""
+    import gcsfs.telemetry.manager as manager_mod
+    from gcsfs.telemetry.manager import _gcs_async_wrapper
+
+    # 1. Count how many times detect() actually executes
+    detect_count = 0
+
+    class MockDetector(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal detect_count
+            detect_count += 1
+            return "fw/pandas"
+
+    tracker = UsageMetricsTracker(detectors=[MockDetector()])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    # 2. Simulate an async file operation (like _cat_file) making 5 inner HTTP requests
+    async def simulated_cat_file():
+        for _ in range(5):
+            # Each HTTP request calls tracker.get_tokens() for the User-Agent header
+            tokens = tracker.get_tokens()
+            assert tokens == ["fw/pandas"]
+        return "done"
+
+    # 3. Wrap with _gcs_async_wrapper
+    wrapped_cat_file = _gcs_async_wrapper(simulated_cat_file)
+
+    # 4. Run the operation
+    assert await wrapped_cat_file() == "done"
+
+    # 5. Check: detect() ran ONCE at entry (instead of 5 times for 5 HTTP requests)
+    assert detect_count == 1
+
+    # 6. Check: ContextVar is cleanly reset after the operation finishes
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_consecutive_native_async_calls_isolated(monkeypatch):
+    """Verify that consecutive native async calls under different frameworks are 100% isolated."""
+    import gcsfs.telemetry.manager as manager_mod
+    from gcsfs.telemetry.manager import _gcs_async_wrapper
+
+    current_fw = "pandas"
+    monkeypatch.setattr(
+        manager_mod.default_usage_tracker,
+        "collect_tokens_map",
+        lambda: {"fw": f"fw/{current_fw}"},
+    )
+
+    captured = []
+
+    async def file_operation():
+        captured.append(get_telemetry_context().get("fw"))
+
+    wrapped = _gcs_async_wrapper(file_operation)
+
+    current_fw = "pandas"
+    await wrapped()
+    assert captured[-1] == "fw/pandas"
+    assert get_telemetry_context() == {}
+
+    current_fw = "torch"
+    await wrapped()
+    assert captured[-1] == "fw/torch"
+    assert get_telemetry_context() == {}
+
+
+def test_async_gen_wrapper_aclose_on_early_exit():
+    """Verify that _gcs_async_gen_wrapper properly closes the underlying async generator on early exit."""
+    from gcsfs.core import GCSFileSystem
+    from gcsfs.telemetry.manager import _gcs_async_gen_wrapper
+
+    closed = False
+
+    async def sample_async_gen():
+        nonlocal closed
+        try:
+            yield 1
+            yield 2
+            yield 3
+        finally:
+            closed = True
+
+    fs = GCSFileSystem(token="anon")
+    wrapped_gen = _gcs_async_gen_wrapper(sample_async_gen, obj=fs)
+    gen_instance = wrapped_gen()
+    val = next(gen_instance)
+    assert val == 1
+    assert not closed
+    # Close the sync generator early (simulating break in for loop)
+    gen_instance.close()
+    assert closed
+
+
+@pytest.mark.asyncio
+async def test_file_telemetry_wrapper_sync_and_async():
+    """Verify _file_telemetry_wrapper propagates caller_framework for both sync and async methods."""
+    from gcsfs.telemetry.manager import _file_telemetry_wrapper
+
+    class DummyFile:
+        def __init__(self, caller_framework: str):
+            self.caller_framework = caller_framework
+
+        def sync_op(self):
+            return get_telemetry_context(Dimension.FRAMEWORK)
+
+        async def async_op(self):
+            return get_telemetry_context(Dimension.FRAMEWORK)
+
+    DummyFile.sync_op = _file_telemetry_wrapper(DummyFile.sync_op)
+    DummyFile.async_op = _file_telemetry_wrapper(DummyFile.async_op)
+
+    f = DummyFile("fw/pytorch")
+    assert f.sync_op() == "fw/pytorch"
+    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+
+    assert await f.async_op() == "fw/pytorch"
+    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+
+
+def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch):
+    """Verify mirror_gcs_methods binds sync/async/gen wrappers and preserves subclass overrides & mocks."""
+    import fsspec.asyn
+
+    from gcsfs.telemetry.manager import mirror_gcs_methods
+
+    class BaseDummyFS(fsspec.asyn.AsyncFileSystem):
+        async def _ls(self, path, detail=False, **kwargs):
+            return [f"base:{path}"]
+
+        async def _cat_file(self, path, start=None, end=None, **kwargs):
+            return f"base_cat:{path}".encode()
+
+        async def _walk(self, path, maxdepth=None, **kwargs):
+            yield (f"base_walk:{path}", [], ["a.txt"])
+
+    mirror_gcs_methods(BaseDummyFS)
+
+    class SubDummyFS(BaseDummyFS):
+        async def _ls(self, path, detail=False, **kwargs):
+            return [f"sub:{path}"]
+
+        async def _walk(self, path, maxdepth=None, **kwargs):
+            yield (f"sub_walk:{path}", [], ["b.txt"])
+
+    sub_fs = SubDummyFS(skip_instance_cache=True)
+    assert sub_fs.ls("bucket") == ["sub:bucket"]
+    assert list(sub_fs.walk("bucket")) == [("sub_walk:bucket", [], ["b.txt"])]
+
+    base_fs = BaseDummyFS(skip_instance_cache=True)
+
+    async def mocked_cat_file(self, path, start=None, end=None, **kwargs):
+        return f"mocked:{path}".encode()
+
+    monkeypatch.setattr(BaseDummyFS, "_cat_file", mocked_cat_file)
+    assert base_fs.cat_file("bucket/file.txt") == b"mocked:bucket/file.txt"
+
+
+# ============================================================================
+# 6. GCSFileSystem & GCSFile Integration Tests
 # ============================================================================
 
 
@@ -314,72 +609,6 @@ def test_nested_method_calls_telemetry():
 
     # After outer method completes, context is completely clean
     assert get_telemetry_context(Dimension.FRAMEWORK) is None
-
-
-def test_multithreaded_context_isolation():
-    """
-    Verify that concurrent threads executing with distinct framework contexts
-    remain completely isolated without cross-thread ContextVar leakage or overlap.
-    """
-    import concurrent.futures
-    import threading
-    import time
-
-    barrier = threading.Barrier(4)
-    errors = []
-
-    def worker(framework_name: str):
-        try:
-            # 1. Verify clean initial state in this thread
-            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
-                errors.append(f"{framework_name}: initial context not None")
-
-            # 2. Set thread-local context
-            token = set_telemetry_context(Dimension.FRAMEWORK, f"fw/{framework_name}")
-            try:
-                # 3. Synchronize all threads so all 4 contexts are simultaneously active
-                barrier.wait(timeout=5)
-
-                # 4. Repeatedly verify context during concurrent overlap
-                for _ in range(5):
-                    current = get_telemetry_context(Dimension.FRAMEWORK)
-                    if current != f"fw/{framework_name}":
-                        errors.append(
-                            f"{framework_name}: expected fw/{framework_name}, got {current}"
-                        )
-                    time.sleep(0.005)
-            finally:
-                reset_telemetry_context(token)
-
-            # 5. Verify thread context is cleanly reset
-            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
-                errors.append(f"{framework_name}: post-reset context not None")
-        except Exception as e:
-            errors.append(f"{framework_name} exception: {e}")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [
-            executor.submit(worker, name) for name in ["pandas", "torch", "dask", "ray"]
-        ]
-        concurrent.futures.wait(futures)
-
-    assert errors == [], f"Thread isolation errors: {errors}"
-
-
-def test_deep_stack_traversal(monkeypatch):
-    """Verify stack frame detector traverses deep stacks up to depth 64."""
-    detector = FrameworkDetector(max_depth=64)
-
-    # Build a 50-frame stack where the top frame (frame 50) is 'lightning'
-    current_frame = _create_mock_frame("lightning.pytorch.trainer")
-    for i in range(49):
-        current_frame = _create_mock_frame(
-            f"internal_module_{i}", back_frame=current_frame
-        )
-
-    monkeypatch.setattr(sys, "_getframe", lambda: current_frame)
-    detected = detector.detect()
-    assert detected == "fw/lightning"
 
 
 def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
@@ -438,196 +667,9 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
             reset_telemetry_context(token)
 
 
-# ============================================================================
-# 8. Fork Reset Tests
-# ============================================================================
-
-
-def test_post_fork_telemetry_reset():
-    """Verify os.register_at_fork automatically clears telemetry in a real forked child process."""
-    if not hasattr(os, "fork"):
-        pytest.skip("os.fork is only supported on Unix platforms")
-
-    import multiprocessing
-
-    from gcsfs.telemetry.context import (
-        get_telemetry_context,
-        reset_telemetry_context,
-        set_telemetry_context,
-    )
-
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/parent-process")
-    try:
-        assert get_telemetry_context() == {"fw": "fw/parent-process"}
-
-        ctx = multiprocessing.get_context("fork")
-        result_queue = ctx.Queue()
-
-        def child_worker(q):
-            # In the forked child, os.register_at_fork(after_in_child=...) automatically runs
-            q.put(get_telemetry_context())
-
-        p = ctx.Process(target=child_worker, args=(result_queue,))
-        p.start()
-        p.join(timeout=5)
-
-        child_result = result_queue.get(timeout=5)
-        # Child process must have an empty telemetry context
-        assert child_result == {}, f"Child telemetry was not reset! Got: {child_result}"
-
-        # Parent process still retains its original telemetry context
-        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/parent-process"
-    finally:
-        reset_telemetry_context(token)
-
-
-def test_async_gen_wrapper_aclose_on_early_exit():
-    """Verify that _gcs_async_gen_wrapper properly closes the underlying async generator on early exit."""
-    from gcsfs.core import GCSFileSystem
-    from gcsfs.telemetry.manager import _gcs_async_gen_wrapper
-
-    closed = False
-
-    async def sample_async_gen():
-        nonlocal closed
-        try:
-            yield 1
-            yield 2
-            yield 3
-        finally:
-            closed = True
-
-    fs = GCSFileSystem(token="anon")
-    wrapped_gen = _gcs_async_gen_wrapper(sample_async_gen, obj=fs)
-    gen_instance = wrapped_gen()
-    val = next(gen_instance)
-    assert val == 1
-    assert not closed
-    # Close the sync generator early (simulating break in for loop)
-    gen_instance.close()
-    assert closed
-
-
-def test_collect_tokens_map_records_empty_for_none_detection():
-    """Verify that collect_tokens_map records empty string for None detection and avoids redundant checks."""
-    from gcsfs.telemetry.context import (
-        Dimension,
-        reset_telemetry_context,
-        set_telemetry_context,
-    )
-    from gcsfs.telemetry.detectors.base import BaseDetector
-    from gcsfs.telemetry.manager import UsageMetricsTracker
-
-    call_count = 0
-
-    class DummyNoneDetector(BaseDetector):
-        name = Dimension.FRAMEWORK
-
-        def detect(self):
-            nonlocal call_count
-            call_count += 1
-            return None
-
-    tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
-    tokens_map = tracker.collect_tokens_map()
-    assert tokens_map == {"fw": ""}
-    assert call_count == 1
-
-    # In _sync(), the captured tokens_map is bridged into ContextVar:
-    token = set_telemetry_context(tokens_map)
-    try:
-        # All downstream operations on event loop (get_tokens, get_dimension, collect_tokens_map)
-        # must now be O(1) without re-running detect()
-        assert tracker.get_tokens() == []
-        assert tracker.get_dimension(Dimension.FRAMEWORK) is None
-        tokens_map_2 = tracker.collect_tokens_map()
-        assert tokens_map_2 == {"fw": ""}
-        assert call_count == 1  # Still 1, no additional detect() calls!
-    finally:
-        reset_telemetry_context(token)
-
-
-@pytest.mark.asyncio
-async def test_gcs_async_wrapper_scopes_context(monkeypatch):
-    """Verify that _gcs_async_wrapper scopes context so inner HTTP requests skip stack detection."""
-    import gcsfs.telemetry.manager as manager_mod
-    from gcsfs.telemetry.context import Dimension, get_telemetry_context
-    from gcsfs.telemetry.detectors.base import BaseDetector
-    from gcsfs.telemetry.manager import UsageMetricsTracker, _gcs_async_wrapper
-
-    # 1. Count how many times detect() actually executes
-    detect_count = 0
-
-    class MockDetector(BaseDetector):
-        name = Dimension.FRAMEWORK
-
-        def detect(self):
-            nonlocal detect_count
-            detect_count += 1
-            return "fw/pandas"
-
-    tracker = UsageMetricsTracker(detectors=[MockDetector()])
-    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
-
-    # 2. Simulate an async file operation (like _cat_file) making 5 inner HTTP requests
-    async def simulated_cat_file():
-        for _ in range(5):
-            # Each HTTP request calls tracker.get_tokens() for the User-Agent header
-            tokens = tracker.get_tokens()
-            assert tokens == ["fw/pandas"]
-        return "done"
-
-    # 3. Wrap with _gcs_async_wrapper
-    wrapped_cat_file = _gcs_async_wrapper(simulated_cat_file)
-
-    # 4. Run the operation
-    assert await wrapped_cat_file() == "done"
-
-    # 5. Check: detect() ran ONCE at entry (instead of 5 times for 5 HTTP requests)
-    assert detect_count == 1
-
-    # 6. Check: ContextVar is cleanly reset after the operation finishes
-    assert get_telemetry_context() == {}
-
-
-@pytest.mark.asyncio
-async def test_consecutive_native_async_calls_isolated(monkeypatch):
-    """Verify that consecutive native async calls under different frameworks are 100% isolated."""
-    import gcsfs.telemetry.manager as manager_mod
-    from gcsfs.telemetry.context import get_telemetry_context
-    from gcsfs.telemetry.manager import _gcs_async_wrapper
-
-    current_fw = "pandas"
-    monkeypatch.setattr(
-        manager_mod.default_usage_tracker,
-        "collect_tokens_map",
-        lambda: {"fw": f"fw/{current_fw}"},
-    )
-
-    captured = []
-
-    async def file_operation():
-        captured.append(get_telemetry_context().get("fw"))
-
-    wrapped = _gcs_async_wrapper(file_operation)
-
-    current_fw = "pandas"
-    await wrapped()
-    assert captured[-1] == "fw/pandas"
-    assert get_telemetry_context() == {}
-
-    current_fw = "torch"
-    await wrapped()
-    assert captured[-1] == "fw/torch"
-    assert get_telemetry_context() == {}
-
-
 def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkeypatch):
     """Verify that GCSFile.caller_framework caches empty string when None and avoids repeated detect calls."""
     from gcsfs.core import GCSFile, GCSFileSystem
-    from gcsfs.telemetry.context import Dimension
-    from gcsfs.telemetry.detectors.base import BaseDetector
-    from gcsfs.telemetry.manager import UsageMetricsTracker
 
     detect_count = 0
 
@@ -660,17 +702,15 @@ def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkey
 @pytest.mark.asyncio
 async def test_async_fetch_range_propagates_caller_framework():
     """Verify that background prefetch coroutines inherit the framework context."""
-    from gcsfs.telemetry.context import Dimension, get_telemetry_context
+    import unittest.mock as mock
+
+    import gcsfs
 
     captured_context = {}
 
     async def mock_cat_file_concurrent(*args, **kwargs):
         captured_context.update(get_telemetry_context())
         return b"data"
-
-    import unittest.mock as mock
-
-    import gcsfs
 
     fs = mock.MagicMock()
     fs._cat_file_concurrent = mock.AsyncMock(side_effect=mock_cat_file_concurrent)
@@ -695,14 +735,11 @@ async def test_async_fetch_range_propagates_caller_framework():
 def test_defer_close_propagates_caller_framework():
     """Verify that background deferred close inherits the framework context."""
     import threading
-
-    from gcsfs.telemetry.context import Dimension, get_telemetry_context
-
-    captured_context = {}
-
     import unittest.mock as mock
 
     import gcsfs
+
+    captured_context = {}
 
     fs = mock.MagicMock()
     fs.split_path.return_value = ("bucket", "test.parquet", None)

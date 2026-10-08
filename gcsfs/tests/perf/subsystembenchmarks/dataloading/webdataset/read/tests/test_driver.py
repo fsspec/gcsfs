@@ -13,7 +13,9 @@ _TINY_PIXEL_BUDGET = imagegen.FACTOR * imagegen.FACTOR * 4
 
 
 def _case(axis=None, predicate=None):
-    cases = configs.WebDatasetReadConfigurator(configs.__file__).generate_cases()
+    cases = configs.WebDatasetReadConfigurator(configs.__file__).generate_cases(
+        include_disabled=True
+    )
     if predicate:
         return next(c for c in cases if predicate(c))
     return next(c for c in cases if c.sweep_axis == (axis or "baseline"))

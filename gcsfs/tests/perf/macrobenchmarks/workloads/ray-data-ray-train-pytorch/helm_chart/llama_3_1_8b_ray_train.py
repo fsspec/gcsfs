@@ -710,16 +710,34 @@ def validate_llama_tp_dimensions(model_config, *, tp_size):
         "intermediate_size": model_config.intermediate_size,
         "num_attention_heads": model_config.num_attention_heads,
         "num_key_value_heads": model_config.num_key_value_heads,
+        "vocab_size": model_config.vocab_size,
     }
     for name, value in dimensions.items():
         if value % tp_size:
             raise ValueError(f"{name}={value} must be divisible by TP size={tp_size}")
 
 
-def llama_tp_plan():
-    from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
+def apply_llama_tp(model, tp_mesh):
+    """Applies tensor parallelism to a LLaMA model: shards embed_tokens, lm_head, and decoder layers."""
+    from torch.distributed.tensor import Replicate
+    from torch.distributed.tensor.parallel import (
+        ColwiseParallel,
+        RowwiseParallel,
+        parallelize_module,
+    )
 
-    return {
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "model.embed_tokens": RowwiseParallel(
+                input_layouts=Replicate(), output_layouts=Replicate()
+            ),
+            "lm_head": ColwiseParallel(output_layouts=Replicate()),
+        },
+    )
+
+    layer_plan = {
         "self_attn.q_proj": ColwiseParallel(),
         "self_attn.k_proj": ColwiseParallel(),
         "self_attn.v_proj": ColwiseParallel(),
@@ -728,6 +746,8 @@ def llama_tp_plan():
         "mlp.up_proj": ColwiseParallel(),
         "mlp.down_proj": RowwiseParallel(),
     }
+    for layer in model.model.layers:
+        parallelize_module(layer, tp_mesh, layer_plan)
 
 
 def _fully_shard_bottom_up(model, *, dp_mesh, mp_policy):
@@ -758,7 +778,6 @@ def parallelize_benchmark_model(model, config, *, device, mp_dtype):
     """Move and wrap a model, returning it with its DP and TP meshes."""
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.fsdp import MixedPrecisionPolicy
-    from torch.distributed.tensor.parallel import parallelize_module
 
     if config.strategy == "ddp":
         model = ray.train.torch.prepare_model(
@@ -785,8 +804,8 @@ def parallelize_benchmark_model(model, config, *, device, mp_dtype):
         )
         dp_mesh = mesh["dp"]
         tp_mesh = mesh["tp"]
-        for layer in model.payload.model.layers:
-            parallelize_module(layer, tp_mesh, llama_tp_plan())
+        if config.tensor_parallel_size > 1:
+            apply_llama_tp(model.payload, tp_mesh)
     else:
         dp_mesh = init_device_mesh(device.type, (config.world_size,))
         tp_mesh = None

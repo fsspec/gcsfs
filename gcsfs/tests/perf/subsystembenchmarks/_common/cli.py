@@ -2,6 +2,9 @@ import os
 import subprocess
 import sys
 
+# Per-case timeout (in seconds) overriding pyproject.toml's 1800s default.
+CASE_TIMEOUT_SECONDS = 7200
+
 
 def tests_globs(suite_dir):
     """Return anchored glob patterns for nested unit test directories to exclude from benchmark execution."""
@@ -16,6 +19,7 @@ def build_pytest_args(suite_dir, json_path, filter_expr=None):
         "--run-benchmarks",
         "-vv",
         "-s",
+        f"--timeout={CASE_TIMEOUT_SECONDS}",
         f"--benchmark-json={json_path}",
     ]
     if filter_expr:

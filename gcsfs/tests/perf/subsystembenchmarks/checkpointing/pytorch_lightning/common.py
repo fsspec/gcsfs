@@ -23,10 +23,27 @@ class DummyDataset(Dataset):
         return torch.randn(self.in_features)
 
 
-def _llama_tp_plan():
-    from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
+def apply_llama_tp(model, tp_mesh):
+    """Applies tensor parallelism to a LLaMA model: shards embed_tokens, lm_head, and decoder layers."""
+    from torch.distributed.tensor import Replicate
+    from torch.distributed.tensor.parallel import (
+        ColwiseParallel,
+        RowwiseParallel,
+        parallelize_module,
+    )
 
-    return {
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "model.embed_tokens": RowwiseParallel(
+                input_layouts=Replicate(), output_layouts=Replicate()
+            ),
+            "lm_head": ColwiseParallel(output_layouts=Replicate()),
+        },
+    )
+
+    layer_plan = {
         "self_attn.q_proj": ColwiseParallel(),
         "self_attn.k_proj": ColwiseParallel(),
         "self_attn.v_proj": ColwiseParallel(),
@@ -35,6 +52,8 @@ def _llama_tp_plan():
         "mlp.up_proj": ColwiseParallel(),
         "mlp.down_proj": RowwiseParallel(),
     }
+    for layer in model.model.layers:
+        parallelize_module(layer, tp_mesh, layer_plan)
 
 
 class DummyModel(L.LightningModule):
@@ -121,7 +140,6 @@ class DummyModel(L.LightningModule):
         # Apply FSDP2 (ModelParallelStrategy) wrapping block-by-block + TP
         elif self.params.strategy in ("model_parallel_sharded", "model_parallel_full"):
             from torch.distributed.fsdp import fully_shard
-            from torch.distributed.tensor.parallel import parallelize_module
 
             mesh = self.trainer.strategy.device_mesh
 
@@ -130,9 +148,7 @@ class DummyModel(L.LightningModule):
                 "tensor_parallel" in mesh.mesh_dim_names
                 and mesh["tensor_parallel"].size() > 1
             ):
-                tp_mesh = mesh["tensor_parallel"]
-                for layer in self.llama.model.layers:
-                    parallelize_module(layer, tp_mesh, _llama_tp_plan())
+                apply_llama_tp(self.llama, mesh["tensor_parallel"])
 
             # Apply FSDP2 (DP)
             if "data_parallel" in mesh.mesh_dim_names:

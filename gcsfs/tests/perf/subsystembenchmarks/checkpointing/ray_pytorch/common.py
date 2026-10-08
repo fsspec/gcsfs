@@ -55,10 +55,27 @@ def is_sharded_strategy(strategy: str) -> bool:
     return strategy in ("fsdp_sharded", "model_parallel_sharded")
 
 
-def _llama_tp_plan():
-    from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
+def apply_llama_tp(model, tp_mesh):
+    """Applies tensor parallelism to a LLaMA model: shards embed_tokens, lm_head, and decoder layers."""
+    from torch.distributed.tensor import Replicate
+    from torch.distributed.tensor.parallel import (
+        ColwiseParallel,
+        RowwiseParallel,
+        parallelize_module,
+    )
 
-    return {
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "model.embed_tokens": RowwiseParallel(
+                input_layouts=Replicate(), output_layouts=Replicate()
+            ),
+            "lm_head": ColwiseParallel(output_layouts=Replicate()),
+        },
+    )
+
+    layer_plan = {
         "self_attn.q_proj": ColwiseParallel(),
         "self_attn.k_proj": ColwiseParallel(),
         "self_attn.v_proj": ColwiseParallel(),
@@ -67,6 +84,8 @@ def _llama_tp_plan():
         "mlp.up_proj": ColwiseParallel(),
         "mlp.down_proj": RowwiseParallel(),
     }
+    for layer in model.model.layers:
+        parallelize_module(layer, tp_mesh, layer_plan)
 
 
 class BenchmarkModel(torch.nn.Module):
@@ -135,7 +154,6 @@ def parallelize_model(model, params):
 
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
-    from torch.distributed.tensor.parallel import parallelize_module
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
@@ -159,9 +177,9 @@ def parallelize_model(model, params):
         dp_mesh = mesh["dp"]
         tp_mesh = mesh["tp"]
 
+        if params.tensor_parallel_size > 1:
+            apply_llama_tp(model.payload, tp_mesh)
         for layer in model.payload.model.layers:
-            if params.tensor_parallel_size > 1:
-                parallelize_module(layer, tp_mesh, _llama_tp_plan())
             fully_shard(layer, mesh=dp_mesh, mp_policy=mp_policy)
         fully_shard(model.payload, mesh=dp_mesh, mp_policy=mp_policy)
         fully_shard(model.probe, mesh=dp_mesh, mp_policy=mp_policy)

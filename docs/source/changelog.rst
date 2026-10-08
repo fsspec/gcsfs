@@ -4,10 +4,49 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
-Unreleased
-----------
+2026.10.0
+---------
 
-* Default ``cat_file`` concurrency to 1 (#1048).
+**New Features**
+
+**Mutual TLS (mTLS) for HTTP requests when a client certificate is configured.** When ``google-auth`` is configured to use a client certificate (``GOOGLE_API_USE_CLIENT_CERTIFICATE=true``, or a certificate config with a ``workload`` section) and a default client certificate source exists, GCSFS now presents that certificate on its HTTP session and, for the default ``googleapis.com`` universe, defaults to ``https://storage.mtls.googleapis.com``, as ``google-cloud-storage`` does. This is needed for access tokens bound to a client certificate (e.g. Agent Identity), which GCS accepts only over mTLS.
+
+* ``endpoint_url`` and ``STORAGE_EMULATOR_HOST`` still take precedence over the mTLS endpoint. If ``session_kwargs`` provides a ``connector``, it is used as-is and the certificate is not presented.
+* Set ``GOOGLE_API_USE_MTLS_ENDPOINT=never`` to keep the regular endpoint (the certificate is still presented).
+* No behavior change when no client certificate is configured.
+* **Known limitations:** gRPC connections (used for Rapid bucket reads/writes, bucket-type detection, and hierarchical namespace folder operations) do not present the client certificate and stay on the regular endpoint. The certificate is loaded when the HTTP session is created and is not reloaded if it rotates.
+
+(#1080)
+
+**Migrate adaptive prefetcher to native fsspec** ``AdaptiveReadaheadCache``: The internal ``gcsfs.prefetcher`` module has been removed from GCSFS and upstreamed into ``fsspec>=2026.9.0``, and GCSFS now uses ``cache_type="adaptive"`` as its default streaming read caching policy. The prefetcher is still enabled by default when ``cache_type`` is not set, and ``max_prefetch_size`` and ``concurrency`` passed to ``open()`` still apply. To use a different cache or disable prefetching, pass ``cache_type`` explicitly (e.g. ``cache_type="none"``). For configuration options, architecture, and benchmarks, see https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
+
+* Removed experimental configuration flags ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`` and ``use_experimental_adaptive_prefetching``. **(Warning)** They are now silently ignored: if you used them to turn prefetching off, set ``cache_type`` explicitly instead.
+* Bumped minimum ``fsspec`` dependency to ``>=2026.9.0``.
+
+(#993)
+
+**Bug Fixes & Improvements**
+
+* **401 Invalid Credentials responses are now retried in single-request** ``get_file()`` **downloads.** The error body was previously not read before validation, so the retry check never saw the "Invalid Credentials" message. Additionally, 401 responses whose message contains lowercase "invalid" (e.g. ``invalid_token``) now raise ``HttpError`` instead of ``ValueError``, so requests that GCSFS retries are retried on them when the message contains "Invalid Credentials". (#1084)
+* **Fixed errors and deadlocks when files are closed from the event loop thread or by the garbage collector.** Previously this could raise ``NotImplementedError`` or deadlock the fsspec I/O event loop. Files closed in those situations are now torn down on a dedicated background worker thread; errors during these deferred closes are logged rather than raised. ``ZonalFile`` read-pool and write-stream teardown now run independently, each bounded by a timeout (default 60 s), so a read-side failure no longer skips write finalization. Files should still be closed explicitly (e.g. ``with fs.open(...)``): a file still open at interpreter shutdown is marked closed without being flushed. (#1009, #1025, #1031, #1040)
+* **Fixed paths for objects whose names start with** ``/``. Listing and ``info()`` results previously dropped the bucket name for such objects (returning ``/name``); they now return ``bucket//name``. (#1044)
+* ``rm()`` **now raises the original error when a whole delete batch fails**, instead of an unrelated ``TypeError``. Aggregation of batch results is also linear instead of quadratic. (#1060)
+* **Lower CPU overhead in recursive** ``find()`` (also used by ``glob()``, ``du()``, and recursive ``rm()``/``get()``/``copy()`` path expansion): directory entries are now built once per unique directory. In an in-memory benchmark that excludes network time, this step was up to 14x faster on deep hierarchies. (#1046)
+* **Opening an existing object for reading no longer calls** ``mimetypes.guess_type()`` when GCS metadata already provides ``contentType``. (#1059)
+* **Rapid (zonal) bucket gRPC reads now report the cache type** in request metadata (``x-goog-api-client``), as HTTP reads already do in the ``User-Agent``. (#1019)
+* **Bumped minimum** ``google-cloud-storage`` **dependency to** ``>=3.14.1``. (#1039, #1050)
+
+**Contributor Tooling: Agent Skills**
+
+The repository now includes AI coding-agent skills under ``_agents/skills/`` (https://github.com/fsspec/gcsfs/tree/main/_agents/skills) for performance work on GCSFS:
+
+* ``create-microbenchmark``: instructions for scaffolding a new microbenchmark for a given method under ``gcsfs/tests/perf/microbenchmarks``. The agent first checks that no benchmark for that method exists yet, and asks for confirmation if a method it calls is already benchmarked. (#1012)
+* ``autoresearch-profiling``: instructions for profile-guided performance optimization. The agent picks a profiler (py-spy, cProfile, or memory_profiler) to find bottlenecks, then runs modify → verify → keep/discard iterations against microbenchmark or subsystem-benchmark metrics. The iteration loop requires the separate ``autoresearch`` skill, which is not included in this repository. (#1071)
+
+2026.8.1
+--------
+
+* Default ``cat_file`` concurrency to 1 (#1051, fixes #1048).
   Restores single-request sequential reads without range headers or extra round-trips
   for small objects (e.g. Zarr, Xarray, Parquet metadata). Callers can still explicitly
   pass ``concurrency=...`` to ``cat_file`` for concurrent fetches of large files.
@@ -29,9 +68,9 @@ GCSFS prefetcher adapts to workload read IO patterns. It tracks the rolling aver
 * **Multi-worker dataloader scaling.** The prefetcher manufactures its own parallelism per worker instead of relying on process count alone.
 * **Accelerate the throughput even further with Rapid Buckets.** With Rapid Buckets single node throughput reaches 21 GiB/s with  16-process sequentially reading at 16 MiB I/O compared to standard buckets with 48processes.
 
-**Adaptive prefetcher is enabled by default** when cache_type is not explicitly set and concurrency value is set at 4(DEFAULT_GCSFS_CONCURRENCY=4) for both Standard and Rapid buckets. You can disable adaptive prefetcher by setting an explicit cache_type, or by setting  USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING='false', or by passing use_experimental_adaptive_prefetching=False to open() call.
+**Adaptive prefetcher (cache_type="adaptive") is enabled by default** when ``cache_type`` is not explicitly set, using ``DEFAULT_GCSFS_CONCURRENCY=4`` for both Standard and Rapid buckets. Users can also explicitly specify ``cache_type="adaptive"`` or choose an alternative caching strategy (e.g., ``cache_type="readahead"``, ``cache_type="readahead_chunked"``, or ``cache_type="none"``).
 
-**(Warning) Impact on memory:** Prefetching trades memory for throughput. Peak memory rises from ~170 MB to 600 MB on single-stream reads for 16 MB IO size and varies with requested IO sizes, and would be materially more under high process counts. Please ensure that   application memory  limits accordingly to use prefetcher without any Out of Memory(OOM) issues. To put hard limit, you can also use [user_max_prefetch_size](https://github.com/fsspec/gcsfs/blob/main/gcsfs/prefetcher.py#L154)
+**(Warning) Impact on memory:** Prefetching trades memory for throughput. Peak memory rises from ~170 MB to 600 MB on single-stream reads for 16 MB IO size and varies with requested IO sizes, and would be materially more under high process counts. Please ensure that   application memory  limits accordingly to use prefetcher without any Out of Memory(OOM) issues. To put a hard limit, you can configure ``cache_options={"max_prefetch_size": <bytes>}``.
 
 For  details on architecture, tuning, full benchmark tables, along with known limitations please refer to : https://github.com/fsspec/gcsfs/blob/main/docs/source/prefetcher.rst
 
