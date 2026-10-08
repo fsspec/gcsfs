@@ -744,6 +744,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
             return await super()._mv(path1, path2, **kwargs)
 
+        rename_submitted = False
         try:
             info1 = await self._info(path1)
             is_folder = info1.get("type") == "directory"
@@ -770,6 +771,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     retry=self._get_retry_config(),
                     timeout=STORAGE_CONTROL_RPC_TIMEOUT,
                 )
+                rename_submitted = True
                 await self._wait_for_folder_rename(
                     operation, path1, path2, request.request_id
                 )
@@ -802,6 +804,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 ) from e
             if isinstance(e, api_exceptions.FailedPrecondition):
                 raise OSError(f"HNS rename failed: {e}") from e
+            if rename_submitted:
+                # The rename may still be running or may already have finished
+                # on the server, so an object-level copy-and-delete could race
+                # with it and cached listings can't be trusted.
+                self.invalidate_cache(path1)
+                self.invalidate_cache(path2)
+                raise
 
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 

@@ -778,11 +778,27 @@ class TestExtendedGcsFileSystemMv:
 
         assert lro.get_operation.await_count == after
 
-    def test_hns_rename_other_operation_error_falls_back(
-        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    @pytest.mark.parametrize("after", [0, 1], ids=["done_at_t0", "done_on_poll"])
+    @pytest.mark.parametrize(
+        "code, expected_exc",
+        [
+            (code_pb2.PERMISSION_DENIED, api_exceptions.PermissionDenied),
+            (code_pb2.INTERNAL, api_exceptions.InternalServerError),
+        ],
+        ids=["permission_denied", "internal"],
+    )
+    def test_hns_rename_other_operation_error_raises_without_fallback(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+        fake_lro,
+        monkeypatch,
+        after,
+        code,
+        expected_exc,
     ):
-        """An operation error without a specific mapping keeps the existing
-        fallback to object-level mv."""
+        """An operation error without a specific mapping is raised as is. The
+        rename was already submitted, so there is no object-level fallback."""
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/src_dir"
         path2 = f"{TEST_HNS_BUCKET}/dst_dir"
@@ -790,14 +806,113 @@ class TestExtendedGcsFileSystemMv:
             "gcsfs.poller.get_default_hns_lro_cadence",
             lambda: PollSchedule(lambda status: 0.0),
         )
-        lro = fake_lro.failed(code_pb2.PERMISSION_DENIED, after=1)
+        lro = fake_lro.failed(code, after=after)
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
             mocks["info"].return_value = {"type": "directory", "name": path1}
             mocks["control_client"].rename_folder.return_value = lro.op
 
+            with pytest.raises(expected_exc):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            mock_mv_file.assert_not_called()
+
+        assert lro.get_operation.await_count == after
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_status_check_error_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """A non-transient GetOperation error while the rename is pending is
+        raised without falling back and without cancelling the rename."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr(
+            "gcsfs.poller.get_default_hns_lro_cadence",
+            lambda: PollSchedule(lambda status: 0.0),
+        )
+        error = api_exceptions.PermissionDenied("no access to operation")
+        lro = fake_lro.sequence([error])
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+
+            with pytest.raises(api_exceptions.PermissionDenied) as exc_info:
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            mock_mv_file.assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        assert exc_info.value is error
+        assert lro.get_operation.await_count == 1
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_dircache_update_error_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro
+    ):
+        """If the dircache update fails after the rename finished, the error
+        is raised and the cached listings are dropped; falling back would try
+        to move a source that is gone."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        lro = fake_lro.succeeded()
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs,
+                "_update_dircache_after_rename",
+                side_effect=RuntimeError("cache update failed"),
+            ),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(RuntimeError, match="cache update failed"):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+    def test_hns_rename_request_error_still_falls_back(self, gcs_hns, gcs_hns_mocks):
+        """An unmapped error from the rename_folder call itself means no
+        rename was started, so the object-level fallback is still used."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.side_effect = (
+                api_exceptions.PermissionDenied("rename not allowed")
+            )
+
             gcsfs.mv(path1, path2)
 
+            mocks["control_client"].rename_folder.assert_called_once()
             mocks["super_mv"].assert_awaited_once_with(path1, path2)
 
     def test_hns_rename_transient_status_check_error_keeps_waiting(
