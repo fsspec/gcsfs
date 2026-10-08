@@ -242,6 +242,7 @@ Contents
    retries
    fuse
    Read Optimization: Prefetching <prefetcher>
+   telemetry
    release
    changelog
    code-of-conduct
