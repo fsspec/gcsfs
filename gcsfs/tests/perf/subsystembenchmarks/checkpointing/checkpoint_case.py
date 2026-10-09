@@ -72,7 +72,7 @@ def run_checkpoint_case(
 
             # Sum up the checkpoint size
             checkpoint_files = {
-                p: info for p, info in all_files.items() if "model.ckpt" in p
+                p: info for p, info in all_files.items() if driver.is_checkpoint_file(p)
             }
             physical_size_bytes = sum(
                 info["size"] for info in checkpoint_files.values()
