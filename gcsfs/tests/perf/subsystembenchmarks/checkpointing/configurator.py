@@ -5,7 +5,13 @@ from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
     OneFactorConfigurator,
 )
 
-_BUCKET = {"regional": "reg", "zonal": "zon", "hns": "hns"}
+_BUCKET = {
+    "regional": "reg",
+    "zonal": "zon",
+    "hns": "hns",
+    "rapid_cache_cold": "rccold",
+    "rapid_cache_warm": "rcwarm",
+}
 _STRATEGY = {
     # pytorch_lightning and ray_pytorch: fsdp_* is FSDP1 (FSDPStrategy),
     # model_parallel_* is FSDP2 + TP (ModelParallelStrategy).

@@ -276,3 +276,80 @@ def test_physical_size_uses_driver_filter(tmp_path, monkeypatch):
     )
 
     assert bench.extra_info["checkpoint_physical_size_bytes"] == 400
+
+
+def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    # Even when GCSFS_SUBSYSTEM_BUCKET_TYPE=rapid_cache_warm is set without GCSFS_SUBSYSTEM_ZONE,
+    # a custom bucket_ctx should not fail BucketSpec.from_env() validation, and warm_if_needed
+    # must receive the fs resolved by fsspec.core.url_to_fs(prefix).
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", "rapid_cache_warm")
+    monkeypatch.delenv("GCSFS_SUBSYSTEM_ZONE", raising=False)
+
+    warm_calls = []
+    orig_warm = rapid_cache.warm_if_needed
+
+    def spy_warm(prefix, bucket_type, *, fs=None):
+        warm_calls.append((prefix, bucket_type, fs))
+        return orig_warm(prefix, bucket_type, fs=fs)
+
+    monkeypatch.setattr(rapid_cache, "warm_if_needed", spy_warm)
+
+    url_to_fs_kwargs = []
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        url_to_fs_kwargs.append(kwargs)
+        if url.startswith("gs://"):
+            mem_url = url.replace("gs://", "memory://")
+            fs, path = original_url_to_fs(mem_url)
+            model_file = os.path.join(path, "model.ckpt")
+            fs.makedirs(os.path.dirname(model_file), exist_ok=True)
+            with fs.open(model_file, "wb") as f:
+                f.write(b"0" * 500)
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+
+    # Read case on rapid_cache_warm must delegate to warm_if_needed (with fs=None),
+    # which calls url_to_fs(skip_instance_cache=True).
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _Monitor(),
+        _params(scenario="checkpoint_read", bucket_type="rapid_cache_warm"),
+        _FakeReadDriver(durations=[1.0]),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert len(warm_calls) == 1
+    assert warm_calls[0][1] == "rapid_cache_warm"
+    assert warm_calls[0][2] is None
+    assert url_to_fs_kwargs[0] == {"skip_instance_cache": True}
+
+    # Read case on rapid_cache_cold must call warm_if_needed (which is a no-op) without pre-run url_to_fs
+    warm_calls.clear()
+    url_to_fs_kwargs.clear()
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _Monitor(),
+        _params(scenario="checkpoint_read", bucket_type="rapid_cache_cold"),
+        _FakeReadDriver(durations=[1.0]),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert len(warm_calls) == 1
+    assert warm_calls[0][1] == "rapid_cache_cold"
+    assert warm_calls[0][2] is None
+    assert len(url_to_fs_kwargs) == 1  # Only the post-run physical size check
+
+    # Write case must not call warm_if_needed
+    warm_calls.clear()
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _Monitor(),
+        _params(scenario="checkpoint_write", bucket_type="rapid_cache_warm"),
+        _FakeWriteDriver(durations=[1.0]),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert warm_calls == []
