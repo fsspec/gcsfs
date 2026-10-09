@@ -353,4 +353,3 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
     assert warm_calls == []
-
