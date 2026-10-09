@@ -431,6 +431,9 @@ def test_allocate_streams_stays_within_budget():
     # 5 objects x 40 ranges, budget 64, cap 16 -> sums to exactly 64.
     a = alloc([40] * 5, 64, 16)
     assert sum(a) == 64 and max(a) <= 16 and min(a) >= 1
+    # Streams follow range counts (D'Hondt), ties to the earlier object.
+    assert alloc([30, 10], 8, 16) == [6, 2]
+    assert alloc([4, 4, 4], 5, 16) == [2, 2, 1]
     # Caps bind: 2 objects cannot use more than 2 x 16 streams.
     assert alloc([100, 100], 64, 16) == [16, 16]
     # Few ranges on an object never get more streams than ranges.
@@ -438,8 +441,12 @@ def test_allocate_streams_stays_within_budget():
     # Skewed counts with the at-least-one floor stay within budget.
     a = alloc([1, 1, 1, 197], 8, 16)
     assert sum(a) == 8 and a[:3] == [1, 1, 1]
-    # More objects than streams -> one each (caller bounds concurrency).
+    # As many or more objects than streams -> one each (caller bounds concurrency).
+    assert alloc([5, 5], 2, 16) == [1, 1]
     assert alloc([3] * 10, 4, 16) == [1] * 10
+    # Many objects under the default budget use the whole budget.
+    a = alloc([2] * 1000, 1280, 16)
+    assert sum(a) == 1280 and max(a) == 2
 
 
 @pytest.mark.asyncio

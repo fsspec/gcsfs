@@ -692,45 +692,27 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     def _allocate_streams(counts, total_streams, per_object_cap):
         """Split a stream budget across objects in proportion to their range counts.
 
-        Each object gets at least one stream and at most
-        ``min(count, per_object_cap)``. When there are at least as many objects
-        as streams, every object gets one stream; callers must then bound how
-        many objects run concurrently to ``total_streams``.
+        Every object gets one stream. The rest of the budget goes out one
+        stream at a time to the object with the most ranges per stream
+        (D'Hondt), up to ``min(count, per_object_cap)`` streams per object.
+        When there are at least as many objects as streams, every object gets
+        one stream; callers must then bound how many objects run concurrently
+        to ``total_streams``.
 
         Returns:
             list[int]: Streams per object, same order as ``counts``. The sum is
             ``<= max(total_streams, len(counts))``.
         """
-        n = sum(counts)
-        if len(counts) >= total_streams:
-            return [1] * len(counts)
-        # Start each object at the whole part of its proportional share,
-        # clamped to [1, cap]. An object never needs more streams than ranges.
         caps = [max(1, min(c, per_object_cap)) for c in counts]
-        shares = [total_streams * c / n for c in counts]
-        alloc = [min(cap, max(1, int(s))) for cap, s in zip(caps, shares)]
-        # Trim if the at-least-one floor pushed us over budget. Since
-        # len(alloc) < total_streams < sum(alloc), max(alloc) is >= 2, so no
-        # object ever drops below 1 stream.
-        while sum(alloc) > total_streams:
-            j = max(range(len(alloc)), key=lambda k: alloc[k])
-            alloc[j] -= 1
-        # Hand out the remainder by largest fractional share, respecting caps.
-        order = sorted(
-            range(len(counts)), key=lambda k: shares[k] - int(shares[k]), reverse=True
-        )
-        left = total_streams - sum(alloc)
-        while left > 0:
-            progressed = False
-            for k in order:
-                if left == 0:
-                    break
-                if alloc[k] < caps[k]:
-                    alloc[k] += 1
-                    left -= 1
-                    progressed = True
-            if not progressed:
-                break
+        alloc = [1] * len(counts)
+        # Max-heap on count / alloc; ties go to the lower index.
+        heap = [(-c, i) for i, c in enumerate(counts) if caps[i] > 1]
+        heapq.heapify(heap)
+        for _ in range(min(total_streams, sum(caps)) - len(counts)):
+            _, j = heapq.heappop(heap)
+            alloc[j] += 1
+            if alloc[j] < caps[j]:
+                heapq.heappush(heap, (-counts[j] / alloc[j], j))
         return alloc
 
     @staticmethod
