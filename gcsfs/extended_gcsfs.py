@@ -828,9 +828,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         cache_type=cache_type,
                         cache_source=cache_source,
                     )
-                    file_size = getattr(pool, "persisted_size", None)
-                    if file_size is None:
-                        file_size = await _get_mrd_size(pool)
+                    # MRDPool.initialize() copies persisted_size from its first MRD.
+                    file_size = pool.persisted_size
                     if file_size is None:
                         logger.warning(
                             f"AsyncMultiRangeDownloader (MRD) for {path} has no "
@@ -914,9 +913,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         MRD pool per object. Each object's ranges are split into byte-balanced
         groups, one per pooled MRD, and every group is sent as one multi-range
         ``download_ranges`` call. ``batch_size`` bounds the total number of
-        concurrent MRD streams across all objects (``-1`` means one per
-        range). Non-zonal paths, and any call with ``max_gap`` set, use the
-        default fsspec implementation.
+        concurrent MRD streams across all objects, subject to the per-object
+        cap (``-1`` means at most one per range; ``None`` or ``0`` select the
+        fsspec default). Non-zonal paths, and any call with ``max_gap`` set,
+        use the default fsspec implementation.
 
         Zonal-only keyword arguments:
             concurrency (int, optional): Maximum MRD streams per object,
@@ -977,7 +977,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if concurrency is not None
             else self.MAX_ZONAL_STREAMS_PER_OBJECT
         )
-        # Same default as fsspec when batch_size is not given.
+        # None or 0 selects the same default as fsspec.
         batch_size = batch_size or self.batch_size or asyn._get_batch_size(True)
         n_zonal = sum(len(idxs) for idxs in zonal.values())
         if batch_size == -1:
@@ -1037,7 +1037,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # cancelled once and awaited, so in-flight streams release their MRDs,
         # each object's pool is closed by its last stream, and (unless this
         # call is cancelled again while waiting) no task outlives this call.
-        tasks = [asyncio.ensure_future(c) for c in coros]
+        tasks = [asyncio.create_task(c) for c in coros]
         try:
             await asyncio.wait(tasks)
         except BaseException:
