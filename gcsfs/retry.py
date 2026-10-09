@@ -191,7 +191,7 @@ async def retry_request(func, retries=6, *args, **kwargs):
             raise e
 
 
-def _is_transient_exception(exception):
+def is_transient_exception(exception):
     is_transient = isinstance(
         exception,
         (
@@ -232,4 +232,4 @@ def get_storage_control_retry_config(base_config=None, **kwargs) -> AsyncRetry:
     overrides = {k: v for k, v in kwargs.items() if k in valid_keys and v is not None}
     retry_kwargs.update(overrides)
 
-    return AsyncRetry(predicate=_is_transient_exception, **retry_kwargs)
+    return AsyncRetry(predicate=is_transient_exception, **retry_kwargs)

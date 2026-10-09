@@ -391,19 +391,17 @@ def test_validate_response_extra():
 def test_is_transient_exception():
     from google.api_core import exceptions as api_exceptions
 
-    from gcsfs.retry import _is_transient_exception
+    from gcsfs.retry import is_transient_exception
 
-    assert _is_transient_exception(api_exceptions.DeadlineExceeded("timeout"))
-    assert _is_transient_exception(api_exceptions.ServiceUnavailable("unavailable"))
-    assert _is_transient_exception(api_exceptions.InternalServerError("internal"))
-    assert _is_transient_exception(api_exceptions.TooManyRequests("too many"))
-    assert _is_transient_exception(api_exceptions.ResourceExhausted("exhausted"))
-    assert _is_transient_exception(api_exceptions.Unknown("unknown"))
-    assert _is_transient_exception(
-        api_exceptions.Unauthenticated("Invalid Credentials")
-    )
-    assert not _is_transient_exception(api_exceptions.Unauthenticated("Other Auth"))
-    assert not _is_transient_exception(api_exceptions.NotFound("not found"))
+    assert is_transient_exception(api_exceptions.DeadlineExceeded("timeout"))
+    assert is_transient_exception(api_exceptions.ServiceUnavailable("unavailable"))
+    assert is_transient_exception(api_exceptions.InternalServerError("internal"))
+    assert is_transient_exception(api_exceptions.TooManyRequests("too many"))
+    assert is_transient_exception(api_exceptions.ResourceExhausted("exhausted"))
+    assert is_transient_exception(api_exceptions.Unknown("unknown"))
+    assert is_transient_exception(api_exceptions.Unauthenticated("Invalid Credentials"))
+    assert not is_transient_exception(api_exceptions.Unauthenticated("Other Auth"))
+    assert not is_transient_exception(api_exceptions.NotFound("not found"))
 
 
 @pytest.mark.asyncio
