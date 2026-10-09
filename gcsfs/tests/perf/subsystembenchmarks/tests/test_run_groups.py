@@ -126,3 +126,62 @@ def test_ray_checkpointing_group_is_discoverable():
 def test_pytorch_checkpointing_group_is_discoverable():
     """Verifies checkpointing/pytorch is discovered from its requirements.txt."""
     assert "checkpointing/pytorch" in run.discover_groups()
+
+
+@pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
+def test_parse_args_requires_zone_for_rapid_cache_bucket_types(capsys, bucket_type):
+    with pytest.raises(SystemExit):
+        run.parse_args(
+            [
+                "--group=dataloading/webdataset",
+                f"--bucket-type={bucket_type}",
+            ]
+            + _REQUIRED
+        )
+    assert "--zone is required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
+def test_parse_args_accepts_rapid_cache_with_zone(monkeypatch, bucket_type):
+    for key in ("GCSFS_SUBSYSTEM_BUCKET_TYPE", "GCSFS_SUBSYSTEM_ZONE"):
+        monkeypatch.delenv(key, raising=False)
+    args = run.parse_args(
+        [
+            "--group=dataloading/webdataset",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    run._setup_environment(args)
+    assert os.environ["GCSFS_SUBSYSTEM_BUCKET_TYPE"] == bucket_type
+    assert os.environ["GCSFS_SUBSYSTEM_ZONE"] == "us-central1-a"
+
+
+def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
+    )
+    cb_path = os.path.join(
+        repo_root,
+        "cloudbuild",
+        "subsystembenchmarks",
+        "subsystembenchmarks-cloudbuild.yaml",
+    )
+    with open(cb_path) as f:
+        cb_yaml = f.read()
+
+    assert cb_yaml.count("/anywhereCaches/") >= 2
+    assert cb_yaml.index("TOKEN=$$(gcloud auth print-access-token") < cb_yaml.index(
+        "gcloud storage buckets list"
+    )
+    assert 'gcloud storage rm --recursive "gs://$$CLEAN_NAME" < /dev/null' in cb_yaml
+    assert (
+        'gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null'
+        in cb_yaml
+    )
+    assert "HAS_CACHE=" in cb_yaml
+    assert (
+        "^${_INFRA_PREFIX}-(regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
+        in cb_yaml
+    )

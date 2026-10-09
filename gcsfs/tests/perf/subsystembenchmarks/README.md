@@ -1,295 +1,195 @@
 # GCSFS Subsystem Benchmarks
 
-## Introduction
+Subsystem benchmarks time one storage-heavy part of a training job, such as
+data loading or checkpointing, through a real framework on top of `gcsfs`. They
+sit between the per-operation [microbenchmarks](../microbenchmarks/README.md)
+and the end-to-end [macrobenchmarks](../macrobenchmarks/README.md).
 
-GCSFS subsystem benchmarks isolate training-relevant storage paths that are too
-large for an operation-level
-[microbenchmark](../microbenchmarks/README.md), but more focused than an
-end-to-end [macrobenchmark](../macrobenchmarks/README.md). They preserve the
-framework behavior around `gcsfs` while separating one subsystem from the rest
-of a training workload.
+The usual way to run them is Cloud Build; see the
+[automation guide](../../../../cloudbuild/subsystembenchmarks/README.md).
 
-The currently runnable groups are:
+## Groups
 
-- `dataloading/huggingface_datasets`: Measures full-corpus streaming reads of a synthetic dataset through Hugging Face Datasets, `fsspec`, and `gcsfs`, with a PyTorch `DataLoader` consuming the stream.
-- `dataloading/ray_data`: Measures full-corpus streaming reads of a synthetic Parquet dataset through Ray Data, `pyarrow.fs`, `fsspec`, and `gcsfs` on CPU.
-- `dataloading/webdataset`: Measures full-corpus streaming reads of synthetic image tar shards through WebDataset and a PyTorch `DataLoader`; `gs://` reads are routed to `gcsfs` by a registered opener. The default sweep keeps storage-bound axes; image-preparation and pipeline axes are parked with `enabled: false`.
-- `checkpointing/pytorch_lightning`: Measures checkpoint write and read performance using PyTorch Lightning and various training strategies (DDP, FSDP, Model Parallel) on CPU-simulated environments.
-- `checkpointing/pytorch`: Measures `torch.distributed.checkpoint.load` from GCS via `FsspecReader` and `gcsfs` across PyTorch parallelism strategies (FSDP2, HSDP, TP, FSDP+TP, HSDP+TP, PP, PP+FSDP, PP+FSDP+TP, PP+HSDP+TP) with identical save and load topology on CPU gloo, using Llama-3.1-8B built from config on meta.
+A group is a `<subsystem>/<implementation>` directory with its own
+`requirements.txt`. `run.py` treats every such directory as a runnable group.
 
-> **This README describes the workload: what it runs, what is timed, and how to
-> debug it directly.** The normal way to provision the benchmark VM, run the
-> suite, upload results, and ingest them into BigQuery is documented in the
-> [Cloud Build automation guide](../../../../cloudbuild/subsystembenchmarks/README.md).
+| Group | Framework path | What is timed |
+| :-- | :-- | :-- |
+| `dataloading/huggingface_datasets` | Hugging Face Datasets (streaming) → PyTorch `DataLoader` | Full reads of a synthetic Parquet or JSONL corpus |
+| `dataloading/ray_data` | Ray Data `read_parquet` → `iter_torch_batches` | Full reads of a synthetic Parquet corpus |
+| `dataloading/webdataset` | WebDataset → PyTorch `DataLoader`; `gs://` opened by a `gcsfs` opener | Reads of synthetic image tar shards |
+| `checkpointing/pytorch` | PyTorch `torch.distributed.checkpoint` (`FsspecReader`) | Sharded DCP checkpoint read of Llama-3.1-8B with AdamW state across FSDP2/HSDP/TP/PP layouts |
+| `checkpointing/pytorch_lightning` | PyTorch Lightning | Checkpoint write and read of Llama-3.1-8B with AdamW state |
+| `checkpointing/ray_pytorch` | Ray actors with PyTorch `torch.save` / DCP | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 
-## Workload architecture
+Data-loading groups detect CUDA automatically. On a GPU host, each round
+includes copying batches to the GPU. The exception is WebDataset with
+`decode: false`, where there is nothing to copy. Checkpointing groups always
+run on CPU (`gloo`).
 
-Groups follow a `<subsystem>/<implementation>` layout. A group owns its pinned
-requirements and configuration, while the package-level harness owns case
-lifecycle, reporting, resource monitoring, and command-line execution. A new
-implementation can therefore be added as another independently installable
-group without changing an existing group's dependency set.
+## How a case runs
 
-For `dataloading/huggingface_datasets`, the execution chain is:
+Every case creates its own GCS bucket and tries to delete it when the case
+ends.
 
-1. `run.py` validates the selected group, exports run-level bucket settings, and
-   starts the group's pytest-benchmark cases.
-2. The Hugging Face configurator expands `configs.yaml` into an implicit
-   baseline plus one-factor variants.
-3. `read_case.py` manages the common data-loading lifecycle and delegates the
-   actual streaming read to the Hugging Face driver.
-4. The driver builds a streaming Hugging Face dataset backed by `gcsfs`, wraps
-   it in a PyTorch `DataLoader`, and optionally splits it across local ranks.
-5. The common report code converts pytest-benchmark JSON into a flat CSV and
-   the runner enriches eligible rows with Cloud Monitoring read metrics.
+**Data loading**
 
-## Per-case lifecycle
+1. Generate and upload a synthetic corpus. This is not timed.
+2. Build the dataset. Build time is reported separately.
+3. Read the whole corpus once per round. With several ranks, a round lasts
+   from the earliest rank start to the latest rank finish.
+4. Fail the case if any round's sample count differs from the corpus's.
 
-Each benchmark case is self-contained:
+**Checkpointing**
 
-1. Create an isolated GCS bucket using the run's bucket profile.
-2. Generate and upload a deterministic synthetic Parquet or JSONL corpus.
-3. Build the streaming dataset and `DataLoader`.
-4. Iterate the complete corpus for each measured round, optionally across
-   multiple local ranks.
-5. Verify that every round yielded the manifest's expected sample count. A
-   partial read fails the case instead of reporting inflated throughput.
-6. Publish workload, timing, resource, environment, and dependency provenance
-   fields into the benchmark result.
-7. Delete the case bucket. Cloud Build also sweeps leaked buckets after the run
-   as a safety net.
-8. After all cases finish, query Cloud Monitoring for each isolated bucket's
-   read bytes and request count, then add read-amplification fields to the CSV.
+- `checkpoint_write` times saving a checkpoint to GCS.
+  - `pytorch_lightning` times `trainer.save_checkpoint()`.
+  - `ray_pytorch` times only the upload from local staging to GCS.
+- `checkpoint_read` first writes a checkpoint (not timed), then times reading
+  it.
+  - `pytorch` times `torch.distributed.checkpoint.load()` via `FsspecReader`.
+  - `pytorch_lightning` times `trainer.strategy.load_checkpoint()`.
+  - `ray_pytorch` times the download plus loading the state into the model.
 
-The isolated bucket is important: GCS read metrics are bucket-scoped and sampled
-on a 60-second grid. A bucket per case keeps the server-side observations
-attributable to one configuration even when measurement windows overlap after
-grid alignment.
+**Read amplification**
 
-## Measurement boundaries
+After all cases finish, the runner asks Cloud Monitoring how many bytes GCS
+served (`ReadObject`/`BidiReadObject`) from each case bucket.
 
-Synthetic corpus generation and upload are setup work and are not part of the
-timed read window. Dataset construction is also outside the full-corpus rounds,
-but its duration is reported separately.
+- It divides that by the stored corpus or checkpoint size × rounds.
+- It is intended for data-loading and `checkpoint_read` cases.
+- For `pytorch_lightning` reads with `ddp`, `fsdp_full`, or
+  `model_parallel_full`, every rank reads the whole checkpoint. The ratio does
+  not account for this.
 
-One round means one complete iteration over the generated corpus. For a
-distributed case, its duration spans from the earliest rank start to the latest
-rank finish, so launch skew and the slowest rank are included. Time to first
-batch uses the same global boundary: it ends when the last rank has produced its
-first batch.
-
-The benchmark reports logical throughput from the stored corpus size and round
-duration. Read amplification is a different, server-observed measurement:
-Cloud Monitoring bytes sent by GCS are divided by the logical dataset bytes
-expected across all measured rounds. Values above 1 indicate that GCS served
-more bytes than the logical full-corpus reads required.
-
-### CPU and GPU hosts
-
-Data-loading benchmarks auto-detect CUDA (published as
-`compute_accelerator_type`); no configuration change is needed. On a CPU host,
-batches end in host memory exactly as before. On a GPU host, every loader
-delivers each rank's batches to a GPU the way training jobs do, via
-`dataloading/device.py`: batches are pinned in host memory, copied with
-`non_blocking=True`, and each round synchronizes once at its end so the round
-duration includes the host-to-device transfer. CUDA tensors are never created
-in loader worker processes, as PyTorch recommends.
-
-| Loader | GPU per rank | What is transferred |
-|---|---|---|
-| Hugging Face Datasets | `rank % device_count` | Token and label tensors; text strings stay on the host. |
-| WebDataset | `rank % device_count` when `decode: true`; none with the baseline `decode: false` | Decoded image tensors when `decode: true`. With `decode: false` samples are raw bytes with nothing to copy, so the rank neither binds a GPU nor pins, and runs as on a CPU host. |
-| Ray Data | Ray assigns `num_gpus = min(1, gpus / world_size)` per consumer task (fractional when ranks outnumber GPUs) | `pretok_parquet` via Ray's native `iter_torch_batches(device=..., pin_memory=True)`; `text_parquet` labels are copied by the shared feed. |
-
-When ranks outnumber GPUs, ranks share GPUs.
-
-Each rank creates its CUDA context before timing starts, as a training job
-already has by the time its data loop runs. The exception is Ray Data with
-`split_by_node`: consumer tasks are dispatched inside the round, so creating
-the context is charged to the round in which a Ray worker first runs
-(normally round 1, since Ray reuses workers).
+The monitoring window covers the driver run: all rounds plus dataset build or
+model setup. It excludes the corpus upload and the untimed setup checkpoint.
+It is widened to Cloud Monitoring's 60-second grid.
 
 ## Configuration
 
-The group's
-[`configs.yaml`](dataloading/huggingface_datasets/configs.yaml) is the source of
-truth for current workload values and experiments. It defines:
+Each group's `configs.yaml` defines:
 
-- shared values applied to every case;
-- an implicit baseline configuration; and
-- variants that change one named configuration axis at a time.
+- `common`: shared settings plus a `baseline` configuration.
+- `scenarios`: a list of entries, each with a `name`, a `scenario`, and
+  `variants`. Each entry runs its own baseline plus its variants. Each variant
+  names an `axis` and overrides one or more baseline values.
 
-A variant can set `enabled: false` to park it without deleting it. Parked
-variants are still built, validated, and checked for duplicate benchmark IDs,
-so they cannot break unnoticed, but benchmark runs skip them. The value must be
-a YAML boolean; a string such as `"false"` is rejected. To run a parked variant
-again, set `enabled: true` (or remove the key) in `configs.yaml`.
+Rules:
 
-`--sweep-axes` accepts a whitespace-separated set of axis names. The baseline
-case is always included, which keeps each selected variant comparable within the
-same run. Leaving the option empty runs every enabled case defined in the YAML.
-`--sweep-axes` only selects among enabled variants; it cannot bring back a
-parked one.
+- `enabled: false` parks a variant. It is still validated but not run. The
+  value must be a YAML boolean.
+- `--sweep-axes="a b"` runs the baseline plus the named axes. An axis name
+  that is unknown, or whose variants are all parked, is an error.
+- Without `--sweep-axes`, every enabled case runs.
 
-Here, "baseline" means only the reference configuration in a one-factor run.
-The suite does not retrieve historical results, compare against an earlier run,
-or fail on a performance regression.
+"Baseline" only means the reference case within one run. The suite does not
+compare against earlier runs.
 
-## Metrics and output
-
-Each case produces one flat result row. The main metric families are:
-
-| Family                       | Meaning                                                                                                                                          |
-| :--------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Logical read performance     | Mean stored bytes and samples consumed per second across full-corpus rounds.                                                                     |
-| Latency and duration         | Dataset initialization time, time to first batch, and full-corpus duration statistics.                                                           |
-| Resource use                 | Peak process-tree CPU and resident memory, plus mean host network receive and send rates.                                                        |
-| Configuration and provenance | Case identity, selected sweep axis, dataset shape, rank/worker settings, machine environment, source revision, and resolved Python requirements. |
-| GCS read behavior            | Server-observed read bytes, read requests, and logical-to-physical read amplification.                                                           |
-
-The authoritative CSV and BigQuery column inventory is
-[`subsystembenchmarks_schema.json`](../../../../cloudbuild/subsystembenchmarks/subsystembenchmarks_schema.json).
-Keeping the schema in one place avoids duplicating a field list while the suite
-is evolving.
-
-Direct runs write timestamped artifacts under:
+## Output
 
 ```text
 gcsfs/tests/perf/subsystembenchmarks/__run__/<YYYYMMDD-HHMMSS>/
-├── results.json
-└── results.csv
+├── results.json   # pytest-benchmark output
+└── results.csv    # one row per case
 ```
 
-The runner also prints the generated CSV as a Markdown table when the run
-finishes.
+The runner also prints the CSV as a table if `prettytable` is installed. For
+column definitions, see
+[`subsystembenchmarks_schema.json`](../../../../cloudbuild/subsystembenchmarks/subsystembenchmarks_schema.json).
 
-## Running through Cloud Build
+## Running directly (debugging)
 
-Cloud Build is the supported operational path. It provides the high-bandwidth
-VM, installs the group requirements and the selected `gcsfs` build, uploads
-available artifacts when possible after a case failure, enforces
-read-amplification collection, and cleans up infrastructure.
+> [!WARNING]
+> A direct run creates, uses, and deletes real GCS buckets in your project,
+> which costs money. After an interrupted run, check the project for leftover
+> buckets.
 
-See the [automation guide](../../../../cloudbuild/subsystembenchmarks/README.md)
-for cost, prerequisites, substitutions, trigger setup, result storage, and
-BigQuery ingestion.
-
-## Running directly for debugging
-
-> **A direct run uses real, billable GCP resources.** It creates and deletes one
-> bucket per case, uploads a synthetic corpus, reads it for every configured
-> round, and may wait for Cloud Monitoring ingestion. Use a unique lowercase
-> bucket prefix and inspect the project for leaked buckets after interrupted
-> runs.
-
-From the repository root, install the package and the current group's pinned
-dependencies:
+From the repository root:
 
 ```bash
 python -m pip install -e .
-python -m pip install -r \
-  gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt
-```
+python -m pip install -r gcsfs/tests/perf/subsystembenchmarks/<GROUP>/requirements.txt
 
-Authenticate with Application Default Credentials that can create and delete
-the case buckets. Monitoring read permission is also needed for amplification
-enrichment. Then run:
-
-For dataloading:
-
-```bash
 python -m gcsfs.tests.perf.subsystembenchmarks.run \
-  --group=dataloading/huggingface_datasets \
-  --bucket-prefix=<UNIQUE_LOWERCASE_PREFIX> \
+  --group=<GROUP> \
+  --bucket-prefix=<unique-lowercase-prefix> \
   --project=<PROJECT_ID> \
-  --location=us-central1 \
-  --bucket-type=regional
+  --location=us-central1
 ```
 
-For checkpointing:
+You need Application Default Credentials that can create and delete buckets.
+Read-amplification enrichment also needs Cloud Monitoring read access.
 
-```bash
-python -m gcsfs.tests.perf.subsystembenchmarks.run \
-  --group=checkpointing/pytorch_lightning \
-  --bucket-prefix=<UNIQUE_LOWERCASE_PREFIX> \
-  --project=<PROJECT_ID> \
-  --location=us-central1 \
-  --bucket-type=zonal \
-  --zone=us-central1-b
-```
+For checkpointing groups:
 
-Or for native PyTorch DCP checkpointing:
+- The default model is `gs://huggingface-model-weights/Llama-3.1-8B` (or
+  `gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B` for
+  `checkpointing/pytorch`).
+- A `gs://.../<name>` model is loaded from `/tmp/<name>`, so copy it there
+  first:
 
-```bash
-python -m gcsfs.tests.perf.subsystembenchmarks.run \
-  --group=checkpointing/pytorch \
-  --bucket-prefix=<UNIQUE_LOWERCASE_PREFIX> \
-  --project=<PROJECT_ID> \
-  --location=us-central1 \
-  --bucket-type=regional
-```
+  ```bash
+  gcloud storage cp -r gs://huggingface-model-weights/Llama-3.1-8B /tmp/
+  ```
 
-Useful optional arguments:
+- `--model-id` also accepts a Hugging Face repo ID or a local path.
+- These groups need a very large-memory host. A code comment in
+  `checkpointing/checkpoint_case.py` targets a 732 GB VM.
 
-- `--sweep-axes="<AXIS> <AXIS>"` limits the run to the named axes plus the
-  baseline.
-- `--bucket-type=zonal --zone=<ZONE>` creates zonal RAPID/HNS case buckets; the
-  zone is required for this profile.
-- `--bucket-type=hns` creates regional hierarchical-namespace case buckets.
-- `--require-amplification` fails the run if eligible rows still lack GCS read
-  metrics after the configured wait and retry.
+| Flag | Default | Meaning |
+| :-- | :-- | :-- |
+| `--group` | required | One group from the table above. |
+| `--bucket-prefix` | required | Name prefix for the per-case buckets. |
+| `--project` | required | GCP project for buckets and metrics. |
+| `--location` | required | Bucket region. |
+| `--bucket-type` | `regional` | `regional`, `zonal` (needs `--zone`), or `hns`. |
+| `--zone` | none | Zone for `zonal` buckets. |
+| `--sweep-axes` | all | Axes to run, in addition to the baseline. |
+| `--filter` | none | pytest `-k` expression. |
+| `--model-id` | from config | Checkpointing model override. |
+| `--amplification-wait` | `300` | Seconds to wait before querying Cloud Monitoring. |
+| `--amplification-retry-wait` | `60` | Seconds to wait before one retry of missing metrics. |
+| `--require-amplification` | off | Fail if eligible rows still lack amplification metrics. |
 
-## Contributor checks
+## Infrastructure tests
 
-Run all subsystem benchmark infrastructure tests without executing the live GCS
-benchmark case:
+These are unit tests only; they do not run the live GCS cases:
 
 ```bash
 pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
 ```
 
-## Repository layout
+## Layout
 
 ```text
 subsystembenchmarks/
-├── README.md
-├── run.py                         # CLI, group discovery, report enrichment.
-├── conftest.py                    # Benchmark hooks and resource fixture.
-├── _common/                       # Config loading, reporting, provenance, metrics.
+├── run.py              # CLI, group discovery, amplification, table output
+├── conftest.py
+├── _common/            # pytest invocation, config loading, CSV report, metadata
 ├── dataloading/
-│   ├── amplification.py           # Cloud Monitoring read-metric enrichment.
-│   ├── bucket.py                  # Per-case GCS bucket lifecycle.
-│   ├── datagen.py                 # Synthetic Parquet/JSONL corpus generation.
-│   ├── driver.py                  # Read-driver contract and rank reduction.
-│   ├── read_case.py               # Shared timed case lifecycle.
-│   └── huggingface_datasets/
-│       ├── configs.yaml           # Current baseline and one-factor variants.
-│       ├── configs.py
-│       ├── parameters.py
-│       ├── requirements.txt
-│       └── read/                  # Hugging Face streaming read driver and case.
+│   ├── read_case.py    # shared data-loading case lifecycle
+│   ├── driver.py       # read-driver interface, rank reduction
+│   ├── configurator.py # config loading for read groups
+│   ├── bucket.py       # per-case bucket (also used by checkpointing)
+│   ├── amplification.py
+│   ├── datagen.py      # synthetic Parquet/JSONL corpus
+│   ├── device.py       # GPU batch delivery
+│   ├── huggingface_datasets/
+│   ├── ray_data/
+│   └── webdataset/     # also gcsfs_opener.py, imagegen.py
 ├── checkpointing/
-│   ├── checkpoint_case.py         # Shared timed checkpoint write case lifecycle.
-│   ├── configurator.py            # Checkpointing config loader.
-│   ├── pytorch/
-│   │   ├── configs.yaml           # Current baseline and strategy variants.
-│   │   ├── configs.py
-│   │   ├── parameters.py
-│   │   ├── model.py               # Meta-init model, seeded init, AdamW state.
-│   │   ├── parallelize.py         # Device mesh, FSDP2/TP/PP layouts.
-│   │   ├── state.py               # FQN state dict, checksums, expected bytes.
-│   │   ├── requirements.txt
-│   │   ├── read/
-│   │   │   ├── driver.py          # PyTorch DCP read driver.
-│   │   │   └── test_checkpoint.py # PyTorch DCP checkpoint read benchmark case.
-│   │   └── tests/
-│   └── pytorch_lightning/
-│       ├── configs.yaml           # Current baseline and strategy variants.
-│       ├── configs.py
-│       ├── parameters.py
-│       ├── requirements.txt
-│       └── write/
-│           ├── driver.py          # PyTorch Lightning write driver (processes launcher).
-│           └── test_checkpoint.py # PyTorch Lightning checkpoint write benchmark case.
-└── tests/                         # Package-level infrastructure tests.
+│   ├── checkpoint_case.py  # shared write/read case lifecycle
+│   ├── driver.py           # checkpoint-driver interface
+│   ├── configurator.py     # config loading for checkpoint groups
+│   ├── _dist.py            # shared gloo spawn and round reduction
+│   ├── _llama_tp.py        # shared LLaMA tensor-parallel plan
+│   ├── pytorch/            # also model.py, parallelize.py, state.py
+│   ├── pytorch_lightning/  # also common.py
+│   └── ray_pytorch/        # also common.py
+└── tests/
 ```
+
+Each group directory has `configs.yaml`, `configs.py`, `parameters.py`,
+`requirements.txt`, and `read/` and/or `write/` directories containing the
+driver and the benchmark test.

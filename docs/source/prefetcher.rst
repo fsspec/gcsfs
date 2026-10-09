@@ -76,6 +76,18 @@ To use a different cache or disable prefetching, explicitly specify a ``cache_ty
 
     gcs.open("bucket/file.txt", "rb", cache_type="readahead")
 
+Limiting Prefetch Memory
+------------------------
+
+With the ``adaptive`` cache type, ``max_prefetch_size`` sets an upper bound on how many bytes are fetched ahead of the current read position. The GCSFS default is 256 MiB per open file. It is a limit, not a target: the prefetcher sizes its read-ahead window from recent read sizes and can stay well below the limit. It does not limit the size of an individual ``read()`` call.
+
+Lowering ``max_prefetch_size`` lowers the cap on read-ahead data held by each open file, which adds up when many files are read at once, for example across many worker processes. It can be set through ``cache_options`` or passed directly to ``open()``. If both are given, the ``cache_options`` value is used:
+
+.. code-block:: python
+
+    gcs.open("bucket/file.bin", "rb", cache_options={"max_prefetch_size": 64 * 1024 * 1024})
+    gcs.open("bucket/file.bin", "rb", max_prefetch_size=64 * 1024 * 1024)
+
 Under the Hood Lifecycle
 ------------------------
 
