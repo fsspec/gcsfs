@@ -13,7 +13,7 @@ a real forward/backward pass, and AdamW state builds up from real
 ``.step()`` calls. Everything else is shared between both modes.
 
 Single-node launch (smoke test):
-    torchrun --nproc_per_node=4 --nnodes=1 llama_3_1_8b_cpu_sim.py
+    torchrun --nproc_per_node=4 --nnodes=1 train_pytorch_lightning.py
 
 Multi-node launch (the production emulator: 2 c4-standard-192 VMs, each
 running 4 processes that stand in for GPU chips -- capped at 4/node, down from
@@ -22,7 +22,7 @@ running 4 processes that stand in for GPU chips -- capped at 4/node, down from
 on each pod it ultimately runs:
     torchrun --nproc_per_node=4 --nnodes=$NNODES --node_rank=$NODE_RANK \\
              --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \\
-             llama_3_1_8b_cpu_sim.py
+             train_pytorch_lightning.py
 
 Required env vars: ``DATASET_PATH``, ``RUN_ID`` (always); ``HF_TOKEN`` only
 when ``MODEL_ID`` points at the HuggingFace gated repo (i.e. not gs://).

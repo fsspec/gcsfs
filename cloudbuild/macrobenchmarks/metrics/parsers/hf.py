@@ -1,7 +1,7 @@
 """HF Llama benchmark log parser.
 
 The 10 regex constants below match the log lines emitted by
-``llama_3_1_8b_cpu_sim.py``. parse_entries matches/pairs them over an
+``train_pytorch_lightning.py``. parse_entries matches/pairs them over an
 injectable iterable of LogEntry, so it is unit-testable without a Cloud
 Logging client.
 """
