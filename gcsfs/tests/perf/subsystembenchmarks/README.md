@@ -18,6 +18,7 @@ A group is a `<subsystem>/<implementation>` directory with its own
 | `dataloading/huggingface_datasets` | Hugging Face Datasets (streaming) → PyTorch `DataLoader` | Full reads of a synthetic Parquet or JSONL corpus |
 | `dataloading/ray_data` | Ray Data `read_parquet` → `iter_torch_batches` | Full reads of a synthetic Parquet corpus |
 | `dataloading/webdataset` | WebDataset → PyTorch `DataLoader`; `gs://` opened by a `gcsfs` opener | Reads of synthetic image tar shards |
+| `checkpointing/pytorch` | PyTorch `torch.distributed.checkpoint` (`FsspecReader`) | Sharded DCP checkpoint read of Llama-3.1-8B with AdamW state across FSDP2/HSDP/TP/PP layouts |
 | `checkpointing/pytorch_lightning` | PyTorch Lightning | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 | `checkpointing/ray_pytorch` | Ray actors with PyTorch `torch.save` / DCP | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 
@@ -46,6 +47,7 @@ ends.
   - `ray_pytorch` times only the upload from local staging to GCS.
 - `checkpoint_read` first writes a checkpoint (not timed), then times reading
   it.
+  - `pytorch` times `torch.distributed.checkpoint.load()` via `FsspecReader`.
   - `pytorch_lightning` times `trainer.strategy.load_checkpoint()`.
   - `ray_pytorch` times the download plus loading the state into the model.
 
@@ -121,7 +123,9 @@ Read-amplification enrichment also needs Cloud Monitoring read access.
 
 For checkpointing groups:
 
-- The default model is `gs://huggingface-model-weights/Llama-3.1-8B`.
+- The default model is `gs://huggingface-model-weights/Llama-3.1-8B` (or
+  `gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B` for
+  `checkpointing/pytorch`).
 - A `gs://.../<name>` model is loaded from `/tmp/<name>`, so copy it there
   first:
 
@@ -178,6 +182,9 @@ subsystembenchmarks/
 │   ├── checkpoint_case.py  # shared write/read case lifecycle
 │   ├── driver.py           # checkpoint-driver interface
 │   ├── configurator.py     # config loading for checkpoint groups
+│   ├── _dist.py            # shared gloo spawn and round reduction
+│   ├── _llama_tp.py        # shared LLaMA tensor-parallel plan
+│   ├── pytorch/            # also model.py, parallelize.py, state.py
 │   ├── pytorch_lightning/  # also common.py
 │   └── ray_pytorch/        # also common.py
 └── tests/
