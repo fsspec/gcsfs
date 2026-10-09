@@ -25,3 +25,7 @@ class CheckpointDriver(Protocol):
     def read_count(self, params) -> int:
         """Returns how many times the checkpoint is transferred from storage across ranks."""
         return 1
+
+    def is_checkpoint_file(self, path: str) -> bool:
+        """Returns True if the file path is part of the physical checkpoint."""
+        return "model.ckpt" in path

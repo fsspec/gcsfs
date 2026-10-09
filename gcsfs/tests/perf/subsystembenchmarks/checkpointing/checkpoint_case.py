@@ -21,9 +21,10 @@ def run_checkpoint_case(
         case_bucket,
     )
 
+    spec = BucketSpec.from_env() if bucket_ctx is None else None
     bucket_ctx = bucket_ctx or case_bucket
 
-    with bucket_ctx(BucketSpec.from_env(), params.name) as bucket:
+    with bucket_ctx(spec, params.name) as bucket:
         # bucket_ctx may yield a raw name or a full URI depending on the branch/version.
         # Extract just the bucket name so we can safely construct our own prefix.
         bucket_name = (
@@ -50,6 +51,11 @@ def run_checkpoint_case(
         if p.exitcode != 0:
             raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
 
+        if "read" in params.scenario:
+            from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
+            rapid_cache.warm_if_needed(prefix, params.bucket_type)
+
         window_start = time.time()
         with monitor() as m:
             result = driver.run(prefix, params)
@@ -66,7 +72,7 @@ def run_checkpoint_case(
 
             # Sum up the checkpoint size
             checkpoint_files = {
-                p: info for p, info in all_files.items() if "model.ckpt" in p
+                p: info for p, info in all_files.items() if driver.is_checkpoint_file(p)
             }
             physical_size_bytes = sum(
                 info["size"] for info in checkpoint_files.values()

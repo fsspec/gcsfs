@@ -7,15 +7,17 @@ import time
 import ray
 import torch.distributed as dist
 
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    find_free_port,
+    setup_distributed_env,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common import (
     ensure_ray_initialized,
-    find_free_port,
     resolve_storage,
-    setup_distributed_env,
     setup_model_and_optimizer,
     stage_checkpoint_locally,
     upload_checkpoint,
