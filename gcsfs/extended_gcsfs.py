@@ -1031,25 +1031,24 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             for i in other:
                 coros.append(_cat_other(i))
 
-        # Every coroutine runs as a task of this call. Shielding gather_fut
-        # prevents an external cancel from cancelling tasks a first time inside
-        # gather (which with return_exceptions=False resolves on the first
-        # cancelled child) and a second time in the except block while sibling
-        # tasks are awaiting pool.close() in their finally blocks.
+        # Every coroutine runs as a task of this call. Unlike gather,
+        # asyncio.wait leaves the tasks alone when this call is cancelled, so
+        # the except block is the only place that cancels them: each task is
+        # cancelled once and awaited, so in-flight streams release their MRDs,
+        # each object's pool is closed by its last stream, and (unless this
+        # call is cancelled again while waiting) no task outlives this call.
         tasks = [asyncio.ensure_future(c) for c in coros]
-        gather_fut = asyncio.gather(*tasks)
         try:
-            await asyncio.shield(gather_fut)
+            await asyncio.wait(tasks)
         except BaseException:
-            if not gather_fut.done():
-                gather_fut.cancel()
-            else:
-                if not gather_fut.cancelled():
-                    gather_fut.exception()
-                for t in tasks:
-                    t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            for t in tasks:
+                t.cancel()
+            await asyncio.wait(tasks)
             raise
+        # The tasks store ordinary errors in `results`, so this only re-raises
+        # a cancellation or an error from closing a pool.
+        for t in tasks:
+            t.result()
 
         # Like fsspec, raise the first error in input order.
         if on_error != "return":

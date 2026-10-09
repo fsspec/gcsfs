@@ -18,6 +18,7 @@ from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import (
     BucketType,
     ExtendedGcsFileSystem,
+    _close_pool,
     initiate_upload,
     simple_upload,
     upload_chunk,
@@ -681,9 +682,27 @@ async def _cancel_once(started, coro):
     return asyncio.all_tasks() - before - {task}
 
 
+@pytest.fixture
+def close_pool_cancels():
+    """Count the cancellations that reach a stream while it is closing its
+    pool, i.e. any cancel after the one that stopped the stream. A regression
+    to supervising the streams with a plain ``asyncio.gather`` shows up here."""
+    counts = {"n": 0}
+
+    async def counting_close_pool(pool):
+        try:
+            return await _close_pool(pool)
+        except asyncio.CancelledError:
+            counts["n"] += 1
+            raise
+
+    with mock.patch("gcsfs.extended_gcsfs._close_pool", counting_close_pool):
+        yield counts
+
+
 @pytest.mark.asyncio
 async def test_cat_ranges_zonal_cancel_closes_pool_and_tasks(
-    extended_gcsfs, gcs_bucket_mocks
+    extended_gcsfs, gcs_bucket_mocks, close_pool_cancels
 ):
     started = asyncio.Event()
     calls = {"downloads": 0, "cancelled": 0, "close_completed": 0}
@@ -699,8 +718,8 @@ async def test_cat_ranges_zonal_cancel_closes_pool_and_tasks(
             raise
 
     async def slow_close():
-        # Span multiple ticks so a second cancel (if gather cancelled tasks and
-        # the except block cancelled them again) would hit slow_close mid-body.
+        # Span multiple ticks so a second cancel of the closing stream would
+        # arrive while _close_pool is still waiting for this to finish.
         for _ in range(3):
             await asyncio.sleep(0)
         calls["close_completed"] += 1
@@ -720,12 +739,13 @@ async def test_cat_ranges_zonal_cancel_closes_pool_and_tasks(
         assert calls["cancelled"] == 4
         assert calls["close_completed"] == 1
         mocks["pool"].close.assert_awaited_once()
+        assert close_pool_cancels["n"] == 0
         assert not leftover
 
 
 @pytest.mark.asyncio
 async def test_cat_ranges_zonal_cancel_while_closing_pool(
-    extended_gcsfs, gcs_bucket_mocks
+    extended_gcsfs, gcs_bucket_mocks, close_pool_cancels
 ):
     paths = [f"{TEST_ZONAL_BUCKET}/done", f"{TEST_ZONAL_BUCKET}/in_flight"]
     closing = asyncio.Event()
@@ -759,12 +779,15 @@ async def test_cat_ranges_zonal_cancel_while_closing_pool(
         # inside pool.close() ran close() to completion.
         assert mocks["pool"].close.await_count == 2
         assert close_completed == 2
+        # Only the stream that was already closing saw its (single) cancel
+        # there; the in-flight stream was not cancelled again while closing.
+        assert close_pool_cancels["n"] == 1
         assert not leftover
 
 
 @pytest.mark.asyncio
 async def test_cat_ranges_zonal_cancel_many_objects_closes_open_pools(
-    extended_gcsfs, gcs_bucket_mocks
+    extended_gcsfs, gcs_bucket_mocks, close_pool_cancels
 ):
     paths = [f"{TEST_ZONAL_BUCKET}/obj{i}" for i in range(10)]
     started = asyncio.Event()
@@ -789,7 +812,52 @@ async def test_cat_ranges_zonal_cancel_many_objects_closes_open_pools(
         # the 6 objects still waiting for the batch never opened one.
         assert mocks["pool_cache_get"].await_count == 4
         assert mocks["pool"].close.await_count == 4
+        assert close_pool_cancels["n"] == 0
         assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_pool_close_error_raised_after_streams_finish(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/done", f"{TEST_ZONAL_BUCKET}/slow"]
+    release = asyncio.Event()
+    close_failed = asyncio.Event()
+    state = {"closes": 0, "slow_finished": False}
+
+    async def download_ranges(read_requests, metadata=None):
+        if read_requests[0][0] != 0:
+            await release.wait()
+            state["slow_finished"] = True
+        for offset, length, view in read_requests:
+            view.write(json_data[offset : offset + length])
+
+    async def close():
+        state["closes"] += 1
+        if state["closes"] == 1:
+            close_failed.set()
+            raise RuntimeError("close boom")
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = download_ranges
+        mocks["pool"].close.side_effect = close
+
+        task = asyncio.ensure_future(
+            extended_gcsfs._cat_ranges(paths, [0, 10], [5, 15], batch_size=2)
+        )
+        await asyncio.wait_for(close_failed.wait(), 5)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # The first object's pool failed to close; the call keeps waiting for
+        # the other object's stream rather than cancelling it.
+        assert not task.done()
+        release.set()
+        with pytest.raises(RuntimeError, match="close boom"):
+            await task
+        assert state["slow_finished"]
+        assert state["closes"] == 2
 
 
 @pytest.mark.asyncio
