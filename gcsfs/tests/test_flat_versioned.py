@@ -81,6 +81,19 @@ def test_cat_versioned(gcs_versioned):
     assert gcs_versioned.cat(f"{b}#{v1}") == b"v1"
 
 
+def test_open_pins_generation(gcs_versioned):
+    with gcs_versioned.open(b, "wb") as wo:
+        wo.write(b"v1")
+    v1 = gcs_versioned.info(b)["generation"]
+
+    with gcs_versioned.open(b, "rb") as ro:
+        assert ro.generation == v1
+        with gcs_versioned.open(b, "wb") as wo:
+            wo.write(b"v2")
+        assert ro.read() == b"v1"
+    assert gcs_versioned.cat(b) == b"v2"
+
+
 def test_cp_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
         wo.write(b"v1")

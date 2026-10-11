@@ -4042,6 +4042,67 @@ def test_open_generation_forwarded():
         assert kwargs.get("generation") == "123"
 
 
+def _open_with_mocked_info(fs, path, generation=None, **kwargs):
+    details = {
+        "name": path,
+        "size": 4,
+        "type": "file",
+        "generation": "123",
+        "contentType": "application/octet-stream",
+    }
+    with mock.patch.object(fs, "info", return_value=details) as mock_info:
+        f = fs.open(path, "rb", generation=generation, cache_type="none", **kwargs)
+    return f, mock_info
+
+
+def test_open_version_aware_pins_generation():
+    fs = gcsfs.core.GCSFileSystem(token="anon", version_aware=True)
+    f, mock_info = _open_with_mocked_info(fs, "bucket/file")
+    mock_info.assert_called_once_with("bucket/file", generation=None)
+    assert f.generation == "123"
+    assert "generation=123" in f.url()
+
+    with mock.patch.object(fs, "cat_file", return_value=b"data") as mock_cat:
+        assert f.read() == b"data"
+    mock_cat.assert_called_once()
+    assert mock_cat.call_args.kwargs["generation"] == "123"
+
+
+def test_open_not_version_aware_does_not_pin_generation():
+    fs = gcsfs.core.GCSFileSystem(token="anon")
+    f, _ = _open_with_mocked_info(fs, "bucket/file")
+    assert f.generation is None
+
+    with mock.patch.object(fs, "cat_file", return_value=b"data") as mock_cat:
+        assert f.read() == b"data"
+    assert mock_cat.call_args.kwargs["generation"] is None
+
+
+def test_open_explicit_generation_used_for_reads():
+    fs = gcsfs.core.GCSFileSystem(token="anon")
+    f, mock_info = _open_with_mocked_info(fs, "bucket/file", generation="456")
+    mock_info.assert_called_once_with("bucket/file", generation="456")
+    assert f.generation == "456"
+
+    with mock.patch.object(fs, "cat_file", return_value=b"data") as mock_cat:
+        assert f.read() == b"data"
+    assert mock_cat.call_args.kwargs["generation"] == "456"
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_range_passes_generation():
+    fs = gcsfs.core.GCSFileSystem(token="anon", version_aware=True)
+    f, _ = _open_with_mocked_info(fs, "bucket/file")
+    assert f.generation == "123"
+
+    with mock.patch.object(
+        fs, "_cat_file_concurrent", new_callable=mock.AsyncMock
+    ) as mock_cat:
+        mock_cat.return_value = b"data"
+        assert await f._async_fetch_range(0, 4) == b"data"
+    assert mock_cat.call_args.kwargs["generation"] == "123"
+
+
 @pytest.mark.asyncio
 async def test_cat_file_generation():
     fs = gcsfs.core.GCSFileSystem(token="anon")

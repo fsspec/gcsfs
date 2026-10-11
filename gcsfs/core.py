@@ -392,6 +392,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     version_aware: bool
         Whether to support object versioning. If enabled this will require the
         user to have the necessary permissions for dealing with versioned objects.
+        Files opened for reading are pinned to the object generation that is
+        current at ``open()`` time, so all reads through the file see the same
+        version even if the object is overwritten in the meantime.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -2584,7 +2587,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         timeout: int
             Timeout seconds for the asynchronous callback.
         generation: str
-            Object generation.
+            Object generation. When reading, all data is fetched from this
+            generation. If not given and the filesystem is ``version_aware``,
+            the generation that is current when the file is opened is used.
         """
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
@@ -2655,6 +2660,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
         if "r" in self.mode:
             det = self.details
+            if self.generation is None and gcsfs.version_aware:
+                # Pin the generation that is current at open() so that every
+                # read through this handle sees the same object version.
+                self.generation = det.get("generation")
         else:
             det = {}
         self.content_type = (
@@ -2843,6 +2852,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 concurrency=self.concurrency,
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
+                generation=self.generation,
             )
         except (RuntimeError, HttpError) as e:
             if "not satisfiable" in str(e) or "InvalidRange" in str(e):
@@ -2858,6 +2868,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             concurrency=split_factor,
             cache_type=self.cache_type,
             cache_source=self.cache_source,
+            generation=self.generation,
         )
 
     def close(self):

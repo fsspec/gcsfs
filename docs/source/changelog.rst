@@ -4,6 +4,17 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+Unreleased
+----------
+
+* On a ``version_aware`` filesystem, ``open()`` for reading now pins the object
+  generation that is current at open time, and every read through that file
+  (including the prefetcher's concurrent fetches) requests that generation, so a
+  file that is overwritten while open keeps returning the version that was
+  opened. Reads from a file opened with an explicit ``generation=`` or a
+  ``#<generation>`` path also request that generation instead of the latest
+  version (#601).
+
 2026.10.0
 ---------
 
