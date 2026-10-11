@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import builtins
 import io
 import json
@@ -6,7 +7,7 @@ import os
 import ssl
 import uuid
 from builtins import FileNotFoundError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import chain
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
@@ -15,6 +16,7 @@ from uuid import uuid4
 import aiohttp
 import fsspec.asyn
 import fsspec.core
+import google.auth.compute_engine
 import pytest
 import requests
 from fsspec.asyn import sync
@@ -2677,6 +2679,96 @@ def test_sign(gcs, monkeypatch):
 
     response = requests.get(result)
     assert response.text == "This is a test string"
+
+
+FAKE_SERVICE_ACCOUNT_FILE = os.path.join(
+    os.path.dirname(__file__), "fake-service-account-credentials.json"
+)
+IAM_SIGN_EMAIL = "sa@project.iam.gserviceaccount.com"
+
+
+def _keyless_credentials():
+    """Credentials without a private key, as GCE or GKE Workload Identity provide."""
+    creds = google.auth.compute_engine.Credentials(
+        service_account_email=IAM_SIGN_EMAIL, universe_domain="googleapis.com"
+    )
+    creds.token = "access-token"
+    creds.expiry = None
+    return creds
+
+
+def _fake_storage_client(monkeypatch):
+    """Replace google.cloud.storage.Client; returns the blob mock that records signing kwargs."""
+    blob = mock.Mock()
+    blob.generate_signed_url.return_value = "https://signed.example/key"
+    client = mock.Mock()
+    client.bucket.return_value.blob.return_value = blob
+    monkeypatch.setattr("google.cloud.storage.Client", mock.Mock(return_value=client))
+    return blob
+
+
+def test_sign_without_private_key_uses_iam_signing(monkeypatch):
+    blob = _fake_storage_client(monkeypatch)
+    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
+
+    assert fs.sign("bucket/key", expiration=300) == "https://signed.example/key"
+    kwargs = blob.generate_signed_url.call_args.kwargs
+    assert kwargs["service_account_email"] == IAM_SIGN_EMAIL
+    assert kwargs["access_token"] == "access-token"
+    assert kwargs["expiration"] == timedelta(seconds=300)
+    assert kwargs["generation"] is None
+
+
+def test_sign_with_private_key_does_not_use_iam_signing(monkeypatch):
+    blob = _fake_storage_client(monkeypatch)
+    fs = GCSFileSystem(token=FAKE_SERVICE_ACCOUNT_FILE, skip_instance_cache=True)
+
+    fs.sign("bucket/key")
+    kwargs = blob.generate_signed_url.call_args.kwargs
+    assert "service_account_email" not in kwargs
+    assert "access_token" not in kwargs
+
+
+def test_sign_explicit_iam_arguments_are_kept(monkeypatch):
+    blob = _fake_storage_client(monkeypatch)
+    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
+
+    fs.sign("bucket/key", service_account_email="other@example.com", access_token="t")
+    kwargs = blob.generate_signed_url.call_args.kwargs
+    assert kwargs["service_account_email"] == "other@example.com"
+    assert kwargs["access_token"] == "t"
+
+
+def test_sign_without_private_key_calls_signblob_api(monkeypatch):
+    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
+    signature = base64.b64encode(b"signature").decode()
+    calls = []
+
+    def fake_request():
+        def request(url, method, body, headers):
+            calls.append((url, method, body, headers))
+            return mock.Mock(
+                status=200, data=json.dumps({"signedBlob": signature}).encode()
+            )
+
+        return request
+
+    monkeypatch.setattr("google.cloud.storage._signing.requests.Request", fake_request)
+
+    url = fs.sign("bucket/key")
+
+    assert len(calls) == 1
+    sign_url, method, body, headers = calls[0]
+    assert sign_url == (
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+        f"{IAM_SIGN_EMAIL}:signBlob?alt=json"
+    )
+    assert method == "POST"
+    assert headers["Authorization"] == "Bearer access-token"
+    assert "payload" in json.loads(body)
+    params = parse_qs(urlparse(url).query)
+    assert params["GoogleAccessId"] == [IAM_SIGN_EMAIL]
+    assert params["Signature"] == [signature]
 
 
 def test_write_x_mpu(gcs):

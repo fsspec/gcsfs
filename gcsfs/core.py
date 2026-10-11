@@ -2414,24 +2414,50 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     def sign(self, path, expiration=100, **kwargs):
         """Create a signed URL representing the given path.
 
+        Signing needs a private key, which only service account key
+        credentials carry. When the filesystem's credentials have no private
+        key, as with Compute Engine or GKE Workload Identity credentials, the
+        URL is signed through the IAM Credentials ``signBlob`` API instead,
+        using the credentials' service account email and current access
+        token. The service account then needs the
+        ``roles/iam.serviceAccountTokenCreator`` role on itself. Passing
+        ``service_account_email`` and ``access_token`` explicitly selects this
+        path with any credentials.
+
         Parameters
         ----------
         path : str
              The path on the filesystem
         expiration : int
             Number of seconds to enable the URL for
+        kwargs :
+            Passed on to ``google.cloud.storage.Blob.generate_signed_url``
 
         Returns
         -------
         URL : str
             The signed URL
         """
+        from google.auth.credentials import Signing
         from google.cloud import storage
 
-        client = storage.Client(
-            credentials=self.credentials.credentials,
-            project=self.project,
-        )
+        credentials = self.credentials.credentials
+        if (
+            credentials is not None
+            and not isinstance(credentials, Signing)
+            and "service_account_email" not in kwargs
+            and "access_token" not in kwargs
+        ):
+            # No private key (e.g. GCE or GKE Workload Identity credentials):
+            # have google-cloud-storage sign through the IAM signBlob API with
+            # the service account's access token instead.
+            self.credentials.maybe_refresh()
+            email = getattr(credentials, "service_account_email", None)
+            if email and credentials.token:
+                kwargs["service_account_email"] = email
+                kwargs["access_token"] = credentials.token
+
+        client = storage.Client(credentials=credentials, project=self.project)
 
         bucket, key, generation = self.split_path(path)
         bucket = client.bucket(bucket)
