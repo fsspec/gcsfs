@@ -2660,7 +2660,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
         if "r" in self.mode:
             det = self.details
-            if self.generation is None and gcsfs.version_aware:
+            if self.generation is None and self.gcsfs.version_aware:
                 # Pin the generation that is current at open() so that every
                 # read through this handle sees the same object version.
                 self.generation = det.get("generation")
