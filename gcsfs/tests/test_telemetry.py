@@ -137,30 +137,39 @@ def test_framework_detector_handles_empty_and_invalid_frames(monkeypatch):
     assert detector.detect() is None
 
 
-def test_framework_detector_opt_out(monkeypatch):
-    detector = FrameworkDetector()
+def test_telemetry_tracker_opt_out(monkeypatch):
+    class DummyEnvDetector(BaseDetector):
+        name = "env"
+
+        def detect(self):
+            return "env/gke"
+
+    tracker = UsageMetricsTracker(detectors=[DummyEnvDetector(), FrameworkDetector()])
 
     # Default: active
-    assert detector.is_enabled()
+    assert tracker.is_enabled()
+    assert "env/gke" in tracker.get_tokens()
 
     # With GCSFS_NO_TELEMETRY=1
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "1")
-    assert not detector.is_enabled()
-    assert detector.detect() is None
+    assert not tracker.is_enabled()
+    assert tracker.collect_tokens_map() == {}
+    assert tracker.get_tokens() == []
 
     # With GCSFS_NO_TELEMETRY=true
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "true")
-    assert not detector.is_enabled()
+    assert not tracker.is_enabled()
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
 
     # With DO_NOT_TRACK=1
     monkeypatch.setenv("DO_NOT_TRACK", "1")
-    assert not detector.is_enabled()
-    assert detector.detect() is None
+    assert not tracker.is_enabled()
+    assert tracker.collect_tokens_map() == {}
+    assert tracker.get_tokens() == []
 
     # With DO_NOT_TRACK=true
     monkeypatch.setenv("DO_NOT_TRACK", "true")
-    assert not detector.is_enabled()
+    assert not tracker.is_enabled()
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
 
 

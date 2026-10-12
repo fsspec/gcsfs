@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional
 
 from gcsfs.telemetry.context import Dimension, get_telemetry_context, sanitize_token
@@ -17,6 +18,13 @@ class UsageMetricsTracker:
             list(detectors) if detectors is not None else []
         )
 
+    def is_enabled(self) -> bool:
+        """Check if telemetry collection is enabled globally."""
+        return not any(
+            os.environ.get(env, "").lower() in ("1", "true", "yes")
+            for env in ("DO_NOT_TRACK", "GCSFS_NO_TELEMETRY")
+        )
+
     def collect_tokens_map(self) -> Dict[str, str]:
         """
         Collect active telemetry tokens across all registered detectors.
@@ -25,6 +33,9 @@ class UsageMetricsTracker:
         -------
         Dict[str, str]: Mapping of dimension name to formatted token string.
         """
+        if not self.is_enabled():
+            return {}
+
         tokens = get_telemetry_context()
 
         # Run registered detectors for any dimensions not already set
@@ -34,7 +45,7 @@ class UsageMetricsTracker:
                 if isinstance(detector.name, Dimension)
                 else str(detector.name)
             )
-            if detector.is_enabled() and dim_key not in tokens:
+            if dim_key not in tokens:
                 try:
                     detected_val = detector.detect()
                     tokens[dim_key] = detected_val or ""

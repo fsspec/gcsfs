@@ -48,9 +48,6 @@ class FrameworkDetector(BaseDetector):
         self.max_depth = max_depth
 
     def detect(self) -> Optional[str]:
-        if not self.is_enabled():
-            return None
-
         try:
             start_frame = sys._getframe()
         except (ValueError, AttributeError, RuntimeError, PermissionError):
