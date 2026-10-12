@@ -1,5 +1,4 @@
 import os
-import socket
 
 import lightning.pytorch as L
 import torch
@@ -7,6 +6,8 @@ import torch.nn as nn
 import transformers
 from lightning.pytorch.strategies import FSDPStrategy, ModelParallelStrategy
 from torch.utils.data import Dataset
+
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
 
 
 class DummyDataset(Dataset):
@@ -21,39 +22,6 @@ class DummyDataset(Dataset):
 
     def __getitem__(self, idx):
         return torch.randn(self.in_features)
-
-
-def apply_llama_tp(model, tp_mesh):
-    """Applies tensor parallelism to a LLaMA model: shards embed_tokens, lm_head, and decoder layers."""
-    from torch.distributed.tensor import Replicate
-    from torch.distributed.tensor.parallel import (
-        ColwiseParallel,
-        RowwiseParallel,
-        parallelize_module,
-    )
-
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "model.embed_tokens": RowwiseParallel(
-                input_layouts=Replicate(), output_layouts=Replicate()
-            ),
-            "lm_head": ColwiseParallel(output_layouts=Replicate()),
-        },
-    )
-
-    layer_plan = {
-        "self_attn.q_proj": ColwiseParallel(),
-        "self_attn.k_proj": ColwiseParallel(),
-        "self_attn.v_proj": ColwiseParallel(),
-        "self_attn.o_proj": RowwiseParallel(),
-        "mlp.gate_proj": ColwiseParallel(),
-        "mlp.up_proj": ColwiseParallel(),
-        "mlp.down_proj": RowwiseParallel(),
-    }
-    for layer in model.model.layers:
-        parallelize_module(layer, tp_mesh, layer_plan)
 
 
 class DummyModel(L.LightningModule):
@@ -158,12 +126,6 @@ class DummyModel(L.LightningModule):
                 fully_shard(self.llama, mesh=dp_mesh)
 
 
-def find_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
 class CPUModelParallelStrategy(ModelParallelStrategy):
     @property
     def root_device(self) -> torch.device:
@@ -224,52 +186,3 @@ def get_strategy(params, setup=False):
         )
     else:
         raise ValueError(f"Unknown strategy: {strategy_name}")
-
-
-def run_split(prefix, params, target_fn, world_size_override=None):
-    """Spawns processes to run the distributed benchmark and gathers timing."""
-    import torch.multiprocessing as mp
-
-    ctx = mp.get_context("spawn")
-    world_size = params.world_size
-    if world_size_override is not None:
-        world_size = world_size_override
-    world_size = min(world_size, 8)  # Cap to 8 to prevent OOM on test-c4-highmem
-    port = find_free_port()
-
-    with ctx.Manager() as manager:
-        q = manager.Queue()
-        mp.spawn(
-            target_fn,
-            args=(world_size, port, prefix, params, q),
-            nprocs=world_size,
-            join=True,
-        )
-        results = [q.get() for _ in range(world_size)]
-
-    if all(r is None for r in results):
-        return []
-
-    # We reduce across ranks for each round.
-    durations = []
-    for r in range(params.rounds):
-        begins = [results[rank][r][0] for rank in range(world_size)]
-        ends = [results[rank][r][1] for rank in range(world_size)]
-        durations.append(max(ends) - min(begins))
-    return durations
-
-
-def setup_distributed_env(rank, world_size, port):
-    """Initializes the CPU distributed environment (gloo) for a multiprocess worker."""
-    import os
-
-    import torch.distributed as dist
-
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(port)
-    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["RANK"] = str(rank)
-    os.environ["LOCAL_RANK"] = str(rank)
-
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
