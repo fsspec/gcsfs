@@ -15,8 +15,7 @@ from gcsfs.telemetry.context import (
     sanitize_token,
     set_telemetry_context,
 )
-from gcsfs.telemetry.detectors.base import BaseDetector
-from gcsfs.telemetry.detectors.framework import FrameworkDetector
+from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
 from gcsfs.telemetry.manager import UsageMetricsTracker
 
 # ============================================================================

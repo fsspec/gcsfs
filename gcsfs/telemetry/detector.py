@@ -1,4 +1,4 @@
-"""Top-to-bottom stack frame detector for upstream caller frameworks (name-only)."""
+"""Telemetry detectors for extracting caller context tokens."""
 
 from __future__ import annotations
 
@@ -6,7 +6,22 @@ import sys
 from typing import Dict, Optional
 
 from gcsfs.telemetry.context import Dimension, sanitize_token
-from gcsfs.telemetry.detectors.base import BaseDetector
+
+
+class BaseDetector:
+    """Base interface for extracting telemetry tokens."""
+
+    name: Dimension | str = ""
+
+    def detect(self) -> Optional[str]:
+        """
+        Execute detection logic and return an RFC 9110 compliant telemetry token.
+
+        Returns
+        -------
+        Optional[str]: Formatted token string (e.g. 'fw/pandas') or None if not detected.
+        """
+        raise NotImplementedError
 
 
 class FrameworkDetector(BaseDetector):

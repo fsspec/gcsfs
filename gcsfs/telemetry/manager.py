@@ -6,8 +6,7 @@ import os
 from typing import Dict, List, Optional
 
 from gcsfs.telemetry.context import Dimension, get_telemetry_context, sanitize_token
-from gcsfs.telemetry.detectors.base import BaseDetector
-from gcsfs.telemetry.detectors.framework import FrameworkDetector
+from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
 
 
 class UsageMetricsTracker:
