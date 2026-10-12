@@ -11,7 +11,7 @@ import weakref
 from io import BytesIO
 
 from fsspec.asyn import FSTimeoutError
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import FailedPrecondition, NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
@@ -161,24 +161,52 @@ async def download_ranges(ranges, mrd):
 
 
 async def init_aaow(
-    grpc_client, bucket_name, object_name, generation=None, flush_interval_bytes=None
+    grpc_client,
+    bucket_name,
+    object_name,
+    generation=None,
+    flush_interval_bytes=None,
+    if_generation_match=None,
 ):
     """
     Creates and opens the AsyncAppendableObjectWriter.
+
+    ``if_generation_match=0`` creates the object only if it does not exist;
+    a positive value overwrites only that generation (requires a
+    google-cloud-storage release whose writer accepts ``if_generation_match``).
+    A failed precondition raises ``FileExistsError``.
     """
     writer_options = {}
     # Only pass flush_interval_bytes if the user explicitly provided a
     # non-default flush interval.
     if flush_interval_bytes and flush_interval_bytes != _DEFAULT_FLUSH_INTERVAL_BYTES:
         writer_options["FLUSH_INTERVAL_BYTES"] = flush_interval_bytes
-    writer = AsyncAppendableObjectWriter(
-        client=grpc_client,
-        bucket_name=bucket_name,
-        object_name=object_name,
-        generation=generation,
-        writer_options=writer_options,
-    )
-    await writer.open()
+    kwargs = {}
+    if if_generation_match == 0:
+        # Every SDK release maps generation=0 to WriteObjectSpec(if_generation_match=0).
+        generation = 0
+    elif if_generation_match is not None:
+        kwargs["if_generation_match"] = if_generation_match
+    try:
+        writer = AsyncAppendableObjectWriter(
+            client=grpc_client,
+            bucket_name=bucket_name,
+            object_name=object_name,
+            generation=generation,
+            writer_options=writer_options,
+            **kwargs,
+        )
+    except TypeError as e:
+        if "if_generation_match" not in str(e):
+            raise
+        raise NotImplementedError(
+            "if_generation_match > 0 on zonal buckets requires a google-cloud-storage "
+            "release whose AsyncAppendableObjectWriter accepts if_generation_match"
+        ) from e
+    try:
+        await writer.open()
+    except FailedPrecondition as e:
+        raise FileExistsError(f"{bucket_name}/{object_name}") from e
     return writer
 
 

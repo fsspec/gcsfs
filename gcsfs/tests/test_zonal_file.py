@@ -216,7 +216,12 @@ def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks, file_path
 
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_called_once_with(
-            extended_gcsfs.grpc_client, bucket, key, None, _DEFAULT_FLUSH_INTERVAL_BYTES
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
         )
     else:
         assert extended_gcsfs.exists(file_path)
@@ -238,7 +243,12 @@ def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
 
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_called_once_with(
-            extended_gcsfs.grpc_client, bucket, key, None, custom_flush_interval_bytes
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            custom_flush_interval_bytes,
+            if_generation_match=None,
         )
     else:
         assert extended_gcsfs.exists(file_path)
@@ -260,6 +270,7 @@ def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_pat
             key,
             "12345",
             _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
         )
     else:
         assert extended_gcsfs.cat(file_path) == b"data"
@@ -286,7 +297,12 @@ def test_zonal_file_open_append_mode_nonexistent_file(
     if zonal_write_mocks:
         # init_aaow should be called with generation=None
         zonal_write_mocks["init_aaow"].assert_called_once_with(
-            extended_gcsfs.grpc_client, bucket, key, None, _DEFAULT_FLUSH_INTERVAL_BYTES
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
         )
         # _info is called to get the generation, but it fails
         extended_gcsfs._info.assert_awaited_once()

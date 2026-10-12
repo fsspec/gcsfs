@@ -36,6 +36,7 @@ from gcsfs.core import (
     GCSFileSystem,
     _get_prefetcher_and_cache_config,
     _location,
+    _resolve_generation_match,
 )
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import MRD_MAX_RANGES, DirectMemmoveBuffer, MRDPool
@@ -1940,6 +1941,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         callback=None,
         fixed_key_metadata=None,
         mode="overwrite",
+        if_generation_match=None,
         **kwargs,
     ):
         """Upload a local file.
@@ -1969,6 +1971,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Unsupported for Zonal buckets and will be ignored.
         mode: str, optional
             The write mode, either 'overwrite' or 'create'.
+        if_generation_match: int, optional
+            Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(rpath)
         if not await self._is_zonal_bucket(bucket):
@@ -1982,6 +1986,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 callback=callback,
                 fixed_key_metadata=fixed_key_metadata,
                 mode=mode,
+                if_generation_match=if_generation_match,
                 **kwargs,
             )
 
@@ -2003,8 +2008,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "These parameters will be ignored."
             )
         await self._get_grpc_client()
-        # Works for both 'overwrite' and 'create' modes
-        writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
+        writer = await zb_hns_utils.init_aaow(
+            self.grpc_client,
+            bucket,
+            key,
+            if_generation_match=_resolve_generation_match(mode, if_generation_match),
+        )
 
         try:
             with open(lpath, "rb") as f:
@@ -2025,6 +2034,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         fixed_key_metadata=None,
         chunksize=50 * 2**20,
         mode="overwrite",
+        if_generation_match=None,
         **kwargs,
     ):
         """Upload bytes to a file.
@@ -2052,6 +2062,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             The size of chunks to upload data in.
         mode: str, optional
             The write mode, either 'overwrite' or 'create'.
+        if_generation_match: int, optional
+            Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(path)
         if not await self._is_zonal_bucket(bucket):
@@ -2064,6 +2076,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 fixed_key_metadata=fixed_key_metadata,
                 chunksize=chunksize,
                 mode=mode,
+                if_generation_match=if_generation_match,
             )
 
         if (
@@ -2076,8 +2089,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "fixed_key_metadata during upload. These parameters will be ignored."
             )
         await self._get_grpc_client()
-        # Works for both 'overwrite' and 'create' modes
-        writer = await zb_hns_utils.init_aaow(self.grpc_client, bucket, key)
+        writer = await zb_hns_utils.init_aaow(
+            self.grpc_client,
+            bucket,
+            key,
+            if_generation_match=_resolve_generation_match(mode, if_generation_match),
+        )
         try:
             with memoryview(data) as data_view:
                 for i in range(0, len(data_view), chunksize):
@@ -2379,6 +2396,7 @@ async def initiate_upload(
     fixed_key_metadata=None,
     mode="overwrite",
     kms_key_name=None,
+    if_generation_match=None,
 ):
     """
     Initiates an upload for Zonal buckets by creating an AsyncAppendableObjectWriter.
@@ -2402,6 +2420,8 @@ async def initiate_upload(
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
         Unsupported for Zonal buckets and will be ignored.
+    if_generation_match: int, optional
+        Only write if the object's current generation matches this value.
     """
     if not await fs._is_zonal_bucket(bucket):
         from gcsfs.core import initiate_upload as core_initiate_upload
@@ -2415,6 +2435,7 @@ async def initiate_upload(
             fixed_key_metadata,
             mode,
             kms_key_name,
+            if_generation_match=if_generation_match,
         )
 
     if (
@@ -2429,9 +2450,12 @@ async def initiate_upload(
         )
 
     await fs._get_grpc_client()
-    # If generation is not passed to init_aaow, it creates a new object and overwrites if object already exists.
-    # Hence it works for both 'overwrite' and 'create' modes.
-    return await zb_hns_utils.init_aaow(fs.grpc_client, bucket, key)
+    return await zb_hns_utils.init_aaow(
+        fs.grpc_client,
+        bucket,
+        key,
+        if_generation_match=_resolve_generation_match(mode, if_generation_match),
+    )
 
 
 async def simple_upload(
@@ -2445,6 +2469,7 @@ async def simple_upload(
     fixed_key_metadata=None,
     mode="overwrite",
     kms_key_name=None,
+    if_generation_match=None,
     **kwargs,
 ):
     """
@@ -2475,6 +2500,8 @@ async def simple_upload(
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
         Unsupported for Zonal buckets and will be ignored.
+    if_generation_match: int, optional
+        Only write if the object's current generation matches this value.
     """
     if not await fs._is_zonal_bucket(bucket):
         from gcsfs.core import simple_upload as core_simple_upload
@@ -2490,6 +2517,7 @@ async def simple_upload(
             fixed_key_metadata,
             mode,
             kms_key_name,
+            if_generation_match=if_generation_match,
         )
 
     if (
@@ -2504,9 +2532,12 @@ async def simple_upload(
             "consistency or kms_key_name during upload. These parameters will be ignored."
         )
     await fs._get_grpc_client()
-    # If generation is not passed to init_aaow, it creates a new object and overwrites if object already exists.
-    # Hence it works for both 'overwrite' and 'create' modes.
-    writer = await zb_hns_utils.init_aaow(fs.grpc_client, bucket, key)
+    writer = await zb_hns_utils.init_aaow(
+        fs.grpc_client,
+        bucket,
+        key,
+        if_generation_match=_resolve_generation_match(mode, if_generation_match),
+    )
     try:
         await writer.append(datain)
     finally:

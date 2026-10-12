@@ -11,6 +11,7 @@ from gcsfs.core import (
     GCSFile,
     _coalesce_generation,
     _get_prefetcher_and_cache_config,
+    _resolve_generation_match,
 )
 from gcsfs.retry import HttpError
 from gcsfs.utils import is_empty_range
@@ -100,7 +101,7 @@ class ZonalFile(GCSFile):
                     "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )
-        elif "w" in self.mode or "a" in self.mode:
+        elif "w" in self.mode or "a" in self.mode or "x" in self.mode:
             pass
         else:
             raise NotImplementedError(
@@ -161,6 +162,9 @@ class ZonalFile(GCSFile):
             object_name,
             generation,
             flush_interval_bytes,
+            if_generation_match=_resolve_generation_match(
+                "create" if "x" in self.mode else "overwrite", self.if_generation_match
+            ),
         )
 
     def _ensure_aaow(self):

@@ -344,7 +344,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     NOTE on "exclusive" mode: mode=="create"" (in pipe and put) and open(mode="xb") are supported on an
     experimental basis. The test harness does not currently support this, so use at your
-    own risk.
+    own risk. Writes also accept ``if_generation_match=N`` (``0`` is equivalent to
+    ``mode="create"``); a mismatch raises ``FileExistsError``.
 
     Parameters
     ----------
@@ -1791,6 +1792,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         fixed_key_metadata=None,
         chunksize=50 * 2**20,
         mode="overwrite",
+        if_generation_match=None,
     ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
@@ -1808,6 +1810,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 content_type,
                 fixed_key_metadata=fixed_key_metadata,
                 mode=mode,
+                if_generation_match=if_generation_match,
             )
         else:
             location = await initiate_upload(
@@ -1818,6 +1821,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 metadata,
                 fixed_key_metadata=fixed_key_metadata,
                 mode=mode,
+                if_generation_match=if_generation_match,
             )
             try:
                 data_view = memoryview(data)
@@ -1827,10 +1831,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                         self, location, bit, offset, size, content_type
                     )
             except Exception:
-                await self._call(
-                    "DELETE",
-                    location.replace("&ifGenerationMatch=0", ""),
-                )
+                await self._call("DELETE", _strip_generation_match(location))
                 raise
 
             checker = get_consistency_checker(consistency)
@@ -1851,6 +1852,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         callback=None,
         fixed_key_metadata=None,
         mode="overwrite",
+        if_generation_match=None,
         **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1882,6 +1884,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     content_type=content_type,
                     fixed_key_metadata=fixed_key_metadata,
                     mode=mode,
+                    if_generation_match=if_generation_match,
                 )
                 callback.absolute_update(size)
 
@@ -1894,6 +1897,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     metadata=metadata,
                     fixed_key_metadata=fixed_key_metadata,
                     mode=mode,
+                    if_generation_match=if_generation_match,
                 )
                 offset = 0
                 try:
@@ -1908,10 +1912,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                         callback.absolute_update(offset)
                         checker.update(bit)
                 except Exception:
-                    await self._call(
-                        "DELETE",
-                        location.replace("&ifGenerationMatch=0", ""),
-                    )
+                    await self._call("DELETE", _strip_generation_match(location))
                     raise
 
                 checker.validate_json_response(out)
@@ -2538,6 +2539,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         fixed_key_metadata=None,
         generation=None,
         kms_key_name=None,
+        if_generation_match=None,
         **kwargs,
     ):
         """
@@ -2585,11 +2587,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             Timeout seconds for the asynchronous callback.
         generation: str
             Object generation.
+        if_generation_match: int
+            Only write if the object's current generation matches this value;
+            ``0`` means the object must not exist (same as mode ``"xb"``).
         """
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
+        self.if_generation_match = if_generation_match
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
             cache_type
@@ -2788,6 +2794,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.metadata,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            if_generation_match=self.if_generation_match,
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
@@ -2799,10 +2806,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         if self.location is None:
             return
-        self.gcsfs.call(
-            "DELETE",
-            self.location.replace("&ifGenerationMatch=0", ""),
-        )
+        self.gcsfs.call("DELETE", _strip_generation_match(self.location))
         self.location = None
         self.closed = True
 
@@ -2822,6 +2826,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.content_type,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            if_generation_match=self.if_generation_match,
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
@@ -2954,6 +2959,30 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     return json.loads(txt) if txt else None
 
 
+def _resolve_generation_match(mode, if_generation_match):
+    """Effective ``ifGenerationMatch`` value, or None.
+
+    ``mode="create"`` is shorthand for ``if_generation_match=0``.
+    """
+    if mode == "create":
+        if if_generation_match not in (None, 0):
+            raise ValueError(
+                "mode='create' conflicts with a non-zero if_generation_match"
+            )
+        return 0
+    return None if if_generation_match is None else int(if_generation_match)
+
+
+def _generation_match_params(mode, if_generation_match):
+    gen = _resolve_generation_match(mode, if_generation_match)
+    return {} if gen is None else {"ifGenerationMatch": str(gen)}
+
+
+def _strip_generation_match(location):
+    """Drop the precondition from a resumable session URL before cancelling it."""
+    return re.sub(r"&ifGenerationMatch=\d+", "", location)
+
+
 async def initiate_upload(
     fs,
     bucket,
@@ -2963,6 +2992,7 @@ async def initiate_upload(
     fixed_key_metadata=None,
     mode="overwrite",
     kms_key_name=None,
+    if_generation_match=None,
 ):
     """
     Initiates a resumable upload. This function has a conditional path to support
@@ -2985,12 +3015,13 @@ async def initiate_upload(
             fixed_key_metadata,
             mode,
             kms_key_name,
+            if_generation_match=if_generation_match,
         )
 
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
-    kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
+    kw = _generation_match_params(mode, if_generation_match)
     if kms_key_name:
         kw["kmsKeyName"] = kms_key_name
     j.update(_convert_fixed_key_metadata(fixed_key_metadata))
@@ -3020,6 +3051,7 @@ async def simple_upload(
     fixed_key_metadata=None,
     mode="overwrite",
     kms_key_name=None,
+    if_generation_match=None,
 ):
     """
     Performs a simple, single-request upload. This function has a conditional path to support
@@ -3043,6 +3075,7 @@ async def simple_upload(
             fixed_key_metadata,
             mode,
             kms_key_name,
+            if_generation_match=if_generation_match,
         )
 
     checker = get_consistency_checker(consistency)
@@ -3050,7 +3083,7 @@ async def simple_upload(
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain
-    kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
+    kw = _generation_match_params(mode, if_generation_match)
     if kms_key_name:
         kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
