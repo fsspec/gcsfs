@@ -111,6 +111,67 @@ def test_roundtrip_16rank(tmp_path, sizes):
     _run_roundtrip(tmp_path, 16, sizes)
 
 
+def _checksum_rank(rank, world_size, port, prefix, params, q):
+    setup_distributed_env(rank, world_size, port)
+    try:
+        model, optim = _build(params, build_mesh(params), _SEED_A)
+        q.put((rank, state_checksum(get_fqn_state_dict(model, optim))))
+    finally:
+        dist.destroy_process_group()
+
+
+def _rank_checksums(tmp_path, world_size, **sizes):
+    import torch.multiprocessing as mp
+
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import find_free_port
+
+    params = _params(
+        _create_tiny_llama_config_dir(tmp_path), world_size=world_size, **sizes
+    )
+    with mp.get_context("spawn").Manager() as manager:
+        q = manager.Queue()
+        mp.spawn(
+            _checksum_rank,
+            args=(world_size, find_free_port(), None, params, q),
+            nprocs=world_size,
+            join=True,
+        )
+        return dict(q.get() for _ in range(world_size))
+
+
+_Q = "model.layers.0.self_attn.q_proj.weight"
+_NORM = "model.layers.0.input_layernorm.weight"
+
+
+def test_seeding_differs_per_shard(tmp_path):
+    # Shards of one tensor must not be byte-identical across ranks, or the
+    # per-rank checksum cannot tell a reader serving another rank's shard.
+    r = _rank_checksums(tmp_path, 4, strategy="fsdp", dp=4)
+    for fqn in (_Q, _NORM):
+        for key in (f"model.{fqn}", f"optim.state.{fqn}.exp_avg"):
+            assert len({r[rank][key] for rank in range(4)}) == 4
+    assert len({r[rank][f"optim.state.{_Q}.step"] for rank in range(4)}) == 1
+
+
+def test_seeding_keeps_replicas_identical(tmp_path):
+    # dcp.save keeps one copy of a replicated tensor, so replicas must agree
+    # with each other at setup or every other replica fails the load checksum.
+    r = _rank_checksums(tmp_path, 4, strategy="hsdp", dpr=2, dp=2)
+    assert r[0] == r[2] and r[1] == r[3]  # dp_replicate copies of each shard
+    assert r[0][f"model.{_Q}"] != r[1][f"model.{_Q}"]
+
+    # TP leaves norms as plain Parameters replicated on every rank.
+    r = _rank_checksums(tmp_path, 4, strategy="tp", tp=4)
+    assert len({r[rank][f"model.{_NORM}"] for rank in range(4)}) == 1
+    assert len({r[rank][f"model.{_Q}"] for rank in range(4)}) == 4
+
+    # fsdp_tp shards norms on dp_shard only, so ranks 0 and 1 (tp 0/1) share them.
+    r = _rank_checksums(tmp_path, 4, strategy="fsdp_tp", dp=2, tp=2)
+    assert r[0][f"model.{_NORM}"] == r[1][f"model.{_NORM}"]
+    assert r[0][f"model.{_NORM}"] != r[2][f"model.{_NORM}"]
+    assert len({r[rank][f"model.{_Q}"] for rank in range(4)}) == 4
+
+
 def _n_bytes_entries(prefix):
     """Returns the number of non-tensor (BYTE_IO) entries in the checkpoint."""
     metadata = FsspecReader(prefix).read_metadata()
