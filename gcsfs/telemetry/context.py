@@ -43,13 +43,9 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_telemetry_in_child)
 
 
-def get_telemetry_context(
-    dimension: Optional[Dimension] = None,
-) -> Union[Dict[str, str], Optional[str]]:
-    """Retrieve active telemetry tokens mapping (or a specific dimension value) from context."""
+def get_telemetry_context() -> Dict[str, str]:
+    """Retrieve active telemetry tokens mapping from context."""
     val = _current_telemetry.get()
-    if dimension is not None:
-        return val.get(dimension.value) if val is not None else None
     return dict(val) if val is not None else {}
 
 

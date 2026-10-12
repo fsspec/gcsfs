@@ -79,6 +79,9 @@ def _create_mock_frame(module_name: str, back_frame=None):
 
 
 def test_framework_detector_known_frameworks_mapping():
+    with pytest.raises(NotImplementedError):
+        BaseDetector().detect()
+
     detector = FrameworkDetector()
     assert detector.KNOWN_FRAMEWORKS["pandas"] == "pandas"
     assert detector.KNOWN_FRAMEWORKS["polars"] == "polars"
@@ -184,15 +187,15 @@ def test_deep_stack_traversal(monkeypatch):
 
 def test_set_and_get_telemetry_context():
     # Initial state
-    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
 
     # Set caller framework
     token = set_telemetry_context(Dimension.FRAMEWORK, "fw/custom-engine")
-    assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-engine"
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) == "fw/custom-engine"
 
     # Reset
     reset_telemetry_context(token)
-    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
 
 
 def test_multithreaded_context_isolation():
@@ -210,7 +213,7 @@ def test_multithreaded_context_isolation():
     def worker(framework_name: str):
         try:
             # 1. Verify clean initial state in this thread
-            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
+            if get_telemetry_context().get(Dimension.FRAMEWORK) is not None:
                 errors.append(f"{framework_name}: initial context not None")
 
             # 2. Set thread-local context
@@ -221,7 +224,7 @@ def test_multithreaded_context_isolation():
 
                 # 4. Repeatedly verify context during concurrent overlap
                 for _ in range(5):
-                    current = get_telemetry_context(Dimension.FRAMEWORK)
+                    current = get_telemetry_context().get(Dimension.FRAMEWORK)
                     if current != f"fw/{framework_name}":
                         errors.append(
                             f"{framework_name}: expected fw/{framework_name}, got {current}"
@@ -231,7 +234,7 @@ def test_multithreaded_context_isolation():
                 reset_telemetry_context(token)
 
             # 5. Verify thread context is cleanly reset
-            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
+            if get_telemetry_context().get(Dimension.FRAMEWORK) is not None:
                 errors.append(f"{framework_name}: post-reset context not None")
         except Exception as e:
             errors.append(f"{framework_name} exception: {e}")
@@ -272,7 +275,13 @@ def test_post_fork_telemetry_reset():
         assert child_result == {}, f"Child telemetry was not reset! Got: {child_result}"
 
         # Parent process still retains its original telemetry context
-        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/parent-process"
+        assert get_telemetry_context().get(Dimension.FRAMEWORK) == "fw/parent-process"
+
+        # Also directly exercise the registered at_fork callback for coverage tracing
+        from gcsfs.telemetry.context import _reset_telemetry_in_child
+
+        _reset_telemetry_in_child()
+        assert get_telemetry_context() == {}
     finally:
         reset_telemetry_context(token)
 

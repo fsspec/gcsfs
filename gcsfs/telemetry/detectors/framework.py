@@ -57,36 +57,34 @@ class FrameworkDetector(BaseDetector):
             return None
 
         try:
-            return self._walk_top_down(start_frame)
+            return self._walk_stack(start_frame)
         finally:
             del start_frame
 
-    def _walk_top_down(self, start_frame) -> Optional[str]:
+    def _walk_stack(self, start_frame) -> Optional[str]:
         """
-        Traverses the frame chain from top (outermost / root) to bottom (innermost / gcsfs).
-        Returns the first recognized framework encountered from the top.
+        Traverses the frame chain in a single pass from innermost (gcsfs) to outermost (root).
+        Returns the outermost recognized framework encountered.
         """
-        module_names = []
         frame = start_frame
         depth = 0
+        detected_framework = None
 
         try:
             while frame is not None and depth < self.max_depth:
                 f_globals = getattr(frame, "f_globals", None) or {}
                 mod_name = f_globals.get("__name__", "")
                 if mod_name:
-                    module_names.append(mod_name)
+                    top_pkg = mod_name.partition(".")[0]
+                    if top_pkg in self.KNOWN_FRAMEWORKS:
+                        detected_framework = self.KNOWN_FRAMEWORKS[top_pkg]
                 frame = frame.f_back
                 depth += 1
         finally:
             del frame
             del start_frame
 
-        # Scan in call order (outermost root -> innermost) to match the initiating framework first
-        for mod_name in reversed(module_names):
-            top_pkg = mod_name.partition(".")[0]
-            if top_pkg in self.KNOWN_FRAMEWORKS:
-                framework_name = self.KNOWN_FRAMEWORKS[top_pkg]
-                return sanitize_token(f"fw/{framework_name}")
+        if detected_framework:
+            return sanitize_token(f"fw/{detected_framework}")
 
         return None
