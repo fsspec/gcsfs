@@ -19,14 +19,12 @@ class Dimension(str, Enum):
 
 
 def sanitize_token(token: Optional[str], max_len: int = 64) -> Optional[str]:
-    """Sanitize a raw token or '<dimension>/<value>' string to comply with RFC 9110."""
+    """Sanitize a bare token value to comply with RFC 9110 product-version grammar."""
     if not token or not isinstance(token, str):
         return None
 
-    parts = [
-        _TOKEN_SANITIZE_REGEX.sub("_", p.strip())[:max_len] for p in token.split("/", 1)
-    ]
-    return "/".join(parts) if all(parts) else None
+    clean = _TOKEN_SANITIZE_REGEX.sub("_", token.strip())[:max_len]
+    return clean if clean.strip("_.-") else None
 
 
 # ContextVar for propagating multi-dimensional telemetry tokens across async event loop and thread boundaries

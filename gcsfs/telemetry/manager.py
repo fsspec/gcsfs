@@ -30,7 +30,8 @@ class UsageMetricsTracker:
 
         Returns
         -------
-        Dict[str, str]: Mapping of dimension name to formatted token string.
+        Dict[str, str]: Mapping of dimension key to bare token value
+            (or empty string "" as a negative-cache sentinel when undetected).
         """
         if not self.is_enabled():
             return {}
@@ -59,19 +60,19 @@ class UsageMetricsTracker:
 
         Returns
         -------
-        List[str]: List of formatted token strings, e.g. ['fw/pandas', 'env/gke'].
+        List[str]: List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
         token_map = self.collect_tokens_map()
-        sanitized_tokens = []
-        for token in token_map.values():
-            clean = sanitize_token(token)
-            if clean:
-                sanitized_tokens.append(clean)
-        return sanitized_tokens
+        out = []
+        for dim_key, val in token_map.items():
+            clean_val = sanitize_token(val)
+            if clean_val:
+                out.append(f"{dim_key}/{clean_val}")
+        return out
 
     def get_dimension(self, dimension: Dimension) -> Optional[str]:
         """
-        Resolve a specific dimension token (e.g. Dimension.FRAMEWORK).
+        Resolve a specific dimension's sanitized bare token value (e.g. Dimension.FRAMEWORK -> 'pandas').
         """
         token_map = self.collect_tokens_map()
         return sanitize_token(token_map.get(dimension.value))

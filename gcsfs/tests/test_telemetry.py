@@ -24,26 +24,22 @@ from gcsfs.telemetry.manager import UsageMetricsTracker
 
 
 def test_sanitize_token_valid_and_edge_cases():
-    # Valid single-segment and multi-segment tokens
+    # Valid bare token values
     assert sanitize_token("pandas") == "pandas"
     assert sanitize_token("datasets") == "datasets"
     assert sanitize_token("scikit-learn") == "scikit-learn"
     assert sanitize_token("version.1.2.3") == "version.1.2.3"
     assert sanitize_token("my_custom_framework-v2") == "my_custom_framework-v2"
-    assert sanitize_token("fw/pandas") == "fw/pandas"
-    assert sanitize_token("env/gke") == "env/gke"
 
-    # Multi-slash values sanitized to single slash
-    assert sanitize_token("fw/my/custom/lib") == "fw/my_custom_lib"
-
-    # CRLF and forbidden characters sanitized
+    # Slashes, CRLF, and forbidden characters sanitized to underscores
+    assert sanitize_token("my/custom/lib") == "my_custom_lib"
     assert (
         sanitize_token("pandas\r\nInjected-Header: bad")
         == "pandas__Injected-Header__bad"
     )
     assert (
-        sanitize_token("fw/custom\r\nInjected-Header: injected_val")
-        == "fw/custom__Injected-Header__injected_val"
+        sanitize_token("custom\r\nInjected-Header: injected_val")
+        == "custom__Injected-Header__injected_val"
     )
     assert sanitize_token("host:8080") == "host_8080"
     assert sanitize_token("my@framework#1$2%3^4*5") == "my_framework_1_2_3_4_5"
@@ -54,14 +50,14 @@ def test_sanitize_token_valid_and_edge_cases():
     assert len(sanitize_token(long_str, max_len=64)) == 64
     assert len(sanitize_token(long_str, max_len=10)) == 10
 
-    # Empty, none, non-string, or malformed tokens
+    # Empty, none, non-string, or punctuation-only tokens
     assert sanitize_token(None) is None
     assert sanitize_token("") is None
     assert sanitize_token(123) is None
     assert sanitize_token("   ") is None
-    assert sanitize_token("fw/") is None
-    assert sanitize_token("/pandas") is None
     assert sanitize_token("///") is None
+    assert sanitize_token("...") is None
+    assert sanitize_token("---") is None
 
 
 # ============================================================================
@@ -100,7 +96,7 @@ def test_framework_detector_top_to_bottom_traversal(monkeypatch):
     f_gcsfs = _create_mock_frame("gcsfs.core", f_pyarrow)
 
     monkeypatch.setattr(sys, "_getframe", lambda: f_gcsfs)
-    assert detector.detect() == "fw/dask"
+    assert detector.detect() == "dask"
 
 
 def test_framework_detector_ignores_internal_and_test_prefixes(monkeypatch):
@@ -141,7 +137,7 @@ def test_telemetry_tracker_opt_out(monkeypatch):
         name = "env"
 
         def detect(self):
-            return "env/gke"
+            return "gke"
 
     tracker = UsageMetricsTracker(detectors=[DummyEnvDetector(), FrameworkDetector()])
 
@@ -185,7 +181,7 @@ def test_deep_stack_traversal(monkeypatch):
 
     monkeypatch.setattr(sys, "_getframe", lambda: current_frame)
     detected = detector.detect()
-    assert detected == "fw/lightning"
+    assert detected == "lightning"
 
 
 # ============================================================================
@@ -198,8 +194,8 @@ def test_set_and_get_telemetry_context():
     assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
 
     # Set caller framework
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/custom-engine")
-    assert get_telemetry_context().get(Dimension.FRAMEWORK) == "fw/custom-engine"
+    token = set_telemetry_context(Dimension.FRAMEWORK, "custom-engine")
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) == "custom-engine"
 
     # Reset
     reset_telemetry_context(token)
@@ -225,7 +221,7 @@ def test_multithreaded_context_isolation():
                 errors.append(f"{framework_name}: initial context not None")
 
             # 2. Set thread-local context
-            token = set_telemetry_context(Dimension.FRAMEWORK, f"fw/{framework_name}")
+            token = set_telemetry_context(Dimension.FRAMEWORK, framework_name)
             try:
                 # 3. Synchronize all threads so all 4 contexts are simultaneously active
                 barrier.wait(timeout=5)
@@ -233,9 +229,9 @@ def test_multithreaded_context_isolation():
                 # 4. Repeatedly verify context during concurrent overlap
                 for _ in range(5):
                     current = get_telemetry_context().get(Dimension.FRAMEWORK)
-                    if current != f"fw/{framework_name}":
+                    if current != framework_name:
                         errors.append(
-                            f"{framework_name}: expected fw/{framework_name}, got {current}"
+                            f"{framework_name}: expected {framework_name}, got {current}"
                         )
                     time.sleep(0.005)
             finally:
@@ -263,9 +259,9 @@ def test_post_fork_telemetry_reset():
 
     import multiprocessing
 
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/parent-process")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "parent-process")
     try:
-        assert get_telemetry_context() == {"fw": "fw/parent-process"}
+        assert get_telemetry_context() == {"fw": "parent-process"}
 
         ctx = multiprocessing.get_context("fork")
         result_queue = ctx.Queue()
@@ -283,7 +279,7 @@ def test_post_fork_telemetry_reset():
         assert child_result == {}, f"Child telemetry was not reset! Got: {child_result}"
 
         # Parent process still retains its original telemetry context
-        assert get_telemetry_context().get(Dimension.FRAMEWORK) == "fw/parent-process"
+        assert get_telemetry_context().get(Dimension.FRAMEWORK) == "parent-process"
 
         # Also directly exercise the registered at_fork callback for coverage tracing
         from gcsfs.telemetry.context import _reset_telemetry_in_child
@@ -304,18 +300,18 @@ def test_multidimensional_telemetry_registration():
         name = "env"
 
         def detect(self):
-            return "env/gke"
+            return "gke"
 
     tracker = UsageMetricsTracker(detectors=[DummyEnvDetector(), FrameworkDetector()])
     assert "env/gke" in tracker.get_tokens()
 
     # When framework is active in context
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/pandas")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
     try:
         tokens = tracker.get_tokens()
         assert "env/gke" in tokens
         assert "fw/pandas" in tokens
-        assert tracker.get_dimension(Dimension.FRAMEWORK) == "fw/pandas"
+        assert tracker.get_dimension(Dimension.FRAMEWORK) == "pandas"
     finally:
         reset_telemetry_context(token)
 
@@ -326,29 +322,27 @@ def test_get_tokens_sanitization_user_controlled_context():
 
     # User sets context with CRLF and custom headers
     token = set_telemetry_context(
-        Dimension.FRAMEWORK, "fw/custom\r\nInjected-Header: injected_val"
+        Dimension.FRAMEWORK, "custom\r\nInjected-Header: injected_val"
     )
     try:
-        tokens = tracker.get_tokens()
-        assert tokens == ["fw/custom__Injected-Header__injected_val"]
+        assert tracker.get_tokens() == ["fw/custom__Injected-Header__injected_val"]
         assert (
             tracker.get_dimension(Dimension.FRAMEWORK)
-            == "fw/custom__Injected-Header__injected_val"
+            == "custom__Injected-Header__injected_val"
         )
     finally:
         reset_telemetry_context(token)
 
-    # Extra slashes in value (e.g. fw/my/custom/lib -> fw/my_custom_lib)
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/my/custom/lib")
+    # Slashes in bare value sanitized to underscores (e.g. my/custom/lib -> fw/my_custom_lib)
+    token = set_telemetry_context(Dimension.FRAMEWORK, "my/custom/lib")
     try:
-        tokens = tracker.get_tokens()
-        assert tokens == ["fw/my_custom_lib"]
-        assert tracker.get_dimension(Dimension.FRAMEWORK) == "fw/my_custom_lib"
+        assert tracker.get_tokens() == ["fw/my_custom_lib"]
+        assert tracker.get_dimension(Dimension.FRAMEWORK) == "my_custom_lib"
     finally:
         reset_telemetry_context(token)
 
-    # Dangling / leading slash or empty should not produce invalid tokens like 'fw/'
-    for malformed in ["fw/", "/pandas", "   ", ""]:
+    # Punctuation-only or whitespace/empty values do not produce invalid tokens like 'fw/'
+    for malformed in ["///", "...", "---", "   ", ""]:
         token = set_telemetry_context(Dimension.FRAMEWORK, malformed)
         try:
             assert tracker.get_tokens() == []

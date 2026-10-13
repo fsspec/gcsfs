@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Dict, Optional
 
-from gcsfs.telemetry.context import Dimension, sanitize_token
+from gcsfs.telemetry.context import Dimension
 
 
 class BaseDetector:
@@ -15,11 +15,11 @@ class BaseDetector:
 
     def detect(self) -> Optional[str]:
         """
-        Execute detection logic and return an RFC 9110 compliant telemetry token.
+        Execute detection logic and return a bare telemetry token value.
 
         Returns
         -------
-        Optional[str]: Formatted token string (e.g. 'fw/pandas') or None if not detected.
+        Optional[str]: Bare token value (e.g. 'pandas') or None if not detected.
         """
         raise NotImplementedError
 
@@ -28,8 +28,9 @@ class FrameworkDetector(BaseDetector):
     """
     Detects the top-most initiating framework name on the call stack.
 
-    Traverses frames from outermost (closest to __main__) down to innermost (gcsfs)
-    to attribute high-level orchestrators (e.g., Dask, Ray) over lower-level serialization layers (PyArrow).
+    Traverses frames from innermost (gcsfs) to outermost (closest to __main__),
+    retaining the outermost match to attribute high-level orchestrators (e.g., Dask, Ray)
+    over lower-level serialization layers (PyArrow).
     """
 
     name = Dimension.FRAMEWORK
@@ -96,7 +97,4 @@ class FrameworkDetector(BaseDetector):
             del frame
             del start_frame
 
-        if detected_framework:
-            return sanitize_token(f"fw/{detected_framework}")
-
-        return None
+        return detected_framework
