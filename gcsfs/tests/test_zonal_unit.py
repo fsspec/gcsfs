@@ -18,6 +18,7 @@ from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
 from gcsfs.extended_gcsfs import (
     BucketType,
     ExtendedGcsFileSystem,
+    _close_pool,
     initiate_upload,
     simple_upload,
     upload_chunk,
@@ -26,7 +27,7 @@ from gcsfs.tests.conftest import csv_files, files, requires_rapid
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.test_zonal import gcs_bucket_mocks  # noqa: F401
 from gcsfs.tests.utils import is_real_gcs, tmpfile
-from gcsfs.zb_hns_utils import MRDPoolCache
+from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPoolCache
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -363,6 +364,601 @@ def test_zonal_prefetcher_default_concurrency(extended_gcsfs, gcs_bucket_mocks):
                 getattr(f.cache, "_prefetcher", None), "concurrency", None
             )
             assert cache_concurrency == 4
+
+
+def test_split_ranges_across_streams_balances_bytes():
+    reqs = [(0, 0, 16), (1, 100, 1), (2, 200, 1), (3, 300, 16), (4, 400, 2)]
+    groups = ExtendedGcsFileSystem._split_ranges_across_streams(reqs, 2)
+    assert len(groups) == 2
+    assert sorted(r for g in groups for r in g) == sorted(reqs)
+    loads = sorted(sum(r[2] for r in g) for g in groups)
+    assert loads == [18, 18]
+    for g in groups:
+        assert [r[1] for r in g] == sorted(r[1] for r in g)
+
+
+def test_split_ranges_across_streams_edge_cases():
+    split = ExtendedGcsFileSystem._split_ranges_across_streams
+    assert split([], 4) == []
+    assert split([(0, 5, 1), (1, 0, 1)], 1) == [[(1, 0, 1), (0, 5, 1)]]
+    # Never more groups than requests.
+    assert len(split([(0, 0, 1), (1, 1, 1)], 64)) == 2
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_uses_one_pool_and_splits_across_mrds(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    starts = [0, 10, 20, 30, 40, 50, file_size - 5, 5]
+    ends = [5, 15, 25, 35, 45, 55, file_size + 100, 5]
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges(
+            [file_path] * len(starts), starts, ends, batch_size=3
+        )
+
+        assert res == [json_data[s:e] for s, e in zip(starts, ends)]
+        mocks["pool_cache_get"].assert_awaited_once()
+        # 7 non-empty ranges across 3 streams -> 3 multi-range calls.
+        assert mocks["pool_cache_get"].call_args.kwargs["pool_size"] == 3
+        assert mocks["downloader"].download_ranges.await_count == 3
+        n_sent = sum(
+            len(c.args[0]) for c in mocks["downloader"].download_ranges.await_args_list
+        )
+        assert n_sent == 7
+        mocks["pool"].close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_multi_file_shares_stream_budget(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    other = f"{TEST_ZONAL_BUCKET}/test/accounts.2.json"
+    paths = [file_path, other] * 4
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges(paths, 0, 10, batch_size=4)
+
+        assert res == [json_data[:10]] * len(paths)
+        assert mocks["pool_cache_get"].await_count == 2
+        sizes = [c.kwargs["pool_size"] for c in mocks["pool_cache_get"].await_args_list]
+        assert sizes == [2, 2]
+
+
+def test_allocate_streams_stays_within_budget():
+    alloc = ExtendedGcsFileSystem._allocate_streams
+    # 5 objects x 40 ranges, budget 64, cap 16 -> sums to exactly 64.
+    a = alloc([40] * 5, 64, 16)
+    assert sum(a) == 64 and max(a) <= 16 and min(a) >= 1
+    # Streams follow range counts (D'Hondt), ties to the earlier object.
+    assert alloc([30, 10], 8, 16) == [6, 2]
+    assert alloc([4, 4, 4], 5, 16) == [2, 2, 1]
+    # Caps bind: 2 objects cannot use more than 2 x 16 streams.
+    assert alloc([100, 100], 64, 16) == [16, 16]
+    # Few ranges on an object never get more streams than ranges.
+    assert alloc([1, 99], 64, 16) == [1, 16]
+    # Skewed counts with the at-least-one floor stay within budget.
+    a = alloc([1, 1, 1, 197], 8, 16)
+    assert sum(a) == 8 and a[:3] == [1, 1, 1]
+    # As many or more objects than streams -> one each (caller bounds concurrency).
+    assert alloc([5, 5], 2, 16) == [1, 1]
+    assert alloc([3] * 10, 4, 16) == [1] * 10
+    # Many objects under the default budget use the whole budget.
+    a = alloc([2] * 1000, 1280, 16)
+    assert sum(a) == 1280 and max(a) == 2
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_many_objects_bounded_by_batch_size(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/obj{i}" for i in range(10)]
+    in_flight = 0
+    peak = 0
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        pool = mocks["pool"]
+
+        async def tracking_get(*args, **kwargs):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            return pool
+
+        async def tracking_close():
+            nonlocal in_flight
+            in_flight -= 1
+
+        mocks["pool_cache_get"].side_effect = tracking_get
+        pool.close.side_effect = tracking_close
+
+        res = await extended_gcsfs._cat_ranges(paths, 0, 10, batch_size=4)
+
+        assert res == [json_data[:10]] * len(paths)
+        assert mocks["pool_cache_get"].await_count == 10
+        assert peak <= 4
+        assert all(
+            c.kwargs["pool_size"] == 1 for c in mocks["pool_cache_get"].await_args_list
+        )
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_returns_group_exceptions(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = ValueError("boom")
+        res = await extended_gcsfs._cat_ranges([file_path] * 2, [0, 10], [5, 15])
+        assert all(isinstance(r, ValueError) for r in res)
+        mocks["pool"].close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_non_zonal_delegates_to_fsspec(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(json_data, bucket_type_val=BucketType.NON_HIERARCHICAL):
+        with mock.patch(
+            "fsspec.asyn.AsyncFileSystem._cat_ranges", new_callable=mock.AsyncMock
+        ) as mock_super:
+            mock_super.return_value = [b"x"]
+            res = await extended_gcsfs._cat_ranges([file_path], [0], [1])
+            assert res == [b"x"]
+            mock_super.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_with_max_gap_delegates_to_fsspec(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with pytest.raises(NotImplementedError):
+            await extended_gcsfs._cat_ranges([file_path], [0], [1], max_gap=0)
+        mocks["pool_cache_get"].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_on_error_raise(extended_gcsfs, gcs_bucket_mocks):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = ValueError("boom")
+        with pytest.raises(ValueError, match="boom"):
+            await extended_gcsfs._cat_ranges(
+                [file_path] * 2, [0, 10], [5, 15], on_error="raise"
+            )
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_respects_concurrency_kwarg(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges(
+            [file_path] * 20, 0, 5, batch_size=64, concurrency=3
+        )
+        assert res == [json_data[:5]] * 20
+        assert mocks["pool_cache_get"].call_args.kwargs["pool_size"] == 3
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_batch_size_minus_one_is_unbounded(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        res = await extended_gcsfs._cat_ranges([file_path] * 20, 0, 5, batch_size=-1)
+        assert res == [json_data[:5]] * 20
+        # fsspec's -1 means "no limit": only the per-object cap applies.
+        assert (
+            mocks["pool_cache_get"].call_args.kwargs["pool_size"]
+            == ExtendedGcsFileSystem.MAX_ZONAL_STREAMS_PER_OBJECT
+        )
+        with pytest.raises(ValueError, match="batch_size"):
+            await extended_gcsfs._cat_ranges([file_path] * 2, 0, 5, batch_size=-2)
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_mixed_zonal_and_regional_paths(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    regional = f"{TEST_BUCKET}/regional.json"
+    paths = [file_path, regional, file_path, regional]
+
+    async def is_zonal(bucket):
+        return bucket == TEST_ZONAL_BUCKET
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        pool = mocks["pool"]
+
+        async def slow_pool_get(*args, **kwargs):
+            await asyncio.sleep(0)
+            return pool
+
+        mocks["pool_cache_get"].side_effect = slow_pool_get
+        err = RuntimeError("regional fail")
+        with (
+            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", side_effect=is_zonal),
+            mock.patch.object(
+                extended_gcsfs,
+                "_cat_file",
+                new_callable=mock.AsyncMock,
+                side_effect=[b"r1", err],
+            ) as mock_cat_file,
+        ):
+            res = await extended_gcsfs._cat_ranges(
+                paths, [0, 1, 5, 3], [5, 2, 10, 4], concurrency=2
+            )
+        assert res == [json_data[:5], b"r1", json_data[5:10], err]
+        assert [c.args for c in mock_cat_file.await_args_list] == [
+            (regional,),
+            (regional,),
+        ]
+        assert [c.kwargs for c in mock_cat_file.await_args_list] == [
+            {"start": 1, "end": 2, "concurrency": 2},
+            {"start": 3, "end": 4, "concurrency": 2},
+        ]
+        mocks["pool_cache_get"].assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_init_fallbacks_and_errors(
+    extended_gcsfs, gcs_bucket_mocks, caplog
+):
+    with pytest.raises(TypeError):
+        await extended_gcsfs._cat_ranges(file_path, [0], [5])
+    with pytest.raises(ValueError):
+        await extended_gcsfs._cat_ranges([file_path], [0, 1], [5])
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["pool"].persisted_size = None
+        mocks["downloader"].persisted_size = None
+
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                extended_gcsfs,
+                "_info",
+                new_callable=mock.AsyncMock,
+                return_value={"size": len(json_data)},
+            ) as mock_info,
+        ):
+            res = await extended_gcsfs._cat_ranges([file_path], [0], [5])
+            assert res == [json_data[:5]]
+            mock_info.assert_awaited_once_with(file_path)
+            assert "Falling back to _info() to get the file size" in caplog.text
+
+        mocks["pool"].close.reset_mock()
+        with mock.patch.object(
+            extended_gcsfs,
+            "_info",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("info boom"),
+        ):
+            res = await extended_gcsfs._cat_ranges([file_path] * 2, [0, 5], [5, 10])
+            assert len(res) == 2
+            assert all(isinstance(r, RuntimeError) for r in res)
+            mocks["pool"].close.assert_awaited_once()
+
+        mocks["pool"].close.reset_mock()
+        with (
+            mock.patch.object(
+                extended_gcsfs,
+                "_info",
+                new_callable=mock.AsyncMock,
+                side_effect=asyncio.CancelledError(),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await extended_gcsfs._cat_ranges([file_path], [0], [5])
+        mocks["pool"].close.assert_awaited_once()
+
+
+async def _cancel_once(started, coro):
+    """Run ``coro`` as a task, cancel it once ``started`` is set, and return the
+    tasks it left behind."""
+    before = set(asyncio.all_tasks())
+    task = asyncio.ensure_future(coro)
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return asyncio.all_tasks() - before - {task}
+
+
+@pytest.fixture
+def close_pool_cancels():
+    """Count the cancellations that reach a stream while it is closing its
+    pool, i.e. any cancel after the one that stopped the stream. A regression
+    to supervising the streams with a plain ``asyncio.gather`` shows up here."""
+    counts = {"n": 0}
+
+    async def counting_close_pool(pool):
+        try:
+            return await _close_pool(pool)
+        except asyncio.CancelledError:
+            counts["n"] += 1
+            raise
+
+    with mock.patch("gcsfs.extended_gcsfs._close_pool", counting_close_pool):
+        yield counts
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_closes_pool_and_tasks(
+    extended_gcsfs, gcs_bucket_mocks, close_pool_cancels
+):
+    started = asyncio.Event()
+    calls = {"downloads": 0, "cancelled": 0, "close_completed": 0}
+
+    async def blocking_download(read_requests, metadata=None):
+        calls["downloads"] += 1
+        if calls["downloads"] == 4:
+            started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            calls["cancelled"] += 1
+            raise
+
+    async def slow_close():
+        # Span multiple ticks so a second cancel of the closing stream would
+        # arrive while _close_pool is still waiting for this to finish.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        calls["close_completed"] += 1
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = blocking_download
+        mocks["pool"].close.side_effect = slow_close
+
+        leftover = await _cancel_once(
+            started,
+            extended_gcsfs._cat_ranges(
+                [file_path] * 4, [0, 10, 20, 30], [5, 15, 25, 35], batch_size=4
+            ),
+        )
+        assert calls["cancelled"] == 4
+        assert calls["close_completed"] == 1
+        mocks["pool"].close.assert_awaited_once()
+        assert close_pool_cancels["n"] == 0
+        assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_while_closing_pool(
+    extended_gcsfs, gcs_bucket_mocks, close_pool_cancels
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/done", f"{TEST_ZONAL_BUCKET}/in_flight"]
+    closing = asyncio.Event()
+    close_completed = 0
+
+    async def download_ranges(read_requests, metadata=None):
+        if read_requests[0][0] == 0:
+            for offset, length, view in read_requests:
+                view.write(json_data[offset : offset + length])
+            return
+        await asyncio.Event().wait()
+
+    async def slow_close():
+        nonlocal close_completed
+        closing.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        close_completed += 1
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = download_ranges
+        mocks["pool"].close.side_effect = slow_close
+
+        leftover = await _cancel_once(
+            closing,
+            extended_gcsfs._cat_ranges(paths, [0, 10], [5, 15], batch_size=2),
+        )
+        # Both objects opened a pool; even the stream cancelled while already
+        # inside pool.close() ran close() to completion.
+        assert mocks["pool"].close.await_count == 2
+        assert close_completed == 2
+        # Only the stream that was already closing saw its (single) cancel
+        # there; the in-flight stream was not cancelled again while closing.
+        assert close_pool_cancels["n"] == 1
+        assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_many_objects_closes_open_pools(
+    extended_gcsfs, gcs_bucket_mocks, close_pool_cancels
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/obj{i}" for i in range(10)]
+    started = asyncio.Event()
+    downloads = 0
+
+    async def blocking_download(read_requests, metadata=None):
+        nonlocal downloads
+        downloads += 1
+        if downloads == 4:
+            started.set()
+        await asyncio.Event().wait()
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = blocking_download
+
+        leftover = await _cancel_once(
+            started, extended_gcsfs._cat_ranges(paths, 0, 10, batch_size=4)
+        )
+        # The 4 objects in flight opened a pool each; all 4 were closed and
+        # the 6 objects still waiting for the batch never opened one.
+        assert mocks["pool_cache_get"].await_count == 4
+        assert mocks["pool"].close.await_count == 4
+        assert close_pool_cancels["n"] == 0
+        assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_pool_close_error_raised_after_streams_finish(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    paths = [f"{TEST_ZONAL_BUCKET}/done", f"{TEST_ZONAL_BUCKET}/slow"]
+    release = asyncio.Event()
+    close_failed = asyncio.Event()
+    state = {"closes": 0, "slow_finished": False}
+
+    async def download_ranges(read_requests, metadata=None):
+        if read_requests[0][0] != 0:
+            await release.wait()
+            state["slow_finished"] = True
+        for offset, length, view in read_requests:
+            view.write(json_data[offset : offset + length])
+
+    async def close():
+        state["closes"] += 1
+        if state["closes"] == 1:
+            close_failed.set()
+            raise RuntimeError("close boom")
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = download_ranges
+        mocks["pool"].close.side_effect = close
+
+        task = asyncio.ensure_future(
+            extended_gcsfs._cat_ranges(paths, [0, 10], [5, 15], batch_size=2)
+        )
+        await asyncio.wait_for(close_failed.wait(), 5)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # The first object's pool failed to close; the call keeps waiting for
+        # the other object's stream rather than cancelling it.
+        assert not task.done()
+        release.set()
+        with pytest.raises(RuntimeError, match="close boom"):
+            await task
+        assert state["slow_finished"]
+        assert state["closes"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_cancel_while_opening_pool(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    started = asyncio.Event()
+
+    async def blocking_get(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["pool_cache_get"].side_effect = blocking_get
+
+        leftover = await _cancel_once(
+            started,
+            extended_gcsfs._cat_ranges(
+                [file_path] * 4, [0, 10, 20, 30], [5, 15, 25, 35], batch_size=4
+            ),
+        )
+        mocks["pool_cache_get"].assert_awaited_once()
+        mocks["pool"].close.assert_not_awaited()
+        assert not leftover
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_chunks_download_ranges_at_mrd_max_ranges(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    starts = list(range(0, 70, 10))
+    ends = [s + 5 for s in starts]
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        with mock.patch("gcsfs.extended_gcsfs.MRD_MAX_RANGES", 3):
+            res = await extended_gcsfs._cat_ranges(
+                [file_path] * len(starts), starts, ends, batch_size=1
+            )
+        assert res == [json_data[s:e] for s, e in zip(starts, ends)]
+        calls = mocks["downloader"].download_ranges.await_args_list
+        assert [len(c.args[0]) for c in calls] == [3, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_short_read_is_an_error(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    async def short_read(read_requests, metadata=None):
+        for offset, length, view in read_requests:
+            view.write(json_data[offset : offset + length - 1])
+
+    with gcs_bucket_mocks(
+        json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL
+    ) as mocks:
+        mocks["downloader"].download_ranges.side_effect = short_read
+        res = await extended_gcsfs._cat_ranges(
+            [file_path] * 2, [0, 10], [5, 15], batch_size=1
+        )
+        assert all(isinstance(r, BufferError) for r in res)
+
+
+@pytest.mark.asyncio
+async def test_cat_ranges_zonal_closes_all_buffers_when_close_raises(
+    extended_gcsfs, gcs_bucket_mocks
+):
+    created = []
+    real_buf = DirectMemmoveBuffer
+
+    def make_buf(length, executor):
+        buf = real_buf(length, executor)
+        idx = len(created)
+        created.append(buf)
+        orig_close = buf.close
+
+        def close():
+            orig_close()
+            if idx == 0:
+                raise RuntimeError("buf0 close failed")
+            if idx == 1:
+                raise RuntimeError("buf1 close failed")
+
+        buf.close = mock.Mock(side_effect=close)
+        return buf
+
+    with (
+        gcs_bucket_mocks(json_data, bucket_type_val=BucketType.ZONAL_HIERARCHICAL),
+        mock.patch("gcsfs.extended_gcsfs.DirectMemmoveBuffer", side_effect=make_buf),
+        pytest.raises(RuntimeError, match="buf0 close failed"),
+    ):
+        await extended_gcsfs._cat_ranges(
+            [file_path] * 3,
+            [0, 5, 10],
+            [5, 10, 15],
+            batch_size=1,
+            on_error="raise",
+        )
+    assert len(created) == 3
+    assert all(b.close.call_count == 1 for b in created)
 
 
 def test_resolve_cache_config():
