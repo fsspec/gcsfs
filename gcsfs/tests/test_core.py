@@ -1569,14 +1569,14 @@ def _upload_call_params(mock_call):
         ({"mode": "create", "if_generation_match": 0}, "0"),
     ],
 )
-def test_pipe_file_if_generation_match_simple(gcs, kwargs, expected):
+def test_pipe_file_if_generation_match_simple(gcs, skip_if_zonal, kwargs, expected):
     with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
         mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
         gcs.pipe_file(TEST_BUCKET + "/cas", b"abc", consistency="none", **kwargs)
     assert _upload_call_params(mock_call) == [expected]
 
 
-def test_pipe_file_if_generation_match_resumable(gcs):
+def test_pipe_file_if_generation_match_resumable(gcs, skip_if_zonal):
     location = (
         "https://storage.googleapis.com/upload/storage/v1/b/"
         f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=123"
@@ -1603,7 +1603,7 @@ def test_pipe_file_if_generation_match_resumable(gcs):
     )
 
 
-def test_put_file_if_generation_match(gcs):
+def test_put_file_if_generation_match(gcs, skip_if_zonal):
     with tmpfile() as lpath:
         with open(lpath, "wb") as f:
             f.write(b"abc")
@@ -1615,7 +1615,7 @@ def test_put_file_if_generation_match(gcs):
     assert _upload_call_params(mock_call) == ["7"]
 
 
-def test_open_if_generation_match(gcs):
+def test_open_if_generation_match(gcs, skip_if_zonal):
     location = (
         "https://storage.googleapis.com/upload/storage/v1/b/"
         f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=7"
@@ -1650,9 +1650,18 @@ def test_write_if_generation_match(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support condition")
     fn = TEST_BUCKET + "/cas.file"
+    if gcs.exists(fn):
+        gcs.rm(fn)
     gcs.pipe_file(fn, b"v1", if_generation_match=0)
+    with pytest.raises(FileExistsError):
+        gcs.pipe_file(fn, b"v1", if_generation_match=0)
     gen = int(gcs.info(fn)["generation"])
-    gcs.pipe_file(fn, b"v2", if_generation_match=gen)
+    try:
+        gcs.pipe_file(fn, b"v2", if_generation_match=gen)
+    except NotImplementedError:
+        pytest.skip(
+            "zonal CAS needs a google-cloud-storage release with if_generation_match"
+        )
     assert gcs.cat(fn) == b"v2"
     with pytest.raises(FileExistsError):
         gcs.pipe_file(fn, b"v3", if_generation_match=gen)
