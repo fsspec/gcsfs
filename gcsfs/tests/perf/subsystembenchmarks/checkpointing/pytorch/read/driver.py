@@ -16,6 +16,7 @@ from torch.distributed.checkpoint.planner import LoadItemType, LoadPlan
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
     run_split,
     setup_distributed_env,
+    spawn_split,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
@@ -109,9 +110,15 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
             dist.barrier()
             durations.append((begin, time.perf_counter()))
 
-        # Outside the timed window. The planner check catches wrong shapes;
-        # the checksum catches wrong or missing bytes, which DCP does not
-        # verify (no CRC), so a bad reader would otherwise just look faster.
+        with open(os.path.join(stats_dir, f"rank{rank}"), "w") as f:
+            f.write(str(planner.read_items))
+        # Report before the checks below so the parent can close its timed
+        # and monitored window while the ranks verify the loaded bytes.
+        q.put(durations)
+
+        # The planner check catches wrong shapes; the checksum catches wrong
+        # or missing bytes, which DCP does not verify (no CRC), so a bad
+        # reader would otherwise just look faster.
         if planner.bytes_requested != bytes_expected:
             raise RuntimeError(
                 f"rank {rank}: DCP requested {planner.bytes_requested} tensor bytes, "
@@ -126,10 +133,6 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
             raise RuntimeError(
                 f"rank {rank}: checksum mismatch in {len(bad)} tensors, e.g. {bad[0]}"
             )
-
-        with open(os.path.join(stats_dir, f"rank{rank}"), "w") as f:
-            f.write(str(planner.read_items))
-        q.put(durations)
     finally:
         dist.destroy_process_group()
 
@@ -140,7 +143,7 @@ class PyTorchCheckpointReadDriver(CheckpointDriver):
 
     def run(self, prefix, params):
         with tempfile.TemporaryDirectory() as stats_dir:
-            durations = run_split(
+            ranks = spawn_split(
                 prefix, params, functools.partial(_rank_load, stats_dir=stats_dir)
             )
             read_items = []
@@ -149,8 +152,9 @@ class PyTorchCheckpointReadDriver(CheckpointDriver):
                     read_items.append(int(f.read()))
 
         return CheckpointResult(
-            durations=durations,
+            durations=ranks.durations,
             extra_columns={"dcp_read_items_per_rank_max": max(read_items)},
+            verify=ranks.join,
         )
 
     def read_count(self, params) -> int:

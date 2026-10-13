@@ -191,6 +191,7 @@ def test_driver_local_fs(tmp_path, sizes):
 
     driver.setup(prefix, params)
     result = driver.run(prefix, params)
+    result.verify()
 
     cols = result.extra_columns
     assert len(result.durations) == 2
@@ -222,6 +223,7 @@ def test_driver_local_fs_pp(tmp_path):
 
     driver.setup(prefix, params)
     result = driver.run(prefix, params)
+    result.verify()
 
     # The last stage owns one layer plus norm and lm_head. Each param has 3
     # tensors, a step, and its own BYTE_IO param_groups entries.
@@ -250,5 +252,8 @@ def test_checksum_mismatch_raises(tmp_path):
     data[mid : mid + 16] = bytes(b ^ 0xFF for b in data[mid : mid + 16])
     path.write_bytes(bytes(data))
 
+    # run() returns the timings; the checksum check runs in verify(), which
+    # the harness calls after the monitored window.
+    result = driver.run(prefix, params)
     with pytest.raises(ProcessRaisedException, match="checksum mismatch"):
-        driver.run(prefix, params)
+        result.verify()

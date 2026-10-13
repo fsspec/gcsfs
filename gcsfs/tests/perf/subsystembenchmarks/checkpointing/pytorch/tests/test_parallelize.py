@@ -374,7 +374,7 @@ def test_state_checksum(tmp_path, fake_pg):
     assert checksum == state_checksum(state)
     assert checksum[f"model.{fqn}"] != checksum[f"optim.state.{fqn}.exp_avg"]
     assert f"optim.state.{fqn}.step" in checksum
-    assert all(isinstance(v, str) and len(v) == 64 for v in checksum.values())
+    assert all(isinstance(v, str) and len(v) == 8 for v in checksum.values())
     assert not any(k.startswith("optim.param_groups") for k in checksum)
 
 

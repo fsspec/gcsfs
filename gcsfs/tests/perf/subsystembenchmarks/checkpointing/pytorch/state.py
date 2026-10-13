@@ -1,5 +1,4 @@
-import hashlib
-
+import google_crc32c
 import torch
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 from torch.distributed.tensor import DTensor
@@ -31,9 +30,13 @@ def expected_bytes_requested(state: dict) -> int:
 
 
 def state_checksum(state: dict) -> dict[str, str]:
+    # Hardware CRC32C runs at several GB/s per thread, so checking a rank's
+    # tensors takes about a second where SHA-256 took tens of seconds.
     return {
-        name: hashlib.sha256(
-            t.detach().contiguous().reshape(-1).view(torch.uint8).numpy()
-        ).hexdigest()
+        name: f"{google_crc32c.value(_raw_bytes(t)):08x}"
         for name, t in _local_tensors(state)
     }
+
+
+def _raw_bytes(t: torch.Tensor):
+    return t.detach().contiguous().reshape(-1).view(torch.uint8).numpy()
