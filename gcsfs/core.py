@@ -2422,7 +2422,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         token. The service account then needs the
         ``roles/iam.serviceAccountTokenCreator`` role on itself. Passing
         ``service_account_email`` and ``access_token`` explicitly selects this
-        path with any credentials.
+        path with any credentials, and passing ``credentials`` signs with those
+        instead.
 
         Parameters
         ----------
@@ -2447,6 +2448,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             and not isinstance(credentials, Signing)
             and "service_account_email" not in kwargs
             and "access_token" not in kwargs
+            and "credentials" not in kwargs
         ):
             # No private key (e.g. GCE or GKE Workload Identity credentials):
             # have google-cloud-storage sign through the IAM signBlob API with

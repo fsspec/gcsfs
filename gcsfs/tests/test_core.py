@@ -2739,6 +2739,18 @@ def test_sign_explicit_iam_arguments_are_kept(monkeypatch):
     assert kwargs["access_token"] == "t"
 
 
+def test_sign_explicit_credentials_are_kept(monkeypatch):
+    blob = _fake_storage_client(monkeypatch)
+    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
+    signer = mock.Mock()
+
+    fs.sign("bucket/key", credentials=signer)
+    kwargs = blob.generate_signed_url.call_args.kwargs
+    assert kwargs["credentials"] is signer
+    assert "service_account_email" not in kwargs
+    assert "access_token" not in kwargs
+
+
 def test_sign_without_private_key_calls_signblob_api(monkeypatch):
     fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
     signature = base64.b64encode(b"signature").decode()
