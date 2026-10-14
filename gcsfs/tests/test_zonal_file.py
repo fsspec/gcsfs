@@ -1261,10 +1261,12 @@ def test_zonal_file_adaptive_cache_rebinds_when_global_loop_differs_from_fs_loop
     mock_gcsfs._concurrent_mrd_fetch = fake_concurrent_mrd_fetch
 
     loop2 = None
+    thread2 = None
     try:
         fsspec.asyn.reset_lock()
         # Force creation of a second global loop before ZonalFile is opened
         loop2 = fsspec.asyn.get_loop()
+        thread2 = fsspec.asyn.iothread[0]
         assert loop2 is not loop1
 
         zf = ZonalFile(
@@ -1282,5 +1284,10 @@ def test_zonal_file_adaptive_cache_rebinds_when_global_loop_differs_from_fs_loop
     finally:
         fsspec.asyn.loop[0] = loop1
         fsspec.asyn.iothread[0] = orig_iothread
-        if loop2 is not None and loop2.is_running():
-            loop2.call_soon_threadsafe(loop2.stop)
+        if loop2 is not None:
+            if loop2.is_running():
+                loop2.call_soon_threadsafe(loop2.stop)
+            if thread2 is not None:
+                thread2.join(timeout=5)
+            if not loop2.is_running():
+                loop2.close()

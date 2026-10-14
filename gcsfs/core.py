@@ -2623,6 +2623,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             # bound to fs_loop, restore asyn.loop[0] before AbstractBufferedFile
             # initializes AdaptiveReadaheadCache so fsspec.asyn.get_loop() does
             # not spawn a second event loop thread that conflicts with gcsfs.loop.
+            # Side effect: fs_loop becomes fsspec's process-wide default loop for
+            # any filesystem created afterwards, and asyn.iothread[0] stays None
+            # (fsspec will not stop fs_loop at interpreter exit).
             with asyn.get_lock():
                 if asyn.loop[0] is None:
                     asyn.loop[0] = fs_loop
