@@ -20,3 +20,6 @@ scenarios:
       - {axis: "strategy", strategy: "pp_fsdp", pipeline_parallel_size: 2, data_parallel_size: 4, world_size: 8}
       - {axis: "strategy", strategy: "pp_fsdp_tp", pipeline_parallel_size: 2, data_parallel_size: 2, tensor_parallel_size: 2, world_size: 8}
       - {axis: "strategy", strategy: "pp_hsdp_tp", pipeline_parallel_size: 2, data_parallel_replicate_size: 2, data_parallel_size: 2, tensor_parallel_size: 2, world_size: 16}
+      # OLMoE: fsdp slices every expert tensor 8 ways; ep gives each rank 8 whole experts per layer
+      - {axis: "model", strategy: "fsdp", model_id: "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924", data_parallel_size: 8, world_size: 8}
+      - {axis: "strategy", strategy: "ep", model_id: "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924", data_parallel_size: 8, expert_parallel_size: 8, world_size: 8}

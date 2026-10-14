@@ -32,14 +32,32 @@ def test_case_names():
         "load-llama_3_1_8b-pp-fsdp-pp2dp4-ws8-reg",
         "load-llama_3_1_8b-pp-fsdp-tp-pp2dp2tp2-ws8-reg",
         "load-llama_3_1_8b-pp-hsdp-tp-pp2dpr2dp2tp2-ws16-reg",
+        "load-olmoe_1b_7b_0924-fsdp-ws8-reg",
+        "load-olmoe_1b_7b_0924-ep-dp8ep8-ws8-reg",
     ]
     assert names == expected_names
 
 
-def test_mesh_product_equals_world_size():
+_OLMOE = "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924"
+
+
+@pytest.mark.parametrize("model_id", [_OLMOE, "gs://b/Llama-3.1-70B"])
+def test_model_id_override_skips_rows_that_pin_model_id(monkeypatch, model_id):
+    # The OLMoE rows pin their own model_id. With --model-id they are skipped,
+    # so the override means "exactly this model" (and OLMoE as the override
+    # does not collide with the OLMoE fsdp row on the same benchmark id).
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_MODEL_ID", model_id)
     cases = _cases()
     assert len(cases) == 10
+    assert {c.model_id for c in cases} == {model_id}
+    assert not any("olmoe" in c.name for c in cases if model_id != _OLMOE)
+
+
+def test_mesh_product_equals_world_size():
+    cases = _cases()
+    assert len(cases) == 12
     for c in cases:
+        # expert_parallel_size is not a mesh factor: EP reuses the dp_shard ranks.
         mesh_product = (
             c.data_parallel_replicate_size
             * c.data_parallel_size
@@ -103,9 +121,49 @@ def test_baseline_is_fsdp():
     assert baseline.scenario == "checkpoint_read"
 
     strategy_cases = [c for c in cases if c.sweep_axis == "strategy"]
-    assert len(strategy_cases) == 9
+    assert len(strategy_cases) == 10
     for c in strategy_cases:
         assert c.scenario == "checkpoint_read"
+
+
+def test_olmoe_cases():
+    olmoe = "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924"
+    cases = {c.name: c for c in _cases() if c.model_id == olmoe}
+    fsdp = cases["load-olmoe_1b_7b_0924-fsdp-ws8-reg"]
+    ep = cases["load-olmoe_1b_7b_0924-ep-dp8ep8-ws8-reg"]
+    assert (fsdp.sweep_axis, fsdp.strategy, fsdp.expert_parallel_size) == (
+        "model",
+        "fsdp",
+        1,
+    )
+    assert (ep.sweep_axis, ep.strategy, ep.expert_parallel_size) == (
+        "strategy",
+        "ep",
+        8,
+    )
+    for c in (fsdp, ep):
+        assert (c.data_parallel_size, c.world_size) == (8, 8)
+
+
+def test_expert_parallel_size_must_match_dp(tmp_path):
+    config = tmp_path / "configs.yaml"
+    config.write_text(
+        """
+common:
+  rounds: 1
+  model_id: "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924"
+  baseline:
+    strategy: "ep"
+    data_parallel_size: 8
+    expert_parallel_size: 4
+    world_size: 8
+scenarios:
+  - name: "checkpoint_read"
+    scenario: "checkpoint_read"
+"""
+    )
+    with pytest.raises(ValueError, match="expert_parallel_size"):
+        PyTorchCheckpointConfigurator(str(tmp_path / "configs.py")).generate_cases()
 
 
 def test_extra_columns():
@@ -114,8 +172,10 @@ def test_extra_columns():
         extra = c.extra_columns()
         assert "data_parallel_replicate_size" in extra
         assert "pipeline_parallel_size" in extra
+        assert "expert_parallel_size" in extra
         assert extra["data_parallel_replicate_size"] == c.data_parallel_replicate_size
         assert extra["pipeline_parallel_size"] == c.pipeline_parallel_size
+        assert extra["expert_parallel_size"] == c.expert_parallel_size
 
 
 def test_columns_in_schema():

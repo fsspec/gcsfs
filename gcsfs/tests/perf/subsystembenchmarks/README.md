@@ -18,7 +18,7 @@ A group is a `<subsystem>/<implementation>` directory with its own
 | `dataloading/huggingface_datasets` | Hugging Face Datasets (streaming) → PyTorch `DataLoader` | Full reads of a synthetic Parquet or JSONL corpus |
 | `dataloading/ray_data` | Ray Data `read_parquet` → `iter_torch_batches` | Full reads of a synthetic Parquet corpus |
 | `dataloading/webdataset` | WebDataset → PyTorch `DataLoader`; `gs://` opened by a `gcsfs` opener | Reads of synthetic image tar shards |
-| `checkpointing/pytorch` | PyTorch `torch.distributed.checkpoint` (`FsspecReader`) | Sharded DCP checkpoint read of Llama-3.1-8B with AdamW state across FSDP2/HSDP/TP/PP layouts |
+| `checkpointing/pytorch` | PyTorch `torch.distributed.checkpoint` (`FsspecReader`) | Sharded DCP checkpoint read of Llama-3.1-8B and OLMoE-1B-7B with AdamW state across FSDP2/HSDP/TP/PP/EP layouts |
 | `checkpointing/pytorch_lightning` | PyTorch Lightning | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 | `checkpointing/ray_pytorch` | Ray actors with PyTorch `torch.save` / DCP | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 
@@ -133,7 +133,7 @@ For checkpointing groups:
   gcloud storage cp -r gs://huggingface-model-weights/Llama-3.1-8B /tmp/
   ```
 
-- `--model-id` also accepts a Hugging Face repo ID or a local path.
+- `--model-id` also accepts a Hugging Face repo ID or a local path. Variants that pin their own `model_id` (the OLMoE rows in `checkpointing/pytorch`) are skipped while `--model-id` is set, so the override runs exactly the model you asked for.
 - These groups need a very large-memory host. A code comment in
   `checkpointing/checkpoint_case.py` targets a 732 GB VM.
 
