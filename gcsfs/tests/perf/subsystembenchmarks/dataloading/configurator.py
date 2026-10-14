@@ -11,7 +11,13 @@ from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
     OneFactorConfigurator,
 )
 
-_BUCKET = {"regional": "reg", "zonal": "zon", "hns": "hns"}
+_BUCKET = {
+    "regional": "reg",
+    "zonal": "zon",
+    "hns": "hns",
+    "rapid_cache_cold": "rccold",
+    "rapid_cache_warm": "rcwarm",
+}
 
 # Traversal patterns published in the read_access_pattern column.
 ACCESS_PATTERNS = ("sequential", "shuffled")

@@ -107,7 +107,7 @@ def test_axis_names_are_complete():
 def test_default_run_is_the_storage_sweep():
     """Only storage-bound variants run by default; the rest are parked."""
     cases = configs.WebDatasetReadConfigurator(CONFIG).generate_cases()
-    assert len(cases) == 11
+    assert len(cases) == 10
     assert {c.sweep_axis for c in cases} == {
         "baseline",
         "shard_size",

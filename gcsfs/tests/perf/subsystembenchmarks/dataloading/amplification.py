@@ -11,9 +11,13 @@ import dataclasses
 import logging
 import time
 
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
 _SENT = "storage.googleapis.com/network/sent_bytes_count"
 _REQ = "storage.googleapis.com/api/request_count"
+_CACHE_SENT = "storage.googleapis.com/anywhere_cache/sent_bytes_count"
 _READ_METHODS = ("ReadObject", "BidiReadObject")
+_HIT_RATIO = "rapid_cache_hit_ratio"
 _NEW_COLS = [
     "dataset_read_bytes",
     "dataset_read_request_count",
@@ -21,6 +25,7 @@ _NEW_COLS = [
     "checkpoint_read_bytes",
     "checkpoint_read_request_count",
     "checkpoint_read_amplification_ratio",
+    _HIT_RATIO,
 ]
 # report.generate_csv writes "N/A" for extra_info keys a case did not publish.
 _MISSING_VALUES = (None, "", "N/A")
@@ -54,41 +59,83 @@ def _point_value(point):
     return float(getattr(v, "int64_value", 0))
 
 
-def _sum_series(client, project, filter_, start_epoch, end_epoch, period):
+def _list_series(client, project, filter_, start_epoch, end_epoch, period):
     s, e = align_interval(start_epoch, end_epoch, period)
-    request = {
-        "name": f"projects/{project}",
-        "filter": filter_,
-        "interval": {"start_time": {"seconds": s}, "end_time": {"seconds": e}},
-        "aggregation": {
-            "alignment_period": {"seconds": period},
-            "per_series_aligner": "ALIGN_DELTA",
-        },
-    }
+    return client.list_time_series(
+        {
+            "name": f"projects/{project}",
+            "filter": filter_,
+            "interval": {"start_time": {"seconds": s}, "end_time": {"seconds": e}},
+            "aggregation": {
+                "alignment_period": {"seconds": period},
+                "per_series_aligner": "ALIGN_DELTA",
+            },
+        }
+    )
+
+
+def _sum_series(client, project, filter_, start_epoch, end_epoch, period):
     total, found = 0.0, False
-    for ts in client.list_time_series(request):
+    for ts in _list_series(client, project, filter_, start_epoch, end_epoch, period):
         for p in ts.points:
             total += _point_value(p)
             found = True
     return total if found else None
 
 
-def bucket_egress_bytes(client, project, bucket, start_epoch, end_epoch, period=60):
+def _read_filter(metric, bucket):
     methods = " OR ".join(f'metric.labels.method = "{m}"' for m in _READ_METHODS)
-    filter_ = (
-        f'metric.type = "{_SENT}" AND resource.type = "gcs_bucket" '
+    return (
+        f'metric.type = "{metric}" AND resource.type = "gcs_bucket" '
         f'AND resource.labels.bucket_name = "{bucket}" AND ({methods})'
     )
+
+
+def bucket_egress_bytes(client, project, bucket, start_epoch, end_epoch, period=60):
+    filter_ = _read_filter(_SENT, bucket)
     return _sum_series(client, project, filter_, start_epoch, end_epoch, period)
 
 
 def bucket_read_requests(client, project, bucket, start_epoch, end_epoch, period=60):
-    methods = " OR ".join(f'metric.labels.method = "{m}"' for m in _READ_METHODS)
-    filter_ = (
-        f'metric.type = "{_REQ}" AND resource.type = "gcs_bucket" '
-        f'AND resource.labels.bucket_name = "{bucket}" AND ({methods})'
-    )
+    filter_ = _read_filter(_REQ, bucket)
     return _sum_series(client, project, filter_, start_epoch, end_epoch, period)
+
+
+def bucket_cache_hit_ratio(client, project, bucket, start_epoch, end_epoch, period=60):
+    """Fraction of Anywhere Cache read bytes served as hits, or None without data.
+
+    A RUNNING cache does not prove reads were served from it (e.g. a VM in another
+    campus than the cache gets no hits), so warm results carry this as evidence.
+    """
+    filter_ = _read_filter(_CACHE_SENT, bucket)
+    hit = total = 0.0
+    for ts in _list_series(client, project, filter_, start_epoch, end_epoch, period):
+        is_hit = str(ts.metric.labels.get("anywhere_cache_hit", "")).lower() == "true"
+        for p in ts.points:
+            value = _point_value(p)
+            total += value
+            if is_hit:
+                hit += value
+    return hit / total if total > 0 else None
+
+
+def _fill_hit_ratio(row, project, client):
+    """Best-effort: a missing ratio leaves the column blank and is not retried for."""
+    try:
+        ratio = bucket_cache_hit_ratio(
+            client,
+            project,
+            row["gcs_bucket_name"],
+            int(float(row["measurement_window_start_unix_seconds"])),
+            int(float(row["measurement_window_end_unix_seconds"])),
+        )
+    except Exception as exc:
+        logging.warning(
+            "rapid cache hit scrape failed for %s: %s", row["gcs_bucket_name"], exc
+        )
+        return
+    if ratio is not None:
+        row[_HIT_RATIO] = str(ratio)
 
 
 def enrich_csv(csv_path, project, *, client):
@@ -142,18 +189,31 @@ def enrich_csv(csv_path, project, *, client):
             rounds = int(float(row.get("measurement_round_count") or 1))
             egress = bucket_egress_bytes(client, project, bucket, ws, we)
             reqs = bucket_read_requests(client, project, bucket, ws, we)
-            if egress is not None:
+            if (
+                rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
+                and egress in (None, 0.0)
+                and reqs in (None, 0.0)
+            ):
+                egress = 0.0
+                reqs = 0.0
+            ideal = physical_size * rounds
+            if egress is not None and reqs is not None and ideal > 0:
                 row[f"{prefix}_read_bytes"] = str(int(egress))
-                ideal = physical_size * rounds
-                if ideal:
-                    row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
-            if reqs is not None:
                 row[f"{prefix}_read_request_count"] = str(int(reqs))
+                row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
         except Exception as exc:
             logging.warning("amplification scrape failed for %s: %s", bucket, exc)
 
         if not all(row.get(column) not in (None, "") for column in cols_to_check):
             missing.append(bucket)
+
+    for row in rows:
+        if (
+            row.get("gcs_bucket_name")
+            and rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
+            and not _has_value(row.get(_HIT_RATIO))
+        ):
+            _fill_hit_ratio(row, project, client)
 
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
