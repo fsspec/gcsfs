@@ -1675,8 +1675,10 @@ def test_resolve_generation_match(mode, value, expected):
     [("rb", {"if_generation_match": 5}), ("xb", {"if_generation_match": 5})],
 )
 def test_open_rejects_invalid_if_generation_match(gcs, mode, kwargs):
+    fn = TEST_BUCKET + "/cas"
+    gcs.pipe_file(fn, b"abc")  # ZonalFile looks the object up before validating
     with pytest.raises(ValueError):
-        gcs.open(TEST_BUCKET + "/cas", mode, **kwargs)
+        gcs.open(fn, mode, **kwargs)
 
 
 @pytest.mark.parametrize(
