@@ -322,11 +322,13 @@ def test_streaming_upload_aligns_non_final_chunk():
     overflow = 7122
     fs = MockGCSFileSystem()
     f = gcsfs.core.GCSFile.__new__(gcsfs.core.GCSFile)
+    f.path = "mock-bucket/mock-key"
     f.buffer = io.BytesIO(b"x" * (gcsfs.core.DEFAULT_BLOCK_SIZE + overflow))
     f.offset = 0
     f.autocommit = True
     f.content_type = "application/octet-stream"
     f.location = "mock-location"
+    f.if_generation_match = None
     f.gcsfs = fs
     f.checker = gcsfs.checkers.get_consistency_checker(None)
 
