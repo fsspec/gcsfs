@@ -278,6 +278,53 @@ def test_physical_size_uses_driver_filter(tmp_path, monkeypatch):
     assert bench.extra_info["checkpoint_physical_size_bytes"] == 400
 
 
+_EVENTS = []
+
+
+class _VerifyingDriver(_FakeWriteDriver):
+    def run(self, prefix, params):
+        from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
+            CheckpointResult,
+        )
+
+        _EVENTS.append("run")
+        return CheckpointResult(
+            durations=[1.0], verify=lambda: _EVENTS.append("verify")
+        )
+
+
+def test_result_verify_runs_after_monitor_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            fs, path = original_url_to_fs(url.replace("gs://", "memory://"))
+            fs.makedirs(path, exist_ok=True)
+            fs.pipe_file(os.path.join(path, "model.ckpt"), b"0" * 500)
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+    _EVENTS.clear()
+
+    class _RecordingMonitor(_Monitor):
+        @contextlib.contextmanager
+        def __call__(self):
+            _EVENTS.append("monitor_enter")
+            yield self
+            _EVENTS.append("monitor_exit")
+
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _RecordingMonitor(),
+        _params(),
+        _VerifyingDriver(),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+    assert _EVENTS == ["monitor_enter", "run", "monitor_exit", "verify"]
+
+
 def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypatch):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 

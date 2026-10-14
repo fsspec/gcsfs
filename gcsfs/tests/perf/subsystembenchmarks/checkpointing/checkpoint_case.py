@@ -60,6 +60,8 @@ def run_checkpoint_case(
         with monitor() as m:
             result = driver.run(prefix, params)
         window_end = time.time()
+        if getattr(result, "verify", None) is not None:
+            result.verify()
 
         # Measure actual GCS files
         physical_size_bytes = 0

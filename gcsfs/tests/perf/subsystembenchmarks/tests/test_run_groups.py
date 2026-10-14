@@ -123,6 +123,11 @@ def test_ray_checkpointing_group_is_discoverable():
     assert "checkpointing/ray_pytorch" in run.discover_groups()
 
 
+def test_pytorch_checkpointing_group_is_discoverable():
+    """Verifies checkpointing/pytorch is discovered from its requirements.txt."""
+    assert "checkpointing/pytorch" in run.discover_groups()
+
+
 @pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
 def test_parse_args_requires_zone_for_rapid_cache_bucket_types(capsys, bucket_type):
     with pytest.raises(SystemExit):

@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Protocol, runtime_checkable
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 
 @dataclasses.dataclass
@@ -8,6 +8,9 @@ class CheckpointResult:
 
     durations: list
     extra_columns: dict = dataclasses.field(default_factory=dict)
+    # Called by the runner after the monitored window closes; raises if the
+    # run produced wrong results. Keeps post-run checks out of the window.
+    verify: Optional[Callable[[], None]] = None
 
 
 @runtime_checkable
