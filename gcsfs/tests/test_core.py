@@ -3415,6 +3415,7 @@ def test_gcsfile_fetch_range_error_handling():
         concurrency=4,
         cache_type="none",
         cache_source="explicit",
+        generation=None,
     )
 
     # Exception handling
@@ -4055,8 +4056,9 @@ def _open_with_mocked_info(fs, path, generation=None, **kwargs):
     return f, mock_info
 
 
-def test_open_version_aware_pins_generation():
-    fs = gcsfs.core.GCSFileSystem(token="anon", version_aware=True)
+@pytest.mark.parametrize("version_aware", [False, True])
+def test_open_pins_generation(version_aware):
+    fs = gcsfs.core.GCSFileSystem(token="anon", version_aware=version_aware)
     f, mock_info = _open_with_mocked_info(fs, "bucket/file")
     mock_info.assert_called_once_with("bucket/file", generation=None)
     assert f.generation == "123"
@@ -4066,16 +4068,6 @@ def test_open_version_aware_pins_generation():
         assert f.read() == b"data"
     mock_cat.assert_called_once()
     assert mock_cat.call_args.kwargs["generation"] == "123"
-
-
-def test_open_not_version_aware_does_not_pin_generation():
-    fs = gcsfs.core.GCSFileSystem(token="anon")
-    f, _ = _open_with_mocked_info(fs, "bucket/file")
-    assert f.generation is None
-
-    with mock.patch.object(fs, "cat_file", return_value=b"data") as mock_cat:
-        assert f.read() == b"data"
-    assert mock_cat.call_args.kwargs["generation"] is None
 
 
 def test_open_explicit_generation_used_for_reads():
@@ -4089,9 +4081,22 @@ def test_open_explicit_generation_used_for_reads():
     assert mock_cat.call_args.kwargs["generation"] == "456"
 
 
+def test_open_overwritten_while_open(gcs):
+    path = f"{TEST_BUCKET}/pinned_{uuid.uuid4().hex}"
+    gcs.pipe(path, b"v1" * 10)
+    with gcs.open(path, "rb", cache_type="none") as f:
+        assert f.read(2) == b"v1"
+        gcs.pipe(path, b"v2" * 10)
+        # the generation that was opened no longer exists on an unversioned
+        # bucket; reading must not silently switch to the new object
+        with pytest.raises(FileNotFoundError):
+            f.read()
+    assert gcs.cat(path) == b"v2" * 10
+
+
 @pytest.mark.asyncio
 async def test_async_fetch_range_passes_generation():
-    fs = gcsfs.core.GCSFileSystem(token="anon", version_aware=True)
+    fs = gcsfs.core.GCSFileSystem(token="anon")
     f, _ = _open_with_mocked_info(fs, "bucket/file")
     assert f.generation == "123"
 
