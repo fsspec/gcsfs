@@ -3293,6 +3293,7 @@ def test_prefetcher_config_options():
     fake_fs = mock.MagicMock()
     fake_fs.split_path.return_value = ("bucket", "file.txt", None)
     fake_fs.info.return_value = {"size": 100}
+    fake_fs.loop = fsspec.asyn.get_loop()
 
     # 1. Default without explicit max_prefetch_size -> MAX_PREFETCH_SIZE (256 MiB)
     with GCSFile(
@@ -3337,6 +3338,7 @@ def test_gcsfile_prefetcher_producer_fetcher_integration():
     fake_fs = mock.MagicMock()
     fake_fs.split_path.return_value = ("bucket", "file.txt", None)
     fake_fs.info.return_value = {"size": 100}
+    fake_fs.loop = fsspec.asyn.get_loop()
 
     with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
         prefetcher = getattr(f.cache, "_prefetcher", None)
