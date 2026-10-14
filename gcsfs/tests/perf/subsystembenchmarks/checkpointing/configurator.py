@@ -123,6 +123,7 @@ class OneFactorCheckpointConfigurator(OneFactorConfigurator):
     """Checkpointing-family pins for generic one-factor config mechanics."""
 
     RUN_LEVEL_KEYS = _RUN_LEVEL_KEYS
+    ENV_OVERRIDE_KEYS = {"model_id": "GCSFS_SUBSYSTEM_MODEL_ID"}
 
     def shared_keys(self, scenario, common_config):
         return dict(

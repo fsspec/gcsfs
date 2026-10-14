@@ -133,7 +133,7 @@ For checkpointing groups:
   gcloud storage cp -r gs://huggingface-model-weights/Llama-3.1-8B /tmp/
   ```
 
-- `--model-id` also accepts a Hugging Face repo ID or a local path.
+- `--model-id` also accepts a Hugging Face repo ID or a local path. Variants that pin their own `model_id` (the OLMoE rows in `checkpointing/pytorch`) are skipped while `--model-id` is set, so the override runs exactly the model you asked for.
 - These groups need a very large-memory host. A code comment in
   `checkpointing/checkpoint_case.py` targets a 732 GB VM.
 

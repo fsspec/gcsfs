@@ -38,6 +38,21 @@ def test_case_names():
     assert names == expected_names
 
 
+_OLMOE = "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924"
+
+
+@pytest.mark.parametrize("model_id", [_OLMOE, "gs://b/Llama-3.1-70B"])
+def test_model_id_override_skips_rows_that_pin_model_id(monkeypatch, model_id):
+    # The OLMoE rows pin their own model_id. With --model-id they are skipped,
+    # so the override means "exactly this model" (and OLMoE as the override
+    # does not collide with the OLMoE fsdp row on the same benchmark id).
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_MODEL_ID", model_id)
+    cases = _cases()
+    assert len(cases) == 10
+    assert {c.model_id for c in cases} == {model_id}
+    assert not any("olmoe" in c.name for c in cases if model_id != _OLMOE)
+
+
 def test_mesh_product_equals_world_size():
     cases = _cases()
     assert len(cases) == 12
