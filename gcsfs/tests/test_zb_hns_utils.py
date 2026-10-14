@@ -8,6 +8,7 @@ import pytest
 from google.api_core.exceptions import FailedPrecondition, NotFound
 
 from gcsfs import zb_hns_utils
+from gcsfs.retry import GenerationMismatchError
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool, MRDPoolCache, _close_mrds
 
 mock_grpc_client = mock.Mock()
@@ -138,7 +139,11 @@ async def test_init_aaow_if_generation_match_unsupported_sdk():
 
 
 @pytest.mark.asyncio
-async def test_init_aaow_failed_precondition():
+@pytest.mark.parametrize(
+    "if_generation_match, expected",
+    [(0, FileExistsError), (7, GenerationMismatchError)],
+)
+async def test_init_aaow_failed_precondition(if_generation_match, expected):
     mock_writer_instance = mock.AsyncMock()
     mock_writer_instance.open.side_effect = FailedPrecondition("exists")
     with mock.patch(
@@ -146,9 +151,12 @@ async def test_init_aaow_failed_precondition():
         new_callable=mock.Mock,
         return_value=mock_writer_instance,
     ):
-        with pytest.raises(FileExistsError):
+        with pytest.raises(expected):
             await zb_hns_utils.init_aaow(
-                mock_grpc_client, bucket_name, object_name, if_generation_match=0
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                if_generation_match=if_generation_match,
             )
 
 

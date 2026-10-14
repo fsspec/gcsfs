@@ -26,7 +26,7 @@ from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
 from gcsfs.credentials import GoogleCredentials
-from gcsfs.retry import HttpError
+from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import (
     a,
     allfiles,
@@ -1646,6 +1646,53 @@ def test_pipe_file_create_conflicts_with_if_generation_match(gcs):
         )
 
 
+@pytest.mark.parametrize(
+    "mode, value, expected",
+    [
+        ("overwrite", None, None),
+        ("overwrite", "7", 7),
+        ("create", "0", 0),
+        ("create", None, 0),
+        ("overwrite", True, ValueError),
+        ("overwrite", -1, ValueError),
+        ("create", 5, ValueError),
+    ],
+)
+def test_resolve_generation_match(mode, value, expected):
+    from gcsfs.core import _resolve_generation_match
+
+    if expected is ValueError:
+        with pytest.raises(ValueError):
+            _resolve_generation_match(mode, value)
+    else:
+        assert _resolve_generation_match(mode, value) == expected
+
+
+@pytest.mark.parametrize(
+    "mode, kwargs",
+    [("rb", {"if_generation_match": 5}), ("xb", {"if_generation_match": 5})],
+)
+def test_open_rejects_invalid_if_generation_match(gcs, mode, kwargs):
+    with pytest.raises(ValueError):
+        gcs.open(TEST_BUCKET + "/cas", mode, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({"if_generation_match": 7}, GenerationMismatchError),
+        ({"mode": "create"}, FileExistsError),
+    ],
+)
+def test_pipe_file_precondition_error(gcs, skip_if_zonal, kwargs, expected):
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        mock_call.side_effect = FileExistsError("412")
+        with pytest.raises(expected) as info:
+            gcs.pipe_file(TEST_BUCKET + "/cas", b"abc", **kwargs)
+    if expected is GenerationMismatchError:
+        assert info.value.generation == 7
+
+
 def test_write_if_generation_match(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support condition")
@@ -1655,7 +1702,7 @@ def test_write_if_generation_match(gcs):
     gcs.pipe_file(fn, b"v1", if_generation_match=0)
     with pytest.raises(FileExistsError):
         gcs.pipe_file(fn, b"v1", if_generation_match=0)
-    gen = int(gcs.info(fn)["generation"])
+    gen = gcs.info(fn)["generation"]
     try:
         gcs.pipe_file(fn, b"v2", if_generation_match=gen)
     except NotImplementedError:
@@ -1663,7 +1710,7 @@ def test_write_if_generation_match(gcs):
             "zonal CAS needs a google-cloud-storage release with if_generation_match"
         )
     assert gcs.cat(fn) == b"v2"
-    with pytest.raises(FileExistsError):
+    with pytest.raises(GenerationMismatchError):
         gcs.pipe_file(fn, b"v3", if_generation_match=gen)
     assert gcs.cat(fn) == b"v2"
 

@@ -20,6 +20,8 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )
 
+from gcsfs.retry import GenerationMismatchError
+
 MRD_MAX_RANGES = 1000  # MRD supports up to 1000 ranges per request
 try:
     DEFAULT_CONCURRENCY = int(os.environ.get("DEFAULT_GCSFS_CONCURRENCY", "4"))
@@ -174,7 +176,8 @@ async def init_aaow(
     ``if_generation_match=0`` creates the object only if it does not exist;
     a positive value overwrites only that generation (requires a
     google-cloud-storage release whose writer accepts ``if_generation_match``).
-    A failed precondition raises ``FileExistsError``.
+    A failed precondition raises ``FileExistsError`` for ``0`` and
+    ``GenerationMismatchError`` otherwise.
     """
     writer_options = {}
     # Only pass flush_interval_bytes if the user explicitly provided a
@@ -206,6 +209,10 @@ async def init_aaow(
     try:
         await writer.open()
     except FailedPrecondition as e:
+        if if_generation_match:
+            raise GenerationMismatchError(
+                f"{bucket_name}/{object_name}", if_generation_match
+            ) from e
         raise FileExistsError(f"{bucket_name}/{object_name}") from e
     return writer
 

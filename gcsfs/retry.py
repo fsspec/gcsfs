@@ -52,6 +52,16 @@ class ChecksumError(Exception):
     pass
 
 
+class GenerationMismatchError(OSError):
+    """Raised when a write with ``if_generation_match=N`` (N > 0) finds that the
+    object's current generation is not N (it was overwritten or deleted)."""
+
+    def __init__(self, path, generation):
+        super().__init__(f"{path}: object generation is not {generation}")
+        self.path = path
+        self.generation = generation
+
+
 class NonRetryableError(Exception):
     """Raised when the underlying error can not be retried, or continued further."""
 
