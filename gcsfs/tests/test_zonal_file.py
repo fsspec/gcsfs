@@ -1255,7 +1255,7 @@ def test_zonal_file_adaptive_cache_reuses_fs_loop_after_reset_lock(mock_gcsfs):
 
 
 def test_zonal_file_adaptive_cache_rebinds_when_global_loop_differs_from_fs_loop(
-    mock_gcsfs,
+    mock_gcsfs, monkeypatch
 ):
     """Verify ZonalFile adaptive prefetcher rebinds to gcsfs.loop when fsspec.asyn.loop[0] differs."""
     loop1 = fsspec.asyn.get_loop()
@@ -1272,6 +1272,17 @@ def test_zonal_file_adaptive_cache_rebinds_when_global_loop_differs_from_fs_loop
         return await fut
 
     mock_gcsfs._concurrent_mrd_fetch = fake_concurrent_mrd_fetch
+
+    # Simulate fsspec <= 2026.9.0 where AdaptiveReadaheadCache does not inspect
+    # fetcher.__self__.fs.loop and instead binds its prefetcher to get_loop().
+    orig_cache_init = fsspec.caching.AdaptiveReadaheadCache.__init__
+    monkeypatch.setattr(
+        fsspec.caching.AdaptiveReadaheadCache,
+        "__init__",
+        lambda self, blocksize, fetcher, size, *args, **kwargs: orig_cache_init(
+            self, blocksize, lambda s, e: fetcher(s, e), size, *args, **kwargs
+        ),
+    )
 
     loop2 = None
     thread2 = None

@@ -266,7 +266,9 @@ def test_gcsfile_cache_del_does_not_block_gc(fake_fs):
     assert getattr(cache, "_prefetcher", None) is None
 
 
-def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(fake_fs, io_loop):
+def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(
+    fake_fs, io_loop, monkeypatch
+):
     payload = b"regional-adaptive-payload-" * 64
     fake_fs.info.return_value = {
         "size": len(payload),
@@ -284,6 +286,17 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(fake_fs, io_lo
     fake_fs._cat_file_concurrent = fake_cat_file_concurrent
     orig_iothread = fsspec.asyn.iothread[0]
 
+    # Simulate fsspec <= 2026.9.0 where AdaptiveReadaheadCache does not inspect
+    # fetcher.__self__.fs.loop and instead binds its prefetcher to get_loop().
+    orig_cache_init = fsspec.caching.AdaptiveReadaheadCache.__init__
+    monkeypatch.setattr(
+        fsspec.caching.AdaptiveReadaheadCache,
+        "__init__",
+        lambda self, blocksize, fetcher, size, *args, **kwargs: orig_cache_init(
+            self, blocksize, lambda s, e: fetcher(s, e), size, *args, **kwargs
+        ),
+    )
+
     loop2 = None
     thread2 = None
     try:
@@ -296,7 +309,7 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(fake_fs, io_lo
         loop2 = fsspec.asyn.loop[0]
         thread2 = fsspec.asyn.iothread[0]
         try:
-            assert loop2 is not io_loop
+            assert loop2 is not None and loop2 is not io_loop
             assert f.cache._prefetcher.loop is io_loop
             assert f.read(128) == payload[:128]
         finally:
