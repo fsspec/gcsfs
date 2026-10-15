@@ -2687,12 +2687,12 @@ FAKE_SERVICE_ACCOUNT_FILE = os.path.join(
 IAM_SIGN_EMAIL = "sa@project.iam.gserviceaccount.com"
 
 
-def _keyless_credentials():
+def _keyless_credentials(email=IAM_SIGN_EMAIL, token="access-token"):
     """Credentials without a private key, as GCE or GKE Workload Identity provide."""
     creds = google.auth.compute_engine.Credentials(
-        service_account_email=IAM_SIGN_EMAIL, universe_domain="googleapis.com"
+        service_account_email=email, universe_domain="googleapis.com"
     )
-    creds.token = "access-token"
+    creds.token = token
     creds.expiry = None
     return creds
 
@@ -2707,48 +2707,89 @@ def _fake_storage_client(monkeypatch):
     return blob
 
 
-def test_sign_without_private_key_uses_iam_signing(monkeypatch):
-    blob = _fake_storage_client(monkeypatch)
-    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
+def _fake_metadata_server(monkeypatch):
+    """Answer Compute Engine credential refreshes; returns the token mock to count them."""
+    expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+    get_token = mock.Mock(return_value=("fresh-token", expiry))
+    monkeypatch.setattr(
+        "google.auth.compute_engine.credentials._metadata.get_service_account_info",
+        mock.Mock(return_value={"email": IAM_SIGN_EMAIL, "scopes": []}),
+    )
+    monkeypatch.setattr(
+        "google.auth.compute_engine.credentials._metadata.get_service_account_token",
+        get_token,
+    )
+    return get_token
 
-    assert fs.sign("bucket/key", expiration=300) == "https://signed.example/key"
+
+SIGNER = object()
+
+
+@pytest.mark.parametrize(
+    "token, sign_kwargs, expected, refreshes",
+    [
+        pytest.param(
+            _keyless_credentials,
+            {},
+            {"service_account_email": IAM_SIGN_EMAIL, "access_token": "access-token"},
+            0,
+            id="no-private-key-uses-iam",
+        ),
+        pytest.param(
+            lambda: _keyless_credentials(token=None),
+            {},
+            {"service_account_email": IAM_SIGN_EMAIL, "access_token": "fresh-token"},
+            1,
+            id="no-private-key-refreshes-token",
+        ),
+        pytest.param(
+            lambda: _keyless_credentials(email="default"),
+            {},
+            {"service_account_email": IAM_SIGN_EMAIL, "access_token": "fresh-token"},
+            1,
+            id="default-email-is-resolved",
+        ),
+        pytest.param(
+            lambda: FAKE_SERVICE_ACCOUNT_FILE,
+            {},
+            {"service_account_email": None, "access_token": None},
+            0,
+            id="private-key-signs-locally",
+        ),
+        pytest.param(
+            _keyless_credentials,
+            {"service_account_email": "other@example.com", "access_token": "t"},
+            {"service_account_email": "other@example.com", "access_token": "t"},
+            0,
+            id="explicit-iam-arguments-kept",
+        ),
+        pytest.param(
+            _keyless_credentials,
+            {"credentials": SIGNER},
+            {
+                "credentials": SIGNER,
+                "service_account_email": None,
+                "access_token": None,
+            },
+            0,
+            id="explicit-credentials-kept",
+        ),
+    ],
+)
+def test_sign_credentials(monkeypatch, token, sign_kwargs, expected, refreshes):
+    blob = _fake_storage_client(monkeypatch)
+    get_token = _fake_metadata_server(monkeypatch)
+    fs = GCSFileSystem(token=token(), skip_instance_cache=True)
+
+    assert fs.sign("bucket/key", expiration=300, **sign_kwargs) == (
+        "https://signed.example/key"
+    )
     kwargs = blob.generate_signed_url.call_args.kwargs
-    assert kwargs["service_account_email"] == IAM_SIGN_EMAIL
-    assert kwargs["access_token"] == "access-token"
     assert kwargs["expiration"] == timedelta(seconds=300)
     assert kwargs["generation"] is None
-
-
-def test_sign_with_private_key_does_not_use_iam_signing(monkeypatch):
-    blob = _fake_storage_client(monkeypatch)
-    fs = GCSFileSystem(token=FAKE_SERVICE_ACCOUNT_FILE, skip_instance_cache=True)
-
-    fs.sign("bucket/key")
-    kwargs = blob.generate_signed_url.call_args.kwargs
-    assert "service_account_email" not in kwargs
-    assert "access_token" not in kwargs
-
-
-def test_sign_explicit_iam_arguments_are_kept(monkeypatch):
-    blob = _fake_storage_client(monkeypatch)
-    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
-
-    fs.sign("bucket/key", service_account_email="other@example.com", access_token="t")
-    kwargs = blob.generate_signed_url.call_args.kwargs
-    assert kwargs["service_account_email"] == "other@example.com"
-    assert kwargs["access_token"] == "t"
-
-
-def test_sign_explicit_credentials_are_kept(monkeypatch):
-    blob = _fake_storage_client(monkeypatch)
-    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
-    signer = mock.Mock()
-
-    fs.sign("bucket/key", credentials=signer)
-    kwargs = blob.generate_signed_url.call_args.kwargs
-    assert kwargs["credentials"] is signer
-    assert "service_account_email" not in kwargs
-    assert "access_token" not in kwargs
+    for key, value in expected.items():
+        assert kwargs.get(key) == value
+    assert get_token.call_count == refreshes
 
 
 def test_sign_without_private_key_calls_signblob_api(monkeypatch):

@@ -2455,7 +2455,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             # the service account's access token instead.
             self.credentials.maybe_refresh()
             email = getattr(credentials, "service_account_email", None)
-            if email and credentials.token:
+            if email == "default":
+                # Compute Engine credentials only learn the real service
+                # account email from the metadata server when they refresh.
+                self.credentials.maybe_refresh(force=True)
+                email = getattr(credentials, "service_account_email", None)
+            if email and email != "default" and credentials.token:
                 kwargs["service_account_email"] = email
                 kwargs["access_token"] = credentials.token
 

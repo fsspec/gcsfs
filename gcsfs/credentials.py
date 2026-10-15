@@ -235,20 +235,20 @@ class GoogleCredentials:
             )
         )
 
-    def maybe_refresh(self, refresh_buffer=LOCAL_REFRESH_BUFFER):
+    def maybe_refresh(self, refresh_buffer=LOCAL_REFRESH_BUFFER, force=False):
         """
-        Check and refresh credentials if needed
+        Check and refresh credentials if needed, or always when ``force`` is set
         """
         if self.credentials is None:
             return  # anon
 
-        if self._credentials_valid(refresh_buffer):
+        if not force and self._credentials_valid(refresh_buffer):
             return  # still good, with buffer
 
         with requests.Session() as session:
             req = Request(session)
             with self.lock:
-                if self._credentials_valid(refresh_buffer):
+                if not force and self._credentials_valid(refresh_buffer):
                     return  # repeat check to avoid race conditions
 
                 logger.debug("GCS refresh")
