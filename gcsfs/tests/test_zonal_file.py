@@ -22,7 +22,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 
 from gcsfs import zb_hns_utils
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-from gcsfs.retry import HttpError
+from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import requires_rapid
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
@@ -252,6 +252,69 @@ def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
         )
     else:
         assert extended_gcsfs.exists(file_path)
+
+
+def test_zonal_file_open_create_mode(extended_gcsfs, zonal_write_mocks, file_path):
+    """mode="xb" opens the writer with the exclusive-create precondition."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    with extended_gcsfs.open(file_path, "xb", finalize_on_close=True):
+        pass
+
+    if zonal_write_mocks:
+        zonal_write_mocks["init_aaow"].assert_called_once_with(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=0,
+        )
+    else:
+        assert extended_gcsfs.exists(file_path)
+
+
+def test_zonal_file_open_write_mode_with_if_generation_match(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """An explicit precondition is forwarded to the writer."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    if zonal_write_mocks:
+        with extended_gcsfs.open(
+            file_path, "wb", finalize_on_close=True, if_generation_match=7
+        ) as f:
+            f.write(test_data)
+        zonal_write_mocks["init_aaow"].assert_called_once_with(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=7,
+        )
+    else:
+        # file_path does not exist, so generation 7 cannot match; SDK releases
+        # whose writer lacks the parameter raise NotImplementedError instead.
+        with pytest.raises((NotImplementedError, GenerationMismatchError)):
+            with extended_gcsfs.open(
+                file_path, "wb", finalize_on_close=True, if_generation_match=7
+            ) as f:
+                f.write(test_data)
+
+
+@mock.patch("gcsfs.zonal_file.asyn.sync")
+def test_zonal_file_rejects_if_generation_match_before_opening_pool(
+    mock_sync, mock_gcsfs
+):
+    """A read-mode precondition is rejected before any MRD pool lookup."""
+    mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", None)
+    with pytest.raises(ValueError, match="only valid for write modes"):
+        ZonalFile(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            if_generation_match=5,
+        )
+    mock_sync.assert_not_called()
 
 
 def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_path):

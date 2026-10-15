@@ -1617,6 +1617,33 @@ def test_put_file_if_generation_match(gcs, skip_if_zonal):
     assert _upload_call_params(mock_call) == ["7"]
 
 
+def test_put_file_if_generation_match_resumable(gcs, skip_if_zonal):
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=7"
+    )
+    with tmpfile() as lpath:
+        with open(lpath, "wb") as f:
+            f.write(b"x" * (5 * 2**20))
+        with (
+            mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+            mock.patch(
+                "gcsfs.core.upload_chunk", new_callable=mock.AsyncMock, return_value={}
+            ) as mock_chunk,
+        ):
+            mock_call.return_value = ({"Location": location}, None)
+            gcs.put_file(
+                lpath,
+                TEST_BUCKET + "/cas",
+                chunksize=2**20,
+                consistency="none",
+                if_generation_match=7,
+            )
+    assert _upload_call_params(mock_call) == ["7"]
+    assert mock_chunk.await_count == 5
+    assert all(c.args[1] == location for c in mock_chunk.await_args_list)
+
+
 def test_open_if_generation_match(gcs, skip_if_zonal):
     location = (
         "https://storage.googleapis.com/upload/storage/v1/b/"
@@ -1639,6 +1666,9 @@ def test_open_if_generation_match(gcs, skip_if_zonal):
     assert mock_init.call_args.kwargs["mode"] == "overwrite"
     mock_call.assert_called_once()
     assert mock_call.call_args.args[:2] == ("POST", location)
+    # call_args holds a memoryview of the upload buffer; release it so the
+    # BytesIO can be finalized without a BufferError during a later test.
+    mock_call.reset_mock()
 
 
 def test_pipe_file_create_conflicts_with_if_generation_match(gcs):
@@ -1670,13 +1700,16 @@ def test_resolve_generation_match(mode, value, expected):
         assert _resolve_generation_match(mode, value) == expected
 
 
+@pytest.mark.parametrize("exists", [True, False], ids=["existing", "missing"])
 @pytest.mark.parametrize(
     "mode, kwargs",
     [("rb", {"if_generation_match": 5}), ("xb", {"if_generation_match": 5})],
 )
-def test_open_rejects_invalid_if_generation_match(gcs, mode, kwargs):
+def test_open_rejects_invalid_if_generation_match(gcs, mode, kwargs, exists):
     fn = TEST_BUCKET + "/cas"
-    gcs.pipe_file(fn, b"abc")  # ZonalFile looks the object up before validating
+    if exists:
+        gcs.pipe_file(fn, b"abc")
+    assert gcs.exists(fn) is exists
     with pytest.raises(ValueError):
         gcs.open(fn, mode, **kwargs)
 

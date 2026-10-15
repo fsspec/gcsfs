@@ -11,6 +11,7 @@ from gcsfs.core import (
     GCSFile,
     _coalesce_generation,
     _get_prefetcher_and_cache_config,
+    _resolve_open_generation_match,
 )
 from gcsfs.retry import HttpError
 from gcsfs.utils import is_empty_range
@@ -46,6 +47,7 @@ class ZonalFile(GCSFile):
         fixed_key_metadata=None,
         generation=None,
         kms_key_name=None,
+        if_generation_match=None,
         pool_size=zb_hns_utils.DEFAULT_CONCURRENCY,
         finalize_on_close=False,
         flush_interval_bytes=_DEFAULT_FLUSH_INTERVAL_BYTES,
@@ -69,6 +71,10 @@ class ZonalFile(GCSFile):
         generation = _coalesce_generation(generation, path_generation)
         if not key:
             raise OSError("Attempt to open a bucket")
+        # GCSFile.__init__ resolves the precondition as well, but only after the
+        # MRD pool below has been opened; validate first so an invalid value
+        # fails without a lookup.
+        _resolve_open_generation_match(mode, if_generation_match)
         self.aaow = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
@@ -123,6 +129,7 @@ class ZonalFile(GCSFile):
             fixed_key_metadata,
             generation,
             kms_key_name,
+            if_generation_match=if_generation_match,
             # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
             _supports_append="a" in mode,
             # pass persisted_size here so that Cache is initialized with correct object size
@@ -343,6 +350,7 @@ class ZonalFile(GCSFile):
             self.metadata,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            if_generation_match=self.if_generation_match,
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
@@ -365,6 +373,7 @@ class ZonalFile(GCSFile):
             self.content_type,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            if_generation_match=self.if_generation_match,
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
             finalize_on_close=self.finalize_on_close,

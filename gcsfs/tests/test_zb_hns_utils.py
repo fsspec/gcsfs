@@ -139,6 +139,18 @@ async def test_init_aaow_if_generation_match_unsupported_sdk():
 
 
 @pytest.mark.asyncio
+async def test_init_aaow_unrelated_type_error_propagates():
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+        side_effect=TypeError("boom"),
+    ):
+        with pytest.raises(TypeError, match="boom"):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client, bucket_name, object_name, if_generation_match=7
+            )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "if_generation_match, expected",
     [(0, FileExistsError), (7, GenerationMismatchError)],

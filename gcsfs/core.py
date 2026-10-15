@@ -2616,10 +2616,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if not key:
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
-        if if_generation_match is not None and not ("w" in mode or "x" in mode):
-            raise ValueError("if_generation_match is only valid for write modes")
-        self.if_generation_match = _resolve_generation_match(
-            "create" if "x" in mode else "overwrite", if_generation_match
+        self.if_generation_match = _resolve_open_generation_match(
+            mode, if_generation_match
         )
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
@@ -3004,6 +3002,20 @@ def _resolve_generation_match(mode, if_generation_match):
             )
         return 0
     return if_generation_match
+
+
+def _resolve_open_generation_match(mode, if_generation_match):
+    """Validate ``if_generation_match`` for an ``open()`` ``mode``.
+
+    Returns the effective ``ifGenerationMatch`` value: ``0`` for ``"x"`` modes,
+    the given value for ``"w"`` modes and ``None`` when unset. Other modes
+    reject the parameter.
+    """
+    if if_generation_match is not None and not ("w" in mode or "x" in mode):
+        raise ValueError("if_generation_match is only valid for write modes")
+    return _resolve_generation_match(
+        "create" if "x" in mode else "overwrite", if_generation_match
+    )
 
 
 def _generation_match_params(if_generation_match):
