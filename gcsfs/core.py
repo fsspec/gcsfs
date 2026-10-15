@@ -2611,24 +2611,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             and fs_loop.is_running()
             and not fs_loop.is_closed()
         )
-        if (
-            self.cache_type == "adaptive"
-            and "r" in mode
-            and has_usable_fs_loop
-            and asyn.loop[0] is None
-        ):
-            # If fsspec.asyn.reset_lock() cleared fsspec's global loop slot
-            # (e.g. Hugging Face datasets IterableDataset._iter_pytorch) while
-            # a cached GCSFileSystem/ExtendedGcsFileSystem instance is still
-            # bound to fs_loop, restore asyn.loop[0] before AbstractBufferedFile
-            # initializes AdaptiveReadaheadCache so fsspec.asyn.get_loop() does
-            # not spawn a second event loop thread that conflicts with gcsfs.loop.
-            # Side effect: fs_loop becomes fsspec's process-wide default loop for
-            # any filesystem created afterwards, and asyn.iothread[0] stays None
-            # (fsspec will not stop fs_loop at interpreter exit).
-            with asyn.get_lock():
-                if asyn.loop[0] is None:
-                    asyn.loop[0] = fs_loop
 
         super().__init__(
             gcsfs,
@@ -2660,9 +2642,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 # AdaptiveReadaheadCache initializes BackgroundPrefetcher with
                 # fsspec.asyn.get_loop(). If that loop differs from gcsfs.loop
                 # (for instance, when gcsfs was given an explicit loop or a new
-                # global loop was created after fsspec.asyn.reset_lock()),
+                # global loop was created after fsspec.asyn.reset_lock(), as
+                # Hugging Face datasets IterableDataset._iter_pytorch does),
                 # recreate the prefetcher bound to gcsfs.loop so _async_fetch_range
                 # runs on the same event loop as the filesystem's gRPC/HTTP clients.
+                # TODO: Remove once the minimum fsspec release makes
+                # AdaptiveReadaheadCache bind BackgroundPrefetcher to fs.loop
+                # (fsspec/filesystem_spec#2292).
                 prefetcher.close()
                 from fsspec.prefetcher import BackgroundPrefetcher
 

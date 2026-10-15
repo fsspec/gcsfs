@@ -284,13 +284,19 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(fake_fs, io_lo
     fake_fs._cat_file_concurrent = fake_cat_file_concurrent
     orig_iothread = fsspec.asyn.iothread[0]
 
+    loop2 = None
+    thread2 = None
     try:
         fsspec.asyn.reset_lock()
         assert fsspec.asyn.loop[0] is None
 
         f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="adaptive")
+        # AdaptiveReadaheadCache called fsspec.asyn.get_loop(), which created a
+        # second global loop; GCSFile must rebind the prefetcher to fake_fs.loop.
+        loop2 = fsspec.asyn.loop[0]
+        thread2 = fsspec.asyn.iothread[0]
         try:
-            assert fsspec.asyn.loop[0] is io_loop
+            assert loop2 is not io_loop
             assert f.cache._prefetcher.loop is io_loop
             assert f.read(128) == payload[:128]
         finally:
@@ -298,3 +304,10 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(fake_fs, io_lo
     finally:
         fsspec.asyn.loop[0] = io_loop
         fsspec.asyn.iothread[0] = orig_iothread
+        if loop2 is not None and loop2 is not io_loop:
+            if loop2.is_running():
+                loop2.call_soon_threadsafe(loop2.stop)
+            if thread2 is not None:
+                thread2.join(timeout=5)
+            if not loop2.is_running():
+                loop2.close()
