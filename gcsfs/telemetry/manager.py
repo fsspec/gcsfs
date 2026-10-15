@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from gcsfs.telemetry.context import (
     Dimension,
     get_telemetry_context,
+    has_telemetry_context,
     reset_telemetry_context,
     sanitize_token,
     set_telemetry_context,
@@ -29,7 +30,7 @@ def _gcs_async_wrapper(func: Callable, obj: Any = None) -> Callable:
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         # Fast path: If telemetry context is already active (e.g. nested call or _sync), pass through in O(1)
-        if get_telemetry_context():
+        if has_telemetry_context():
             return await func(*args, **kwargs)
 
         tokens_map = default_usage_tracker.collect_tokens_map()
@@ -155,7 +156,11 @@ def wrap_file_methods():
     from gcsfs.core import GCSFile
 
     for name, attr in list(GCSFile.__dict__.items()):
-        if not name.startswith("__") and callable(attr):
+        if (
+            not name.startswith("__")
+            and callable(attr)
+            and not isinstance(attr, (classmethod, staticmethod))
+        ):
             if not getattr(attr, "_is_telemetry_wrapped", False):
                 wrapped = _file_telemetry_wrapper(attr)
                 wrapped._is_telemetry_wrapped = True
