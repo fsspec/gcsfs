@@ -4081,7 +4081,7 @@ def test_open_explicit_generation_used_for_reads():
     assert mock_cat.call_args.kwargs["generation"] == "456"
 
 
-def test_open_overwritten_while_open(gcs):
+def test_open_overwritten_while_open(gcs, skip_if_zonal):
     path = f"{TEST_BUCKET}/pinned_{uuid.uuid4().hex}"
     gcs.pipe(path, b"v1" * 10)
     with gcs.open(path, "rb", cache_type="none") as f:
