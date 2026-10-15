@@ -264,3 +264,63 @@ def test_gcsfile_cache_del_does_not_block_gc(fake_fs):
 
     f.close()
     assert getattr(cache, "_prefetcher", None) is None
+
+
+def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(
+    fake_fs, io_loop, monkeypatch
+):
+    payload = b"regional-adaptive-payload-" * 64
+    fake_fs.info.return_value = {
+        "size": len(payload),
+        "generation": "1",
+        "name": "test-key",
+    }
+
+    async def fake_cat_file_concurrent(
+        path, start=None, end=None, concurrency=1, **kwargs
+    ):
+        fut = io_loop.create_future()
+        io_loop.call_soon(fut.set_result, payload[start:end])
+        return await fut
+
+    fake_fs._cat_file_concurrent = fake_cat_file_concurrent
+    orig_iothread = fsspec.asyn.iothread[0]
+
+    # Simulate fsspec <= 2026.9.0 where AdaptiveReadaheadCache does not inspect
+    # fetcher.__self__.fs.loop and instead binds its prefetcher to get_loop().
+    orig_cache_init = fsspec.caching.AdaptiveReadaheadCache.__init__
+    monkeypatch.setattr(
+        fsspec.caching.AdaptiveReadaheadCache,
+        "__init__",
+        lambda self, blocksize, fetcher, size, *args, **kwargs: orig_cache_init(
+            self, blocksize, lambda s, e: fetcher(s, e), size, *args, **kwargs
+        ),
+    )
+
+    loop2 = None
+    thread2 = None
+    try:
+        fsspec.asyn.reset_lock()
+        assert fsspec.asyn.loop[0] is None
+
+        f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="adaptive")
+        # AdaptiveReadaheadCache called fsspec.asyn.get_loop(), which created a
+        # second global loop; GCSFile must rebind the prefetcher to fake_fs.loop.
+        loop2 = fsspec.asyn.loop[0]
+        thread2 = fsspec.asyn.iothread[0]
+        try:
+            assert loop2 is not None and loop2 is not io_loop
+            assert f.cache._prefetcher.loop is io_loop
+            assert f.read(128) == payload[:128]
+        finally:
+            f.close()
+    finally:
+        fsspec.asyn.loop[0] = io_loop
+        fsspec.asyn.iothread[0] = orig_iothread
+        if loop2 is not None and loop2 is not io_loop:
+            if loop2.is_running():
+                loop2.call_soon_threadsafe(loop2.stop)
+            if thread2 is not None:
+                thread2.join(timeout=5)
+            if not loop2.is_running():
+                loop2.close()
