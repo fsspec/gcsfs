@@ -4,6 +4,11 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.10.1
+---------
+
+* **Fixed event-loop mismatch in** ``AdaptiveReadaheadCache`` **after** ``fsspec.asyn.reset_lock()`` **or with a custom** ``loop``. When ``fsspec`` initializes ``BackgroundPrefetcher`` on a loop that differs from ``gcsfs.loop``, ``GCSFile`` and ``ZonalFile`` now rebind the prefetcher to ``gcsfs.loop``. (#1104)
+
 2026.10.0
 ---------
 
