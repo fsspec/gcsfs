@@ -23,7 +23,20 @@ steps:
         mkdir -p /workspace/.ssh
         ssh-keygen -q -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
-        gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h > /dev/null
+        # OS Login rejects concurrent importSshPublicKey calls for the same service
+        # account ("Multiple concurrent mutations were attempted"), which happens when
+        # several builds start in the same minute. Retry with jitter; re-importing the
+        # same key is idempotent.
+        attempt=0
+        until gcloud compute os-login ssh-keys add --key-file=/workspace/gcb_ssh_key.pub --ttl=4h > /dev/null; do
+          attempt=$$((attempt+1))
+          if [ "$$attempt" -ge 5 ]; then
+            echo "ERROR: os-login ssh-keys add failed after $$attempt attempts."
+            exit 1
+          fi
+          echo "os-login ssh-keys add failed (attempt $$attempt/5), retrying..."
+          sleep $$((RANDOM % 10 + 3))
+        done
     waitFor: ["-"]
 
   # 2. Initialize shared variables.
