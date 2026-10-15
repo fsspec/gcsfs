@@ -122,7 +122,7 @@ params = [
     (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
     (MD5Checker(), b"hello world", b"hello world", ()),
     (SizeChecker(), b"hello world", b"hello world", ()),
-    (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
+    (SizeChecker(), b"hello world", b"different size", (ChecksumError,)),
 ]
 
 if crcmod is not None:
@@ -147,7 +147,7 @@ params = [
     (MD5Checker(), b"hello world", b"different checksum", (ChecksumError,)),
     (MD5Checker(), b"hello world", b"hello world", ()),
     (SizeChecker(), b"hello world", b"hello world", ()),
-    (SizeChecker(), b"hello world", b"different size", (AssertionError,)),
+    (SizeChecker(), b"hello world", b"different size", (ChecksumError,)),
 ]
 if crcmod is not None:
     params.extend(
