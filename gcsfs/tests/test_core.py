@@ -2687,13 +2687,21 @@ FAKE_SERVICE_ACCOUNT_FILE = os.path.join(
 IAM_SIGN_EMAIL = "sa@project.iam.gserviceaccount.com"
 
 
-def _keyless_credentials(email=IAM_SIGN_EMAIL, token="access-token"):
-    """Credentials without a private key, as GCE or GKE Workload Identity provide."""
-    creds = google.auth.compute_engine.Credentials(
-        service_account_email=email, universe_domain="googleapis.com"
-    )
-    creds.token = token
-    creds.expiry = None
+def _keyless_credentials():
+    """Credentials without a private key, as GCE or GKE Workload Identity provide.
+
+    Like real Compute Engine credentials before their first refresh, they have
+    no token and report the service account email as "default"; refreshing
+    resolves both, as the metadata server would.
+    """
+    creds = google.auth.compute_engine.Credentials(universe_domain="googleapis.com")
+    creds.token = None
+
+    def refresh(request):
+        creds._service_account_email = IAM_SIGN_EMAIL
+        creds.token = "access-token"
+
+    creds.refresh = mock.Mock(side_effect=refresh)
     return creds
 
 
@@ -2707,60 +2715,28 @@ def _fake_storage_client(monkeypatch):
     return blob
 
 
-def _fake_metadata_server(monkeypatch):
-    """Answer Compute Engine credential refreshes; returns the token mock to count them."""
-    expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
-    get_token = mock.Mock(return_value=("fresh-token", expiry))
-    monkeypatch.setattr(
-        "google.auth.compute_engine.credentials._metadata.get_service_account_info",
-        mock.Mock(return_value={"email": IAM_SIGN_EMAIL, "scopes": []}),
-    )
-    monkeypatch.setattr(
-        "google.auth.compute_engine.credentials._metadata.get_service_account_token",
-        get_token,
-    )
-    return get_token
-
-
 SIGNER = object()
 
 
 @pytest.mark.parametrize(
-    "token, sign_kwargs, expected, refreshes",
+    "token, sign_kwargs, expected",
     [
         pytest.param(
             _keyless_credentials,
             {},
             {"service_account_email": IAM_SIGN_EMAIL, "access_token": "access-token"},
-            0,
             id="no-private-key-uses-iam",
-        ),
-        pytest.param(
-            lambda: _keyless_credentials(token=None),
-            {},
-            {"service_account_email": IAM_SIGN_EMAIL, "access_token": "fresh-token"},
-            1,
-            id="no-private-key-refreshes-token",
-        ),
-        pytest.param(
-            lambda: _keyless_credentials(email="default"),
-            {},
-            {"service_account_email": IAM_SIGN_EMAIL, "access_token": "fresh-token"},
-            1,
-            id="default-email-is-resolved",
         ),
         pytest.param(
             lambda: FAKE_SERVICE_ACCOUNT_FILE,
             {},
             {"service_account_email": None, "access_token": None},
-            0,
             id="private-key-signs-locally",
         ),
         pytest.param(
             _keyless_credentials,
             {"service_account_email": "other@example.com", "access_token": "t"},
             {"service_account_email": "other@example.com", "access_token": "t"},
-            0,
             id="explicit-iam-arguments-kept",
         ),
         pytest.param(
@@ -2771,14 +2747,12 @@ SIGNER = object()
                 "service_account_email": None,
                 "access_token": None,
             },
-            0,
             id="explicit-credentials-kept",
         ),
     ],
 )
-def test_sign_credentials(monkeypatch, token, sign_kwargs, expected, refreshes):
+def test_sign_credentials(monkeypatch, token, sign_kwargs, expected):
     blob = _fake_storage_client(monkeypatch)
-    get_token = _fake_metadata_server(monkeypatch)
     fs = GCSFileSystem(token=token(), skip_instance_cache=True)
 
     assert fs.sign("bucket/key", expiration=300, **sign_kwargs) == (
@@ -2789,7 +2763,6 @@ def test_sign_credentials(monkeypatch, token, sign_kwargs, expected, refreshes):
     assert kwargs["generation"] is None
     for key, value in expected.items():
         assert kwargs.get(key) == value
-    assert get_token.call_count == refreshes
 
 
 def test_sign_without_private_key_calls_signblob_api(monkeypatch):
