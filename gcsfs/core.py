@@ -2433,24 +2433,54 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     def sign(self, path, expiration=100, **kwargs):
         """Create a signed URL representing the given path.
 
+        Signing needs a private key, which only service account key
+        credentials carry. When the filesystem's credentials have no private
+        key, as with Compute Engine or GKE Workload Identity credentials, the
+        URL is signed through the IAM Credentials ``signBlob`` API instead,
+        using the credentials' service account email and current access
+        token. The service account then needs the
+        ``roles/iam.serviceAccountTokenCreator`` role on itself. Passing
+        ``service_account_email`` and ``access_token`` explicitly selects this
+        path with any credentials, and passing ``credentials`` signs with those
+        instead.
+
         Parameters
         ----------
         path : str
              The path on the filesystem
         expiration : int
             Number of seconds to enable the URL for
+        kwargs :
+            Passed on to ``google.cloud.storage.Blob.generate_signed_url``
 
         Returns
         -------
         URL : str
             The signed URL
         """
+        from google.auth.credentials import Signing
         from google.cloud import storage
 
-        client = storage.Client(
-            credentials=self.credentials.credentials,
-            project=self.project,
-        )
+        credentials = self.credentials.credentials
+        if (
+            credentials is not None
+            and not isinstance(credentials, Signing)
+            and "service_account_email" not in kwargs
+            and "access_token" not in kwargs
+            and "credentials" not in kwargs
+        ):
+            # No private key (e.g. GCE or GKE Workload Identity credentials):
+            # have google-cloud-storage sign through the IAM signBlob API with
+            # the service account's access token instead.
+            self.credentials.maybe_refresh()
+            email = getattr(credentials, "service_account_email", None)
+            # Compute Engine credentials report "default" until a refresh has
+            # looked up the real email on the metadata server.
+            if email and email != "default" and credentials.token:
+                kwargs["service_account_email"] = email
+                kwargs["access_token"] = credentials.token
+
+        client = storage.Client(credentials=credentials, project=self.project)
 
         bucket, key, generation = self.split_path(path)
         bucket = client.bucket(bucket)
@@ -2634,6 +2664,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             else:
                 kwargs.pop("max_prefetch_size", None)
 
+        fs_loop = getattr(gcsfs, "loop", None)
+        has_usable_fs_loop = (
+            isinstance(fs_loop, asyncio.AbstractEventLoop)
+            and fs_loop.is_running()
+            and not fs_loop.is_closed()
+        )
+
         super().__init__(
             gcsfs,
             path,
@@ -2660,7 +2697,30 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
             # Only producer uses the fetcher and producer will always be there for a prefetcher hence
             # fetcher attributes check is not required.
-            prefetcher.producer.fetcher = self._async_fetch_range
+            if has_usable_fs_loop and prefetcher.loop is not fs_loop:
+                # AdaptiveReadaheadCache initializes BackgroundPrefetcher with
+                # fsspec.asyn.get_loop(). If that loop differs from gcsfs.loop
+                # (for instance, when gcsfs was given an explicit loop or a new
+                # global loop was created after fsspec.asyn.reset_lock(), as
+                # Hugging Face datasets IterableDataset._iter_pytorch does),
+                # recreate the prefetcher bound to gcsfs.loop so _async_fetch_range
+                # runs on the same event loop as the filesystem's gRPC/HTTP clients.
+                # TODO: Remove once the minimum fsspec release makes
+                # AdaptiveReadaheadCache bind BackgroundPrefetcher to fs.loop
+                # (fsspec/filesystem_spec#2292).
+                prefetcher.close()
+                from fsspec.prefetcher import BackgroundPrefetcher
+
+                prefetcher = BackgroundPrefetcher(
+                    fetcher=self._async_fetch_range,
+                    size=self.size,
+                    concurrency=cache_options.get("concurrency", self.concurrency),
+                    max_prefetch_size=cache_options.get("max_prefetch_size"),
+                    loop=fs_loop,
+                )
+                cache._prefetcher = prefetcher
+            else:
+                prefetcher.producer.fetcher = self._async_fetch_range
 
             if hasattr(cache, "close"):
                 # TODO: Remove this disarm once fsspec adds native support for deferred or

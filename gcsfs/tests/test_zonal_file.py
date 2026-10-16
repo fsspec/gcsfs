@@ -1268,3 +1268,129 @@ async def test_mrd_pool_cache_sets_pool_details():
         "size": 100,
         "timeFinalized": "2026-06-17T00:00:00Z",
     }
+
+
+def test_zonal_file_adaptive_cache_reuses_fs_loop_after_reset_lock(mock_gcsfs):
+    """Verify ZonalFile adaptive prefetcher uses gcsfs.loop after fsspec.asyn.reset_lock().
+
+    Hugging Face datasets IterableDataset._iter_pytorch() calls fsspec.asyn.reset_lock()
+    in each DataLoader worker, clearing fsspec.asyn.loop[0] = None while a cached
+    ExtendedGcsFileSystem instance still has fs.loop (and its gRPC MRD stream futures)
+    bound to the original event loop.
+    """
+    loop1 = fsspec.asyn.get_loop()
+    orig_iothread = fsspec.asyn.iothread[0]
+    mock_gcsfs.loop = loop1
+    payload = b"zonal-adaptive-payload-" * 64
+    mock_gcsfs._mrd_pool_cache.get.return_value.persisted_size = len(payload)
+
+    async def fake_concurrent_mrd_fetch(start_offset, total_size, split_factor, mrd):
+        # Simulate gRPC Cython _StreamMultiplexer._recv_loop awaiting a Future
+        # explicitly attached to loop1 (mock_gcsfs.loop). If BackgroundPrefetcher
+        # runs _async_fetch_range on a different loop, awaiting fut raises:
+        # RuntimeError: Task ... got Future <Future pending> attached to a different loop
+        fut = loop1.create_future()
+        loop1.call_soon(
+            fut.set_result, payload[start_offset : start_offset + total_size]
+        )
+        return await fut
+
+    mock_gcsfs._concurrent_mrd_fetch = fake_concurrent_mrd_fetch
+
+    loop2 = None
+    thread2 = None
+    try:
+        fsspec.asyn.reset_lock()
+        assert fsspec.asyn.loop[0] is None
+
+        zf = ZonalFile(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="adaptive",
+        )
+        # AdaptiveReadaheadCache called fsspec.asyn.get_loop(), which created a
+        # second global loop; ZonalFile must rebind the prefetcher to gcsfs.loop.
+        loop2 = fsspec.asyn.loop[0]
+        thread2 = fsspec.asyn.iothread[0]
+        try:
+            assert loop2 is not loop1
+            assert zf.cache._prefetcher is not None
+            assert zf.cache._prefetcher.loop is loop1
+            assert zf.read(128) == payload[:128]
+            assert zf.read(128) == payload[128:256]
+        finally:
+            zf.close()
+    finally:
+        fsspec.asyn.loop[0] = loop1
+        fsspec.asyn.iothread[0] = orig_iothread
+        if loop2 is not None and loop2 is not loop1:
+            if loop2.is_running():
+                loop2.call_soon_threadsafe(loop2.stop)
+            if thread2 is not None:
+                thread2.join(timeout=5)
+            if not loop2.is_running():
+                loop2.close()
+
+
+def test_zonal_file_adaptive_cache_rebinds_when_global_loop_differs_from_fs_loop(
+    mock_gcsfs, monkeypatch
+):
+    """Verify ZonalFile adaptive prefetcher rebinds to gcsfs.loop when fsspec.asyn.loop[0] differs."""
+    loop1 = fsspec.asyn.get_loop()
+    orig_iothread = fsspec.asyn.iothread[0]
+    mock_gcsfs.loop = loop1
+    payload = b"zonal-custom-loop-data-" * 64
+    mock_gcsfs._mrd_pool_cache.get.return_value.persisted_size = len(payload)
+
+    async def fake_concurrent_mrd_fetch(start_offset, total_size, split_factor, mrd):
+        fut = loop1.create_future()
+        loop1.call_soon(
+            fut.set_result, payload[start_offset : start_offset + total_size]
+        )
+        return await fut
+
+    mock_gcsfs._concurrent_mrd_fetch = fake_concurrent_mrd_fetch
+
+    # Simulate fsspec <= 2026.9.0 where AdaptiveReadaheadCache does not inspect
+    # fetcher.__self__.fs.loop and instead binds its prefetcher to get_loop().
+    orig_cache_init = fsspec.caching.AdaptiveReadaheadCache.__init__
+    monkeypatch.setattr(
+        fsspec.caching.AdaptiveReadaheadCache,
+        "__init__",
+        lambda self, blocksize, fetcher, size, *args, **kwargs: orig_cache_init(
+            self, blocksize, lambda s, e: fetcher(s, e), size, *args, **kwargs
+        ),
+    )
+
+    loop2 = None
+    thread2 = None
+    try:
+        fsspec.asyn.reset_lock()
+        # Force creation of a second global loop before ZonalFile is opened
+        loop2 = fsspec.asyn.get_loop()
+        thread2 = fsspec.asyn.iothread[0]
+        assert loop2 is not loop1
+
+        zf = ZonalFile(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="adaptive",
+        )
+        try:
+            assert zf.cache._prefetcher is not None
+            assert zf.cache._prefetcher.loop is loop1
+            assert zf.read(256) == payload[:256]
+        finally:
+            zf.close()
+    finally:
+        fsspec.asyn.loop[0] = loop1
+        fsspec.asyn.iothread[0] = orig_iothread
+        if loop2 is not None:
+            if loop2.is_running():
+                loop2.call_soon_threadsafe(loop2.stop)
+            if thread2 is not None:
+                thread2.join(timeout=5)
+            if not loop2.is_running():
+                loop2.close()
