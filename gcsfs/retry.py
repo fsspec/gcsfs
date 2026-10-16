@@ -61,6 +61,10 @@ class GenerationMismatchError(OSError):
         self.path = path
         self.generation = generation
 
+    def __reduce__(self):
+        """This makes the Exception pickleable."""
+        return GenerationMismatchError, (self.path, self.generation)
+
 
 class NonRetryableError(Exception):
     """Raised when the underlying error can not be retried, or continued further."""

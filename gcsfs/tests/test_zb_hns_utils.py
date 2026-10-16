@@ -127,6 +127,27 @@ async def test_init_aaow_if_generation_match(if_generation_match, expected_kwarg
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("if_generation_match", [0, 7])
+async def test_init_aaow_rejects_generation_with_if_generation_match(
+    if_generation_match,
+):
+    # generation > 0 selects an existing object to append to, which carries no
+    # precondition, so the combination must not silently drop the precondition.
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter", new_callable=mock.Mock
+    ) as mock_writer_class:
+        with pytest.raises(ValueError, match="if_generation_match"):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                generation=123,
+                if_generation_match=if_generation_match,
+            )
+        mock_writer_class.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_init_aaow_if_generation_match_unsupported_sdk():
     with mock.patch(
         "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
@@ -153,7 +174,7 @@ async def test_init_aaow_unrelated_type_error_propagates():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "if_generation_match, expected",
-    [(0, FileExistsError), (7, GenerationMismatchError)],
+    [(0, FileExistsError), (7, GenerationMismatchError), (None, FailedPrecondition)],
 )
 async def test_init_aaow_failed_precondition(if_generation_match, expected):
     mock_writer_instance = mock.AsyncMock()
@@ -163,13 +184,16 @@ async def test_init_aaow_failed_precondition(if_generation_match, expected):
         new_callable=mock.Mock,
         return_value=mock_writer_instance,
     ):
-        with pytest.raises(expected):
+        with pytest.raises(expected) as excinfo:
             await zb_hns_utils.init_aaow(
                 mock_grpc_client,
                 bucket_name,
                 object_name,
                 if_generation_match=if_generation_match,
             )
+    if if_generation_match is None:
+        # No precondition was requested, so the SDK error is not translated.
+        assert excinfo.value is mock_writer_instance.open.side_effect
 
 
 @pytest.mark.asyncio

@@ -177,7 +177,8 @@ async def init_aaow(
     a positive value overwrites only that generation (requires a
     google-cloud-storage release whose writer accepts ``if_generation_match``).
     A failed precondition raises ``FileExistsError`` for ``0`` and
-    ``GenerationMismatchError`` otherwise.
+    ``GenerationMismatchError`` otherwise; without ``if_generation_match`` the
+    SDK's ``FailedPrecondition`` propagates unchanged.
     """
     writer_options = {}
     # Only pass flush_interval_bytes if the user explicitly provided a
@@ -185,6 +186,12 @@ async def init_aaow(
     if flush_interval_bytes and flush_interval_bytes != _DEFAULT_FLUSH_INTERVAL_BYTES:
         writer_options["FLUSH_INTERVAL_BYTES"] = flush_interval_bytes
     kwargs = {}
+    if generation and if_generation_match is not None:
+        # generation > 0 appends to an existing object (AppendObjectSpec), which
+        # carries no precondition, so the SDK would silently ignore it.
+        raise ValueError(
+            "if_generation_match cannot be combined with an explicit generation"
+        )
     if if_generation_match == 0:
         # Every SDK release maps generation=0 to WriteObjectSpec(if_generation_match=0).
         generation = 0
@@ -209,6 +216,10 @@ async def init_aaow(
     try:
         await writer.open()
     except FailedPrecondition as e:
+        if if_generation_match is None:
+            # No precondition was requested (e.g. appending to a finalized
+            # object), so this is not a generation mismatch.
+            raise
         if if_generation_match:
             raise GenerationMismatchError(
                 f"{bucket_name}/{object_name}", if_generation_match
