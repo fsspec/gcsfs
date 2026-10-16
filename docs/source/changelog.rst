@@ -7,6 +7,14 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* ``sign()`` now works with credentials that have no private key, such as
+  Compute Engine and GKE Workload Identity credentials. When the credentials
+  cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
+  using the service account's email and access token; the service account
+  needs the ``roles/iam.serviceAccountTokenCreator`` role on itself.
+  ``service_account_email`` and ``access_token`` can also be passed explicitly,
+  and explicitly passed ``credentials`` are used as given (#653).
+
 * ``open()`` for reading now pins the object generation that is current at open
   time, and every read through that file (including the prefetcher's concurrent
   fetches) requests that generation, so a file that is overwritten while open
