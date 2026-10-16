@@ -1183,6 +1183,7 @@ async def test_simple_upload_delegates_to_core_for_non_zonal(async_gcs):
             None,
             "overwrite",
             None,
+            if_generation_match=None,
         )
         assert result == {"generation": "123"}
 
@@ -1223,6 +1224,7 @@ async def test_initiate_upload_delegates_to_core_for_non_zonal(async_gcs):
             None,
             "overwrite",
             None,
+            if_generation_match=None,
         )
         assert result == "http://mock-resumable-url"
 

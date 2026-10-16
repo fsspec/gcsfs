@@ -28,7 +28,7 @@ from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
 from gcsfs.credentials import GoogleCredentials
-from gcsfs.retry import HttpError
+from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import (
     a,
     allfiles,
@@ -324,11 +324,13 @@ def test_streaming_upload_aligns_non_final_chunk():
     overflow = 7122
     fs = MockGCSFileSystem()
     f = gcsfs.core.GCSFile.__new__(gcsfs.core.GCSFile)
+    f.path = "mock-bucket/mock-key"
     f.buffer = io.BytesIO(b"x" * (gcsfs.core.DEFAULT_BLOCK_SIZE + overflow))
     f.offset = 0
     f.autocommit = True
     f.content_type = "application/octet-stream"
     f.location = "mock-location"
+    f.if_generation_match = None
     f.gcsfs = fs
     f.checker = gcsfs.checkers.get_consistency_checker(None)
 
@@ -1548,6 +1550,208 @@ def test_put_file_resumable_upload_cleanup_on_chunk_failure(protocol, gcs):
             mock_init.assert_awaited_once()
             mock_chunk.assert_awaited()
             mock_call.assert_awaited_once_with("DELETE", expected_cleanup_url)
+
+
+def _upload_call_params(mock_call):
+    """ifGenerationMatch sent on the upload POST(s) recorded by a mocked _call."""
+    out = []
+    for call in mock_call.call_args_list:
+        method = call.args[0] if call.args else call.kwargs.get("method")
+        path = call.args[1] if len(call.args) > 1 else call.kwargs.get("path", "")
+        if method == "POST" and "upload/storage" in path:
+            out.append(call.kwargs.get("ifGenerationMatch"))
+    return out
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({}, None),
+        ({"mode": "create"}, "0"),
+        ({"if_generation_match": 0}, "0"),
+        ({"if_generation_match": 123}, "123"),
+        ({"mode": "create", "if_generation_match": 0}, "0"),
+    ],
+)
+def test_pipe_file_if_generation_match_simple(gcs, skip_if_zonal, kwargs, expected):
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.pipe_file(TEST_BUCKET + "/cas", b"abc", consistency="none", **kwargs)
+    assert _upload_call_params(mock_call) == [expected]
+
+
+def test_pipe_file_if_generation_match_resumable(gcs, skip_if_zonal):
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=123"
+    )
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "gcsfs.core.upload_chunk",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        mock_call.return_value = ({"Location": location}, None)
+        with pytest.raises(RuntimeError):
+            gcs.pipe_file(
+                TEST_BUCKET + "/cas",
+                b"x" * 2**20,
+                chunksize=2**19,
+                if_generation_match=123,
+            )
+    assert _upload_call_params(mock_call) == ["123"]
+    mock_call.assert_awaited_with(
+        "DELETE", location.replace("&ifGenerationMatch=123", "")
+    )
+
+
+def test_put_file_if_generation_match(gcs, skip_if_zonal):
+    with tmpfile() as lpath:
+        with open(lpath, "wb") as f:
+            f.write(b"abc")
+        with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+            mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+            gcs.put_file(
+                lpath, TEST_BUCKET + "/cas", consistency="none", if_generation_match=7
+            )
+    assert _upload_call_params(mock_call) == ["7"]
+
+
+def test_put_file_if_generation_match_resumable(gcs, skip_if_zonal):
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=7"
+    )
+    with tmpfile() as lpath:
+        with open(lpath, "wb") as f:
+            f.write(b"x" * (5 * 2**20))
+        with (
+            mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+            mock.patch(
+                "gcsfs.core.upload_chunk", new_callable=mock.AsyncMock, return_value={}
+            ) as mock_chunk,
+        ):
+            mock_call.return_value = ({"Location": location}, None)
+            gcs.put_file(
+                lpath,
+                TEST_BUCKET + "/cas",
+                chunksize=2**20,
+                consistency="none",
+                if_generation_match=7,
+            )
+    assert _upload_call_params(mock_call) == ["7"]
+    assert mock_chunk.await_count == 5
+    assert all(c.args[1] == location for c in mock_chunk.await_args_list)
+
+
+def test_open_if_generation_match(gcs, skip_if_zonal):
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=7"
+    )
+    with (
+        mock.patch(
+            "gcsfs.core.initiate_upload",
+            new_callable=mock.AsyncMock,
+            return_value=location,
+        ) as mock_init,
+        mock.patch.object(gcs, "call") as mock_call,
+    ):
+        mock_call.return_value = ({}, '{"generation": "8", "size": "3"}')
+        with gcs.open(
+            TEST_BUCKET + "/cas", "wb", consistency="none", if_generation_match=7
+        ) as f:
+            f.write(b"abc")
+    assert mock_init.call_args.kwargs["if_generation_match"] == 7
+    assert mock_init.call_args.kwargs["mode"] == "overwrite"
+    mock_call.assert_called_once()
+    assert mock_call.call_args.args[:2] == ("POST", location)
+    # call_args holds a memoryview of the upload buffer; release it so the
+    # BytesIO can be finalized without a BufferError during a later test.
+    mock_call.reset_mock()
+
+
+def test_pipe_file_create_conflicts_with_if_generation_match(gcs):
+    with pytest.raises(ValueError):
+        gcs.pipe_file(
+            TEST_BUCKET + "/cas", b"abc", mode="create", if_generation_match=5
+        )
+
+
+@pytest.mark.parametrize(
+    "mode, value, expected",
+    [
+        ("overwrite", None, None),
+        ("overwrite", "7", 7),
+        ("create", "0", 0),
+        ("create", None, 0),
+        ("overwrite", True, ValueError),
+        ("overwrite", -1, ValueError),
+        ("create", 5, ValueError),
+    ],
+)
+def test_resolve_generation_match(mode, value, expected):
+    from gcsfs.core import _resolve_generation_match
+
+    if expected is ValueError:
+        with pytest.raises(ValueError):
+            _resolve_generation_match(mode, value)
+    else:
+        assert _resolve_generation_match(mode, value) == expected
+
+
+@pytest.mark.parametrize("exists", [True, False], ids=["existing", "missing"])
+@pytest.mark.parametrize(
+    "mode, kwargs",
+    [("rb", {"if_generation_match": 5}), ("xb", {"if_generation_match": 5})],
+)
+def test_open_rejects_invalid_if_generation_match(gcs, mode, kwargs, exists):
+    fn = TEST_BUCKET + "/cas"
+    if exists:
+        gcs.pipe_file(fn, b"abc")
+    assert gcs.exists(fn) is exists
+    with pytest.raises(ValueError):
+        gcs.open(fn, mode, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({"if_generation_match": 7}, GenerationMismatchError),
+        ({"mode": "create"}, FileExistsError),
+    ],
+)
+def test_pipe_file_precondition_error(gcs, skip_if_zonal, kwargs, expected):
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        mock_call.side_effect = FileExistsError("412")
+        with pytest.raises(expected) as info:
+            gcs.pipe_file(TEST_BUCKET + "/cas", b"abc", **kwargs)
+    if expected is GenerationMismatchError:
+        assert info.value.generation == 7
+
+
+def test_write_if_generation_match(gcs):
+    if not gcs.on_google:
+        pytest.skip("emulator does not support condition")
+    fn = TEST_BUCKET + "/cas.file"
+    if gcs.exists(fn):
+        gcs.rm(fn)
+    gcs.pipe_file(fn, b"v1", if_generation_match=0)
+    with pytest.raises(FileExistsError):
+        gcs.pipe_file(fn, b"v1", if_generation_match=0)
+    gen = gcs.info(fn)["generation"]
+    try:
+        gcs.pipe_file(fn, b"v2", if_generation_match=gen)
+    except NotImplementedError:
+        pytest.skip(
+            "zonal CAS needs a google-cloud-storage release with if_generation_match"
+        )
+    assert gcs.cat(fn) == b"v2"
+    with pytest.raises(GenerationMismatchError):
+        gcs.pipe_file(fn, b"v3", if_generation_match=gen)
+    assert gcs.cat(fn) == b"v2"
 
 
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])

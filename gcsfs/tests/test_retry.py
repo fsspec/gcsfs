@@ -9,6 +9,7 @@ from requests.exceptions import ProxyError
 
 from gcsfs.retry import (
     DEFAULT_RETRY_CONFIG,
+    GenerationMismatchError,
     HttpError,
     get_storage_control_retry_config,
     is_retriable,
@@ -140,6 +141,17 @@ def test_pickle_serialization():
     is_same_args = expected.args == actual.args
 
     assert is_same_type and is_same_args
+
+
+def test_generation_mismatch_error_pickle():
+    expected = GenerationMismatchError("bucket/key", 7)
+
+    actual = pickle.loads(pickle.dumps(expected))
+
+    assert type(actual) is GenerationMismatchError
+    assert actual.args == expected.args
+    assert actual.path == "bucket/key"
+    assert actual.generation == 7
 
 
 def conditional_exception(process_id):
