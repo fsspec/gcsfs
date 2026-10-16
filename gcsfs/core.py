@@ -2634,7 +2634,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         timeout: int
             Timeout seconds for the asynchronous callback.
         generation: str
-            Object generation.
+            Object generation. When reading, all data is fetched from this
+            generation. If not given, the generation that is current when the
+            file is opened is used.
         if_generation_match: int
             Only write if the object's current generation matches this value;
             ``0`` means the object must not exist (same as mode ``"xb"``). To
@@ -2744,6 +2746,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
         if "r" in self.mode:
             det = self.details
+            if self.generation is None:
+                # Pin the generation that is current at open() so that every
+                # read through this handle sees the same object version.
+                self.generation = det.get("generation")
         else:
             det = {}
         self.content_type = (
@@ -2932,6 +2938,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 concurrency=self.concurrency,
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
+                generation=self.generation,
             )
         except (RuntimeError, HttpError) as e:
             if "not satisfiable" in str(e) or "InvalidRange" in str(e):
@@ -2947,6 +2954,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             concurrency=split_factor,
             cache_type=self.cache_type,
             cache_source=self.cache_source,
+            generation=self.generation,
         )
 
     def close(self):
