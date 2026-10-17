@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ .Release.Name }}-config"
+data:
+  torchtitan_train.py: |
+{{ .Files.Get "torchtitan_train.py" | indent 4 }}
+  requirements.txt: |
+{{ .Files.Get "requirements.txt" | indent 4 }}

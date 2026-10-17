@@ -1,0 +1,210 @@
+{{- $nodes := int (.Values.workload.nodes | default 1) -}}
+{{- $ranksPerNode := int (.Values.workload.ranksPerNode | default 8) -}}
+{{- $worldSize := mul $nodes $ranksPerNode -}}
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: "{{ .Release.Name }}"
+  namespace: default
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: workload
+    replicas: 1
+    template:
+      spec:
+        parallelism: {{ $nodes }}
+        completions: {{ $nodes }}
+        backoffLimit: 0
+        completionMode: Indexed
+        ttlSecondsAfterFinished: 43200
+        template:
+          metadata:
+            name: {{ .Release.Name }}
+            annotations:
+              kubectl.kubernetes.io/default-container: workload
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount | default "default" }}
+            {{- if .Values.network.hostNetwork }}
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            {{- end }}
+            subdomain: "{{ .Release.Name }}"
+            restartPolicy: Never
+            {{- if .Values.nodeSelector }}
+            nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 14 }}
+            {{- end }}
+            {{- if .Values.workload.singlePodPerNode }}
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      jobset.sigs.k8s.io/jobset-name: "{{ .Release.Name }}"
+            {{- end }}
+            tolerations:
+            - key: "nvidia.com/gpu"
+              operator: "Exists"
+            - key: "cloud.google.com/impending-node-termination"
+              operator: "Exists"
+            - key: "components.gke.io/gke-managed-components"
+              operator: "Exists"
+            {{- if .Values.network.gibVersion }}
+            initContainers:
+            - name: nccl-plugin-installer
+              image: {{ .Values.network.gibVersion }}
+              imagePullPolicy: IfNotPresent
+              command:
+              - /bin/sh
+              - -c
+              args:
+              - |
+                set -ex
+                /scripts/container_entry.sh install --install-nccl
+                mkdir -p /target/usr/local/gib/lib64 /target/usr/local/gib
+                cp -R /var/lib/gib/lib64/. /target/usr/local/gib/lib64
+                cp -R /var/lib/gib/. /target/usr/local/gib
+              volumeMounts:
+              - name: gib
+                mountPath: /target/usr/local/gib
+            {{- end }}
+            volumes:
+            {{- if .Values.network.gibVersion }}
+            - name: gib
+              emptyDir: {}
+            {{- end }}
+            - name: workload-launcher
+              configMap:
+                name: "{{ .Release.Name }}-launcher"
+            - name: workload-configuration
+              configMap:
+                name: "{{ .Release.Name }}-config"
+            - name: shared-memory
+              emptyDir:
+                medium: "Memory"
+                sizeLimit: {{ .Values.workload.shmSize | default "250Gi" }}
+            {{- if .Values.workload.hostCachePath }}
+            - name: host-cache
+              hostPath:
+                path: "{{ .Values.workload.hostCachePath }}"
+                type: DirectoryOrCreate
+            {{- end }}
+            containers:
+            - name: workload
+              image: "{{ .Values.workload.image }}"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                privileged: true
+              env:
+              - name: JOB_TIMESTAMP
+                value: "{{ now | date "20060102-150405" }}"
+              - name: JOB_UUID
+                value: "{{ uuidv4 }}"
+              - name: MASTER_ADDR
+                value: "{{ .Release.Name }}-workload-0-0.{{ .Release.Name }}.default.svc.cluster.local"
+              - name: MASTER_PORT
+                value: "{{ .Values.network.masterPort | default "29500" }}"
+              - name: WORLD_SIZE
+                value: "{{ $worldSize }}"
+              - name: NNODES
+                value: "{{ $nodes }}"
+              - name: GPUS_PER_NODE
+                value: "{{ $ranksPerNode }}"
+              - name: NODE_RANK
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+              - name: TORCH_NIGHTLY_INDEX
+                value: "{{ .Values.workload.torchNightlyIndex }}"
+              - name: NCCL_PLUGIN_PATH
+                value: /usr/local/gib/lib64
+              - name: NCCL_DEBUG
+                value: WARN
+              - name: GLOO_SOCKET_IFNAME
+                value: eth0
+              - name: TORCH_DISTRIBUTED_TIMEOUT_SECONDS
+                value: "{{ .Values.workload.torchDistributedTimeoutSeconds }}"
+              - name: DATASET_PATH
+                value: "{{ .Values.gcsfs.datasetPath }}"
+              - name: CKPT_WRITE_PATH
+                value: "{{ .Values.gcsfs.ckptWritePath }}"
+              - name: CKPT_LOAD_PATH
+                value: "{{ .Values.gcsfs.ckptLoadPath }}"
+              - name: RUN_ID
+                value: "{{ .Release.Name }}"
+              - name: MODEL_ID
+                value: "{{ .Values.workload.modelId }}"
+              {{- if .Values.workload.hfToken }}
+              - name: HF_TOKEN
+                value: "{{ .Values.workload.hfToken }}"
+              {{- end }}
+              {{- if .Values.workload.hostCachePath }}
+              - name: HOST_CACHE_PATH
+                value: "/workload/cache"
+              {{- end }}
+              - name: TORCHTITAN_FLAVOR
+                value: "{{ .Values.workload.modelFlavor }}"
+              - name: SEQ_LEN
+                value: "{{ .Values.workload.seqLen }}"
+              - name: MAX_STEPS
+                value: "{{ .Values.workload.steps }}"
+              - name: CHECKPOINT_WRITE_INTERVAL
+                value: "{{ .Values.workload.ckptWriterInterval }}"
+              - name: CKPT_TO_KEEP
+                value: "{{ .Values.workload.ckptToKeep }}"
+              - name: PER_DEVICE_TRAIN_BATCH_SIZE
+                value: "{{ .Values.workload.perDeviceBatch }}"
+              - name: GRADIENT_ACCUMULATION_STEPS
+                value: "{{ .Values.workload.gradAccum }}"
+              - name: SHUFFLE_BUFFER_SIZE
+                value: "{{ .Values.workload.shuffleBufferSize }}"
+              - name: ATTN_BACKEND
+                value: "{{ .Values.workload.attnBackend }}"
+              - name: TRAINING_STRATEGY
+                value: "{{ .Values.workload.trainingStrategy }}"
+              - name: TENSOR_PARALLEL_SIZE
+                value: "{{ .Values.workload.tensorParallelSize }}"
+              - name: DATA_PARALLEL_SIZE
+                value: "{{ .Values.workload.dataParallelSize }}"
+              - name: DP_REPLICATE_SIZE
+                value: "{{ .Values.workload.dpReplicateSize | default 1 }}"
+              - name: CONTEXT_PARALLEL_SIZE
+                value: "{{ .Values.workload.contextParallelSize | default 1 }}"
+              - name: PIPELINE_PARALLEL_SIZE
+                value: "{{ .Values.workload.pipelineParallelSize | default 1 }}"
+              - name: REQUIREMENTS
+                value: "{{ .Values.workload.requirements }}"
+              {{- range $i, $env := .Values.workload.envs }}
+              - name: "{{ $env.name }}"
+                value: "{{ $env.value }}"
+              {{- end }}
+              command:
+              - bash
+              - -c
+              - |
+                trap "" SIGCONT
+                bash /etc/workload-launcher/launcher.sh
+              resources:
+                requests:
+                  nvidia.com/gpu: {{ $ranksPerNode }}
+                limits:
+                  nvidia.com/gpu: {{ $ranksPerNode }}
+              volumeMounts:
+              {{- if .Values.network.gibVersion }}
+              - name: gib
+                mountPath: /usr/local/gib
+              {{- end }}
+              - name: workload-launcher
+                mountPath: /etc/workload-launcher
+              - name: workload-configuration
+                mountPath: /etc/workload-config
+              - name: shared-memory
+                mountPath: /dev/shm
+              {{- if .Values.workload.hostCachePath }}
+              - name: host-cache
+                mountPath: /workload/cache
+              {{- end }}
