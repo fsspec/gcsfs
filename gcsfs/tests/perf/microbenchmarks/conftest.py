@@ -389,7 +389,12 @@ def _benchmark_listing_fixture_helper(
 ):
     gcs = extended_gcs_factory()
 
-    prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
+    reuse = os.environ.get("GCSFS_BENCHMARK_REUSE_DATA") == "true"
+    if reuse:
+        prefix = f"{params.bucket_name}/benchmark-static/{params.name}"
+        teardown = False
+    else:
+        prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
 
     # Deterministic folder structure generation
     target_dirs = []
@@ -431,8 +436,21 @@ def _benchmark_listing_fixture_helper(
             levels[d] = current_level_folders
 
     try:
+        file_paths = []
+        for folder in target_dirs:
+            for i in range(files_per_folder):
+                file_paths.append(f"{folder}/file_{i}")
+
+        params.files = len(file_paths)
+
+        reuse_data = bool(reuse and file_paths and gcs.exists(file_paths[0]))
+        if reuse_data:
+            logging.info(
+                f"Benchmark '{params.name}': Reusing existing data at '{prefix}', skipping file/folder creation."
+            )
+
         # Create empty folders first if specified
-        if create_folders:
+        if not reuse_data and create_folders:
             logging.info(
                 f"Setting up benchmark '{params.name}': creating {len(target_dirs)} "
                 f"folders at depth {depth} with prefix '{prefix}'."
@@ -444,26 +462,20 @@ def _benchmark_listing_fixture_helper(
                 f"Benchmark '{params.name}' setup created {len(target_dirs)} folders in {duration_ms:.2f} ms."
             )
 
-        file_paths = []
-        for folder in target_dirs:
-            for i in range(files_per_folder):
-                file_paths.append(f"{folder}/file_{i}")
+        if not reuse_data:
+            logging.info(
+                f"Setting up benchmark '{params.name}': creating {len(file_paths)} "
+                f"files at depth {depth} with prefix '{prefix}' distributed across {len(target_dirs)} "
+                f"folders and with {files_per_folder} files per folder."
+            )
 
-        params.files = len(file_paths)
+            start_time = time.perf_counter()
+            _prepare_files(gcs, file_paths, getattr(params, "file_size_bytes", 0))
 
-        logging.info(
-            f"Setting up benchmark '{params.name}': creating {len(file_paths)} "
-            f"files at depth {depth} with prefix '{prefix}' distributed across {len(target_dirs)} "
-            f"folders and with {files_per_folder} files per folder."
-        )
-
-        start_time = time.perf_counter()
-        _prepare_files(gcs, file_paths, getattr(params, "file_size_bytes", 0))
-
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        logging.info(
-            f"Benchmark '{params.name}' setup created {len(file_paths)} files in {duration_ms:.2f} ms."
-        )
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logging.info(
+                f"Benchmark '{params.name}' setup created {len(file_paths)} files in {duration_ms:.2f} ms."
+            )
 
         if require_file_paths:
             yield gcs, target_dirs, file_paths, prefix, params
