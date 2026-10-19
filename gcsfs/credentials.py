@@ -156,14 +156,18 @@ class GoogleCredentials:
         Off GCE, the token request in ``_connect_cloud`` only fails after
         google-auth has retried it with backoff, which takes ~15s.
         """
+        # these helpers are private to google-auth; without them, skip the check
+        metadata = getattr(gauth.compute_engine, "_metadata", None)
+        ping = getattr(metadata, "ping", None)
+        detect_gce_residency = getattr(metadata, "detect_gce_residency_linux", None)
+        if ping is None or detect_gce_residency is None:
+            return
         with requests.Session() as session:
             req = Request(session)
-            if gauth.compute_engine._metadata.ping(
-                req, timeout=GCE_METADATA_PING_TIMEOUT_SECONDS, retry_count=1
-            ):
+            if ping(req, timeout=GCE_METADATA_PING_TIMEOUT_SECONDS, retry_count=1):
                 return
         # on a GCE VM, try the token request even if the server was slow to answer
-        if not gauth.compute_engine._metadata.detect_gce_residency_linux():
+        if not detect_gce_residency():
             raise ValueError("No GCE metadata server found")
 
     def _connect_cache(self):

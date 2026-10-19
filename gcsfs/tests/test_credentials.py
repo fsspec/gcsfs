@@ -330,6 +330,19 @@ def test_connect_cloud_on_gce_vm_when_ping_fails(no_metadata_server, monkeypatch
     assert mock_creds_class.return_value.refresh.called
 
 
+@pytest.mark.parametrize("helper", ["ping", "detect_gce_residency_linux"])
+def test_connect_cloud_without_private_metadata_helpers(
+    no_metadata_server, monkeypatch, helper
+):
+    # if google-auth drops its private helpers, "cloud" is tried as before
+    monkeypatch.delattr("google.auth.compute_engine._metadata." + helper)
+    with patch("google.auth.compute_engine.Credentials") as mock_creds_class:
+        cred = GoogleCredentials(project="myproject", token=None, access="read_only")
+
+    assert cred.method == "cloud"
+    assert mock_creds_class.return_value.refresh.called
+
+
 def test_connect_cloud_with_metadata_server(fake_metadata_server):
     cred = GoogleCredentials(project="myproject", token=None, access="read_only")
 
