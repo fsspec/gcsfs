@@ -39,6 +39,7 @@ client_config = {
 }
 
 TOKEN_INFO_TIMEOUT_SECONDS = 10
+GCE_METADATA_PING_TIMEOUT_SECONDS = 1
 LOCAL_REFRESH_BUFFER = 300  # Greater than google.auth._helpers.REFRESH_THRESHOLD
 
 
@@ -148,6 +149,22 @@ class GoogleCredentials:
                 self.credentials.refresh(req)
         except gauth.exceptions.RefreshError as error:
             raise ValueError("Invalid gcloud credentials") from error
+
+    def _check_gce_metadata_server(self):
+        """Fail quickly if there is no metadata server for the "cloud" method
+
+        Off GCE, the token request in ``_connect_cloud`` only fails after
+        google-auth has retried it with backoff, which takes ~15s.
+        """
+        with requests.Session() as session:
+            req = Request(session)
+            if gauth.compute_engine._metadata.ping(
+                req, timeout=GCE_METADATA_PING_TIMEOUT_SECONDS, retry_count=1
+            ):
+                return
+        # on a GCE VM, try the token request even if the server was slow to answer
+        if not gauth.compute_engine._metadata.detect_gce_residency_linux():
+            raise ValueError("No GCE metadata server found")
 
     def _connect_cache(self):
         if len(self.tokens) == 0:
@@ -327,6 +344,8 @@ class GoogleCredentials:
                 methods.remove("cloud")
             for meth in methods:
                 try:
+                    if meth == "cloud" and self.on_google:
+                        self._check_gce_metadata_server()
                     self.connect(method=meth)
                     logger.debug("Connected with method %s", meth)
                     break
