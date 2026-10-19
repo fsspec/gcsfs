@@ -488,25 +488,26 @@ async def test_consecutive_native_async_calls_isolated(monkeypatch):
 
 
 def test_async_gen_wrapper_aclose_on_early_exit():
-    """Verify that _gcs_async_gen_wrapper properly closes the underlying async generator on early exit."""
+    """Verify that _gcs_sync_wrapper properly closes the underlying async generator on early exit."""
     import fsspec.asyn
 
-    from gcsfs.telemetry.manager import _gcs_async_gen_wrapper
+    from gcsfs.telemetry.manager import _gcs_sync_wrapper
 
     closed = False
 
-    async def sample_async_gen():
-        nonlocal closed
-        try:
-            yield 1
-            yield 2
-            yield 3
-        finally:
-            closed = True
+    class GenFS(fsspec.asyn.AsyncFileSystem):
+        async def _sample_async_gen(self):
+            nonlocal closed
+            try:
+                yield 1
+                yield 2
+                yield 3
+            finally:
+                closed = True
 
-    fs = fsspec.asyn.AsyncFileSystem(skip_instance_cache=True)
-    wrapped_gen = _gcs_async_gen_wrapper(sample_async_gen, obj=fs)
-    gen_instance = wrapped_gen()
+        sample_async_gen = _gcs_sync_wrapper(_sample_async_gen)
+
+    gen_instance = GenFS(skip_instance_cache=True).sample_async_gen()
     val = next(gen_instance)
     assert val == 1
     assert not closed
@@ -541,17 +542,36 @@ async def test_file_telemetry_wrapper_sync_and_async():
     assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
 
 
-def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch):
-    """Verify mirror_gcs_methods binds sync/async/gen wrappers and preserves subclass overrides & mocks."""
+@pytest.mark.asyncio
+async def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch):
+    """
+    Verify mirror_gcs_methods binds sync/async/gen wrappers, wraps inherited batch
+    coroutines, and preserves subclass overrides & mocks.
+    """
     import fsspec.asyn
 
+    import gcsfs.telemetry.manager as manager_mod
     from gcsfs.telemetry.manager import mirror_gcs_methods
+
+    detect_count = 0
+
+    class CountingDetector(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal detect_count
+            detect_count += 1
+            return "pandas"
+
+    tracker = UsageMetricsTracker(detectors=[CountingDetector()])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
 
     class BaseDummyFS(fsspec.asyn.AsyncFileSystem):
         async def _ls(self, path, detail=False, **kwargs):
             return [f"base:{path}"]
 
         async def _cat_file(self, path, start=None, end=None, **kwargs):
+            assert tracker.get_tokens() == ["fw/pandas"]
             return f"base_cat:{path}".encode()
 
         async def _walk(self, path, maxdepth=None, **kwargs):
@@ -566,14 +586,64 @@ def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch):
         async def _walk(self, path, maxdepth=None, **kwargs):
             yield (f"sub_walk:{path}", [], ["b.txt"])
 
+    mirror_gcs_methods(SubDummyFS)
+
     sub_fs = SubDummyFS(skip_instance_cache=True)
     assert sub_fs.ls("bucket") == ["sub:bucket"]
     assert list(sub_fs.walk("bucket")) == [("sub_walk:bucket", [], ["b.txt"])]
 
     base_fs = BaseDummyFS(skip_instance_cache=True)
 
+    # Inherited batch coroutine (_cat from AsyncFileSystem) detects framework ONCE across multiple files
+    detect_count = 0
+    batch_res = await base_fs._cat(["bucket/f1.txt", "bucket/f2.txt", "bucket/f3.txt"])
+    assert len(batch_res) == 3
+    assert detect_count == 1
+    assert get_telemetry_context() == {}
+
     async def mocked_cat_file(self, path, start=None, end=None, **kwargs):
         return f"mocked:{path}".encode()
 
     monkeypatch.setattr(BaseDummyFS, "_cat_file", mocked_cat_file)
     assert base_fs.cat_file("bucket/file.txt") == b"mocked:bucket/file.txt"
+    # SubDummyFS did not override _cat_file, so it inherits the monkeypatch on BaseDummyFS
+    assert sub_fs.cat_file("bucket/file.txt") == b"mocked:bucket/file.txt"
+
+
+def test_sync_wrapper_propagates_context_to_background_loop_thread(monkeypatch):
+    """Verify _run_sync captures context on caller thread and propagates it to fsspecIO thread."""
+    import threading
+
+    import fsspec.asyn
+
+    import gcsfs.telemetry.manager as manager_mod
+    from gcsfs.telemetry.manager import mirror_gcs_methods
+
+    caller_thread_id = threading.get_ident()
+    detect_calls = []
+
+    class ThreadAwareDetector(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            detect_calls.append(threading.get_ident())
+            # Only the caller sync thread has the framework on its call stack
+            return "pandas" if threading.get_ident() == caller_thread_id else None
+
+    tracker = UsageMetricsTracker(detectors=[ThreadAwareDetector()])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    class DummySyncFS(fsspec.asyn.AsyncFileSystem):
+        async def _ls(self, path, detail=False, **kwargs):
+            # Running on background fsspecIO thread, not caller thread
+            assert threading.get_ident() != caller_thread_id
+            assert tracker.get_tokens() == ["fw/pandas"]
+            return [path]
+
+    mirror_gcs_methods(DummySyncFS)
+    fs = DummySyncFS(skip_instance_cache=True)
+
+    assert fs.ls("bucket") == ["bucket"]
+    # Detector ran exactly once on the caller sync thread (fast-pathed on background loop thread)
+    assert detect_calls == [caller_thread_id]
+    assert get_telemetry_context() == {}
