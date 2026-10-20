@@ -4331,7 +4331,10 @@ def test_get_file_concurrent_cancelled_error(gcs, cancel_cleanup):
             assert not kwargs
             tasks = set(args[0])
             assert tasks
-            assert all(task.get_coro().cr_code.co_name == "to_thread" for task in tasks)
+            assert all(
+                getattr(task.get_coro(), "__name__", None) == "to_thread"
+                for task in tasks
+            )
             wait_calls.append(tasks)
             if cancel_cleanup and len(wait_calls) == 1:
                 raise asyncio.CancelledError()
