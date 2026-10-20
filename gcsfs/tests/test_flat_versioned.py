@@ -94,6 +94,18 @@ def test_open_pins_generation(gcs_versioned):
     assert gcs_versioned.cat(b) == b"v2"
 
 
+def test_open_older_generation(gcs_versioned):
+    old = b"older-version-is-longer"
+    gcs_versioned.pipe_file(b, old)
+    v1 = gcs_versioned.info(b)["generation"]
+    gcs_versioned.pipe_file(b, b"new")
+
+    assert gcs_versioned.info(b, generation=v1)["size"] == len(old)
+    with gcs_versioned.open(b, "rb", generation=v1, cache_type="none") as f:
+        assert f.size == len(old)
+        assert f.read() == old
+
+
 def test_cp_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
         wo.write(b"v1")

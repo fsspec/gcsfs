@@ -718,9 +718,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     make_bucket_requester_pays = asyn.sync_wrapper(_make_bucket_requester_pays)
 
-    async def _get_object(self, path):
+    async def _get_object(self, path, generation=None):
         """Return object information at the given path."""
-        bucket, key, generation = self.split_path(path)
+        bucket, key, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
 
         # Check if parent dir is in listing cache
         listing = self._ls_from_cache(path)
@@ -1248,7 +1249,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         async with parallel_tasks_first_completed(
             [
-                self._get_object(path),
+                self._get_object(path, generation),
                 self._get_directory_info(path, bucket, key, generation),
             ]
         ) as (tasks, done, pending):
