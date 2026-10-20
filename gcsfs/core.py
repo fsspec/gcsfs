@@ -723,16 +723,13 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         bucket, key, path_generation = self.split_path(path)
         generation = _coalesce_generation(generation, path_generation)
 
-        # Check if parent dir is in listing cache
-        listing = self._ls_from_cache(path)
+        # Check if parent dir is in listing cache. Listings only hold current
+        # objects, so they cannot answer for a specific generation.
+        listing = None if generation else self._ls_from_cache(path)
         if listing:
             name = "/".join((bucket, key))
             for file_details in listing:
-                if (
-                    file_details["type"] == "file"
-                    and file_details["name"] == name
-                    and (not generation or file_details.get("generation") == generation)
-                ):
+                if file_details["type"] == "file" and file_details["name"] == name:
                     return file_details
             else:
                 raise FileNotFoundError(path)
@@ -1237,6 +1234,13 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     not generation or o.get("generation") == generation
                 ):
                     return o
+        if generation:
+            # Only objects.get can resolve a specific generation; a missing one
+            # is a 404 there and must not fall back to the current object.
+            out = await self._get_object(path, generation)
+            if _is_directory_marker(out):
+                return await self._get_directory_info(path, bucket, key, generation)
+            return out
         if self._ls_from_cache(path):
             # this is a directory
             return {
