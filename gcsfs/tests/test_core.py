@@ -9,6 +9,7 @@ import uuid
 from builtins import FileNotFoundError
 from datetime import datetime, timedelta, timezone
 from itertools import chain
+from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
@@ -4314,8 +4315,9 @@ def test_get_file_concurrent_write_exception_in_finally(gcs):
                 gcs.get_file(fn, lpath, concurrency=3, chunk_size=20 * 1024 * 1024)
 
 
-def test_get_file_concurrent_cancelled_error(gcs):
-    """Coverage: `except asyncio.CancelledError: break/pass` inside the finally block"""
+@pytest.mark.parametrize("cancel_cleanup", [False, True])
+def test_get_file_concurrent_cancelled_error(gcs, cancel_cleanup):
+    """Finish pending writes before propagating cancellation from cleanup."""
     fn = f"{TEST_BUCKET}/cancelled.txt"
     data = b"1234567890" * 1024 * 1024  # ~10MB (larger than 5MB default)
     gcs.pipe(fn, data)
@@ -4323,9 +4325,30 @@ def test_get_file_concurrent_cancelled_error(gcs):
     with tempdir() as dn:
         lpath = os.path.join(dn, "out_cancelled.txt")
 
-        # Create a mock that forces the exact exception we are trying to cover
+        wait_calls = []
+
         async def mock_wait(*args, **kwargs):
-            raise asyncio.CancelledError()
+            assert not kwargs
+            tasks = set(args[0])
+            assert tasks
+            assert all(task.get_coro().cr_code.co_name == "to_thread" for task in tasks)
+            wait_calls.append(tasks)
+            if cancel_cleanup and len(wait_calls) == 1:
+                raise asyncio.CancelledError()
+            result = await asyncio.wait(*args, **kwargs)
+            assert all(task.done() and task.exception() is None for task in tasks)
+            with open(lpath, "rb") as output:
+                assert output.read() == data
+            return result
+
+        async def download():
+            try:
+                await gcs._get_file(
+                    fn, lpath, concurrency=2, chunk_size=20 * 1024 * 1024
+                )
+            except asyncio.CancelledError:
+                return True
+            return False
 
         with (
             mock.patch.object(
@@ -4334,9 +4357,21 @@ def test_get_file_concurrent_cancelled_error(gcs):
                 new_callable=mock.AsyncMock,
                 return_value=-1,
             ),
-            mock.patch("gcsfs.core.asyncio.wait", side_effect=mock_wait),
+            mock.patch(
+                "gcsfs.core.asyncio",
+                SimpleNamespace(**{**vars(asyncio), "wait": mock_wait}),
+            ),
         ):
-            gcs.get_file(fn, lpath, concurrency=2, chunk_size=20 * 1024 * 1024)
+            # Assert the coroutine contract on its own loop, independently of
+            # older fsspec versions swallowing cancellation in the sync bridge.
+            assert sync(gcs.loop, download) is cancel_cleanup
+
+        assert len(wait_calls) == (2 if cancel_cleanup else 1)
+        if cancel_cleanup:
+            assert not os.path.exists(lpath)
+        else:
+            with open(lpath, "rb") as output:
+                assert output.read() == data
 
 
 def test_init_local_file(gcs):
