@@ -134,8 +134,12 @@ spec:
                 value: "{{ .Values.gcsfs.ckptWritePath }}"
               - name: CKPT_LOAD_PATH
                 value: "{{ .Values.gcsfs.ckptLoadPath }}"
+              # Per-install suffix: upstream CheckpointManager resumes from the latest
+              # step-N in <ckptWritePath>/<RUN_ID>, so reusing a release name would
+              # otherwise restore the previous run's final step and train 0 steps.
+              # Rendered once per install, so JobSet pod restarts still resume.
               - name: RUN_ID
-                value: "{{ .Release.Name }}"
+                value: "{{ .Release.Name }}-{{ now | date "20060102-150405" }}"
               - name: MODEL_ID
                 value: "{{ .Values.workload.modelId }}"
               {{- if .Values.workload.hfToken }}

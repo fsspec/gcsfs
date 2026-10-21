@@ -43,11 +43,19 @@ from torchtitan.components.data import (
 from torchtitan.components.data.text_datasets import TextProcessor
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import (
+    ContextParallelTransform,
+    transform_model_config_,
+)
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention.cp_attention import (
+    AllGatherKVFlexInnerAttention,
+    UlyssesVarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
-from torchtitan.tools import filesystem
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.data import c4_document_capacity
@@ -62,6 +70,13 @@ SUPPORTED_FLAVORS = ("70B", "debugmodel")
 _CHECKPOINTER_LOGGER = "torchtitan.components.checkpointer.base"
 _DELETED_MSG = "Checkpointer deleted %s in %.2f seconds."
 _STEP_DIR_RE = re.compile(r"step-(\d+)/?$")
+
+# CP > 1 needs a CPInnerAttention in every attention layer (upstream
+# `validate_context_parallel`); same mapping as torchtitan_recipes' muse_glimmer.
+_CP_INNER_ATTENTION_MAP = {
+    FlexInnerAttention: AllGatherKVFlexInnerAttention,
+    VarlenInnerAttention: UlyssesVarlenInnerAttention,
+}
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -186,7 +201,7 @@ def build_checkpointer_config(
             else "checkpoint"
         ),
         interval=max(1, interval),
-        keep_latest_k=0 if keep_latest_k <= 0 else max(2, keep_latest_k),
+        keep_latest_k=keep_latest_k,
         # Keep the final save a full, resumable checkpoint (upstream defaults to a
         # model-only export) so every save in a run has the same shape.
         last_save_model_only=False,
@@ -234,6 +249,12 @@ def llama3_70b_gcsfs() -> Trainer.Config:
         parallelism=parallelism,
         attn_backend=_env_str("ATTN_BACKEND", "flex"),
     )
+    if parallelism.context_parallel_degree > 1:
+        # Must happen before Trainer.Config is built: its __post_init__ validates CP.
+        model_config = transform_model_config_(
+            model_config,
+            [ContextParallelTransform(inner_attention_map=_CP_INNER_ATTENTION_MAP)],
+        )
 
     base = llama3_70b(seq_len=seq_len)
     tokens_per_microbatch = per_device_batch * model_config.max_context_length
@@ -285,8 +306,8 @@ def llama3_70b_gcsfs() -> Trainer.Config:
         "checkpointer": build_checkpointer_config(
             ckpt_write_path=_env_str("CKPT_WRITE_PATH").rstrip("/"),
             run_id=run_id,
-            interval=min(_env_int("CHECKPOINT_WRITE_INTERVAL", 25), max_steps),
-            keep_latest_k=_env_int("CKPT_TO_KEEP", 1),
+            interval=min(_env_int("CHECKPOINT_WRITE_INTERVAL", 15), max_steps),
+            keep_latest_k=_env_int("CKPT_TO_KEEP", 2),
             ckpt_load_path=_env_str("CKPT_LOAD_PATH"),
         ),
         "hf_assets_path": _env_str("LOCAL_TOKENIZER_PATH") or base.hf_assets_path,
@@ -371,10 +392,6 @@ class GcsfsTrainingEngine(TrainingEngine):
         _install_delete_bridge()
         super().__init__(*args, **kwargs)
 
-    def _checkpoint_dir(self, step: int) -> str:
-        folder = getattr(self.checkpointer, "folder", self.config.checkpointer.folder)
-        return filesystem.join(folder, f"step-{step}")
-
     def _current_dp_degree(self) -> int:
         ctx = self.parallelism_context
         return ctx.get_mesh("dp").size() if ctx.dp_enabled else 1
@@ -396,16 +413,22 @@ class GcsfsTrainingEngine(TrainingEngine):
                 flush=True,
             )
 
+    def _resolve_load_target(self) -> tuple[str | None, int]:
+        """``(checkpoint_id, step)`` that upstream ``CheckpointManager.load`` will
+        pick: the latest resumable ``folder/step-N`` (fault-tolerance restart),
+        else ``initial_load_path`` with step -1."""
+        step = self.checkpointer._find_load_step()  # -1 if folder is missing
+        if step != -1:
+            return self.checkpointer._create_checkpoint_id(step), step
+        return self.config.checkpointer.initial_load_path, -1
+
     def load_checkpoint(self) -> bool:
-        ckpt_config = self.config.checkpointer
-        if ckpt_config is None:
+        if self.config.checkpointer is None:
             return False
-        load_path = ckpt_config.initial_load_path
-        fresh_folder = not filesystem.isdir(self.checkpointer.folder)
-        if load_path and fresh_folder:
+        load_path, step = self._resolve_load_target()
+        # Step 0 is a model-only seed checkpoint, so no dataloader state loads.
+        if load_path and step != 0:
             self._skip_incompatible_dataloader_state(load_path)
-        else:
-            load_path = self.checkpointer.folder
 
         start_wall = time.time()
         start = time.perf_counter()
@@ -436,7 +459,7 @@ class GcsfsTrainingEngine(TrainingEngine):
         _barrier()
         duration = time.perf_counter() - start
         step = self.num_completed_steps
-        ckpt_dir = self._checkpoint_dir(step)
+        ckpt_dir = self.checkpointer._create_checkpoint_id(step)
         rank = _global_rank()
         print(
             f"Checkpoint Save : Rank: {rank} : Step: {step} : "
@@ -449,13 +472,18 @@ class GcsfsTrainingEngine(TrainingEngine):
             flush=True,
         )
         if rank == 0:
-            fs, fs_path = fsspec.core.url_to_fs(ckpt_dir)
-            total_bytes = int(fs.du(fs_path)) if fs.exists(fs_path) else 0
-            print(
-                f"Checkpoint Size : Rank : 0 : Step : {step} : "
-                f"Bytes : {total_bytes} : Path: {ckpt_dir}",
-                flush=True,
-            )
+            # Metrics only: a failed size lookup must not fail the run.
+            try:
+                fs, fs_path = fsspec.core.url_to_fs(ckpt_dir)
+                total_bytes = int(fs.du(fs_path))
+            except Exception as e:
+                logging.warning("Could not measure checkpoint size: %s", e)
+            else:
+                print(
+                    f"Checkpoint Size : Rank : 0 : Step : {step} : "
+                    f"Bytes : {total_bytes} : Path: {ckpt_dir}",
+                    flush=True,
+                )
         _barrier()
         return True
 

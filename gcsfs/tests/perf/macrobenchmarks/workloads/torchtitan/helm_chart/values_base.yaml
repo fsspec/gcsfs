@@ -9,8 +9,11 @@ network:
 nodeSelector: {}
 
 gcsfs:
-  datasetPath: "gs://zhixiangli-gcsfs-performance-standard-ew1/dataset16"
-  ckptWritePath: "gs://zhixiangli-gcsfs-performance-standard-ew1/checkpoints"
+  # Required: gs:// directory of *.parquet files with a `text` column.
+  datasetPath: ""
+  # Required unless ckptLoadPath is set. Each install writes to
+  # <ckptWritePath>/<release>-<timestamp>/step-N.
+  ckptWritePath: ""
   ckptLoadPath: ""
 
 workload:
@@ -23,8 +26,9 @@ workload:
   envs: []
 
   torchDistributedTimeoutSeconds: "3600"
-  # Tokenizer / model config path on GCS or HuggingFace Hub
-  modelId: "gs://zhixiangli-gcsfs-performance-standard-ew1/models/Llama-3.1-8B"
+  # gs:// directory holding the Llama 3.1 tokenizer files (tokenizer*.json,
+  # special_tokens*, config.json); staged once per node. Only gs:// is supported.
+  modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
   hfToken: ""
 
   # Llama 3.1 model flavor: "70B" (benchmark) or "debugmodel" (smoke/unit tests;
@@ -36,8 +40,12 @@ workload:
   attnBackend: "flex"
 
   steps: 50
-  ckptWriterInterval: 25
-  ckptToKeep: 1
+  # Saves at steps 15, 30, 45 and 50 (the last step always saves). TorchTitan
+  # purges before each save and keeps ckptToKeep - 1 older checkpoints, so
+  # step-15 and step-30 are deleted during the step-45 and step-50 saves.
+  # ckptToKeep must be 0 (keep all) or >= 2.
+  ckptWriterInterval: 15
+  ckptToKeep: 2
   perDeviceBatch: 1
   gradAccum: 1
   # Rows kept per rank by Grain's streaming window shuffle.

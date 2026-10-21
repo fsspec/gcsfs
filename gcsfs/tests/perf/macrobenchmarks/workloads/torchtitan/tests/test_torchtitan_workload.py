@@ -3,17 +3,17 @@
 TorchTitan ``main`` needs a PyTorch nightly and its ``Trainer`` needs CUDA, so
 these tests cover what runs on CPU: recipe/config construction, the metric-log
 emitters, the hooks we wrap in upstream classes, checkpoint metadata inspection,
-the hf.py parser contract, and the Helm chart. End-to-end training runs on GPUs.
+and the hf.py parser contract. End-to-end training runs on GPUs. The Helm chart
+and launcher are covered torch-free in ``test_helm_chart.py``.
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
-import shutil
-import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,6 +35,10 @@ import torchtitan_train as tt  # noqa: E402
 from metrics import calculate, raw_store  # noqa: E402
 from metrics.parsers import hf as hf_parser  # noqa: E402
 from torchtitan.components.checkpointer import base as ckpt_base  # noqa: E402
+from torchtitan.components.checkpointer import dcp as ckpt_dcp  # noqa: E402
+from torchtitan.models.common.attention.cp_attention import (  # noqa: E402
+    CPInnerAttention,
+)
 from torchtitan.observability.metrics import MetricsProcessor  # noqa: E402
 from torchtitan.trainer import Trainer  # noqa: E402
 from torchtitan.training_engine import TrainingEngine  # noqa: E402
@@ -48,8 +52,8 @@ BASE_ENV = {
     "TORCHTITAN_FLAVOR": "70B",
     "SEQ_LEN": "2048",
     "MAX_STEPS": "50",
-    "CHECKPOINT_WRITE_INTERVAL": "25",
-    "CKPT_TO_KEEP": "1",
+    "CHECKPOINT_WRITE_INTERVAL": "15",
+    "CKPT_TO_KEEP": "2",
     "PER_DEVICE_TRAIN_BATCH_SIZE": "1",
     "GRADIENT_ACCUMULATION_STEPS": "1",
     "TRAINING_STRATEGY": "model_parallel_sharded",
@@ -167,11 +171,24 @@ class TestRecipe:
     def test_checkpointer_writes_full_state_to_gcs(self, recipe_env):
         ckpt = tt.llama3_70b_gcsfs().checkpointer
         assert ckpt.folder == "gs://bucket/checkpoints/tt-run"
-        assert ckpt.interval == 25
-        assert ckpt.keep_latest_k == 2  # upstream minimum when retention is on
+        assert ckpt.interval == 15
+        assert ckpt.keep_latest_k == 2
         assert ckpt.last_save_model_only is False
         assert ckpt.initial_load_path is None
         assert ckpt.load_only is False
+
+    @pytest.mark.parametrize(
+        ("keep", "message"),
+        [("1", "at least 2 checkpoint replicas"), ("-1", "cannot be negative")],
+    )
+    def test_upstream_rejects_invalid_ckpt_to_keep(self, recipe_env, keep, message):
+        recipe_env.setenv("CKPT_TO_KEEP", keep)
+        with pytest.raises(ValueError, match=message):
+            tt.llama3_70b_gcsfs()
+
+    def test_ckpt_to_keep_zero_keeps_all(self, recipe_env):
+        recipe_env.setenv("CKPT_TO_KEEP", "0")
+        assert tt.llama3_70b_gcsfs().checkpointer.keep_latest_k == 0
 
     def test_resume_loads_full_state(self, recipe_env):
         recipe_env.setenv("CKPT_LOAD_PATH", "gs://bucket/checkpoints/seed/step-1")
@@ -206,6 +223,54 @@ class TestRecipe:
             tt.llama3_70b_gcsfs()
 
 
+class TestContextParallelRecipe:
+    """CP > 1 must survive upstream ``Trainer.Config`` validation."""
+
+    @pytest.mark.parametrize(
+        ("attn_backend", "cp_cls"),
+        [
+            ("flex", tt.AllGatherKVFlexInnerAttention),
+            ("varlen", tt.UlyssesVarlenInnerAttention),
+        ],
+    )
+    def test_cp2_builds_with_cp_inner_attention(self, recipe_env, attn_backend, cp_cls):
+        recipe_env.setenv("ATTN_BACKEND", attn_backend)
+        recipe_env.setenv("CONTEXT_PARALLEL_SIZE", "2")
+        recipe_env.setenv("DATA_PARALLEL_SIZE", "2")
+        cfg = tt.llama3_70b_gcsfs()
+        assert cfg.parallelism.context_parallel_degree == 2
+        assert cfg.parallelism.tensor_parallel_degree == 4
+        assert cfg.parallelism.data_parallel_shard_degree == 2
+        inner = [layer.attention.inner_attention for layer in cfg.model.layers]
+        assert inner and all(isinstance(a, CPInnerAttention.Config) for a in inner)
+        assert all(a._owner is cp_cls for a in inner)
+
+    def test_5d_recipe_builds(self, recipe_env):
+        for key, value in {
+            "WORLD_SIZE": "32",
+            "TENSOR_PARALLEL_SIZE": "2",
+            "DP_REPLICATE_SIZE": "2",
+            "CONTEXT_PARALLEL_SIZE": "2",
+            "PIPELINE_PARALLEL_SIZE": "2",
+            "DATA_PARALLEL_SIZE": "2",
+        }.items():
+            recipe_env.setenv(key, value)
+        cfg = tt.llama3_70b_gcsfs()
+        p = cfg.parallelism
+        assert (
+            p.pipeline_parallel_degree,
+            p.data_parallel_replicate_degree,
+            p.data_parallel_shard_degree,
+            p.context_parallel_degree,
+            p.tensor_parallel_degree,
+        ) == (2, 2, 2, 2, 2)
+
+    def test_cp1_keeps_plain_attention(self, recipe_env):
+        cfg = tt.llama3_70b_gcsfs()
+        inner = cfg.model.layers[0].attention.inner_attention
+        assert not isinstance(inner, CPInnerAttention.Config)
+
+
 class TestUpstreamHookShape:
     """Fail loudly when TorchTitan main renames the internals this workload wraps."""
 
@@ -222,6 +287,8 @@ class TestUpstreamHookShape:
             "last_step" in inspect.signature(TrainingEngine.save_checkpoint).parameters
         )
         assert hasattr(TrainingEngine, "load_checkpoint")
+        for name in ("_find_load_step", "_create_checkpoint_id"):
+            assert hasattr(ckpt_dcp.CheckpointManager, name), name
 
     def test_metrics_log_signature(self):
         params = list(inspect.signature(MetricsProcessor.log).parameters)
@@ -238,17 +305,133 @@ class TestUpstreamHookShape:
         assert ckpt_base.logger.name == tt._CHECKPOINTER_LOGGER
 
 
+# ---------------------------------------------------------------------------
+# Engine / trainer shells: real upstream CheckpointManager logic on local disk,
+# with the CUDA-only constructors and the upstream save/load bodies stubbed.
+# ---------------------------------------------------------------------------
+
+
+def _engine(folder, *, initial_load_path=None):
+    ckpt = object.__new__(ckpt_dcp.CheckpointManager)
+    ckpt.folder = str(folder)
+    ckpt._storage = ckpt_dcp._FilesystemCheckpointStorage()
+    ckpt.exclude_from_loading = []
+    engine = object.__new__(tt.GcsfsTrainingEngine)
+    engine.checkpointer = ckpt
+    engine.config = SimpleNamespace(
+        checkpointer=SimpleNamespace(initial_load_path=initial_load_path)
+    )
+    return engine
+
+
+def _trainer():
+    trainer = object.__new__(tt.GcsfsBenchmarkTrainer)
+    trainer._last_loss = 11.8234
+    trainer._fetch_count = 0
+    trainer._fetch_wait_s = 0.0
+    trainer._data_wait_total_s = 0.0
+    trainer._step_wall_s = 0.0
+    trainer._samples_per_step = 4
+    trainer.engine = SimpleNamespace(num_completed_steps=1)
+    return trainer
+
+
+def _make_step(folder: Path, step: int, *, resumable: bool = True) -> None:
+    step_dir = folder / f"step-{step}"
+    step_dir.mkdir(parents=True)
+    if resumable:
+        (step_dir / ".metadata").write_bytes(b"")
+
+
+@pytest.fixture
+def stub_upstream(monkeypatch):
+    """Upstream save/load/step bodies need CUDA + a real model; make them no-ops."""
+    monkeypatch.setattr(TrainingEngine, "load_checkpoint", lambda self: True)
+    monkeypatch.setattr(
+        TrainingEngine, "save_checkpoint", lambda self, *, last_step=False: True
+    )
+    monkeypatch.setattr(Trainer, "train_step", lambda self, it: None)
+    monkeypatch.setattr(tt.GrainDataLoader, "__init__", lambda self, cfg, **kw: None)
+    return monkeypatch
+
+
+class TestCheckpointHooks:
+    @pytest.mark.parametrize(
+        ("existing", "expected_step"),
+        [
+            ({20: True, 40: True, 50: False}, 40),  # newest resumable; 50 half-written
+            ({20: False}, -1),  # nothing resumable -> initial_load_path
+            ({}, -1),  # no folder -> initial_load_path
+        ],
+    )
+    def test_load_target_matches_upstream(self, tmp_path, existing, expected_step):
+        folder = tmp_path / "run"
+        for step, resumable in existing.items():
+            _make_step(folder, step, resumable=resumable)
+        seed = str(tmp_path / "seed" / "step-1")
+        expected = (
+            (str(folder / f"step-{expected_step}"), expected_step)
+            if expected_step != -1
+            else (seed, -1)
+        )
+        engine = _engine(folder, initial_load_path=seed)
+        assert engine._resolve_load_target() == expected
+
+    @pytest.mark.parametrize(("step", "checks_dataloader"), [(20, True), (0, False)])
+    def test_load_reports_step_dir(
+        self, tmp_path, stub_upstream, capsys, step, checks_dataloader
+    ):
+        folder = tmp_path / "run"
+        _make_step(folder, step)
+        engine = _engine(folder)
+        checked = []
+        stub_upstream.setattr(
+            engine, "_skip_incompatible_dataloader_state", checked.append
+        )
+        assert engine.load_checkpoint() is True
+        step_dir = str(folder / f"step-{step}")
+        assert checked == ([step_dir] if checks_dataloader else [])
+        assert capsys.readouterr().out.count(f"Path: {step_dir}") == 2
+
+    def test_save_reports_size(self, tmp_path, stub_upstream, capsys):
+        engine = _engine(tmp_path)
+        engine.num_completed_steps = 20
+        (tmp_path / "step-20").mkdir()
+        (tmp_path / "step-20" / "shard").write_bytes(b"x" * 10)
+        assert engine.save_checkpoint() is True
+        out = capsys.readouterr().out
+        assert f"Finished saving checkpoint to {tmp_path}/step-20" in out
+        assert "Checkpoint Size : Rank : 0 : Step : 20 : Bytes : 10 :" in out
+
+    def test_size_failure_does_not_fail_run(self, tmp_path, stub_upstream, capsys):
+        engine = _engine(tmp_path)
+        engine.num_completed_steps = 20
+
+        def _boom(*args, **kwargs):
+            raise OSError("transient")
+
+        stub_upstream.setattr(tt.fsspec.core, "url_to_fs", _boom)
+        assert engine.save_checkpoint() is True
+        out = capsys.readouterr().out
+        assert "Finished saving checkpoint to" in out
+        assert "Checkpoint Size" not in out
+
+
+def _log_purge(path: str, seconds: float) -> None:
+    tt._install_delete_bridge()
+    logger = logging.getLogger(tt._CHECKPOINTER_LOGGER)
+    old_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        logger.info(tt._DELETED_MSG, path, seconds)
+    finally:
+        logger.setLevel(old_level)
+
+
 class TestMetricEmitters:
     def test_delete_bridge_reemits_purge_timing(self, capsys):
-        tt._install_delete_bridge()
-        tt._install_delete_bridge()  # idempotent
-        logger = logging.getLogger(tt._CHECKPOINTER_LOGGER)
-        old_level = logger.level
-        logger.setLevel(logging.INFO)
-        try:
-            logger.info(tt._DELETED_MSG, "gs://b/ckpts/run/step-25", 3.5)
-        finally:
-            logger.setLevel(old_level)
+        tt._install_delete_bridge()  # idempotent with the call in _log_purge
+        _log_purge("gs://b/ckpts/run/step-25", 3.5)
         out = capsys.readouterr().out
         assert out.count("Finished deleting checkpoint") == 1
         assert (
@@ -257,10 +440,7 @@ class TestMetricEmitters:
         ) in out
 
     def test_timed_batches_emit_data_wait_lines(self, capsys):
-        trainer = object.__new__(tt.GcsfsBenchmarkTrainer)
-        trainer._fetch_count = 0
-        trainer._fetch_wait_s = 0.0
-        trainer._data_wait_total_s = 0.0
+        trainer = _trainer()
         assert list(trainer._timed_batches(["a", "b"])) == ["a", "b"]
         lines = capsys.readouterr().out.splitlines()
         assert lines[0].startswith(
@@ -289,42 +469,40 @@ class TestMetricEmitters:
 
 
 class TestMetricsParserCompatibility:
-    def test_emitted_lines_parse_into_summary_row(self, tmp_path, capsys):
-        trainer = object.__new__(tt.GcsfsBenchmarkTrainer)
-        trainer._fetch_count = 0
-        trainer._fetch_wait_s = 0.0
-        trainer._data_wait_total_s = 0.0
-        trainer._step_wall_s = 2.0
+    def test_emitted_lines_parse_into_summary_row(
+        self, tmp_path, stub_upstream, capsys
+    ):
+        # Every line comes from the workload's real hooks, so format drift in
+        # torchtitan_train.py breaks this test.
+        tt.GcsfsGrainDataLoader(SimpleNamespace(dataset_path="gs://b/dataset16"))
+        trainer = _trainer()
         list(trainer._timed_batches(range(2)))
+        trainer.train_step(iter(()))
         trainer._print_summary()
-        emitted = capsys.readouterr().out.splitlines()
 
-        lines = [
-            "Dataset Build : Rank : 0 : Duration : 0.8123 seconds : Path: gs://b/dataset16",
-            *emitted,
-            "Global Rank: 0 | Step: 1 | Loss: 11.8234 | Step Time: 2.1500s | Throughput: 7.44 samples/s",
-            "Checkpoint Save : Rank: 0 : Step: 2 : Start time: 1700000000.0000 seconds: Path: gs://b/ckpts/run/step-2",
-            "Finished saving checkpoint to gs://b/ckpts/run/step-2 in 14.5000 seconds for global_step 2 from rank 0",
-            "Checkpoint Size : Rank : 0 : Step : 2 : Bytes : 847000000000 : Path: gs://b/ckpts/run/step-2",
-            "Finished deleting checkpoint gs://b/ckpts/run/step-1 in 1.2000 seconds for global_step 1 from rank 0",
-            (
-                "Checkpoint Restore Start : Rank : 0 : Start time: 1700000020.0000 seconds : "
-                "Path: gs://b/ckpts/seed/step-1"
-            ),
-            (
-                "Finished restoring checkpoint : Rank : 0 : Duration: 9.8000 seconds : "
-                "End Time: 1700000029.8000 seconds : Path: gs://b/ckpts/seed/step-1"
-            ),
-        ]
+        folder = tmp_path / "ckpts" / "run"
+        (folder / "step-2").mkdir(parents=True)
+        (folder / "step-2" / "shard").write_bytes(b"x" * 10)
+        saver = _engine(folder)
+        saver.num_completed_steps = 2
+        saver.save_checkpoint()
+        _log_purge(str(folder / "step-1"), 1.2)
+
+        seed = str(tmp_path / "seed" / "step-1")
+        loader = _engine(tmp_path / "fresh", initial_load_path=seed)
+        stub_upstream.setattr(loader, "_skip_incompatible_dataloader_state", print)
+        loader.load_checkpoint()
+        lines = capsys.readouterr().out.splitlines()
+
         entries = [
             hf_parser.LogEntry(message=line, timestamp=1700000000.0 + i)
             for i, line in enumerate(lines)
         ]
         parsed = hf_parser.parse_entries(
-            entries, run_id="tt-test-run", checkpoint_location="gs://b/ckpts"
+            entries, run_id="tt-test-run", checkpoint_location=str(tmp_path)
         )
-        raw_store.write_raw_metrics(parsed, str(tmp_path))
-        tables = raw_store.read_raw_metrics(str(tmp_path))
+        raw_store.write_raw_metrics(parsed, str(tmp_path / "raw"))
+        tables = raw_store.read_raw_metrics(str(tmp_path / "raw"))
         row = calculate.build_summary_row(
             run_id="tt-test-run",
             workload_name="torchtitan",
@@ -341,54 +519,13 @@ class TestMetricsParserCompatibility:
             ray_data_iteration_rows=tables.ray_data_iteration_rows,
             dimensions={"nodes": 2, "ranks_per_node": 8},
         )
-        assert float(row["dataset_build_time"]) == pytest.approx(0.8123)
-        assert float(row["checkpoint_write_time_avg"]) == pytest.approx(14.5)
-        assert float(row["checkpoint_restore_time_avg"]) == pytest.approx(9.8)
-        assert float(row["checkpoint_delete_time_avg"]) == pytest.approx(1.2)
-        assert int(row["checkpoint_size_bytes"]) == 847000000000
-        assert len(tables.data_wait_rows) == 3  # setup + 2 fetches
-
-
-class TestHelmChartRendering:
-    def test_helm_template_renders(self):
-        helm_bin = shutil.which("helm")
-        if not helm_bin:
-            pytest.skip("helm binary not available")
-        rendered = subprocess.run(
-            [
-                helm_bin,
-                "template",
-                "tt-llama70b",
-                str(HELM_CHART_DIR),
-                "-f",
-                str(HELM_CHART_DIR / "values_base.yaml"),
-                "--set",
-                "workload.nodes=2",
-                "--set",
-                "workload.ranksPerNode=8",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        assert "kind: JobSet" in rendered
-        assert "parallelism: 2" in rendered
-        assert "nvidia.com/gpu: 8" in rendered
-        assert "nccl-plugin-installer" in rendered
-        assert "torchtitan_train.py: |" in rendered
-        assert (
-            "torchtitan @ git+https://github.com/pytorch/torchtitan.git@main"
-            in rendered
-        )
-        assert "-m torchtitan.train" in rendered
-        assert 'name: ATTN_BACKEND\n                value: "flex"' in rendered
-        assert (
-            'name: TORCH_NIGHTLY_INDEX\n                value: "https://download.pytorch.org/whl/nightly/cu132"'
-            in rendered
-        )
-        for removed in (
-            "TORCH_DISTRIBUTED_TARGET",
-            "DATALOADER_NUM_WORKERS",
-            "SHUFFLE_MAX_BUFFER_INPUT_SHARDS",
+        for column in (
+            "dataset_build_time",
+            "checkpoint_write_time_avg",
+            "checkpoint_restore_time_avg",
         ):
-            assert removed not in rendered
+            assert row[column] not in (None, ""), column
+        assert float(row["checkpoint_delete_time_avg"]) == pytest.approx(1.2)
+        assert int(row["checkpoint_size_bytes"]) == 10
+        assert len(tables.step_rows) == 1
+        assert len(tables.data_wait_rows) == 3  # setup + 2 fetches

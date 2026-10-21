@@ -126,7 +126,7 @@ The workloads save and restore as follows:
 
 | | Lightning | Ray | TorchTitan |
 | :-- | :-- | :-- | :-- |
-| Save | Synchronous, through Lightning `ModelCheckpoint`. | Written to a local temp directory, then uploaded asynchronously by Ray Train. At most one upload is in flight at a time. | TorchTitan's `CheckpointManager` (synchronous sharded DCP) to `gs://<ckptWritePath>/<release>/step-N` via `fsspec`/`gcsfs`; the final save is a full checkpoint (`last_save_model_only=False`). Retention needs `ckptToKeep` ≥ 2 (or 0 to keep all); old checkpoints are deleted by TorchTitan's background purge thread. |
+| Save | Synchronous, through Lightning `ModelCheckpoint`. | Written to a local temp directory, then uploaded asynchronously by Ray Train. At most one upload is in flight at a time. | TorchTitan's `CheckpointManager` (synchronous sharded DCP) to `gs://<ckptWritePath>/<release>-<install timestamp>/step-N` via `fsspec`/`gcsfs` (a per-install folder, so re-installing a release starts fresh instead of auto-resuming); the final save is a full checkpoint (`last_save_model_only=False`). `ckptToKeep` must be 0 (keep all) or ≥ 2. TorchTitan's background purge thread deletes old checkpoints before each save, keeping `ckptToKeep - 1`, so deletes need at least `ckptToKeep + 1` saves (defaults: saves at steps 15/30/45/50; step-15 and step-30 are deleted). |
 | Restore | Full resume through `trainer.fit(ckpt_path=...)`. | Warm start: model, optimizer, and scheduler state are restored, but step and epoch restart at 0. | Full resume from `ckptLoadPath` (`initial_load_path`, `initial_load_model_only=False`): model, optimizer, LR scheduler, Grain dataloader, and train state; training continues at the restored step + 1. |
 | Compatibility | No explicit check. | These must match the new run: schema version, format, strategy, world size, TP/DP sizes, and SHA-256 hashes of the model `config.json` and tokenizer files. | DCP reshards model and optimizer state across topologies. Upstream `GrainDataLoader` refuses to resume after a DP-degree change, so when the checkpoint's dataloader state was saved at a different DP degree the workload excludes it from loading (with a warning) and the data stream restarts. |
 
@@ -170,7 +170,8 @@ Each run produces one summary row. For column names, see
 - **`_MODEL_ID`**: defaults to `gs://huggingface-model-weights/Llama-3.1-8B`.
   - A `gs://` model is copied to the pod with `gcloud storage cp`, not
     `gcsfs` (or staged once per node for tokenizer metadata in `torchtitan`).
-  - A Hugging Face repo ID also works, together with `_HF_TOKEN`.
+  - A Hugging Face repo ID also works, together with `_HF_TOKEN` (not for
+    `torchtitan`, which requires a `gs://` tokenizer location).
 - **`_REQUIREMENTS`**: the `gcsfs` build under test. This is required. It is
   installed with `--no-cache-dir`.
 
@@ -247,6 +248,8 @@ To deploy the TorchTitan Llama 3.1 70B GPU workload (e.g., on `a3-ultragpu-8g` /
 helm install torchtitan-llama70b \
   gcsfs/tests/perf/macrobenchmarks/workloads/torchtitan/helm_chart \
   -f gcsfs/tests/perf/macrobenchmarks/workloads/torchtitan/helm_chart/values_base.yaml \
+  --set gcsfs.datasetPath=gs://<bucket>/<parquet-dataset-dir> \
+  --set gcsfs.ckptWritePath=gs://<bucket>/checkpoints \
   --set workload.modelFlavor=70B \
   --set workload.nodes=2 \
   --set workload.ranksPerNode=8 \

@@ -3,6 +3,22 @@ set -euxo pipefail
 
 echo "Starting TorchTitan GPU workload launcher script..."
 
+# Validate required inputs before the pip installs below.
+if [[ -z "${DATASET_PATH:-}" ]]; then
+  echo "ERROR: gcsfs.datasetPath (DATASET_PATH) is required." >&2
+  exit 1
+fi
+if [[ -z "${CKPT_WRITE_PATH:-}" && -z "${CKPT_LOAD_PATH:-}" ]]; then
+  echo "ERROR: gcsfs.ckptWritePath (CKPT_WRITE_PATH) is required." >&2
+  exit 1
+fi
+# Only gs:// tokenizer sources are staged below; anything else would leave
+# TorchTitan's hf_assets_path at its upstream default and fail to load.
+if [[ "${MODEL_ID:-}" != gs://* ]]; then
+  echo "ERROR: workload.modelId (MODEL_ID) must be a gs:// path (got '${MODEL_ID:-}')." >&2
+  exit 1
+fi
+
 # Configure NCCL / GPUDirect-RDMA (gIB) on A3 Ultra / H200 clusters if present
 if [[ -f /usr/local/gib/scripts/set_nccl_env.sh ]]; then
   echo "Sourcing /usr/local/gib/scripts/set_nccl_env.sh..."
