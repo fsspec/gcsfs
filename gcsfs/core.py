@@ -1369,7 +1369,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if start is None:
             start = 0
         if end is None:
-            end = (await self._info(path))["size"]
+            end = (await self._info(path, generation=kwargs.get("generation")))["size"]
         if start >= end:
             return b""
 

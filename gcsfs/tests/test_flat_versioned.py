@@ -135,6 +135,16 @@ def test_missing_generation_not_found(gcs_versioned):
             gcs_versioned.open(b, "rb", generation=missing)
 
 
+def test_cat_file_concurrent_older_generation(gcs_versioned):
+    old = b"0123456789abcdefghij"
+    gcs_versioned.pipe_file(b, old)
+    v1 = gcs_versioned.info(b)["generation"]
+    gcs_versioned.pipe_file(b, b"new")
+    gcs_versioned.invalidate_cache()
+
+    assert gcs_versioned.cat_file(b, generation=v1, concurrency=4) == old
+
+
 def test_cp_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
         wo.write(b"v1")
