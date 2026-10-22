@@ -20,8 +20,8 @@ from gcsfs.telemetry.context import (
     set_telemetry_context,
 )
 from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
-from gcsfs.telemetry.manager import (
-    UsageMetricsTracker,
+from gcsfs.telemetry.manager import UsageMetricsTracker
+from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
     mirror_gcs_methods,
