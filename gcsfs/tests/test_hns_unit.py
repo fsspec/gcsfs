@@ -2878,11 +2878,11 @@ class TestExtendedGcsFileSystemRm:
                 gcsfs.rm([flat_file, hns_file])
 
     @pytest.mark.parametrize(
-        "recursive, maxdepth, expect_placeholder_delete",
+        "recursive, maxdepth, expected_batch_files, expected_rm_files, expected_folder_deletes",
         [
-            (True, None, False),
-            (False, None, True),
-            (True, 1, True),
+            (True, None, ["dir/sub/"], [], 2),
+            (True, 1, [], ["dir/sub/", "dir/"], 2),
+            (False, None, [], ["dir/"], 1),
         ],
     )
     def test_rm_placeholder_delete_behavior(
@@ -2891,34 +2891,46 @@ class TestExtendedGcsFileSystemRm:
         gcs_hns_mocks,
         recursive,
         maxdepth,
-        expect_placeholder_delete,
+        expected_batch_files,
+        expected_rm_files,
+        expected_folder_deletes,
     ):
-        """Test that placeholder deletion in _rmdir is skipped only when recursive=True and maxdepth=None."""
+        """Test that placeholder deletion in _hns_rmdir is skipped only when recursive=True and maxdepth=None."""
         gcsfs = gcs_hns
-        dir_path = f"{TEST_HNS_BUCKET}/dir_with_placeholder"
+        dir_path = f"{TEST_HNS_BUCKET}/dir"
+        sub_placeholder = f"{TEST_HNS_BUCKET}/dir/sub/"
 
-        mock_expand = mock.AsyncMock(
-            return_value=[{"name": dir_path, "type": "directory"}]
-        )
         mock_delete_files = mock.AsyncMock(return_value=[])
-        mock_rm_file = mock.AsyncMock()
+        mock_rm_file = mock.AsyncMock(side_effect=FileNotFoundError)
 
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
             mock.patch.object(gcsfs, "_rm_file", new=mock_rm_file),
         ):
+            mocks["super_find"].return_value = {
+                sub_placeholder: {
+                    "name": sub_placeholder,
+                    "type": "file",
+                    "size": 0,
+                }
+            }
+            mocks["control_client"].list_folders.return_value = AsyncIter(
+                [get_mock_folder("dir"), get_mock_folder("dir/sub")]
+            )
+            mocks["info"].return_value = {"name": dir_path, "type": "directory"}
+
             gcsfs.rm(dir_path, recursive=recursive, maxdepth=maxdepth)
 
-            if expect_placeholder_delete:
-                mock_rm_file.assert_awaited_once_with(f"{dir_path}/")
-            else:
-                mock_rm_file.assert_not_awaited()
-
-            expected_request = self._get_delete_folder_request(gcsfs, dir_path)
-            mocks["control_client"].delete_folder.assert_called_once_with(
-                request=expected_request, retry=mock.ANY, timeout=mock.ANY
+            assert mock_delete_files.await_args[0][0] == [
+                f"{TEST_HNS_BUCKET}/{k}" for k in expected_batch_files
+            ]
+            assert sorted(c.args[0] for c in mock_rm_file.await_args_list) == sorted(
+                f"{TEST_HNS_BUCKET}/{k}" for k in expected_rm_files
+            )
+            assert (
+                mocks["control_client"].delete_folder.call_count
+                == expected_folder_deletes
             )
 
 

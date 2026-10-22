@@ -825,7 +825,8 @@ class TestExtendedGcsFileSystemRm:
     def test_rm_folder_with_placeholder(self, gcs_hns):
         """
         Test deleting a folder that contains a placeholder object.
-        Covers rm on directory path, directory path with trailing slash, and parent directory.
+        Covers rm on directory path, directory path with trailing slash,
+        non-recursive rm, recursive rm with maxdepth=1, and parent directory.
         """
         gcsfs = gcs_hns
         base_dir = f"{TEST_HNS_BUCKET}/rm_placeholder_test"
@@ -858,39 +859,39 @@ class TestExtendedGcsFileSystemRm:
         assert not gcsfs.exists(dir_path_2)
         assert not gcsfs.exists(file_path_2)
 
-        # Case 3: rm on parent containing placeholder
+        # Case 3: non-recursive rm on empty folder containing only its placeholder
         dir_path_3 = f"{base_dir}/dir3"
         placeholder_3 = f"{dir_path_3}/"
-        file_path_3 = f"{dir_path_3}/file"
 
         gcsfs.touch(placeholder_3)
-        gcsfs.touch(file_path_3)
-
         assert gcsfs.exists(dir_path_3)
-        assert gcsfs.exists(file_path_3)
-        gcsfs.rm(base_dir, recursive=True)
-        assert not gcsfs.exists(base_dir)
+        gcsfs.rm(dir_path_3, recursive=False)
+        assert not gcsfs.exists(dir_path_3)
 
-        # Case 4: non-recursive rm on empty folder containing only its placeholder
+        # Case 4: recursive rm with maxdepth=1 where child folder has a placeholder
         dir_path_4 = f"{base_dir}/dir4"
-        placeholder_4 = f"{dir_path_4}/"
+        sub_dir_4 = f"{dir_path_4}/sub"
+        sub_placeholder_4 = f"{sub_dir_4}/"
 
-        gcsfs.touch(placeholder_4)
-        assert gcsfs.exists(dir_path_4)
-        gcsfs.rm(dir_path_4, recursive=False)
+        gcsfs.touch(sub_placeholder_4)
+        assert gcsfs.exists(sub_dir_4)
+        gcsfs.rm(dir_path_4, recursive=True, maxdepth=1)
+        assert not gcsfs.exists(sub_dir_4)
         assert not gcsfs.exists(dir_path_4)
 
-        # Case 5: recursive rm with maxdepth=1 where child folder has a placeholder
+        # Case 5: rm on parent containing placeholder
         dir_path_5 = f"{base_dir}/dir5"
-        sub_dir_5 = f"{dir_path_5}/sub"
-        sub_placeholder_5 = f"{sub_dir_5}/"
+        placeholder_5 = f"{dir_path_5}/"
+        file_path_5 = f"{dir_path_5}/file"
 
-        gcsfs.touch(sub_placeholder_5)
-        assert gcsfs.exists(sub_dir_5)
-        gcsfs.rm(dir_path_5, recursive=True, maxdepth=1)
-        assert not gcsfs.exists(sub_dir_5)
-        assert not gcsfs.exists(dir_path_5)
+        gcsfs.touch(placeholder_5)
+        gcsfs.touch(file_path_5)
+
+        assert gcsfs.exists(dir_path_5)
+        assert gcsfs.exists(file_path_5)
         gcsfs.rm(base_dir, recursive=True)
+        assert not gcsfs.exists(dir_path_5)
+        assert not gcsfs.exists(file_path_5)
         assert not gcsfs.exists(base_dir)
 
     def test_rm_non_existent_path_raises_error(self, gcs_hns):
