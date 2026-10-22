@@ -871,6 +871,28 @@ class TestExtendedGcsFileSystemRm:
         gcsfs.rm(base_dir, recursive=True)
         assert not gcsfs.exists(base_dir)
 
+        # Case 4: non-recursive rm on empty folder containing only its placeholder
+        dir_path_4 = f"{base_dir}/dir4"
+        placeholder_4 = f"{dir_path_4}/"
+
+        gcsfs.touch(placeholder_4)
+        assert gcsfs.exists(dir_path_4)
+        gcsfs.rm(dir_path_4, recursive=False)
+        assert not gcsfs.exists(dir_path_4)
+
+        # Case 5: recursive rm with maxdepth=1 where child folder has a placeholder
+        dir_path_5 = f"{base_dir}/dir5"
+        sub_dir_5 = f"{dir_path_5}/sub"
+        sub_placeholder_5 = f"{sub_dir_5}/"
+
+        gcsfs.touch(sub_placeholder_5)
+        assert gcsfs.exists(sub_dir_5)
+        gcsfs.rm(dir_path_5, recursive=True, maxdepth=1)
+        assert not gcsfs.exists(sub_dir_5)
+        assert not gcsfs.exists(dir_path_5)
+        gcsfs.rm(base_dir, recursive=True)
+        assert not gcsfs.exists(base_dir)
+
     def test_rm_non_existent_path_raises_error(self, gcs_hns):
         """Test that rm on a non-existent path raises FileNotFoundError."""
         gcsfs = gcs_hns
