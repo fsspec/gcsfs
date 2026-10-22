@@ -139,67 +139,6 @@ def _gcs_sync_wrapper(func: Callable) -> Callable:
     return wrapper
 
 
-def _setup_file_telemetry(file_obj) -> Optional[Any]:
-    fw = getattr(file_obj, "caller_framework", None)
-
-    if not isinstance(fw, str):
-        return None
-
-    # Fast path: framework already active (e.g. nested file method calls), skip a redundant set/reset
-    if get_telemetry_context().get(Dimension.FRAMEWORK) == fw:
-        return None
-
-    return set_telemetry_context(Dimension.FRAMEWORK, fw)
-
-
-@contextlib.contextmanager
-def _file_telemetry_context(file_obj):
-    """Context manager to safely handle file telemetry token setup and teardown."""
-    token = _setup_file_telemetry(file_obj)
-    try:
-        yield
-    finally:
-        if token is not None:
-            reset_telemetry_context(token)
-
-
-def _file_telemetry_wrapper(func: Callable) -> Callable:
-    """Wraps a File sync or async method to propagate `self.caller_framework`."""
-    if inspect.iscoroutinefunction(func):
-
-        @functools.wraps(func)
-        async def async_wrapper(self, *args, **kwargs):
-            with _file_telemetry_context(self):
-                return await func(self, *args, **kwargs)
-
-        return async_wrapper
-
-    @functools.wraps(func)
-    def sync_wrapper(self, *args, **kwargs):
-        with _file_telemetry_context(self):
-            return func(self, *args, **kwargs)
-
-    return sync_wrapper
-
-
-def wrap_file_methods(cls: Any = None) -> None:
-    """Wrap all callable methods and properties on a File class (`GCSFile` by default, or `ZonalFile`)."""
-    if cls is None:
-        from gcsfs.core import GCSFile
-
-        cls = GCSFile
-
-    for name, attr in list(cls.__dict__.items()):
-        if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
-            continue
-        is_prop = isinstance(attr, property)
-        func = attr.fget if is_prop else (attr if callable(attr) else None)
-        if func is not None and not getattr(func, "_is_telemetry_wrapped", False):
-            wrapped = _file_telemetry_wrapper(func)
-            wrapped._is_telemetry_wrapped = True
-            setattr(cls, name, attr.getter(wrapped) if is_prop else wrapped)
-
-
 def mirror_gcs_methods(obj: type) -> None:
     """
     Binds sync and native async methods on a GCSFileSystem class using
@@ -265,3 +204,64 @@ def mirror_gcs_methods(obj: type) -> None:
                         getattr(AbstractFileSystem, smethod, None), "__doc__", ""
                     )
                 setattr(obj, smethod, mth)
+
+
+def _setup_file_telemetry(file_obj) -> Optional[Any]:
+    fw = getattr(file_obj, "caller_framework", None)
+
+    if not isinstance(fw, str):
+        return None
+
+    # Fast path: framework already active (e.g. nested file method calls), skip a redundant set/reset
+    if get_telemetry_context().get(Dimension.FRAMEWORK) == fw:
+        return None
+
+    return set_telemetry_context(Dimension.FRAMEWORK, fw)
+
+
+@contextlib.contextmanager
+def _file_telemetry_context(file_obj):
+    """Context manager to safely handle file telemetry token setup and teardown."""
+    token = _setup_file_telemetry(file_obj)
+    try:
+        yield
+    finally:
+        if token is not None:
+            reset_telemetry_context(token)
+
+
+def _file_telemetry_wrapper(func: Callable) -> Callable:
+    """Wraps a File sync or async method to propagate `self.caller_framework`."""
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def async_wrapper(self, *args, **kwargs):
+            with _file_telemetry_context(self):
+                return await func(self, *args, **kwargs)
+
+        return async_wrapper
+
+    @functools.wraps(func)
+    def sync_wrapper(self, *args, **kwargs):
+        with _file_telemetry_context(self):
+            return func(self, *args, **kwargs)
+
+    return sync_wrapper
+
+
+def wrap_file_methods(cls: Any = None) -> None:
+    """Wrap all callable methods and properties on a File class (`GCSFile` by default, or `ZonalFile`)."""
+    if cls is None:
+        from gcsfs.core import GCSFile
+
+        cls = GCSFile
+
+    for name, attr in list(cls.__dict__.items()):
+        if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
+            continue
+        is_prop = isinstance(attr, property)
+        func = attr.fget if is_prop else (attr if callable(attr) else None)
+        if func is not None and not getattr(func, "_is_telemetry_wrapped", False):
+            wrapped = _file_telemetry_wrapper(func)
+            wrapped._is_telemetry_wrapped = True
+            setattr(cls, name, attr.getter(wrapped) if is_prop else wrapped)
