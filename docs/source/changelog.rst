@@ -4,6 +4,13 @@ Changelog
 Note: in some releases, there are no changes, because we always guarantee
 releasing in step with fsspec.
 
+2026.8.2
+--------
+
+* Fix ``NotImplementedError`` and deadlocks when a file is closed from the event loop
+  thread or by the garbage collector (#1009, #1025, #1031, #1040).
+  Such closes now run on a background thread, and prefetcher/zonal teardown is bounded by a timeout.
+
 2026.8.1
 ----------
 
