@@ -2472,9 +2472,7 @@ class TestExtendedGcsFileSystemRmdir:
 
         with (
             gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(
-                gcsfs, "_rm_file", wraps=gcsfs._rm_file
-            ) as mock_rm_file,
+            mock.patch.object(gcsfs, "_rm_file", wraps=gcsfs._rm_file) as mock_rm_file,
         ):
             mocks["info"].side_effect = [
                 {"type": "directory", "name": folder_path},  # from isdir
