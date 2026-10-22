@@ -2494,7 +2494,7 @@ class TestExtendedGcsFileSystemRmdir:
 class TestExtendedGcsFileSystemRm:
     """Unit tests for the rm method in ExtendedGcsFileSystem."""
 
-    BATCH_SIZE = 20
+    BATCH_SIZE = 100
 
     def _get_delete_folder_request(self, gcsfs, dir_path):
         """Constructs a DeleteFolderRequest for testing."""
