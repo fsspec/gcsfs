@@ -1283,6 +1283,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _create_hns_folder(
         self, path, bucket, key, create_parents, exist_ok=True
     ):
+        path = path.rstrip("/")
+        key = key.rstrip("/")
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
 
         # Preemptively check if the path already exists to ensure fsspec compatibility.
@@ -1303,7 +1305,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             pass
 
         parent = f"projects/_/buckets/{bucket}"
-        folder_id = key.rstrip("/") + "/"
+        folder_id = f"{key}/"
         request = storage_control_v2.CreateFolderRequest(
             parent=parent,
             folder_id=folder_id,
@@ -1321,7 +1323,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Instead of invalidating the parent cache, update it to add the new entry.
             self._cache_add_entry(
                 self._parent(path),
-                self._directory_cache_entry(path, key.rstrip("/")),
+                self._directory_cache_entry(path, key),
             )
         except api_exceptions.Conflict as e:
             logger.debug(f"Conflict detected for path: {path}: {e}")
@@ -1457,7 +1459,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 placeholder object (`"{path}/"`) before calling `delete_folder`.
                 Defaults to True.
         """
-        path = self._strip_protocol(path)
+        path = self._strip_protocol(path).rstrip("/")
         bucket, key, _ = self.split_path(path)
 
         # The parent _rmdir is only for deleting buckets. If key is empty,
