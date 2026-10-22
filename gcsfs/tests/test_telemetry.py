@@ -641,6 +641,10 @@ async def test_file_telemetry_wrapper_and_wrap_file_methods():
         async def async_op(self):
             return get_telemetry_context().get(Dimension.FRAMEWORK)
 
+        @property
+        def details(self):
+            return get_telemetry_context().get(Dimension.FRAMEWORK)
+
         @staticmethod
         def static_helper(x):
             return x * 2
@@ -653,6 +657,9 @@ async def test_file_telemetry_wrapper_and_wrap_file_methods():
 
     f = DummyFile("pytorch")
     assert f.sync_op() == "pytorch"
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
+
+    assert f.details == "pytorch"
     assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
 
     assert await f.async_op() == "pytorch"
@@ -677,7 +684,17 @@ async def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch, detecto
         async def _walk(self, path, maxdepth=None, **kwargs):
             yield (f"sub_walk:{path}", [], ["b.txt"])
 
+        async def _internal_helper(self):
+            return "internal"
+
     mirror_gcs_methods(SubDummyFS)
+
+    # Private internal helpers (not on AsyncFileSystem and no public sync counterpart) must not be wrapped,
+    # whereas AsyncFileSystem async-only methods (_process_limits) are async-wrapped without a sync mirror.
+    assert not getattr(SubDummyFS._internal_helper, "_is_gcs_async_wrapped", False)
+    assert not hasattr(SubDummyFS, "internal_helper")
+    assert getattr(_DummyFS._process_limits, "_is_gcs_async_wrapped", False)
+    assert not hasattr(_DummyFS, "process_limits")
 
     sub_fs = SubDummyFS(skip_instance_cache=True)
     assert sub_fs.ls("bucket") == ["sub:bucket"]

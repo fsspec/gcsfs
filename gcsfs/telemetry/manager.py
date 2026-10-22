@@ -185,22 +185,21 @@ def _file_telemetry_wrapper(func: Callable) -> Callable:
 
 
 def wrap_file_methods(cls: Any = None) -> None:
-    """Wrap all callable methods on a File class (`GCSFile` by default, or `ZonalFile`)."""
+    """Wrap all callable methods and properties on a File class (`GCSFile` by default, or `ZonalFile`)."""
     if cls is None:
         from gcsfs.core import GCSFile
 
         cls = GCSFile
 
     for name, attr in list(cls.__dict__.items()):
-        if (
-            not name.startswith("__")
-            and callable(attr)
-            and not isinstance(attr, (classmethod, staticmethod))
-        ):
-            if not getattr(attr, "_is_telemetry_wrapped", False):
-                wrapped = _file_telemetry_wrapper(attr)
-                wrapped._is_telemetry_wrapped = True
-                setattr(cls, name, wrapped)
+        if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
+            continue
+        is_prop = isinstance(attr, property)
+        func = attr.fget if is_prop else (attr if callable(attr) else None)
+        if func is not None and not getattr(func, "_is_telemetry_wrapped", False):
+            wrapped = _file_telemetry_wrapper(func)
+            wrapped._is_telemetry_wrapped = True
+            setattr(cls, name, attr.getter(wrapped) if is_prop else wrapped)
 
 
 def mirror_gcs_methods(obj: type) -> None:
@@ -216,7 +215,7 @@ def mirror_gcs_methods(obj: type) -> None:
     Mixin)`) will therefore resolve those methods to `obj`'s wrapper instead of the mixin's
     override. Mixins listed before `obj` (as in `ExtendedGcsFileSystem`) are unaffected.
     """
-    from fsspec.asyn import async_methods
+    from fsspec.asyn import AsyncFileSystem, async_methods
 
     # Collect coroutine and async generator method names strictly from class dictionaries in MRO
     method_names = set(async_methods)
@@ -242,8 +241,16 @@ def mirror_gcs_methods(obj: type) -> None:
             1:
         ]  # e.g., "_ls" -> "ls", "_cat_file" -> "cat_file", "_walk" -> "walk"
 
+        is_public_sync = (
+            hasattr(AbstractFileSystem, smethod)
+            or method in async_methods
+            or hasattr(obj, smethod)
+        )
+        # Only wrap public API or AsyncFileSystem methods (skip gcsfs-internal helpers like _request)
+        if not (is_public_sync or hasattr(AsyncFileSystem, method)):
+            continue
+
         async_fn = getattr(obj, method, None)
-        mth = None
 
         if inspect.iscoroutinefunction(async_fn) or inspect.isasyncgenfunction(
             async_fn
@@ -253,19 +260,13 @@ def mirror_gcs_methods(obj: type) -> None:
             if not getattr(async_fn, "_is_gcs_async_wrapped", False):
                 async_fn = _gcs_async_wrapper(async_fn)
                 setattr(obj, method, async_fn)
-            mth = _gcs_sync_wrapper(async_fn)
-
-        # Only mirror sync method if smethod is a valid public method
-        if mth is not None and (
-            hasattr(AbstractFileSystem, smethod)
-            or method in async_methods
-            or hasattr(obj, smethod)
-        ):
-            if not getattr(mth, "__doc__", None):
-                mth.__doc__ = getattr(
-                    getattr(AbstractFileSystem, smethod, None), "__doc__", ""
-                )
-            setattr(obj, smethod, mth)
+            if is_public_sync:
+                mth = _gcs_sync_wrapper(async_fn)
+                if not getattr(mth, "__doc__", None):
+                    mth.__doc__ = getattr(
+                        getattr(AbstractFileSystem, smethod, None), "__doc__", ""
+                    )
+                setattr(obj, smethod, mth)
 
 
 class UsageMetricsTracker:
