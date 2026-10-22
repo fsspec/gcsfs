@@ -1612,7 +1612,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             raise FileNotFoundError(path)
         return out
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=100):
         """
         Deletes files and directories.
 
@@ -1684,7 +1684,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return results
 
     async def _rm_bucket_paths(
-        self, bucket, path, recursive=False, maxdepth=None, batchsize=20
+        self, bucket, path, recursive=False, maxdepth=None, batchsize=100
     ):
         """Helper method to handle the rm operation for paths within a single bucket."""
         if not await self._is_bucket_hns_enabled(bucket):
