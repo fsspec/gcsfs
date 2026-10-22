@@ -2159,12 +2159,11 @@ def test_content_type_put_guess(gcs):
     assert gcs.info(dst)["contentType"] == "text/plain"
 
 
-def test_content_type_lazy_evaluation():
+def test_content_type_lazy_evaluation(fake_fs):
     from gcsfs.core import GCSFile
 
-    fs_mock = mock.MagicMock(spec=GCSFileSystem)
-    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
-    fs_mock.info.return_value = {
+    fake_fs.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fake_fs.info.return_value = {
         "name": "test-bucket/test-key.txt",
         "size": 10,
         "contentType": "application/json",
@@ -2172,18 +2171,17 @@ def test_content_type_lazy_evaluation():
     }
     with mock.patch("mimetypes.guess_type") as mock_guess:
         f = GCSFile(
-            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+            fake_fs, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
         )
         assert f.content_type == "application/json"
         mock_guess.assert_not_called()
 
 
-def test_content_type_lazy_evaluation_fallback():
+def test_content_type_lazy_evaluation_fallback(fake_fs):
     from gcsfs.core import GCSFile
 
-    fs_mock = mock.MagicMock(spec=GCSFileSystem)
-    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
-    fs_mock.info.return_value = {
+    fake_fs.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fake_fs.info.return_value = {
         "name": "test-bucket/test-key.txt",
         "size": 10,
         "type": "file",
@@ -2192,7 +2190,7 @@ def test_content_type_lazy_evaluation_fallback():
         "mimetypes.guess_type", return_value=("text/plain", None)
     ) as mock_guess:
         f = GCSFile(
-            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+            fake_fs, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
         )
         assert f.content_type == "text/plain"
         mock_guess.assert_called_once()
@@ -3611,11 +3609,16 @@ def test_prefetcher_default_concurrency(gcs):
     assert cache_concurrency == 4
 
 
-def test_prefetcher_config_options():
-    fake_fs = mock.MagicMock()
-    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
-    fake_fs.info.return_value = {"size": 100}
+@pytest.fixture
+def fake_fs():
+    fs = mock.MagicMock()
+    fs.split_path.return_value = ("bucket", "file.txt", None)
+    fs.info.return_value = {"size": 100}
+    fs.loop = fsspec.asyn.get_loop()
+    return fs
 
+
+def test_prefetcher_config_options(fake_fs):
     # 1. Default without explicit max_prefetch_size -> MAX_PREFETCH_SIZE (256 MiB)
     with GCSFile(
         fake_fs,
@@ -3655,11 +3658,7 @@ def test_prefetcher_config_options():
         )
 
 
-def test_gcsfile_prefetcher_producer_fetcher_integration():
-    fake_fs = mock.MagicMock()
-    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
-    fake_fs.info.return_value = {"size": 100}
-
+def test_gcsfile_prefetcher_producer_fetcher_integration(fake_fs):
     with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
         prefetcher = getattr(f.cache, "_prefetcher", None)
         assert prefetcher is not None
@@ -3717,10 +3716,7 @@ def test_gcsfile_not_satisfiable_range(gcs):
         assert f.cache._fetch(3, 1) == b""
 
 
-def test_gcsfile_fetch_range_error_handling():
-    fake_fs = mock.MagicMock()
-    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
-    fake_fs.info.return_value = {"size": 100}
+def test_gcsfile_fetch_range_error_handling(fake_fs):
     fake_fs.cat_file.return_value = b"data"
     f = GCSFile(fake_fs, "bucket/file.txt", mode="rb", cache_type="none", size=100)
 
