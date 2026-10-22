@@ -1440,7 +1440,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # Fallback to standard GCS behavior for non-HNS buckets
         return await super()._get_directory_info(path, bucket, key, generation)
 
-    async def _rmdir(self, path):
+    async def _rmdir(self, path, delete_placeholder=True):
         """
         Deletes an empty directory. Overrides the parent `_rmdir` to delete
         empty directories in HNS-enabled buckets.
@@ -1468,16 +1468,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # effect is acceptable because placeholder objects are used to simulate
         # folders and are not strictly necessary in HNS-enabled buckets, which
         # have native folder entities.
-        try:
-            placeholder_path = f"{path.rstrip('/')}/"
+        if delete_placeholder:
+            try:
+                placeholder_path = f"{path.rstrip('/')}/"
 
-            await self._rm_file(placeholder_path)
-            logger.debug(
-                f"Removed placeholder object '{placeholder_path}' before rmdir."
-            )
-        except FileNotFoundError:
-            # This is expected if no placeholder object exists and can be safely ignored.
-            pass
+                await self._rm_file(placeholder_path)
+                logger.debug(
+                    f"Removed placeholder object '{placeholder_path}' before rmdir."
+                )
+            except FileNotFoundError:
+                # This is expected if no placeholder object exists and can be safely ignored.
+                pass
 
         try:
             logger.debug(f"Using HNS-aware rmdir for '{path}'.")
@@ -1704,9 +1705,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             reverse=True,
         )
 
-        return await self._perform_rm(files, dirs, path, batchsize=batchsize)
+        return await self._perform_rm(
+            files,
+            dirs,
+            path,
+            batchsize=batchsize,
+            delete_placeholder=not (recursive and maxdepth is None),
+        )
 
-    async def _perform_rm(self, files, dirs, path, batchsize):
+    async def _perform_rm(self, files, dirs, path, batchsize, delete_placeholder=True):
         """
         Helper method to perform the deletion of files and directories.
 
@@ -1716,6 +1723,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                               deepest to shallowest.
             path (str): The original path for the rm operation, for error reporting.
             batchsize (int): The number of files to delete in a single batch request.
+            delete_placeholder (bool): Whether `_rmdir` should attempt to delete
+                each directory's placeholder object before deleting the folder.
 
         Returns:
             list: A list of exceptions that occurred during deletion.
@@ -1736,7 +1745,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         for depth in sorted(dirs_by_depth.keys(), reverse=True):
             level_dirs = dirs_by_depth[depth]
             results = await asyn._run_coros_in_chunks(
-                [self._rmdir(d) for d in level_dirs],
+                [
+                    self._rmdir(d, delete_placeholder=delete_placeholder)
+                    for d in level_dirs
+                ],
                 batch_size=batchsize,
                 return_exceptions=True,
             )

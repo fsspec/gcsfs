@@ -2877,6 +2877,50 @@ class TestExtendedGcsFileSystemRm:
             with pytest.raises(OSError, match="boom"):
                 gcsfs.rm([flat_file, hns_file])
 
+    @pytest.mark.parametrize(
+        "recursive, maxdepth, expect_placeholder_delete",
+        [
+            (True, None, False),
+            (False, None, True),
+            (True, 1, True),
+        ],
+    )
+    def test_rm_placeholder_delete_behavior(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+        recursive,
+        maxdepth,
+        expect_placeholder_delete,
+    ):
+        """Test that placeholder deletion in _rmdir is skipped only when recursive=True and maxdepth=None."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/dir_with_placeholder"
+
+        mock_expand = mock.AsyncMock(
+            return_value=[{"name": dir_path, "type": "directory"}]
+        )
+        mock_delete_files = mock.AsyncMock(return_value=[])
+        mock_rm_file = mock.AsyncMock()
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+            mock.patch.object(gcsfs, "_rm_file", new=mock_rm_file),
+        ):
+            gcsfs.rm(dir_path, recursive=recursive, maxdepth=maxdepth)
+
+            if expect_placeholder_delete:
+                mock_rm_file.assert_awaited_once_with(f"{dir_path}/")
+            else:
+                mock_rm_file.assert_not_awaited()
+
+            expected_request = self._get_delete_folder_request(gcsfs, dir_path)
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=expected_request, retry=mock.ANY, timeout=mock.ANY
+            )
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
