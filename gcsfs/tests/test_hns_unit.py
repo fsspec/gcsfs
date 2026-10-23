@@ -1037,8 +1037,12 @@ class TestExtendedGcsFileSystemCacheHelpers:
         entry = {"name": f"{parent}/b", "type": "file"}
 
         fs._cache_add_entry(parent, entry)
+        fs._cache_add_entry(parent, entry)
 
-        assert entry in fs.dircache[parent]
+        assert [e["name"] for e in fs.dircache[parent]] == [
+            f"{parent}/a",
+            f"{parent}/b",
+        ]
 
     def test_cache_add_entry_noop_when_parent_uncached(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
@@ -1149,6 +1153,10 @@ class TestExtendedGcsFileSystemMkdir:
                 raise FileNotFoundError
 
             mocks["info"].side_effect = mock_info
+            gcsfs.dircache[TEST_HNS_BUCKET] = [
+                {"name": parent_dir, "type": "directory"}
+            ]
+            gcsfs.dircache[parent_dir] = []
 
             gcsfs.mkdir(dir_path, create_parents=True)
 
@@ -1158,6 +1166,8 @@ class TestExtendedGcsFileSystemMkdir:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
             mocks["super_mkdir"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[parent_dir]] == [dir_path]
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [parent_dir]
 
     def test_hns_mkdir_nested_fails_if_create_parents_false(
         self, gcs_hns, gcs_hns_mocks
@@ -1447,7 +1457,8 @@ class TestExtendedGcsFileSystemMakedirs:
     def test_hns_makedirs_success(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS folder creation via makedirs."""
         gcsfs = gcs_hns
-        dir_path = f"{TEST_HNS_BUCKET}/new_dir/nested_dir"
+        parent_dir = f"{TEST_HNS_BUCKET}/new_dir"
+        dir_path = f"{parent_dir}/nested_dir"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             folder_exists = False
@@ -1462,6 +1473,7 @@ class TestExtendedGcsFileSystemMakedirs:
                 raise FileNotFoundError
 
             mocks["info"].side_effect = mock_info
+            gcsfs.dircache[TEST_HNS_BUCKET] = []
 
             assert not gcsfs.exists(dir_path)
             gcsfs.makedirs(dir_path)
@@ -1474,6 +1486,8 @@ class TestExtendedGcsFileSystemMakedirs:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
             mocks["super_makedirs"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [parent_dir]
+            assert parent_dir not in gcsfs.dircache
 
     def test_hns_makedirs_existing_dir_exist_ok_true(self, gcs_hns, gcs_hns_mocks):
         """Test makedirs when folder already exists and exist_ok=True (no-op)."""

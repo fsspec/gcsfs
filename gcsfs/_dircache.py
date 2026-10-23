@@ -101,10 +101,12 @@ class HnsDirCacheUpdater(DirCacheUpdater):
             ]
 
     def _cache_add_entry(self, parent, entry):
-        """Append ``entry`` to ``parent``'s cached listing. No-op when
-        ``parent`` is not cached."""
+        """Append ``entry`` to ``parent``'s cached listing if not already
+        present. No-op when ``parent`` is not cached."""
         if parent in self.dircache:
-            self.dircache[parent].append(entry)
+            name = entry.get("name")
+            if not any(e.get("name") == name for e in self.dircache[parent]):
+                self.dircache[parent].append(entry)
 
     def _cache_upsert_entry(self, parent, entry):
         """Replace any cached entry with the same name before appending
