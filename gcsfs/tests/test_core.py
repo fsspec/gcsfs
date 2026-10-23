@@ -3473,6 +3473,47 @@ def test_cat_file_routing_and_thresholds(gcs, skip_if_zonal, monkeypatch):
         ] == [(0, 5), (5, 10), (10, 15), (15, 21)]
 
 
+@pytest.mark.parametrize(
+    "start,end",
+    [
+        (None, -1),
+        (0, -1),
+        (5, -1),
+        (-10, None),
+        (-10, -1),
+        (-50, 10),
+        (-50, -1),
+        (5, -50),
+        (None, -50),
+        (-1, -1),
+        (0, 0),
+        (0, 10),
+        (None, None),
+    ],
+)
+def test_cat_file_concurrent_negative_bounds(
+    gcs, skip_if_zonal, monkeypatch, start, end
+):
+    monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 2)
+    path = f"{TEST_BUCKET}/concurrent_negative_bounds"
+    data = b"0123456789abcdefghij"
+    gcs.pipe(path, data)
+
+    with (
+        mock.patch.object(gcs, "_info", wraps=gcs._info) as info,
+        mock.patch.object(
+            gcs, "_cat_file_sequential", wraps=gcs._cat_file_sequential
+        ) as sequential,
+    ):
+        expected = data[start:end]
+        assert gcs.cat_file(path, start=start, end=end, concurrency=4) == expected
+        assert info.await_count <= 1
+        if start is not None and end is not None and start >= 0 and end >= 0:
+            info.assert_not_called()
+        if len(expected) >= 4:
+            assert sequential.call_count > 1
+
+
 def test_cat_file_concurrent_data_integrity(gcs):
     fn = f"{TEST_BUCKET}/core_integrity.txt"
     file_size = 20 * 1024 * 1024  # 20MB
