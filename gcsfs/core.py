@@ -718,20 +718,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     make_bucket_requester_pays = asyn.sync_wrapper(_make_bucket_requester_pays)
 
-    async def _get_object(self, path):
+    async def _get_object(self, path, generation=None):
         """Return object information at the given path."""
-        bucket, key, generation = self.split_path(path)
+        bucket, key, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
 
-        # Check if parent dir is in listing cache
-        listing = self._ls_from_cache(path)
+        # Check if parent dir is in listing cache. Listings only hold current
+        # objects, so they cannot answer for a specific generation.
+        listing = None if generation else self._ls_from_cache(path)
         if listing:
             name = "/".join((bucket, key))
             for file_details in listing:
-                if (
-                    file_details["type"] == "file"
-                    and file_details["name"] == name
-                    and (not generation or file_details.get("generation") == generation)
-                ):
+                if file_details["type"] == "file" and file_details["name"] == name:
                     return file_details
             else:
                 raise FileNotFoundError(path)
@@ -1236,6 +1234,13 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     not generation or o.get("generation") == generation
                 ):
                     return o
+        if generation:
+            # Only objects.get can resolve a specific generation; a missing one
+            # is a 404 there and must not fall back to the current object.
+            out = await self._get_object(path, generation)
+            if _is_directory_marker(out):
+                return await self._get_directory_info(path, bucket, key, generation)
+            return out
         if self._ls_from_cache(path):
             # this is a directory
             return {
@@ -1248,7 +1253,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         async with parallel_tasks_first_completed(
             [
-                self._get_object(path),
+                self._get_object(path, generation),
                 self._get_directory_info(path, bucket, key, generation),
             ]
         ) as (tasks, done, pending):
@@ -1364,7 +1369,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if start is None:
             start = 0
         if end is None:
-            end = (await self._info(path))["size"]
+            end = (await self._info(path, generation=kwargs.get("generation")))["size"]
         if start >= end:
             return b""
 
@@ -2634,7 +2639,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         timeout: int
             Timeout seconds for the asynchronous callback.
         generation: str
-            Object generation.
+            Object generation. When reading, all data is fetched from this
+            generation. If not given, the generation that is current when the
+            file is opened is used.
         if_generation_match: int
             Only write if the object's current generation matches this value;
             ``0`` means the object must not exist (same as mode ``"xb"``). To
@@ -2744,6 +2751,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
         if "r" in self.mode:
             det = self.details
+            if self.generation is None:
+                # Pin the generation that is current at open() so that every
+                # read through this handle sees the same object version.
+                self.generation = det.get("generation")
         else:
             det = {}
         self.content_type = (
@@ -2932,6 +2943,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 concurrency=self.concurrency,
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
+                generation=self.generation,
             )
         except (RuntimeError, HttpError) as e:
             if "not satisfiable" in str(e) or "InvalidRange" in str(e):
@@ -2947,6 +2959,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             concurrency=split_factor,
             cache_type=self.cache_type,
             cache_source=self.cache_source,
+            generation=self.generation,
         )
 
     def close(self):
