@@ -41,6 +41,11 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_telemetry_in_child)
 
 
+def has_telemetry_context() -> bool:
+    """Check if a telemetry context is currently active without copying the dict."""
+    return _current_telemetry.get() is not None
+
+
 def get_telemetry_context() -> Dict[str, str]:
     """Retrieve active telemetry tokens mapping from context."""
     val = _current_telemetry.get()
