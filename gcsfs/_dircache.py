@@ -143,14 +143,14 @@ class HnsDirCacheUpdater(DirCacheUpdater):
             path1 (str): The source path that was renamed.
             path2 (str): The destination path.
         """
-        # dircache keys and entry names are stored without the protocol, so
-        # normalize the incoming paths first; otherwise the pop/startswith
-        # matching below silently misses every cached entry for a ``gs://`` path.
-        path1 = self._strip_protocol(path1)
-        path2 = self._strip_protocol(path2)
+        # dircache keys and entry names are stored without the protocol or
+        # trailing slash, so normalize the incoming paths first; otherwise the
+        # pop/startswith/_parent matching below silently misses cached entries.
+        path1 = self._strip_protocol(path1).rstrip("/")
+        path2 = self._strip_protocol(path2).rstrip("/")
 
         # 1. Find and remove all descendant paths of the source from the cache.
-        source_prefix = f"{path1.rstrip('/')}/"
+        source_prefix = f"{path1}/"
         for key in list(self.dircache):
             if key.startswith(source_prefix):
                 self.dircache.pop(key, None)
@@ -160,7 +160,7 @@ class HnsDirCacheUpdater(DirCacheUpdater):
         self._cache_drop_entries(self._parent(path1), {path1})
 
         # 3. Invalidate the destination path/subtree and update its parent's cache.
-        dest_prefix = f"{path2.rstrip('/')}/"
+        dest_prefix = f"{path2}/"
         for key in list(self.dircache):
             if key == path2 or key.startswith(dest_prefix):
                 self.dircache.pop(key, None)

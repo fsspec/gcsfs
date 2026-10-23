@@ -1130,7 +1130,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     timeout=STORAGE_CONTROL_RPC_TIMEOUT,
                 )
                 await operation.result()
-                self._update_dircache_after_rename(path1, path2)
+                self._update_dircache_after_rename(
+                    path1, f"{bucket2}/{destination_folder_id.rstrip('/')}"
+                )
 
                 logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
@@ -1283,6 +1285,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _create_hns_folder(
         self, path, bucket, key, create_parents, exist_ok=True
     ):
+        path = path.rstrip("/")
+        key = key.rstrip("/")
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
 
         # Preemptively check if the path already exists to ensure fsspec compatibility.
@@ -1303,7 +1307,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             pass
 
         parent = f"projects/_/buckets/{bucket}"
-        folder_id = key.rstrip("/") + "/"
+        folder_id = f"{key}/"
         request = storage_control_v2.CreateFolderRequest(
             parent=parent,
             folder_id=folder_id,
@@ -1321,7 +1325,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Instead of invalidating the parent cache, update it to add the new entry.
             self._cache_add_entry(
                 self._parent(path),
-                self._directory_cache_entry(path, key.rstrip("/")),
+                self._directory_cache_entry(path, key),
             )
         except api_exceptions.Conflict as e:
             logger.debug(f"Conflict detected for path: {path}: {e}")
@@ -1445,7 +1449,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         Deletes an empty directory. Overrides the parent `_rmdir` to delete
         empty directories in HNS-enabled buckets.
         """
-        path = self._strip_protocol(path)
+        return await self._hns_rmdir(path, delete_placeholder=True)
+
+    async def _hns_rmdir(self, path, delete_placeholder=True):
+        """
+        Internal helper to delete an empty directory in HNS-enabled buckets.
+
+        Args:
+            path (str): The directory path to delete.
+            delete_placeholder (bool): Whether to attempt deleting the zero-byte
+                placeholder object (`"{path}/"`) before calling `delete_folder`.
+                Defaults to True.
+        """
+        path = self._strip_protocol(path).rstrip("/")
         bucket, key, _ = self.split_path(path)
 
         # The parent _rmdir is only for deleting buckets. If key is empty,
@@ -1459,7 +1475,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         # In HNS buckets, a placeholder object (e.g., 'a/b/c/') might exist,
         # which would cause rmdir('a/b/c') to fail because the directory is not empty.
-        # To handle this, we first attempt to delete the placeholder object.
+        # To handle this, we first attempt to delete the placeholder object
+        # (unless skipped via `delete_placeholder=False` during unbounded
+        # recursive `rm`, where `_find` + `_delete_files` has already listed
+        # and batch-deleted any placeholder objects).
         # If it doesn't exist, _rm_file will raise a FileNotFoundError, which we can
         # safely ignore and proceed with the directory deletion.
         #
@@ -1468,20 +1487,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # effect is acceptable because placeholder objects are used to simulate
         # folders and are not strictly necessary in HNS-enabled buckets, which
         # have native folder entities.
-        try:
-            placeholder_path = f"{path.rstrip('/')}/"
+        if delete_placeholder:
+            try:
+                placeholder_path = f"{path}/"
 
-            await self._rm_file(placeholder_path)
-            logger.debug(
-                f"Removed placeholder object '{placeholder_path}' before rmdir."
-            )
-        except FileNotFoundError:
-            # This is expected if no placeholder object exists and can be safely ignored.
-            pass
+                await self._rm_file(placeholder_path)
+                logger.debug(
+                    f"Removed placeholder object '{placeholder_path}' before rmdir."
+                )
+            except FileNotFoundError:
+                # This is expected if no placeholder object exists and can be safely ignored.
+                pass
 
         try:
             logger.debug(f"Using HNS-aware rmdir for '{path}'.")
-            folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
+            folder_name = f"projects/_/buckets/{bucket}/folders/{key}"
             request = storage_control_v2.DeleteFolderRequest(
                 name=folder_name,
                 request_id=str(uuid.uuid4()),
@@ -1612,7 +1632,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             raise FileNotFoundError(path)
         return out
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=20):
+    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=100):
         """
         Deletes files and directories.
 
@@ -1684,7 +1704,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return results
 
     async def _rm_bucket_paths(
-        self, bucket, path, recursive=False, maxdepth=None, batchsize=20
+        self, bucket, path, recursive=False, maxdepth=None, batchsize=100
     ):
         """Helper method to handle the rm operation for paths within a single bucket."""
         if not await self._is_bucket_hns_enabled(bucket):
@@ -1704,9 +1724,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             reverse=True,
         )
 
-        return await self._perform_rm(files, dirs, path, batchsize=batchsize)
+        # When recursive=True and maxdepth is None, _find lists all placeholder
+        # objects ("dir/") in `files`, so _delete_files already batch-deletes
+        # them. When maxdepth is set, a boundary child directory ("dir/sub") is
+        # included in `dirs` while its placeholder ("dir/sub/", which has one
+        # extra "/") is filtered out by _find's slash-count check, so
+        # _hns_rmdir must still delete placeholders in that case.
+        return await self._perform_rm(
+            files,
+            dirs,
+            path,
+            batchsize=batchsize,
+            delete_placeholder=not (recursive and maxdepth is None),
+        )
 
-    async def _perform_rm(self, files, dirs, path, batchsize):
+    async def _perform_rm(self, files, dirs, path, batchsize, delete_placeholder=True):
         """
         Helper method to perform the deletion of files and directories.
 
@@ -1716,6 +1748,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                               deepest to shallowest.
             path (str): The original path for the rm operation, for error reporting.
             batchsize (int): The number of files to delete in a single batch request.
+            delete_placeholder (bool): Whether `_hns_rmdir` should attempt to delete
+                each directory's placeholder object before deleting the folder.
 
         Returns:
             list: A list of exceptions that occurred during deletion.
@@ -1736,7 +1770,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         for depth in sorted(dirs_by_depth.keys(), reverse=True):
             level_dirs = dirs_by_depth[depth]
             results = await asyn._run_coros_in_chunks(
-                [self._rmdir(d) for d in level_dirs],
+                [
+                    self._hns_rmdir(d, delete_placeholder=delete_placeholder)
+                    for d in level_dirs
+                ],
                 batch_size=batchsize,
                 return_exceptions=True,
             )
