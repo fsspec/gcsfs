@@ -1285,7 +1285,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _create_hns_folder(
         self, path, bucket, key, create_parents, exist_ok=True
     ):
-        path = path.rstrip("/")
+        path = self._strip_protocol(path).rstrip("/")
         key = key.rstrip("/")
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
 
@@ -1323,10 +1323,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
             # Instead of invalidating the parent cache, update it to add the new entry.
-            self._cache_add_entry(
-                self._parent(path),
-                self._directory_cache_entry(path, key),
-            )
+            # When create_parents=True, intermediate ancestor folders may also have
+            # been created, so walk up to the bucket root and add any missing folder
+            # entries to already-cached ancestor listings.
+            cur_path, cur_key = path, key
+            while cur_key:
+                parent_path = self._parent(cur_path)
+                self._cache_add_entry(
+                    parent_path,
+                    self._directory_cache_entry(cur_path, cur_key),
+                )
+                if not create_parents:
+                    break
+                cur_path = parent_path
+                _, cur_key, _ = self.split_path(cur_path)
         except api_exceptions.Conflict as e:
             logger.debug(f"Conflict detected for path: {path}: {e}")
             # Under race conditions, folder might have been created concurrently
