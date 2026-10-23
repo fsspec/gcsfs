@@ -422,32 +422,47 @@ class TestExtendedGcsFileSystemMv:
 
             mocks["info"].assert_has_awaits(expected_info_calls)
 
+    @pytest.mark.parametrize("trailing_slash", ["", "/"])
     def test_folder_rename_to_root_directory(
         self,
         gcs_hns,
         gcs_hns_mocks,
+        trailing_slash,
     ):
-        """Test that folder rename to root directory uses HNS rename API."""
+        """Test that folder rename to root directory uses HNS rename API and updates dircache."""
         gcsfs = gcs_hns
         dir_name = "root_dir"
-        path1 = f"{TEST_HNS_BUCKET}/test/{dir_name}"
-        path2 = f"{TEST_HNS_BUCKET}/"
+        parent = f"{TEST_HNS_BUCKET}/test"
+        path1 = f"{parent}/{dir_name}"
+        path2 = f"{TEST_HNS_BUCKET}{trailing_slash}"
+        expected_dst = f"{TEST_HNS_BUCKET}/{dir_name}"
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = [
                 {"type": "directory", "name": path1},
                 FileNotFoundError(path1),
                 {"type": "directory", "name": path2},
-                {"type": "directory", "name": f"{path2}/{dir_name}"},
-                {"type": "file", "name": f"{path2}/{dir_name}/file.txt"},
+                {"type": "directory", "name": expected_dst},
+                {"type": "file", "name": f"{expected_dst}/file.txt"},
             ]
 
             gcsfs.touch(f"{path1}/file.txt")
+            gcsfs.dircache[parent] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/file.txt", "type": "file"}]
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
+
             gcsfs.mv(path1, path2, recursive=True)
+
+            assert path1 not in gcsfs.dircache
+            assert [e["name"] for e in gcsfs.dircache[parent]] == []
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [
+                parent,
+                expected_dst,
+            ]
 
             assert not gcsfs.exists(path1)
             assert gcsfs.exists(path2)
-            assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}")
-            assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
+            assert gcsfs.exists(expected_dst)
+            assert gcsfs.exists(f"{expected_dst}/file.txt")
 
             # Verify HNS rename was used
             expected_request = storage_control_v2.RenameFolderRequest(
@@ -467,10 +482,8 @@ class TestExtendedGcsFileSystemMv:
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
                 mock.call(path2),  # from exists(path2)
-                mock.call(
-                    f"{path2.rstrip('/')}/{dir_name}"
-                ),  # from exists(path2/dir_name)
-                mock.call(f"{path2.rstrip('/')}/{dir_name}/file.txt"),
+                mock.call(expected_dst),  # from exists(path2/dir_name)
+                mock.call(f"{expected_dst}/file.txt"),
             ]
             mocks["info"].assert_has_awaits(expected_info_calls)
 

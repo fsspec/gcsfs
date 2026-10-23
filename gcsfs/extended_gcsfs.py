@@ -1130,7 +1130,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     timeout=STORAGE_CONTROL_RPC_TIMEOUT,
                 )
                 await operation.result()
-                self._update_dircache_after_rename(path1, path2)
+                self._update_dircache_after_rename(
+                    path1, f"{bucket2}/{destination_folder_id.rstrip('/')}"
+                )
 
                 logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
@@ -1487,7 +1489,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # have native folder entities.
         if delete_placeholder:
             try:
-                placeholder_path = f"{path.rstrip('/')}/"
+                placeholder_path = f"{path}/"
 
                 await self._rm_file(placeholder_path)
                 logger.debug(
@@ -1499,7 +1501,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         try:
             logger.debug(f"Using HNS-aware rmdir for '{path}'.")
-            folder_name = f"projects/_/buckets/{bucket}/folders/{key.rstrip('/')}"
+            folder_name = f"projects/_/buckets/{bucket}/folders/{key}"
             request = storage_control_v2.DeleteFolderRequest(
                 name=folder_name,
                 request_id=str(uuid.uuid4()),
