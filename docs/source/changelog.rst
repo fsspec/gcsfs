@@ -7,6 +7,9 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* Normalize finite negative ``cat_file`` bounds before sequential reads, and
+  avoid data requests for slices that resolve to an empty interval.
+
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API

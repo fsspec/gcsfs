@@ -718,9 +718,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     make_bucket_requester_pays = asyn.sync_wrapper(_make_bucket_requester_pays)
 
-    async def _get_object(self, path):
+    async def _get_object(self, path, generation=None):
         """Return object information at the given path."""
-        bucket, key, generation = self.split_path(path)
+        bucket, key, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
 
         # Check if parent dir is in listing cache
         listing = self._ls_from_cache(path)
@@ -734,7 +735,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 ):
                     return file_details
             else:
-                raise FileNotFoundError(path)
+                # A listing of current objects cannot rule out an older generation.
+                if not generation:
+                    raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -1236,6 +1239,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     not generation or o.get("generation") == generation
                 ):
                     return o
+        if generation:
+            return await self._get_object(path, generation=generation)
         if self._ls_from_cache(path):
             # this is a directory
             return {
@@ -1343,6 +1348,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """Simple one-shot get of file data"""
         if is_empty_range(start, end):
             return b""
+
+        if end is not None and (end < 0 or (start is not None and start < 0)):
+            size = (await self._info(path, generation=kwargs.get("generation")))["size"]
+            start, end, _ = slice(start, end).indices(size)
+            if is_empty_range(start, end):
+                return b""
 
         u2 = self.url(path, generation=kwargs.get("generation"))
         if start is not None or end is not None:

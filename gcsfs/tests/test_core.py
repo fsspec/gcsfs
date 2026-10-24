@@ -1399,6 +1399,51 @@ def test_cat_file(gcs):
     assert data[:1] == gcs.cat_file(fn, end=1)
 
 
+@pytest.mark.parametrize(
+    "start,end,info_calls",
+    [
+        (None, -1, 1),
+        (0, -1, 1),
+        (5, -1, 1),
+        (-10, None, 0),
+        (-50, None, 0),
+        (-10, -1, 1),
+        (-50, 10, 1),
+        (-50, -1, 1),
+        (5, -50, 1),
+        (None, -50, 1),
+        (-1, -1, 0),
+        (-5, -10, 1),
+        (-2, 18, 1),
+        (-2, 17, 1),
+        (None, 0, 0),
+        (0, 0, 0),
+        (0, 10, 0),
+        (None, None, 0),
+        (5, None, 0),
+        (None, 50, 0),
+        (-50, 100, 1),
+    ],
+)
+def test_cat_file_sequential_bounds(gcs, skip_if_zonal, start, end, info_calls):
+    path = f"{TEST_BUCKET}/sequential_bounds"
+    data = b"0123456789abcdefghij"
+    gcs.pipe(path, data)
+    expected = data[start:end]
+
+    with (
+        mock.patch.object(gcs, "_info", wraps=gcs._info) as info,
+        mock.patch.object(gcs, "_call", wraps=gcs._call) as calls,
+    ):
+        assert gcs.cat_file(path, start=start, end=end, concurrency=1) == expected
+        assert info.await_count == info_calls
+        if not expected:
+            assert not any(
+                call.args[:2] == ("GET", gcs.url(path))
+                for call in calls.await_args_list
+            )
+
+
 @pytest.mark.parametrize("consistency", [None, "size", "md5", "crc32c"])
 def test_get_put(consistency, gcs):
     if consistency == "crc32c" and gcsfs.checkers.crcmod is None:
@@ -4378,6 +4423,75 @@ async def test_cat_file_generation():
             assert mock_call.call_count == 1
             url = mock_call.call_args[0][1]
             assert "generation=12345" in url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached_latest", [False, True])
+@pytest.mark.parametrize(
+    "start,end,range_header,expected,metadata_calls",
+    [
+        (-4, -1, "bytes=1-3", b"bcd", 1),
+        (None, -1, "bytes=0-3", b"abcd", 1),
+        (-20, -15, None, b"", 1),
+        (0, 3, "bytes=0-2", b"abc", 0),
+        (-3, None, "bytes=-3", b"cde", 0),
+    ],
+)
+async def test_cat_file_generation_bounds(
+    cached_latest, start, end, range_header, expected, metadata_calls
+):
+    fs = gcsfs.core.GCSFileSystem(token="anon", skip_instance_cache=True)
+    metadata_generations = []
+    data_headers = []
+
+    async def call(method, path, *args, **kwargs):
+        if path == "b/{}/o/{}":
+            generation = kwargs.get("generation")
+            metadata_generations.append(generation)
+            return {
+                "name": "file",
+                "size": "5" if generation == "12345" else "20",
+                "generation": generation or "67890",
+            }
+        assert method == "GET"
+        assert path == fs.url("bucket/file", generation="12345")
+        data_headers.append(kwargs["headers"]["Range"])
+        return {}, expected
+
+    if cached_latest:
+        fs.dircache["bucket"] = [
+            {"name": "bucket/file", "size": 20, "type": "file", "generation": "67890"}
+        ]
+    with (
+        mock.patch.object(fs, "_call", side_effect=call),
+        mock.patch.object(fs, "_get_directory_info", new_callable=mock.AsyncMock),
+    ):
+        assert (
+            await fs._cat_file(
+                "bucket/file", start=start, end=end, generation="12345", concurrency=1
+            )
+            == expected
+        )
+    assert data_headers == ([range_header] if range_header else [])
+    assert metadata_generations == ["12345"] * metadata_calls
+
+
+@pytest.mark.asyncio
+async def test_info_missing_generation_does_not_use_current_object():
+    fs = gcsfs.core.GCSFileSystem(token="anon", skip_instance_cache=True)
+    with (
+        mock.patch.object(
+            fs, "_call", side_effect=FileNotFoundError("missing generation")
+        ),
+        mock.patch.object(
+            fs,
+            "_get_directory_info",
+            new_callable=mock.AsyncMock,
+            return_value={"name": "bucket/file", "size": 20, "type": "file"},
+        ),
+    ):
+        with pytest.raises(FileNotFoundError):
+            await fs._info("bucket/file", generation="12345")
 
 
 def test_file_url_generation():
