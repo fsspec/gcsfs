@@ -726,15 +726,18 @@ class TestExtendedGcsFileSystemMvFile:
     @pytest.mark.asyncio
     async def test_mv_file_hns_replaces_cached_destination_entry(self):
         """Moving a file over an already-cached destination must not leave
-        duplicate or stale destination entries in the parent listing."""
+        duplicate or stale destination entries in the parent listing, while
+        preserving a same-named directory entry."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         parent = f"{TEST_HNS_BUCKET}/parent"
         src = f"{parent}/src.txt"
         dst = f"{parent}/dst.txt"
+        dst_dir = {"name": dst, "type": "directory"}
 
         fs.dircache[parent] = [
             {"name": src, "type": "file", "size": 1},
             {"name": dst, "type": "file", "size": 10},
+            dst_dir,
             {"name": f"{parent}/keep.txt", "type": "file", "size": 20},
         ]
 
@@ -745,8 +748,11 @@ class TestExtendedGcsFileSystemMvFile:
         entries = fs.dircache[parent]
         names = [e["name"] for e in entries]
         assert src not in names
-        assert names.count(dst) == 1
-        assert any(e["name"] == dst and e["size"] == 1 for e in entries)
+        assert [(e["name"], e["type"]) for e in entries].count((dst, "file")) == 1
+        assert any(
+            e["name"] == dst and e["type"] == "file" and e["size"] == 1 for e in entries
+        )
+        assert dst_dir in entries
         assert f"{parent}/keep.txt" in names
 
 
@@ -1013,13 +1019,19 @@ class TestExtendedGcsFileSystemCacheHelpers:
         parent = f"{TEST_HNS_BUCKET}/p"
         fs.dircache[parent] = [
             {"name": f"{parent}/a", "type": "file"},
+            {"name": f"{parent}/a", "type": "directory"},
             {"name": f"{parent}/b", "type": "file"},
             {"name": f"{parent}/c", "type": "file"},
         ]
 
-        fs._cache_drop_entries(parent, {f"{parent}/a", f"{parent}/c"})
+        fs._cache_drop_entries(
+            parent, {f"{parent}/a", f"{parent}/c"}, entry_type="file"
+        )
 
-        assert [e["name"] for e in fs.dircache[parent]] == [f"{parent}/b"]
+        assert fs.dircache[parent] == [
+            {"name": f"{parent}/a", "type": "directory"},
+            {"name": f"{parent}/b", "type": "file"},
+        ]
 
     def test_cache_drop_entries_noop_when_parent_uncached(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)

@@ -1322,21 +1322,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 retry=self._get_retry_config(),
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
-            # Instead of invalidating the parent cache, update it to add the new entry.
-            # When create_parents=True, intermediate ancestor folders may also have
-            # been created, so walk up to the bucket root and add any missing folder
-            # entries to already-cached ancestor listings.
-            cur_path, cur_key = path, key
-            while cur_key:
-                parent_path = self._parent(cur_path)
-                self._cache_add_entry(
-                    parent_path,
-                    self._directory_cache_entry(cur_path, cur_key),
-                )
-                if not create_parents:
-                    break
-                cur_path = parent_path
-                cur_key = self._parent(cur_key)
+            # Instead of invalidating the parent cache, update it (and any cached
+            # ancestors when create_parents=True) to add the new folder entry.
+            self._update_dircache_after_mkdir(path, create_parents=create_parents)
         except api_exceptions.Conflict as e:
             logger.debug(f"Conflict detected for path: {path}: {e}")
             # Under race conditions, folder might have been created concurrently
@@ -1528,7 +1516,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Remove the directory from the cache and from its parent's listing.
             self.dircache.pop(path, None)
             # Remove the deleted directory entry from the parent's listing.
-            self._cache_drop_entries(self._parent(path), {path})
+            self._cache_drop_entries(self._parent(path), {path}, entry_type="directory")
             return
         except api_exceptions.NotFound as e:
             # This can happen if the directory does not exist, or if the path
