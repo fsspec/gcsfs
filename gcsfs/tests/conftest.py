@@ -702,12 +702,16 @@ def mock_gcs_harness(monkeypatch):
             return {}, sample_csv_data
         return {}, sample_pt_data
 
-    monkeypatch.setattr(GCSFileSystem, "_call", mock_call)
+    from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+
+    monkeypatch.setattr(CoreGCSFileSystem, "_call", mock_call)
+    for proto in ("gcs", "gs"):
+        fsspec.register_implementation(proto, CoreGCSFileSystem, clobber=True)
 
     class Harness:
         def __init__(self):
             self.user_agents = captured_user_agents
-            self.fs = GCSFileSystem(
+            self.fs = CoreGCSFileSystem(
                 token="anon", project="test-project", consistency="none"
             )
 
@@ -718,7 +722,11 @@ def mock_gcs_harness(monkeypatch):
             assert len(self.user_agents) > 0, "No User-Agent was captured!"
             return self.user_agents[-1]
 
-    return Harness()
+    try:
+        yield Harness()
+    finally:
+        for proto in ("gcs", "gs"):
+            fsspec.register_implementation(proto, GCSFileSystem, clobber=True)
 
 
 def pytest_addoption(parser):

@@ -9,6 +9,11 @@ from lightning.pytorch.trainer.call import _call_configure_model
 from lightning.pytorch.trainer.states import TrainerFn
 from torch.utils.data import DataLoader
 
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    MAX_RANKS,
+    run_split,
+    setup_distributed_env,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
@@ -18,8 +23,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.common
     DummyModel,
     get_strategy,
     is_distributed_strategy,
-    run_split,
-    setup_distributed_env,
 )
 
 
@@ -164,5 +167,5 @@ class PLCheckpointReadDriver(CheckpointDriver):
 
     def read_count(self, params) -> int:
         if params.strategy in ("ddp", "fsdp_full", "model_parallel_full"):
-            return min(params.world_size, 8)
+            return min(params.world_size, MAX_RANKS)
         return 1

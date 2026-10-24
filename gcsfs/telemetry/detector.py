@@ -1,20 +1,36 @@
-"""Top-to-bottom stack frame detector for upstream caller frameworks (name-only)."""
+"""Telemetry detectors for extracting caller context tokens."""
 
 from __future__ import annotations
 
 import sys
 from typing import Dict, Optional
 
-from gcsfs.telemetry.context import Dimension, sanitize_token
-from gcsfs.telemetry.detectors.base import BaseDetector
+from gcsfs.telemetry.context import Dimension
+
+
+class BaseDetector:
+    """Base interface for extracting telemetry tokens."""
+
+    name: Dimension | str = ""
+
+    def detect(self) -> Optional[str]:
+        """
+        Execute detection logic and return a bare telemetry token value.
+
+        Returns
+        -------
+        Optional[str]: Bare token value (e.g. 'pandas') or None if not detected.
+        """
+        raise NotImplementedError
 
 
 class FrameworkDetector(BaseDetector):
     """
     Detects the top-most initiating framework name on the call stack.
 
-    Traverses frames from outermost (closest to __main__) down to innermost (gcsfs)
-    to attribute high-level orchestrators (e.g., Dask, Ray) over lower-level serialization layers (PyArrow).
+    Traverses frames from innermost (gcsfs) to outermost (closest to __main__),
+    retaining the outermost match to attribute high-level orchestrators (e.g., Dask, Ray)
+    over lower-level serialization layers (PyArrow).
     """
 
     name = Dimension.FRAMEWORK
@@ -48,45 +64,37 @@ class FrameworkDetector(BaseDetector):
         self.max_depth = max_depth
 
     def detect(self) -> Optional[str]:
-        if not self.is_enabled():
-            return None
-
         try:
             start_frame = sys._getframe()
         except (ValueError, AttributeError, RuntimeError, PermissionError):
             return None
 
         try:
-            return self._walk_top_down(start_frame)
+            return self._walk_stack(start_frame)
         finally:
             del start_frame
 
-    def _walk_top_down(self, start_frame) -> Optional[str]:
+    def _walk_stack(self, start_frame) -> Optional[str]:
         """
-        Traverses the frame chain from top (outermost / root) to bottom (innermost / gcsfs).
-        Returns the first recognized framework encountered from the top.
+        Traverses the frame chain in a single pass from innermost (gcsfs) to outermost (root).
+        Returns the outermost recognized framework encountered.
         """
-        module_names = []
         frame = start_frame
         depth = 0
+        detected_framework = None
 
         try:
             while frame is not None and depth < self.max_depth:
                 f_globals = getattr(frame, "f_globals", None) or {}
                 mod_name = f_globals.get("__name__", "")
                 if mod_name:
-                    module_names.append(mod_name)
+                    top_pkg = mod_name.partition(".")[0]
+                    if top_pkg in self.KNOWN_FRAMEWORKS:
+                        detected_framework = self.KNOWN_FRAMEWORKS[top_pkg]
                 frame = frame.f_back
                 depth += 1
         finally:
             del frame
             del start_frame
 
-        # Scan in call order (outermost root -> innermost) to match the initiating framework first
-        for mod_name in reversed(module_names):
-            top_pkg = mod_name.partition(".")[0]
-            if top_pkg in self.KNOWN_FRAMEWORKS:
-                framework_name = self.KNOWN_FRAMEWORKS[top_pkg]
-                return sanitize_token(f"fw/{framework_name}")
-
-        return None
+        return detected_framework

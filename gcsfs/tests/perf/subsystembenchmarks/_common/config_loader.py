@@ -104,6 +104,9 @@ class OneFactorConfigurator(BaseBenchmarkConfigurator):
     FRAMEWORK = None  # subclass pins
     PARAMS_CLASS = None  # subclass pins
     RUN_LEVEL_KEYS = ()
+    # key -> env var. A variant that sets such a key is skipped while the env var
+    # is set, so a run-level override (e.g. --model-id) applies to every case.
+    ENV_OVERRIDE_KEYS = {}
 
     def shared_keys(self, scenario, common_config):
         """Family-shared keys merged into every case (may read the run env)."""
@@ -139,6 +142,16 @@ class OneFactorConfigurator(BaseBenchmarkConfigurator):
                     f"variant {variant!r} enabled: must be true or false, got {enabled!r}"
                 )
             over = {k: v for k, v in variant.items() if k not in ("axis", "enabled")}
+            overridden = [
+                k
+                for k, env in self.ENV_OVERRIDE_KEYS.items()
+                if k in over and os.environ.get(env)
+            ]
+            if overridden:
+                logging.info(
+                    "skipping variant %r: %s set by the run env", variant, overridden
+                )
+                continue
             case = self._make(base, over, shared, sweep_axis=variant["axis"])
             cases.append((case, enabled))
 

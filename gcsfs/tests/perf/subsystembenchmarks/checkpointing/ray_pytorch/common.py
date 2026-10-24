@@ -2,7 +2,6 @@
 
 import logging
 import os
-import socket
 import tempfile
 
 import fsspec
@@ -13,6 +12,7 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
 
@@ -26,25 +26,6 @@ def ensure_ray_initialized():
         )
 
 
-def find_free_port():
-    """Finds an available TCP port for the Gloo distributed backend."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
-def setup_distributed_env(rank, world_size, port):
-    """Initializes the CPU distributed environment (gloo) for a worker."""
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(port)
-    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["RANK"] = str(rank)
-    os.environ["LOCAL_RANK"] = str(rank)
-
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
-
-
 def is_distributed_strategy(strategy: str) -> bool:
     """Returns True if the strategy requires multi-process coordination."""
     return strategy != "single"
@@ -53,39 +34,6 @@ def is_distributed_strategy(strategy: str) -> bool:
 def is_sharded_strategy(strategy: str) -> bool:
     """Returns True if each rank owns a shard of the checkpoint."""
     return strategy in ("fsdp_sharded", "model_parallel_sharded")
-
-
-def apply_llama_tp(model, tp_mesh):
-    """Applies tensor parallelism to a LLaMA model: shards embed_tokens, lm_head, and decoder layers."""
-    from torch.distributed.tensor import Replicate
-    from torch.distributed.tensor.parallel import (
-        ColwiseParallel,
-        RowwiseParallel,
-        parallelize_module,
-    )
-
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "model.embed_tokens": RowwiseParallel(
-                input_layouts=Replicate(), output_layouts=Replicate()
-            ),
-            "lm_head": ColwiseParallel(output_layouts=Replicate()),
-        },
-    )
-
-    layer_plan = {
-        "self_attn.q_proj": ColwiseParallel(),
-        "self_attn.k_proj": ColwiseParallel(),
-        "self_attn.v_proj": ColwiseParallel(),
-        "self_attn.o_proj": RowwiseParallel(),
-        "mlp.gate_proj": ColwiseParallel(),
-        "mlp.up_proj": ColwiseParallel(),
-        "mlp.down_proj": RowwiseParallel(),
-    }
-    for layer in model.model.layers:
-        parallelize_module(layer, tp_mesh, layer_plan)
 
 
 class BenchmarkModel(torch.nn.Module):

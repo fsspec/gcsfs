@@ -19,14 +19,12 @@ class Dimension(str, Enum):
 
 
 def sanitize_token(token: Optional[str], max_len: int = 64) -> Optional[str]:
-    """Sanitize a raw token or '<dimension>/<value>' string to comply with RFC 9110."""
+    """Sanitize a bare token value to comply with RFC 9110 product-version grammar."""
     if not token or not isinstance(token, str):
         return None
 
-    parts = [
-        _TOKEN_SANITIZE_REGEX.sub("_", p.strip())[:max_len] for p in token.split("/", 1)
-    ]
-    return "/".join(parts) if all(parts) else None
+    clean = _TOKEN_SANITIZE_REGEX.sub("_", token.strip())[:max_len]
+    return clean if clean.strip("_.-") else None
 
 
 # ContextVar for propagating multi-dimensional telemetry tokens across async event loop and thread boundaries
@@ -43,13 +41,14 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_telemetry_in_child)
 
 
-def get_telemetry_context(
-    dimension: Optional[Dimension] = None,
-) -> Union[Dict[str, str], Optional[str]]:
-    """Retrieve active telemetry tokens mapping (or a specific dimension value) from context."""
+def has_telemetry_context() -> bool:
+    """Check if a telemetry context is currently active without copying the dict."""
+    return _current_telemetry.get() is not None
+
+
+def get_telemetry_context() -> Dict[str, str]:
+    """Retrieve active telemetry tokens mapping from context."""
     val = _current_telemetry.get()
-    if dimension is not None:
-        return val.get(dimension.value) if val is not None else None
     return dict(val) if val is not None else {}
 
 

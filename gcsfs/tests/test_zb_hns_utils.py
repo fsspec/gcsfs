@@ -5,9 +5,10 @@ import logging
 from unittest import mock
 
 import pytest
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import FailedPrecondition, NotFound
 
 from gcsfs import zb_hns_utils
+from gcsfs.retry import GenerationMismatchError
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool, MRDPoolCache, _close_mrds
 
 mock_grpc_client = mock.Mock()
@@ -96,6 +97,103 @@ async def test_init_aaow():
         )
         mock_writer_instance.open.assert_awaited_once()
         assert result is mock_writer_instance
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "if_generation_match, expected_kwargs",
+    [(0, {"generation": 0}), (7, {"generation": None, "if_generation_match": 7})],
+)
+async def test_init_aaow_if_generation_match(if_generation_match, expected_kwargs):
+    mock_writer_instance = mock.AsyncMock()
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+        new_callable=mock.Mock,
+        return_value=mock_writer_instance,
+    ) as mock_writer_class:
+        await zb_hns_utils.init_aaow(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            if_generation_match=if_generation_match,
+        )
+        mock_writer_class.assert_called_once_with(
+            client=mock_grpc_client,
+            bucket_name=bucket_name,
+            object_name=object_name,
+            writer_options={},
+            **expected_kwargs,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("if_generation_match", [0, 7])
+async def test_init_aaow_rejects_generation_with_if_generation_match(
+    if_generation_match,
+):
+    # generation > 0 selects an existing object to append to, which carries no
+    # precondition, so the combination must not silently drop the precondition.
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter", new_callable=mock.Mock
+    ) as mock_writer_class:
+        with pytest.raises(ValueError, match="if_generation_match"):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                generation=123,
+                if_generation_match=if_generation_match,
+            )
+        mock_writer_class.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_if_generation_match_unsupported_sdk():
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+        side_effect=TypeError("unexpected keyword argument 'if_generation_match'"),
+    ):
+        with pytest.raises(NotImplementedError):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client, bucket_name, object_name, if_generation_match=7
+            )
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_unrelated_type_error_propagates():
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+        side_effect=TypeError("boom"),
+    ):
+        with pytest.raises(TypeError, match="boom"):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client, bucket_name, object_name, if_generation_match=7
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "if_generation_match, expected",
+    [(0, FileExistsError), (7, GenerationMismatchError), (None, FailedPrecondition)],
+)
+async def test_init_aaow_failed_precondition(if_generation_match, expected):
+    mock_writer_instance = mock.AsyncMock()
+    mock_writer_instance.open.side_effect = FailedPrecondition("exists")
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+        new_callable=mock.Mock,
+        return_value=mock_writer_instance,
+    ):
+        with pytest.raises(expected) as excinfo:
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                if_generation_match=if_generation_match,
+            )
+    if if_generation_match is None:
+        # No precondition was requested, so the SDK error is not translated.
+        assert excinfo.value is mock_writer_instance.open.side_effect
 
 
 @pytest.mark.asyncio

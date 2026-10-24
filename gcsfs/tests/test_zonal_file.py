@@ -22,7 +22,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 
 from gcsfs import zb_hns_utils
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-from gcsfs.retry import HttpError
+from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import requires_rapid
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
@@ -216,7 +216,12 @@ def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks, file_path
 
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_called_once_with(
-            extended_gcsfs.grpc_client, bucket, key, None, _DEFAULT_FLUSH_INTERVAL_BYTES
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
         )
     else:
         assert extended_gcsfs.exists(file_path)
@@ -238,10 +243,78 @@ def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
 
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_called_once_with(
-            extended_gcsfs.grpc_client, bucket, key, None, custom_flush_interval_bytes
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            custom_flush_interval_bytes,
+            if_generation_match=None,
         )
     else:
         assert extended_gcsfs.exists(file_path)
+
+
+def test_zonal_file_open_create_mode(extended_gcsfs, zonal_write_mocks, file_path):
+    """mode="xb" opens the writer with the exclusive-create precondition."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    with extended_gcsfs.open(file_path, "xb", finalize_on_close=True):
+        pass
+
+    if zonal_write_mocks:
+        zonal_write_mocks["init_aaow"].assert_called_once_with(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=0,
+        )
+    else:
+        assert extended_gcsfs.exists(file_path)
+
+
+def test_zonal_file_open_write_mode_with_if_generation_match(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """An explicit precondition is forwarded to the writer."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    if zonal_write_mocks:
+        with extended_gcsfs.open(
+            file_path, "wb", finalize_on_close=True, if_generation_match=7
+        ) as f:
+            f.write(test_data)
+        zonal_write_mocks["init_aaow"].assert_called_once_with(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=7,
+        )
+    else:
+        # file_path does not exist, so generation 7 cannot match; SDK releases
+        # whose writer lacks the parameter raise NotImplementedError instead.
+        with pytest.raises((NotImplementedError, GenerationMismatchError)):
+            with extended_gcsfs.open(
+                file_path, "wb", finalize_on_close=True, if_generation_match=7
+            ) as f:
+                f.write(test_data)
+
+
+@mock.patch("gcsfs.zonal_file.asyn.sync")
+def test_zonal_file_rejects_if_generation_match_before_opening_pool(
+    mock_sync, mock_gcsfs
+):
+    """A read-mode precondition is rejected before any MRD pool lookup."""
+    mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", None)
+    with pytest.raises(ValueError, match="only valid for write modes"):
+        ZonalFile(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            if_generation_match=5,
+        )
+    mock_sync.assert_not_called()
 
 
 def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_path):
@@ -260,6 +333,7 @@ def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_pat
             key,
             "12345",
             _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
         )
     else:
         assert extended_gcsfs.cat(file_path) == b"data"
@@ -286,7 +360,12 @@ def test_zonal_file_open_append_mode_nonexistent_file(
     if zonal_write_mocks:
         # init_aaow should be called with generation=None
         zonal_write_mocks["init_aaow"].assert_called_once_with(
-            extended_gcsfs.grpc_client, bucket, key, None, _DEFAULT_FLUSH_INTERVAL_BYTES
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
         )
         # _info is called to get the generation, but it fails
         extended_gcsfs._info.assert_awaited_once()
@@ -1189,3 +1268,129 @@ async def test_mrd_pool_cache_sets_pool_details():
         "size": 100,
         "timeFinalized": "2026-06-17T00:00:00Z",
     }
+
+
+def test_zonal_file_adaptive_cache_reuses_fs_loop_after_reset_lock(mock_gcsfs):
+    """Verify ZonalFile adaptive prefetcher uses gcsfs.loop after fsspec.asyn.reset_lock().
+
+    Hugging Face datasets IterableDataset._iter_pytorch() calls fsspec.asyn.reset_lock()
+    in each DataLoader worker, clearing fsspec.asyn.loop[0] = None while a cached
+    ExtendedGcsFileSystem instance still has fs.loop (and its gRPC MRD stream futures)
+    bound to the original event loop.
+    """
+    loop1 = fsspec.asyn.get_loop()
+    orig_iothread = fsspec.asyn.iothread[0]
+    mock_gcsfs.loop = loop1
+    payload = b"zonal-adaptive-payload-" * 64
+    mock_gcsfs._mrd_pool_cache.get.return_value.persisted_size = len(payload)
+
+    async def fake_concurrent_mrd_fetch(start_offset, total_size, split_factor, mrd):
+        # Simulate gRPC Cython _StreamMultiplexer._recv_loop awaiting a Future
+        # explicitly attached to loop1 (mock_gcsfs.loop). If BackgroundPrefetcher
+        # runs _async_fetch_range on a different loop, awaiting fut raises:
+        # RuntimeError: Task ... got Future <Future pending> attached to a different loop
+        fut = loop1.create_future()
+        loop1.call_soon(
+            fut.set_result, payload[start_offset : start_offset + total_size]
+        )
+        return await fut
+
+    mock_gcsfs._concurrent_mrd_fetch = fake_concurrent_mrd_fetch
+
+    loop2 = None
+    thread2 = None
+    try:
+        fsspec.asyn.reset_lock()
+        assert fsspec.asyn.loop[0] is None
+
+        zf = ZonalFile(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="adaptive",
+        )
+        # AdaptiveReadaheadCache called fsspec.asyn.get_loop(), which created a
+        # second global loop; ZonalFile must rebind the prefetcher to gcsfs.loop.
+        loop2 = fsspec.asyn.loop[0]
+        thread2 = fsspec.asyn.iothread[0]
+        try:
+            assert loop2 is not loop1
+            assert zf.cache._prefetcher is not None
+            assert zf.cache._prefetcher.loop is loop1
+            assert zf.read(128) == payload[:128]
+            assert zf.read(128) == payload[128:256]
+        finally:
+            zf.close()
+    finally:
+        fsspec.asyn.loop[0] = loop1
+        fsspec.asyn.iothread[0] = orig_iothread
+        if loop2 is not None and loop2 is not loop1:
+            if loop2.is_running():
+                loop2.call_soon_threadsafe(loop2.stop)
+            if thread2 is not None:
+                thread2.join(timeout=5)
+            if not loop2.is_running():
+                loop2.close()
+
+
+def test_zonal_file_adaptive_cache_rebinds_when_global_loop_differs_from_fs_loop(
+    mock_gcsfs, monkeypatch
+):
+    """Verify ZonalFile adaptive prefetcher rebinds to gcsfs.loop when fsspec.asyn.loop[0] differs."""
+    loop1 = fsspec.asyn.get_loop()
+    orig_iothread = fsspec.asyn.iothread[0]
+    mock_gcsfs.loop = loop1
+    payload = b"zonal-custom-loop-data-" * 64
+    mock_gcsfs._mrd_pool_cache.get.return_value.persisted_size = len(payload)
+
+    async def fake_concurrent_mrd_fetch(start_offset, total_size, split_factor, mrd):
+        fut = loop1.create_future()
+        loop1.call_soon(
+            fut.set_result, payload[start_offset : start_offset + total_size]
+        )
+        return await fut
+
+    mock_gcsfs._concurrent_mrd_fetch = fake_concurrent_mrd_fetch
+
+    # Simulate fsspec <= 2026.9.0 where AdaptiveReadaheadCache does not inspect
+    # fetcher.__self__.fs.loop and instead binds its prefetcher to get_loop().
+    orig_cache_init = fsspec.caching.AdaptiveReadaheadCache.__init__
+    monkeypatch.setattr(
+        fsspec.caching.AdaptiveReadaheadCache,
+        "__init__",
+        lambda self, blocksize, fetcher, size, *args, **kwargs: orig_cache_init(
+            self, blocksize, lambda s, e: fetcher(s, e), size, *args, **kwargs
+        ),
+    )
+
+    loop2 = None
+    thread2 = None
+    try:
+        fsspec.asyn.reset_lock()
+        # Force creation of a second global loop before ZonalFile is opened
+        loop2 = fsspec.asyn.get_loop()
+        thread2 = fsspec.asyn.iothread[0]
+        assert loop2 is not loop1
+
+        zf = ZonalFile(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="adaptive",
+        )
+        try:
+            assert zf.cache._prefetcher is not None
+            assert zf.cache._prefetcher.loop is loop1
+            assert zf.read(256) == payload[:256]
+        finally:
+            zf.close()
+    finally:
+        fsspec.asyn.loop[0] = loop1
+        fsspec.asyn.iothread[0] = orig_iothread
+        if loop2 is not None:
+            if loop2.is_running():
+                loop2.call_soon_threadsafe(loop2.stop)
+            if thread2 is not None:
+                thread2.join(timeout=5)
+            if not loop2.is_running():
+                loop2.close()

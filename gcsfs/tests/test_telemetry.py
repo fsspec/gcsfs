@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
 
+import fsspec.asyn
+import fsspec.spec
 import pytest
 
+import gcsfs.telemetry.manager as manager_mod
 from gcsfs.telemetry.context import (
     Dimension,
     get_telemetry_context,
@@ -15,9 +19,14 @@ from gcsfs.telemetry.context import (
     sanitize_token,
     set_telemetry_context,
 )
-from gcsfs.telemetry.detectors.base import BaseDetector
-from gcsfs.telemetry.detectors.framework import FrameworkDetector
+from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
 from gcsfs.telemetry.manager import UsageMetricsTracker
+from gcsfs.telemetry.wrapper import (
+    _gcs_async_wrapper,
+    _gcs_sync_wrapper,
+    mirror_gcs_methods,
+    wrap_file_methods,
+)
 
 # ============================================================================
 # 1. Sanitizer Tests
@@ -25,26 +34,22 @@ from gcsfs.telemetry.manager import UsageMetricsTracker
 
 
 def test_sanitize_token_valid_and_edge_cases():
-    # Valid single-segment and multi-segment tokens
+    # Valid bare token values
     assert sanitize_token("pandas") == "pandas"
     assert sanitize_token("datasets") == "datasets"
     assert sanitize_token("scikit-learn") == "scikit-learn"
     assert sanitize_token("version.1.2.3") == "version.1.2.3"
     assert sanitize_token("my_custom_framework-v2") == "my_custom_framework-v2"
-    assert sanitize_token("fw/pandas") == "fw/pandas"
-    assert sanitize_token("env/gke") == "env/gke"
 
-    # Multi-slash values sanitized to single slash
-    assert sanitize_token("fw/my/custom/lib") == "fw/my_custom_lib"
-
-    # CRLF and forbidden characters sanitized
+    # Slashes, CRLF, and forbidden characters sanitized to underscores
+    assert sanitize_token("my/custom/lib") == "my_custom_lib"
     assert (
         sanitize_token("pandas\r\nInjected-Header: bad")
         == "pandas__Injected-Header__bad"
     )
     assert (
-        sanitize_token("fw/custom\r\nInjected-Header: injected_val")
-        == "fw/custom__Injected-Header__injected_val"
+        sanitize_token("custom\r\nInjected-Header: injected_val")
+        == "custom__Injected-Header__injected_val"
     )
     assert sanitize_token("host:8080") == "host_8080"
     assert sanitize_token("my@framework#1$2%3^4*5") == "my_framework_1_2_3_4_5"
@@ -55,14 +60,14 @@ def test_sanitize_token_valid_and_edge_cases():
     assert len(sanitize_token(long_str, max_len=64)) == 64
     assert len(sanitize_token(long_str, max_len=10)) == 10
 
-    # Empty, none, non-string, or malformed tokens
+    # Empty, none, non-string, or punctuation-only tokens
     assert sanitize_token(None) is None
     assert sanitize_token("") is None
     assert sanitize_token(123) is None
     assert sanitize_token("   ") is None
-    assert sanitize_token("fw/") is None
-    assert sanitize_token("/pandas") is None
     assert sanitize_token("///") is None
+    assert sanitize_token("...") is None
+    assert sanitize_token("---") is None
 
 
 # ============================================================================
@@ -79,6 +84,9 @@ def _create_mock_frame(module_name: str, back_frame=None):
 
 
 def test_framework_detector_known_frameworks_mapping():
+    with pytest.raises(NotImplementedError):
+        BaseDetector().detect()
+
     detector = FrameworkDetector()
     assert detector.KNOWN_FRAMEWORKS["pandas"] == "pandas"
     assert detector.KNOWN_FRAMEWORKS["polars"] == "polars"
@@ -98,7 +106,7 @@ def test_framework_detector_top_to_bottom_traversal(monkeypatch):
     f_gcsfs = _create_mock_frame("gcsfs.core", f_pyarrow)
 
     monkeypatch.setattr(sys, "_getframe", lambda: f_gcsfs)
-    assert detector.detect() == "fw/dask"
+    assert detector.detect() == "dask"
 
 
 def test_framework_detector_ignores_internal_and_test_prefixes(monkeypatch):
@@ -134,30 +142,39 @@ def test_framework_detector_handles_empty_and_invalid_frames(monkeypatch):
     assert detector.detect() is None
 
 
-def test_framework_detector_opt_out(monkeypatch):
-    detector = FrameworkDetector()
+def test_telemetry_tracker_opt_out(monkeypatch):
+    class DummyEnvDetector(BaseDetector):
+        name = "env"
+
+        def detect(self):
+            return "gke"
+
+    tracker = UsageMetricsTracker(detectors=[DummyEnvDetector(), FrameworkDetector()])
 
     # Default: active
-    assert detector.is_enabled()
+    assert tracker.is_enabled()
+    assert "env/gke" in tracker.get_tokens()
 
     # With GCSFS_NO_TELEMETRY=1
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "1")
-    assert not detector.is_enabled()
-    assert detector.detect() is None
+    assert not tracker.is_enabled()
+    assert tracker.collect_tokens_map() == {}
+    assert tracker.get_tokens() == []
 
     # With GCSFS_NO_TELEMETRY=true
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "true")
-    assert not detector.is_enabled()
+    assert not tracker.is_enabled()
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
 
     # With DO_NOT_TRACK=1
     monkeypatch.setenv("DO_NOT_TRACK", "1")
-    assert not detector.is_enabled()
-    assert detector.detect() is None
+    assert not tracker.is_enabled()
+    assert tracker.collect_tokens_map() == {}
+    assert tracker.get_tokens() == []
 
     # With DO_NOT_TRACK=true
     monkeypatch.setenv("DO_NOT_TRACK", "true")
-    assert not detector.is_enabled()
+    assert not tracker.is_enabled()
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
 
 
@@ -174,7 +191,7 @@ def test_deep_stack_traversal(monkeypatch):
 
     monkeypatch.setattr(sys, "_getframe", lambda: current_frame)
     detected = detector.detect()
-    assert detected == "fw/lightning"
+    assert detected == "lightning"
 
 
 # ============================================================================
@@ -184,15 +201,15 @@ def test_deep_stack_traversal(monkeypatch):
 
 def test_set_and_get_telemetry_context():
     # Initial state
-    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
 
     # Set caller framework
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/custom-engine")
-    assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-engine"
+    token = set_telemetry_context(Dimension.FRAMEWORK, "custom-engine")
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) == "custom-engine"
 
     # Reset
     reset_telemetry_context(token)
-    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
 
 
 def test_multithreaded_context_isolation():
@@ -210,28 +227,28 @@ def test_multithreaded_context_isolation():
     def worker(framework_name: str):
         try:
             # 1. Verify clean initial state in this thread
-            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
+            if get_telemetry_context().get(Dimension.FRAMEWORK) is not None:
                 errors.append(f"{framework_name}: initial context not None")
 
             # 2. Set thread-local context
-            token = set_telemetry_context(Dimension.FRAMEWORK, f"fw/{framework_name}")
+            token = set_telemetry_context(Dimension.FRAMEWORK, framework_name)
             try:
                 # 3. Synchronize all threads so all 4 contexts are simultaneously active
                 barrier.wait(timeout=5)
 
                 # 4. Repeatedly verify context during concurrent overlap
                 for _ in range(5):
-                    current = get_telemetry_context(Dimension.FRAMEWORK)
-                    if current != f"fw/{framework_name}":
+                    current = get_telemetry_context().get(Dimension.FRAMEWORK)
+                    if current != framework_name:
                         errors.append(
-                            f"{framework_name}: expected fw/{framework_name}, got {current}"
+                            f"{framework_name}: expected {framework_name}, got {current}"
                         )
                     time.sleep(0.005)
             finally:
                 reset_telemetry_context(token)
 
             # 5. Verify thread context is cleanly reset
-            if get_telemetry_context(Dimension.FRAMEWORK) is not None:
+            if get_telemetry_context().get(Dimension.FRAMEWORK) is not None:
                 errors.append(f"{framework_name}: post-reset context not None")
         except Exception as e:
             errors.append(f"{framework_name} exception: {e}")
@@ -252,9 +269,9 @@ def test_post_fork_telemetry_reset():
 
     import multiprocessing
 
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/parent-process")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "parent-process")
     try:
-        assert get_telemetry_context() == {"fw": "fw/parent-process"}
+        assert get_telemetry_context() == {"fw": "parent-process"}
 
         ctx = multiprocessing.get_context("fork")
         result_queue = ctx.Queue()
@@ -272,7 +289,13 @@ def test_post_fork_telemetry_reset():
         assert child_result == {}, f"Child telemetry was not reset! Got: {child_result}"
 
         # Parent process still retains its original telemetry context
-        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/parent-process"
+        assert get_telemetry_context().get(Dimension.FRAMEWORK) == "parent-process"
+
+        # Also directly exercise the registered at_fork callback for coverage tracing
+        from gcsfs.telemetry.context import _reset_telemetry_in_child
+
+        _reset_telemetry_in_child()
+        assert get_telemetry_context() == {}
     finally:
         reset_telemetry_context(token)
 
@@ -287,18 +310,18 @@ def test_multidimensional_telemetry_registration():
         name = "env"
 
         def detect(self):
-            return "env/gke"
+            return "gke"
 
     tracker = UsageMetricsTracker(detectors=[DummyEnvDetector(), FrameworkDetector()])
     assert "env/gke" in tracker.get_tokens()
 
     # When framework is active in context
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/pandas")
+    token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
     try:
         tokens = tracker.get_tokens()
         assert "env/gke" in tokens
         assert "fw/pandas" in tokens
-        assert tracker.get_dimension(Dimension.FRAMEWORK) == "fw/pandas"
+        assert tracker.get_dimension(Dimension.FRAMEWORK) == "pandas"
     finally:
         reset_telemetry_context(token)
 
@@ -309,29 +332,27 @@ def test_get_tokens_sanitization_user_controlled_context():
 
     # User sets context with CRLF and custom headers
     token = set_telemetry_context(
-        Dimension.FRAMEWORK, "fw/custom\r\nInjected-Header: injected_val"
+        Dimension.FRAMEWORK, "custom\r\nInjected-Header: injected_val"
     )
     try:
-        tokens = tracker.get_tokens()
-        assert tokens == ["fw/custom__Injected-Header__injected_val"]
+        assert tracker.get_tokens() == ["fw/custom__Injected-Header__injected_val"]
         assert (
             tracker.get_dimension(Dimension.FRAMEWORK)
-            == "fw/custom__Injected-Header__injected_val"
+            == "custom__Injected-Header__injected_val"
         )
     finally:
         reset_telemetry_context(token)
 
-    # Extra slashes in value (e.g. fw/my/custom/lib -> fw/my_custom_lib)
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/my/custom/lib")
+    # Slashes in bare value sanitized to underscores (e.g. my/custom/lib -> fw/my_custom_lib)
+    token = set_telemetry_context(Dimension.FRAMEWORK, "my/custom/lib")
     try:
-        tokens = tracker.get_tokens()
-        assert tokens == ["fw/my_custom_lib"]
-        assert tracker.get_dimension(Dimension.FRAMEWORK) == "fw/my_custom_lib"
+        assert tracker.get_tokens() == ["fw/my_custom_lib"]
+        assert tracker.get_dimension(Dimension.FRAMEWORK) == "my_custom_lib"
     finally:
         reset_telemetry_context(token)
 
-    # Dangling / leading slash or empty should not produce invalid tokens like 'fw/'
-    for malformed in ["fw/", "/pandas", "   ", ""]:
+    # Punctuation-only or whitespace/empty values do not produce invalid tokens like 'fw/'
+    for malformed in ["///", "...", "---", "   ", ""]:
         token = set_telemetry_context(Dimension.FRAMEWORK, malformed)
         try:
             assert tracker.get_tokens() == []
@@ -404,60 +425,85 @@ def test_collect_tokens_map_records_empty_for_none_detection():
 # ============================================================================
 
 
+class _CountingDetector(BaseDetector):
+    """Framework detector that returns `value` and records the thread of every call."""
+
+    name = Dimension.FRAMEWORK
+
+    def __init__(self, value="pandas"):
+        self.value = value
+        self.calls = []
+
+    def detect(self):
+        self.calls.append(threading.get_ident())
+        return self.value
+
+
+@pytest.fixture
+def detector(monkeypatch):
+    """Install a counting framework detector on the default tracker for one test."""
+    counting = _CountingDetector()
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[counting])
+    )
+    return counting
+
+
+class _DummyFS(fsspec.asyn.AsyncFileSystem):
+    """Fake async filesystem whose leaf calls record (thread, User-Agent tokens)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen = []
+
+    def _record(self):
+        tokens = tuple(manager_mod.default_usage_tracker.get_tokens())
+        self.seen.append((threading.get_ident(), tokens))
+
+    async def _ls(self, path, detail=False, **kwargs):
+        self._record()
+        return [path]
+
+    async def _cat_file(self, path, start=None, end=None, **kwargs):
+        self._record()
+        return b"abc"[start:end]
+
+    async def _walk(self, path, maxdepth=None, **kwargs):
+        for i in range(4):
+            await self._ls(f"{path}/dir_{i}")
+            yield (f"{path}/dir_{i}", [], [f"file_{i}.txt"])
+
+
+mirror_gcs_methods(_DummyFS)
+
+
 @pytest.mark.asyncio
-async def test_gcs_async_wrapper_scopes_context(monkeypatch):
+async def test_gcs_async_wrapper_scopes_context(detector):
     """Verify that _gcs_async_wrapper scopes context so inner HTTP requests skip stack detection."""
-    import gcsfs.telemetry.manager as manager_mod
-    from gcsfs.telemetry.manager import _gcs_async_wrapper
 
-    # 1. Count how many times detect() actually executes
-    detect_count = 0
-
-    class MockDetector(BaseDetector):
-        name = Dimension.FRAMEWORK
-
-        def detect(self):
-            nonlocal detect_count
-            detect_count += 1
-            return "fw/pandas"
-
-    tracker = UsageMetricsTracker(detectors=[MockDetector()])
-    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
-
-    # 2. Simulate an async file operation (like _cat_file) making 5 inner HTTP requests
+    # 1. Simulate an async file operation (like _cat_file) making 5 inner HTTP requests
     async def simulated_cat_file():
         for _ in range(5):
-            # Each HTTP request calls tracker.get_tokens() for the User-Agent header
-            tokens = tracker.get_tokens()
-            assert tokens == ["fw/pandas"]
+            # Each HTTP request calls get_tokens() for the User-Agent header
+            assert manager_mod.default_usage_tracker.get_tokens() == ["fw/pandas"]
         return "done"
 
-    # 3. Wrap with _gcs_async_wrapper
+    # 2. Wrap with _gcs_async_wrapper
     wrapped_cat_file = _gcs_async_wrapper(simulated_cat_file)
 
-    # 4. Run the operation
+    # 3. Run the operation
     assert await wrapped_cat_file() == "done"
 
-    # 5. Check: detect() ran ONCE at entry (instead of 5 times for 5 HTTP requests)
-    assert detect_count == 1
+    # 4. Check: detect() ran ONCE at entry (instead of 5 times for 5 HTTP requests)
+    assert len(detector.calls) == 1
 
-    # 6. Check: ContextVar is cleanly reset after the operation finishes
+    # 5. Check: ContextVar is cleanly reset after the operation finishes
     assert get_telemetry_context() == {}
 
 
 @pytest.mark.asyncio
-async def test_consecutive_native_async_calls_isolated(monkeypatch):
+async def test_consecutive_native_async_calls_isolated(detector):
     """Verify that consecutive native async calls under different frameworks are 100% isolated."""
-    import gcsfs.telemetry.manager as manager_mod
-    from gcsfs.telemetry.manager import _gcs_async_wrapper
-
-    current_fw = "pandas"
-    monkeypatch.setattr(
-        manager_mod.default_usage_tracker,
-        "collect_tokens_map",
-        lambda: {"fw": f"fw/{current_fw}"},
-    )
-
     captured = []
 
     async def file_operation():
@@ -465,150 +511,231 @@ async def test_consecutive_native_async_calls_isolated(monkeypatch):
 
     wrapped = _gcs_async_wrapper(file_operation)
 
-    current_fw = "pandas"
+    detector.value = "pandas"
     await wrapped()
-    assert captured[-1] == "fw/pandas"
+    assert captured[-1] == "pandas"
     assert get_telemetry_context() == {}
 
-    current_fw = "torch"
+    detector.value = "torch"
     await wrapped()
-    assert captured[-1] == "fw/torch"
+    assert captured[-1] == "torch"
     assert get_telemetry_context() == {}
 
 
-def test_async_gen_wrapper_aclose_on_early_exit():
-    """Verify that _gcs_async_gen_wrapper properly closes the underlying async generator on early exit."""
-    from gcsfs.core import GCSFileSystem
-    from gcsfs.telemetry.manager import _gcs_async_gen_wrapper
+def test_async_gen_wrapper_aclose_on_early_exit(detector):
+    """Verify that _gcs_sync_wrapper closes the underlying async generator on early exit, with telemetry."""
+    closed_with = []
 
+    class GenFS(fsspec.asyn.AsyncFileSystem):
+        async def _sample_async_gen(self):
+            try:
+                yield 1
+                yield 2
+                yield 3
+            finally:
+                # Has telemetry only when closed by the wrapper, not by garbage collection
+                closed_with.append(get_telemetry_context())
+
+        sample_async_gen = _gcs_sync_wrapper(_sample_async_gen)
+
+    gen_instance = GenFS(skip_instance_cache=True).sample_async_gen()
+    val = next(gen_instance)
+    assert val == 1
+    assert closed_with == []
+    # Close the sync generator early (simulating break in for loop)
+    gen_instance.close()
+    assert closed_with == [{"fw": "pandas"}]
+
+
+@pytest.mark.asyncio
+async def test_async_gen_detects_framework_only_once(detector):
+    """Verify sync walk and native `async for _walk` detect framework only once across all yields."""
+    fs = _DummyFS(skip_instance_cache=True)
+
+    # 1. Sync walk across 4 yielded directories -> detect() must run strictly ONCE
+    assert len(list(fs.walk("bucket"))) == 4
+    assert len(detector.calls) == 1
+
+    # 2. Native async _walk across 4 yielded directories -> detect() must run strictly ONCE
+    detector.calls.clear()
+    assert len([item async for item in fs._walk("bucket")]) == 4
+    assert len(detector.calls) == 1
+
+    # Every inner _ls call carried the framework, and nothing leaked afterwards
+    assert {tokens for _, tokens in fs.seen} == {("fw/pandas",)}
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_native_async_gen_scopes_context_per_step_and_closes(detector):
+    """Verify native async gen wrapper scopes context to each step (no leak to consumer) and closes on early exit."""
     closed = False
+    seen_inside = []
 
     async def sample_async_gen():
         nonlocal closed
         try:
-            yield 1
-            yield 2
-            yield 3
+            for i in range(3):
+                seen_inside.append(get_telemetry_context().get("fw"))
+                yield i
         finally:
             closed = True
 
-    fs = GCSFileSystem(token="anon")
-    wrapped_gen = _gcs_async_gen_wrapper(sample_async_gen, obj=fs)
-    gen_instance = wrapped_gen()
-    val = next(gen_instance)
-    assert val == 1
-    assert not closed
-    # Close the sync generator early (simulating break in for loop)
-    gen_instance.close()
+    agen = _gcs_async_wrapper(sample_async_gen)()
+    assert await agen.__anext__() == 0
+    # Context is active inside the generator step but never leaks to the consumer between yields
+    assert seen_inside == ["pandas"]
+    assert get_telemetry_context() == {}
+
+    # Early exit (like `break` in `async for`) closes the underlying generator
+    await agen.aclose()
     assert closed
 
 
+def test_file_inherited_methods_propagate_caller_framework_across_threads(detector):
+    """
+    Verify inherited AbstractBufferedFile methods (e.g. read) called on another thread
+    (pyarrow IO thread, dask worker) carry the file's caller_framework without re-detecting,
+    including ZonalFile-style overrides that call raw fsspec.asyn.sync.
+    """
+
+    class LeafFile(fsspec.spec.AbstractBufferedFile):
+        def _fetch_range(self, start, end):
+            return self.fs.cat_file(self.path, start=start, end=end)
+
+    class ZonalLikeFile(LeafFile):
+        def _fetch_range(self, start, end):
+            # Same pattern as ZonalFile: raw asyn.sync instead of a wrapped fs method
+            return fsspec.asyn.sync(
+                self.fs.loop, self.fs._cat_file, self.path, start, end
+            )
+
+    wrap_file_methods(LeafFile)
+    wrap_file_methods(ZonalLikeFile)
+
+    for file_cls in (LeafFile, ZonalLikeFile):
+        fs = _DummyFS(skip_instance_cache=True)
+        f = file_cls(fs, "bucket/f.txt", mode="rb", size=3, cache_type="none")
+        # Differs from the detector's "pandas", so a re-detection would show up
+        f.caller_framework = "torch"
+        out = []
+        t = threading.Thread(target=lambda: out.append(f.read()))
+        t.start()
+        t.join()
+        assert out == [b"abc"], file_cls.__name__
+        assert [tokens for _, tokens in fs.seen] == [("fw/torch",)], file_cls.__name__
+    assert detector.calls == []
+
+
 @pytest.mark.asyncio
-async def test_file_telemetry_wrapper_sync_and_async():
-    """Verify _file_telemetry_wrapper propagates caller_framework for both sync and async methods."""
-    from gcsfs.telemetry.manager import _file_telemetry_wrapper
+async def test_file_telemetry_wrapper_and_wrap_file_methods():
+    """Verify wrap_file_methods and _file_telemetry_wrapper cover sync and async methods."""
 
     class DummyFile:
         def __init__(self, caller_framework: str):
             self.caller_framework = caller_framework
 
         def sync_op(self):
-            return get_telemetry_context(Dimension.FRAMEWORK)
+            return get_telemetry_context().get(Dimension.FRAMEWORK)
 
         async def async_op(self):
-            return get_telemetry_context(Dimension.FRAMEWORK)
+            return get_telemetry_context().get(Dimension.FRAMEWORK)
 
-    DummyFile.sync_op = _file_telemetry_wrapper(DummyFile.sync_op)
-    DummyFile.async_op = _file_telemetry_wrapper(DummyFile.async_op)
+        @property
+        def details(self):
+            return get_telemetry_context().get(Dimension.FRAMEWORK)
 
-    f = DummyFile("fw/pytorch")
-    assert f.sync_op() == "fw/pytorch"
-    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+        @staticmethod
+        def static_helper(x):
+            return x * 2
 
-    assert await f.async_op() == "fw/pytorch"
-    assert get_telemetry_context(Dimension.FRAMEWORK) is None
+        @classmethod
+        def class_helper(cls):
+            return cls.__name__
+
+    wrap_file_methods(DummyFile)
+
+    f = DummyFile("pytorch")
+    assert f.sync_op() == "pytorch"
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
+
+    assert f.details == "pytorch"
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
+
+    assert await f.async_op() == "pytorch"
+    assert get_telemetry_context().get(Dimension.FRAMEWORK) is None
+
+    # Called through the instance: a wrapped staticmethod would receive `self` and fail
+    assert f.static_helper(3) == 6
+    assert f.class_helper() == "DummyFile"
 
 
-def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch):
-    """Verify mirror_gcs_methods binds sync/async/gen wrappers and preserves subclass overrides & mocks."""
-    import fsspec.asyn
+@pytest.mark.asyncio
+async def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch, detector):
+    """
+    Verify mirror_gcs_methods binds sync/async/gen wrappers, wraps inherited batch
+    coroutines, and preserves subclass overrides & mocks.
+    """
 
-    from gcsfs.telemetry.manager import mirror_gcs_methods
-
-    class BaseDummyFS(fsspec.asyn.AsyncFileSystem):
-        async def _ls(self, path, detail=False, **kwargs):
-            return [f"base:{path}"]
-
-        async def _cat_file(self, path, start=None, end=None, **kwargs):
-            return f"base_cat:{path}".encode()
-
-        async def _walk(self, path, maxdepth=None, **kwargs):
-            yield (f"base_walk:{path}", [], ["a.txt"])
-
-    mirror_gcs_methods(BaseDummyFS)
-
-    class SubDummyFS(BaseDummyFS):
+    class SubDummyFS(_DummyFS):
         async def _ls(self, path, detail=False, **kwargs):
             return [f"sub:{path}"]
 
         async def _walk(self, path, maxdepth=None, **kwargs):
             yield (f"sub_walk:{path}", [], ["b.txt"])
 
+        async def _internal_helper(self):
+            return "internal"
+
+    mirror_gcs_methods(SubDummyFS)
+
+    # Private internal helpers (not on AsyncFileSystem and no public sync counterpart) must not be wrapped,
+    # whereas AsyncFileSystem async-only methods (_process_limits) are async-wrapped without a sync mirror.
+    assert not getattr(SubDummyFS._internal_helper, "_is_gcs_async_wrapped", False)
+    assert not hasattr(SubDummyFS, "internal_helper")
+    assert getattr(_DummyFS._process_limits, "_is_gcs_async_wrapped", False)
+    assert not hasattr(_DummyFS, "process_limits")
+
     sub_fs = SubDummyFS(skip_instance_cache=True)
     assert sub_fs.ls("bucket") == ["sub:bucket"]
     assert list(sub_fs.walk("bucket")) == [("sub_walk:bucket", [], ["b.txt"])]
 
-    base_fs = BaseDummyFS(skip_instance_cache=True)
+    base_fs = _DummyFS(skip_instance_cache=True)
+
+    # Inherited batch coroutine (_cat from AsyncFileSystem) detects framework ONCE across multiple files
+    detector.calls.clear()
+    batch_res = await base_fs._cat(["bucket/f1.txt", "bucket/f2.txt", "bucket/f3.txt"])
+    assert len(batch_res) == 3
+    assert len(detector.calls) == 1
+    assert get_telemetry_context() == {}
 
     async def mocked_cat_file(self, path, start=None, end=None, **kwargs):
         return f"mocked:{path}".encode()
 
-    monkeypatch.setattr(BaseDummyFS, "_cat_file", mocked_cat_file)
+    monkeypatch.setattr(_DummyFS, "_cat_file", mocked_cat_file)
     assert base_fs.cat_file("bucket/file.txt") == b"mocked:bucket/file.txt"
+    # SubDummyFS did not override _cat_file, so it inherits the monkeypatch on _DummyFS
+    assert sub_fs.cat_file("bucket/file.txt") == b"mocked:bucket/file.txt"
+
+
+def test_sync_wrapper_propagates_context_to_background_loop_thread(detector):
+    """Verify _run_sync captures context on caller thread and propagates it to fsspecIO thread."""
+    caller_thread_id = threading.get_ident()
+    fs = _DummyFS(skip_instance_cache=True)
+
+    assert fs.ls("bucket") == ["bucket"]
+    [(thread_id, tokens)] = fs.seen
+    # Ran on the background fsspecIO thread, with the caller thread's framework
+    assert thread_id != caller_thread_id
+    assert tokens == ("fw/pandas",)
+    # Detection ran once, on the caller thread: the loop thread's stack has no framework frames
+    assert detector.calls == [caller_thread_id]
+    assert get_telemetry_context() == {}
 
 
 # ============================================================================
 # 6. GCSFileSystem & GCSFile Integration Tests
 # ============================================================================
-
-
-def test_nested_method_calls_telemetry():
-    """
-    Verify that deeply nested method calls (e.g. outer sync -> bridged async -> inner async)
-    correctly maintain the outer framework across all levels and cleanly reset context.
-    """
-    import fsspec.asyn
-
-    from gcsfs.core import GCSFileSystem
-
-    fs = GCSFileSystem(token="anon", project="test-project")
-
-    # Set outer framework context
-    token = set_telemetry_context(Dimension.FRAMEWORK, "fw/custom-pipeline")
-    try:
-        # Outermost level
-        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
-
-        # Simulate nested async execution across bridged sync
-        async def inner_coro():
-            assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
-
-            # Simulate innermost async method (Level 2)
-            async def innermost_coro():
-                return get_telemetry_context(Dimension.FRAMEWORK)
-
-            return await innermost_coro()
-
-        res = fsspec.asyn.sync(fs.loop, inner_coro)
-        assert res == "fw/custom-pipeline"
-
-        # Context at outer level is still intact
-        assert get_telemetry_context(Dimension.FRAMEWORK) == "fw/custom-pipeline"
-    finally:
-        reset_telemetry_context(token)
-
-    # After outer method completes, context is completely clean
-    assert get_telemetry_context(Dimension.FRAMEWORK) is None
 
 
 def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
@@ -619,7 +746,12 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
     fs = mock_gcs_harness.fs
     captured = mock_gcs_harness.user_agents
 
-    # 1. Test all inherited & overridden FileSystem methods
+    def _write_file_helper(filesystem):
+        with filesystem.open("test-bucket/file.txt", "wb") as f:
+            f.write(b"data\n")
+            f.writelines([b"data2\n"])
+            f.flush()
+
     fs_operations = [
         ("ls", lambda: fs.ls("test-bucket")),
         ("info", lambda: fs.info("test-bucket/file.txt")),
@@ -638,23 +770,15 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
         ("write_text", lambda: fs.write_text("test-bucket/file.txt", "data")),
         ("buckets", lambda: fs.buckets),
         ("open_read", lambda: fs.open("test-bucket/file.txt", "rb").read(5)),
-        (
-            "open_write",
-            lambda: _write_file_helper(fs),
-        ),
+        ("open_write", lambda: _write_file_helper(fs)),
     ]
-
-    def _write_file_helper(filesystem):
-        with filesystem.open("test-bucket/file.txt", "wb") as f:
-            f.write(b"data\n")
-            f.writelines([b"data2\n"])
-            f.flush()
 
     for name, op in fs_operations:
         fs.dircache.clear()
         captured.clear()
-        expected_token = f"fw/test-{name}"
-        token = set_telemetry_context(Dimension.FRAMEWORK, expected_token)
+        fw_name = f"test-{name}"
+        expected_token = f"fw/{fw_name}"
+        token = set_telemetry_context(Dimension.FRAMEWORK, fw_name)
         try:
             op()
             assert (
@@ -683,7 +807,7 @@ def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkey
 
     tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
     monkeypatch.setattr("gcsfs.core.default_usage_tracker", tracker)
-    monkeypatch.setattr("gcsfs.telemetry.manager.default_usage_tracker", tracker)
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
 
     fs = GCSFileSystem(token="anon")
     f = GCSFile(fs, "bucket/test.txt", mode="wb")
@@ -716,28 +840,20 @@ async def test_async_fetch_range_propagates_caller_framework():
     fs._cat_file_concurrent = mock.AsyncMock(side_effect=mock_cat_file_concurrent)
     fs.split_path.return_value = ("bucket", "test.parquet", None)
 
-    # Bypass info call during init
     with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
         f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "rb", cache_type="none")
 
-    f.caller_framework = "fw/pandas"
-    # Ensure it is wrapped since it is manually instantiated without module load hooks
-    from gcsfs.telemetry.manager import _file_telemetry_wrapper
-
-    f._async_fetch_range = _file_telemetry_wrapper(
-        gcsfs.core.GCSFile._async_fetch_range
-    ).__get__(f)
-
+    f.caller_framework = "pandas"
     await f._async_fetch_range(0, 10)
-    assert captured_context.get(Dimension.FRAMEWORK.value) == "fw/pandas"
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "pandas"
 
 
 def test_defer_close_propagates_caller_framework():
     """Verify that background deferred close inherits the framework context."""
-    import threading
     import unittest.mock as mock
 
     import gcsfs
+    from gcsfs.telemetry.wrapper import _file_telemetry_wrapper
 
     captured_context = {}
 
@@ -746,23 +862,18 @@ def test_defer_close_propagates_caller_framework():
     with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
         f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "wb")
 
-    f.caller_framework = "fw/ray"
+    f.caller_framework = "ray"
 
     def mock_upload_chunk(self, final=False):
         captured_context.update(get_telemetry_context())
 
-    from gcsfs.telemetry.manager import _file_telemetry_wrapper
-
     f._upload_chunk = _file_telemetry_wrapper(mock_upload_chunk).__get__(f)
 
-    def background_job():
-        f._upload_chunk(final=True)
-
-    t = threading.Thread(target=background_job)
+    t = threading.Thread(target=lambda: f._upload_chunk(final=True))
     t.start()
     t.join()
 
-    assert captured_context.get(Dimension.FRAMEWORK.value) == "fw/ray"
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
     f.closed = True
 
 
