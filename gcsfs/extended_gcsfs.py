@@ -1336,7 +1336,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if not create_parents:
                     break
                 cur_path = parent_path
-                _, cur_key, _ = self.split_path(cur_path)
+                cur_key = self._parent(cur_key)
         except api_exceptions.Conflict as e:
             logger.debug(f"Conflict detected for path: {path}: {e}")
             # Under race conditions, folder might have been created concurrently

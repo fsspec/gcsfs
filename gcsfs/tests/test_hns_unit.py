@@ -1033,16 +1033,19 @@ class TestExtendedGcsFileSystemCacheHelpers:
     def test_cache_add_entry_appends_to_parent(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         parent = f"{TEST_HNS_BUCKET}/p"
-        fs.dircache[parent] = [{"name": f"{parent}/a", "type": "file"}]
-        entry = {"name": f"{parent}/b", "type": "file"}
+        existing = {"name": f"{parent}/a", "type": "directory", "metageneration": 7}
+        same_name_file = {"name": f"{parent}/a", "type": "file"}
+        new_entry = {"name": f"{parent}/b", "type": "file"}
+        fs.dircache[parent] = [existing]
 
-        fs._cache_add_entry(parent, entry)
-        fs._cache_add_entry(parent, entry)
+        # Same name and type: preserves existing entry (and its metadata).
+        fs._cache_add_entry(parent, {"name": f"{parent}/a", "type": "directory"})
+        # Same name but different type (file vs directory): appended.
+        fs._cache_add_entry(parent, same_name_file)
+        # New entry: appended.
+        fs._cache_add_entry(parent, new_entry)
 
-        assert [e["name"] for e in fs.dircache[parent]] == [
-            f"{parent}/a",
-            f"{parent}/b",
-        ]
+        assert fs.dircache[parent] == [existing, same_name_file, new_entry]
 
     def test_cache_add_entry_noop_when_parent_uncached(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
