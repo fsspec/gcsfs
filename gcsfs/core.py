@@ -1344,6 +1344,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if is_empty_range(start, end):
             return b""
 
+        if end is not None and (end < 0 or (start is not None and start < 0)):
+            size = (await self._info(path))["size"]
+            start, end, _ = slice(start, end).indices(size)
+            if is_empty_range(start, end):
+                return b""
+
         u2 = self.url(path, generation=kwargs.get("generation"))
         if start is not None or end is not None:
             head = {"Range": await self._process_limits(path, start, end)}
