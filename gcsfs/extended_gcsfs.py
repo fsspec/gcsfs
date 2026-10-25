@@ -2286,14 +2286,22 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
 
         try:
+            details = dict(mrd_pool.details or {})
             size = await _get_mrd_size(mrd_pool)
             if size is None:
                 logger.warning(
                     f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
-                    "Falling back to _info() to get the file size. "
+                    "Falling back to cached details to get the file size. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )
-                size = (await self._info(rpath, **kwargs)).get("size", 0)
+                size = details.get("size", 0)
+            elif int(details.get("size", -1)) != size:
+                # Metadata hashes don't describe the bytes the MRD will serve.
+                details.pop("crc32c", None)
+                details.pop("md5Hash", None)
+                if kwargs.get("consistency", self.consistency) in ("md5", "crc32c"):
+                    kwargs["consistency"] = "size"
+            details["size"] = size
 
             return await super()._get_file_concurrent(
                 rpath,
@@ -2304,7 +2312,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 headers=headers,
                 callback=callback,
                 fetcher_fn=custom_fetcher,  # Pass our custom fetcher up the chain
-                size=size,
+                details=details,
                 **kwargs,
             )
         finally:
