@@ -379,6 +379,65 @@ def test_comparison_configurator(mock_config_dependencies):
     assert case.bucket_type == "regional"
 
 
+def test_prepare_files_gcloud_sets_bidi_finalize_env():
+    """Test that _prepare_files_gcloud sets CLOUDSDK_STORAGE_BIDI_STREAMING_FINALIZE_WRITES=True."""
+    from gcsfs.tests.perf.microbenchmarks.conftest import _prepare_files_gcloud
+
+    with (
+        mock.patch("shutil.which", return_value="/usr/bin/gcloud"),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.conftest._write_local_file"
+        ) as mock_write,
+        mock.patch("subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = mock.MagicMock(returncode=0)
+        assert _prepare_files_gcloud(["bucket/obj.bin"], 1024) is True
+        mock_write.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert (
+            kwargs["env"].get("CLOUDSDK_STORAGE_BIDI_STREAMING_FINALIZE_WRITES")
+            == "True"
+        )
+
+
+def test_pytest_benchmark_generate_json_filters_empty_stats():
+    """Test that pytest_benchmark_generate_json removes timed-out benchmarks with empty stats.data."""
+    from types import SimpleNamespace
+
+    from gcsfs.tests.perf.microbenchmarks.conftest import pytest_benchmark_generate_json
+
+    class FakeBench:
+        def __init__(self, data, extra_info=None):
+            self.stats = SimpleNamespace(data=data)
+            self.extra_info = extra_info or {}
+
+        def get(self, key, default=None):
+            if key == "extra_info":
+                return self.extra_info
+            return default
+
+    completed = FakeBench([1.25])
+    timed_out = FakeBench([])
+    multi_proc = FakeBench(
+        [],
+        extra_info={
+            "runs": [2.5],
+            "min_run": 2.5,
+            "max_run": 2.5,
+            "mean_run": 2.5,
+            "median_run": 2.5,
+            "stddev_run": 0.0,
+            "rounds": 1,
+        },
+    )
+
+    benchmarks = [completed, timed_out, multi_proc]
+    pytest_benchmark_generate_json(None, benchmarks, {}, {})
+
+    assert benchmarks == [completed, multi_proc]
+    assert multi_proc.stats.data == [2.5]
+
+
 def test_cat_configurator(mock_config_dependencies):
     """Test that CatConfigurator correctly builds benchmark parameters."""
     common = {
