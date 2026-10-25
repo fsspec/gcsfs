@@ -664,23 +664,24 @@ def test_cat_ranges_op_error_handling():
 
 
 def test_listing_configurator_skips_files_less_than_folders(mock_config_dependencies):
-    """Test that ListingConfigurator filters out combinations where files < folders."""
+    """Test that ListingConfigurator filters out invalid files/folders combinations."""
     common = {"bucket_types": ["regional"], "rounds": 1}
     scenario = {
         "name": "delete_fsdp_checkpoint_rank_folders",
         "processes": [1],
         "threads": [1],
         "depth": 1,
-        "folders": [8, 32, 128, 512],
+        "folders": [0, 8, 32, 128, 512],
         "files": [100, 1000],
     }
 
     configurator = ListingConfigurator("dummy")
     cases = configurator.build_cases(scenario, common)
 
-    # For files=100, only folders=8 and folders=32 are valid; for files=1000, all 4 are valid.
+    # folders=0 is skipped when files > 0; for files=100 only folders=8, 32
+    # are valid; for files=1000 folders=8, 32, 128, 512 are valid.
     assert len(cases) == 6
-    assert all(c.files >= c.folders for c in cases)
+    assert all(c.folders > 0 and c.files >= c.folders for c in cases)
 
 
 def test_delete_benchmark_cases_never_have_fewer_files_than_folders(
@@ -692,8 +693,11 @@ def test_delete_benchmark_cases_never_have_fewer_files_than_folders(
     assert all(c.files >= c.folders for c in cases if c.folders > 0)
 
 
-def test_benchmark_listing_fixture_helper_rejects_files_less_than_folders():
-    """Test that _benchmark_listing_fixture_helper raises ValueError if files < folders."""
+@pytest.mark.parametrize("folders,files", [(128, 100), (0, 10)])
+def test_benchmark_listing_fixture_helper_rejects_invalid_folders_and_files(
+    folders, files
+):
+    """Test that _benchmark_listing_fixture_helper raises ValueError when not (0 < folders <= files)."""
     from types import SimpleNamespace
 
     from gcsfs.tests.perf.microbenchmarks.conftest import (
@@ -703,13 +707,12 @@ def test_benchmark_listing_fixture_helper_rejects_files_less_than_folders():
     params = SimpleNamespace(
         name="bad_delete_case",
         bucket_name="test-bucket",
-        folders=128,
+        folders=folders,
         depth=1,
-        files=100,
+        files=files,
     )
     gen = _benchmark_listing_fixture_helper(
         lambda: mock.MagicMock(), params, "benchmark-delete", teardown=False
     )
-    with pytest.raises(ValueError, match="files .* must be >= folders"):
+    with pytest.raises(ValueError, match="require 0 < folders .* <= files"):
         next(gen)
-
