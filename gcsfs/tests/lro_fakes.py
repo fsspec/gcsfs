@@ -1,58 +1,17 @@
-"""Correctly shaped long-running operation (LRO) doubles for tests.
+"""Long-running operation (LRO) test doubles shaped like GAPIC's.
 
-Every ``FakeLroFactory`` constructor returns a ``FakeLro`` whose ``op`` is a
-real ``google.api_core.operation_async.AsyncOperation`` wrapping a real
-``google.longrunning.Operation`` proto. Only the two transport calls behind it
-are mocked: ``get_operation`` (GetOperation; one await per server poll) and
-``cancel_operation`` (CancelOperation). Code under test therefore sees the same
-public shape that GAPIC clients return: ``op.operation.done``,
-``op.operation.name``, ``await op.done(retry=...)``, ``await op.result()`` and
-``await op.cancel()``.
+Each ``FakeLroFactory`` method returns a ``FakeLro`` whose ``op`` is a real
+``AsyncOperation`` over a real ``google.longrunning.Operation`` proto; only the
+GetOperation and CancelOperation transport calls are mocked::
 
-Tests normally use the ``fake_lro`` fixture from ``conftest.py``::
+    lro = fake_lro.succeeded(after=3)          # done on the 3rd poll
+    lro = fake_lro.failed(code_pb2.ABORTED)    # failed at t=0
+    lro = fake_lro.pending()                   # never finishes
+    lro = fake_lro.sequence([ServiceUnavailable("blip"), operation_pb(done=True)])
 
-    lro = fake_lro.succeeded()                   # done at t=0, Empty response
-    lro = fake_lro.succeeded(after=3)            # done on the 3rd poll
-    lro = fake_lro.failed(code_pb2.ABORTED)      # failed at t=0
-    lro = fake_lro.failed(status_pb2.Status(code=code_pb2.NOT_FOUND), after=2)
-    lro = fake_lro.pending()                     # never finishes
-    lro = fake_lro.sequence(
-        [
-            api_exceptions.ServiceUnavailable("blip"),  # 1st poll raises
-            operation_pb(done=True),                    # 2nd poll finishes
-        ]
-    )
-
-``after=N`` is the number of polls until the terminal state: ``after=0`` means
-the operation is already terminal when the RPC returns it (t=0), so the
-in-memory check sees it without polling.
-
-Pitfalls:
-
-* Event loop: ``AsyncOperation`` binds a future to the current event loop when
-  it is built, so it must be awaited on that loop. The factory builds on the
-  running loop in async tests, and otherwise on fsspec's IO loop, which is
-  where sync ``gcsfs`` calls such as ``fs.mv`` run. Don't build an op in a sync
-  test and then await it on another loop (for example via ``asyncio.run``).
-* Unread failures: a failed op stores its exception on that future as soon as
-  it reaches the terminal state. If nothing ever calls ``op.result()``,
-  asyncio logs "Future exception was never retrieved" when the op is garbage
-  collected. That doesn't fail the test; run ``pytest -s -p no:logging`` to
-  see it.
-* Real sleeps in sync tests: code that polls with the default HNS cadence
-  (about 150-250 ms per early poll) sleeps for real, so a sync test that
-  drives it with ``after=N`` waits about N times that. To speed such a test
-  up, patch the cadence, for example::
-
-      monkeypatch.setattr(
-          "gcsfs.poller.get_default_hns_lro_cadence",
-          lambda: PollSchedule(lambda status: 0.0),
-      )
-
-* ``op.cancel()`` polls first: the real ``AsyncOperation.cancel()`` awaits
-  ``done()`` before sending CancelOperation. It costs one extra
-  ``get_operation`` call and only awaits ``cancel_operation`` while the op is
-  still pending.
+An ``AsyncOperation`` is bound to the event loop it was built on, so await it
+there: the factory builds on the running loop in async tests and on fsspec's IO
+loop (where sync ``gcsfs`` calls run) otherwise.
 """
 
 import asyncio
@@ -62,18 +21,12 @@ from unittest import mock
 
 from fsspec import asyn
 from google.api_core import operation_async
-from google.api_core.future import async_future
 from google.longrunning import operations_pb2
 from google.protobuf import empty_pb2
 from google.rpc import code_pb2, status_pb2
 
 #: Server-side name given to fake operations unless ``name=`` is passed.
 DEFAULT_LRO_NAME = "projects/_/buckets/test-bucket/operations/op-test"
-
-#: Polling retry used by ``AsyncOperation.result()`` when it has to poll by
-#: itself (for example ``result()`` on a pending op). api-core's default starts
-#: at 1 s and doubles, which would make such tests sleep for real.
-FAST_RESULT_RETRY = async_future.DEFAULT_RETRY.with_delay(initial=0.001, maximum=0.01)
 
 #: An LRO error: a ``google.rpc.code_pb2`` int or a full ``status_pb2.Status``.
 ErrorSpec = Union[int, status_pb2.Status]
@@ -288,6 +241,9 @@ class FakeLroFactory:
         result_type: Optional[type],
     ) -> FakeLro:
         get_operation = mock.AsyncMock(side_effect=_replay(steps))
+        # The real AsyncOperation.cancel() awaits done() first: one extra
+        # get_operation call, and cancel_operation is only awaited while the
+        # op is still pending.
         cancel_operation = mock.AsyncMock(return_value=None)
 
         def _new_op() -> operation_async.AsyncOperation:
@@ -296,7 +252,6 @@ class FakeLroFactory:
                 get_operation,
                 cancel_operation,
                 result_type=result_type or empty_pb2.Empty,
-                retry=FAST_RESULT_RETRY,
             )
 
         try:

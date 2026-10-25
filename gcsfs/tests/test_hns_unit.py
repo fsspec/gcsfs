@@ -23,7 +23,7 @@ from google.cloud import storage_control_v2
 from google.rpc import code_pb2
 
 from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
-from gcsfs.poller import _BACKGROUND_TASKS, PollSchedule
+from gcsfs.poller import _BACKGROUND_TASKS
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
 from gcsfs.tests.conftest import requires_hns
 from gcsfs.tests.lro_fakes import operation_pb
@@ -639,10 +639,7 @@ class TestExtendedGcsFileSystemMv:
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/src_dir"
         path2 = f"{TEST_HNS_BUCKET}/dst_dir"
-        monkeypatch.setattr(
-            "gcsfs.poller.get_default_hns_lro_cadence",
-            lambda: PollSchedule(lambda status: 0.0),
-        )
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
         lro = fake_lro.succeeded(after=2)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
@@ -698,10 +695,7 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/src_timeout"
         path2 = f"{TEST_HNS_BUCKET}/dst_timeout"
         name = "projects/_/buckets/b/operations/op-timeout"
-        monkeypatch.setattr(
-            "gcsfs.poller.get_default_hns_lro_cadence",
-            lambda: PollSchedule(lambda status: 0.05),
-        )
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.05)
         monkeypatch.setattr("gcsfs.extended_gcsfs.DEFAULT_HNS_LRO_TIMEOUT", 0.2)
         lro = fake_lro.pending(name=name)
 
@@ -774,10 +768,7 @@ class TestExtendedGcsFileSystemMv:
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/src_dir"
         path2 = f"{TEST_HNS_BUCKET}/dst_dir"
-        monkeypatch.setattr(
-            "gcsfs.poller.get_default_hns_lro_cadence",
-            lambda: PollSchedule(lambda status: 0.0),
-        )
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
         lro = fake_lro.failed(code, after=after)
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
@@ -815,10 +806,7 @@ class TestExtendedGcsFileSystemMv:
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/src_dir"
         path2 = f"{TEST_HNS_BUCKET}/dst_dir"
-        monkeypatch.setattr(
-            "gcsfs.poller.get_default_hns_lro_cadence",
-            lambda: PollSchedule(lambda status: 0.0),
-        )
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
         lro = fake_lro.failed(code, after=after)
 
         with (
@@ -847,10 +835,7 @@ class TestExtendedGcsFileSystemMv:
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/src_dir"
         path2 = f"{TEST_HNS_BUCKET}/dst_dir"
-        monkeypatch.setattr(
-            "gcsfs.poller.get_default_hns_lro_cadence",
-            lambda: PollSchedule(lambda status: 0.0),
-        )
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
         error = api_exceptions.PermissionDenied("no access to operation")
         lro = fake_lro.sequence([error])
 
@@ -929,17 +914,14 @@ class TestExtendedGcsFileSystemMv:
             mocks["super_mv"].assert_awaited_once_with(path1, path2)
 
     def test_hns_rename_transient_status_check_error_keeps_waiting(
-        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+        self, gcs_hns, gcs_hns_mocks, fake_lro, fake_clock, monkeypatch
     ):
         """A transient GetOperation error (ServiceUnavailable) moves on to the
         next check instead of ending the wait and falling back."""
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/src_dir"
         path2 = f"{TEST_HNS_BUCKET}/dst_dir"
-        monkeypatch.setattr(
-            "gcsfs.poller.get_default_hns_lro_cadence",
-            lambda: PollSchedule(lambda status: 0.0),
-        )
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
         lro = fake_lro.sequence(
             [
                 api_exceptions.ServiceUnavailable("transient"),
@@ -964,6 +946,10 @@ class TestExtendedGcsFileSystemMv:
             mock_mv_file.assert_not_called()
 
         assert lro.get_operation.await_count == 2
+        # The second check waits for the first backoff step (0.5 s +-25%).
+        first, backoff = fake_clock.sleeps
+        assert first == 0.0
+        assert 0.375 <= backoff <= 0.625
         lro.cancel_operation.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -977,18 +963,19 @@ class TestExtendedGcsFileSystemMv:
         path2 = f"{TEST_HNS_BUCKET}/dst_cancel"
         waiting_after_first_poll = asyncio.Event()
 
-        def cadence(status):
-            if status.attempt == 1:
+        delay_calls = 0
+
+        def cadence(elapsed):
+            nonlocal delay_calls
+            delay_calls += 1
+            if delay_calls == 1:
                 return 0.0
-            # Cancel while poll_until sleeps, after a status check has
+            # Cancel while _poll_until sleeps, after a status check has
             # finished. test_poller covers a cancel that races a check.
             waiting_after_first_poll.set()
             return 5.0
 
-        monkeypatch.setattr(
-            "gcsfs.poller.get_default_hns_lro_cadence",
-            lambda: PollSchedule(cadence),
-        )
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", cadence)
         lro = fake_lro.pending()
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:

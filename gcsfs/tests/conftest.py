@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import shlex
@@ -603,16 +604,36 @@ def zonal_write_mocks():
 
 @pytest.fixture
 def fake_lro():
-    """Builds correctly shaped long-running operation doubles.
-
-    Returns a ``FakeLroFactory``: ``fake_lro.pending()``,
-    ``fake_lro.succeeded(response=None, after=0)``,
-    ``fake_lro.failed(error, after=0)`` and ``fake_lro.sequence([...])``. Each
-    returns a ``FakeLro`` with a real ``AsyncOperation`` (``.op``) and the
-    GetOperation/CancelOperation mocks behind it. See
-    ``gcsfs/tests/lro_fakes.py`` for details and pitfalls.
-    """
+    """Factory for LRO test doubles (see gcsfs/tests/lro_fakes.py)."""
     return FakeLroFactory()
+
+
+class FakeClock:
+    """Virtual clock for ``gcsfs.poller``: sleeps return at once and advance ``now``."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+        # Yield like asyncio.sleep, so a pending cancel is delivered here.
+        await asyncio.sleep(0)
+
+    def patch(self, monkeypatch) -> "FakeClock":
+        monkeypatch.setattr("gcsfs.poller._monotonic", self.time)
+        monkeypatch.setattr("gcsfs.poller._sleep", self.sleep)
+        return self
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """Virtual clock for gcsfs.poller's polling loop."""
+    return FakeClock().patch(monkeypatch)
 
 
 @pytest.fixture
