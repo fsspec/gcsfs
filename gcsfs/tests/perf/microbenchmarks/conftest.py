@@ -578,11 +578,15 @@ def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info
             del bench.extra_info["median_run"]
             del bench.extra_info["stddev_run"]
 
-        # pytest-timeout raises BaseException, which bypasses pytest-benchmark's
-        # `except Exception:` handler and leaves `has_error=False`. Note: this
-        # only catches timeouts before round 1 completes (`stats.data` is empty).
-        if not bench.stats.data:
-            bench.fixture.has_error = True
+    # Filter out benchmarks interrupted before completing all rounds (e.g. by
+    # pytest-timeout, which raises a BaseException subclass and leaves
+    # bench.has_error=False with partial or empty bench.stats.data).
+    benchmarks[:] = [
+        b
+        for b in benchmarks
+        if b.stats
+        and len(getattr(b.stats, "data", None) or ()) >= b.extra_info.get("rounds", 1)
+    ]
 
 
 def publish_benchmark_extra_info(

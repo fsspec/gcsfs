@@ -96,14 +96,24 @@ def test_generate_report():
         mock_file.assert_any_call(report_path, "w", newline="")
 
 
-def test_generate_report_empty_json():
+@pytest.mark.parametrize(
+    "empty_payload",
+    [
+        pytest.param({}, id="empty_dict"),
+        pytest.param({"benchmarks": []}, id="empty_benchmarks_list"),
+    ],
+)
+def test_generate_report_empty_json(empty_payload):
+    # Arrange
     with (
-        mock.patch("json.load", return_value={}),
+        mock.patch("json.load", return_value=empty_payload),
         mock.patch("builtins.open", mock.mock_open()),
     ):
-
+        # Act
         report_path = run._generate_report("results.json", "/tmp")
-        assert report_path is None
+
+    # Assert
+    assert report_path is None
 
 
 def test_format_mb():

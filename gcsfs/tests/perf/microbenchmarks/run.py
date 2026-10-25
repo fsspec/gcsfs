@@ -174,7 +174,7 @@ def _generate_report(json_path, results_dir):
         )
         return None
 
-    if not data:
+    if not data or not data.get("benchmarks"):
         logging.error(f"JSON results from {json_path} are empty.")
         return None
 
