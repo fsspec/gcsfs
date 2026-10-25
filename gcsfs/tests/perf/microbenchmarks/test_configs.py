@@ -661,3 +661,55 @@ def test_cat_ranges_op_error_handling():
     mock_gcs.cat_ranges.return_value = [b"data1", OSError("Failed read")]
     with pytest.raises(OSError, match="Failed read"):
         _cat_ranges_op(mock_gcs, paths=["a", "b"], starts=[0, 10], ends=[10, 20])
+
+
+def test_listing_configurator_skips_files_less_than_folders(mock_config_dependencies):
+    """Test that ListingConfigurator filters out combinations where files < folders."""
+    common = {"bucket_types": ["regional"], "rounds": 1}
+    scenario = {
+        "name": "delete_fsdp_checkpoint_rank_folders",
+        "processes": [1],
+        "threads": [1],
+        "depth": 1,
+        "folders": [8, 32, 128, 512],
+        "files": [100, 1000],
+    }
+
+    configurator = ListingConfigurator("dummy")
+    cases = configurator.build_cases(scenario, common)
+
+    # For files=100, only folders=8 and folders=32 are valid; for files=1000, all 4 are valid.
+    assert len(cases) == 6
+    assert all(c.files >= c.folders for c in cases)
+
+
+def test_delete_benchmark_cases_never_have_fewer_files_than_folders(
+    mock_config_dependencies,
+):
+    """Ensure shipped delete configs never generate cases with 0 files per folder."""
+    cases = get_delete_benchmark_cases()
+    assert cases
+    assert all(c.files >= c.folders for c in cases if c.folders > 0)
+
+
+def test_benchmark_listing_fixture_helper_rejects_files_less_than_folders():
+    """Test that _benchmark_listing_fixture_helper raises ValueError if files < folders."""
+    from types import SimpleNamespace
+
+    from gcsfs.tests.perf.microbenchmarks.conftest import (
+        _benchmark_listing_fixture_helper,
+    )
+
+    params = SimpleNamespace(
+        name="bad_delete_case",
+        bucket_name="test-bucket",
+        folders=128,
+        depth=1,
+        files=100,
+    )
+    gen = _benchmark_listing_fixture_helper(
+        lambda: mock.MagicMock(), params, "benchmark-delete", teardown=False
+    )
+    with pytest.raises(ValueError, match="files .* must be >= folders"):
+        next(gen)
+
