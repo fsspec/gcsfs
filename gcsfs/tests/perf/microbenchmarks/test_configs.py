@@ -402,25 +402,14 @@ def test_comparison_gcsfs_get_raises_on_size_mismatch(tmp_path):
         )
 
 
-def test_comparison_cat_file_skips_above_max_bytes():
-    """Test that test_download_large_file_gcsfs_cat_file skips objects larger than MAX_CAT_FILE_BYTES."""
-    from types import SimpleNamespace
+def test_shipped_comparison_cases_max_file_size(mock_config_dependencies):
+    """Test that shipped comparison configs cap large file sizes at 100 GiB."""
+    # Act
+    cases = get_comparison_benchmark_cases()
 
-    from gcsfs.tests.perf.microbenchmarks.comparison.test_comparison import (
-        MAX_CAT_FILE_BYTES,
-        test_download_large_file_gcsfs_cat_file,
-    )
-
-    # Arrange
-    params = SimpleNamespace(
-        name="download_large_file_zonal_204800MB",
-        file_size_bytes=MAX_CAT_FILE_BYTES + MB,
-    )
-    fixture_val = (SimpleNamespace(), "bucket/large_file.bin", "/tmp/out.bin", params)
-
-    # Act & Assert
-    with pytest.raises(pytest.skip.Exception, match="Skipping in-memory cat_file"):
-        test_download_large_file_gcsfs_cat_file(None, fixture_val, None)
+    # Assert
+    assert cases
+    assert max(c.file_size_bytes for c in cases) == 102400 * MB
 
 
 def test_comparison_download_large_fixture_reuses_cached_object():
@@ -450,11 +439,12 @@ def test_comparison_download_large_fixture_reuses_cached_object():
         )
 
         # Act
-        gen1 = fixture_fn(lambda: SimpleNamespace(), remote_cache, request)
+        fake_gcs = SimpleNamespace(rm=mock.MagicMock())
+        gen1 = fixture_fn(lambda: fake_gcs, remote_cache, request)
         _, remote_path_1, local_path_1, _ = next(gen1)
         next(gen1, None)
 
-        gen2 = fixture_fn(lambda: SimpleNamespace(), remote_cache, request)
+        gen2 = fixture_fn(lambda: fake_gcs, remote_cache, request)
         _, remote_path_2, local_path_2, _ = next(gen2)
         next(gen2, None)
     finally:
@@ -464,6 +454,13 @@ def test_comparison_download_large_fixture_reuses_cached_object():
     assert len(prepared_calls) == 1
     assert remote_path_1 == remote_path_2
     assert local_path_1 != local_path_2
+
+    # Verify module-scoped cache fixture teardown cleans up using the stored gcs client
+    cache_gen = test_comparison._download_large_remote_cache.__wrapped__()
+    cache = next(cache_gen)
+    cache.update(remote_cache)
+    next(cache_gen, None)
+    fake_gcs.rm.assert_called_once()
 
 
 def test_cat_configurator(mock_config_dependencies):
