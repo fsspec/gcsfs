@@ -726,15 +726,18 @@ class TestExtendedGcsFileSystemMvFile:
     @pytest.mark.asyncio
     async def test_mv_file_hns_replaces_cached_destination_entry(self):
         """Moving a file over an already-cached destination must not leave
-        duplicate or stale destination entries in the parent listing."""
+        duplicate or stale destination entries in the parent listing, while
+        preserving a same-named directory entry."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         parent = f"{TEST_HNS_BUCKET}/parent"
         src = f"{parent}/src.txt"
         dst = f"{parent}/dst.txt"
+        dst_dir = {"name": dst, "type": "directory"}
 
         fs.dircache[parent] = [
             {"name": src, "type": "file", "size": 1},
             {"name": dst, "type": "file", "size": 10},
+            dst_dir,
             {"name": f"{parent}/keep.txt", "type": "file", "size": 20},
         ]
 
@@ -745,8 +748,11 @@ class TestExtendedGcsFileSystemMvFile:
         entries = fs.dircache[parent]
         names = [e["name"] for e in entries]
         assert src not in names
-        assert names.count(dst) == 1
-        assert any(e["name"] == dst and e["size"] == 1 for e in entries)
+        assert [(e["name"], e["type"]) for e in entries].count((dst, "file")) == 1
+        assert any(
+            e["name"] == dst and e["type"] == "file" and e["size"] == 1 for e in entries
+        )
+        assert dst_dir in entries
         assert f"{parent}/keep.txt" in names
 
 
@@ -1013,13 +1019,19 @@ class TestExtendedGcsFileSystemCacheHelpers:
         parent = f"{TEST_HNS_BUCKET}/p"
         fs.dircache[parent] = [
             {"name": f"{parent}/a", "type": "file"},
+            {"name": f"{parent}/a", "type": "directory"},
             {"name": f"{parent}/b", "type": "file"},
             {"name": f"{parent}/c", "type": "file"},
         ]
 
-        fs._cache_drop_entries(parent, {f"{parent}/a", f"{parent}/c"})
+        fs._cache_drop_entries(
+            parent, {f"{parent}/a", f"{parent}/c"}, entry_type="file"
+        )
 
-        assert [e["name"] for e in fs.dircache[parent]] == [f"{parent}/b"]
+        assert fs.dircache[parent] == [
+            {"name": f"{parent}/a", "type": "directory"},
+            {"name": f"{parent}/b", "type": "file"},
+        ]
 
     def test_cache_drop_entries_noop_when_parent_uncached(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
@@ -1033,12 +1045,19 @@ class TestExtendedGcsFileSystemCacheHelpers:
     def test_cache_add_entry_appends_to_parent(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         parent = f"{TEST_HNS_BUCKET}/p"
-        fs.dircache[parent] = [{"name": f"{parent}/a", "type": "file"}]
-        entry = {"name": f"{parent}/b", "type": "file"}
+        existing = {"name": f"{parent}/a", "type": "directory", "metageneration": 7}
+        same_name_file = {"name": f"{parent}/a", "type": "file"}
+        new_entry = {"name": f"{parent}/b", "type": "file"}
+        fs.dircache[parent] = [existing]
 
-        fs._cache_add_entry(parent, entry)
+        # Same name and type: preserves existing entry (and its metadata).
+        fs._cache_add_entry(parent, {"name": f"{parent}/a", "type": "directory"})
+        # Same name but different type (file vs directory): appended.
+        fs._cache_add_entry(parent, same_name_file)
+        # New entry: appended.
+        fs._cache_add_entry(parent, new_entry)
 
-        assert entry in fs.dircache[parent]
+        assert fs.dircache[parent] == [existing, same_name_file, new_entry]
 
     def test_cache_add_entry_noop_when_parent_uncached(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
@@ -1149,6 +1168,10 @@ class TestExtendedGcsFileSystemMkdir:
                 raise FileNotFoundError
 
             mocks["info"].side_effect = mock_info
+            gcsfs.dircache[TEST_HNS_BUCKET] = [
+                {"name": parent_dir, "type": "directory"}
+            ]
+            gcsfs.dircache[parent_dir] = []
 
             gcsfs.mkdir(dir_path, create_parents=True)
 
@@ -1158,6 +1181,8 @@ class TestExtendedGcsFileSystemMkdir:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
             mocks["super_mkdir"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[parent_dir]] == [dir_path]
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [parent_dir]
 
     def test_hns_mkdir_nested_fails_if_create_parents_false(
         self, gcs_hns, gcs_hns_mocks
@@ -1447,7 +1472,8 @@ class TestExtendedGcsFileSystemMakedirs:
     def test_hns_makedirs_success(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS folder creation via makedirs."""
         gcsfs = gcs_hns
-        dir_path = f"{TEST_HNS_BUCKET}/new_dir/nested_dir"
+        parent_dir = f"{TEST_HNS_BUCKET}/new_dir"
+        dir_path = f"{parent_dir}/nested_dir"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             folder_exists = False
@@ -1462,6 +1488,7 @@ class TestExtendedGcsFileSystemMakedirs:
                 raise FileNotFoundError
 
             mocks["info"].side_effect = mock_info
+            gcsfs.dircache[TEST_HNS_BUCKET] = []
 
             assert not gcsfs.exists(dir_path)
             gcsfs.makedirs(dir_path)
@@ -1474,6 +1501,8 @@ class TestExtendedGcsFileSystemMakedirs:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
             mocks["super_makedirs"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [parent_dir]
+            assert parent_dir not in gcsfs.dircache
 
     def test_hns_makedirs_existing_dir_exist_ok_true(self, gcs_hns, gcs_hns_mocks):
         """Test makedirs when folder already exists and exist_ok=True (no-op)."""

@@ -1285,7 +1285,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _create_hns_folder(
         self, path, bucket, key, create_parents, exist_ok=True
     ):
-        path = path.rstrip("/")
+        path = self._strip_protocol(path).rstrip("/")
         key = key.rstrip("/")
         logger.debug(f"Using HNS-aware mkdir for '{path}'.")
 
@@ -1322,11 +1322,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 retry=self._get_retry_config(),
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
-            # Instead of invalidating the parent cache, update it to add the new entry.
-            self._cache_add_entry(
-                self._parent(path),
-                self._directory_cache_entry(path, key),
-            )
+            # Instead of invalidating the parent cache, update it (and any cached
+            # ancestors when create_parents=True) to add the new folder entry.
+            self._update_dircache_after_mkdir(path, create_parents=create_parents)
         except api_exceptions.Conflict as e:
             logger.debug(f"Conflict detected for path: {path}: {e}")
             # Under race conditions, folder might have been created concurrently
@@ -1518,7 +1516,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Remove the directory from the cache and from its parent's listing.
             self.dircache.pop(path, None)
             # Remove the deleted directory entry from the parent's listing.
-            self._cache_drop_entries(self._parent(path), {path})
+            self._cache_drop_entries(self._parent(path), {path}, entry_type="directory")
             return
         except api_exceptions.NotFound as e:
             # This can happen if the directory does not exist, or if the path
