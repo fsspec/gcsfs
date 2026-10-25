@@ -379,6 +379,93 @@ def test_comparison_configurator(mock_config_dependencies):
     assert case.bucket_type == "regional"
 
 
+def test_comparison_gcsfs_get_raises_on_size_mismatch(tmp_path):
+    """Test that _gcsfs_get raises RuntimeError when the downloaded file size does not match expected_size."""
+    from types import SimpleNamespace
+
+    from gcsfs.tests.perf.microbenchmarks.comparison.test_comparison import _gcsfs_get
+
+    # Arrange
+    local_file = tmp_path / "downloaded.bin"
+    fake_gcs = SimpleNamespace(
+        get=lambda rpath, lpath, chunk_size: local_file.write_bytes(b"short")
+    )
+
+    # Act & Assert
+    with pytest.raises(RuntimeError, match="Download integrity check failed"):
+        _gcsfs_get(
+            fake_gcs,
+            "bucket/remote.bin",
+            str(local_file),
+            chunk_size=1024,
+            expected_size=100,
+        )
+
+
+def test_comparison_cat_file_skips_above_max_bytes():
+    """Test that test_download_large_file_gcsfs_cat_file skips objects larger than MAX_CAT_FILE_BYTES."""
+    from types import SimpleNamespace
+
+    from gcsfs.tests.perf.microbenchmarks.comparison.test_comparison import (
+        MAX_CAT_FILE_BYTES,
+        test_download_large_file_gcsfs_cat_file,
+    )
+
+    # Arrange
+    params = SimpleNamespace(
+        name="download_large_file_zonal_204800MB",
+        file_size_bytes=MAX_CAT_FILE_BYTES + MB,
+    )
+    fixture_val = (SimpleNamespace(), "bucket/large_file.bin", "/tmp/out.bin", params)
+
+    # Act & Assert
+    with pytest.raises(pytest.skip.Exception, match="Skipping in-memory cat_file"):
+        test_download_large_file_gcsfs_cat_file(None, fixture_val, None)
+
+
+def test_comparison_download_large_fixture_reuses_cached_object():
+    """Test that gcsfs_benchmark_comparison_download_large reuses the cached remote object."""
+    from types import SimpleNamespace
+
+    from gcsfs.tests.perf.microbenchmarks.comparison import test_comparison
+
+    # Arrange
+    params = SimpleNamespace(
+        name="download_large_file_zonal_1024MB",
+        bucket_name="zonal-bucket",
+        file_size_bytes=1024 * MB,
+    )
+    request = SimpleNamespace(param=params)
+    remote_cache = {}
+    prepared_calls = []
+
+    def fake_prepare(gcs, paths, size):
+        prepared_calls.append((paths, size))
+
+    orig_prepare = test_comparison._prepare_files
+    test_comparison._prepare_files = fake_prepare
+    try:
+        fixture_fn = (
+            test_comparison.gcsfs_benchmark_comparison_download_large.__wrapped__
+        )
+
+        # Act
+        gen1 = fixture_fn(lambda: SimpleNamespace(), remote_cache, request)
+        _, remote_path_1, local_path_1, _ = next(gen1)
+        next(gen1, None)
+
+        gen2 = fixture_fn(lambda: SimpleNamespace(), remote_cache, request)
+        _, remote_path_2, local_path_2, _ = next(gen2)
+        next(gen2, None)
+    finally:
+        test_comparison._prepare_files = orig_prepare
+
+    # Assert
+    assert len(prepared_calls) == 1
+    assert remote_path_1 == remote_path_2
+    assert local_path_1 != local_path_2
+
+
 def test_cat_configurator(mock_config_dependencies):
     """Test that CatConfigurator correctly builds benchmark parameters."""
     common = {

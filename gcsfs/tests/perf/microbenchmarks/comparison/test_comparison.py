@@ -22,15 +22,28 @@ from gcsfs.tests.perf.microbenchmarks.conftest import (
 
 BENCHMARK_GROUP = "comparison"
 
+# Maximum object size for single-buffer in-memory cat_file() benchmarks (100 GiB).
+# Larger objects (e.g. 200 GiB) exceed available RAM when combined with the
+# tmpfs RAM disk on benchmark VMs.
+MAX_CAT_FILE_BYTES = 100 * 1024 * MB
+LARGE_FILE_TIMEOUT_S = 3600
+
 
 # --- GCSFS Operations ---
 
 
-def _gcsfs_get(gcs, remote_path, local_path, chunk_size):
+def _gcsfs_get(gcs, remote_path, local_path, chunk_size, expected_size=None):
     """Download a remote GCS file to local disk via gcs.get()."""
     if os.path.exists(local_path):
         os.remove(local_path)
     gcs.get(remote_path, local_path, chunk_size=chunk_size)
+    if expected_size is not None:
+        actual_size = os.path.getsize(local_path)
+        if actual_size != expected_size:
+            raise RuntimeError(
+                f"Download integrity check failed for {local_path}. "
+                f"Expected size: {expected_size}, Actual size: {actual_size}"
+            )
 
 
 def _gcsfs_cat_file(gcs, remote_path):
@@ -176,33 +189,60 @@ def run_comparison_benchmark(
 # --- Fixtures ---
 
 
+@pytest.fixture(scope="module")
+def _download_large_remote_cache(gcs_factory):
+    """Module-scoped cache of remote objects for large-file download benchmarks.
+
+    All five download test functions only read the remote object, so we upload
+    each (bucket_name, file_size_bytes) object once and clean up at module end.
+    """
+    cache = {}
+    yield cache
+    if cache:
+        gcs = gcs_factory()
+        for prefix, remote_path in cache.values():
+            logging.info(f"Cleaning up shared remote object {remote_path}...")
+            try:
+                gcs.rm(prefix, recursive=True)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logging.error(f"Failed to clean up remote benchmark files: {e!r}")
+
+
 @pytest.fixture
-def gcsfs_benchmark_comparison_download_large(extended_gcs_factory, request):
-    """Sets up a remote large file on GCS and creates local destination scratch space."""
+def gcsfs_benchmark_comparison_download_large(
+    extended_gcs_factory, _download_large_remote_cache, request
+):
+    """Sets up (or reuses) a remote large file on GCS and creates local destination scratch space."""
     params = request.param
     gcs = extended_gcs_factory()
-    prefix = f"{params.bucket_name}/benchmark-comparison-{uuid.uuid4().hex[:8]}"
-    remote_path = f"{prefix}/large_file.bin"
+    cache_key = (params.bucket_name, params.file_size_bytes)
     temp_dir = tempfile.mkdtemp(prefix="gcsfs-comparison-bench-dl-")
     local_path = os.path.join(temp_dir, "downloaded.bin")
 
-    logging.info(
-        f"Setting up large file benchmark '{params.name}': creating remote object {remote_path} "
-        f"of size {params.file_size_bytes / MB:.2f} MB."
-    )
     try:
-        start_time = time.perf_counter()
-        _prepare_files(gcs, [remote_path], params.file_size_bytes)
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        logging.info(f"Remote test object created in {duration_ms:.2f} ms.")
+        if cache_key not in _download_large_remote_cache:
+            prefix = f"{params.bucket_name}/benchmark-comparison-{uuid.uuid4().hex[:8]}"
+            remote_path = f"{prefix}/large_file.bin"
+            logging.info(
+                f"Setting up large file benchmark '{params.name}': creating remote object {remote_path} "
+                f"of size {params.file_size_bytes / MB:.2f} MB."
+            )
+            start_time = time.perf_counter()
+            _prepare_files(gcs, [remote_path], params.file_size_bytes)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logging.info(f"Remote test object created in {duration_ms:.2f} ms.")
+            _download_large_remote_cache[cache_key] = (prefix, remote_path)
+        else:
+            _, remote_path = _download_large_remote_cache[cache_key]
+            logging.info(
+                f"Reusing existing remote object {remote_path} for '{params.name}'."
+            )
 
         yield gcs, remote_path, local_path, params
     finally:
-        logging.info(f"Cleaning up {remote_path} and {temp_dir}...")
-        try:
-            gcs.rm(prefix, recursive=True)
-        except Exception as e:
-            logging.error(f"Failed to clean up remote benchmark files: {e!r}")
+        logging.info(f"Cleaning up local scratch {temp_dir}...")
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -231,6 +271,8 @@ def gcsfs_benchmark_comparison_download_small(extended_gcs_factory, request):
         logging.info(f"Cleaning up {prefix} and {temp_dir}...")
         try:
             gcs.rm(prefix, recursive=True)
+        except FileNotFoundError:
+            pass
         except Exception as e:
             logging.error(f"Failed to clean up remote benchmark files: {e!r}")
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -261,6 +303,8 @@ def gcsfs_benchmark_comparison_upload_large(extended_gcs_factory, request):
         logging.info(f"Cleaning up {remote_path} and {temp_dir}...")
         try:
             gcs.rm(prefix, recursive=True)
+        except FileNotFoundError:
+            pass
         except Exception as e:
             logging.error(f"Failed to clean up remote benchmark files: {e!r}")
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -294,6 +338,8 @@ def gcsfs_benchmark_comparison_upload_small(extended_gcs_factory, request):
         logging.info(f"Cleaning up {prefix} and {temp_dir}...")
         try:
             gcs.rm(prefix, recursive=True)
+        except FileNotFoundError:
+            pass
         except Exception as e:
             logging.error(f"Failed to clean up remote benchmark files: {e!r}")
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -325,6 +371,7 @@ gcloud_required = pytest.mark.skipif(
 # 1. Download Single Large File Tests
 
 
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_download_large",
     download_large_cases,
@@ -342,10 +389,17 @@ def test_download_large_file_gcsfs_get(
         "get",
         "gcsfs",
         _gcsfs_get,
-        (gcs, remote_path, local_path, params.chunk_size_bytes),
+        (
+            gcs,
+            remote_path,
+            local_path,
+            params.chunk_size_bytes,
+            params.file_size_bytes,
+        ),
     )
 
 
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_download_large",
     download_large_cases,
@@ -356,6 +410,11 @@ def test_download_large_file_gcsfs_cat_file(
     benchmark, gcsfs_benchmark_comparison_download_large, monitor
 ):
     gcs, remote_path, _, params = gcsfs_benchmark_comparison_download_large
+    if params.file_size_bytes > MAX_CAT_FILE_BYTES:
+        pytest.skip(
+            f"Skipping in-memory cat_file for {params.file_size_bytes / MB:.0f} MB "
+            f"(exceeds {MAX_CAT_FILE_BYTES / MB:.0f} MB single-buffer memory limit)"
+        )
     run_comparison_benchmark(
         benchmark,
         monitor,
@@ -367,6 +426,7 @@ def test_download_large_file_gcsfs_cat_file(
     )
 
 
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_download_large",
     download_large_cases,
@@ -389,6 +449,7 @@ def test_download_large_file_gcsfs_open_read(
 
 
 @gcloud_required
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_download_large",
     download_large_cases,
@@ -411,6 +472,7 @@ def test_download_large_file_gcloud_cp(
 
 
 @gcloud_required
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_download_large",
     download_large_cases,
@@ -502,6 +564,7 @@ def test_download_small_files_gcloud_cp(
 # 3. Upload Single Large File Tests
 
 
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_upload_large",
     upload_large_cases,
@@ -523,6 +586,7 @@ def test_upload_large_file_gcsfs_put(
     )
 
 
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_upload_large",
     upload_large_cases,
@@ -544,6 +608,7 @@ def test_upload_large_file_gcsfs_pipe(
     )
 
 
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_upload_large",
     upload_large_cases,
@@ -566,6 +631,7 @@ def test_upload_large_file_gcsfs_open_write(
 
 
 @gcloud_required
+@pytest.mark.timeout(LARGE_FILE_TIMEOUT_S)
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_upload_large",
     upload_large_cases,
