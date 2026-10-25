@@ -400,8 +400,8 @@ def test_prepare_files_gcloud_sets_bidi_finalize_env():
         )
 
 
-def test_pytest_benchmark_generate_json_filters_empty_stats():
-    """Test that pytest_benchmark_generate_json removes timed-out benchmarks with empty stats.data."""
+def test_pytest_benchmark_generate_json_marks_empty_stats_has_error():
+    """Test that pytest_benchmark_generate_json sets fixture.has_error = True when stats.data is empty."""
     from types import SimpleNamespace
 
     from gcsfs.tests.perf.microbenchmarks.conftest import pytest_benchmark_generate_json
@@ -409,6 +409,7 @@ def test_pytest_benchmark_generate_json_filters_empty_stats():
     class FakeBench:
         def __init__(self, data, extra_info=None):
             self.stats = SimpleNamespace(data=data)
+            self.fixture = SimpleNamespace(has_error=False)
             self.extra_info = extra_info or {}
 
         def get(self, key, default=None):
@@ -431,10 +432,11 @@ def test_pytest_benchmark_generate_json_filters_empty_stats():
         },
     )
 
-    benchmarks = [completed, timed_out, multi_proc]
-    pytest_benchmark_generate_json(None, benchmarks, {}, {})
+    pytest_benchmark_generate_json(None, [completed, timed_out, multi_proc], {}, {})
 
-    assert benchmarks == [completed, multi_proc]
+    assert completed.fixture.has_error is False
+    assert timed_out.fixture.has_error is True
+    assert multi_proc.fixture.has_error is False
     assert multi_proc.stats.data == [2.5]
 
 
