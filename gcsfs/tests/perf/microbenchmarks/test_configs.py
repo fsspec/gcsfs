@@ -663,7 +663,7 @@ def test_cat_ranges_op_error_handling():
         _cat_ranges_op(mock_gcs, paths=["a", "b"], starts=[0, 10], ends=[10, 20])
 
 
-def test_listing_configurator_skips_files_less_than_folders(mock_config_dependencies):
+def test_listing_configurator_skips_invalid_folders_and_files(mock_config_dependencies):
     """Test that ListingConfigurator filters out invalid files/folders combinations."""
     common = {"bucket_types": ["regional"], "rounds": 1}
     scenario = {
@@ -681,16 +681,20 @@ def test_listing_configurator_skips_files_less_than_folders(mock_config_dependen
     # folders=0 is skipped when files > 0; for files=100 only folders=8, 32
     # are valid; for files=1000 folders=8, 32, 128, 512 are valid.
     assert len(cases) == 6
-    assert all(c.folders > 0 and c.files >= c.folders for c in cases)
+    assert all(0 < c.folders <= c.files for c in cases)
 
 
-def test_delete_benchmark_cases_never_have_fewer_files_than_folders(
-    mock_config_dependencies,
+@pytest.mark.parametrize(
+    "get_cases",
+    [get_delete_benchmark_cases, get_open_benchmark_cases],
+)
+def test_shipped_listing_based_cases_have_valid_folders_and_files(
+    mock_config_dependencies, get_cases
 ):
-    """Ensure shipped delete configs never generate cases with 0 files per folder."""
-    cases = get_delete_benchmark_cases()
+    """Ensure shipped listing-based configs have valid folders and files counts."""
+    cases = get_cases()
     assert cases
-    assert all(c.files >= c.folders for c in cases if c.folders > 0)
+    assert all(0 < c.folders <= c.files for c in cases)
 
 
 @pytest.mark.parametrize("folders,files", [(128, 100), (0, 10)])
