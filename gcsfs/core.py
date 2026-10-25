@@ -2150,11 +2150,16 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         headers=None,
         callback=None,
         fetcher_fn=None,
+        size=None,
         **kwargs,
     ):
         """Main orchestrator for concurrent file downloads utilizing BackgroundPrefetcher."""
-        details = await self._info(rpath, **kwargs)
-        total_size = details.get("size", 0)
+        if size is None:
+            details = await self._info(rpath, **kwargs)
+            total_size = details.get("size", 0)
+        else:
+            details = {"size": size}
+            total_size = size
 
         # Concurrency typically improves performance for RAM downloads exceeding 5MB.
         # However, for disk-backed reads in the standard bucket, _cat_file uses

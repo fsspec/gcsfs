@@ -1688,3 +1688,57 @@ async def test_close_resources_with_exceptions(caplog):
 
     assert fs._grpc_client is None
     assert fs._storage_control_client is None
+
+
+@pytest.mark.asyncio
+async def test_get_file_concurrent_uses_mrd_persisted_size(tmp_path):
+    """Test that _get_file_concurrent uses MRD persisted_size without calling _info."""
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+    from gcsfs.zb_hns_utils import MRDPool
+
+    fs = ExtendedGcsFileSystem(token="anon", loop=asyncio.get_running_loop())
+    data = b"x" * (6 * 1024 * 1024)
+    lpath = tmp_path / "out.bin"
+
+    mock_mrd = mock.MagicMock()
+    mock_mrd.persisted_size = len(data)
+
+    mock_pool = mock.MagicMock(spec=MRDPool)
+    mock_pool.get_mrd.return_value.__aenter__ = mock.AsyncMock(return_value=mock_mrd)
+    mock_pool.get_mrd.return_value.__aexit__ = mock.AsyncMock(return_value=False)
+    mock_pool.close = mock.AsyncMock()
+
+    mock_cache = mock.MagicMock()
+    mock_cache.get = mock.AsyncMock(return_value=mock_pool)
+    fs._mrd_pool_cache = mock_cache
+
+    async def fake_cat_file(
+        rpath, start=None, end=None, mrd=None, concurrency=1, headers=None, **kwargs
+    ):
+        return data[start:end]
+
+    mock_info = mock.AsyncMock(return_value={"size": 0, "generation": "123"})
+    with (
+        mock.patch.object(
+            fs, "_is_zonal_bucket", new=mock.AsyncMock(return_value=True)
+        ),
+        mock.patch.object(fs, "_info", new=mock_info),
+        mock.patch.object(
+            fs,
+            "_get_threshold_for_disk_reads",
+            new=mock.AsyncMock(return_value=5 * 1024 * 1024),
+        ),
+        mock.patch.object(fs, "_cat_file", side_effect=fake_cat_file),
+    ):
+        await fs._get_file_concurrent(
+            "zonal-bucket/unfinalized.bin",
+            str(lpath),
+            concurrency=2,
+            chunk_size=3 * 1024 * 1024,
+            max_prefetch_size=6 * 1024 * 1024,
+        )
+
+    mock_info.assert_not_awaited()
+    assert lpath.stat().st_size == len(data)
+    assert lpath.read_bytes() == data
+    mock_pool.close.assert_awaited_once()
