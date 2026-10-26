@@ -16,6 +16,7 @@ class Dimension(str, Enum):
     """Standard telemetry dimension keys."""
 
     FRAMEWORK = "fw"
+    ENVIRONMENT = "env"
 
 
 def sanitize_token(token: Optional[str], max_len: int = 64) -> Optional[str]:

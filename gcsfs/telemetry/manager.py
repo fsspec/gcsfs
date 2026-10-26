@@ -6,7 +6,11 @@ import os
 from typing import Dict, List, Optional
 
 from gcsfs.telemetry.context import Dimension, get_telemetry_context, sanitize_token
-from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
+from gcsfs.telemetry.detector import (
+    BaseDetector,
+    EnvironmentDetector,
+    FrameworkDetector,
+)
 
 
 class UsageMetricsTracker:
@@ -78,9 +82,10 @@ class UsageMetricsTracker:
         return sanitize_token(token_map.get(dimension.value))
 
 
-# Default singleton instance pre-configured with standard framework detector
+# Default singleton instance pre-configured with standard detectors
 default_usage_tracker = UsageMetricsTracker(
     detectors=[
         FrameworkDetector(),
+        EnvironmentDetector(),
     ]
 )
