@@ -97,6 +97,7 @@ def gcs_bucket_mocks():
 
         mock_pool = mock.AsyncMock(spec=MRDPool)
         mock_pool.persisted_size = len(file_data)
+        mock_pool.details = {"size": len(file_data)}
         mock_pool.get_mrd.return_value.__aenter__.return_value = mock_downloader
 
         async def close_pool():

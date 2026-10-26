@@ -2150,10 +2150,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         headers=None,
         callback=None,
         fetcher_fn=None,
+        details=None,
         **kwargs,
     ):
         """Main orchestrator for concurrent file downloads utilizing BackgroundPrefetcher."""
-        details = await self._info(rpath, **kwargs)
+        if details is None:
+            details = await self._info(rpath, **kwargs)
         total_size = details.get("size", 0)
 
         # Concurrency typically improves performance for RAM downloads exceeding 5MB.

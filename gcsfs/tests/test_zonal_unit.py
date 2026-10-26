@@ -1688,3 +1688,173 @@ async def test_close_resources_with_exceptions(caplog):
 
     assert fs._grpc_client is None
     assert fs._storage_control_client is None
+
+
+def _crc32c_b64(payload: bytes) -> str:
+    import base64
+
+    import google_crc32c
+
+    return base64.b64encode(google_crc32c.Checksum(payload).digest()).decode()
+
+
+def _make_fake_mrd_pool(persisted_size: int | None, details: dict):
+    import contextlib
+    from types import SimpleNamespace
+
+    from gcsfs.zb_hns_utils import MRDPool
+
+    class _FakeMRDPool(MRDPool):
+        def __init__(self):
+            self.persisted_size = persisted_size
+            self.details = details
+            self.closed = False
+
+        @contextlib.asynccontextmanager
+        async def get_mrd(self):
+            yield SimpleNamespace(persisted_size=self.persisted_size)
+
+        async def close(self):
+            self.closed = True
+
+    return _FakeMRDPool()
+
+
+def _enable_crc32c_checker(monkeypatch):
+    from types import SimpleNamespace
+
+    import google_crc32c
+
+    import gcsfs.checkers
+
+    if gcsfs.checkers.crcmod is None:
+        monkeypatch.setattr(
+            gcsfs.checkers,
+            "crcmod",
+            SimpleNamespace(Crc=lambda *a, **kw: google_crc32c.Checksum()),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "consistency,persisted_size,details_size,crc_payload",
+    [
+        pytest.param("none", 6 * 1024 * 1024, 0, None, id="unfinalized_size_zero"),
+        pytest.param(
+            "none", None, 6 * 1024 * 1024, None, id="missing_persisted_size_fallback"
+        ),
+        pytest.param(
+            "crc32c",
+            6 * 1024 * 1024,
+            6 * 1024 * 1024,
+            b"x" * (6 * 1024 * 1024),
+            id="valid_crc32c",
+        ),
+        pytest.param(
+            "crc32c",
+            6 * 1024 * 1024,
+            1024 * 1024,
+            b"x" * (1024 * 1024),
+            id="stale_prefix_crc32c",
+        ),
+    ],
+)
+async def test_get_file_concurrent_downloads_persisted_size(
+    tmp_path, monkeypatch, consistency, persisted_size, details_size, crc_payload
+):
+    """Test _get_file_concurrent downloads persisted_size bytes without calling _info."""
+    from types import SimpleNamespace
+
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    # Arrange
+    _enable_crc32c_checker(monkeypatch)
+    data = b"x" * (6 * 1024 * 1024)
+    lpath = tmp_path / "out.bin"
+    details = {"size": details_size, "generation": "123"}
+    if crc_payload is not None:
+        details["crc32c"] = _crc32c_b64(crc_payload)
+
+    pool = _make_fake_mrd_pool(persisted_size=persisted_size, details=details)
+    fs = ExtendedGcsFileSystem(
+        token="anon",
+        consistency=consistency,
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    fs._mrd_pool_cache = SimpleNamespace(get=mock.AsyncMock(return_value=pool))
+    mock_info = mock.AsyncMock(return_value=details)
+
+    async def fake_cat_file(rpath, start=None, end=None, **kwargs):
+        return data[start:end]
+
+    # Act
+    with (
+        mock.patch.object(
+            fs, "_is_zonal_bucket", new=mock.AsyncMock(return_value=True)
+        ),
+        mock.patch.object(fs, "_info", new=mock_info),
+        mock.patch.object(fs, "_cat_file", side_effect=fake_cat_file),
+    ):
+        await fs._get_file_concurrent(
+            "zonal-bucket/obj.bin",
+            str(lpath),
+            concurrency=2,
+            chunk_size=3 * 1024 * 1024,
+            max_prefetch_size=6 * 1024 * 1024,
+        )
+
+    # Assert
+    mock_info.assert_not_awaited()
+    assert lpath.stat().st_size == len(data)
+    assert lpath.read_bytes() == data
+    assert pool.closed
+
+
+@pytest.mark.asyncio
+async def test_get_file_concurrent_crc32c_mismatch_raises(tmp_path, monkeypatch):
+    """Test _get_file_concurrent raises ChecksumError when crc32c does not match."""
+    from types import SimpleNamespace
+
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+    from gcsfs.retry import ChecksumError
+
+    # Arrange
+    _enable_crc32c_checker(monkeypatch)
+    data = b"x" * (6 * 1024 * 1024)
+    lpath = tmp_path / "corrupt.bin"
+    details = {
+        "size": len(data),
+        "generation": "123",
+        "crc32c": _crc32c_b64(b"wrong"),
+    }
+    pool = _make_fake_mrd_pool(persisted_size=len(data), details=details)
+    fs = ExtendedGcsFileSystem(
+        token="anon",
+        consistency="crc32c",
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    fs._mrd_pool_cache = SimpleNamespace(get=mock.AsyncMock(return_value=pool))
+
+    async def fake_cat_file(rpath, start=None, end=None, **kwargs):
+        return data[start:end]
+
+    # Act & Assert
+    with (
+        mock.patch.object(
+            fs, "_is_zonal_bucket", new=mock.AsyncMock(return_value=True)
+        ),
+        mock.patch.object(fs, "_cat_file", side_effect=fake_cat_file),
+        mock.patch("gcsfs.retry.asyncio.sleep", new=mock.AsyncMock()),
+        pytest.raises(ChecksumError),
+    ):
+        await fs._get_file_concurrent(
+            "zonal-bucket/obj.bin",
+            str(lpath),
+            concurrency=2,
+            chunk_size=3 * 1024 * 1024,
+            max_prefetch_size=6 * 1024 * 1024,
+        )
+
+    assert pool.closed
