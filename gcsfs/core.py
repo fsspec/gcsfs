@@ -2407,22 +2407,26 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         generation = None
         if version_aware:
             fragment_key, separator, fragment = keypart.rpartition("#")
-            path = fragment_key if separator else keypart
-            query_key, _, query = path.partition("?")
-            query_generation = parse_qs(query).get("generation", [None])[0]
-            candidate = fragment if separator and fragment else query_generation
-            try:
-                int(candidate)
-            except (TypeError, ValueError):
-                pass
-            else:
-                key, generation = path, candidate
+            if separator:
                 try:
-                    int(query_generation)
-                except (TypeError, ValueError):
+                    int(fragment)
+                except ValueError:
+                    pass
+                else:
+                    key, generation = fragment_key, fragment
+
+            query_path = key if generation is not None else keypart.removesuffix("#")
+            query_key, _, query = query_path.partition("?")
+            values = parse_qs(query).get("generation", [])
+            if values:
+                try:
+                    int(values[0])
+                except ValueError:
                     pass
                 else:
                     key = query_key
+                    if generation is None:
+                        generation = values[0]
         return (
             bucket,
             key,
