@@ -462,6 +462,23 @@ def test_comparison_download_large_fixture_reuses_cached_object():
     next(cache_gen, None)
     fake_gcs.rm.assert_called_once()
 
+    # Verify failed _prepare_files cleans up the remote prefix immediately and does not cache it
+    fail_gcs = SimpleNamespace(rm=mock.MagicMock())
+    fail_cache = {}
+
+    def failing_prepare(gcs, paths, size):
+        raise RuntimeError("upload failed")
+
+    test_comparison._prepare_files = failing_prepare
+    try:
+        with pytest.raises(RuntimeError, match="upload failed"):
+            next(fixture_fn(lambda: fail_gcs, fail_cache, request))
+    finally:
+        test_comparison._prepare_files = orig_prepare
+
+    assert not fail_cache
+    fail_gcs.rm.assert_called_once()
+
 
 def test_cat_configurator(mock_config_dependencies):
     """Test that CatConfigurator correctly builds benchmark parameters."""

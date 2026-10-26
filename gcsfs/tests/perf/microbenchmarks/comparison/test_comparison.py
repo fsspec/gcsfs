@@ -222,11 +222,20 @@ def gcsfs_benchmark_comparison_download_large(
                 f"Setting up large file benchmark '{params.name}': creating remote object {remote_path} "
                 f"of size {params.file_size_bytes / MB:.2f} MB."
             )
-            start_time = time.perf_counter()
-            _prepare_files(gcs, [remote_path], params.file_size_bytes)
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            logging.info(f"Remote test object created in {duration_ms:.2f} ms.")
-            _download_large_remote_cache[cache_key] = (prefix, remote_path, gcs)
+            try:
+                start_time = time.perf_counter()
+                _prepare_files(gcs, [remote_path], params.file_size_bytes)
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                logging.info(f"Remote test object created in {duration_ms:.2f} ms.")
+                _download_large_remote_cache[cache_key] = (prefix, remote_path, gcs)
+            except BaseException:
+                try:
+                    gcs.rm(prefix, recursive=True)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    logging.error(f"Failed to clean up remote benchmark files: {e!r}")
+                raise
         else:
             _, remote_path, _ = _download_large_remote_cache[cache_key]
             logging.info(
