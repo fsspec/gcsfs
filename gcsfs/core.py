@@ -22,7 +22,6 @@ from datetime import datetime, timedelta
 from glob import has_magic
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
-from urllib.parse import urlsplit
 
 import aiohttp
 import fsspec
@@ -2407,22 +2406,23 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         key = keypart
         generation = None
         if version_aware:
-            parts = urlsplit(keypart)
+            fragment_key, separator, fragment = keypart.rpartition("#")
+            path = fragment_key if separator else keypart
+            query_key, _, query = path.partition("?")
+            query_generation = parse_qs(query).get("generation", [None])[0]
+            candidate = fragment if separator and fragment else query_generation
             try:
-                if parts.fragment:
-                    generation = parts.fragment
-                elif parts.query:
-                    parsed = parse_qs(parts.query)
-                    if "generation" in parsed:
-                        generation = parsed["generation"][0]
-                # Sanity check whether this could be a valid generation ID. If
-                # it is not, assume that # or ? characters are supposed to be
-                # part of the object name.
-                if generation is not None:
-                    int(generation)
-                    key = parts.path
-            except ValueError:
-                generation = None
+                int(candidate)
+            except (TypeError, ValueError):
+                pass
+            else:
+                key, generation = path, candidate
+                try:
+                    int(query_generation)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    key = query_key
         return (
             bucket,
             key,
