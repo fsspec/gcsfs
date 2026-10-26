@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import inspect
 import io
 import os
@@ -1010,12 +1011,17 @@ async def test_case_b_flavored_404_resolves_gce(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [403, 404, 500])
-async def test_case_c_a_flavorless_errors_retry_until_case_a(fake_host, status):
+@pytest.mark.parametrize(
+    "status, flavor",
+    [(403, False), (404, False), (500, False), (503, True)],
+)
+async def test_case_c_a_unusable_responses_retry_until_case_a(
+    fake_host, status, flavor
+):
     fake_host.product_name = "Google Compute Engine"
     fake_host.outcomes = [
-        _mds_response(status, flavor=False, body="Not Found\n"),
-        _mds_response(status, flavor=False, body="Not Found\n"),
+        _mds_response(status, flavor=flavor, body="Not Found\n"),
+        _mds_response(status, flavor=flavor, body="Not Found\n"),
         _mds_response(200, body="prod-cluster"),
     ]
     detector = EnvironmentDetector()
@@ -1152,6 +1158,66 @@ def test_closed_loop_with_pending_probe_is_rescheduled(fake_host, without_fsspec
 
     assert in_flight_after_close is True
     assert resolved == "gke"
+
+
+def test_gc_of_stranded_probe_under_lock_does_not_deadlock(
+    fake_host, without_fsspec_loop
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(503, flavor=False)]
+    detector = EnvironmentDetector()
+
+    async def run_until_probe_sleeps():
+        probe_sleeping = asyncio.Event()
+
+        async def block_forever():
+            probe_sleeping.set()
+            await asyncio.Event().wait()
+
+        fake_host.on_sleep = block_forever
+        detector.detect()
+        await probe_sleeping.wait()
+
+    gc.disable()
+    try:
+        abandoned_loop = asyncio.new_event_loop()
+        abandoned_loop.run_until_complete(run_until_probe_sleeps())
+        abandoned_loop.close()
+        del abandoned_loop
+
+        def collect_while_holding_lock():
+            with detector._lock:
+                detector._probe_task = None
+                gc.collect()
+
+        worker = threading.Thread(target=collect_while_holding_lock, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+    finally:
+        gc.enable()
+
+    assert not worker.is_alive()
+    assert detector._probe_in_flight is True
+
+
+@pytest.mark.asyncio
+async def test_metadata_host_override_probes_that_host_even_off_gcp(
+    fake_host, monkeypatch
+):
+    monkeypatch.setenv("GCE_METADATA_HOST", "metadata.internal:8080")
+    fake_host.product_name = "QEMU"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert [url for url, _ in fake_host.requests] == [
+        "http://metadata.internal:8080/computeMetadata/v1/instance/attributes/"
+        "cluster-name"
+    ]
 
 
 @pytest.mark.parametrize(
