@@ -2101,6 +2101,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(path)
+        if generation is not None:
+            raise ValueError("Cannot write to specific object generation")
         if not await self._is_zonal_bucket(bucket):
             return await super()._pipe_file(
                 path,

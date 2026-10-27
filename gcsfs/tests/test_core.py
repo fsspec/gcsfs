@@ -4613,3 +4613,20 @@ def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
     assert f"{bucket}/a/b/c" in dirs
     # Cache should remain empty because update_cache=False and prefix is used
     assert len(gcs.dircache) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("versioned_destination", [True, False])
+@pytest.mark.parametrize(
+    "suffix", ["#123", "?generation=123", "#variant?generation=123"]
+)
+async def test_merge_rejects_specific_generations_before_request(
+    versioned_destination, suffix
+):
+    fs = GCSFileSystem(token="anon", version_aware=True)
+    destination = "bucket/destination" + (suffix if versioned_destination else "")
+    source = "bucket/source" + ("" if versioned_destination else suffix)
+    with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as request:
+        with pytest.raises(ValueError, match="specific object generation"):
+            await fs._merge(destination, [source])
+        request.assert_not_awaited()

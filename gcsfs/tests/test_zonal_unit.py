@@ -1858,3 +1858,22 @@ async def test_get_file_concurrent_crc32c_mismatch_raises(tmp_path, monkeypatch)
         )
 
     assert pool.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "suffix", ["#123", "?generation=123", "#variant?generation=123"]
+)
+async def test_pipe_zonal_rejects_specific_generation(
+    async_gcs, zonal_write_mocks, suffix
+):
+    async_gcs.version_aware = True
+    async_gcs._grpc_client = mock.AsyncMock()
+    with mock.patch.object(async_gcs, "_get_grpc_client", new_callable=mock.AsyncMock):
+        with pytest.raises(
+            ValueError, match="Cannot write to specific object generation"
+        ):
+            await async_gcs._pipe_file(
+                f"{TEST_ZONAL_BUCKET}/file{suffix}", b"replacement"
+            )
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
