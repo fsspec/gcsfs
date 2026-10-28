@@ -7,10 +7,6 @@ import functools
 import inspect
 from typing import Any, Callable, Dict, Optional
 
-import fsspec.asyn
-from fsspec.asyn import AsyncFileSystem, async_methods
-from fsspec.spec import AbstractFileSystem
-
 from gcsfs.telemetry import manager
 from gcsfs.telemetry.context import (
     Dimension,
@@ -46,13 +42,13 @@ def _run_sync(
     **kwargs,
 ) -> Any:
     """Set telemetry context on the caller thread and execute `func` via `fsspec.asyn.sync`."""
+    import fsspec.asyn
+
     with _telemetry_context(tokens_map):
         return fsspec.asyn.sync(loop, func, *args, **kwargs)
 
 
-def _gcs_async_wrapper(
-    func: Callable, super_cls: Optional[type] = None
-) -> Callable:
+def _gcs_async_wrapper(func: Callable, super_cls: Optional[type] = None) -> Callable:
     """
     GCS-specific async wrapper for coroutines and async generators that scopes telemetry
     context during native async execution, avoiding repetitive stack-walking across
@@ -91,6 +87,9 @@ def _gcs_async_wrapper(
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         target, pass_args = _resolve(args)
+        # O(1) fast path for nested calls (already inside _run_sync or another wrapped call)
+        if has_telemetry_context():
+            return await target(*pass_args, **kwargs)
         with _telemetry_context():
             return await target(*pass_args, **kwargs)
 
@@ -160,18 +159,31 @@ def mirror_gcs_methods(obj: type) -> None:
     Mixin)`) will therefore resolve those methods to `obj`'s wrapper instead of the mixin's
     override. Mixins listed before `obj` (as in `ExtendedGcsFileSystem`) are unaffected.
     """
+    from fsspec.asyn import AsyncFileSystem, async_methods
+
     # Collect coroutine and async generator method names strictly from class dictionaries in MRO
-    method_names = {
-        name
-        for cls in obj.__mro__
-        for name, attr in cls.__dict__.items()
-        if name.startswith("_")
-        and not name.startswith("__")
-        and (inspect.iscoroutinefunction(attr) or inspect.isasyncgenfunction(attr))
-    } | set(async_methods)
+    method_names = set(async_methods)
+
+    for cls in obj.__mro__:
+        if cls is object:
+            continue
+        for name, attr in cls.__dict__.items():
+            # Only pick private methods that are NOT dunders (e.g. '_ls', '_cat_file', '_info')
+            if name.startswith("_") and not (
+                name.startswith("__") and name.endswith("__")
+            ):
+                if inspect.iscoroutinefunction(attr) or inspect.isasyncgenfunction(
+                    attr
+                ):
+                    method_names.add(name)
+
+    # Bind the wrappers for valid methods
+    from fsspec.spec import AbstractFileSystem
 
     for method in method_names:
-        smethod = method[1:]  # e.g., "_ls" -> "ls", "_cat_file" -> "cat_file"
+        smethod = method[
+            1:
+        ]  # e.g., "_ls" -> "ls", "_cat_file" -> "cat_file", "_walk" -> "walk"
 
         is_public_sync = (
             hasattr(AbstractFileSystem, smethod)
@@ -183,43 +195,47 @@ def mirror_gcs_methods(obj: type) -> None:
             continue
 
         async_fn = getattr(obj, method, None)
-        if not (
-            inspect.iscoroutinefunction(async_fn)
-            or inspect.isasyncgenfunction(async_fn)
-        ):
-            continue
 
-        # Wrap each native async method once. Skip ones a parent already wrapped, so subclasses
-        # inherit the parent's wrapper instead of a copy that would hide patches on the parent.
-        if not getattr(async_fn, "_is_gcs_async_wrapped", False):
-            super_cls = None if method in obj.__dict__ else obj
-            async_fn = _gcs_async_wrapper(async_fn, super_cls=super_cls)
-            setattr(obj, method, async_fn)
-        if is_public_sync:
-            mth = _gcs_sync_wrapper(async_fn)
-            if not getattr(mth, "__doc__", None):
-                mth.__doc__ = getattr(
-                    getattr(AbstractFileSystem, smethod, None), "__doc__", ""
-                )
-            setattr(obj, smethod, mth)
+        if inspect.iscoroutinefunction(async_fn) or inspect.isasyncgenfunction(
+            async_fn
+        ):
+            # Wrap each native async method once. Skip ones a parent already wrapped, so subclasses
+            # inherit the parent's wrapper instead of a copy that would hide patches on the parent.
+            if not getattr(async_fn, "_is_gcs_async_wrapped", False):
+                super_cls = None if method in obj.__dict__ else obj
+                async_fn = _gcs_async_wrapper(async_fn, super_cls=super_cls)
+                setattr(obj, method, async_fn)
+            if is_public_sync:
+                mth = _gcs_sync_wrapper(async_fn)
+                if not getattr(mth, "__doc__", None):
+                    mth.__doc__ = getattr(
+                        getattr(AbstractFileSystem, smethod, None), "__doc__", ""
+                    )
+                setattr(obj, smethod, mth)
+
+
+def _setup_file_telemetry(file_obj) -> Optional[Any]:
+    fw = getattr(file_obj, "caller_framework", None)
+
+    if not isinstance(fw, str):
+        return None
+
+    # Fast path: framework already active (e.g. nested file method calls), skip a redundant set/reset
+    if get_telemetry_context().get(Dimension.FRAMEWORK) == fw:
+        return None
+
+    return set_telemetry_context(Dimension.FRAMEWORK, fw)
 
 
 @contextlib.contextmanager
 def _file_telemetry_context(file_obj):
     """Context manager to safely handle file telemetry token setup and teardown."""
-    fw = getattr(file_obj, "caller_framework", None)
-    # Fast path: no valid framework on file or already active in context
-    if (
-        not isinstance(fw, str)
-        or get_telemetry_context().get(Dimension.FRAMEWORK) == fw
-    ):
-        yield
-        return
-    token = set_telemetry_context(Dimension.FRAMEWORK, fw)
+    token = _setup_file_telemetry(file_obj)
     try:
         yield
     finally:
-        reset_telemetry_context(token)
+        if token is not None:
+            reset_telemetry_context(token)
 
 
 def _file_telemetry_wrapper(func: Callable) -> Callable:
@@ -242,7 +258,7 @@ def _file_telemetry_wrapper(func: Callable) -> Callable:
 
 
 def wrap_file_methods(cls: Any = None) -> None:
-    """Wrap all callable methods and properties on a File class (`GCSFile` by default)."""
+    """Wrap all callable methods and properties on a File class (`GCSFile` by default, or `ZonalFile`)."""
     if cls is None:
         from gcsfs.core import GCSFile
 
