@@ -83,6 +83,16 @@ BucketLayout.STANDARD_HIERARCHICAL = BucketLayout(
 BucketLayout.STANDARD = BucketLayout(
     StorageClass.STANDARD, CachingTier.NONE, NamespaceLayout.NON_HIERARCHICAL
 )
+BucketLayout.STANDARD_RCU = BucketLayout(
+    StorageClass.STANDARD,
+    CachingTier.RAPID_CACHE_ULTRA,
+    NamespaceLayout.NON_HIERARCHICAL,
+)
+BucketLayout.HIERARCHICAL_RCU = BucketLayout(
+    StorageClass.STANDARD,
+    CachingTier.RAPID_CACHE_ULTRA,
+    NamespaceLayout.HIERARCHICAL,
+)
 BucketLayout.UNKNOWN = BucketLayout(
     StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN
 )
@@ -207,7 +217,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         )
 
     async def _get_threshold_for_disk_reads(self, bucket):
-        if await self._is_zonal_bucket(bucket):
+        if await self._uses_grpc_data_path(bucket):
             return (
                 5 * 1024 * 1024
             )  # Thanks to our in house, zero copy DirectMemmoveBuffer
@@ -370,9 +380,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             else:
                 namespace_layout = NamespaceLayout.NON_HIERARCHICAL
 
+            rapid_cache_info = getattr(response, "rapid_cache_info", None)
+            cache_type = (
+                getattr(rapid_cache_info, "cache_type", "") if rapid_cache_info else ""
+            )
+            if cache_type == "rapid-cache-ultra":
+                caching_tier = CachingTier.RAPID_CACHE_ULTRA
+            elif cache_type == "rapid-cache":
+                caching_tier = CachingTier.RAPID_CACHE
+            else:
+                caching_tier = CachingTier.NONE
+
             return BucketLayout(
                 storage_class=storage_class,
-                caching_tier=CachingTier.NONE,
+                caching_tier=caching_tier,
                 namespace_layout=namespace_layout,
             )
         except api_exceptions.NotFound:
@@ -407,9 +428,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_layout = self._sync_lookup_bucket_layout(bucket)
-        file_cls = (
-            ZonalFile if bucket_layout.storage_class == StorageClass.RAPID else GCSFile
+        use_zonal_file = bucket_layout.storage_class == StorageClass.RAPID or (
+            "r" in mode and bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
         )
+        file_cls = ZonalFile if use_zonal_file else GCSFile
 
         return file_cls(
             self,
@@ -692,7 +714,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
-            if not await self._is_zonal_bucket(bucket):
+            if not await self._uses_grpc_data_path(bucket):
                 # Fall back to default implementation if not a zonal bucket
                 return await super()._cat_file(
                     path, start=start, end=end, concurrency=concurrency, **kwargs
@@ -1006,7 +1028,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         zonal, other = {}, []
         for p, idxs in by_path.items():
             bucket, _, _ = self.split_path(p)
-            if await self._is_zonal_bucket(bucket):
+            if await self._uses_grpc_data_path(bucket):
                 zonal[p] = idxs
             else:
                 other.extend(idxs)
@@ -2212,7 +2234,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, key, path_generation = self.split_path(rpath)
 
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._get_file_request(
                 rpath, lpath, *args, headers=headers, callback=callback, **kwargs
             )
@@ -2295,7 +2317,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket, key, path_generation = self.split_path(rpath)
 
         # Delegate standard buckets to the original implementation
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._get_file_concurrent(
                 rpath,
                 lpath,

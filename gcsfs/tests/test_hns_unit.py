@@ -1973,10 +1973,20 @@ class TestExtendedGcsFileSystemInternal:
             assert await fs._is_bucket_hns_enabled("my-bucket") is True
 
     @pytest.mark.asyncio
+    async def test_is_bucket_hns_enabled_true_hns_rcu(self):
+        """Verifies HNS is enabled when bucket layout is HIERARCHICAL_RCU."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", return_value=BucketLayout.HIERARCHICAL_RCU
+        ):
+            assert await fs._is_bucket_hns_enabled("my-bucket") is True
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "bucket_layout",
         [
             BucketLayout.STANDARD,
+            BucketLayout.STANDARD_RCU,
             BucketLayout.UNKNOWN,
         ],
     )
@@ -2018,23 +2028,25 @@ class TestExtendedGcsFileSystemInternal:
             (
                 BucketLayout(
                     StorageClass.STANDARD,
-                    CachingTier.RAPID_CACHE_ULTRA,
+                    CachingTier.RAPID_CACHE,
                     NamespaceLayout.NON_HIERARCHICAL,
                 ),
                 False,
-                True,
-                True,
+                False,
+                False,
             ),
             (
                 BucketLayout(
                     StorageClass.STANDARD,
-                    CachingTier.RAPID_CACHE_ULTRA,
+                    CachingTier.RAPID_CACHE,
                     NamespaceLayout.HIERARCHICAL,
                 ),
                 False,
-                True,
-                True,
+                False,
+                False,
             ),
+            (BucketLayout.STANDARD_RCU, False, True, True),
+            (BucketLayout.HIERARCHICAL_RCU, False, True, True),
             (BucketLayout.UNKNOWN, False, False, False),
         ],
     )
@@ -3310,21 +3322,54 @@ class TestExtendedGcsFileSystemBucketLayout:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "location_type, hns_enabled, expected_bucket_layout",
+        "location_type, hns_enabled, cache_type, expected_bucket_layout",
         [
-            ("zone", None, BucketLayout.ZONAL_HIERARCHICAL),
-            ("region", True, BucketLayout.STANDARD_HIERARCHICAL),
-            ("region", False, BucketLayout.STANDARD),
+            ("zone", None, None, BucketLayout.ZONAL_HIERARCHICAL),
+            ("region", True, None, BucketLayout.STANDARD_HIERARCHICAL),
+            ("region", False, None, BucketLayout.STANDARD),
+            ("region", False, "", BucketLayout.STANDARD),
+            ("region", False, "rapid-cache-ultra", BucketLayout.STANDARD_RCU),
+            ("region", True, "rapid-cache-ultra", BucketLayout.HIERARCHICAL_RCU),
+            (
+                "region",
+                False,
+                "rapid-cache",
+                BucketLayout(
+                    StorageClass.STANDARD,
+                    CachingTier.RAPID_CACHE,
+                    NamespaceLayout.NON_HIERARCHICAL,
+                ),
+            ),
+            (
+                "region",
+                True,
+                "rapid-cache",
+                BucketLayout(
+                    StorageClass.STANDARD,
+                    CachingTier.RAPID_CACHE,
+                    NamespaceLayout.HIERARCHICAL,
+                ),
+            ),
         ],
     )
     async def test_get_bucket_layout_detection(
-        self, extended_gcsfs, location_type, hns_enabled, expected_bucket_layout
+        self,
+        extended_gcsfs,
+        location_type,
+        hns_enabled,
+        cache_type,
+        expected_bucket_layout,
     ):
         fs = extended_gcsfs
         mock_response = mock.Mock()
         mock_response.location_type = location_type
         if hns_enabled is not None:
             mock_response.hierarchical_namespace = mock.Mock(enabled=hns_enabled)
+        else:
+            mock_response.hierarchical_namespace = None
+        mock_response.rapid_cache_info = (
+            mock.Mock(cache_type=cache_type) if cache_type is not None else None
+        )
 
         with mock.patch.object(
             fs, "_get_control_plane_client", new_callable=mock.AsyncMock
@@ -3425,6 +3470,16 @@ class TestExtendedGcsFileSystemBucketLayout:
         )
         assert BucketLayout.STANDARD == BucketLayout(
             StorageClass.STANDARD, CachingTier.NONE, NamespaceLayout.NON_HIERARCHICAL
+        )
+        assert BucketLayout.STANDARD_RCU == BucketLayout(
+            StorageClass.STANDARD,
+            CachingTier.RAPID_CACHE_ULTRA,
+            NamespaceLayout.NON_HIERARCHICAL,
+        )
+        assert BucketLayout.HIERARCHICAL_RCU == BucketLayout(
+            StorageClass.STANDARD,
+            CachingTier.RAPID_CACHE_ULTRA,
+            NamespaceLayout.HIERARCHICAL,
         )
         assert BucketLayout.UNKNOWN == BucketLayout(
             StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN
