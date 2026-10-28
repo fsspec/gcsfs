@@ -994,7 +994,7 @@ def test_detect_from_sync_caller_probes_on_fsspec_loop(fake_host):
         ),
     ],
 )
-async def test_case_b_flavored_404_resolves_gce(
+async def test_google_flavored_404_resolves_gce(
     fake_host, monkeypatch, product_name, env_vars
 ):
     for name, value in env_vars.items():
@@ -1013,9 +1013,14 @@ async def test_case_b_flavored_404_resolves_gce(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status, flavor",
-    [(403, False), (404, False), (500, False), (503, True)],
+    [
+        pytest.param(403, False, id="flavorless-403"),
+        pytest.param(404, False, id="flavorless-404"),
+        pytest.param(500, False, id="flavorless-500"),
+        pytest.param(503, True, id="flavored-503"),
+    ],
 )
-async def test_case_c_a_unusable_responses_retry_until_case_a(
+async def test_untrusted_metadata_responses_retry_until_cluster_name(
     fake_host, status, flavor
 ):
     fake_host.product_name = "Google Compute Engine"
@@ -1049,11 +1054,13 @@ async def test_case_c_a_unusable_responses_retry_until_case_a(
 @pytest.mark.parametrize(
     "final_response, expected",
     [
-        pytest.param(_mds_response(200, body="prod-cluster"), "gke", id="case-a"),
-        pytest.param(_mds_response(404), "gce", id="case-b"),
+        pytest.param(
+            _mds_response(200, body="prod-cluster"), "gke", id="cluster-name-gke"
+        ),
+        pytest.param(_mds_response(404), "gce", id="flavored-404-gce"),
     ],
 )
-async def test_case_c_b_network_errors_retry_until_resolved(
+async def test_network_errors_retry_until_metadata_server_answers(
     fake_host, error_factory, final_response, expected
 ):
     fake_host.product_name = "Google Compute Engine"
