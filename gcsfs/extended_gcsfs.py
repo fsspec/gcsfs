@@ -221,7 +221,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         )
 
     async def _get_threshold_for_disk_reads(self, bucket):
-        if await self._is_zonal_bucket(bucket):
+        if await self._uses_grpc_data_path(bucket):
             return (
                 5 * 1024 * 1024
             )  # Thanks to our in house, zero copy DirectMemmoveBuffer
@@ -384,9 +384,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             else:
                 namespace_layout = NamespaceLayout.NON_HIERARCHICAL
 
+            rapid_cache_info = getattr(response, "rapid_cache_info", None)
+            cache_type = (
+                getattr(rapid_cache_info, "cache_type", "") if rapid_cache_info else ""
+            )
+            if cache_type == "rapid-cache-ultra":
+                caching_tier = CachingTier.RAPID_CACHE_ULTRA
+            elif cache_type == "rapid-cache":
+                caching_tier = CachingTier.RAPID_CACHE
+            else:
+                caching_tier = CachingTier.NONE
+
             return BucketLayout(
                 storage_class=storage_class,
-                caching_tier=CachingTier.NONE,
+                caching_tier=caching_tier,
                 namespace_layout=namespace_layout,
             )
         except api_exceptions.NotFound:
@@ -421,7 +432,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_layout = self._sync_lookup_bucket_layout(bucket)
-        file_cls = ZonalFile if bucket_layout.is_zonal else GCSFile
+        use_zonal_file = bucket_layout.is_zonal or (
+            mode == "rb" and bucket_layout.is_rcu
+        )
+        file_cls = ZonalFile if use_zonal_file else GCSFile
 
         return file_cls(
             self,
@@ -677,16 +691,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         mrd=None,
         **kwargs,
     ):
-        """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
+        """Fetch a file's contents as bytes, with an optimized path for Zonal and RCU buckets.
 
-        This method overrides the parent `_cat_file` to read objects in Zonal buckets using gRPC.
+        This method overrides the parent `_cat_file` to read objects in Zonal and RCU buckets using gRPC.
 
         Args:
             path (str): The full GCS path to the file (e.g., "bucket/object").
             start (int, optional): The starting byte position to read from.
             end (int, optional): The ending byte position to read to.
             mrd (AsyncMultiRangeDownloader, MRDPool, optional): An existing multi-range
-                downloader instance or a pool of MRD. If not provided, a new one will be created for Zonal buckets.
+                downloader instance or a pool of MRD. If not provided, a new one will be
+                created for Zonal and RCU buckets.
 
         Returns:
             bytes: The content of the file or file range.
@@ -701,8 +716,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
-            if not await self._is_zonal_bucket(bucket):
-                # Fall back to default implementation if not a zonal bucket
+            if not await self._uses_grpc_data_path(bucket):
+                # Fall back to default implementation if not a Zonal or RCU bucket
                 return await super()._cat_file(
                     path, start=start, end=end, concurrency=concurrency, **kwargs
                 )
@@ -968,19 +983,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Get the contents of byte ranges from one or more files.
 
-        For Zonal buckets, ranges are grouped per object and served by a single
+        For Zonal and RCU buckets, ranges are grouped per object and served by a single
         MRD pool per object. Each object's ranges are split into byte-balanced
         groups, one per pooled MRD, and every group is sent as one multi-range
         ``download_ranges`` call. ``batch_size`` bounds the total number of
         concurrent MRD streams across all objects, subject to the per-object
         cap (``-1`` means at most one per range; ``None`` or ``0`` select the
-        fsspec default). Non-zonal paths, and any call with ``max_gap`` set,
+        fsspec default). Paths in other buckets, and any call with ``max_gap`` set,
         use the default fsspec implementation.
 
-        Zonal-only keyword arguments:
+        Zonal and RCU keyword arguments:
             concurrency (int, optional): Maximum MRD streams per object,
                 instead of ``MAX_ZONAL_STREAMS_PER_OBJECT``. Also forwarded to
-                the fsspec path for non-zonal files.
+                the fsspec path for files in other buckets.
 
         With ``on_error="return"``, a failure while downloading a group of
         ranges is returned for every range in that group, and a failure to
@@ -1015,7 +1030,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         zonal, other = {}, []
         for p, idxs in by_path.items():
             bucket, _, _ = self.split_path(p)
-            if await self._is_zonal_bucket(bucket):
+            if await self._uses_grpc_data_path(bucket):
                 zonal[p] = idxs
             else:
                 other.extend(idxs)
@@ -2204,8 +2219,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         Downloads a file from GCS to a local path.
 
-        For Zonal buckets, it uses gRPC client for optimized downloads.
-        For Standard buckets, it delegates to the parent class implementation.
+        For Zonal and RCU buckets, it uses gRPC client for optimized downloads.
+        For other buckets, it delegates to the parent class implementation.
 
         Parameters
         ----------
@@ -2216,12 +2231,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         callback: fsspec.callbacks.Callback, optional
             Callback to monitor the download progress.
         **kwargs:
-            For Zonal buckets, `chunksize` bytes (int) can be provided to control
+            For Zonal and RCU buckets, `chunksize` bytes (int) can be provided to control
             the download chunk size (default is 128KB).
         """
         bucket, key, path_generation = self.split_path(rpath)
 
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._get_file_request(
                 rpath, lpath, *args, headers=headers, callback=callback, **kwargs
             )
@@ -2304,7 +2319,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket, key, path_generation = self.split_path(rpath)
 
         # Delegate standard buckets to the original implementation
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._get_file_concurrent(
                 rpath,
                 lpath,

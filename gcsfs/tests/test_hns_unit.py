@@ -1971,10 +1971,20 @@ class TestExtendedGcsFileSystemInternal:
             assert await fs._is_bucket_hns_enabled("my-bucket") is True
 
     @pytest.mark.asyncio
+    async def test_is_bucket_hns_enabled_true_hns_rcu(self):
+        """Verifies HNS is enabled when bucket layout is HIERARCHICAL_RCU."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", return_value=layouts.HIERARCHICAL_RCU
+        ):
+            assert await fs._is_bucket_hns_enabled("my-bucket") is True
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "bucket_layout",
         [
             layouts.STANDARD,
+            layouts.STANDARD_RCU,
             BucketLayout.UNKNOWN,
         ],
     )
@@ -3320,6 +3330,47 @@ class TestExtendedGcsFileSystemBucketLayout:
                 layouts.STANDARD,
             ),
             ({"location_type": "region"}, layouts.STANDARD),
+            (
+                {"location_type": "region", "rapid_cache_info": {"cache_type": ""}},
+                layouts.STANDARD,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "rapid_cache_info": {"cache_type": "unknown-cache-type"},
+                },
+                layouts.STANDARD,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "rapid_cache_info": {"cache_type": "rapid-cache-ultra"},
+                },
+                layouts.STANDARD_RCU,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "hierarchical_namespace": {"enabled": True},
+                    "rapid_cache_info": {"cache_type": "rapid-cache-ultra"},
+                },
+                layouts.HIERARCHICAL_RCU,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "rapid_cache_info": {"cache_type": "rapid-cache"},
+                },
+                layouts.STANDARD_RAPID_CACHE,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "hierarchical_namespace": {"enabled": True},
+                    "rapid_cache_info": {"cache_type": "rapid-cache"},
+                },
+                layouts.HIERARCHICAL_RAPID_CACHE,
+            ),
         ],
     )
     async def test_get_bucket_layout_detection(
