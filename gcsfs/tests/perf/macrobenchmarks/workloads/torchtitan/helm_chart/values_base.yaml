@@ -1,0 +1,68 @@
+serviceAccount: default
+
+network:
+  hostNetwork: true
+  gibVersion: us-docker.pkg.dev/gce-ai-infra/gpudirect-gib/nccl-plugin-gib:v1.1.2
+  masterPort: "29500"
+
+# Optional nodeSelector for targeting specific GPU nodepools (e.g., a3-ultragpu-8g)
+nodeSelector: {}
+
+gcsfs:
+  # Required: gs:// directory of *.parquet files with a `text` column.
+  datasetPath: ""
+  # Required unless ckptLoadPath is set. Each install writes to
+  # <ckptWritePath>/<release>-<timestamp>/step-N.
+  ckptWritePath: ""
+  ckptLoadPath: ""
+
+workload:
+  image: nvcr.io/nvidia/pytorch:26.08-py3
+  nodes: 2
+  ranksPerNode: 8
+  singlePodPerNode: true
+  shmSize: "512Gi"
+  hostCachePath: "/var/lib/gcsfs-macrobench"
+  envs: []
+
+  torchDistributedTimeoutSeconds: "3600"
+  # gs:// directory holding the Llama 3.1 tokenizer files (tokenizer*.json,
+  # special_tokens*, config.json); staged once per node. Only gs:// is supported.
+  modelId: "gs://huggingface-model-weights/Llama-3.1-8B"
+  hfToken: ""
+
+  # Llama 3.1 model flavor: "70B" (benchmark) or "debugmodel" (smoke/unit tests;
+  # needs a vocab-2048 tokenizer, e.g. TorchTitan's tests/assets).
+  modelFlavor: "70B"
+  seqLen: "2048"
+  # TorchTitan attention backend. "flex" works out of the box; upstream's default
+  # "varlen" needs FlashAttention 3 (flash_attn_interface) in the image.
+  attnBackend: "flex"
+
+  steps: 50
+  # Saves at steps 15, 30, 45 and 50 (the last step always saves). TorchTitan
+  # purges before each save and keeps ckptToKeep - 1 older checkpoints, so
+  # step-15 and step-30 are deleted during the step-45 and step-50 saves.
+  # ckptToKeep must be 0 (keep all) or >= 2.
+  ckptWriterInterval: 15
+  ckptToKeep: 2
+  perDeviceBatch: 1
+  gradAccum: 1
+  # Rows kept per rank by Grain's streaming window shuffle.
+  shuffleBufferSize: 1000
+
+  # TorchTitan main tracks PyTorch nightly; torch and torchao are installed from
+  # this index over the image's build.
+  torchNightlyIndex: "https://download.pytorch.org/whl/nightly/cu132"
+
+  # Parallelism & checkpointing strategy:
+  #   - "fsdp_sharded": 1D FSDP2 + sharded PyTorch DCP checkpointing
+  #   - "model_parallel_sharded": Up to 5D Parallelism (PP + HSDP dp_replicate/dp_shard + CP + TP) + sharded PyTorch DCP checkpointing
+  #     WORLD_SIZE = pipelineParallelSize * dpReplicateSize * dataParallelSize * contextParallelSize * tensorParallelSize
+  trainingStrategy: "model_parallel_sharded"
+  tensorParallelSize: 4
+  dataParallelSize: 4
+  dpReplicateSize: 1
+  contextParallelSize: 1
+  pipelineParallelSize: 1
+  requirements: ""
