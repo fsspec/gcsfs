@@ -169,6 +169,7 @@ async def init_aaow(
     generation=None,
     flush_interval_bytes=None,
     if_generation_match=None,
+    storage_class=None,
 ):
     """
     Creates and opens the AsyncAppendableObjectWriter.
@@ -179,6 +180,11 @@ async def init_aaow(
     A failed precondition raises ``FileExistsError`` for ``0`` and
     ``GenerationMismatchError`` otherwise; without ``if_generation_match`` the
     SDK's ``FailedPrecondition`` propagates unchanged.
+
+    ``storage_class`` is passed to the writer only when set. RCU buckets
+    default new objects to ``STANDARD``, which appendable writes reject, so
+    writes to them must request ``"RAPID"``; Zonal buckets already default to
+    ``RAPID`` and leave it unset.
     """
     writer_options = {}
     # Only pass flush_interval_bytes if the user explicitly provided a
@@ -197,6 +203,8 @@ async def init_aaow(
         generation = 0
     elif if_generation_match is not None:
         kwargs["if_generation_match"] = if_generation_match
+    if storage_class is not None:
+        kwargs["storage_class"] = storage_class
     try:
         writer = AsyncAppendableObjectWriter(
             client=grpc_client,
@@ -210,7 +218,7 @@ async def init_aaow(
         if "if_generation_match" not in str(e):
             raise
         raise NotImplementedError(
-            "if_generation_match > 0 on zonal buckets requires a google-cloud-storage "
+            "if_generation_match > 0 on zonal and RCU buckets requires a google-cloud-storage "
             "release whose AsyncAppendableObjectWriter accepts if_generation_match"
         ) from e
     try:

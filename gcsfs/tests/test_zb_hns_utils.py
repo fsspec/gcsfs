@@ -127,6 +127,32 @@ async def test_init_aaow_if_generation_match(if_generation_match, expected_kwarg
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "storage_class, expected_kwargs",
+    [("RAPID", {"storage_class": "RAPID"}), (None, {})],
+)
+async def test_init_aaow_storage_class(storage_class, expected_kwargs):
+    """storage_class is forwarded to the writer only when it is set."""
+    mock_writer_instance = mock.AsyncMock()
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+        new_callable=mock.Mock,
+        return_value=mock_writer_instance,
+    ) as mock_writer_class:
+        await zb_hns_utils.init_aaow(
+            mock_grpc_client, "bucket", "object", storage_class=storage_class
+        )
+        mock_writer_class.assert_called_once_with(
+            client=mock_grpc_client,
+            bucket_name="bucket",
+            object_name="object",
+            generation=None,
+            writer_options={},
+            **expected_kwargs,
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("if_generation_match", [0, 7])
 async def test_init_aaow_rejects_generation_with_if_generation_match(
     if_generation_match,
