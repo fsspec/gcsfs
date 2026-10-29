@@ -402,8 +402,10 @@ def main():
     json_result_path = _run_benchmarks(results_dir, args)
     if json_result_path:
         csv_report_path = _generate_report(json_result_path, results_dir)
-        if csv_report_path:
-            _print_csv_to_shell(csv_report_path)
+        if not csv_report_path:
+            logging.error("No benchmark results produced; failing the run.")
+            sys.exit(1)
+        _print_csv_to_shell(csv_report_path)
 
 
 if __name__ == "__main__":

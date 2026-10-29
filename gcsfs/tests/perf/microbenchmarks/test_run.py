@@ -188,3 +188,21 @@ def test_print_csv_to_shell(mock_table):
     with mock.patch("builtins.open", mock.mock_open(read_data=csv_content)):
         run._print_csv_to_shell("report.csv")
         mock_table.return_value.add_row.assert_called()
+
+
+def test_main_exits_nonzero_when_no_report(tmp_path):
+    # Arrange
+    with (
+        mock.patch("sys.argv", ["run.py", "--regional-bucket", "b"]),
+        mock.patch.object(run, "_setup_environment"),
+        mock.patch.object(
+            run, "_run_benchmarks", return_value=str(tmp_path / "results.json")
+        ),
+        mock.patch.object(run, "_generate_report", return_value=None),
+        pytest.raises(SystemExit) as exc,
+    ):
+        # Act
+        run.main()
+
+    # Assert
+    assert exc.value.code == 1
