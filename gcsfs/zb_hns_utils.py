@@ -12,6 +12,7 @@ from io import BytesIO
 
 from fsspec.asyn import FSTimeoutError
 from google.api_core.exceptions import FailedPrecondition, NotFound
+from google.cloud.storage.asyncio import async_appendable_object_writer as _aaow_mod
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
@@ -21,6 +22,8 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 
 from gcsfs.retry import GenerationMismatchError
+
+Preconditions = getattr(_aaow_mod, "Preconditions", None)
 
 MRD_MAX_RANGES = 1000  # MRD supports up to 1000 ranges per request
 try:
@@ -175,7 +178,7 @@ async def init_aaow(
 
     ``if_generation_match=0`` creates the object only if it does not exist;
     a positive value overwrites only that generation (requires a
-    google-cloud-storage release whose writer accepts ``if_generation_match``).
+    google-cloud-storage release whose writer accepts ``preconditions``).
     A failed precondition raises ``FileExistsError`` for ``0`` and
     ``GenerationMismatchError`` otherwise; without ``if_generation_match`` the
     SDK's ``FailedPrecondition`` propagates unchanged.
@@ -188,7 +191,7 @@ async def init_aaow(
     kwargs = {}
     if generation and if_generation_match is not None:
         # generation > 0 appends to an existing object (AppendObjectSpec), which
-        # carries no precondition, so the SDK would silently ignore it.
+        # ignores generation preconditions, so the SDK would silently ignore it.
         raise ValueError(
             "if_generation_match cannot be combined with an explicit generation"
         )
@@ -196,23 +199,20 @@ async def init_aaow(
         # Every SDK release maps generation=0 to WriteObjectSpec(if_generation_match=0).
         generation = 0
     elif if_generation_match is not None:
-        kwargs["if_generation_match"] = if_generation_match
-    try:
-        writer = AsyncAppendableObjectWriter(
-            client=grpc_client,
-            bucket_name=bucket_name,
-            object_name=object_name,
-            generation=generation,
-            writer_options=writer_options,
-            **kwargs,
-        )
-    except TypeError as e:
-        if "if_generation_match" not in str(e):
-            raise
-        raise NotImplementedError(
-            "if_generation_match > 0 on zonal buckets requires a google-cloud-storage "
-            "release whose AsyncAppendableObjectWriter accepts if_generation_match"
-        ) from e
+        if Preconditions is None:
+            raise NotImplementedError(
+                "if_generation_match > 0 on zonal buckets requires a google-cloud-storage "
+                "release whose AsyncAppendableObjectWriter accepts Preconditions"
+            )
+        kwargs["preconditions"] = Preconditions(if_generation_match=if_generation_match)
+    writer = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+        generation=generation,
+        writer_options=writer_options,
+        **kwargs,
+    )
     try:
         await writer.open()
     except FailedPrecondition as e:
