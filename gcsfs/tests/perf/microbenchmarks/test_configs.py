@@ -661,3 +661,62 @@ def test_cat_ranges_op_error_handling():
     mock_gcs.cat_ranges.return_value = [b"data1", OSError("Failed read")]
     with pytest.raises(OSError, match="Failed read"):
         _cat_ranges_op(mock_gcs, paths=["a", "b"], starts=[0, 10], ends=[10, 20])
+
+
+def test_listing_configurator_skips_invalid_folders_and_files(mock_config_dependencies):
+    """Test that ListingConfigurator filters out invalid files/folders combinations."""
+    common = {"bucket_types": ["regional"], "rounds": 1}
+    scenario = {
+        "name": "delete_fsdp_checkpoint_rank_folders",
+        "processes": [1],
+        "threads": [1],
+        "depth": 1,
+        "folders": [0, 8, 32, 128, 512],
+        "files": [100, 1000],
+    }
+
+    configurator = ListingConfigurator("dummy")
+    cases = configurator.build_cases(scenario, common)
+
+    # folders=0 is skipped when files > 0; for files=100 only folders=8, 32
+    # are valid; for files=1000 folders=8, 32, 128, 512 are valid.
+    assert len(cases) == 6
+    assert all(0 < c.folders <= c.files for c in cases)
+
+
+@pytest.mark.parametrize(
+    "get_cases",
+    [get_delete_benchmark_cases, get_open_benchmark_cases],
+)
+def test_shipped_listing_based_cases_have_valid_folders_and_files(
+    mock_config_dependencies, get_cases
+):
+    """Ensure shipped listing-based configs have valid folders and files counts."""
+    cases = get_cases()
+    assert cases
+    assert all(0 < c.folders <= c.files for c in cases)
+
+
+@pytest.mark.parametrize("folders,files", [(128, 100), (0, 10)])
+def test_benchmark_listing_fixture_helper_rejects_invalid_folders_and_files(
+    folders, files
+):
+    """Test that _benchmark_listing_fixture_helper raises ValueError when not (0 < folders <= files)."""
+    from types import SimpleNamespace
+
+    from gcsfs.tests.perf.microbenchmarks.conftest import (
+        _benchmark_listing_fixture_helper,
+    )
+
+    params = SimpleNamespace(
+        name="bad_delete_case",
+        bucket_name="test-bucket",
+        folders=folders,
+        depth=1,
+        files=files,
+    )
+    gen = _benchmark_listing_fixture_helper(
+        lambda: mock.MagicMock(), params, "benchmark-delete", teardown=False
+    )
+    with pytest.raises(ValueError, match="require 0 < folders .* <= files"):
+        next(gen)

@@ -397,7 +397,12 @@ def _benchmark_listing_fixture_helper(
     folders = getattr(params, "folders", 0)
     depth = getattr(params, "depth", 0)
     total_files = getattr(params, "files", 0)
-    files_per_folder = int(total_files / folders)
+    if not (0 < folders <= total_files):
+        raise ValueError(
+            f"Invalid benchmark configuration for '{params.name}': "
+            f"require 0 < folders ({folders}) <= files ({total_files})."
+        )
+    files_per_folder = total_files // folders
 
     # Level 0 is the prefix itself
     levels = {0: [prefix]}

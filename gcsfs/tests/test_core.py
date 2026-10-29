@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import builtins
 import io
 import json
@@ -6,7 +7,7 @@ import os
 import ssl
 import uuid
 from builtins import FileNotFoundError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import chain
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlparse
@@ -15,6 +16,7 @@ from uuid import uuid4
 import aiohttp
 import fsspec.asyn
 import fsspec.core
+import google.auth.compute_engine
 import pytest
 import requests
 from fsspec.asyn import sync
@@ -26,7 +28,7 @@ from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
 from gcsfs.credentials import GoogleCredentials
-from gcsfs.retry import HttpError
+from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import (
     a,
     allfiles,
@@ -322,11 +324,13 @@ def test_streaming_upload_aligns_non_final_chunk():
     overflow = 7122
     fs = MockGCSFileSystem()
     f = gcsfs.core.GCSFile.__new__(gcsfs.core.GCSFile)
+    f.path = "mock-bucket/mock-key"
     f.buffer = io.BytesIO(b"x" * (gcsfs.core.DEFAULT_BLOCK_SIZE + overflow))
     f.offset = 0
     f.autocommit = True
     f.content_type = "application/octet-stream"
     f.location = "mock-location"
+    f.if_generation_match = None
     f.gcsfs = fs
     f.checker = gcsfs.checkers.get_consistency_checker(None)
 
@@ -1548,6 +1552,208 @@ def test_put_file_resumable_upload_cleanup_on_chunk_failure(protocol, gcs):
             mock_call.assert_awaited_once_with("DELETE", expected_cleanup_url)
 
 
+def _upload_call_params(mock_call):
+    """ifGenerationMatch sent on the upload POST(s) recorded by a mocked _call."""
+    out = []
+    for call in mock_call.call_args_list:
+        method = call.args[0] if call.args else call.kwargs.get("method")
+        path = call.args[1] if len(call.args) > 1 else call.kwargs.get("path", "")
+        if method == "POST" and "upload/storage" in path:
+            out.append(call.kwargs.get("ifGenerationMatch"))
+    return out
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({}, None),
+        ({"mode": "create"}, "0"),
+        ({"if_generation_match": 0}, "0"),
+        ({"if_generation_match": 123}, "123"),
+        ({"mode": "create", "if_generation_match": 0}, "0"),
+    ],
+)
+def test_pipe_file_if_generation_match_simple(gcs, skip_if_zonal, kwargs, expected):
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.pipe_file(TEST_BUCKET + "/cas", b"abc", consistency="none", **kwargs)
+    assert _upload_call_params(mock_call) == [expected]
+
+
+def test_pipe_file_if_generation_match_resumable(gcs, skip_if_zonal):
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=123"
+    )
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "gcsfs.core.upload_chunk",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        mock_call.return_value = ({"Location": location}, None)
+        with pytest.raises(RuntimeError):
+            gcs.pipe_file(
+                TEST_BUCKET + "/cas",
+                b"x" * 2**20,
+                chunksize=2**19,
+                if_generation_match=123,
+            )
+    assert _upload_call_params(mock_call) == ["123"]
+    mock_call.assert_awaited_with(
+        "DELETE", location.replace("&ifGenerationMatch=123", "")
+    )
+
+
+def test_put_file_if_generation_match(gcs, skip_if_zonal):
+    with tmpfile() as lpath:
+        with open(lpath, "wb") as f:
+            f.write(b"abc")
+        with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+            mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+            gcs.put_file(
+                lpath, TEST_BUCKET + "/cas", consistency="none", if_generation_match=7
+            )
+    assert _upload_call_params(mock_call) == ["7"]
+
+
+def test_put_file_if_generation_match_resumable(gcs, skip_if_zonal):
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=7"
+    )
+    with tmpfile() as lpath:
+        with open(lpath, "wb") as f:
+            f.write(b"x" * (5 * 2**20))
+        with (
+            mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+            mock.patch(
+                "gcsfs.core.upload_chunk", new_callable=mock.AsyncMock, return_value={}
+            ) as mock_chunk,
+        ):
+            mock_call.return_value = ({"Location": location}, None)
+            gcs.put_file(
+                lpath,
+                TEST_BUCKET + "/cas",
+                chunksize=2**20,
+                consistency="none",
+                if_generation_match=7,
+            )
+    assert _upload_call_params(mock_call) == ["7"]
+    assert mock_chunk.await_count == 5
+    assert all(c.args[1] == location for c in mock_chunk.await_args_list)
+
+
+def test_open_if_generation_match(gcs, skip_if_zonal):
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123&ifGenerationMatch=7"
+    )
+    with (
+        mock.patch(
+            "gcsfs.core.initiate_upload",
+            new_callable=mock.AsyncMock,
+            return_value=location,
+        ) as mock_init,
+        mock.patch.object(gcs, "call") as mock_call,
+    ):
+        mock_call.return_value = ({}, '{"generation": "8", "size": "3"}')
+        with gcs.open(
+            TEST_BUCKET + "/cas", "wb", consistency="none", if_generation_match=7
+        ) as f:
+            f.write(b"abc")
+    assert mock_init.call_args.kwargs["if_generation_match"] == 7
+    assert mock_init.call_args.kwargs["mode"] == "overwrite"
+    mock_call.assert_called_once()
+    assert mock_call.call_args.args[:2] == ("POST", location)
+    # call_args holds a memoryview of the upload buffer; release it so the
+    # BytesIO can be finalized without a BufferError during a later test.
+    mock_call.reset_mock()
+
+
+def test_pipe_file_create_conflicts_with_if_generation_match(gcs):
+    with pytest.raises(ValueError):
+        gcs.pipe_file(
+            TEST_BUCKET + "/cas", b"abc", mode="create", if_generation_match=5
+        )
+
+
+@pytest.mark.parametrize(
+    "mode, value, expected",
+    [
+        ("overwrite", None, None),
+        ("overwrite", "7", 7),
+        ("create", "0", 0),
+        ("create", None, 0),
+        ("overwrite", True, ValueError),
+        ("overwrite", -1, ValueError),
+        ("create", 5, ValueError),
+    ],
+)
+def test_resolve_generation_match(mode, value, expected):
+    from gcsfs.core import _resolve_generation_match
+
+    if expected is ValueError:
+        with pytest.raises(ValueError):
+            _resolve_generation_match(mode, value)
+    else:
+        assert _resolve_generation_match(mode, value) == expected
+
+
+@pytest.mark.parametrize("exists", [True, False], ids=["existing", "missing"])
+@pytest.mark.parametrize(
+    "mode, kwargs",
+    [("rb", {"if_generation_match": 5}), ("xb", {"if_generation_match": 5})],
+)
+def test_open_rejects_invalid_if_generation_match(gcs, mode, kwargs, exists):
+    fn = TEST_BUCKET + "/cas"
+    if exists:
+        gcs.pipe_file(fn, b"abc")
+    assert gcs.exists(fn) is exists
+    with pytest.raises(ValueError):
+        gcs.open(fn, mode, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({"if_generation_match": 7}, GenerationMismatchError),
+        ({"mode": "create"}, FileExistsError),
+    ],
+)
+def test_pipe_file_precondition_error(gcs, skip_if_zonal, kwargs, expected):
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        mock_call.side_effect = FileExistsError("412")
+        with pytest.raises(expected) as info:
+            gcs.pipe_file(TEST_BUCKET + "/cas", b"abc", **kwargs)
+    if expected is GenerationMismatchError:
+        assert info.value.generation == 7
+
+
+def test_write_if_generation_match(gcs):
+    if not gcs.on_google:
+        pytest.skip("emulator does not support condition")
+    fn = TEST_BUCKET + "/cas.file"
+    if gcs.exists(fn):
+        gcs.rm(fn)
+    gcs.pipe_file(fn, b"v1", if_generation_match=0)
+    with pytest.raises(FileExistsError):
+        gcs.pipe_file(fn, b"v1", if_generation_match=0)
+    gen = gcs.info(fn)["generation"]
+    try:
+        gcs.pipe_file(fn, b"v2", if_generation_match=gen)
+    except NotImplementedError:
+        pytest.skip(
+            "zonal CAS needs a google-cloud-storage release with if_generation_match"
+        )
+    assert gcs.cat(fn) == b"v2"
+    with pytest.raises(GenerationMismatchError):
+        gcs.pipe_file(fn, b"v3", if_generation_match=gen)
+    assert gcs.cat(fn) == b"v2"
+
+
 @pytest.mark.parametrize("protocol", ["", "gs://", "gcs://"])
 def test_get_file_to_current_working_directory(monkeypatch, protocol, gcs):
     fn = protocol + TEST_BUCKET + "/temp"
@@ -1953,12 +2159,11 @@ def test_content_type_put_guess(gcs):
     assert gcs.info(dst)["contentType"] == "text/plain"
 
 
-def test_content_type_lazy_evaluation():
+def test_content_type_lazy_evaluation(fake_fs):
     from gcsfs.core import GCSFile
 
-    fs_mock = mock.MagicMock(spec=GCSFileSystem)
-    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
-    fs_mock.info.return_value = {
+    fake_fs.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fake_fs.info.return_value = {
         "name": "test-bucket/test-key.txt",
         "size": 10,
         "contentType": "application/json",
@@ -1966,18 +2171,17 @@ def test_content_type_lazy_evaluation():
     }
     with mock.patch("mimetypes.guess_type") as mock_guess:
         f = GCSFile(
-            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+            fake_fs, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
         )
         assert f.content_type == "application/json"
         mock_guess.assert_not_called()
 
 
-def test_content_type_lazy_evaluation_fallback():
+def test_content_type_lazy_evaluation_fallback(fake_fs):
     from gcsfs.core import GCSFile
 
-    fs_mock = mock.MagicMock(spec=GCSFileSystem)
-    fs_mock.split_path.return_value = ("test-bucket", "test-key.txt", None)
-    fs_mock.info.return_value = {
+    fake_fs.split_path.return_value = ("test-bucket", "test-key.txt", None)
+    fake_fs.info.return_value = {
         "name": "test-bucket/test-key.txt",
         "size": 10,
         "type": "file",
@@ -1986,7 +2190,7 @@ def test_content_type_lazy_evaluation_fallback():
         "mimetypes.guess_type", return_value=("text/plain", None)
     ) as mock_guess:
         f = GCSFile(
-            fs_mock, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
+            fake_fs, "test-bucket/test-key.txt", mode="rb", cache_type="readahead"
         )
         assert f.content_type == "text/plain"
         mock_guess.assert_called_once()
@@ -2679,6 +2883,122 @@ def test_sign(gcs, monkeypatch):
     assert response.text == "This is a test string"
 
 
+FAKE_SERVICE_ACCOUNT_FILE = os.path.join(
+    os.path.dirname(__file__), "fake-service-account-credentials.json"
+)
+IAM_SIGN_EMAIL = "sa@project.iam.gserviceaccount.com"
+
+
+def _keyless_credentials():
+    """Credentials without a private key, as GCE or GKE Workload Identity provide.
+
+    Like real Compute Engine credentials before their first refresh, they have
+    no token and report the service account email as "default"; refreshing
+    resolves both, as the metadata server would.
+    """
+    creds = google.auth.compute_engine.Credentials(universe_domain="googleapis.com")
+    creds.token = None
+
+    def refresh(request):
+        creds._service_account_email = IAM_SIGN_EMAIL
+        creds.token = "access-token"
+
+    creds.refresh = mock.Mock(side_effect=refresh)
+    return creds
+
+
+def _fake_storage_client(monkeypatch):
+    """Replace google.cloud.storage.Client; returns the blob mock that records signing kwargs."""
+    blob = mock.Mock()
+    blob.generate_signed_url.return_value = "https://signed.example/key"
+    client = mock.Mock()
+    client.bucket.return_value.blob.return_value = blob
+    monkeypatch.setattr("google.cloud.storage.Client", mock.Mock(return_value=client))
+    return blob
+
+
+SIGNER = object()
+
+
+@pytest.mark.parametrize(
+    "token, sign_kwargs, expected",
+    [
+        pytest.param(
+            _keyless_credentials,
+            {},
+            {"service_account_email": IAM_SIGN_EMAIL, "access_token": "access-token"},
+            id="no-private-key-uses-iam",
+        ),
+        pytest.param(
+            lambda: FAKE_SERVICE_ACCOUNT_FILE,
+            {},
+            {"service_account_email": None, "access_token": None},
+            id="private-key-signs-locally",
+        ),
+        pytest.param(
+            _keyless_credentials,
+            {"service_account_email": "other@example.com", "access_token": "t"},
+            {"service_account_email": "other@example.com", "access_token": "t"},
+            id="explicit-iam-arguments-kept",
+        ),
+        pytest.param(
+            _keyless_credentials,
+            {"credentials": SIGNER},
+            {
+                "credentials": SIGNER,
+                "service_account_email": None,
+                "access_token": None,
+            },
+            id="explicit-credentials-kept",
+        ),
+    ],
+)
+def test_sign_credentials(monkeypatch, token, sign_kwargs, expected):
+    blob = _fake_storage_client(monkeypatch)
+    fs = GCSFileSystem(token=token(), skip_instance_cache=True)
+
+    assert fs.sign("bucket/key", expiration=300, **sign_kwargs) == (
+        "https://signed.example/key"
+    )
+    kwargs = blob.generate_signed_url.call_args.kwargs
+    assert kwargs["expiration"] == timedelta(seconds=300)
+    assert kwargs["generation"] is None
+    for key, value in expected.items():
+        assert kwargs.get(key) == value
+
+
+def test_sign_without_private_key_calls_signblob_api(monkeypatch):
+    fs = GCSFileSystem(token=_keyless_credentials(), skip_instance_cache=True)
+    signature = base64.b64encode(b"signature").decode()
+    calls = []
+
+    def fake_request():
+        def request(url, method, body, headers):
+            calls.append((url, method, body, headers))
+            return mock.Mock(
+                status=200, data=json.dumps({"signedBlob": signature}).encode()
+            )
+
+        return request
+
+    monkeypatch.setattr("google.cloud.storage._signing.requests.Request", fake_request)
+
+    url = fs.sign("bucket/key")
+
+    assert len(calls) == 1
+    sign_url, method, body, headers = calls[0]
+    assert sign_url == (
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+        f"{IAM_SIGN_EMAIL}:signBlob?alt=json"
+    )
+    assert method == "POST"
+    assert headers["Authorization"] == "Bearer access-token"
+    assert "payload" in json.loads(body)
+    params = parse_qs(urlparse(url).query)
+    assert params["GoogleAccessId"] == [IAM_SIGN_EMAIL]
+    assert params["Signature"] == [signature]
+
+
 def test_write_x_mpu(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support condition")
@@ -3289,11 +3609,16 @@ def test_prefetcher_default_concurrency(gcs):
     assert cache_concurrency == 4
 
 
-def test_prefetcher_config_options():
-    fake_fs = mock.MagicMock()
-    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
-    fake_fs.info.return_value = {"size": 100}
+@pytest.fixture
+def fake_fs():
+    fs = mock.MagicMock()
+    fs.split_path.return_value = ("bucket", "file.txt", None)
+    fs.info.return_value = {"size": 100}
+    fs.loop = fsspec.asyn.get_loop()
+    return fs
 
+
+def test_prefetcher_config_options(fake_fs):
     # 1. Default without explicit max_prefetch_size -> MAX_PREFETCH_SIZE (256 MiB)
     with GCSFile(
         fake_fs,
@@ -3333,11 +3658,7 @@ def test_prefetcher_config_options():
         )
 
 
-def test_gcsfile_prefetcher_producer_fetcher_integration():
-    fake_fs = mock.MagicMock()
-    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
-    fake_fs.info.return_value = {"size": 100}
-
+def test_gcsfile_prefetcher_producer_fetcher_integration(fake_fs):
     with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
         prefetcher = getattr(f.cache, "_prefetcher", None)
         assert prefetcher is not None
@@ -3395,10 +3716,7 @@ def test_gcsfile_not_satisfiable_range(gcs):
         assert f.cache._fetch(3, 1) == b""
 
 
-def test_gcsfile_fetch_range_error_handling():
-    fake_fs = mock.MagicMock()
-    fake_fs.split_path.return_value = ("bucket", "file.txt", None)
-    fake_fs.info.return_value = {"size": 100}
+def test_gcsfile_fetch_range_error_handling(fake_fs):
     fake_fs.cat_file.return_value = b"data"
     f = GCSFile(fake_fs, "bucket/file.txt", mode="rb", cache_type="none", size=100)
 

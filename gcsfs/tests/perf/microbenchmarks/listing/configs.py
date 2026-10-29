@@ -36,6 +36,8 @@ class ListingConfigurator(BaseBenchmarkConfigurator):
         for combination in param_combinations:
             # Unpack base parameters (first 5)
             procs, threads, files, bucket_type, folders, *extra_values = combination
+            if not (0 < folders <= files):
+                continue
 
             bucket_name = self.get_bucket_name(bucket_type)
             if not bucket_name:

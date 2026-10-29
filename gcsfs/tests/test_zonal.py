@@ -97,6 +97,7 @@ def gcs_bucket_mocks():
 
         mock_pool = mock.AsyncMock(spec=MRDPool)
         mock_pool.persisted_size = len(file_data)
+        mock_pool.details = {"size": len(file_data)}
         mock_pool.get_mrd.return_value.__aenter__.return_value = mock_downloader
 
         async def close_pool():
@@ -780,7 +781,7 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
     )
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            async_gcs.grpc_client, bucket, object_name
+            async_gcs.grpc_client, bucket, object_name, if_generation_match=None
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
@@ -795,7 +796,7 @@ async def test_initiate_upload_zonal(async_gcs, zonal_write_mocks, file_path):
     writer = await initiate_upload(fs=async_gcs, bucket=bucket, key=object_name)
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            async_gcs.grpc_client, bucket, object_name
+            async_gcs.grpc_client, bucket, object_name, if_generation_match=None
         )
         assert writer is zonal_write_mocks["aaow"]
     else:
@@ -901,7 +902,7 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
         if zonal_write_mocks:
             grpc_client = await async_gcs._get_grpc_client()
             zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-                grpc_client, bucket, object_name
+                grpc_client, bucket, object_name, if_generation_match=None
             )
             zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
             args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
@@ -930,7 +931,7 @@ async def test_pipe_file_zonal(async_gcs, zonal_write_mocks, file_path):
     if zonal_write_mocks:
         grpc_client = await async_gcs._get_grpc_client()
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            grpc_client, bucket, object_name
+            grpc_client, bucket, object_name, if_generation_match=None
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)

@@ -3,6 +3,7 @@ Google Cloud Storage pythonic interface
 """
 
 import asyncio
+import contextlib
 import io
 import json
 import logging
@@ -36,7 +37,13 @@ from .checkers import get_consistency_checker
 from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
-from .retry import HttpError, errs, retry_request, validate_response
+from .retry import (
+    GenerationMismatchError,
+    HttpError,
+    errs,
+    retry_request,
+    validate_response,
+)
 from .utils import is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
@@ -344,7 +351,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     NOTE on "exclusive" mode: mode=="create"" (in pipe and put) and open(mode="xb") are supported on an
     experimental basis. The test harness does not currently support this, so use at your
-    own risk.
+    own risk. Writes also accept ``if_generation_match=N`` (``0`` is equivalent to
+    ``mode="create"``); a mismatch raises ``FileExistsError`` for ``0`` and
+    ``gcsfs.retry.GenerationMismatchError`` for ``N > 0``. For a read-modify-write
+    loop, take the generation from ``info()`` and read that exact version, since a
+    file handle may return bytes from a newer version than its ``details`` describe::
+
+        g = fs.info(path)["generation"]
+        data = fs.cat_file(path, generation=g)
+        fs.pipe_file(path, merge(data), if_generation_match=g)
 
     Parameters
     ----------
@@ -1791,10 +1806,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         fixed_key_metadata=None,
         chunksize=50 * 2**20,
         mode="overwrite",
+        if_generation_match=None,
     ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
+        if_generation_match = _resolve_generation_match(mode, if_generation_match)
         size = len(data)
         out = None
         if size < chunksize:
@@ -1808,6 +1825,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 content_type,
                 fixed_key_metadata=fixed_key_metadata,
                 mode=mode,
+                if_generation_match=if_generation_match,
             )
         else:
             location = await initiate_upload(
@@ -1818,19 +1836,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 metadata,
                 fixed_key_metadata=fixed_key_metadata,
                 mode=mode,
+                if_generation_match=if_generation_match,
             )
             try:
                 data_view = memoryview(data)
-                for offset in range(0, size, chunksize):
-                    bit = data_view[offset : offset + chunksize]
-                    out = await upload_chunk(
-                        self, location, bit, offset, size, content_type
-                    )
+                with _translate_generation_mismatch(path, if_generation_match):
+                    for offset in range(0, size, chunksize):
+                        bit = data_view[offset : offset + chunksize]
+                        out = await upload_chunk(
+                            self, location, bit, offset, size, content_type
+                        )
             except Exception:
-                await self._call(
-                    "DELETE",
-                    location.replace("&ifGenerationMatch=0", ""),
-                )
+                await self._call("DELETE", _strip_generation_match(location))
                 raise
 
             checker = get_consistency_checker(consistency)
@@ -1851,6 +1868,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         callback=None,
         fixed_key_metadata=None,
         mode="overwrite",
+        if_generation_match=None,
         **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1866,6 +1884,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         bucket, key, generation = self.split_path(rpath)
         if generation:
             raise ValueError("Cannot write to specific object generation")
+        if_generation_match = _resolve_generation_match(mode, if_generation_match)
         with open(lpath, "rb") as f0:
             size = f0.seek(0, 2)
             f0.seek(0)
@@ -1882,6 +1901,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     content_type=content_type,
                     fixed_key_metadata=fixed_key_metadata,
                     mode=mode,
+                    if_generation_match=if_generation_match,
                 )
                 callback.absolute_update(size)
 
@@ -1894,24 +1914,23 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     metadata=metadata,
                     fixed_key_metadata=fixed_key_metadata,
                     mode=mode,
+                    if_generation_match=if_generation_match,
                 )
                 offset = 0
                 try:
-                    while True:
-                        bit = f0.read(chunksize)
-                        if not bit:
-                            break
-                        out = await upload_chunk(
-                            self, location, bit, offset, size, content_type
-                        )
-                        offset += len(bit)
-                        callback.absolute_update(offset)
-                        checker.update(bit)
+                    with _translate_generation_mismatch(rpath, if_generation_match):
+                        while True:
+                            bit = f0.read(chunksize)
+                            if not bit:
+                                break
+                            out = await upload_chunk(
+                                self, location, bit, offset, size, content_type
+                            )
+                            offset += len(bit)
+                            callback.absolute_update(offset)
+                            checker.update(bit)
                 except Exception:
-                    await self._call(
-                        "DELETE",
-                        location.replace("&ifGenerationMatch=0", ""),
-                    )
+                    await self._call("DELETE", _strip_generation_match(location))
                     raise
 
                 checker.validate_json_response(out)
@@ -2131,10 +2150,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         headers=None,
         callback=None,
         fetcher_fn=None,
+        details=None,
         **kwargs,
     ):
         """Main orchestrator for concurrent file downloads utilizing BackgroundPrefetcher."""
-        details = await self._info(rpath, **kwargs)
+        if details is None:
+            details = await self._info(rpath, **kwargs)
         total_size = details.get("size", 0)
 
         # Concurrency typically improves performance for RAM downloads exceeding 5MB.
@@ -2414,24 +2435,54 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     def sign(self, path, expiration=100, **kwargs):
         """Create a signed URL representing the given path.
 
+        Signing needs a private key, which only service account key
+        credentials carry. When the filesystem's credentials have no private
+        key, as with Compute Engine or GKE Workload Identity credentials, the
+        URL is signed through the IAM Credentials ``signBlob`` API instead,
+        using the credentials' service account email and current access
+        token. The service account then needs the
+        ``roles/iam.serviceAccountTokenCreator`` role on itself. Passing
+        ``service_account_email`` and ``access_token`` explicitly selects this
+        path with any credentials, and passing ``credentials`` signs with those
+        instead.
+
         Parameters
         ----------
         path : str
              The path on the filesystem
         expiration : int
             Number of seconds to enable the URL for
+        kwargs :
+            Passed on to ``google.cloud.storage.Blob.generate_signed_url``
 
         Returns
         -------
         URL : str
             The signed URL
         """
+        from google.auth.credentials import Signing
         from google.cloud import storage
 
-        client = storage.Client(
-            credentials=self.credentials.credentials,
-            project=self.project,
-        )
+        credentials = self.credentials.credentials
+        if (
+            credentials is not None
+            and not isinstance(credentials, Signing)
+            and "service_account_email" not in kwargs
+            and "access_token" not in kwargs
+            and "credentials" not in kwargs
+        ):
+            # No private key (e.g. GCE or GKE Workload Identity credentials):
+            # have google-cloud-storage sign through the IAM signBlob API with
+            # the service account's access token instead.
+            self.credentials.maybe_refresh()
+            email = getattr(credentials, "service_account_email", None)
+            # Compute Engine credentials report "default" until a refresh has
+            # looked up the real email on the metadata server.
+            if email and email != "default" and credentials.token:
+                kwargs["service_account_email"] = email
+                kwargs["access_token"] = credentials.token
+
+        client = storage.Client(credentials=credentials, project=self.project)
 
         bucket, key, generation = self.split_path(path)
         bucket = client.bucket(bucket)
@@ -2538,6 +2589,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         fixed_key_metadata=None,
         generation=None,
         kms_key_name=None,
+        if_generation_match=None,
         **kwargs,
     ):
         """
@@ -2585,11 +2637,20 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             Timeout seconds for the asynchronous callback.
         generation: str
             Object generation.
+        if_generation_match: int
+            Only write if the object's current generation matches this value;
+            ``0`` means the object must not exist (same as mode ``"xb"``). To
+            pair this with a read, use ``info()["generation"]`` and
+            ``cat_file(path, generation=...)`` rather than a read handle's
+            ``details``.
         """
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
+        self.if_generation_match = _resolve_open_generation_match(
+            mode, if_generation_match
+        )
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
             cache_type
@@ -2604,6 +2665,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 )
             else:
                 kwargs.pop("max_prefetch_size", None)
+
+        fs_loop = getattr(gcsfs, "loop", None)
+        has_usable_fs_loop = (
+            isinstance(fs_loop, asyncio.AbstractEventLoop)
+            and fs_loop.is_running()
+            and not fs_loop.is_closed()
+        )
 
         super().__init__(
             gcsfs,
@@ -2631,7 +2699,30 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
             # Only producer uses the fetcher and producer will always be there for a prefetcher hence
             # fetcher attributes check is not required.
-            prefetcher.producer.fetcher = self._async_fetch_range
+            if has_usable_fs_loop and prefetcher.loop is not fs_loop:
+                # AdaptiveReadaheadCache initializes BackgroundPrefetcher with
+                # fsspec.asyn.get_loop(). If that loop differs from gcsfs.loop
+                # (for instance, when gcsfs was given an explicit loop or a new
+                # global loop was created after fsspec.asyn.reset_lock(), as
+                # Hugging Face datasets IterableDataset._iter_pytorch does),
+                # recreate the prefetcher bound to gcsfs.loop so _async_fetch_range
+                # runs on the same event loop as the filesystem's gRPC/HTTP clients.
+                # TODO: Remove once the minimum fsspec release makes
+                # AdaptiveReadaheadCache bind BackgroundPrefetcher to fs.loop
+                # (fsspec/filesystem_spec#2292).
+                prefetcher.close()
+                from fsspec.prefetcher import BackgroundPrefetcher
+
+                prefetcher = BackgroundPrefetcher(
+                    fetcher=self._async_fetch_range,
+                    size=self.size,
+                    concurrency=cache_options.get("concurrency", self.concurrency),
+                    max_prefetch_size=cache_options.get("max_prefetch_size"),
+                    loop=fs_loop,
+                )
+                cache._prefetcher = prefetcher
+            else:
+                prefetcher.producer.fetcher = self._async_fetch_range
 
             if hasattr(cache, "close"):
                 # TODO: Remove this disarm once fsspec adds native support for deferred or
@@ -2741,9 +2832,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             head.update(
                 {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
             )
-            headers, contents = self.gcsfs.call(
-                "POST", self.location, headers=head, data=chunk
-            )
+            with _translate_generation_mismatch(self.path, self.if_generation_match):
+                headers, contents = self.gcsfs.call(
+                    "POST", self.location, headers=head, data=chunk
+                )
             if "Range" in headers:
                 end = int(headers["Range"].split("-")[1])
                 shortfall = (self.offset + l - 1) - end
@@ -2788,6 +2880,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.metadata,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            if_generation_match=self.if_generation_match,
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
@@ -2799,10 +2892,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         if self.location is None:
             return
-        self.gcsfs.call(
-            "DELETE",
-            self.location.replace("&ifGenerationMatch=0", ""),
-        )
+        self.gcsfs.call("DELETE", _strip_generation_match(self.location))
         self.location = None
         self.closed = True
 
@@ -2822,6 +2912,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             self.content_type,
             self.fixed_key_metadata,
             mode="create" if "x" in self.mode else "overwrite",
+            if_generation_match=self.if_generation_match,
             kms_key_name=self.kms_key_name,
             timeout=self.timeout,
         )
@@ -2954,6 +3045,65 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
     return json.loads(txt) if txt else None
 
 
+def _resolve_generation_match(mode, if_generation_match):
+    """Effective ``ifGenerationMatch`` value as an int, or None.
+
+    ``mode="create"`` is shorthand for ``if_generation_match=0``.
+    """
+    if if_generation_match is not None:
+        if isinstance(if_generation_match, bool) or int(if_generation_match) < 0:
+            raise ValueError(
+                f"if_generation_match must be a non-negative integer, "
+                f"got {if_generation_match!r}"
+            )
+        if_generation_match = int(if_generation_match)
+    if mode == "create":
+        if if_generation_match not in (None, 0):
+            raise ValueError(
+                "mode='create' conflicts with a non-zero if_generation_match"
+            )
+        return 0
+    return if_generation_match
+
+
+def _resolve_open_generation_match(mode, if_generation_match):
+    """Validate ``if_generation_match`` for an ``open()`` ``mode``.
+
+    Returns the effective ``ifGenerationMatch`` value: ``0`` for ``"x"`` modes,
+    the given value for ``"w"`` modes and ``None`` when unset. Other modes
+    reject the parameter.
+    """
+    if if_generation_match is not None and not ("w" in mode or "x" in mode):
+        raise ValueError("if_generation_match is only valid for write modes")
+    return _resolve_generation_match(
+        "create" if "x" in mode else "overwrite", if_generation_match
+    )
+
+
+def _generation_match_params(if_generation_match):
+    return (
+        {}
+        if if_generation_match is None
+        else {"ifGenerationMatch": str(if_generation_match)}
+    )
+
+
+@contextlib.contextmanager
+def _translate_generation_mismatch(path, if_generation_match):
+    """Re-raise the 412 ``FileExistsError`` as ``GenerationMismatchError`` for N > 0."""
+    try:
+        yield
+    except FileExistsError as e:
+        if if_generation_match:
+            raise GenerationMismatchError(path, if_generation_match) from e
+        raise
+
+
+def _strip_generation_match(location):
+    """Drop the precondition from a resumable session URL before cancelling it."""
+    return re.sub(r"&ifGenerationMatch=\d+", "", location)
+
+
 async def initiate_upload(
     fs,
     bucket,
@@ -2963,6 +3113,7 @@ async def initiate_upload(
     fixed_key_metadata=None,
     mode="overwrite",
     kms_key_name=None,
+    if_generation_match=None,
 ):
     """
     Initiates a resumable upload. This function has a conditional path to support
@@ -2985,23 +3136,26 @@ async def initiate_upload(
             fixed_key_metadata,
             mode,
             kms_key_name,
+            if_generation_match=if_generation_match,
         )
 
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
-    kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
+    if_generation_match = _resolve_generation_match(mode, if_generation_match)
+    kw = _generation_match_params(if_generation_match)
     if kms_key_name:
         kw["kmsKeyName"] = kms_key_name
     j.update(_convert_fixed_key_metadata(fixed_key_metadata))
-    headers, _ = await fs._call(
-        method="POST",
-        path=f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o?name={quote(key)}",
-        uploadType="resumable",
-        json=j,
-        headers={"X-Upload-Content-Type": content_type},
-        **kw,
-    )
+    with _translate_generation_mismatch(f"{bucket}/{key}", if_generation_match):
+        headers, _ = await fs._call(
+            method="POST",
+            path=f"{fs._location}/upload/storage/v1/b/{quote(bucket)}/o?name={quote(key)}",
+            uploadType="resumable",
+            json=j,
+            headers={"X-Upload-Content-Type": content_type},
+            **kw,
+        )
     loc = headers["Location"]
     out = loc[0] if isinstance(loc, list) else loc  # <- for CVR responses
     if len(str(loc)) < 20:
@@ -3020,6 +3174,7 @@ async def simple_upload(
     fixed_key_metadata=None,
     mode="overwrite",
     kms_key_name=None,
+    if_generation_match=None,
 ):
     """
     Performs a simple, single-request upload. This function has a conditional path to support
@@ -3043,6 +3198,7 @@ async def simple_upload(
             fixed_key_metadata,
             mode,
             kms_key_name,
+            if_generation_match=if_generation_match,
         )
 
     checker = get_consistency_checker(consistency)
@@ -3050,7 +3206,8 @@ async def simple_upload(
     metadata = {"name": key}
     if metadatain is not None:
         metadata["metadata"] = metadatain
-    kw = {"ifGenerationMatch": "0"} if mode == "create" else {}
+    if_generation_match = _resolve_generation_match(mode, if_generation_match)
+    kw = _generation_match_params(if_generation_match)
     if kms_key_name:
         kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
@@ -3069,15 +3226,16 @@ async def simple_upload(
         if isinstance(data, (bytes, bytearray, memoryview))
         else UnclosableBytesIO(data)
     )
-    j = await fs._call(
-        "POST",
-        path,
-        uploadType="multipart",
-        headers={"Content-Type": 'multipart/related; boundary="==0=="'},
-        data=payload,
-        json_out=True,
-        **kw,
-    )
+    with _translate_generation_mismatch(f"{bucket}/{key}", if_generation_match):
+        j = await fs._call(
+            "POST",
+            path,
+            uploadType="multipart",
+            headers={"Content-Type": 'multipart/related; boundary="==0=="'},
+            data=payload,
+            json_out=True,
+            **kw,
+        )
     checker.update(datain)
     checker.validate_json_response(j)
     return j

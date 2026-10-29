@@ -426,32 +426,47 @@ class TestExtendedGcsFileSystemMv:
 
             mocks["info"].assert_has_awaits(expected_info_calls)
 
+    @pytest.mark.parametrize("trailing_slash", ["", "/"])
     def test_folder_rename_to_root_directory(
         self,
         gcs_hns,
         gcs_hns_mocks,
+        trailing_slash,
     ):
-        """Test that folder rename to root directory uses HNS rename API."""
+        """Test that folder rename to root directory uses HNS rename API and updates dircache."""
         gcsfs = gcs_hns
         dir_name = "root_dir"
-        path1 = f"{TEST_HNS_BUCKET}/test/{dir_name}"
-        path2 = f"{TEST_HNS_BUCKET}/"
+        parent = f"{TEST_HNS_BUCKET}/test"
+        path1 = f"{parent}/{dir_name}"
+        path2 = f"{TEST_HNS_BUCKET}{trailing_slash}"
+        expected_dst = f"{TEST_HNS_BUCKET}/{dir_name}"
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = [
                 {"type": "directory", "name": path1},
                 FileNotFoundError(path1),
                 {"type": "directory", "name": path2},
-                {"type": "directory", "name": f"{path2}/{dir_name}"},
-                {"type": "file", "name": f"{path2}/{dir_name}/file.txt"},
+                {"type": "directory", "name": expected_dst},
+                {"type": "file", "name": f"{expected_dst}/file.txt"},
             ]
 
             gcsfs.touch(f"{path1}/file.txt")
+            gcsfs.dircache[parent] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/file.txt", "type": "file"}]
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
+
             gcsfs.mv(path1, path2, recursive=True)
+
+            assert path1 not in gcsfs.dircache
+            assert [e["name"] for e in gcsfs.dircache[parent]] == []
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [
+                parent,
+                expected_dst,
+            ]
 
             assert not gcsfs.exists(path1)
             assert gcsfs.exists(path2)
-            assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}")
-            assert gcsfs.exists(f"{path2.rstrip('/')}/{dir_name}/file.txt")
+            assert gcsfs.exists(expected_dst)
+            assert gcsfs.exists(f"{expected_dst}/file.txt")
 
             # Verify HNS rename was used
             expected_request = storage_control_v2.RenameFolderRequest(
@@ -471,10 +486,8 @@ class TestExtendedGcsFileSystemMv:
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
                 mock.call(path2),  # from exists(path2)
-                mock.call(
-                    f"{path2.rstrip('/')}/{dir_name}"
-                ),  # from exists(path2/dir_name)
-                mock.call(f"{path2.rstrip('/')}/{dir_name}/file.txt"),
+                mock.call(expected_dst),  # from exists(path2/dir_name)
+                mock.call(f"{expected_dst}/file.txt"),
             ]
             mocks["info"].assert_has_awaits(expected_info_calls)
 
@@ -1097,15 +1110,18 @@ class TestExtendedGcsFileSystemMvFile:
     @pytest.mark.asyncio
     async def test_mv_file_hns_replaces_cached_destination_entry(self):
         """Moving a file over an already-cached destination must not leave
-        duplicate or stale destination entries in the parent listing."""
+        duplicate or stale destination entries in the parent listing, while
+        preserving a same-named directory entry."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         parent = f"{TEST_HNS_BUCKET}/parent"
         src = f"{parent}/src.txt"
         dst = f"{parent}/dst.txt"
+        dst_dir = {"name": dst, "type": "directory"}
 
         fs.dircache[parent] = [
             {"name": src, "type": "file", "size": 1},
             {"name": dst, "type": "file", "size": 10},
+            dst_dir,
             {"name": f"{parent}/keep.txt", "type": "file", "size": 20},
         ]
 
@@ -1116,8 +1132,11 @@ class TestExtendedGcsFileSystemMvFile:
         entries = fs.dircache[parent]
         names = [e["name"] for e in entries]
         assert src not in names
-        assert names.count(dst) == 1
-        assert any(e["name"] == dst and e["size"] == 1 for e in entries)
+        assert [(e["name"], e["type"]) for e in entries].count((dst, "file")) == 1
+        assert any(
+            e["name"] == dst and e["type"] == "file" and e["size"] == 1 for e in entries
+        )
+        assert dst_dir in entries
         assert f"{parent}/keep.txt" in names
 
 
@@ -1384,13 +1403,19 @@ class TestExtendedGcsFileSystemCacheHelpers:
         parent = f"{TEST_HNS_BUCKET}/p"
         fs.dircache[parent] = [
             {"name": f"{parent}/a", "type": "file"},
+            {"name": f"{parent}/a", "type": "directory"},
             {"name": f"{parent}/b", "type": "file"},
             {"name": f"{parent}/c", "type": "file"},
         ]
 
-        fs._cache_drop_entries(parent, {f"{parent}/a", f"{parent}/c"})
+        fs._cache_drop_entries(
+            parent, {f"{parent}/a", f"{parent}/c"}, entry_type="file"
+        )
 
-        assert [e["name"] for e in fs.dircache[parent]] == [f"{parent}/b"]
+        assert fs.dircache[parent] == [
+            {"name": f"{parent}/a", "type": "directory"},
+            {"name": f"{parent}/b", "type": "file"},
+        ]
 
     def test_cache_drop_entries_noop_when_parent_uncached(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
@@ -1404,12 +1429,19 @@ class TestExtendedGcsFileSystemCacheHelpers:
     def test_cache_add_entry_appends_to_parent(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         parent = f"{TEST_HNS_BUCKET}/p"
-        fs.dircache[parent] = [{"name": f"{parent}/a", "type": "file"}]
-        entry = {"name": f"{parent}/b", "type": "file"}
+        existing = {"name": f"{parent}/a", "type": "directory", "metageneration": 7}
+        same_name_file = {"name": f"{parent}/a", "type": "file"}
+        new_entry = {"name": f"{parent}/b", "type": "file"}
+        fs.dircache[parent] = [existing]
 
-        fs._cache_add_entry(parent, entry)
+        # Same name and type: preserves existing entry (and its metadata).
+        fs._cache_add_entry(parent, {"name": f"{parent}/a", "type": "directory"})
+        # Same name but different type (file vs directory): appended.
+        fs._cache_add_entry(parent, same_name_file)
+        # New entry: appended.
+        fs._cache_add_entry(parent, new_entry)
 
-        assert entry in fs.dircache[parent]
+        assert fs.dircache[parent] == [existing, same_name_file, new_entry]
 
     def test_cache_add_entry_noop_when_parent_uncached(self):
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
@@ -1444,10 +1476,11 @@ class TestExtendedGcsFileSystemCacheHelpers:
         assert dst_child not in fs.dircache
         assert [e["name"] for e in fs.dircache[TEST_HNS_BUCKET]] == [dst]
 
-    def test_update_dircache_after_rename_strips_protocol(self):
-        """Protocol-qualified paths (``gs://...``) must mutate the same cache
-        keys/entries as stripped paths, since the dircache stores names without
-        the protocol. Without stripping, the pop/startswith matching no-ops."""
+    @pytest.mark.parametrize("trailing_slash", ["", "/"])
+    def test_update_dircache_after_rename_strips_protocol(self, trailing_slash):
+        """Protocol-qualified paths (``gs://...``) and trailing slashes must
+        mutate the same cache keys/entries as stripped paths, since the
+        dircache stores names without protocol or trailing slash."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         src = f"{TEST_HNS_BUCKET}/src"
         dst = f"{TEST_HNS_BUCKET}/dst"
@@ -1459,7 +1492,9 @@ class TestExtendedGcsFileSystemCacheHelpers:
         ]
 
         # Callers such as _mv pass the raw (protocol-qualified) paths through.
-        fs._update_dircache_after_rename(f"gs://{src}", f"gs://{dst}")
+        fs._update_dircache_after_rename(
+            f"gs://{src}{trailing_slash}", f"gs://{dst}{trailing_slash}"
+        )
 
         # Source and its descendants are dropped from the cache.
         assert src not in fs.dircache
@@ -1483,15 +1518,17 @@ class TestExtendedGcsFileSystemMkdir:
             request_id=FIXED_REQUEST_ID,
         )
 
-    def test_hns_mkdir_success(self, gcs_hns, gcs_hns_mocks):
-        """Test successful HNS folder creation."""
+    @pytest.mark.parametrize("trailing_slash", ["", "/"])
+    def test_hns_mkdir_success(self, gcs_hns, gcs_hns_mocks, trailing_slash):
+        """Test successful HNS folder creation and parent dircache update."""
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/new_mkdir_dir"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
+            gcsfs.dircache[TEST_HNS_BUCKET] = []
 
-            gcsfs.mkdir(dir_path)
+            gcsfs.mkdir(f"{dir_path}{trailing_slash}")
 
             mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_create_folder_request(dir_path)
@@ -1499,6 +1536,7 @@ class TestExtendedGcsFileSystemMkdir:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
             mocks["super_mkdir"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [dir_path]
 
     def test_hns_mkdir_nested_success_with_create_parents(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS folder creation for a nested path with create_parents=True."""
@@ -1514,6 +1552,10 @@ class TestExtendedGcsFileSystemMkdir:
                 raise FileNotFoundError
 
             mocks["info"].side_effect = mock_info
+            gcsfs.dircache[TEST_HNS_BUCKET] = [
+                {"name": parent_dir, "type": "directory"}
+            ]
+            gcsfs.dircache[parent_dir] = []
 
             gcsfs.mkdir(dir_path, create_parents=True)
 
@@ -1523,6 +1565,8 @@ class TestExtendedGcsFileSystemMkdir:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
             mocks["super_mkdir"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[parent_dir]] == [dir_path]
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [parent_dir]
 
     def test_hns_mkdir_nested_fails_if_create_parents_false(
         self, gcs_hns, gcs_hns_mocks
@@ -1812,7 +1856,8 @@ class TestExtendedGcsFileSystemMakedirs:
     def test_hns_makedirs_success(self, gcs_hns, gcs_hns_mocks):
         """Test successful HNS folder creation via makedirs."""
         gcsfs = gcs_hns
-        dir_path = f"{TEST_HNS_BUCKET}/new_dir/nested_dir"
+        parent_dir = f"{TEST_HNS_BUCKET}/new_dir"
+        dir_path = f"{parent_dir}/nested_dir"
 
         with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
             folder_exists = False
@@ -1827,6 +1872,7 @@ class TestExtendedGcsFileSystemMakedirs:
                 raise FileNotFoundError
 
             mocks["info"].side_effect = mock_info
+            gcsfs.dircache[TEST_HNS_BUCKET] = []
 
             assert not gcsfs.exists(dir_path)
             gcsfs.makedirs(dir_path)
@@ -1839,6 +1885,8 @@ class TestExtendedGcsFileSystemMakedirs:
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
             mocks["super_makedirs"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [parent_dir]
+            assert parent_dir not in gcsfs.dircache
 
     def test_hns_makedirs_existing_dir_exist_ok_true(self, gcs_hns, gcs_hns_mocks):
         """Test makedirs when folder already exists and exist_ok=True (no-op)."""
@@ -2718,7 +2766,8 @@ class TestExtendedGcsFileSystemRmdir:
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
-    def test_hns_rmdir_cache_invalidation(self, gcs_hns, gcs_hns_mocks):
+    @pytest.mark.parametrize("trailing_slash", ["", "/"])
+    def test_hns_rmdir_cache_invalidation(self, gcs_hns, gcs_hns_mocks, trailing_slash):
         """Test that HNS rmdir correctly invalidates and updates the cache."""
         gcsfs = gcs_hns
         base_dir = f"{TEST_HNS_BUCKET}/rmdir_cache_test"
@@ -2768,7 +2817,7 @@ class TestExtendedGcsFileSystemRmdir:
             bucket, key, _ = gcsfs.split_path(file_to_delete)
             gcsfs.call("DELETE", "b/{}/o/{}", bucket, key)
 
-            gcsfs.rmdir(dir_to_delete)
+            gcsfs.rmdir(f"{dir_to_delete}{trailing_slash}")
 
             # --- Post-Delete Cache Assertions ---
             # 1. The deleted directory should be removed from the cache.
@@ -2854,7 +2903,10 @@ class TestExtendedGcsFileSystemRmdir:
         placeholder_path = f"{folder_path}/"
         gcsfs.touch(placeholder_path)
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_rm_file", wraps=gcsfs._rm_file) as mock_rm_file,
+        ):
             mocks["info"].side_effect = [
                 {"type": "directory", "name": folder_path},  # from isdir
                 FileNotFoundError(folder_path),  # from exists after rm
@@ -2864,6 +2916,7 @@ class TestExtendedGcsFileSystemRmdir:
             gcsfs.rmdir(folder_path)
 
             assert not gcsfs.exists(folder_path)
+            mock_rm_file.assert_awaited_once_with(placeholder_path)
             # The bucket type is looked up both for the rmdir itself and for the
             # targeted cache update when the placeholder object is deleted via
             # _rm_file. The lookup is cached, so this is not an extra API call.
@@ -2874,11 +2927,37 @@ class TestExtendedGcsFileSystemRmdir:
             )
             mocks["super_rmdir"].assert_not_called()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("delete_placeholder", [True, False])
+    async def test_hns_rmdir_delete_placeholder_flag(
+        self, gcs_hns, gcs_hns_mocks, delete_placeholder
+    ):
+        """Tests that _hns_rmdir only awaits _rm_file for the placeholder when delete_placeholder=True."""
+        gcsfs = gcs_hns
+        folder_path = f"{TEST_HNS_BUCKET}/empty_dir"
+        mock_rm_file = mock.AsyncMock(side_effect=FileNotFoundError)
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_rm_file", new=mock_rm_file),
+        ):
+            await gcsfs._hns_rmdir(folder_path, delete_placeholder=delete_placeholder)
+
+            if delete_placeholder:
+                mock_rm_file.assert_awaited_once_with(f"{folder_path}/")
+            else:
+                mock_rm_file.assert_not_awaited()
+            mocks["control_client"].delete_folder.assert_called_once_with(
+                request=self._get_delete_folder_request(folder_path),
+                retry=mock.ANY,
+                timeout=mock.ANY,
+            )
+
 
 class TestExtendedGcsFileSystemRm:
     """Unit tests for the rm method in ExtendedGcsFileSystem."""
 
-    BATCH_SIZE = 20
+    BATCH_SIZE = 100
 
     def _get_delete_folder_request(self, gcsfs, dir_path):
         """Constructs a DeleteFolderRequest for testing."""
@@ -3260,6 +3339,62 @@ class TestExtendedGcsFileSystemRm:
 
             with pytest.raises(OSError, match="boom"):
                 gcsfs.rm([flat_file, hns_file])
+
+    @pytest.mark.parametrize(
+        "recursive, maxdepth, expected_batch_files, expected_rm_files, expected_folder_deletes",
+        [
+            (True, None, ["dir/sub/"], [], 2),
+            (True, 1, [], ["dir/sub/", "dir/"], 2),
+            (False, None, [], ["dir/"], 1),
+        ],
+    )
+    def test_rm_placeholder_delete_behavior(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+        recursive,
+        maxdepth,
+        expected_batch_files,
+        expected_rm_files,
+        expected_folder_deletes,
+    ):
+        """Test that placeholder deletion in _hns_rmdir is skipped only when recursive=True and maxdepth=None."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/dir"
+        sub_placeholder = f"{TEST_HNS_BUCKET}/dir/sub/"
+
+        mock_delete_files = mock.AsyncMock(return_value=[])
+        mock_rm_file = mock.AsyncMock(side_effect=FileNotFoundError)
+
+        with (
+            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+            mock.patch.object(gcsfs, "_rm_file", new=mock_rm_file),
+        ):
+            mocks["super_find"].return_value = {
+                sub_placeholder: {
+                    "name": sub_placeholder,
+                    "type": "file",
+                    "size": 0,
+                }
+            }
+            mocks["control_client"].list_folders.return_value = AsyncIter(
+                [get_mock_folder("dir"), get_mock_folder("dir/sub")]
+            )
+            mocks["info"].return_value = {"name": dir_path, "type": "directory"}
+
+            gcsfs.rm(dir_path, recursive=recursive, maxdepth=maxdepth)
+
+            assert mock_delete_files.await_args[0][0] == [
+                f"{TEST_HNS_BUCKET}/{k}" for k in expected_batch_files
+            ]
+            assert sorted(c.args[0] for c in mock_rm_file.await_args_list) == sorted(
+                f"{TEST_HNS_BUCKET}/{k}" for k in expected_rm_files
+            )
+            assert (
+                mocks["control_client"].delete_folder.call_count
+                == expected_folder_deletes
+            )
 
 
 @pytest.mark.asyncio

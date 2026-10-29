@@ -88,31 +88,40 @@ class HnsDirCacheUpdater(DirCacheUpdater):
     :meth:`DirCacheUpdater._write_file_cache_update`.
     """
 
-    def _cache_drop_entries(self, parent, names):
-        """Remove entries whose ``name`` is in ``names`` from ``parent``'s
-        cached listing. No-op when ``parent`` is not cached.
+    def _cache_drop_entries(self, parent, names, entry_type="file"):
+        """Remove entries of ``entry_type`` whose ``name`` is in ``names`` from
+        ``parent``'s cached listing. No-op when ``parent`` is not cached.
 
         ``names`` is a set of stripped ``bucket/key`` names matching the
         ``name`` field of the cached entries.
         """
         if parent in self.dircache:
             self.dircache[parent] = [
-                e for e in self.dircache[parent] if e.get("name") not in names
+                e
+                for e in self.dircache[parent]
+                if not (e.get("name") in names and e.get("type") == entry_type)
             ]
 
     def _cache_add_entry(self, parent, entry):
-        """Append ``entry`` to ``parent``'s cached listing. No-op when
-        ``parent`` is not cached."""
+        """Append ``entry`` to ``parent``'s cached listing if not already
+        present. No-op when ``parent`` is not cached."""
         if parent in self.dircache:
-            self.dircache[parent].append(entry)
+            name, entry_type = entry.get("name"), entry.get("type")
+            if not any(
+                e.get("name") == name and e.get("type") == entry_type
+                for e in self.dircache[parent]
+            ):
+                self.dircache[parent].append(entry)
 
     def _cache_upsert_entry(self, parent, entry):
-        """Replace any cached entry with the same name before appending
-        ``entry``. No-op when ``parent`` is not cached."""
+        """Replace any cached entry with the same name and type before
+        appending ``entry``. No-op when ``parent`` is not cached."""
         if parent in self.dircache:
-            name = entry.get("name")
+            name, entry_type = entry.get("name"), entry.get("type")
             self.dircache[parent] = [
-                e for e in self.dircache[parent] if e.get("name") != name
+                e
+                for e in self.dircache[parent]
+                if not (e.get("name") == name and e.get("type") == entry_type)
             ]
             self.dircache[parent].append(entry)
 
@@ -129,6 +138,28 @@ class HnsDirCacheUpdater(DirCacheUpdater):
             "storageClass": "DIRECTORY",
         }
 
+    def _update_dircache_after_mkdir(self, path, create_parents=False):
+        """
+        Update cached parent (and ancestor) listings after creating an HNS
+        folder at ``path``.
+
+        When ``create_parents=True``, intermediate ancestor folders may also
+        have been created, so walk up to the bucket root and add any missing
+        folder entries to already-cached ancestor listings.
+        """
+        cur_path = self._strip_protocol(path).rstrip("/")
+        _, cur_key, _ = self.split_path(cur_path)
+        while cur_key:
+            parent_path = self._parent(cur_path)
+            self._cache_add_entry(
+                parent_path,
+                self._directory_cache_entry(cur_path, cur_key),
+            )
+            if not create_parents:
+                break
+            cur_path = parent_path
+            cur_key = self._parent(cur_key)
+
     def _update_dircache_after_rename(self, path1, path2):
         """
         Performs a targeted update of the directory cache after a successful
@@ -143,24 +174,24 @@ class HnsDirCacheUpdater(DirCacheUpdater):
             path1 (str): The source path that was renamed.
             path2 (str): The destination path.
         """
-        # dircache keys and entry names are stored without the protocol, so
-        # normalize the incoming paths first; otherwise the pop/startswith
-        # matching below silently misses every cached entry for a ``gs://`` path.
-        path1 = self._strip_protocol(path1)
-        path2 = self._strip_protocol(path2)
+        # dircache keys and entry names are stored without the protocol or
+        # trailing slash, so normalize the incoming paths first; otherwise the
+        # pop/startswith/_parent matching below silently misses cached entries.
+        path1 = self._strip_protocol(path1).rstrip("/")
+        path2 = self._strip_protocol(path2).rstrip("/")
 
         # 1. Find and remove all descendant paths of the source from the cache.
-        source_prefix = f"{path1.rstrip('/')}/"
+        source_prefix = f"{path1}/"
         for key in list(self.dircache):
             if key.startswith(source_prefix):
                 self.dircache.pop(key, None)
 
         # 2. Remove the old source entry from its parent's listing.
         self.dircache.pop(path1, None)
-        self._cache_drop_entries(self._parent(path1), {path1})
+        self._cache_drop_entries(self._parent(path1), {path1}, entry_type="directory")
 
         # 3. Invalidate the destination path/subtree and update its parent's cache.
-        dest_prefix = f"{path2.rstrip('/')}/"
+        dest_prefix = f"{path2}/"
         for key in list(self.dircache):
             if key == path2 or key.startswith(dest_prefix):
                 self.dircache.pop(key, None)
@@ -188,7 +219,9 @@ class HnsDirCacheUpdater(DirCacheUpdater):
         if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
             # Source: removing the entry never changes an ancestor's listing, so
             # drop it in place.
-            self._cache_drop_entries(self._parent(path1), {self._strip_protocol(path1)})
+            self._cache_drop_entries(
+                self._parent(path1), {self._strip_protocol(path1)}, entry_type="file"
+            )
             dest_parent = self._parent(path2)
             if response and dest_parent in self.dircache:
                 # Destination parent is already cached (so it existed before the
@@ -244,7 +277,7 @@ class HnsDirCacheUpdater(DirCacheUpdater):
                 non_hns_paths.append(path)
 
         for parent, removed_names in removed_names_by_parent.items():
-            self._cache_drop_entries(parent, removed_names)
+            self._cache_drop_entries(parent, removed_names, entry_type="file")
 
         if non_hns_paths:
             await super()._rm_files_cache_update(non_hns_paths)

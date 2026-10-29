@@ -60,6 +60,8 @@ def run_checkpoint_case(
         with monitor() as m:
             result = driver.run(prefix, params)
         window_end = time.time()
+        if getattr(result, "verify", None) is not None:
+            result.verify()
 
         # Measure actual GCS files
         physical_size_bytes = 0
@@ -72,7 +74,7 @@ def run_checkpoint_case(
 
             # Sum up the checkpoint size
             checkpoint_files = {
-                p: info for p, info in all_files.items() if "model.ckpt" in p
+                p: info for p, info in all_files.items() if driver.is_checkpoint_file(p)
             }
             physical_size_bytes = sum(
                 info["size"] for info in checkpoint_files.values()
