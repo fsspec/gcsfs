@@ -426,6 +426,34 @@ def test_open_write_modes_use_zonal_file_on_rcu(
     assert zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"] == "RAPID"
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_write_mode_warns_on_ignored_upload_params(
+    extended_gcsfs, zonal_write_mocks, file_path, caplog
+):
+    """Write modes warn when upload parameters the appendable writer ignores are set."""
+    with caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"):
+        with extended_gcsfs.open(
+            file_path,
+            "wb",
+            finalize_on_close=True,
+            metadata={"k": "v"},
+            kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+        ):
+            pass
+    assert any(
+        "These parameters will be ignored" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"):
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True):
+            pass
+    assert not any(
+        "These parameters will be ignored" in r.message for r in caplog.records
+    )
+
+
 def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that flush calls the underlying writer's flush method."""
     with extended_gcsfs.open(file_path, "wb") as f:
@@ -539,7 +567,7 @@ def test_zonal_file_discard(extended_gcsfs, zonal_write_mocks, file_path):
             f.discard()
         mock_logger.warning.assert_called_once()
         assert (
-            "Discard is not applicable for Zonal Buckets"
+            "Discard is not applicable for Zonal and RCU buckets"
             in mock_logger.warning.call_args[0][0]
         )
 
