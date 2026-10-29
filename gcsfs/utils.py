@@ -20,7 +20,10 @@ def is_empty_range(start: int | None, end: int | None, size: int | None = None) 
     # In Python slicing, omitting start (start is None) defaults to index 0 (e.g. [:end])
     start = start or 0
 
-    # Negative offsets without known size cannot be evaluated yet
+    if start == end:
+        return True
+
+    # Other negative offsets without known size cannot be evaluated yet
     if start < 0 or end < 0:
         return False
 

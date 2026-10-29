@@ -15,6 +15,8 @@ from gcsfs.utils import is_empty_range
         (0, -1, None, False, "Negative end with unknown size (deferred)"),
         (-10, None, None, False, "Negative start with unknown size (deferred)"),
         (-10, -5, None, False, "Negative range with unknown size (deferred)"),
+        (-1, -1, None, True, "Equal negative bounds without size"),
+        (-10, -10, None, True, "Equal negative bounds beyond a short file"),
         # Zero size
         (None, None, 0, True, "Full file read of 0-byte file"),
         (0, 10, 0, True, "Read slice of 0-byte file"),
