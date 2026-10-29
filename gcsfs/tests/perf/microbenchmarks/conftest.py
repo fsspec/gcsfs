@@ -100,6 +100,7 @@ def _prepare_files_gcloud(file_paths, file_size):
         with tempfile.TemporaryDirectory(prefix="gcsfs-bench-prep-") as tmpdir:
             env = {
                 **os.environ,
+                "CLOUDSDK_STORAGE_BIDI_STREAMING_FINALIZE_WRITES": "True",
                 "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED": "True",
                 "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_THRESHOLD": "50M",
                 "CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_COMPONENT_SIZE": "50M",
@@ -581,6 +582,16 @@ def pytest_benchmark_generate_json(config, benchmarks, machine_info, commit_info
             del bench.extra_info["mean_run"]
             del bench.extra_info["median_run"]
             del bench.extra_info["stddev_run"]
+
+    # Filter out benchmarks interrupted before completing all rounds (e.g. by
+    # pytest-timeout, which raises a BaseException subclass and leaves
+    # bench.has_error=False with partial or empty bench.stats.data).
+    benchmarks[:] = [
+        b
+        for b in benchmarks
+        if b.stats
+        and len(getattr(b.stats, "data", None) or ()) >= b.extra_info.get("rounds", 1)
+    ]
 
 
 def publish_benchmark_extra_info(
