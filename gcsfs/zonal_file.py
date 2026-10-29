@@ -107,10 +107,19 @@ class ZonalFile(GCSFile):
                     "This may result in incorrect behavior for unfinalized objects."
                 )
         elif "w" in self.mode or "a" in self.mode or "x" in self.mode:
-            pass
+            if (
+                metadata
+                or fixed_key_metadata
+                or kms_key_name
+                or (content_type and content_type != "application/octet-stream")
+            ):
+                logger.warning(
+                    "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
+                    "or kms_key_name during upload. These parameters will be ignored."
+                )
         else:
             raise NotImplementedError(
-                "Only read, write and append operations are currently supported for Zonal buckets."
+                "Only read, write and append operations are currently supported for Zonal and RCU buckets."
             )
 
         super().__init__(
@@ -328,9 +337,9 @@ class ZonalFile(GCSFile):
         self.finalize_on_close = False
 
     def discard(self):
-        """Discard is not applicable for Zonal Buckets. Log a warning instead."""
+        """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""
         logger.warning(
-            "Discard is not applicable for Zonal Buckets. \
+            "Discard is not applicable for Zonal and RCU buckets. \
             Data is uploaded via streaming and cannot be cancelled."
         )
 
