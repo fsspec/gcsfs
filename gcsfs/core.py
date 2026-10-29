@@ -22,7 +22,6 @@ from datetime import datetime, timedelta
 from glob import has_magic
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
-from urllib.parse import urlsplit
 
 import aiohttp
 import fsspec
@@ -1479,7 +1478,14 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     async def _merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
         bucket, key, generation = self.split_path(path)
-        source = [{"name": self.split_path(p)[1]} for p in paths]
+        if generation is not None:
+            raise ValueError("Cannot write to specific object generation")
+        source = []
+        for p in paths:
+            _, source_key, source_generation = self.split_path(p)
+            if source_generation is not None:
+                raise ValueError("Cannot merge from a specific object generation")
+            source.append({"name": source_key})
         await self._call(
             "POST",
             "b/{}/o/{}/compose",
@@ -1811,6 +1817,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
+        if generation is not None:
+            raise ValueError("Cannot write to specific object generation")
         if_generation_match = _resolve_generation_match(mode, if_generation_match)
         size = len(data)
         out = None
@@ -2390,11 +2398,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         ----------
         path : string
             Input path, like `gcs://mybucket/path/to/file`.
-            Path is of the form: '[gs|gcs://]bucket[/key][?querystring][#fragment]'
+            Everything after the bucket delimiter is an object key, not a URL.
 
-        GCS allows object generation (object version) to be specified in either
-        the URL fragment or the `generation` query parameter. When provided,
-        the fragment will take priority over the `generation` query parameter.
+        With version awareness enabled, a valid integer after the last ``#``
+        selects an object generation and takes precedence over the first
+        ``generation`` query value. Query parameters begin at the first ``?``;
+        keys containing a literal ``?`` can use the ``#generation`` form.
+        Invalid generation values remain part of the key. A valid query also
+        accepts an empty trailing ``#``. With version awareness disabled, the
+        entire key is returned literally.
 
         Returns
         -------
@@ -2407,22 +2419,29 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         key = keypart
         generation = None
         if version_aware:
-            parts = urlsplit(keypart)
-            try:
-                if parts.fragment:
-                    generation = parts.fragment
-                elif parts.query:
-                    parsed = parse_qs(parts.query)
-                    if "generation" in parsed:
-                        generation = parsed["generation"][0]
-                # Sanity check whether this could be a valid generation ID. If
-                # it is not, assume that # or ? characters are supposed to be
-                # part of the object name.
-                if generation is not None:
-                    int(generation)
-                    key = parts.path
-            except ValueError:
-                generation = None
+            fragment_key, separator, fragment = keypart.rpartition("#")
+            if separator:
+                try:
+                    int(fragment)
+                except ValueError:
+                    pass
+                else:
+                    key, generation = fragment_key, fragment
+
+            # A valid fragment is already stripped. An empty trailing fragment
+            # is also ignored when a query supplies the generation.
+            query_path = key if generation is not None else keypart.removesuffix("#")
+            query_key, _, query = query_path.partition("?")
+            values = parse_qs(query).get("generation", [])
+            if values:
+                try:
+                    int(values[0])
+                except ValueError:
+                    pass
+                else:
+                    key = query_key
+                    if generation is None:
+                        generation = values[0]
         return (
             bucket,
             key,
@@ -2648,6 +2667,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         if not key:
             raise OSError("Attempt to open a bucket")
         self.generation = _coalesce_generation(generation, path_generation)
+        if self.generation is not None and mode in {"wb", "xb", "ab"}:
+            raise ValueError("Cannot write to specific object generation")
         self.if_generation_match = _resolve_open_generation_match(
             mode, if_generation_match
         )
