@@ -738,7 +738,7 @@ def test_sync_wrapper_propagates_context_to_background_loop_thread(detector):
 # ============================================================================
 
 
-def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
+def test_all_parent_methods_telemetry_coverage(mock_gcs_harness, tmp_path, monkeypatch):
     """
     Concise verification that ALL inherited and overridden FileSystem and File
     methods correctly propagate the caller framework in outgoing User-Agent headers.
@@ -751,6 +751,26 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
             f.write(b"data\n")
             f.writelines([b"data2\n"])
             f.flush()
+
+    def _get_file_concurrent_helper(filesystem):
+        monkeypatch.setattr(filesystem, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
+
+        async def _zero_threshold(bucket):
+            return 0
+
+        monkeypatch.setattr(
+            filesystem, "_get_threshold_for_disk_reads", _zero_threshold
+        )
+        filesystem.get_file(
+            "test-bucket/file.txt",
+            str(tmp_path / "downloaded.bin"),
+            concurrency=2,
+            chunk_size=10,
+        )
+
+    def _read_file_helper(filesystem):
+        with filesystem.open("test-bucket/file.txt", "rb") as f:
+            return f.read(5)
 
     fs_operations = [
         ("ls", lambda: fs.ls("test-bucket")),
@@ -769,8 +789,9 @@ def test_all_parent_methods_telemetry_coverage(mock_gcs_harness):
         ("write_bytes", lambda: fs.write_bytes("test-bucket/file.txt", b"data")),
         ("write_text", lambda: fs.write_text("test-bucket/file.txt", "data")),
         ("buckets", lambda: fs.buckets),
-        ("open_read", lambda: fs.open("test-bucket/file.txt", "rb").read(5)),
+        ("open_read", lambda: _read_file_helper(fs)),
         ("open_write", lambda: _write_file_helper(fs)),
+        ("get_file_concurrent", lambda: _get_file_concurrent_helper(fs)),
     ]
 
     for name, op in fs_operations:
@@ -849,12 +870,13 @@ async def test_async_fetch_range_propagates_caller_framework():
 
 
 def test_defer_close_propagates_caller_framework():
-    """Verify that background deferred close inherits the framework context."""
+    """Verify that background deferred close worker thread inherits the file's framework context."""
     import unittest.mock as mock
 
     import gcsfs
-    from gcsfs.telemetry.wrapper import _file_telemetry_wrapper
+    from gcsfs.core import _defer_close
 
+    done = threading.Event()
     captured_context = {}
 
     fs = mock.MagicMock()
@@ -863,44 +885,50 @@ def test_defer_close_propagates_caller_framework():
         f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "wb")
 
     f.caller_framework = "ray"
+    f.buffer.write(b"x")
 
-    def mock_upload_chunk(self, final=False):
+    def mock_upload_chunk(final=False):
         captured_context.update(get_telemetry_context())
+        done.set()
+        return True
 
-    f._upload_chunk = _file_telemetry_wrapper(mock_upload_chunk).__get__(f)
+    f._initiate_upload = lambda: None
+    f._upload_chunk = mock_upload_chunk
+    _defer_close(f)
 
-    t = threading.Thread(target=lambda: f._upload_chunk(final=True))
-    t.start()
-    t.join()
-
+    assert done.wait(timeout=5.0)
     assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
-    f.closed = True
 
 
-def test_subclass_polymorphism_and_mocking(monkeypatch):
-    """Verify that class-level sync wrappers dynamically dispatch to subclass overrides and monkeypatches."""
+@pytest.mark.asyncio
+async def test_gcsfs_native_async_and_super_resolution(mock_gcs_harness, monkeypatch):
+    """Verify native async GCSFileSystem methods and super() resolution on inherited AsyncFileSystem methods."""
+    from unittest import mock
+
     from gcsfs.core import GCSFileSystem
 
-    class CustomGCSFileSystem(GCSFileSystem):
-        async def _ls(self, path, detail=False, **kwargs):
-            return [f"subclass:{path}"]
+    fs = mock_gcs_harness.fs
+    mock_gcs_harness.clear()
 
-        async def _walk(self, path, maxdepth=None, **kwargs):
-            yield (f"subclass_walk:{path}", [], ["file.txt"])
+    token = set_telemetry_context(Dimension.FRAMEWORK, "jax")
+    try:
+        res = await fs._cat(["test-bucket/f1.txt", "test-bucket/f2.txt"])
+        assert len(res) == 2
+        assert len(mock_gcs_harness.user_agents) >= 2
+        assert all("fw/jax" in ua for ua in mock_gcs_harness.user_agents)
+    finally:
+        reset_telemetry_context(token)
 
-    sub_fs = CustomGCSFileSystem(
-        token="anon", project="test-project", skip_instance_cache=True
-    )
-    assert sub_fs.ls("my-bucket") == ["subclass:my-bucket"]
-    assert list(sub_fs.walk("my-bucket")) == [
-        ("subclass_walk:my-bucket", [], ["file.txt"])
-    ]
+    class SubGCSFS(GCSFileSystem):
+        async def _cat_ranges(self, paths, starts, ends, **kwargs):
+            return await super()._cat_ranges(paths, starts, ends, **kwargs)
 
-    # Verify monkeypatch on GCSFileSystem._cat_file intercepts fs.cat_file()
-    fs = GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
-
-    async def mocked_cat_file(self, path, start=None, end=None, **kwargs):
-        return f"mocked:{path}".encode()
-
-    monkeypatch.setattr(GCSFileSystem, "_cat_file", mocked_cat_file)
-    assert fs.cat_file("my-bucket/obj.txt") == b"mocked:my-bucket/obj.txt"
+    sub_fs = SubGCSFS(token="anon", project="test-project", skip_instance_cache=True)
+    with mock.patch(
+        "fsspec.asyn.AsyncFileSystem._cat_ranges",
+        new_callable=mock.AsyncMock,
+        return_value=[b"patched"],
+    ) as mock_super:
+        out = await sub_fs._cat_ranges(["test-bucket/f1.txt"], [0], [5])
+        assert out == [b"patched"]
+        mock_super.assert_awaited_once()
