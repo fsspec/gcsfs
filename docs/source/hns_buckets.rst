@@ -87,6 +87,17 @@ Before routing directory-level or file-level operations, the ``ExtendedGcsFileSy
 * **Non-Caching of UNKNOWN:** If the bucket type detection returns ``UNKNOWN`` (for instance, due to transient network failures), it is **intentionally not cached**. This ensures that transient lookup failures do not permanently degrade HNS or Zonal performance.
 * **Fallback Behavior:** If the bucket type is flagged as ``UNKNOWN``, the filesystem gracefully falls back to standard flat-namespace GCS operations without raising an error. The filesystem will retry the lookup on subsequent requests, allowing it to automatically adopt HNS/Zonal optimizations if the issue resolves.
 
+Waiting for Folder Renames
+--------------------------
+
+A folder rename runs as a long-running operation on the server. ``ExtendedGcsFileSystem`` checks its status every 0.2 s at first, then waits about 20% of the elapsed time between checks (at most 30 s, with random jitter), and backs off when status checks keep failing with transient errors. If the rename has not finished after 300 s, ``mv`` raises ``TimeoutError``; the rename may still complete on the server, so check the destination before retrying.
+
+To wait with ``google-api-core``'s ``operation.result()`` instead, pass ``fast_lro_polling=False``, or set it through the ``fsspec`` configuration. In this mode ``mv`` has no time limit, status checks follow ``google-api-core``'s retry rules, and cancelling ``mv`` does not cancel the rename on the server. For example:
+
+.. code-block:: bash
+
+    export FSSPEC_GCS_FAST_LRO_POLLING=false
+
 Disabling HNS Support
 ------------------------------
 

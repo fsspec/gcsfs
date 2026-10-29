@@ -38,6 +38,7 @@ from gcsfs.core import (
     _location,
     _resolve_generation_match,
 )
+from gcsfs.poller import poll_lro, unwrap_operation_result
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import MRD_MAX_RANGES, DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -46,6 +47,22 @@ logger = logging.getLogger("gcsfs")
 
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
+_HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
+
+
+def _parse_bool(value, name):
+    """Returns ``value`` as a bool, accepting the strings fsspec config can pass."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
 
 
 class BucketType(Enum):
@@ -123,6 +140,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         finalize_on_close=False,
         mrd_pool_cache_size=16,
         max_mrd_pool_cache_queue_size=16,
+        fast_lro_polling=True,
         **kwargs,
     ):
         """
@@ -134,6 +152,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Maximum number of idle pools to retain in the cache.
         max_mrd_pool_cache_queue_size : int, default 16
             Maximum number of idle MRDs per key in the cache.
+        fast_lro_polling : bool, default True
+            Wait for HNS folder renames with gcsfs's own poller, which checks
+            often early on and gives up after a timeout. Set to False (or set
+            ``FSSPEC_GCS_FAST_LRO_POLLING=false``) to wait with
+            ``operation.result()`` from google-api-core instead. That wait
+            has no time limit and does not cancel the rename on the server
+            if ``mv`` is cancelled.
         **kwargs : dict
             Additional arguments passed to GCSFileSystem.
             Supports retry configuration overrides for Storage Control API:
@@ -143,6 +168,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             - retry_multiplier: Multiplier for delay between retries.
             These map to `google.api_core.retry.AsyncRetry` arguments (without 'retry_' prefix).
         """
+        self.fast_lro_polling = _parse_bool(fast_lro_polling, "fast_lro_polling")
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -1071,6 +1097,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
 
+    async def _wait_for_folder_rename(self, operation, path1, path2, request_id):
+        """Waits for a RenameFolder operation with poll_lro; raises TimeoutError on timeout."""
+        try:
+            await poll_lro(operation, timeout=_HNS_RENAME_FOLDER_LRO_TIMEOUT)
+        except asyncio.TimeoutError as e:
+            op_name = operation.operation.name or request_id
+            raise TimeoutError(
+                f"HNS folder rename from '{path1}' to '{path2}' (op: {op_name}) "
+                f"did not finish within {_HNS_RENAME_FOLDER_LRO_TIMEOUT:g}s. The rename "
+                "may still complete on the server; check the destination before "
+                "retrying."
+            ) from e
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
@@ -1103,6 +1142,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
             return await super()._mv(path1, path2, **kwargs)
 
+        rename_submitted = False
         try:
             info1 = await self._info(path1)
             is_folder = info1.get("type") == "directory"
@@ -1129,10 +1169,30 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     retry=self._get_retry_config(),
                     timeout=STORAGE_CONTROL_RPC_TIMEOUT,
                 )
-                await operation.result()
-                self._update_dircache_after_rename(
-                    path1, f"{bucket2}/{destination_folder_id.rstrip('/')}"
-                )
+                rename_submitted = True
+                try:
+                    if self.fast_lro_polling:
+                        await self._wait_for_folder_rename(
+                            operation, path1, path2, request.request_id
+                        )
+                    else:
+                        await unwrap_operation_result(operation)
+                    self._update_dircache_after_rename(
+                        path1, f"{bucket2}/{destination_folder_id.rstrip('/')}"
+                    )
+                except BaseException as e:
+                    # The rename may still be running or may already have
+                    # finished, so cached listings can't be trusted.
+                    self.invalidate_cache(path1)
+                    self.invalidate_cache(path2)
+                    logger.warning(
+                        "HNS rename '%s' -> '%s' did not complete (op: %s): %r",
+                        path1,
+                        path2,
+                        operation.operation.name or request.request_id,
+                        e,
+                    )
+                    raise
 
                 logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
@@ -1157,6 +1217,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 ) from e
             if isinstance(e, api_exceptions.FailedPrecondition):
                 raise OSError(f"HNS rename failed: {e}") from e
+            if rename_submitted:
+                # Fall back to copy-and-delete only when the server operation failed,
+                # because after a timeout or cache error the server move may be
+                # active or complete.
+                if not (
+                    operation.operation.done and operation.operation.HasField("error")
+                ):
+                    raise
 
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import shlex
@@ -19,6 +20,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 
 from gcsfs import GCSFileSystem
 from gcsfs.extended_gcsfs import BucketType
+from gcsfs.tests.lro_fakes import FakeLroFactory
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
@@ -598,6 +600,40 @@ def zonal_write_mocks():
             "_gcsfs_info": mock_gcsfs_info,
         }
         yield mocks
+
+
+@pytest.fixture
+def fake_lro():
+    """Factory for LRO test doubles (see gcsfs/tests/lro_fakes.py)."""
+    return FakeLroFactory()
+
+
+class FakeClock:
+    """Virtual clock for ``gcsfs.poller``: sleeps return at once and advance ``now``."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+        # Yield like asyncio.sleep, so a pending cancel is delivered here.
+        await asyncio.sleep(0)
+
+    def patch(self, monkeypatch) -> "FakeClock":
+        monkeypatch.setattr("gcsfs.poller._monotonic", self.time)
+        monkeypatch.setattr("gcsfs.poller._sleep", self.sleep)
+        return self
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """Virtual clock for gcsfs.poller's polling loop."""
+    return FakeClock().patch(monkeypatch)
 
 
 @pytest.fixture
