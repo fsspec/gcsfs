@@ -23,10 +23,12 @@ from gcsfs.tests import layouts
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
+    TEST_HNS_RCU_BUCKET,
     TEST_HNS_REQUESTER_PAYS_BUCKET,
     TEST_PROJECT,
     TEST_REGION,
     TEST_REQUESTER_PAYS_BUCKET,
+    TEST_STANDARD_RCU_BUCKET,
     TEST_VERSIONED_BUCKET,
     TEST_ZONAL_BUCKET,
 )
@@ -104,6 +106,12 @@ BUCKET_NAME_MAP = {
     "regional": TEST_BUCKET,
     "zonal": TEST_ZONAL_BUCKET,
     "hns": TEST_HNS_BUCKET,
+    "standard_rcu_z": TEST_STANDARD_RCU_BUCKET,
+    "standard_rcu_warm": TEST_STANDARD_RCU_BUCKET,
+    "standard_rcu_cold": TEST_STANDARD_RCU_BUCKET,
+    "hns_rcu_z": TEST_HNS_RCU_BUCKET,
+    "hns_rcu_warm": TEST_HNS_RCU_BUCKET,
+    "hns_rcu_cold": TEST_HNS_RCU_BUCKET,
 }
 
 

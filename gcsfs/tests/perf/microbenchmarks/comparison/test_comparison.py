@@ -14,7 +14,10 @@ from gcsfs.tests.perf.microbenchmarks.comparison.configs import (
 )
 from gcsfs.tests.perf.microbenchmarks.conftest import (
     MB,
+    _is_rcu_warm,
+    _is_rcu_z,
     _prepare_files,
+    _warm_rcu_files,
     _write_local_file,
     publish_benchmark_extra_info,
     publish_resource_metrics,
@@ -192,7 +195,14 @@ def gcsfs_benchmark_comparison_download_large(extended_gcs_factory, request):
     )
     try:
         start_time = time.perf_counter()
-        _prepare_files(gcs, [remote_path], params.file_size_bytes)
+        _prepare_files(
+            gcs,
+            [remote_path],
+            params.file_size_bytes,
+            bucket_type=params.bucket_type,
+        )
+        if _is_rcu_warm(params.bucket_type):
+            _warm_rcu_files(extended_gcs_factory, [remote_path], params.file_size_bytes)
         duration_ms = (time.perf_counter() - start_time) * 1000
         logging.info(f"Remote test object created in {duration_ms:.2f} ms.")
 
@@ -222,7 +232,14 @@ def gcsfs_benchmark_comparison_download_small(extended_gcs_factory, request):
     )
     try:
         start_time = time.perf_counter()
-        _prepare_files(gcs, file_paths, params.file_size_bytes)
+        _prepare_files(
+            gcs,
+            file_paths,
+            params.file_size_bytes,
+            bucket_type=params.bucket_type,
+        )
+        if _is_rcu_warm(params.bucket_type):
+            _warm_rcu_files(extended_gcs_factory, file_paths, params.file_size_bytes)
         duration_ms = (time.perf_counter() - start_time) * 1000
         logging.info(f"Remote test files created in {duration_ms:.2f} ms.")
 
@@ -313,6 +330,14 @@ upload_large_cases = [
 ]
 upload_small_cases = [
     c for c in all_benchmark_cases if c.scenario == "upload_small_files"
+]
+# gcloud storage cp only uses RAPID appendable writes on zonal buckets; on RCU
+# buckets it uploads STANDARD regional objects over HTTP.
+gcloud_upload_large_cases = [
+    c for c in upload_large_cases if not _is_rcu_z(c.bucket_type)
+]
+gcloud_upload_small_cases = [
+    c for c in upload_small_cases if not _is_rcu_z(c.bucket_type)
 ]
 
 
@@ -568,7 +593,7 @@ def test_upload_large_file_gcsfs_open_write(
 @gcloud_required
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_upload_large",
-    upload_large_cases,
+    gcloud_upload_large_cases,
     indirect=True,
     ids=lambda p: p.name,
 )
@@ -635,7 +660,7 @@ def test_upload_small_files_gcsfs_pipe(
 @gcloud_required
 @pytest.mark.parametrize(
     "gcsfs_benchmark_comparison_upload_small",
-    upload_small_cases,
+    gcloud_upload_small_cases,
     indirect=True,
     ids=lambda p: p.name,
 )

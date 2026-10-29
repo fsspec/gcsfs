@@ -1,4 +1,6 @@
 import contextlib
+import inspect
+import itertools
 import logging
 import multiprocessing
 import os
@@ -38,6 +40,23 @@ def filter_test_cases(all_cases):
     return single_threaded, multi_threaded, multi_process
 
 
+def _accepts_round_num(fn) -> bool:
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        p
+        for p in sig.parameters.values()
+        if p.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    return len(positional) >= 4
+
+
 def run_single_threaded(
     benchmark,
     monitor_cls,
@@ -47,6 +66,7 @@ def run_single_threaded(
     benchmark_group,
     total_bytes=None,
     operations_per_round=None,
+    round_args_builder=None,
 ):
     """Runs a single-threaded benchmark.
 
@@ -55,13 +75,23 @@ def run_single_threaded(
         operations_per_round: Number of filesystem operations ``func`` performs
             per round. When given, the HTTP calls gcsfs issues are counted and
             reported as ``requests_per_op``.
+        round_args_builder: Optional ``(round_num) -> tuple`` hook invoked outside
+            the timed region before each round (e.g. to rotate ``*_rcu_cold`` paths).
     """
     publish_benchmark_extra_info(
         benchmark, params, benchmark_group, total_bytes=total_bytes
     )
 
     with monitor_cls() as m, _optional_request_counter(operations_per_round) as counter:
-        benchmark.pedantic(func, rounds=params.rounds, args=args)
+        if round_args_builder is None:
+            benchmark.pedantic(func, rounds=params.rounds, args=args)
+        else:
+            round_counter = itertools.count()
+            benchmark.pedantic(
+                func,
+                setup=lambda: (round_args_builder(next(round_counter)), {}),
+                rounds=params.rounds,
+            )
 
     publish_request_metrics(
         benchmark, counter, (operations_per_round or 0) * params.rounds
@@ -70,7 +100,13 @@ def run_single_threaded(
 
 
 def run_single_threaded_fixed_duration(
-    benchmark, monitor_cls, params, func, args, benchmark_group
+    benchmark,
+    monitor_cls,
+    params,
+    func,
+    args,
+    benchmark_group,
+    round_args_builder=None,
 ):
     """Runs a single-threaded benchmark for a fixed duration (runtime) over multiple rounds."""
     publish_benchmark_extra_info(benchmark, params, benchmark_group)
@@ -81,8 +117,13 @@ def run_single_threaded_fixed_duration(
             logging.info(
                 f"Single-threaded {benchmark_group} benchmark: Starting round {round_num + 1}/{params.rounds}."
             )
+            round_args = (
+                round_args_builder(round_num)
+                if round_args_builder is not None
+                else args
+            )
             # The func itself is expected to run for params.runtime and return total bytes
-            bytes_this_round = func(*args)
+            bytes_this_round = func(*round_args)
             total_bytes_per_round.append(bytes_this_round)
 
     publish_fixed_duration_benchmark_extra_info(
@@ -103,6 +144,7 @@ def run_multi_threaded(
     benchmark_group,
     total_bytes=None,
     operations_per_round=None,
+    round_args_builder=None,
 ):
     """
     Runs a multi-threaded benchmark.
@@ -114,22 +156,36 @@ def run_multi_threaded(
         operations_per_round: Total filesystem operations performed across all
             threads per round. When given, the HTTP calls gcsfs issues are
             counted and reported as ``requests_per_op``.
+        round_args_builder: Optional ``(round_num) -> list[tuple]`` hook invoked
+            outside the timed region before each round.
     """
     publish_benchmark_extra_info(
         benchmark, params, benchmark_group, total_bytes=total_bytes
     )
+
+    current_args_list = [args_list]
 
     def workload():
         logging.info(
             f"Multi-threaded {benchmark_group} benchmark: Starting benchmark round."
         )
         with ThreadPoolExecutor(max_workers=params.threads) as executor:
-            futures = [executor.submit(worker_func, *args) for args in args_list]
+            futures = [
+                executor.submit(worker_func, *args) for args in current_args_list[0]
+            ]
             for f in futures:
                 f.result()
 
     with monitor_cls() as m, _optional_request_counter(operations_per_round) as counter:
-        benchmark.pedantic(workload, rounds=params.rounds)
+        if round_args_builder is None:
+            benchmark.pedantic(workload, rounds=params.rounds)
+        else:
+            round_counter = itertools.count()
+
+            def _setup_round():
+                current_args_list[0] = round_args_builder(next(round_counter))
+
+            benchmark.pedantic(workload, setup=_setup_round, rounds=params.rounds)
 
     publish_request_metrics(
         benchmark, counter, (operations_per_round or 0) * params.rounds
@@ -138,7 +194,13 @@ def run_multi_threaded(
 
 
 def run_multi_threaded_fixed_duration(
-    benchmark, monitor_cls, params, worker_func, args_list, benchmark_group
+    benchmark,
+    monitor_cls,
+    params,
+    worker_func,
+    args_list,
+    benchmark_group,
+    round_args_builder=None,
 ):
     """
     Runs a multi-threaded benchmark for a fixed duration and records bytes per round.
@@ -150,6 +212,8 @@ def run_multi_threaded_fixed_duration(
     Args:
         worker_func: The function to run in each thread. It must return bytes processed.
         args_list: A list of tuples, where each tuple contains arguments for one thread.
+        round_args_builder: Optional ``(round_num) -> list[tuple]`` hook invoked
+            before each round.
     """
     publish_benchmark_extra_info(benchmark, params, benchmark_group)
 
@@ -160,8 +224,15 @@ def run_multi_threaded_fixed_duration(
                 f"Multi-threaded fixed-duration {benchmark_group} benchmark: "
                 f"Starting round {round_num + 1}/{params.rounds}."
             )
+            round_args_list = (
+                round_args_builder(round_num)
+                if round_args_builder is not None
+                else args_list
+            )
             with ThreadPoolExecutor(max_workers=params.threads) as executor:
-                futures = [executor.submit(worker_func, *args) for args in args_list]
+                futures = [
+                    executor.submit(worker_func, *args) for args in round_args_list
+                ]
                 total_bytes_per_round.append(sum(f.result() for f in futures))
 
     publish_fixed_duration_benchmark_extra_info(
@@ -241,11 +312,17 @@ def run_multi_process(
                         affinity_set = True
 
             try:
+                pass_round = _accepts_round_num(args_builder)
                 for i in range(params.processes):
                     # Build arguments specific to this process (e.g. file slice)
-                    p_args = args_builder(
-                        worker_gcs_instances[i], i, process_data_shared
-                    )
+                    if pass_round:
+                        p_args = args_builder(
+                            worker_gcs_instances[i], i, process_data_shared, round_num
+                        )
+                    else:
+                        p_args = args_builder(
+                            worker_gcs_instances[i], i, process_data_shared
+                        )
                     p = ctx.Process(
                         target=_multiprocess_worker_wrapper,
                         args=(worker_target, p_args),

@@ -26,6 +26,7 @@ from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     get_listing_benchmark_cases,
 )
 from gcsfs.tests.perf.microbenchmarks.open.configs import get_open_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.pipe.configs import get_pipe_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.put.configs import (
     PutConfigurator,
     get_put_benchmark_cases,
@@ -53,6 +54,9 @@ def mock_config_dependencies():
             {"regional": "test-bucket"},
         ),
         mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES", ""
+        ),
     ):
         yield
 
@@ -783,3 +787,175 @@ def test_benchmark_listing_fixture_helper_rejects_invalid_folders_and_files(
     )
     with pytest.raises(ValueError, match="require 0 < folders .* <= files"):
         next(gen)
+
+
+def test_bucket_name_map_maps_all_six_rcu_bucket_types():
+    """Verify flat and HNS RCU bucket_type variants map to their respective test buckets."""
+    from gcsfs.tests import settings
+    from gcsfs.tests.conftest import BUCKET_NAME_MAP
+
+    for b_type in ("standard_rcu_z", "standard_rcu_warm", "standard_rcu_cold"):
+        assert BUCKET_NAME_MAP[b_type] == settings.TEST_STANDARD_RCU_BUCKET
+
+    for b_type in ("hns_rcu_z", "hns_rcu_warm", "hns_rcu_cold"):
+        assert BUCKET_NAME_MAP[b_type] == settings.TEST_HNS_RCU_BUCKET
+
+
+@pytest.mark.parametrize(
+    "bucket_types_env,expected_resolved",
+    [
+        (
+            "",
+            {
+                "regional": "reg-bkt",
+                "standard_rcu_z": "std-rcu-bkt",
+                "standard_rcu_warm": "std-rcu-bkt",
+                "standard_rcu_cold": "std-rcu-bkt",
+                "hns_rcu_z": "hns-rcu-bkt",
+            },
+        ),
+        (
+            "standard_rcu_z, hns_rcu_z",
+            {
+                "regional": None,
+                "standard_rcu_z": "std-rcu-bkt",
+                "standard_rcu_warm": None,
+                "standard_rcu_cold": None,
+                "hns_rcu_z": "hns-rcu-bkt",
+            },
+        ),
+        (
+            "standard_rcu_warm standard_rcu_cold",
+            {
+                "regional": None,
+                "standard_rcu_z": None,
+                "standard_rcu_warm": "std-rcu-bkt",
+                "standard_rcu_cold": "std-rcu-bkt",
+                "hns_rcu_z": None,
+            },
+        ),
+    ],
+)
+def test_get_bucket_name_filters_by_benchmark_bucket_types(
+    bucket_types_env, expected_resolved
+):
+    """Verify BENCHMARK_BUCKET_TYPES selects specific variants on a shared RCU bucket."""
+    fake_map = {
+        "regional": "reg-bkt",
+        "standard_rcu_z": "std-rcu-bkt",
+        "standard_rcu_warm": "std-rcu-bkt",
+        "standard_rcu_cold": "std-rcu-bkt",
+        "hns_rcu_z": "hns-rcu-bkt",
+    }
+    with (
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BUCKET_NAME_MAP", fake_map
+        ),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES",
+            bucket_types_env,
+        ),
+    ):
+        configurator = configs.BaseBenchmarkConfigurator("dummy")
+        for b_type, expected_bucket in expected_resolved.items():
+            assert configurator.get_bucket_name(b_type) == expected_bucket
+
+
+def test_rcu_bucket_types_in_shipped_yaml_configs():
+    """Verify all 11 active microbenchmark groups include the expected RCU bucket_types and open stays untouched."""
+    all_six_rcu = {
+        "standard_rcu_z",
+        "standard_rcu_warm",
+        "standard_rcu_cold",
+        "hns_rcu_z",
+        "hns_rcu_warm",
+        "hns_rcu_cold",
+    }
+    write_rcu = {"standard_rcu_z", "hns_rcu_z"}
+    metadata_rcu = {
+        "standard_rcu_z",
+        "standard_rcu_cold",
+        "hns_rcu_z",
+        "hns_rcu_cold",
+    }
+
+    with (
+        mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES", ""
+        ),
+    ):
+        # Read groups: all 6 RCU bucket types (including read_reopen_fixed_duration)
+        read_cases = get_read_benchmark_cases()
+        assert all_six_rcu.issubset({c.bucket_type for c in read_cases})
+        reopen_types = {
+            c.bucket_type
+            for c in read_cases
+            if c.name.startswith("read_reopen_fixed_duration")
+        }
+        assert all_six_rcu.issubset(reopen_types)
+
+        for get_fn in (get_cat_benchmark_cases, get_cat_ranges_benchmark_cases):
+            types = {c.bucket_type for c in get_fn()}
+            assert all_six_rcu.issubset(types)
+
+        # Write groups: only *_rcu_z among RCU types
+        for get_fn in (
+            get_write_benchmark_cases,
+            get_put_benchmark_cases,
+            get_pipe_benchmark_cases,
+        ):
+            rcu_types = {c.bucket_type for c in get_fn()} & all_six_rcu
+            assert rcu_types == write_rcu
+
+        # Comparison group
+        comp_cases = get_comparison_benchmark_cases()
+        dl_large = [c for c in comp_cases if c.scenario == "download_large_file"]
+        for b_type in (
+            "standard_rcu_warm",
+            "standard_rcu_cold",
+            "hns_rcu_warm",
+            "hns_rcu_cold",
+        ):
+            sizes_mb = {
+                c.file_size_bytes // MB for c in dl_large if c.bucket_type == b_type
+            }
+            assert sizes_mb == {1024, 10240, 51200, 102400}
+        for b_type in ("standard_rcu_z", "hns_rcu_z"):
+            sizes_mb = {
+                c.file_size_bytes // MB for c in dl_large if c.bucket_type == b_type
+            }
+            assert sizes_mb == {1024, 10240, 51200, 102400, 204800}
+
+        dl_small_types = {
+            c.bucket_type for c in comp_cases if c.scenario == "download_small_files"
+        }
+        assert dl_small_types == {"regional", "zonal"} | all_six_rcu
+
+        ul_large = [c for c in comp_cases if c.scenario == "upload_large_file"]
+        assert ({c.bucket_type for c in ul_large} & all_six_rcu) == write_rcu
+        for b_type in ("standard_rcu_z", "hns_rcu_z"):
+            sizes_mb = {
+                c.file_size_bytes // MB for c in ul_large if c.bucket_type == b_type
+            }
+            assert sizes_mb == {1024, 10240, 51200, 102400, 204800}
+
+        ul_small_types = {
+            c.bucket_type for c in comp_cases if c.scenario == "upload_small_files"
+        }
+        assert ul_small_types == {"regional", "zonal"} | write_rcu
+
+        # 0-byte Metadata groups: *_rcu_z and *_rcu_cold, never *_rcu_warm
+        for get_fn in (
+            get_listing_benchmark_cases,
+            get_glob_benchmark_cases,
+            get_info_benchmark_cases,
+            get_delete_benchmark_cases,
+            get_rename_benchmark_cases,
+        ):
+            rcu_types = {c.bucket_type for c in get_fn()} & all_six_rcu
+            assert rcu_types == metadata_rcu
+
+        # Open group stays untouched
+        open_types = {c.bucket_type for c in get_open_benchmark_cases()}
+        assert open_types == {"regional", "zonal", "hns"}

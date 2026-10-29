@@ -4,7 +4,7 @@ substitutions:
   _VM_SERVICE_ACCOUNT: ""
   # Format: "group1:config1,config2 group2:config1"
   _BENCHMARK_CONFIG: ""
-  # Format: "hns regional zonal"
+  # Format: "hns regional zonal standard_rcu_z standard_rcu_warm standard_rcu_cold hns_rcu_z hns_rcu_warm hns_rcu_cold"
   _BUCKET_TYPES: ""
   # Target benchmark workload (e.g., "IO" or "METADATA")
   _BENCHMARK_TYPE: ""
@@ -71,6 +71,8 @@ steps:
         echo "export REGIONAL_BUCKET=${_INFRA_PREFIX}-regional-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export ZONAL_BUCKET=${_INFRA_PREFIX}-zonal-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export HNS_BUCKET=${_INFRA_PREFIX}-hns-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export STANDARD_RCU_BUCKET=${_INFRA_PREFIX}-standard-rcu-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
+        echo "export HNS_RCU_BUCKET=${_INFRA_PREFIX}-hns-rcu-$${SHORT_BUILD_ID}" >> /workspace/build_vars.env
         echo "export RESULTS_BUCKET=${_INFRA_PREFIX}-run-results" >> /workspace/build_vars.env
         echo "export VM_NAME='${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}'" >> /workspace/build_vars.env
     waitFor: ["-"]
@@ -104,6 +106,36 @@ steps:
             echo "Skipping VM: $$name (Age: $$AGE seconds)"
           fi
         done <<< "$$VMS"
+
+        BUCKETS=$$(gcloud storage buckets list "gs://${_INFRA_PREFIX}-*" --project="${PROJECT_ID}" --format="value(name,creation_time)" --quiet || true)
+
+        while read -r name creation_time; do
+          if [ -z "$$name" ]; then continue; fi
+          CLEAN_NAME="$${name#gs://}"
+          CLEAN_NAME="$${CLEAN_NAME%/}"
+          if [ "$$CLEAN_NAME" = "$${RESULTS_BUCKET}" ] || [ "$$CLEAN_NAME" = "${_INFRA_PREFIX}-run-results" ]; then continue; fi
+          if [[ ! "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}-(regional|zonal|hns|standard-rcu|hns-rcu)-[0-9a-f]{8}$$ ]]; then continue; fi
+
+          CREATION_SECONDS=$$(date -d "$$creation_time" +%s 2>/dev/null) || continue
+          AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
+
+          if [ $$AGE -gt $$THRESHOLD ]; then
+            echo "Deleting leaked bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
+            if [[ "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}-(standard-rcu|hns-rcu)-[0-9a-f]{8}$$ ]]; then
+              CACHES=$$(gcloud alpha storage buckets rapid-caches list "gs://$$CLEAN_NAME" --project="${PROJECT_ID}" --format="value(id,state)" --quiet < /dev/null || true)
+              while read -r cache_id cache_state; do
+                if [ -z "$$cache_id" ]; then continue; fi
+                if [ "$${cache_state,,}" != "disabled" ]; then
+                  echo "Disabling leaked rapid-cache $$cache_id (state: $$cache_state)"
+                  gcloud alpha storage buckets rapid-caches disable "$$cache_id" --project="${PROJECT_ID}" --quiet < /dev/null || true
+                fi
+              done <<< "$$CACHES"
+            fi
+            gcloud storage rm --recursive "gs://$$CLEAN_NAME" --project="${PROJECT_ID}" --quiet < /dev/null || gcloud storage buckets delete "gs://$$CLEAN_NAME" --project="${PROJECT_ID}" --quiet < /dev/null || true
+          else
+            echo "Skipping bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
+          fi
+        done <<< "$$BUCKETS"
     waitFor: ["init-variables"]
     allowFailure: true
 
@@ -121,24 +153,50 @@ steps:
         source /workspace/build_vars.env
 
         # Create Test Buckets, in parallel
+        pids=()
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
           gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} &
+          pids+=("$$!")
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
           gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+          pids+=("$$!")
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
           gcloud storage buckets create gs://$$HNS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+          pids+=("$$!")
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ [[:space:]]standard_rcu_(z|warm|cold)[[:space:]] ]]; then
+          (
+            gcloud storage buckets create "gs://$$STANDARD_RCU_BUCKET" --project="${PROJECT_ID}" --location="${LOCATION}" --uniform-bucket-level-access --quiet &&
+            gcloud alpha storage buckets rapid-caches create "gs://$$STANDARD_RCU_BUCKET" "${_ZONE}" --project="${PROJECT_ID}" --cache-type=rapid-cache-ultra --admission-policy=admit-on-first-miss --no-async --quiet
+          ) &
+          pids+=("$$!")
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ [[:space:]]hns_rcu_(z|warm|cold)[[:space:]] ]]; then
+          (
+            gcloud storage buckets create "gs://$$HNS_RCU_BUCKET" --project="${PROJECT_ID}" --location="${LOCATION}" --enable-hierarchical-namespace --uniform-bucket-level-access --quiet &&
+            gcloud alpha storage buckets rapid-caches create "gs://$$HNS_RCU_BUCKET" "${_ZONE}" --project="${PROJECT_ID}" --cache-type=rapid-cache-ultra --admission-policy=admit-on-first-miss --no-async --quiet
+          ) &
+          pids+=("$$!")
         fi
 
         # Create HNS Results Bucket (Persistent)
         if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
           gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+          pids+=("$$!")
         else
           echo "Results bucket gs://$${RESULTS_BUCKET} already exists"
         fi
 
-        wait
+        create_failed=0
+        for pid in "$${pids[@]}"; do
+          wait "$$pid" || create_failed=1
+        done
+        if [ "$$create_failed" -ne 0 ]; then
+          echo "create-buckets" >> /workspace/FAILED
+          exit 1
+        fi
     waitFor: ["init-variables"]
     allowFailure: true
 
@@ -327,6 +385,16 @@ steps:
           if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
             BUCKET_ARGS="$${BUCKET_ARGS} --hns-bucket='$${HNS_BUCKET}'"
           fi
+          if [[ " ${_BUCKET_TYPES} " =~ [[:space:]]standard_rcu_(z|warm|cold)[[:space:]] ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --standard-rcu-bucket='$${STANDARD_RCU_BUCKET}'"
+          fi
+          if [[ " ${_BUCKET_TYPES} " =~ [[:space:]]hns_rcu_(z|warm|cold)[[:space:]] ]]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --hns-rcu-bucket='$${HNS_RCU_BUCKET}'"
+          fi
+          read -r -a BUCKET_TYPES_ARRAY <<< "${_BUCKET_TYPES}"
+          if [ "$${#BUCKET_TYPES_ARRAY[@]}" -gt 0 ]; then
+            BUCKET_ARGS="$${BUCKET_ARGS} --bucket-types $${BUCKET_TYPES_ARRAY[*]}"
+          fi
 
           RUN_SCRIPT="
             set -e
@@ -447,6 +515,22 @@ steps:
         if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
           (
             gcloud storage rm --recursive gs://$$HNS_BUCKET || true
+          ) &
+        fi
+        # rapid-caches disable runs asynchronously; if disablement is still in
+        # progress when buckets delete runs, cleanup-leaked-resources reaps the bucket.
+        if [[ " ${_BUCKET_TYPES} " =~ [[:space:]]standard_rcu_(z|warm|cold)[[:space:]] ]]; then
+          (
+            gcloud storage rm --recursive "gs://$$STANDARD_RCU_BUCKET/*" --project="${PROJECT_ID}" --quiet 2>/dev/null || true
+            gcloud alpha storage buckets rapid-caches disable "$$STANDARD_RCU_BUCKET/${_ZONE}" --project="${PROJECT_ID}" --quiet || true
+            gcloud storage buckets delete "gs://$$STANDARD_RCU_BUCKET" --project="${PROJECT_ID}" --quiet || true
+          ) &
+        fi
+        if [[ " ${_BUCKET_TYPES} " =~ [[:space:]]hns_rcu_(z|warm|cold)[[:space:]] ]]; then
+          (
+            gcloud storage rm --recursive "gs://$$HNS_RCU_BUCKET/*" --project="${PROJECT_ID}" --quiet 2>/dev/null || true
+            gcloud alpha storage buckets rapid-caches disable "$$HNS_RCU_BUCKET/${_ZONE}" --project="${PROJECT_ID}" --quiet || true
+            gcloud storage buckets delete "gs://$$HNS_RCU_BUCKET" --project="${PROJECT_ID}" --quiet || true
           ) &
         fi
         wait

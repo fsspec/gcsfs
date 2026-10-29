@@ -9,18 +9,26 @@ common:
   rounds: 1
 
 scenarios:
-  # 1a. Download Single Large File - Regional
+  # 1a. Download Single Large File - Regional & RCU Standard (warm/cold)
   - name: "download_large_file"
-    bucket_types: ["regional"]
+    bucket_types:
+      - "regional"
+      - "standard_rcu_warm"
+      - "standard_rcu_cold"
+      - "hns_rcu_warm"
+      - "hns_rcu_cold"
     file_sizes_mb:
       - 1024 # 1 GB
       - 10240 # 10 GB
       - 51200 # 50 GB
       - 102400 # 100 GB
 
-  # 1b. Download Single Large File - Zonal
+  # 1b. Download Single Large File - Zonal & RCU Rapid (z)
   - name: "download_large_file"
-    bucket_types: ["zonal"]
+    bucket_types:
+      - "zonal"
+      - "standard_rcu_z"
+      - "hns_rcu_z"
     file_sizes_mb:
       - 1024 # 1 GB
       - 10240 # 10 GB
@@ -30,6 +38,15 @@ scenarios:
 
   # 2. Download Multiple Small Files
   - name: "download_small_files"
+    bucket_types:
+      - "regional"
+      - "zonal"
+      - "standard_rcu_z"
+      - "standard_rcu_warm"
+      - "standard_rcu_cold"
+      - "hns_rcu_z"
+      - "hns_rcu_warm"
+      - "hns_rcu_cold"
     files: [10, 100]
     file_sizes_mb: [10, 100]
 
@@ -43,9 +60,12 @@ scenarios:
       - 102400 # 100 GB
     chunk_sizes_mb: [50]
 
-  # 3b. Upload Single Large File - Zonal
+  # 3b. Upload Single Large File - Zonal & RCU Rapid (z)
   - name: "upload_large_file"
-    bucket_types: ["zonal"]
+    bucket_types:
+      - "zonal"
+      - "standard_rcu_z"
+      - "hns_rcu_z"
     file_sizes_mb:
       - 1024 # 1 GB
       - 10240 # 10 GB
@@ -56,6 +76,11 @@ scenarios:
 
   # 4. Upload Multiple Small Files
   - name: "upload_small_files"
+    bucket_types:
+      - "regional"
+      - "zonal"
+      - "standard_rcu_z"
+      - "hns_rcu_z"
     files: [10, 100]
     file_sizes_mb: [10, 100]
     chunk_sizes_mb: [50]

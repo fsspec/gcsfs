@@ -13,6 +13,12 @@ TEST_VERSIONED_BUCKET = _get_bucket_name(
 )
 TEST_HNS_BUCKET = _get_bucket_name("GCSFS_HNS_TEST_BUCKET", "gcsfs_hns_test")
 TEST_ZONAL_BUCKET = _get_bucket_name("GCSFS_ZONAL_TEST_BUCKET", "gcsfs_zonal_test")
+TEST_STANDARD_RCU_BUCKET = _get_bucket_name(
+    "GCSFS_STANDARD_RCU_TEST_BUCKET", "gcsfs_standard_rcu_test"
+)
+TEST_HNS_RCU_BUCKET = _get_bucket_name(
+    "GCSFS_HNS_RCU_TEST_BUCKET", "gcsfs_hns_rcu_test"
+)
 TEST_PROJECT = os.getenv("GCSFS_TEST_PROJECT", "project")
 TEST_REGION = os.getenv("GCSFS_TEST_REGION", "us-central1")
 TEST_REQUESTER_PAYS_BUCKET = _get_bucket_name(
@@ -30,6 +36,10 @@ TEST_KMS_KEY = os.getenv(
 # Performance Benchmark Settings
 # =============================================================================
 BENCHMARK_FILTER = os.environ.get("GCSFS_BENCHMARK_FILTER", "")
+BENCHMARK_BUCKET_TYPES = os.environ.get("GCSFS_BENCHMARK_BUCKET_TYPES", "")
 BENCHMARK_CPU_AFFINITY = (
     os.environ.get("GCSFS_BENCHMARK_CPU_AFFINITY", "false").lower() == "true"
+)
+RCU_WARMUP_SETTLE_SECONDS = float(
+    os.environ.get("GCSFS_RCU_WARMUP_SETTLE_SECONDS", "65")
 )

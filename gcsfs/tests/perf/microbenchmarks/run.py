@@ -26,10 +26,23 @@ def _setup_environment(args):
         args (argparse.Namespace): The parsed command-line arguments.
 
     """
+    standard_rcu_bucket = getattr(args, "standard_rcu_bucket", None)
+    hns_rcu_bucket = getattr(args, "hns_rcu_bucket", None)
+    bucket_types = getattr(args, "bucket_types", None)
+
     # Validate that at least one bucket is provided
-    if not any([args.regional_bucket, args.zonal_bucket, args.hns_bucket]):
+    if not any(
+        [
+            args.regional_bucket,
+            args.zonal_bucket,
+            args.hns_bucket,
+            standard_rcu_bucket,
+            hns_rcu_bucket,
+        ]
+    ):
         logging.error(
-            "At least one of --regional-bucket, --zonal-bucket, or --hns-bucket must be provided."
+            "At least one of --regional-bucket, --zonal-bucket, --hns-bucket, "
+            "--standard-rcu-bucket, or --hns-rcu-bucket must be provided."
         )
         sys.exit(1)
 
@@ -41,11 +54,20 @@ def _setup_environment(args):
         args.zonal_bucket if args.zonal_bucket else ""
     )
     os.environ["GCSFS_HNS_TEST_BUCKET"] = args.hns_bucket if args.hns_bucket else ""
+    os.environ["GCSFS_STANDARD_RCU_TEST_BUCKET"] = (
+        standard_rcu_bucket if standard_rcu_bucket else ""
+    )
+    os.environ["GCSFS_HNS_RCU_TEST_BUCKET"] = hns_rcu_bucket if hns_rcu_bucket else ""
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
 
     if args.config:
         os.environ["GCSFS_BENCHMARK_FILTER"] = ",".join(args.config)
+
+    if bucket_types:
+        os.environ["GCSFS_BENCHMARK_BUCKET_TYPES"] = ",".join(bucket_types)
+    else:
+        os.environ.pop("GCSFS_BENCHMARK_BUCKET_TYPES", None)
 
 
 def _run_benchmarks(results_dir, args):
@@ -378,6 +400,22 @@ def main():
     parser.add_argument(
         "--hns-bucket",
         help="Name of the HNS GCS bucket to use for benchmarks.",
+    )
+    parser.add_argument(
+        "--standard-rcu-bucket",
+        help="Name of the flat (non-HNS) RCU-enabled GCS bucket to use for benchmarks.",
+    )
+    parser.add_argument(
+        "--hns-rcu-bucket",
+        help="Name of the HNS RCU-enabled GCS bucket to use for benchmarks.",
+    )
+    parser.add_argument(
+        "--bucket-types",
+        nargs="+",
+        help=(
+            "Optional list of bucket_type values to run "
+            "(e.g., --bucket-types standard_rcu_z standard_rcu_warm)."
+        ),
     )
     parser.add_argument(
         "--log",
