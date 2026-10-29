@@ -14,8 +14,8 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 from google.cloud.storage.exceptions import DataCorruption
 
+import gcsfs.core
 from gcsfs.checkers import ConsistencyChecker, MD5Checker, SizeChecker
-from gcsfs.core import GCSFile
 from gcsfs.extended_gcsfs import (
     BucketLayout,
     CachingTier,
@@ -1185,7 +1185,7 @@ async def test_simple_upload_delegates_to_core_for_non_zonal(async_gcs):
     data = b"test data"
 
     with (
-        mock.patch.object(async_gcs, "_is_zonal_bucket", return_value=False),
+        mock.patch.object(async_gcs, "_uses_grpc_data_path", return_value=False),
         mock.patch(
             "gcsfs.core.simple_upload", new_callable=mock.AsyncMock
         ) as mock_core_simple,
@@ -1230,7 +1230,7 @@ async def test_initiate_upload_delegates_to_core_for_non_zonal(async_gcs):
     key = "test-key"
 
     with (
-        mock.patch.object(async_gcs, "_is_zonal_bucket", return_value=False),
+        mock.patch.object(async_gcs, "_uses_grpc_data_path", return_value=False),
         mock.patch(
             "gcsfs.core.initiate_upload", new_callable=mock.AsyncMock
         ) as mock_core_initiate,
@@ -1953,18 +1953,101 @@ async def test_get_threshold_for_disk_reads_http_buckets_delegates_to_super(
 @pytest.mark.parametrize(
     "bucket_layout", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU]
 )
-def test_open_rcu_bucket_read_uses_zonal_file_and_write_uses_gcs_file(
+def test_open_rcu_bucket_read_uses_zonal_file(
     extended_gcsfs, gcs_bucket_mocks, bucket_layout
 ):
-    """Test _open returns ZonalFile for 'rb' and GCSFile for 'wb' on RCU buckets."""
+    """Test _open returns ZonalFile for 'rb' on RCU buckets."""
     with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
         with extended_gcsfs.open(file_path, "rb") as rf:
             assert isinstance(rf, ZonalFile)
             assert rf.read(10) == json_data[:10]
         mocks["pool_cache_get"].assert_called_once()
 
-        wf = extended_gcsfs._open(file_path, "wb")
-        assert type(wf) is GCSFile
-        assert not isinstance(wf, ZonalFile)
-        wf.discard()
-        wf.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU])
+async def test_cp_file_and_merge_on_rcu_bucket_delegate_to_core(
+    async_gcs, bucket_layout
+):
+    """cp_file and merge on RCU buckets keep using the HTTP implementation."""
+    with (
+        mock.patch.object(
+            async_gcs,
+            "_lookup_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch(
+            "gcsfs.core.GCSFileSystem._cp_file", new_callable=mock.AsyncMock
+        ) as mock_core_cp_file,
+        mock.patch(
+            "gcsfs.core.GCSFileSystem._merge", new_callable=mock.AsyncMock
+        ) as mock_core_merge,
+    ):
+        await async_gcs._cp_file(f"{TEST_BUCKET}/a", f"{TEST_BUCKET}/b")
+        await async_gcs._merge(
+            f"{TEST_BUCKET}/m", [f"{TEST_BUCKET}/a", f"{TEST_BUCKET}/b"]
+        )
+
+    mock_core_cp_file.assert_awaited_once()
+    mock_core_merge.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_anywhere_cache_bucket_writes_stay_on_http(extended_gcsfs, async_gcs):
+    """Anywhere Cache (RAPID_CACHE) buckets keep writing over HTTP."""
+    layout = BucketLayout(
+        StorageClass.STANDARD, CachingTier.RAPID_CACHE, NamespaceLayout.NON_HIERARCHICAL
+    )
+    path = f"{TEST_BUCKET}/anywhere-cache-file"
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=layout,
+        ),
+        mock.patch(
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_layout",
+            return_value=layout,
+        ),
+        mock.patch("gcsfs.extended_gcsfs.GCSFile") as mock_gcs_file,
+        mock.patch("gcsfs.extended_gcsfs.ZonalFile") as mock_zonal_file,
+        mock.patch(
+            "gcsfs.core.GCSFileSystem._pipe_file", new_callable=mock.AsyncMock
+        ) as mock_core_pipe_file,
+        mock.patch(
+            "gcsfs.zb_hns_utils.init_aaow", new_callable=mock.AsyncMock
+        ) as mock_init_aaow,
+    ):
+        extended_gcsfs._open(path, "wb")
+        await async_gcs._pipe_file(path, b"data")
+
+    mock_gcs_file.assert_called_once()
+    mock_zonal_file.assert_not_called()
+    mock_core_pipe_file.assert_awaited_once()
+    mock_init_aaow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU])
+async def test_core_upload_helpers_route_rcu_to_extended(async_gcs, bucket_layout):
+    """core.simple_upload and core.initiate_upload hand RCU buckets to gRPC."""
+    with (
+        mock.patch.object(
+            async_gcs,
+            "_lookup_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch(
+            "gcsfs.extended_gcsfs.simple_upload", new_callable=mock.AsyncMock
+        ) as mock_ext_simple_upload,
+        mock.patch(
+            "gcsfs.extended_gcsfs.initiate_upload", new_callable=mock.AsyncMock
+        ) as mock_ext_initiate_upload,
+    ):
+        await gcsfs.core.simple_upload(async_gcs, TEST_BUCKET, "key", b"data")
+        await gcsfs.core.initiate_upload(async_gcs, TEST_BUCKET, "key")
+
+    mock_ext_simple_upload.assert_awaited_once()
+    mock_ext_initiate_upload.assert_awaited_once()

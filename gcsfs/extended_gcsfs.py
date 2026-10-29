@@ -428,8 +428,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_layout = self._sync_lookup_bucket_layout(bucket)
-        use_zonal_file = bucket_layout.storage_class == StorageClass.RAPID or (
-            "r" in mode and bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+        use_zonal_file = (
+            bucket_layout.storage_class == StorageClass.RAPID
+            or bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
         )
         file_cls = ZonalFile if use_zonal_file else GCSFile
 
@@ -515,6 +516,34 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return (
             bucket_layout.storage_class == StorageClass.RAPID
             or bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+        )
+
+    async def _init_aaow(
+        self,
+        bucket,
+        key,
+        generation=None,
+        flush_interval_bytes=None,
+        if_generation_match=None,
+    ):
+        """Open an AsyncAppendableObjectWriter for ``bucket/key``.
+
+        RCU buckets default new objects to the ``STANDARD`` storage class,
+        which appendable writes reject, so writes to them request
+        ``storage_class="RAPID"``: the object lands in the zonal cache and the
+        server later copies it to regional storage. Zonal buckets already
+        default to ``RAPID``, so their writes leave ``storage_class`` unset.
+        """
+        await self._get_grpc_client()
+        storage_class = "RAPID" if await self._is_rcu_bucket(bucket) else None
+        return await zb_hns_utils.init_aaow(
+            self.grpc_client,
+            bucket,
+            key,
+            generation,
+            flush_interval_bytes,
+            if_generation_match=if_generation_match,
+            storage_class=storage_class,
         )
 
     @staticmethod
@@ -2052,10 +2081,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Upload a local file.
 
-        This method is optimized for Zonal buckets, using gRPC for uploads.
-        In zonal buckets, file is left *unfinalized* by default unless
+        This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
+        In Zonal and RCU buckets, file is left *unfinalized* by default unless
         `finalize_on_close` is set to True.
-        For non-Zonal buckets, it delegates to the parent class's implementation.
+        For other buckets, it delegates to the parent class's implementation.
 
         Parameters
         ----------
@@ -2064,24 +2093,24 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         rpath: str
             Path on GCS to upload the file to.
         metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         consistency: str, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         content_type: str, optional
-            Unsupported for Zonal buckets and will be ignored except for the default.
+            Unsupported for Zonal and RCU buckets and will be ignored except for the default.
         chunksize: int, optional
             The size of chunks to upload data in.
         callback: fsspec.callbacks.Callback, optional
             Callback to monitor the upload progress.
         fixed_key_metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         mode: str, optional
             The write mode, either 'overwrite' or 'create'.
         if_generation_match: int, optional
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(rpath)
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._put_file(
                 lpath,
                 rpath,
@@ -2109,13 +2138,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             or (content_type and content_type != "application/octet-stream")
         ):
             logger.warning(
-                "Zonal buckets do not support content_type, metadata, "
+                "Zonal and RCU buckets do not support content_type, metadata, "
                 "fixed_key_metadata or consistency during upload. "
                 "These parameters will be ignored."
             )
-        await self._get_grpc_client()
-        writer = await zb_hns_utils.init_aaow(
-            self.grpc_client,
+        writer = await self._init_aaow(
             bucket,
             key,
             if_generation_match=_resolve_generation_match(mode, if_generation_match),
@@ -2145,10 +2172,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Upload bytes to a file.
 
-        This method is optimized for Zonal buckets, using gRPC for uploads.
-        In zonal buckets, file is left *unfinalized* by default unless
+        This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
+        In Zonal and RCU buckets, file is left *unfinalized* by default unless
         `finalize_on_close` is set to True.
-        For non-Zonal buckets, it delegates to the parent class's implementation.
+        For other buckets, it delegates to the parent class's implementation.
 
         Parameters
         ----------
@@ -2157,13 +2184,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         data: bytes
             The content to write to the file.
         metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         consistency: str, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         content_type: str, optional
-            Unsupported for Zonal buckets and will be ignored, except for the default.
+            Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
         fixed_key_metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         chunksize: int, optional
             The size of chunks to upload data in.
         mode: str, optional
@@ -2172,7 +2199,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(path)
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._pipe_file(
                 path,
                 data,
@@ -2191,12 +2218,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             or (content_type and content_type != "application/octet-stream")
         ):
             logger.warning(
-                "Zonal buckets do not support content_type, metadata or "
+                "Zonal and RCU buckets do not support content_type, metadata or "
                 "fixed_key_metadata during upload. These parameters will be ignored."
             )
-        await self._get_grpc_client()
-        writer = await zb_hns_utils.init_aaow(
-            self.grpc_client,
+        writer = await self._init_aaow(
             bucket,
             key,
             if_generation_match=_resolve_generation_match(mode, if_generation_match),
@@ -2485,12 +2510,13 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
 
     if not isinstance(location, AsyncAppendableObjectWriter):
         raise TypeError(
-            "upload_chunk for Zonal buckets expects an AsyncAppendableObjectWriter instance."
+            "upload_chunk for Zonal and RCU buckets expects an AsyncAppendableObjectWriter instance."
         )
 
     if offset or size or content_type:
         logger.warning(
-            "Zonal buckets do not support offset, or content_type during upload. These parameters will be ignored."
+            "Zonal and RCU buckets do not support offset, or content_type during upload. "
+            "These parameters will be ignored."
         )
 
     if not location._is_stream_open:
@@ -2523,8 +2549,8 @@ async def initiate_upload(
     if_generation_match=None,
 ):
     """
-    Initiates an upload for Zonal buckets by creating an AsyncAppendableObjectWriter.
-    Delegates to core initiate_upload implementation for Non-Zonal buckets.
+    Initiates an upload for Zonal and RCU buckets by creating an AsyncAppendableObjectWriter.
+    Delegates to core initiate_upload implementation for other buckets.
 
     Parameters
     ----------
@@ -2535,19 +2561,19 @@ async def initiate_upload(
     key: str
         The target object key.
     content_type: str, optional
-        Unsupported for Zonal buckets and will be ignored, except for the default.
+        Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
     metadata: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     fixed_key_metadata: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if not await fs._is_zonal_bucket(bucket):
+    if not await fs._uses_grpc_data_path(bucket):
         from gcsfs.core import initiate_upload as core_initiate_upload
 
         return await core_initiate_upload(
@@ -2569,13 +2595,11 @@ async def initiate_upload(
         or (content_type and content_type != "application/octet-stream")
     ):
         logger.warning(
-            "Zonal buckets do not support content_type, metadata, fixed_key_metadata, "
+            "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
             "or kms_key_name during upload. These parameters will be ignored."
         )
 
-    await fs._get_grpc_client()
-    return await zb_hns_utils.init_aaow(
-        fs.grpc_client,
+    return await fs._init_aaow(
         bucket,
         key,
         if_generation_match=_resolve_generation_match(mode, if_generation_match),
@@ -2597,10 +2621,10 @@ async def simple_upload(
     **kwargs,
 ):
     """
-    Performs a simple, single-request upload to Zonal bucket using gRPC.
-    In zonal buckets, file is left *unfinalized* by default unless
+    Performs a simple, single-request upload to Zonal and RCU buckets using gRPC.
+    In Zonal and RCU buckets, file is left *unfinalized* by default unless
     `finalize_on_close` is set to True.
-    Delegates to core simple_upload implementation for Non-Zonal buckets.
+    Delegates to core simple_upload implementation for other buckets.
 
     Parameters
     ----------
@@ -2613,21 +2637,21 @@ async def simple_upload(
     datain: bytes
         The data to be uploaded.
     metadatain: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     consistency: str, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     content_type: str, optional
-        Unsupported for Zonal buckets and will be ignored, except for the default.
+        Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
     fixed_key_metadata: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if not await fs._is_zonal_bucket(bucket):
+    if not await fs._uses_grpc_data_path(bucket):
         from gcsfs.core import simple_upload as core_simple_upload
 
         return await core_simple_upload(
@@ -2652,12 +2676,10 @@ async def simple_upload(
         or (content_type and content_type != "application/octet-stream")
     ):
         logger.warning(
-            "Zonal buckets do not support content_type, metadatain, fixed_key_metadata, "
+            "Zonal and RCU buckets do not support content_type, metadatain, fixed_key_metadata, "
             "consistency or kms_key_name during upload. These parameters will be ignored."
         )
-    await fs._get_grpc_client()
-    writer = await zb_hns_utils.init_aaow(
-        fs.grpc_client,
+    writer = await fs._init_aaow(
         bucket,
         key,
         if_generation_match=_resolve_generation_match(mode, if_generation_match),

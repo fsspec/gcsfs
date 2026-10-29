@@ -21,9 +21,9 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import zb_hns_utils
-from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.extended_gcsfs import BucketLayout, CachingTier, ExtendedGcsFileSystem
 from gcsfs.retry import GenerationMismatchError, HttpError
-from gcsfs.tests.conftest import requires_rapid
+from gcsfs.tests.conftest import RAPID_WRITE_LAYOUTS, requires_rapid
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS
@@ -36,7 +36,10 @@ pytestmark = [requires_rapid]
 
 class TestZonalGcsFileSystemWriteFileCacheUpdate:
     @pytest.mark.asyncio
-    async def test_pipe_file_zonal_routes_through_write_cache_update(self):
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_pipe_file_zonal_routes_through_write_cache_update(
+        self, bucket_layout
+    ):
         """The zonal pipe_file path routes through the shared cache updater."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         fs._grpc_client = mock.MagicMock()
@@ -46,13 +49,18 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         writer.append = mock.AsyncMock()
 
         with (
-            mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=bucket_layout,
+            ),
             mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
             mock.patch(
                 "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
                 new_callable=mock.AsyncMock,
                 return_value=writer,
-            ),
+            ) as mock_init_aaow,
             mock.patch(
                 "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
                 new_callable=mock.AsyncMock,
@@ -64,9 +72,17 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
             await fs._pipe_file(path, b"some-data")
 
         mock_update.assert_awaited_once_with(path)
+        assert mock_init_aaow.await_args.kwargs["storage_class"] == (
+            "RAPID"
+            if bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+            else None
+        )
 
     @pytest.mark.asyncio
-    async def test_put_file_zonal_routes_through_write_cache_update(self):
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_put_file_zonal_routes_through_write_cache_update(
+        self, bucket_layout
+    ):
         """The zonal put_file path routes through the shared cache updater."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         fs._grpc_client = mock.MagicMock()
@@ -80,13 +96,18 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                 f.write(b"some-data")
 
             with (
-                mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+                mock.patch.object(
+                    fs,
+                    "_lookup_bucket_layout",
+                    new_callable=mock.AsyncMock,
+                    return_value=bucket_layout,
+                ),
                 mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
                 mock.patch(
                     "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
                     new_callable=mock.AsyncMock,
                     return_value=writer,
-                ),
+                ) as mock_init_aaow,
                 mock.patch(
                     "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
                     new_callable=mock.AsyncMock,
@@ -98,6 +119,11 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                 await fs._put_file(lpath, rpath)
 
         mock_update.assert_awaited_once_with(rpath)
+        assert mock_init_aaow.await_args.kwargs["storage_class"] == (
+            "RAPID"
+            if bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+            else None
+        )
 
 
 @pytest.fixture
@@ -208,6 +234,7 @@ def test_zonal_file_write_success(extended_gcsfs, zonal_write_mocks, file_path):
         assert extended_gcsfs.cat(file_path) == data1 + data2
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that opening a ZonalFile in write mode initializes the writer."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
@@ -222,11 +249,13 @@ def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks, file_path
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.exists(file_path)
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -249,11 +278,13 @@ def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
             None,
             custom_flush_interval_bytes,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.exists(file_path)
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_create_mode(extended_gcsfs, zonal_write_mocks, file_path):
     """mode="xb" opens the writer with the exclusive-create precondition."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
@@ -268,11 +299,13 @@ def test_zonal_file_open_create_mode(extended_gcsfs, zonal_write_mocks, file_pat
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=0,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.exists(file_path)
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode_with_if_generation_match(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -290,6 +323,7 @@ def test_zonal_file_open_write_mode_with_if_generation_match(
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=7,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         # file_path does not exist, so generation 7 cannot match; SDK releases
@@ -317,6 +351,7 @@ def test_zonal_file_rejects_if_generation_match_before_opening_pool(
     mock_sync.assert_not_called()
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that opening a ZonalFile in append mode initializes the writer with generation."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
@@ -334,11 +369,13 @@ def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_pat
             "12345",
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.cat(file_path) == b"data"
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_append_mode_nonexistent_file(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -366,11 +403,27 @@ def test_zonal_file_open_append_mode_nonexistent_file(
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         # _info is called to get the generation, but it fails
         extended_gcsfs._info.assert_awaited_once()
     else:
         assert extended_gcsfs.cat(file_path) == test_data
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+@pytest.mark.parametrize(
+    "zonal_write_mocks", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU], indirect=True
+)
+def test_open_write_modes_use_zonal_file_on_rcu(
+    extended_gcsfs, zonal_write_mocks, file_path, mode
+):
+    """Every write mode on an RCU bucket opens a ZonalFile that writes RAPID."""
+    with extended_gcsfs.open(file_path, mode, finalize_on_close=True) as f:
+        assert isinstance(f, ZonalFile)
+        f.write(test_data)
+
+    assert zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"] == "RAPID"
 
 
 def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks, file_path):

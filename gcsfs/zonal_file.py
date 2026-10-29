@@ -27,7 +27,7 @@ logger = logging.getLogger("gcsfs.zonal_file")
 class ZonalFile(GCSFile):
     """
     ZonalFile is subclass of GCSFile and handles data operations from
-    Zonal buckets only using a high-performance gRPC path.
+    Zonal and RCU buckets using a high-performance gRPC path.
     """
 
     def __init__(
@@ -161,9 +161,7 @@ class ZonalFile(GCSFile):
             except FileNotFoundError:
                 # if file doesn't exist, we don't need generation
                 pass
-        await self.gcsfs._get_grpc_client()
-        return await zb_hns_utils.init_aaow(
-            self.gcsfs.grpc_client,
+        return await self.gcsfs._init_aaow(
             bucket_name,
             object_name,
             generation,

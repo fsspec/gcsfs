@@ -34,7 +34,13 @@ from gcsfs.extended_gcsfs import (
     simple_upload,
     upload_chunk,
 )
-from gcsfs.tests.conftest import csv_files, files, requires_rapid, text_files
+from gcsfs.tests.conftest import (
+    RAPID_WRITE_LAYOUTS,
+    csv_files,
+    files,
+    requires_rapid,
+    text_files,
+)
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
@@ -767,6 +773,7 @@ def test_multiprocess_error_handling_zb(extended_gcsfs):
 
 # =========================== Zonal Upload Tests ===========================
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
     """Test simple_upload for Zonal buckets calls the correct writer methods."""
     data = b"test data for simple_upload"
@@ -781,7 +788,13 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
     )
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            async_gcs.grpc_client, bucket, object_name, if_generation_match=None
+            async_gcs.grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
@@ -790,13 +803,20 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 async def test_initiate_upload_zonal(async_gcs, zonal_write_mocks, file_path):
     """Test initiate_upload for Zonal buckets returns a writer instance."""
     bucket, object_name, _ = async_gcs.split_path(file_path)
     writer = await initiate_upload(fs=async_gcs, bucket=bucket, key=object_name)
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            async_gcs.grpc_client, bucket, object_name, if_generation_match=None
+            async_gcs.grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         assert writer is zonal_write_mocks["aaow"]
     else:
@@ -888,6 +908,7 @@ async def test_upload_chunk_zonal_final_chunk(async_gcs, zonal_write_mocks, file
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
     """Test _put_file for Zonal buckets."""
     data = b"test data for put_file"
@@ -902,7 +923,13 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
         if zonal_write_mocks:
             grpc_client = await async_gcs._get_grpc_client()
             zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-                grpc_client, bucket, object_name, if_generation_match=None
+                grpc_client,
+                bucket,
+                object_name,
+                None,
+                None,
+                if_generation_match=None,
+                storage_class=zonal_write_mocks["storage_class"],
             )
             zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
             args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
@@ -921,6 +948,7 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 async def test_pipe_file_zonal(async_gcs, zonal_write_mocks, file_path):
     """Test _pipe_file for Zonal buckets."""
     data = b"test data for pipe_file"
@@ -931,7 +959,13 @@ async def test_pipe_file_zonal(async_gcs, zonal_write_mocks, file_path):
     if zonal_write_mocks:
         grpc_client = await async_gcs._get_grpc_client()
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            grpc_client, bucket, object_name, if_generation_match=None
+            grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)

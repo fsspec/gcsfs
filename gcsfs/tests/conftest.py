@@ -18,7 +18,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import GCSFileSystem
-from gcsfs.extended_gcsfs import BucketLayout
+from gcsfs.extended_gcsfs import BucketLayout, CachingTier
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
@@ -546,11 +546,27 @@ def flat_bucket(flat_bucket_name, gcs_factory):
         _close_gcs(gcs)
 
 
+# Bucket layouts whose appendable writes use the gRPC writer; pass them to
+# ``zonal_write_mocks`` as indirect params.
+RAPID_WRITE_LAYOUTS = [
+    BucketLayout.ZONAL_HIERARCHICAL,
+    BucketLayout.STANDARD_RCU,
+    BucketLayout.HIERARCHICAL_RCU,
+]
+
+
 @pytest.fixture
-def zonal_write_mocks():
-    """A fixture for mocking Zonal bucket write functionality."""
+def zonal_write_mocks(request):
+    """A fixture for mocking Zonal and RCU bucket write functionality.
+
+    Accepts an indirect ``BucketLayout`` param (default ``ZONAL_HIERARCHICAL``).
+    On real GCS it yields ``None`` for the zonal layout and skips the others.
+    """
+    layout = getattr(request, "param", BucketLayout.ZONAL_HIERARCHICAL)
 
     if is_real_gcs():
+        if layout != BucketLayout.ZONAL_HIERARCHICAL:
+            pytest.skip("Live write tests only run against the zonal test bucket")
         yield None
         return
 
@@ -585,10 +601,7 @@ def zonal_write_mocks():
     mock_aaow.finalize.side_effect = finalize_side_effect
 
     with (
-        mock.patch(
-            patch_target_get_bucket_layout,
-            return_value=BucketLayout.ZONAL_HIERARCHICAL,
-        ),
+        mock.patch(patch_target_get_bucket_layout, return_value=layout),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),
         mock.patch(patch_target_init_aaow, mock_init_aaow),
     ):
@@ -596,6 +609,11 @@ def zonal_write_mocks():
             "aaow": mock_aaow,
             "init_aaow": mock_init_aaow,
             "_gcsfs_info": mock_gcsfs_info,
+            "storage_class": (
+                "RAPID"
+                if layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+                else None
+            ),
         }
         yield mocks
 
