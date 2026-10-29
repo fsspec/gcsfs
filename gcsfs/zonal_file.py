@@ -27,7 +27,7 @@ logger = logging.getLogger("gcsfs.zonal_file")
 class ZonalFile(GCSFile):
     """
     ZonalFile is subclass of GCSFile and handles data operations from
-    Zonal buckets only using a high-performance gRPC path.
+    Zonal and RCU buckets using a high-performance gRPC path.
     """
 
     def __init__(
@@ -62,7 +62,7 @@ class ZonalFile(GCSFile):
         ensure the write is finalized, `.commit()` must be called explicitly or
         `finalize_on_close` must be set to `True` when opening the file.
 
-        For Zonal buckets, `flush_interval_bytes` controls the write buffer size before
+        For Zonal and RCU buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
         of `_MAX_CHUNK_SIZE_BYTES` (2 MiB). Note that this higher default value may
         increase memory usage.
@@ -161,9 +161,7 @@ class ZonalFile(GCSFile):
             except FileNotFoundError:
                 # if file doesn't exist, we don't need generation
                 pass
-        await self.gcsfs._get_grpc_client()
-        return await zb_hns_utils.init_aaow(
-            self.gcsfs.grpc_client,
+        return await self.gcsfs._init_aaow(
             bucket_name,
             object_name,
             generation,
@@ -337,7 +335,7 @@ class ZonalFile(GCSFile):
         )
 
     def _initiate_upload(self):
-        """Initiates the upload for Zonal buckets using gRPC."""
+        """Initiates the upload for Zonal and RCU buckets using gRPC."""
         from gcsfs.extended_gcsfs import initiate_upload
 
         self.location = asyn.sync(
@@ -356,7 +354,7 @@ class ZonalFile(GCSFile):
         )
 
     def _simple_upload(self):
-        """Performs a simple upload for Zonal buckets using gRPC."""
+        """Performs a simple upload for Zonal and RCU buckets using gRPC."""
         from gcsfs.extended_gcsfs import simple_upload
 
         self.buffer.seek(0)
