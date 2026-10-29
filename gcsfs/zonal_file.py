@@ -348,6 +348,10 @@ class ZonalFile(GCSFile):
                 "This file has already been finalized. Ignoring commit call."
             )
             return
+        if self.forced and self.aaow is None:
+            # The writer failed to open on an earlier write or force-flush, so
+            # there is nothing to finalize and the file can only be closed.
+            raise ValueError("This file has been force-flushed, can only close")
 
         self._ensure_aaow()
         asyn.sync(self.gcsfs.loop, self.aaow.finalize)

@@ -4,8 +4,9 @@ When an appendable write to a bucket cached as RCU fails to open,
 ExtendedGcsFileSystem looks the bucket layout up once more. If RCU is no
 longer enabled, it caches the fresh layout and raises
 ``RapidCacheUltraDisabledError``, which ``pipe_file`` and ``put_file`` answer
-with one retry over HTTP; otherwise the original error surfaces. The gRPC
-writer, the layout lookup, and the HTTP upload are mocked.
+with one retry over HTTP; otherwise the original error surfaces. Writers that
+open after the cached layout was refreshed fail fast with the same error. The
+gRPC writer, the layout lookup, and the HTTP upload are mocked.
 """
 
 import logging
@@ -31,6 +32,13 @@ pytestmark = pytest.mark.skipif(
 
 BUCKET = "rcu-bucket"
 PATH = f"{BUCKET}/key"
+
+
+def _writer():
+    """A mock writer whose open succeeded."""
+    writer = mock.AsyncMock(spec=AsyncAppendableObjectWriter)
+    writer._is_stream_open = True
+    return writer
 
 
 @pytest.fixture
@@ -152,6 +160,56 @@ async def test_init_aaow_precondition_failure_skips_recheck(rcu_fs):
 
 
 @pytest.mark.asyncio
+async def test_init_aaow_layout_already_refreshed_raises_without_open(rcu_fs):
+    """A writer opening after the cached layout lost RCU fails without an open."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD
+
+    with pytest.raises(RapidCacheUltraDisabledError):
+        await fs._init_aaow(BUCKET, "key")
+
+    init_aaow.assert_not_awaited()
+    fs._get_bucket_layout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_unknown_layout_still_opens(rcu_fs):
+    """A failed layout lookup does not block the open, which skips RAPID."""
+    fs, init_aaow = rcu_fs
+    fs._get_bucket_layout.return_value = BucketLayout.UNKNOWN
+    writer = _writer()
+    init_aaow.return_value = writer
+
+    assert await fs._init_aaow(BUCKET, "key") is writer
+
+    init_aaow.assert_awaited_once()
+    assert init_aaow.await_args.kwargs["storage_class"] is None
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_rcu_failure_reuses_layout_refreshed_by_another_writer(
+    rcu_fs, open_error
+):
+    """An open failing after another writer refreshed the cache sends no lookup."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    fs._get_bucket_layout.return_value = layouts.STANDARD
+
+    def refresh_then_fail(*args, **kwargs):
+        # Another writer refreshes the cached layout while this open is in flight.
+        fs._storage_layout_cache[BUCKET] = layouts.STANDARD
+        raise open_error
+
+    init_aaow.side_effect = refresh_then_fail
+
+    with pytest.raises(RapidCacheUltraDisabledError) as excinfo:
+        await fs._init_aaow(BUCKET, "key")
+
+    assert excinfo.value.__cause__ is open_error
+    fs._get_bucket_layout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_pipe_file_retries_over_http_when_rcu_disabled(
     rcu_fs, open_error, caplog
 ):
@@ -167,15 +225,44 @@ async def test_pipe_file_retries_over_http_when_rcu_disabled(
         ) as http_pipe_file,
         caplog.at_level(logging.WARNING, logger="gcsfs"),
     ):
-        await fs._pipe_file(PATH, b"data", mode="create")
+        await fs._pipe_file(PATH, b"data", mode="create", metadata={"k": "v"})
 
     http_pipe_file.assert_awaited_once()
     assert http_pipe_file.await_args.args[:2] == (PATH, b"data")
     assert http_pipe_file.await_args.kwargs["mode"] == "create"
+    assert http_pipe_file.await_args.kwargs["metadata"] == {"k": "v"}
     assert any(
         r.name == "gcsfs"
         and r.levelno == logging.WARNING
         and "Retrying the write over HTTP" in r.getMessage()
+        for r in caplog.records
+    )
+    # The HTTP retry honors metadata, so the ignored-parameters warning is not logged.
+    assert not any(
+        "These parameters will be ignored" in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_warns_on_ignored_params_when_writer_opens(rcu_fs, caplog):
+    """The ignored-parameters warning is still logged when the gRPC writer opens."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.return_value = _writer()
+
+    with (
+        mock.patch(
+            "gcsfs.core.GCSFileSystem._pipe_file", new_callable=mock.AsyncMock
+        ) as http_pipe_file,
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+    ):
+        await fs._pipe_file(PATH, b"data", metadata={"k": "v"})
+
+    http_pipe_file.assert_not_awaited()
+    assert any(
+        r.name == "gcsfs"
+        and r.levelno == logging.WARNING
+        and "These parameters will be ignored" in r.getMessage()
         for r in caplog.records
     )
 
@@ -253,3 +340,36 @@ def test_zonal_file_write_after_rcu_disabled_raises_clear_error(rcu_fs, open_err
 
     assert init_aaow.await_count == 1
     assert fs._sync_lookup_bucket_layout(BUCKET) == layouts.STANDARD
+
+
+def test_zonal_file_opened_before_refresh_raises_clear_error(rcu_fs):
+    """A handle opened while the bucket was cached as RCU fails fast after a refresh."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.return_value = _writer()
+    f = fs.open(PATH, "wb")
+    # Another write found RCU disabled and refreshed the cached layout.
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD
+
+    with pytest.raises(RapidCacheUltraDisabledError):
+        with f:
+            f.write(b"x")
+
+    init_aaow.assert_not_awaited()
+
+
+def test_zonal_file_commit_after_rcu_error_raises_value_error(rcu_fs, open_error):
+    """commit() on a handle whose writer could not open raises; close() still works."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error
+    fs._get_bucket_layout.return_value = layouts.STANDARD
+    f = fs.open(PATH, "wb")
+    with pytest.raises(RapidCacheUltraDisabledError):
+        f.write(b"x")
+
+    with pytest.raises(ValueError, match="force-flushed"):
+        f.commit()
+
+    assert init_aaow.await_count == 1
+    f.close()

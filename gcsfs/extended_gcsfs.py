@@ -111,6 +111,14 @@ class RapidCacheUltraDisabledError(OSError):
     """
 
 
+def _rapid_cache_ultra_disabled_error(bucket):
+    return RapidCacheUltraDisabledError(
+        f"Rapid Cache Ultra is no longer enabled on bucket '{bucket}'. "
+        "The cached bucket layout was refreshed, so new writes use the "
+        "HTTP upload path."
+    )
+
+
 @contextlib.asynccontextmanager
 async def _get_mrd_from_pool_or_mrd(mrd_or_pool):
     """
@@ -377,10 +385,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         The layout of each bucket (zonal, hierarchical namespace, Rapid Cache
         Ultra) is looked up the first time this filesystem instance uses the
-        bucket and cached for the life of the instance. Call this method after
-        enabling or disabling Rapid Cache Ultra on a bucket that this instance
-        already used, so that later reads and writes pick the matching data
-        path. It only clears in-memory state and sends no request.
+        bucket. It stays cached until it is invalidated here, or until an
+        appendable write to a Rapid Cache Ultra bucket fails to open and the
+        re-checked layout no longer reports Rapid Cache Ultra. Call this method
+        after enabling or disabling Rapid Cache Ultra on a bucket that this
+        instance already used, so that later reads and writes pick the
+        matching data path. It only clears in-memory state and sends no
+        request.
 
         Parameters
         ----------
@@ -579,14 +590,28 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         server later copies it to regional storage. Zonal buckets already
         default to ``RAPID``, so their writes leave ``storage_class`` unset.
 
-        When the writer fails to open on a bucket cached as RCU, the bucket
-        layout is looked up again once. If the fresh layout no longer reports
-        RCU, it replaces the cached layout and ``RapidCacheUltraDisabledError``
+        If the cached layout is known and no longer uses the gRPC data path,
+        for example in a file opened while the bucket was cached as RCU that
+        writes after another write found RCU disabled,
+        ``RapidCacheUltraDisabledError`` is raised without opening a writer.
+
+        On a bucket cached as RCU, an open that fails with a
+        ``google.api_core`` ``GoogleAPICallError`` re-checks the layout;
+        precondition errors such as ``FileExistsError`` are not re-checked.
+        The re-check reuses a layout without RCU that another write already
+        cached, and otherwise looks the layout up once. If the layout no
+        longer reports RCU, it is cached and ``RapidCacheUltraDisabledError``
         is raised from the original error; otherwise the original error is
         re-raised and the cached layout is kept.
         """
         await self._get_grpc_client()
-        is_rcu_bucket = await self._is_rcu_bucket(bucket)
+        layout = await self._lookup_bucket_layout(bucket)
+        if (
+            layout.storage_class != StorageClass.UNKNOWN
+            and not layout.uses_grpc_data_path
+        ):
+            raise _rapid_cache_ultra_disabled_error(bucket)
+        is_rcu = layout.is_rcu
         try:
             return await zb_hns_utils.init_aaow(
                 self.grpc_client,
@@ -595,23 +620,22 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 generation,
                 flush_interval_bytes,
                 if_generation_match=if_generation_match,
-                storage_class="RAPID" if is_rcu_bucket else None,
+                storage_class="RAPID" if is_rcu else None,
             )
         except api_exceptions.GoogleAPICallError as e:
-            if not is_rcu_bucket:
+            if not is_rcu:
                 raise
-            fresh_layout = await self._get_bucket_layout(bucket)
-            if (
-                fresh_layout.storage_class == StorageClass.UNKNOWN
-                or fresh_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
-            ):
-                raise
-            self._storage_layout_cache[bucket] = fresh_layout
-            raise RapidCacheUltraDisabledError(
-                f"Rapid Cache Ultra is no longer enabled on bucket '{bucket}'. "
-                "The cached bucket layout was refreshed, so new writes use the "
-                "HTTP upload path."
-            ) from e
+            cached_layout = self._storage_layout_cache.get(bucket)
+            if cached_layout is None or cached_layout.is_rcu:
+                # No other write has refreshed the layout yet: look it up once.
+                fresh_layout = await self._get_bucket_layout(bucket)
+                if (
+                    fresh_layout.storage_class == StorageClass.UNKNOWN
+                    or fresh_layout.is_rcu
+                ):
+                    raise
+                self._storage_layout_cache[bucket] = fresh_layout
+            raise _rapid_cache_ultra_disabled_error(bucket) from e
 
     @staticmethod
     def _resolve_cache_config(kwargs):
@@ -2189,17 +2213,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if generation:
                 raise ValueError("Cannot write to specific object generation")
 
-            if (
-                metadata
-                or fixed_key_metadata
-                or consistency
-                or (content_type and content_type != "application/octet-stream")
-            ):
-                logger.warning(
-                    "Zonal and RCU buckets do not support content_type, metadata, "
-                    "fixed_key_metadata or consistency during upload. "
-                    "These parameters will be ignored."
-                )
             finalize_on_close = self._resolve_finalize_on_close(
                 await self._lookup_bucket_layout(bucket),
                 kwargs.get("finalize_on_close"),
@@ -2216,6 +2229,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 except RapidCacheUltraDisabledError as e:
                     logger.warning("%s Retrying the write over HTTP.", e)
                 else:
+                    if (
+                        metadata
+                        or fixed_key_metadata
+                        or consistency
+                        or (content_type and content_type != "application/octet-stream")
+                    ):
+                        logger.warning(
+                            "Zonal and RCU buckets do not support content_type, metadata, "
+                            "fixed_key_metadata or consistency during upload. "
+                            "These parameters will be ignored."
+                        )
                     # The open writer has already replaced the object, so update
                     # the cache even if the write fails.
                     try:
@@ -2295,15 +2319,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, key, generation = self.split_path(path)
         if await self._uses_grpc_data_path(bucket):
-            if (
-                metadata
-                or fixed_key_metadata
-                or (content_type and content_type != "application/octet-stream")
-            ):
-                logger.warning(
-                    "Zonal and RCU buckets do not support content_type, metadata or "
-                    "fixed_key_metadata during upload. These parameters will be ignored."
-                )
             finalize_on_close = self._resolve_finalize_on_close(
                 await self._lookup_bucket_layout(bucket),
                 kwargs.get("finalize_on_close"),
@@ -2319,6 +2334,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             except RapidCacheUltraDisabledError as e:
                 logger.warning("%s Retrying the write over HTTP.", e)
             else:
+                if (
+                    metadata
+                    or fixed_key_metadata
+                    or (content_type and content_type != "application/octet-stream")
+                ):
+                    logger.warning(
+                        "Zonal and RCU buckets do not support content_type, metadata or "
+                        "fixed_key_metadata during upload. These parameters will be ignored."
+                    )
                 # The open writer has already replaced the object, so update the
                 # cache even if the write fails.
                 try:
