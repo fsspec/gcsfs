@@ -1930,7 +1930,7 @@ class TestExtendedGcsFileSystemHnsRequesterPays:
         fs = gcs_factory(requester_pays=True)
 
         # Clear cache to force lookup
-        fs._storage_layout_cache.clear()
+        fs.invalidate_storage_layout_cache()
 
         bucket_layout = fs._sync_lookup_bucket_layout(hns_requester_pays_bucket)
         assert bucket_layout == layouts.STANDARD_HIERARCHICAL

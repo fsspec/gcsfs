@@ -102,6 +102,15 @@ BucketLayout.UNKNOWN = BucketLayout(
 )
 
 
+class RapidCacheUltraDisabledError(OSError):
+    """Rapid Cache Ultra was disabled on a bucket cached as using it.
+
+    Raised when an appendable write cannot open because Rapid Cache Ultra is
+    no longer enabled on the bucket. The cached bucket layout is refreshed
+    before this error is raised, so the next write uses the HTTP upload path.
+    """
+
+
 @contextlib.asynccontextmanager
 async def _get_mrd_from_pool_or_mrd(mrd_or_pool):
     """
@@ -363,6 +372,29 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     _sync_lookup_bucket_layout = asyn.sync_wrapper(_lookup_bucket_layout)
 
+    def invalidate_storage_layout_cache(self, bucket=None):
+        """Forget cached bucket layouts so the next operation looks them up again.
+
+        The layout of each bucket (zonal, hierarchical namespace, Rapid Cache
+        Ultra) is looked up the first time this filesystem instance uses the
+        bucket and cached for the life of the instance. Call this method after
+        enabling or disabling Rapid Cache Ultra on a bucket that this instance
+        already used, so that later reads and writes pick the matching data
+        path. It only clears in-memory state and sends no request.
+
+        Parameters
+        ----------
+        bucket: str, optional
+            A bucket name, or any path inside the bucket such as
+            ``"gs://bucket/key"``. When omitted, the cached layouts of all
+            buckets are dropped. A bucket without a cached layout is ignored.
+        """
+        if bucket is None:
+            self._storage_layout_cache.clear()
+            return
+        bucket_name, _, _ = self.split_path(bucket)
+        self._storage_layout_cache.pop(bucket_name, None)
+
     async def _get_bucket_layout(self, bucket):
         try:
             client = await self._get_control_plane_client()
@@ -546,18 +578,40 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         ``storage_class="RAPID"``: the object lands in the zonal cache and the
         server later copies it to regional storage. Zonal buckets already
         default to ``RAPID``, so their writes leave ``storage_class`` unset.
+
+        When the writer fails to open on a bucket cached as RCU, the bucket
+        layout is looked up again once. If the fresh layout no longer reports
+        RCU, it replaces the cached layout and ``RapidCacheUltraDisabledError``
+        is raised from the original error; otherwise the original error is
+        re-raised and the cached layout is kept.
         """
         await self._get_grpc_client()
-        storage_class = "RAPID" if await self._is_rcu_bucket(bucket) else None
-        return await zb_hns_utils.init_aaow(
-            self.grpc_client,
-            bucket,
-            key,
-            generation,
-            flush_interval_bytes,
-            if_generation_match=if_generation_match,
-            storage_class=storage_class,
-        )
+        is_rcu_bucket = await self._is_rcu_bucket(bucket)
+        try:
+            return await zb_hns_utils.init_aaow(
+                self.grpc_client,
+                bucket,
+                key,
+                generation,
+                flush_interval_bytes,
+                if_generation_match=if_generation_match,
+                storage_class="RAPID" if is_rcu_bucket else None,
+            )
+        except api_exceptions.GoogleAPICallError as e:
+            if not is_rcu_bucket:
+                raise
+            fresh_layout = await self._get_bucket_layout(bucket)
+            if (
+                fresh_layout.storage_class == StorageClass.UNKNOWN
+                or fresh_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+            ):
+                raise
+            self._storage_layout_cache[bucket] = fresh_layout
+            raise RapidCacheUltraDisabledError(
+                f"Rapid Cache Ultra is no longer enabled on bucket '{bucket}'. "
+                "The cached bucket layout was refreshed, so new writes use the "
+                "HTTP upload path."
+            ) from e
 
     @staticmethod
     def _resolve_cache_config(kwargs):
@@ -2128,63 +2182,71 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(rpath)
-        if not await self._uses_grpc_data_path(bucket):
-            return await super()._put_file(
-                lpath,
-                rpath,
-                metadata=metadata,
-                consistency=consistency,
-                content_type=content_type,
-                chunksize=chunksize,
-                callback=callback,
-                fixed_key_metadata=fixed_key_metadata,
-                mode=mode,
-                if_generation_match=if_generation_match,
-                **kwargs,
-            )
+        if await self._uses_grpc_data_path(bucket):
+            if os.path.isdir(lpath):
+                return
 
-        if os.path.isdir(lpath):
-            return
+            if generation:
+                raise ValueError("Cannot write to specific object generation")
 
-        if generation:
-            raise ValueError("Cannot write to specific object generation")
-
-        if (
-            metadata
-            or fixed_key_metadata
-            or consistency
-            or (content_type and content_type != "application/octet-stream")
-        ):
-            logger.warning(
-                "Zonal and RCU buckets do not support content_type, metadata, "
-                "fixed_key_metadata or consistency during upload. "
-                "These parameters will be ignored."
-            )
-        finalize_on_close = self._resolve_finalize_on_close(
-            await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
-        )
-        with open(lpath, "rb") as f:
-            writer = await self._init_aaow(
-                bucket,
-                key,
-                if_generation_match=_resolve_generation_match(
-                    mode, if_generation_match
-                ),
-            )
-            # The open writer has already replaced the object, so update the
-            # cache even if the write fails.
-            try:
-                try:
-                    await writer.append_from_file(f, block_size=chunksize)
-                except BaseException:
-                    # Leave a partially written object unfinalized.
-                    await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
-                    raise
-                await zb_hns_utils.close_aaow(
-                    writer, finalize_on_close=finalize_on_close
+            if (
+                metadata
+                or fixed_key_metadata
+                or consistency
+                or (content_type and content_type != "application/octet-stream")
+            ):
+                logger.warning(
+                    "Zonal and RCU buckets do not support content_type, metadata, "
+                    "fixed_key_metadata or consistency during upload. "
+                    "These parameters will be ignored."
                 )
-            finally:
-                await self._write_file_cache_update(rpath)
+            finalize_on_close = self._resolve_finalize_on_close(
+                await self._lookup_bucket_layout(bucket),
+                kwargs.get("finalize_on_close"),
+            )
+            with open(lpath, "rb") as f:
+                try:
+                    writer = await self._init_aaow(
+                        bucket,
+                        key,
+                        if_generation_match=_resolve_generation_match(
+                            mode, if_generation_match
+                        ),
+                    )
+                except RapidCacheUltraDisabledError as e:
+                    logger.warning("%s Retrying the write over HTTP.", e)
+                else:
+                    # The open writer has already replaced the object, so update
+                    # the cache even if the write fails.
+                    try:
+                        try:
+                            await writer.append_from_file(f, block_size=chunksize)
+                        except BaseException:
+                            # Leave a partially written object unfinalized.
+                            await zb_hns_utils.close_aaow(
+                                writer, finalize_on_close=False
+                            )
+                            raise
+                        await zb_hns_utils.close_aaow(
+                            writer, finalize_on_close=finalize_on_close
+                        )
+                    finally:
+                        await self._write_file_cache_update(rpath)
+                    return
+
+        return await super()._put_file(
+            lpath,
+            rpath,
+            metadata=metadata,
+            consistency=consistency,
+            content_type=content_type,
+            chunksize=chunksize,
+            callback=callback,
+            fixed_key_metadata=fixed_key_metadata,
+            mode=mode,
+            if_generation_match=if_generation_match,
+            **kwargs,
+        )
 
     async def _pipe_file(
         self,
@@ -2232,50 +2294,60 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(path)
-        if not await self._uses_grpc_data_path(bucket):
-            return await super()._pipe_file(
-                path,
-                data,
-                metadata=metadata,
-                consistency=consistency,
-                content_type=content_type,
-                fixed_key_metadata=fixed_key_metadata,
-                chunksize=chunksize,
-                mode=mode,
-                if_generation_match=if_generation_match,
+        if await self._uses_grpc_data_path(bucket):
+            if (
+                metadata
+                or fixed_key_metadata
+                or (content_type and content_type != "application/octet-stream")
+            ):
+                logger.warning(
+                    "Zonal and RCU buckets do not support content_type, metadata or "
+                    "fixed_key_metadata during upload. These parameters will be ignored."
+                )
+            finalize_on_close = self._resolve_finalize_on_close(
+                await self._lookup_bucket_layout(bucket),
+                kwargs.get("finalize_on_close"),
             )
-
-        if (
-            metadata
-            or fixed_key_metadata
-            or (content_type and content_type != "application/octet-stream")
-        ):
-            logger.warning(
-                "Zonal and RCU buckets do not support content_type, metadata or "
-                "fixed_key_metadata during upload. These parameters will be ignored."
-            )
-        finalize_on_close = self._resolve_finalize_on_close(
-            await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
-        )
-        writer = await self._init_aaow(
-            bucket,
-            key,
-            if_generation_match=_resolve_generation_match(mode, if_generation_match),
-        )
-        # The open writer has already replaced the object, so update the cache
-        # even if the write fails.
-        try:
             try:
-                with memoryview(data) as data_view:
-                    for i in range(0, len(data_view), chunksize):
-                        await writer.append(data_view[i : i + chunksize])
-            except BaseException:
-                # Leave a partially written object unfinalized.
-                await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
-                raise
-            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
-        finally:
-            await self._write_file_cache_update(path)
+                writer = await self._init_aaow(
+                    bucket,
+                    key,
+                    if_generation_match=_resolve_generation_match(
+                        mode, if_generation_match
+                    ),
+                )
+            except RapidCacheUltraDisabledError as e:
+                logger.warning("%s Retrying the write over HTTP.", e)
+            else:
+                # The open writer has already replaced the object, so update the
+                # cache even if the write fails.
+                try:
+                    try:
+                        with memoryview(data) as data_view:
+                            for i in range(0, len(data_view), chunksize):
+                                await writer.append(data_view[i : i + chunksize])
+                    except BaseException:
+                        # Leave a partially written object unfinalized.
+                        await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+                        raise
+                    await zb_hns_utils.close_aaow(
+                        writer, finalize_on_close=finalize_on_close
+                    )
+                finally:
+                    await self._write_file_cache_update(path)
+                return
+
+        return await super()._pipe_file(
+            path,
+            data,
+            metadata=metadata,
+            consistency=consistency,
+            content_type=content_type,
+            fixed_key_metadata=fixed_key_metadata,
+            chunksize=chunksize,
+            mode=mode,
+            if_generation_match=if_generation_match,
+        )
 
     async def _get_file_request(
         self, rpath, lpath, *args, headers=None, callback=None, **kwargs
