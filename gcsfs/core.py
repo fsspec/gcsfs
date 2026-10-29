@@ -1363,8 +1363,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """Concurrent fetch of file data"""
         if start is None:
             start = 0
-        if end is None:
-            end = (await self._info(path))["size"]
+        if end is None or start < 0 or end < 0:
+            size = (await self._info(path))["size"]
+            start, end, _ = slice(start, end).indices(size)
         if start >= end:
             return b""
 
