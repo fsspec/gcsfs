@@ -1,7 +1,9 @@
 import asyncio
 import collections
 import concurrent.futures
+import dataclasses
 import logging
+from typing import Optional
 from unittest import mock
 
 import pytest
@@ -99,18 +101,35 @@ async def test_init_aaow():
         assert result is mock_writer_instance
 
 
+@dataclasses.dataclass
+class _FakePreconditions:
+    if_generation_match: Optional[int] = None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "if_generation_match, expected_kwargs",
-    [(0, {"generation": 0}), (7, {"generation": None, "if_generation_match": 7})],
+    [
+        (0, {"generation": 0}),
+        (
+            7,
+            {
+                "generation": None,
+                "preconditions": _FakePreconditions(if_generation_match=7),
+            },
+        ),
+    ],
 )
 async def test_init_aaow_if_generation_match(if_generation_match, expected_kwargs):
     mock_writer_instance = mock.AsyncMock()
-    with mock.patch(
-        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
-        new_callable=mock.Mock,
-        return_value=mock_writer_instance,
-    ) as mock_writer_class:
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _FakePreconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+            return_value=mock_writer_instance,
+        ) as mock_writer_class,
+    ):
         await zb_hns_utils.init_aaow(
             mock_grpc_client,
             bucket_name,
@@ -149,21 +168,51 @@ async def test_init_aaow_rejects_generation_with_if_generation_match(
 
 @pytest.mark.asyncio
 async def test_init_aaow_if_generation_match_unsupported_sdk():
-    with mock.patch(
-        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
-        side_effect=TypeError("unexpected keyword argument 'if_generation_match'"),
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", None),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
     ):
         with pytest.raises(NotImplementedError):
             await zb_hns_utils.init_aaow(
                 mock_grpc_client, bucket_name, object_name, if_generation_match=7
             )
+        mock_writer_class.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_if_generation_match_zero_without_preconditions():
+    mock_writer_instance = mock.AsyncMock()
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", None),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+            return_value=mock_writer_instance,
+        ) as mock_writer_class,
+    ):
+        await zb_hns_utils.init_aaow(
+            mock_grpc_client, bucket_name, object_name, if_generation_match=0
+        )
+        mock_writer_class.assert_called_once_with(
+            client=mock_grpc_client,
+            bucket_name=bucket_name,
+            object_name=object_name,
+            generation=0,
+            writer_options={},
+        )
 
 
 @pytest.mark.asyncio
 async def test_init_aaow_unrelated_type_error_propagates():
-    with mock.patch(
-        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
-        side_effect=TypeError("boom"),
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _FakePreconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            side_effect=TypeError("boom"),
+        ),
     ):
         with pytest.raises(TypeError, match="boom"):
             await zb_hns_utils.init_aaow(
@@ -179,10 +228,13 @@ async def test_init_aaow_unrelated_type_error_propagates():
 async def test_init_aaow_failed_precondition(if_generation_match, expected):
     mock_writer_instance = mock.AsyncMock()
     mock_writer_instance.open.side_effect = FailedPrecondition("exists")
-    with mock.patch(
-        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
-        new_callable=mock.Mock,
-        return_value=mock_writer_instance,
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _FakePreconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+            return_value=mock_writer_instance,
+        ),
     ):
         with pytest.raises(expected) as excinfo:
             await zb_hns_utils.init_aaow(
