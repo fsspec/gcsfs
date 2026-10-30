@@ -8,7 +8,7 @@ trap 'record_failure run-workload' ERR
 skip_if_failed
 source "${BUILD_VARS_FILE}"
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${_ZONE}" --project="${PROJECT_ID}"
+gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}"
 CHART="gcsfs/tests/perf/macrobenchmarks/workloads/${_WORKLOAD}/helm_chart"
 # Restore precedence: an external checkpoint wins; otherwise, when seeding is on,
 # restore the per-run seed produced by the seed-checkpoint step. Empty => fresh
