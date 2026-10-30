@@ -14,7 +14,7 @@ echo "--- Deleting GKE cluster: ${CLUSTER_NAME} ---"
 # is the last cleanup step and blocks nothing, so it's worth being patient to
 # release the cluster's resources rather than leaking them.
 for i in {1..20}; do
-  if gcloud container clusters delete "$CLUSTER_NAME" --zone="${_ZONE}" --project="${PROJECT_ID}" --quiet; then
+  if gcloud container clusters delete "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}" --quiet; then
     echo "Cluster ${CLUSTER_NAME} deleted successfully."
     break
   fi
