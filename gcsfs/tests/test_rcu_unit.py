@@ -5,8 +5,10 @@ ExtendedGcsFileSystem looks the bucket layout up once more. If RCU is no
 longer enabled, it caches the fresh layout and raises
 ``RapidCacheUltraDisabledError``, which ``pipe_file`` and ``put_file`` answer
 with one retry over HTTP; otherwise the original error surfaces. Writers that
-open after the cached layout was refreshed fail fast with the same error. The
-gRPC writer, the layout lookup, and the HTTP upload are mocked.
+open after the cached layout was refreshed fail fast with the same error, and
+uploads that already opened keep the ``finalize_on_close`` they resolved
+before opening. The gRPC writer, the layout lookup, and the HTTP upload are
+mocked.
 """
 
 import logging
@@ -22,6 +24,7 @@ from gcsfs.extended_gcsfs import (
     BucketLayout,
     ExtendedGcsFileSystem,
     RapidCacheUltraDisabledError,
+    simple_upload,
 )
 from gcsfs.tests import layouts
 from gcsfs.tests.utils import is_real_gcs, tmpfile
@@ -325,6 +328,37 @@ async def test_pipe_file_append_failure_after_open_does_not_retry(rcu_fs, open_e
     writer.close.assert_awaited_once()
     fs._get_bucket_layout.assert_not_awaited()
     http_pipe_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["pipe_file", "put_file", "simple_upload"])
+async def test_layout_invalidated_during_upload_keeps_finalize_on_close(rcu_fs, method):
+    """Invalidating the layout mid-upload does not change finalize_on_close."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    fs._get_bucket_layout.return_value = layouts.STANDARD
+    writer = _writer()
+
+    def invalidate(*args, **kwargs):
+        fs.invalidate_storage_layout_cache(BUCKET)
+
+    writer.append.side_effect = invalidate
+    writer.append_from_file.side_effect = invalidate
+    init_aaow.return_value = writer
+
+    if method == "pipe_file":
+        await fs._pipe_file(PATH, b"data")
+    elif method == "put_file":
+        with tmpfile() as lpath:
+            with open(lpath, "wb") as f:
+                f.write(b"data")
+            await fs._put_file(lpath, PATH)
+    else:
+        await simple_upload(fs, BUCKET, "key", b"data")
+
+    assert init_aaow.await_args.kwargs["storage_class"] == "RAPID"
+    writer.close.assert_awaited_once_with(finalize_on_close=True)
+    fs._get_bucket_layout.assert_not_awaited()
 
 
 def test_zonal_file_write_after_rcu_disabled_raises_clear_error(rcu_fs, open_error):
