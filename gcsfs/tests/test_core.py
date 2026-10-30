@@ -4521,44 +4521,67 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         assert any("cache_type/readahead:e" in ua for ua in user_agents)
 
 
-def test_user_agent_telemetry_integration(gcs):
-    """Verify that gcs._get_headers and User-Agent include telemetry tokens and handle overrides."""
-    from gcsfs.telemetry.context import (
-        Dimension,
-        reset_telemetry_context,
-        set_telemetry_context,
+@pytest.mark.parametrize(
+    "input_headers,cache_type,cache_source,framework,expected_in,expected_not_in",
+    [
+        (None, None, None, None, ["python-gcsfs/"], ["cache_type"]),
+        (
+            None,
+            "readahead",
+            "explicit",
+            None,
+            ["python-gcsfs/", "cache_type/readahead:e"],
+            [],
+        ),
+        (
+            None,
+            "none",
+            "default",
+            None,
+            ["python-gcsfs/", "cache_type/none:d"],
+            [],
+        ),
+        (None, None, None, "torch", ["python-gcsfs/", "fw/torch"], []),
+        (
+            {"User-Agent": "my-custom-agent"},
+            None,
+            None,
+            "pandas",
+            ["my-custom-agent"],
+            ["fw/pandas"],
+        ),
+    ],
+)
+def test_user_agent_telemetry_integration(
+    gcs,
+    input_headers,
+    cache_type,
+    cache_source,
+    framework,
+    expected_in,
+    expected_not_in,
+):
+    """Verify that gcs._get_headers builds User-Agent with cache/telemetry tokens and preserves overrides."""
+    import contextlib
+
+    from gcsfs.telemetry.context import Dimension
+    from gcsfs.telemetry.wrapper import _telemetry_context
+
+    ctx = (
+        _telemetry_context({Dimension.FRAMEWORK.value: framework})
+        if framework
+        else contextlib.nullcontext()
     )
+    with ctx:
+        headers = gcs._get_headers(
+            input_headers, cache_type=cache_type, cache_source=cache_source
+        )
 
-    # 1. Default headers
-    headers = gcs._get_headers(None)
-    assert headers["User-Agent"].startswith("python-gcsfs/")
-    assert "cache_type" not in headers["User-Agent"]
-
-    # 2. Cache type explicit & default
-    headers_explicit = gcs._get_headers(
-        None, cache_type="readahead", cache_source="explicit"
-    )
-    assert "cache_type/readahead:e" in headers_explicit["User-Agent"]
-
-    headers_default = gcs._get_headers(None, cache_type="none", cache_source="default")
-    assert "cache_type/none:d" in headers_default["User-Agent"]
-
-    # 3. ContextVar caller framework
-    token = set_telemetry_context(Dimension.FRAMEWORK, "torch")
-    try:
-        headers_caller = gcs._get_headers(None)
-        assert "fw/torch" in headers_caller["User-Agent"]
-        assert headers_caller["User-Agent"].startswith("python-gcsfs/")
-    finally:
-        reset_telemetry_context(token)
-
-    # 4. Preset User-Agent is preserved
-    token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
-    try:
-        headers_preset = gcs._get_headers({"User-Agent": "my-custom-agent"})
-        assert headers_preset["User-Agent"] == "my-custom-agent"
-    finally:
-        reset_telemetry_context(token)
+    ua = headers["User-Agent"]
+    for token in expected_in:
+        assert token in ua
+    for token in expected_not_in:
+        assert token not in ua
 
 
 def test_no_eager_property_evaluation_on_init(monkeypatch):

@@ -738,78 +738,102 @@ def test_sync_wrapper_propagates_context_to_background_loop_thread(detector):
 # ============================================================================
 
 
-def test_all_parent_methods_telemetry_coverage(mock_gcs_harness, tmp_path, monkeypatch):
+def _write_file_helper(fs, tmp_path, monkeypatch):
+    with fs.open("test-bucket/file.txt", "wb") as f:
+        f.write(b"data\n")
+        f.writelines([b"data2\n"])
+        f.flush()
+
+
+def _get_file_concurrent_helper(fs, tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
+
+    async def _zero_threshold(bucket):
+        return 0
+
+    monkeypatch.setattr(fs, "_get_threshold_for_disk_reads", _zero_threshold)
+    fs.get_file(
+        "test-bucket/file.txt",
+        str(tmp_path / "downloaded.bin"),
+        concurrency=2,
+        chunk_size=10,
+    )
+
+
+def _read_file_helper(fs, tmp_path, monkeypatch):
+    with fs.open("test-bucket/file.txt", "rb") as f:
+        return f.read(5)
+
+
+@pytest.mark.parametrize(
+    "name,op",
+    [
+        ("ls", lambda fs, tmp_path, monkeypatch: fs.ls("test-bucket")),
+        ("info", lambda fs, tmp_path, monkeypatch: fs.info("test-bucket/file.txt")),
+        ("exists", lambda fs, tmp_path, monkeypatch: fs.exists("test-bucket/file.txt")),
+        ("cat", lambda fs, tmp_path, monkeypatch: fs.cat("test-bucket/file.txt")),
+        (
+            "head",
+            lambda fs, tmp_path, monkeypatch: fs.head("test-bucket/file.txt", size=5),
+        ),
+        (
+            "tail",
+            lambda fs, tmp_path, monkeypatch: fs.tail("test-bucket/file.txt", size=5),
+        ),
+        ("find", lambda fs, tmp_path, monkeypatch: fs.find("test-bucket")),
+        ("walk", lambda fs, tmp_path, monkeypatch: list(fs.walk("test-bucket"))),
+        ("glob", lambda fs, tmp_path, monkeypatch: fs.glob("test-bucket/*")),
+        ("du", lambda fs, tmp_path, monkeypatch: fs.du("test-bucket")),
+        ("size", lambda fs, tmp_path, monkeypatch: fs.size("test-bucket/file.txt")),
+        (
+            "read_bytes",
+            lambda fs, tmp_path, monkeypatch: fs.read_bytes("test-bucket/file.txt"),
+        ),
+        (
+            "read_text",
+            lambda fs, tmp_path, monkeypatch: fs.read_text("test-bucket/file.txt"),
+        ),
+        (
+            "write_bytes",
+            lambda fs, tmp_path, monkeypatch: fs.write_bytes(
+                "test-bucket/file.txt", b"data"
+            ),
+        ),
+        (
+            "write_text",
+            lambda fs, tmp_path, monkeypatch: fs.write_text(
+                "test-bucket/file.txt", "data"
+            ),
+        ),
+        ("buckets", lambda fs, tmp_path, monkeypatch: fs.buckets),
+        ("open_read", _read_file_helper),
+        ("open_write", _write_file_helper),
+        ("get_file_concurrent", _get_file_concurrent_helper),
+    ],
+)
+def test_all_parent_methods_telemetry_coverage(
+    mock_gcs_harness, tmp_path, monkeypatch, name, op
+):
     """
-    Concise verification that ALL inherited and overridden FileSystem and File
-    methods correctly propagate the caller framework in outgoing User-Agent headers.
+    Verify that inherited and overridden FileSystem and File methods
+    correctly propagate the caller framework in outgoing User-Agent headers.
     """
     fs = mock_gcs_harness.fs
     captured = mock_gcs_harness.user_agents
+    fs.dircache.clear()
+    captured.clear()
 
-    def _write_file_helper(filesystem):
-        with filesystem.open("test-bucket/file.txt", "wb") as f:
-            f.write(b"data\n")
-            f.writelines([b"data2\n"])
-            f.flush()
-
-    def _get_file_concurrent_helper(filesystem):
-        monkeypatch.setattr(filesystem, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
-
-        async def _zero_threshold(bucket):
-            return 0
-
-        monkeypatch.setattr(
-            filesystem, "_get_threshold_for_disk_reads", _zero_threshold
-        )
-        filesystem.get_file(
-            "test-bucket/file.txt",
-            str(tmp_path / "downloaded.bin"),
-            concurrency=2,
-            chunk_size=10,
-        )
-
-    def _read_file_helper(filesystem):
-        with filesystem.open("test-bucket/file.txt", "rb") as f:
-            return f.read(5)
-
-    fs_operations = [
-        ("ls", lambda: fs.ls("test-bucket")),
-        ("info", lambda: fs.info("test-bucket/file.txt")),
-        ("exists", lambda: fs.exists("test-bucket/file.txt")),
-        ("cat", lambda: fs.cat("test-bucket/file.txt")),
-        ("head", lambda: fs.head("test-bucket/file.txt", size=5)),
-        ("tail", lambda: fs.tail("test-bucket/file.txt", size=5)),
-        ("find", lambda: fs.find("test-bucket")),
-        ("walk", lambda: list(fs.walk("test-bucket"))),
-        ("glob", lambda: fs.glob("test-bucket/*")),
-        ("du", lambda: fs.du("test-bucket")),
-        ("size", lambda: fs.size("test-bucket/file.txt")),
-        ("read_bytes", lambda: fs.read_bytes("test-bucket/file.txt")),
-        ("read_text", lambda: fs.read_text("test-bucket/file.txt")),
-        ("write_bytes", lambda: fs.write_bytes("test-bucket/file.txt", b"data")),
-        ("write_text", lambda: fs.write_text("test-bucket/file.txt", "data")),
-        ("buckets", lambda: fs.buckets),
-        ("open_read", lambda: _read_file_helper(fs)),
-        ("open_write", lambda: _write_file_helper(fs)),
-        ("get_file_concurrent", lambda: _get_file_concurrent_helper(fs)),
-    ]
-
-    for name, op in fs_operations:
-        fs.dircache.clear()
-        captured.clear()
-        fw_name = f"test-{name}"
-        expected_token = f"fw/{fw_name}"
-        token = set_telemetry_context(Dimension.FRAMEWORK, fw_name)
-        try:
-            op()
-            assert (
-                len(captured) > 0
-            ), f"operation {name} did not execute any network calls"
-            assert all(
-                expected_token in ua for ua in captured
-            ), f"operation {name} had requests missing {expected_token}: {captured}"
-        finally:
-            reset_telemetry_context(token)
+    fw_name = f"test-{name}"
+    expected_token = f"fw/{fw_name}"
+    token = set_telemetry_context(Dimension.FRAMEWORK, fw_name)
+    try:
+        op(fs, tmp_path, monkeypatch)
+        assert len(captured) > 0, f"operation {name} did not execute any network calls"
+        assert all(
+            expected_token in ua for ua in captured
+        ), f"operation {name} had requests missing {expected_token}: {captured}"
+    finally:
+        reset_telemetry_context(token)
 
 
 def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkeypatch):
@@ -901,12 +925,8 @@ def test_defer_close_propagates_caller_framework():
 
 
 @pytest.mark.asyncio
-async def test_gcsfs_native_async_and_super_resolution(mock_gcs_harness, monkeypatch):
-    """Verify native async GCSFileSystem methods and super() resolution on inherited AsyncFileSystem methods."""
-    from unittest import mock
-
-    from gcsfs.core import GCSFileSystem
-
+async def test_gcsfs_native_async_telemetry_propagation(mock_gcs_harness):
+    """Verify native async GCSFileSystem methods propagate telemetry context."""
     fs = mock_gcs_harness.fs
     mock_gcs_harness.clear()
 
@@ -918,6 +938,14 @@ async def test_gcsfs_native_async_and_super_resolution(mock_gcs_harness, monkeyp
         assert all("fw/jax" in ua for ua in mock_gcs_harness.user_agents)
     finally:
         reset_telemetry_context(token)
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_async_wrapper_super_resolution():
+    """Verify super() resolution works on inherited AsyncFileSystem methods wrapped by telemetry."""
+    from unittest import mock
+
+    from gcsfs.core import GCSFileSystem
 
     class SubGCSFS(GCSFileSystem):
         async def _cat_ranges(self, paths, starts, ends, **kwargs):

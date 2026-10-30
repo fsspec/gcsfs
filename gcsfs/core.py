@@ -2663,6 +2663,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
+        # "" acts as a negative cache value so subsequent chunk reads / background fetches don't re-walk the stack.
         self.caller_framework = (
             default_usage_tracker.get_dimension(Dimension.FRAMEWORK) or ""
         )
@@ -3260,4 +3261,4 @@ async def simple_upload(
     return j
 
 
-wrap_file_methods()
+wrap_file_methods(GCSFile)

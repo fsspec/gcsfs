@@ -257,13 +257,8 @@ def _file_telemetry_wrapper(func: Callable) -> Callable:
     return sync_wrapper
 
 
-def wrap_file_methods(cls: Any = None) -> None:
-    """Wrap all callable methods and properties on a File class (`GCSFile` by default, or `ZonalFile`)."""
-    if cls is None:
-        from gcsfs.core import GCSFile
-
-        cls = GCSFile
-
+def wrap_file_methods(cls: Any) -> None:
+    """Wrap all callable methods and properties on a File class (e.g. `GCSFile` or `ZonalFile`)."""
     for name, attr in list(cls.__dict__.items()):
         if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
             continue
