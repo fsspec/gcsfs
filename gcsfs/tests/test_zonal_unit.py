@@ -1965,7 +1965,9 @@ def test_open_rcu_bucket_read_uses_zonal_file(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bucket_layout", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU])
+@pytest.mark.parametrize(
+    "bucket_layout", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU]
+)
 async def test_cp_file_and_merge_on_rcu_bucket_delegate_to_core(
     async_gcs, bucket_layout
 ):
@@ -2029,7 +2031,9 @@ async def test_anywhere_cache_bucket_writes_stay_on_http(extended_gcsfs, async_g
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bucket_layout", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU])
+@pytest.mark.parametrize(
+    "bucket_layout", [BucketLayout.STANDARD_RCU, BucketLayout.HIERARCHICAL_RCU]
+)
 async def test_core_upload_helpers_route_rcu_to_extended(async_gcs, bucket_layout):
     """core.simple_upload and core.initiate_upload hand RCU buckets to gRPC."""
     with (

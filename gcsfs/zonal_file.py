@@ -49,18 +49,19 @@ class ZonalFile(GCSFile):
         kms_key_name=None,
         if_generation_match=None,
         pool_size=zb_hns_utils.DEFAULT_CONCURRENCY,
-        finalize_on_close=False,
+        finalize_on_close=None,
         flush_interval_bytes=_DEFAULT_FLUSH_INTERVAL_BYTES,
         **kwargs,
     ):
         """
         Initializes the ZonalFile object.
 
-        For Zonal buckets, `finalize_on_close` is set to `False` by default to optimize
-        for write throughput and keep the file appendable. This means that when exiting
-        a `with` block or closing, the file will not be automatically finalized. To
-        ensure the write is finalized, `.commit()` must be called explicitly or
-        `finalize_on_close` must be set to `True` when opening the file.
+        For Zonal buckets, `finalize_on_close` defaults to `False` to optimize
+        for write throughput and keep the file appendable. For RCU buckets,
+        `finalize_on_close` defaults to `True`. When `finalize_on_close` is
+        `False`, exiting a `with` block or closing the file will not
+        automatically finalize it; to finalize the write, `.commit()` must be
+        called explicitly or `finalize_on_close` must be set to `True`.
 
         For Zonal buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
@@ -75,6 +76,15 @@ class ZonalFile(GCSFile):
         # MRD pool below has been opened; validate first so an invalid value
         # fails without a lookup.
         _resolve_open_generation_match(mode, if_generation_match)
+        if finalize_on_close is None:
+            from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+            if isinstance(gcsfs, ExtendedGcsFileSystem):
+                finalize_on_close = gcsfs._resolve_finalize_on_close(
+                    gcsfs._sync_lookup_bucket_layout(bucket)
+                )
+            else:
+                finalize_on_close = False
         self.aaow = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
