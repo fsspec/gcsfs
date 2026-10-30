@@ -175,9 +175,9 @@ def run_multi_threaded_fixed_duration(
 
 def _multiprocess_worker_wrapper(worker_target, args):
     """Wrapper to apply emulator mock inside spawned child processes."""
-    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
+    from gcsfs.tests.utils import _patch_get_bucket_layout_for_emulator
 
-    patch = _patch_get_bucket_type_for_emulator()
+    patch = _patch_get_bucket_layout_for_emulator()
     if patch:
         with patch:
             worker_target(*args)
