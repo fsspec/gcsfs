@@ -159,7 +159,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     def __init__(
         self,
         *args,
-        finalize_on_close=False,
+        finalize_on_close=None,
         mrd_pool_cache_size=16,
         max_mrd_pool_cache_queue_size=16,
         **kwargs,
@@ -167,8 +167,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         Parameters
         ----------
-        finalize_on_close : bool, default False
-            By default, files in zonal buckets are left unfinalized to allow appends.
+        finalize_on_close : bool, optional
+            If set, overrides the default finalization behavior when closing
+            appendable gRPC writers. When ``None`` (the default), files in
+            Zonal buckets default to ``False`` (left unfinalized to allow
+            appends) and files in RCU buckets default to ``True``.
         mrd_pool_cache_size : int, default 16
             Maximum number of idle pools to retain in the cache.
         max_mrd_pool_cache_queue_size : int, default 16
@@ -189,7 +192,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if k.startswith("retry_") and k[6:] in valid_keys and v is not None
         }
         super().__init__(*args, **kwargs)
-        # By default, files in zonal buckets are left unfinalized to allow appends.
+        # When None, defaults to False for Zonal buckets and True for RCU buckets.
         self.finalize_on_close = finalize_on_close
         self._grpc_client = None
         self._storage_control_client = None
@@ -434,6 +437,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket_layout = self._sync_lookup_bucket_layout(bucket)
         use_zonal_file = "+" not in mode and bucket_layout.uses_grpc_data_path
         file_cls = ZonalFile if use_zonal_file else GCSFile
+        finalize_on_close = self._resolve_finalize_on_close(
+            bucket_layout, kwargs.pop("finalize_on_close", None)
+        )
 
         return file_cls(
             self,
@@ -447,7 +453,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             autocommit=autocommit,
             fixed_key_metadata=fixed_key_metadata,
             generation=generation,
-            finalize_on_close=kwargs.pop("finalize_on_close", self.finalize_on_close),
+            finalize_on_close=finalize_on_close,
             **kwargs,
         )
 
@@ -515,6 +521,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _uses_grpc_data_path(self, bucket):
         bucket_layout = await self._lookup_bucket_layout(bucket)
         return bucket_layout.uses_grpc_data_path
+
+    def _resolve_finalize_on_close(self, bucket_layout, finalize_on_close=None):
+        """Return the per-call value, else the filesystem default, else True for RCU."""
+        if finalize_on_close is not None:
+            return finalize_on_close
+        fs_default = getattr(self, "finalize_on_close", None)
+        if fs_default is not None:
+            return fs_default
+        return bucket_layout.is_rcu
 
     async def _init_aaow(
         self,
@@ -2081,8 +2096,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """Upload a local file.
 
         This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
-        In Zonal and RCU buckets, file is left *unfinalized* by default unless
-        `finalize_on_close` is set to True.
+        By default, files in Zonal buckets are left *unfinalized* (unless
+        `finalize_on_close` is set to True), whereas files in RCU buckets are
+        finalized on close by default.
         For other buckets, it delegates to the parent class's implementation.
 
         Parameters
@@ -2141,6 +2157,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "fixed_key_metadata or consistency during upload. "
                 "These parameters will be ignored."
             )
+        finalize_on_close = self._resolve_finalize_on_close(
+            await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
+        )
         writer = await self._init_aaow(
             bucket,
             key,
@@ -2150,9 +2169,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         try:
             with open(lpath, "rb") as f:
                 await writer.append_from_file(f, block_size=chunksize)
-        finally:
-            finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
-            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
+        except BaseException:
+            # Leave a partially written object unfinalized.
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+            raise
+        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
         await self._write_file_cache_update(rpath)
 
@@ -2172,8 +2193,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """Upload bytes to a file.
 
         This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
-        In Zonal and RCU buckets, file is left *unfinalized* by default unless
-        `finalize_on_close` is set to True.
+        By default, files in Zonal buckets are left *unfinalized* (unless
+        `finalize_on_close` is set to True), whereas files in RCU buckets are
+        finalized on close by default.
         For other buckets, it delegates to the parent class's implementation.
 
         Parameters
@@ -2220,6 +2242,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "Zonal and RCU buckets do not support content_type, metadata or "
                 "fixed_key_metadata during upload. These parameters will be ignored."
             )
+        finalize_on_close = self._resolve_finalize_on_close(
+            await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
+        )
         writer = await self._init_aaow(
             bucket,
             key,
@@ -2229,9 +2254,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             with memoryview(data) as data_view:
                 for i in range(0, len(data_view), chunksize):
                     await writer.append(data_view[i : i + chunksize])
-        finally:
-            finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
-            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
+        except BaseException:
+            # Leave a partially written object unfinalized.
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+            raise
+        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
 
         await self._write_file_cache_update(path)
 
@@ -2621,8 +2648,9 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload to Zonal and RCU buckets using gRPC.
-    In Zonal and RCU buckets, file is left *unfinalized* by default unless
-    `finalize_on_close` is set to True.
+    By default, files in Zonal buckets are left *unfinalized* (unless
+    `finalize_on_close` is set to True), whereas files in RCU buckets are
+    finalized on close by default. A failed upload is never finalized.
     Delegates to core simple_upload implementation for other buckets.
 
     Parameters
@@ -2678,6 +2706,9 @@ async def simple_upload(
             "Zonal and RCU buckets do not support content_type, metadatain, fixed_key_metadata, "
             "consistency or kms_key_name during upload. These parameters will be ignored."
         )
+    finalize_on_close = fs._resolve_finalize_on_close(
+        await fs._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
+    )
     writer = await fs._init_aaow(
         bucket,
         key,
@@ -2685,7 +2716,8 @@ async def simple_upload(
     )
     try:
         await writer.append(datain)
-    finally:
-        default_finalize = getattr(fs, "finalize_on_close", False)
-        finalize_on_close = kwargs.get("finalize_on_close", default_finalize)
-        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
+    except BaseException:
+        # Leave a partially written object unfinalized.
+        await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+        raise
+    await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
