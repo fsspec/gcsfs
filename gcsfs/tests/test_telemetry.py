@@ -731,3 +731,232 @@ def test_sync_wrapper_propagates_context_to_background_loop_thread(detector):
     # Detection ran once, on the caller thread: the loop thread's stack has no framework frames
     assert detector.calls == [caller_thread_id]
     assert get_telemetry_context() == {}
+
+
+# ============================================================================
+# 6. GCSFileSystem & GCSFile Integration Tests
+# ============================================================================
+
+
+def _write_file_helper(fs, tmp_path, monkeypatch):
+    with fs.open("test-bucket/file.txt", "wb") as f:
+        f.write(b"data\n")
+        f.writelines([b"data2\n"])
+        f.flush()
+
+
+def _get_file_concurrent_helper(fs, tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
+
+    async def _zero_threshold(bucket):
+        return 0
+
+    monkeypatch.setattr(fs, "_get_threshold_for_disk_reads", _zero_threshold)
+    fs.get_file(
+        "test-bucket/file.txt",
+        str(tmp_path / "downloaded.bin"),
+        concurrency=2,
+        chunk_size=10,
+    )
+
+
+def _read_file_helper(fs, tmp_path, monkeypatch):
+    with fs.open("test-bucket/file.txt", "rb") as f:
+        return f.read(5)
+
+
+@pytest.mark.parametrize(
+    "name,op",
+    [
+        ("ls", lambda fs, tmp_path, monkeypatch: fs.ls("test-bucket")),
+        ("info", lambda fs, tmp_path, monkeypatch: fs.info("test-bucket/file.txt")),
+        ("exists", lambda fs, tmp_path, monkeypatch: fs.exists("test-bucket/file.txt")),
+        ("cat", lambda fs, tmp_path, monkeypatch: fs.cat("test-bucket/file.txt")),
+        (
+            "head",
+            lambda fs, tmp_path, monkeypatch: fs.head("test-bucket/file.txt", size=5),
+        ),
+        (
+            "tail",
+            lambda fs, tmp_path, monkeypatch: fs.tail("test-bucket/file.txt", size=5),
+        ),
+        ("find", lambda fs, tmp_path, monkeypatch: fs.find("test-bucket")),
+        ("walk", lambda fs, tmp_path, monkeypatch: list(fs.walk("test-bucket"))),
+        ("glob", lambda fs, tmp_path, monkeypatch: fs.glob("test-bucket/*")),
+        ("du", lambda fs, tmp_path, monkeypatch: fs.du("test-bucket")),
+        ("size", lambda fs, tmp_path, monkeypatch: fs.size("test-bucket/file.txt")),
+        (
+            "read_bytes",
+            lambda fs, tmp_path, monkeypatch: fs.read_bytes("test-bucket/file.txt"),
+        ),
+        (
+            "read_text",
+            lambda fs, tmp_path, monkeypatch: fs.read_text("test-bucket/file.txt"),
+        ),
+        (
+            "write_bytes",
+            lambda fs, tmp_path, monkeypatch: fs.write_bytes(
+                "test-bucket/file.txt", b"data"
+            ),
+        ),
+        (
+            "write_text",
+            lambda fs, tmp_path, monkeypatch: fs.write_text(
+                "test-bucket/file.txt", "data"
+            ),
+        ),
+        ("buckets", lambda fs, tmp_path, monkeypatch: fs.buckets),
+        ("open_read", _read_file_helper),
+        ("open_write", _write_file_helper),
+        ("get_file_concurrent", _get_file_concurrent_helper),
+    ],
+)
+def test_all_parent_methods_telemetry_coverage(
+    mock_gcs_harness, tmp_path, monkeypatch, name, op
+):
+    """
+    Verify that inherited and overridden FileSystem and File methods
+    correctly propagate the caller framework in outgoing User-Agent headers.
+    """
+    fs = mock_gcs_harness.fs
+    captured = mock_gcs_harness.user_agents
+    fs.dircache.clear()
+    captured.clear()
+
+    fw_name = f"test-{name}"
+    expected_token = f"fw/{fw_name}"
+    token = set_telemetry_context(Dimension.FRAMEWORK, fw_name)
+    try:
+        op(fs, tmp_path, monkeypatch)
+        assert len(captured) > 0, f"operation {name} did not execute any network calls"
+        assert all(
+            expected_token in ua for ua in captured
+        ), f"operation {name} had requests missing {expected_token}: {captured}"
+    finally:
+        reset_telemetry_context(token)
+
+
+def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkeypatch):
+    """Verify that GCSFile.caller_framework caches empty string when None and avoids repeated detect calls."""
+    from gcsfs.core import GCSFile, GCSFileSystem
+
+    detect_count = 0
+
+    class DummyNoneDetector(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal detect_count
+            detect_count += 1
+            return None
+
+    tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
+    monkeypatch.setattr("gcsfs.core.default_usage_tracker", tracker)
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    fs = GCSFileSystem(token="anon")
+    f = GCSFile(fs, "bucket/test.txt", mode="wb")
+
+    # Initialized once during GCSFile.__init__
+    assert detect_count == 1
+    assert f.caller_framework == ""
+
+    # Subsequent reads of property must be O(1) without re-running detect()
+    for _ in range(10):
+        assert f.caller_framework == ""
+    assert detect_count == 1
+    f.closed = True
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_range_propagates_caller_framework():
+    """Verify that background prefetch coroutines inherit the framework context."""
+    import unittest.mock as mock
+
+    import gcsfs
+
+    captured_context = {}
+
+    async def mock_cat_file_concurrent(*args, **kwargs):
+        captured_context.update(get_telemetry_context())
+        return b"data"
+
+    fs = mock.MagicMock()
+    fs._cat_file_concurrent = mock.AsyncMock(side_effect=mock_cat_file_concurrent)
+    fs.split_path.return_value = ("bucket", "test.parquet", None)
+
+    with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
+        f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "rb", cache_type="none")
+
+    f.caller_framework = "pandas"
+    await f._async_fetch_range(0, 10)
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "pandas"
+
+
+def test_defer_close_propagates_caller_framework():
+    """Verify that background deferred close worker thread inherits the file's framework context."""
+    import unittest.mock as mock
+
+    import gcsfs
+    from gcsfs.core import _defer_close
+
+    done = threading.Event()
+    captured_context = {}
+
+    fs = mock.MagicMock()
+    fs.split_path.return_value = ("bucket", "test.parquet", None)
+    with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
+        f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "wb")
+
+    f.caller_framework = "ray"
+    f.buffer.write(b"x")
+
+    def mock_upload_chunk(final=False):
+        captured_context.update(get_telemetry_context())
+        done.set()
+        return True
+
+    f._initiate_upload = lambda: None
+    f._upload_chunk = mock_upload_chunk
+    _defer_close(f)
+
+    assert done.wait(timeout=5.0)
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_native_async_telemetry_propagation(mock_gcs_harness):
+    """Verify native async GCSFileSystem methods propagate telemetry context."""
+    fs = mock_gcs_harness.fs
+    mock_gcs_harness.clear()
+
+    token = set_telemetry_context(Dimension.FRAMEWORK, "jax")
+    try:
+        res = await fs._cat(["test-bucket/f1.txt", "test-bucket/f2.txt"])
+        assert len(res) == 2
+        assert len(mock_gcs_harness.user_agents) >= 2
+        assert all("fw/jax" in ua for ua in mock_gcs_harness.user_agents)
+    finally:
+        reset_telemetry_context(token)
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_async_wrapper_super_resolution():
+    """Verify super() resolution works on inherited AsyncFileSystem methods wrapped by telemetry."""
+    from unittest import mock
+
+    from gcsfs.core import GCSFileSystem
+
+    class SubGCSFS(GCSFileSystem):
+        async def _cat_ranges(self, paths, starts, ends, **kwargs):
+            return await super()._cat_ranges(paths, starts, ends, **kwargs)
+
+    sub_fs = SubGCSFS(token="anon", project="test-project", skip_instance_cache=True)
+    with mock.patch(
+        "fsspec.asyn.AsyncFileSystem._cat_ranges",
+        new_callable=mock.AsyncMock,
+        return_value=[b"patched"],
+    ) as mock_super:
+        out = await sub_fs._cat_ranges(["test-bucket/f1.txt"], [0], [5])
+        assert out == [b"patched"]
+        mock_super.assert_awaited_once()
