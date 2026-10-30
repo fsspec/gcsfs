@@ -27,7 +27,7 @@ logger = logging.getLogger("gcsfs.zonal_file")
 class ZonalFile(GCSFile):
     """
     ZonalFile is subclass of GCSFile and handles data operations from
-    Zonal buckets only using a high-performance gRPC path.
+    Zonal and RCU buckets using a high-performance gRPC path.
     """
 
     def __init__(
@@ -49,18 +49,19 @@ class ZonalFile(GCSFile):
         kms_key_name=None,
         if_generation_match=None,
         pool_size=zb_hns_utils.DEFAULT_CONCURRENCY,
-        finalize_on_close=False,
+        finalize_on_close=None,
         flush_interval_bytes=_DEFAULT_FLUSH_INTERVAL_BYTES,
         **kwargs,
     ):
         """
         Initializes the ZonalFile object.
 
-        For Zonal buckets, `finalize_on_close` is set to `False` by default to optimize
-        for write throughput and keep the file appendable. This means that when exiting
-        a `with` block or closing, the file will not be automatically finalized. To
-        ensure the write is finalized, `.commit()` must be called explicitly or
-        `finalize_on_close` must be set to `True` when opening the file.
+        For Zonal buckets, `finalize_on_close` defaults to `False` to optimize
+        for write throughput and keep the file appendable. For RCU buckets,
+        `finalize_on_close` defaults to `True`. When `finalize_on_close` is
+        `False`, exiting a `with` block or closing the file will not
+        automatically finalize it; to finalize the write, `.commit()` must be
+        called explicitly or `finalize_on_close` must be set to `True`.
 
         For Zonal buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
@@ -75,6 +76,15 @@ class ZonalFile(GCSFile):
         # MRD pool below has been opened; validate first so an invalid value
         # fails without a lookup.
         _resolve_open_generation_match(mode, if_generation_match)
+        if finalize_on_close is None:
+            from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+            if isinstance(gcsfs, ExtendedGcsFileSystem):
+                finalize_on_close = gcsfs._resolve_finalize_on_close(
+                    gcsfs._sync_lookup_bucket_layout(bucket)
+                )
+            else:
+                finalize_on_close = False
         self.aaow = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
@@ -107,10 +117,19 @@ class ZonalFile(GCSFile):
                     "This may result in incorrect behavior for unfinalized objects."
                 )
         elif "w" in self.mode or "a" in self.mode or "x" in self.mode:
-            pass
+            if (
+                metadata
+                or fixed_key_metadata
+                or kms_key_name
+                or (content_type and content_type != "application/octet-stream")
+            ):
+                logger.warning(
+                    "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
+                    "or kms_key_name during upload. These parameters will be ignored."
+                )
         else:
             raise NotImplementedError(
-                "Only read, write and append operations are currently supported for Zonal buckets."
+                "Only read, write and append operations are currently supported for Zonal and RCU buckets."
             )
 
         super().__init__(
@@ -161,9 +180,7 @@ class ZonalFile(GCSFile):
             except FileNotFoundError:
                 # if file doesn't exist, we don't need generation
                 pass
-        await self.gcsfs._get_grpc_client()
-        return await zb_hns_utils.init_aaow(
-            self.gcsfs.grpc_client,
+        return await self.gcsfs._init_aaow(
             bucket_name,
             object_name,
             generation,
@@ -330,9 +347,9 @@ class ZonalFile(GCSFile):
         self.finalize_on_close = False
 
     def discard(self):
-        """Discard is not applicable for Zonal Buckets. Log a warning instead."""
+        """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""
         logger.warning(
-            "Discard is not applicable for Zonal Buckets. \
+            "Discard is not applicable for Zonal and RCU buckets. \
             Data is uploaded via streaming and cannot be cancelled."
         )
 
