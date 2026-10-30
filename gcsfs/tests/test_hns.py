@@ -20,7 +20,7 @@ import uuid
 
 import pytest
 
-from gcsfs.extended_gcsfs import BucketType
+from gcsfs.extended_gcsfs import BucketLayout
 from gcsfs.tests.conftest import requires_hns, requires_real_gcs
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
@@ -389,7 +389,10 @@ class TestExtendedGcsFileSystemMkdir:
         assert gcsfs.exists(bucket_name)
         assert gcsfs.exists(dir_path)
 
-        assert gcsfs._sync_lookup_bucket_type(bucket_name) is BucketType.HIERARCHICAL
+        assert (
+            gcsfs._sync_lookup_bucket_layout(bucket_name)
+            == BucketLayout.STANDARD_HIERARCHICAL
+        )
 
     def test_mkdir_for_zonal_bucket(self, gcs_hns, buckets_to_delete):
         """Test creating a Zonal bucket using the placement parameter (string)."""
@@ -409,7 +412,8 @@ class TestExtendedGcsFileSystemMkdir:
         assert gcsfs.exists(bucket_name)
         assert gcsfs.exists(dir_path)
         assert (
-            gcsfs._sync_lookup_bucket_type(bucket_name) == BucketType.ZONAL_HIERARCHICAL
+            gcsfs._sync_lookup_bucket_layout(bucket_name)
+            == BucketLayout.ZONAL_HIERARCHICAL
         )
 
         info = gcsfs.info(bucket_name)
@@ -424,9 +428,7 @@ class TestExtendedGcsFileSystemMkdir:
         assert not gcsfs.exists(bucket_path)
         gcsfs.mkdir(bucket_path)
         assert gcsfs.exists(bucket_path)
-        assert (
-            gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.NON_HIERARCHICAL
-        )
+        assert gcsfs._sync_lookup_bucket_layout(bucket_path) == BucketLayout.STANDARD
 
     def test_mkdir_create_bucket_with_parent_params(self, gcs_hns, buckets_to_delete):
         """Test creating a bucket passes parent-level parameters like enable_versioning."""
@@ -447,7 +449,10 @@ class TestExtendedGcsFileSystemMkdir:
         assert not gcsfs.exists(bucket_path)
         gcsfs.mkdir(bucket_path, enable_hierarchical_namespace=True)
         assert gcsfs.exists(bucket_path)
-        assert gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.HIERARCHICAL
+        assert (
+            gcsfs._sync_lookup_bucket_layout(bucket_path)
+            == BucketLayout.STANDARD_HIERARCHICAL
+        )
 
     def test_hns_mkdir_existing_file_error(self, gcs_hns):
         """Test mkdir raises FileExistsError if a file exists at the path."""
@@ -1928,5 +1933,5 @@ class TestExtendedGcsFileSystemHnsRequesterPays:
         # Clear cache to force lookup
         fs._storage_layout_cache.clear()
 
-        bucket_type = fs._sync_lookup_bucket_type(hns_requester_pays_bucket)
-        assert bucket_type == BucketType.HIERARCHICAL
+        bucket_layout = fs._sync_lookup_bucket_layout(hns_requester_pays_bucket)
+        assert bucket_layout == BucketLayout.STANDARD_HIERARCHICAL
