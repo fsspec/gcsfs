@@ -96,14 +96,24 @@ def test_generate_report():
         mock_file.assert_any_call(report_path, "w", newline="")
 
 
-def test_generate_report_empty_json():
+@pytest.mark.parametrize(
+    "empty_payload",
+    [
+        pytest.param({}, id="empty_dict"),
+        pytest.param({"benchmarks": []}, id="empty_benchmarks_list"),
+    ],
+)
+def test_generate_report_empty_json(empty_payload):
+    # Arrange
     with (
-        mock.patch("json.load", return_value={}),
+        mock.patch("json.load", return_value=empty_payload),
         mock.patch("builtins.open", mock.mock_open()),
     ):
-
+        # Act
         report_path = run._generate_report("results.json", "/tmp")
-        assert report_path is None
+
+    # Assert
+    assert report_path is None
 
 
 def test_format_mb():
@@ -178,3 +188,21 @@ def test_print_csv_to_shell(mock_table):
     with mock.patch("builtins.open", mock.mock_open(read_data=csv_content)):
         run._print_csv_to_shell("report.csv")
         mock_table.return_value.add_row.assert_called()
+
+
+def test_main_exits_nonzero_when_no_report(tmp_path):
+    # Arrange
+    with (
+        mock.patch("sys.argv", ["run.py", "--regional-bucket", "b"]),
+        mock.patch.object(run, "_setup_environment"),
+        mock.patch.object(
+            run, "_run_benchmarks", return_value=str(tmp_path / "results.json")
+        ),
+        mock.patch.object(run, "_generate_report", return_value=None),
+        pytest.raises(SystemExit) as exc,
+    ):
+        # Act
+        run.main()
+
+    # Assert
+    assert exc.value.code == 1
