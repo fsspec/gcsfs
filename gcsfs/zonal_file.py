@@ -76,6 +76,7 @@ class ZonalFile(GCSFile):
         # fails without a lookup.
         _resolve_open_generation_match(mode, if_generation_match)
         self.aaow = None
+        self.mrd_pool = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
         self.mode = mode
@@ -83,7 +84,7 @@ class ZonalFile(GCSFile):
         self.gcsfs = gcsfs
         self.pool_size = pool_size
         object_size = None
-        if "r" in self.mode:
+        if self.mode == "rb":
             resolved_cache_type, resolved_cache_source = (
                 _get_prefetcher_and_cache_config(cache_type)
             )
@@ -106,36 +107,48 @@ class ZonalFile(GCSFile):
                     "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )
-        elif "w" in self.mode or "a" in self.mode or "x" in self.mode:
+        elif self.mode in ("wb", "ab", "xb"):
             pass
         else:
             raise NotImplementedError(
                 "Only read, write and append operations are currently supported for Zonal buckets."
             )
 
-        super().__init__(
-            gcsfs,
-            path,
-            mode,
-            block_size,
-            autocommit,
-            cache_type,
-            cache_options,
-            acl,
-            consistency,
-            metadata,
-            content_type,
-            timeout,
-            fixed_key_metadata,
-            generation,
-            kms_key_name,
-            if_generation_match=if_generation_match,
-            # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
-            _supports_append="a" in mode,
-            # pass persisted_size here so that Cache is initialized with correct object size
-            size=object_size,
-            **kwargs,
-        )
+        try:
+            super().__init__(
+                gcsfs,
+                path,
+                mode,
+                block_size,
+                autocommit,
+                cache_type,
+                cache_options,
+                acl,
+                consistency,
+                metadata,
+                content_type,
+                timeout,
+                fixed_key_metadata,
+                generation,
+                kms_key_name,
+                if_generation_match=if_generation_match,
+                # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
+                _supports_append="a" in mode,
+                # pass persisted_size here so that Cache is initialized with correct object size
+                size=object_size,
+                **kwargs,
+            )
+        except BaseException:
+            self.closed = True
+            if self.mrd_pool is not None:
+                pool, self.mrd_pool = self.mrd_pool, None
+                sync_teardown(
+                    self.gcsfs.loop,
+                    pool.close,
+                    timeout=timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS,
+                    description=f"closing mrd_pool for {path} after failed open",
+                )
+            raise
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """
