@@ -41,6 +41,7 @@ from gcsfs.core import (
     _resolve_generation_match,
 )
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.telemetry.wrapper import _gcs_sync_wrapper, mirror_gcs_methods
 from gcsfs.zb_hns_utils import MRD_MAX_RANGES, DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
 
@@ -358,7 +359,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self._storage_layout_cache[bucket] = bucket_layout
         return self._storage_layout_cache[bucket]
 
-    _sync_lookup_bucket_layout = asyn.sync_wrapper(_lookup_bucket_layout)
+    # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
+    _sync_lookup_bucket_layout = _gcs_sync_wrapper(_lookup_bucket_layout)
 
     async def _get_bucket_layout(self, bucket):
         try:
@@ -502,7 +504,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return offset, length
 
-    sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
+    # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
+    sync_process_limits_to_offset_and_length = _gcs_sync_wrapper(
         _process_limits_to_offset_and_length
     )
 
@@ -2470,6 +2473,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return await super()._merge(path, paths, acl=acl)
 
     merge = asyn.sync_wrapper(_merge)
+
+
+# Wrap ExtendedGcsFileSystem's own sync/async overrides (e.g. `mv`, `rm`, `_cat_file`, `_open`)
+# so they propagate caller framework telemetry; inherited GCSFileSystem methods are already wrapped.
+mirror_gcs_methods(ExtendedGcsFileSystem)
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):

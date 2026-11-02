@@ -644,11 +644,16 @@ def skip_if_grpc_read(gcs):
 
 
 @pytest.fixture
-def mock_gcs_harness(monkeypatch):
+def mock_gcs_harness(request, monkeypatch):
     """
     Harness that mocks GCSFileSystem HTTP transport and records the exact
     User-Agent header sent on every outgoing GCS request.
+
+    Parametrize indirectly with "core" (default) or "extended" to select
+    `gcsfs.core.GCSFileSystem` or `ExtendedGcsFileSystem` (on a standard,
+    non-hierarchical bucket).
     """
+    fs_kind = getattr(request, "param", "core")
     captured_user_agents = []
     sample_pt_data = b"MOCK_PT_BINARY_DATA_FOR_TORCH_LOADER_TESTING_12345"
     sample_csv_data = b"col1,col2,col3\n1,2,3\n4,5,6\n"
@@ -676,6 +681,18 @@ def mock_gcs_harness(monkeypatch):
         # Mock upload chunk / upload completion
         if "http://mock-gcs/upload" in str(path):
             return {}, b'{"generation": "1"}'
+
+        # Mock batch delete: one "204 No Content" part per object in the request
+        if str(path) == getattr(self, "batch_url_base", None):
+            n_parts = str(kwargs.get("data", "")).count("Content-ID")
+            boundary = "batch_mock_boundary"
+            body = "".join(
+                f"--{boundary}\nContent-Type: application/http\n\nHTTP/1.1 204 No Content\n\n"
+                for _ in range(n_parts)
+            )
+            return {
+                "Content-Type": f"multipart/mixed; boundary={boundary}"
+            }, f"{body}--{boundary}--".encode()
 
         # Mock object metadata response (json_out=True returns dict directly)
         if kwargs.get("json_out"):
@@ -714,17 +731,43 @@ def mock_gcs_harness(monkeypatch):
             return {}, sample_csv_data
         return {}, sample_pt_data
 
+    from fsspec.registry import _registry
+
     from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
     monkeypatch.setattr(CoreGCSFileSystem, "_call", mock_call)
-    for proto in ("gcs", "gs"):
-        fsspec.register_implementation(proto, CoreGCSFileSystem, clobber=True)
+    # HTTP is fully mocked, so skip credential refresh: filesystems created internally by
+    # frameworks (e.g. Lightning, Pandas) use default credentials, which may be a fake
+    # service account (GOOGLE_APPLICATION_CREDENTIALS in CI) that cannot be refreshed.
+    from gcsfs.credentials import GoogleCredentials
+
+    monkeypatch.setattr(GoogleCredentials, "apply", lambda self, out: None)
+    if fs_kind == "extended":
+        fs_cls = ExtendedGcsFileSystem
+
+        async def mock_lookup_bucket_type(self, bucket):
+            return BucketType.NON_HIERARCHICAL
+
+        monkeypatch.setattr(
+            ExtendedGcsFileSystem, "_lookup_bucket_type", mock_lookup_bucket_type
+        )
+    else:
+        fs_cls = CoreGCSFileSystem
+
+    protocols = ("gcs", "gs")
+    saved_registry = {proto: _registry.get(proto) for proto in protocols}
+    for proto in protocols:
+        fsspec.register_implementation(proto, fs_cls, clobber=True)
 
     class Harness:
         def __init__(self):
             self.user_agents = captured_user_agents
-            self.fs = CoreGCSFileSystem(
-                token="anon", project="test-project", consistency="none"
+            self.fs = fs_cls(
+                token="anon",
+                project="test-project",
+                consistency="none",
+                skip_instance_cache=True,
             )
 
         def clear(self):
@@ -737,8 +780,12 @@ def mock_gcs_harness(monkeypatch):
     try:
         yield Harness()
     finally:
-        for proto in ("gcs", "gs"):
-            fsspec.register_implementation(proto, GCSFileSystem, clobber=True)
+        # Restore the registry exactly as it was (including "not registered")
+        for proto, cls in saved_registry.items():
+            if cls is None:
+                _registry.pop(proto, None)
+            else:
+                _registry[proto] = cls
 
 
 def pytest_addoption(parser):

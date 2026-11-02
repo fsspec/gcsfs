@@ -14,6 +14,7 @@ from gcsfs.core import (
     _resolve_open_generation_match,
 )
 from gcsfs.retry import HttpError
+from gcsfs.telemetry.wrapper import wrap_file_methods
 from gcsfs.utils import is_empty_range
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS, sync_teardown
 
@@ -425,3 +426,8 @@ class ZonalFile(GCSFile):
 
         if errors:
             raise errors[0]
+
+
+# Wrap ZonalFile's own overrides (inherited GCSFile methods are already wrapped) so that
+# background fetches, writes and deferred close keep the opening framework context.
+wrap_file_methods(ZonalFile)

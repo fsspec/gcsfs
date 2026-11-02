@@ -52,6 +52,15 @@ def get_telemetry_context() -> Dict[str, str]:
     return dict(val) if val is not None else {}
 
 
+def get_telemetry_value(dimension: Union[Dimension, str]) -> Optional[str]:
+    """Return a single dimension's value from the active context without copying the mapping."""
+    val = _current_telemetry.get()
+    if val is None:
+        return None
+    key = dimension.value if isinstance(dimension, Dimension) else dimension
+    return val.get(key)
+
+
 def set_telemetry_context(
     tokens: Union[Dict[str, str], Dimension], value: Optional[str] = None
 ) -> contextvars.Token:
