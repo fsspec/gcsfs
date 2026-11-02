@@ -14,10 +14,13 @@ pip install pytest pytest-timeout pytest-subtests pytest-asyncio pytest-xdist bu
 # Upstream frameworks for telemetry e2e tests (gcsfs/tests/test_telemetry_e2e.py).
 # CPU-only torch wheels avoid pulling multi-GB CUDA dependencies onto the test VM.
 # Non-fatal: those tests importorskip the frameworks, so an index outage must not fail every suite.
+# lightning is only installed after CPU torch succeeds; otherwise pip would resolve its torch
+# dependency from PyPI and download the multi-GB CUDA build.
+pip install pandas > /dev/null \
+    || echo "WARN: pandas not installed; telemetry e2e pandas tests will be skipped"
 pip install torch --index-url https://download.pytorch.org/whl/cpu > /dev/null \
-    || echo "WARN: torch not installed; telemetry e2e torch/lightning tests will be skipped"
-pip install pandas lightning > /dev/null \
-    || echo "WARN: pandas/lightning not installed; telemetry e2e tests will be skipped"
+    && pip install lightning > /dev/null \
+    || echo "WARN: torch/lightning not installed; telemetry e2e torch/lightning tests will be skipped"
 if [ "$INSTALL_GCSFS_FROM_PYPI" = "true" ]; then
     echo '--- Installing gcsfs from PyPI ---'
     pip install gcsfs > /dev/null
