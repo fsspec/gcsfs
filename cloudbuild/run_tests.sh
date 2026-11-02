@@ -95,6 +95,7 @@ case "$TEST_SUITE" in
       gcsfs/tests/test_zonal_file.py \
       gcsfs/tests/test_async.py \
       gcsfs/tests/test_hns.py \
+      gcsfs/tests/test_telemetry_e2e.py \
       --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_mkdir_fails_without_quota_project \
       --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays || STATUS=$?
     ;;

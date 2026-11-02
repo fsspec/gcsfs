@@ -11,6 +11,10 @@ source env/bin/activate
 
 pip install --upgrade pip > /dev/null
 pip install pytest pytest-timeout pytest-subtests pytest-asyncio pytest-xdist build hatchling hatch-vcs fusepy google-cloud-storage > /dev/null
+# Upstream frameworks for telemetry e2e tests (gcsfs/tests/test_telemetry_e2e.py).
+# CPU-only torch wheels avoid pulling multi-GB CUDA dependencies onto the test VM.
+pip install torch --index-url https://download.pytorch.org/whl/cpu > /dev/null
+pip install pandas lightning > /dev/null
 if [ "$INSTALL_GCSFS_FROM_PYPI" = "true" ]; then
     echo '--- Installing gcsfs from PyPI ---'
     pip install gcsfs > /dev/null
