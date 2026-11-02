@@ -1,6 +1,15 @@
 """
 End-to-end telemetry tests: real upstream frameworks driving gcsfs against a GCS
-endpoint (real GCS in the Cloud Build e2e suites, or the fake GCS emulator in CI).
+endpoint over the JSON API (HTTP) path.
+
+Where these run:
+- Cloud Build e2e `standard` suite: real GCS, regional bucket (GCSFileSystem /
+  ExtendedGcsFileSystem on a flat bucket).
+- Cloud Build e2e `hns` suite: real GCS, HNS bucket.
+- GitHub CI: the fake GCS emulator.
+
+Rapid (zonal) buckets are intentionally not covered: their data path uses gRPC
+bidi streaming APIs, which don't go through the HTTP User-Agent path at all.
 
 Unlike `test_upstream_frameworks_real.py`, nothing in gcsfs is mocked here. Requests
 go through the real `_call` / `_request` / aiohttp path, and the `User-Agent` header is
@@ -9,7 +18,6 @@ recorded at the aiohttp layer, i.e. exactly what is sent over the wire.
 
 from __future__ import annotations
 
-import os
 import uuid
 from urllib.parse import urlparse
 
@@ -17,13 +25,7 @@ import aiohttp
 import fsspec
 import pytest
 
-from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
-from gcsfs.tests.utils import is_real_gcs
-
-_is_rapid_suite = os.environ.get("GCSFS_RUN_RAPID_TESTS", "false").lower() in (
-    "true",
-    "1",
-)
+from gcsfs.tests.settings import TEST_BUCKET
 
 
 class _WireRecorder:
@@ -36,9 +38,8 @@ class _WireRecorder:
     def clear(self):
         self.user_agents.clear()
 
-    def assert_all_tagged(self, fw: str, require_requests: bool = True):
-        if require_requests:
-            assert self.user_agents, "no HTTP requests reached the GCS endpoint"
+    def assert_all_tagged(self, fw: str):
+        assert self.user_agents, "no HTTP requests reached the GCS endpoint"
         missing = [ua for ua in self.user_agents if f"fw/{fw}" not in ua]
         assert not missing, (
             f"{len(missing)}/{len(self.user_agents)} GCS requests missing fw/{fw}: "
@@ -74,8 +75,8 @@ def wire(gcs, monkeypatch):
     gcs.clear_instance_cache()
 
 
-def _unique_prefix(bucket: str = TEST_BUCKET) -> str:
-    return f"{bucket}/telemetry-e2e/{uuid.uuid4().hex}"
+def _unique_prefix() -> str:
+    return f"{TEST_BUCKET}/telemetry-e2e/{uuid.uuid4().hex}"
 
 
 def test_pandas_csv_round_trip_e2e(gcs, wire):
@@ -142,28 +143,3 @@ def test_lightning_checkpoint_save_e2e(gcs, wire, tmp_path):
     trainer.save_checkpoint(f"gs://{path}")
     wire.assert_all_tagged("lightning")
     assert gcs.exists(path)
-
-
-@pytest.mark.skipif(
-    not (is_real_gcs() and _is_rapid_suite),
-    reason="Requires a real Rapid (zonal) bucket (GCSFS_RUN_RAPID_TESTS=true)",
-)
-def test_pandas_zonal_bucket_e2e(gcs, wire):
-    """
-    On Rapid (zonal) buckets the data path uses gRPC, whose User-Agent does not carry
-    the framework token yet. Verify the round trip works and that any JSON API (HTTP)
-    requests that are still issued carry `fw/pandas`.
-    """
-    pd = pytest.importorskip("pandas")
-    prefix = _unique_prefix(TEST_ZONAL_BUCKET)
-    url = f"gs://{prefix}/data.csv"
-    df = pd.DataFrame({"a": [1, 2, 3]})
-
-    try:
-        wire.clear()
-        df.to_csv(url, index=False)
-        out = pd.read_csv(url)
-        pd.testing.assert_frame_equal(out, df)
-        wire.assert_all_tagged("pandas", require_requests=False)
-    finally:
-        gcs.rm(prefix, recursive=True)
