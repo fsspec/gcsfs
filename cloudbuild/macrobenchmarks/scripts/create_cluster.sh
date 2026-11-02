@@ -21,14 +21,6 @@ gcloud compute networks subnets create "${SUBNET_NAME}" \
   --range="10.0.0.0/20" \
   --enable-private-ip-google-access --quiet
 
-# `gcloud container clusters create` has no --node-pool flag and always names
-# its initial pool "default-pool", which would not match the workload's
-# nodeSelector (cloud.google.com/gke-nodepool=c4-standard-192). Create a small
-# system pool for the cluster, then a dedicated ${_MACHINE_TYPE} pool whose name
-# the GKE node label (and the chart's nodeSelector) keys off of. --enable-gvnic
-# puts the nodes on gVNIC, which C4 requires and which TIER_1 egress (the direct
-# high-bandwidth path) is gated on.
-#
 # The GKE control plane of a zonal cluster runs in the cluster's zone and can hit
 # GCE_STOCKOUT there independently of the node pools. If that happens, retry the
 # control plane in the region's other zones; the ${_MACHINE_TYPE} pool stays in
@@ -36,6 +28,7 @@ gcloud compute networks subnets create "${SUBNET_NAME}" \
 ZONES="${_ZONE} $(gcloud compute zones list --project="${PROJECT_ID}" --filter="region:${REGION}" --format="value(name)" | grep -vx "${_ZONE}" || true)"
 CLUSTER_LOCATION=""
 for zone in $ZONES; do
+  echo "--- Creating GKE cluster ${CLUSTER_NAME} in ${zone} ---"
   if gcloud container clusters create "$CLUSTER_NAME" \
     --project="${PROJECT_ID}" --zone="${zone}" \
     --machine-type="e2-standard-4" --num-nodes="1" \
@@ -47,13 +40,25 @@ for zone in $ZONES; do
     CLUSTER_LOCATION="$zone"
     break
   fi
+  echo "Cluster creation in ${zone} failed; deleting the failed cluster and trying the next zone."
   gcloud container clusters delete "$CLUSTER_NAME" --zone="${zone}" --project="${PROJECT_ID}" --quiet || true
 done
 if [ -z "$CLUSTER_LOCATION" ]; then
+  echo "ERROR: could not create ${CLUSTER_NAME} in any of: ${ZONES}" >&2
   record_failure create-cluster
   exit 1
 fi
+echo "Cluster ${CLUSTER_NAME} created in ${CLUSTER_LOCATION}."
 echo "export CLUSTER_LOCATION=${CLUSTER_LOCATION}" >> "${BUILD_VARS_FILE}"
+
+# `gcloud container clusters create` has no --node-pool flag and always names
+# its initial pool "default-pool", which would not match the workload's
+# nodeSelector (cloud.google.com/gke-nodepool=c4-standard-192). Create a small
+# system pool for the cluster, then a dedicated ${_MACHINE_TYPE} pool whose name
+# the GKE node label (and the chart's nodeSelector) keys off of. --enable-gvnic
+# puts the nodes on gVNIC, which C4 requires and which TIER_1 egress (the direct
+# high-bandwidth path) is gated on. --zone selects the cluster (wherever its
+# control plane landed); --node-locations keeps the workers in ${_ZONE}.
 NODE_POOL_ARGS=(
   --cluster="$CLUSTER_NAME"
   --project="${PROJECT_ID}"
@@ -73,7 +78,7 @@ if [ "${_ENABLE_TIER1_NETWORKING:-true}" = "true" ]; then
   NODE_POOL_ARGS+=(--network-performance-configs="total-egress-bandwidth-tier=TIER_1")
 fi
 gcloud container node-pools create "${_MACHINE_TYPE}" "${NODE_POOL_ARGS[@]}"
-gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}"
+gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION}" --project="${PROJECT_ID}"
 kubectl apply --server-side -f "https://github.com/kubernetes-sigs/jobset/releases/download/${_JOBSET_VERSION}/manifests.yaml"
 kubectl rollout status deployment/jobset-controller-manager -n jobset-system --timeout=300s
 
