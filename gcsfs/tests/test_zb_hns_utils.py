@@ -320,7 +320,7 @@ async def test_init_mrd_not_found():
 
 @pytest.mark.asyncio
 async def test_close_aaow(caplog):
-    """Tests all graceful closing scenarios for AsyncAppendableObjectWriter."""
+    """Tests the closing scenarios for AsyncAppendableObjectWriter."""
     # 1. Handles None gracefully
     await zb_hns_utils.close_aaow(None)
 
@@ -341,6 +341,21 @@ async def test_close_aaow(caplog):
     mock_aaow.close.assert_awaited_once_with(finalize_on_close=False)
     assert (
         "Error closing AsyncAppendableObjectWriter for test-bucket/test-object: Close failed"
+        in caplog.text
+    )
+
+    # 4. Logs and re-raises a failed finalize, so the write is not reported as successful
+    mock_aaow.reset_mock()
+    mock_aaow.close.side_effect = NotFound("Object deleted before finalize")
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        with pytest.raises(NotFound, match="Object deleted before finalize"):
+            await zb_hns_utils.close_aaow(mock_aaow, finalize_on_close=True)
+
+    mock_aaow.close.assert_awaited_once_with(finalize_on_close=True)
+    assert (
+        "Error closing AsyncAppendableObjectWriter for test-bucket/test-object"
         in caplog.text
     )
 
