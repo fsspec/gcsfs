@@ -889,31 +889,60 @@ def test_all_parent_methods_telemetry_coverage(
     assert get_telemetry_context() == {}
 
 
-def test_extended_gcsfs_methods_are_wrapped():
-    """Verify ExtendedGcsFileSystem's own sync and async overrides carry telemetry wrappers."""
-    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+def _is_async_fn(fn) -> bool:
+    return inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)
 
-    for name in ("mv", "rm", "mkdir", "makedirs", "rmdir", "merge", "cat_file"):
-        assert getattr(
-            getattr(ExtendedGcsFileSystem, name), "_is_gcs_sync_wrapped", False
-        ), f"ExtendedGcsFileSystem.{name} is not telemetry-wrapped"
-    for name in (
-        "_sync_lookup_bucket_type",
-        "sync_process_limits_to_offset_and_length",
-    ):
-        assert getattr(
-            getattr(ExtendedGcsFileSystem, name), "_is_gcs_sync_wrapped", False
-        ), f"ExtendedGcsFileSystem.{name} is not telemetry-wrapped"
-    for name, attr in ExtendedGcsFileSystem.__dict__.items():
-        if name.startswith("_") and not name.startswith("__"):
-            if inspect.iscoroutinefunction(attr) or inspect.isasyncgenfunction(attr):
-                smethod = name[1:]
-                if hasattr(fsspec.spec.AbstractFileSystem, smethod) or hasattr(
-                    fsspec.asyn.AsyncFileSystem, name
-                ):
-                    assert getattr(
-                        attr, "_is_gcs_async_wrapped", False
-                    ), f"ExtendedGcsFileSystem.{name} is not telemetry-wrapped"
+
+@pytest.mark.parametrize(
+    "fs_cls_path",
+    ["gcsfs.core.GCSFileSystem", "gcsfs.extended_gcsfs.ExtendedGcsFileSystem"],
+    ids=["core", "extended"],
+)
+def test_filesystem_methods_are_telemetry_wrapped(fs_cls_path):
+    """
+    Verify, without a hardcoded method list, that every sync bridge and eligible native
+    async method defined on the filesystem class carries a telemetry wrapper.
+
+    - Any sync function defined on the class that wraps a coroutine (e.g. a leftover
+      `foo = asyn.sync_wrapper(_foo)`, detected via `functools.wraps`' `__wrapped__`)
+      must be a `_gcs_sync_wrapper`; otherwise it would skip caller-thread detection.
+    - Any native async method that `mirror_gcs_methods` targets (public sync counterpart
+      or AsyncFileSystem method) must be async-wrapped, and its public sync
+      counterpart (if any) must be sync-wrapped.
+    """
+    import importlib
+
+    module_name, cls_name = fs_cls_path.rsplit(".", 1)
+    fs_cls = getattr(importlib.import_module(module_name), cls_name)
+
+    unwrapped = set()
+    for name, attr in fs_cls.__dict__.items():
+        if name.startswith("__") or not inspect.isfunction(attr):
+            continue
+
+        # Sync bridges over coroutines (fsspec's sync_wrapper or ours)
+        if not _is_async_fn(attr) and _is_async_fn(inspect.unwrap(attr)):
+            if not getattr(attr, "_is_gcs_sync_wrapped", False):
+                unwrapped.add(name)
+            continue
+
+        # Native async methods targeted by mirror_gcs_methods
+        if name.startswith("_") and _is_async_fn(attr):
+            smethod = name[1:]
+            has_public_sync = hasattr(fsspec.spec.AbstractFileSystem, smethod) or (
+                hasattr(fs_cls, smethod)
+            )
+            if not (has_public_sync or hasattr(fsspec.asyn.AsyncFileSystem, name)):
+                continue
+            if not getattr(attr, "_is_gcs_async_wrapped", False):
+                unwrapped.add(name)
+            public = getattr(fs_cls, smethod, None)
+            if has_public_sync and not getattr(public, "_is_gcs_sync_wrapped", False):
+                unwrapped.add(smethod)
+
+    assert (
+        not unwrapped
+    ), f"{cls_name} methods missing telemetry wrappers: {sorted(unwrapped)}"
 
 
 def test_zonal_file_methods_are_wrapped():
