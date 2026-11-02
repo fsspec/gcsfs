@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 from gcsfs.telemetry import manager
 from gcsfs.telemetry.context import (
     Dimension,
-    get_telemetry_value,
+    get_telemetry_context,
     has_telemetry_context,
     reset_telemetry_context,
     set_telemetry_context,
@@ -252,9 +252,8 @@ def _setup_file_telemetry(file_obj) -> Optional[Any]:
     if not isinstance(fw, str):
         return None
 
-    # Fast path: framework already active (e.g. nested file method calls), skip a redundant set/reset.
-    # Reads the single value directly to avoid copying the context mapping on every file method call.
-    if get_telemetry_value(Dimension.FRAMEWORK) == fw:
+    # Fast path: framework already active (e.g. nested file method calls), skip a redundant set/reset
+    if get_telemetry_context().get(Dimension.FRAMEWORK) == fw:
         return None
 
     return set_telemetry_context(Dimension.FRAMEWORK, fw)
