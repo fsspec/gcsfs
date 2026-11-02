@@ -41,7 +41,11 @@ from gcsfs.core import (
     _resolve_generation_match,
 )
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
-from gcsfs.telemetry.wrapper import _gcs_sync_wrapper, mirror_gcs_methods
+from gcsfs.telemetry.wrapper import (
+    _gcs_sync_wrapper,
+    mirror_gcs_methods,
+    with_telemetry_context,
+)
 from gcsfs.zb_hns_utils import MRD_MAX_RANGES, DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
 
@@ -415,6 +419,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Default to UNKNOWN in case bucket layout is not obtained
             return BucketLayout.UNKNOWN
 
+    # Plain sync method (not covered by mirror_gcs_methods): scope telemetry for the whole open,
+    # so bucket-type lookup, metadata/MRD-pool requests and GCSFile.__init__ share one detection.
+    @with_telemetry_context
     def _open(
         self,
         path,
@@ -2475,7 +2482,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     merge = asyn.sync_wrapper(_merge)
 
 
-# Wrap ExtendedGcsFileSystem's own sync/async overrides (e.g. `mv`, `rm`, `_cat_file`, `_open`)
+# Wrap ExtendedGcsFileSystem's own sync/async overrides (e.g. `mv`, `rm`, `_cat_file`, `_find`)
 # so they propagate caller framework telemetry; inherited GCSFileSystem methods are already wrapped.
 mirror_gcs_methods(ExtendedGcsFileSystem)
 

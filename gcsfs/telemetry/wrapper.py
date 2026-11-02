@@ -35,6 +35,22 @@ def _telemetry_context(tokens_map: Optional[Dict[str, str]] = None):
         reset_telemetry_context(token)
 
 
+def with_telemetry_context(func: Callable) -> Callable:
+    """
+    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap (e.g. `_open`).
+
+    Detects the caller framework once on the caller thread and scopes it for the whole call, so
+    any requests issued underneath (including via `asyn.sync` to the loop thread) carry it.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _telemetry_context():
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
 def _run_sync(
     loop: Any,
     func: Callable,

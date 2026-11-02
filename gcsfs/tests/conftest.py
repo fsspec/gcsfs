@@ -756,6 +756,7 @@ def mock_gcs_harness(request, monkeypatch):
         fs_cls = CoreGCSFileSystem
 
     protocols = ("gcs", "gs")
+    # fsspec exposes the registry read-only; use the private dict to restore it exactly
     saved_registry = {proto: _registry.get(proto) for proto in protocols}
     for proto in protocols:
         fsspec.register_implementation(proto, fs_cls, clobber=True)
@@ -780,6 +781,8 @@ def mock_gcs_harness(request, monkeypatch):
     try:
         yield Harness()
     finally:
+        # Drop filesystems created by frameworks via fsspec while the mocks were active
+        fs_cls.clear_instance_cache()
         # Restore the registry exactly as it was (including "not registered")
         for proto, cls in saved_registry.items():
             if cls is None:

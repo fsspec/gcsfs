@@ -881,10 +881,11 @@ def test_all_parent_methods_telemetry_coverage(
     assert all(
         f"fw/{fw_name}" in ua for ua in captured
     ), f"operation {name} had requests missing fw/{fw_name}: {captured}"
-    # Regression guard: stack-walking must never run on the fsspecIO loop thread,
+    # Regression guard: stack-walking must never run on the fsspec loop thread,
     # where it can't find user frames and would add per-request overhead.
+    loop_thread_name = fsspec.asyn.iothread[0].name
     assert (
-        "fsspecIO" not in detector.thread_names
+        loop_thread_name not in detector.thread_names
     ), f"operation {name} ran framework detection on the loop thread: {detector.thread_names}"
     assert get_telemetry_context() == {}
 
@@ -943,6 +944,61 @@ def test_filesystem_methods_are_telemetry_wrapped(fs_cls_path):
     assert (
         not unwrapped
     ), f"{cls_name} methods missing telemetry wrappers: {sorted(unwrapped)}"
+
+
+def test_zonal_open_propagates_caller_framework(monkeypatch):
+    """
+    Opening a Rapid (zonal) file for read issues a JSON API `_info` request from
+    `ZonalFile.__init__` (MRD pool setup) before any file method runs. `_open` must
+    scope telemetry so that request carries the caller framework and detection never
+    runs on the fsspecIO loop thread.
+    """
+    from gcsfs import zb_hns_utils
+    from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+    from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
+
+    detector = _CallerThreadOnlyDetector("test-zonal-open")
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
+    )
+    user_agents = []
+
+    async def fake_call(self, method, path, *args, **kwargs):
+        user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
+        return {
+            "kind": "storage#object",
+            "name": "obj",
+            "bucket": "zonal-bucket",
+            "size": "10",
+            "generation": "1",
+            "timeFinalized": "2026-01-01T00:00:00.000Z",
+        }
+
+    async def fake_lookup_bucket_type(self, bucket):
+        return BucketType.ZONAL_HIERARCHICAL
+
+    async def fake_mrd_pool_initialize(self):
+        return None
+
+    monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
+    monkeypatch.setattr(
+        ExtendedGcsFileSystem, "_lookup_bucket_type", fake_lookup_bucket_type
+    )
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "persisted_size", 10, raising=False)
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    f = fs.open("zonal-bucket/obj", "rb")
+    try:
+        assert f.caller_framework == "test-zonal-open"
+        assert user_agents, "zonal open did not issue any JSON API requests"
+        assert all(
+            "fw/test-zonal-open" in ua for ua in user_agents
+        ), f"zonal open sent requests without the framework token: {user_agents}"
+        assert detector.thread_names == [threading.current_thread().name]
+    finally:
+        f.closed = True  # Skip MRD pool teardown for the mocked pool
+    assert get_telemetry_context() == {}
 
 
 def test_zonal_file_methods_are_wrapped():

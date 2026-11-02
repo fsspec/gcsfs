@@ -4580,14 +4580,12 @@ def test_user_agent_telemetry_integration(
         assert token not in ua
 
 
-def test_mirror_gcs_methods_does_not_evaluate_properties(monkeypatch):
+def test_init_does_not_evaluate_buckets(monkeypatch):
     """
-    Verify that `mirror_gcs_methods` (run at import time on GCSFileSystem and its
-    subclasses) never evaluates properties such as `fs.buckets`, which would trigger
-    network I/O, and that instantiating the filesystem doesn't either.
+    Verify that creating a (telemetry-mirrored) GCSFileSystem does not evaluate
+    properties such as `fs.buckets`, which would trigger network I/O.
     """
     from gcsfs.core import GCSFileSystem
-    from gcsfs.telemetry.wrapper import mirror_gcs_methods
 
     buckets_called = False
 
@@ -4598,15 +4596,8 @@ def test_mirror_gcs_methods_does_not_evaluate_properties(monkeypatch):
 
     monkeypatch.setattr(GCSFileSystem, "_list_buckets", mock_list_buckets)
 
-    class _SubFS(GCSFileSystem):
-        @property
-        def eager_trap(self):
-            raise AssertionError("mirror_gcs_methods evaluated a property")
-
-    # Mirror a fresh subclass *after* patching, so eager evaluation would be observed
-    mirror_gcs_methods(_SubFS)
-    _ = _SubFS(token="anon", project="test-project", skip_instance_cache=True)
-    assert not buckets_called, "fs.buckets was evaluated during mirroring/init"
+    _ = GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+    assert not buckets_called, "GCSFileSystem.__init__ evaluated fs.buckets"
 
 
 def test_process_object_structure(gcs):

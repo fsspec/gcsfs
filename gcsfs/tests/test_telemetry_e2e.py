@@ -60,6 +60,10 @@ def wire(gcs, monkeypatch):
         monkeypatch.setitem(fsspec.config.conf, proto, storage_options)
 
     recorder = _WireRecorder(urlparse(gcs._location).netloc)
+    # ClientSession.request()/get()/... all funnel through the private `_request` (aiohttp 3.x).
+    assert hasattr(
+        aiohttp.ClientSession, "_request"
+    ), "aiohttp.ClientSession._request not found; update the e2e request recorder"
     original_request = aiohttp.ClientSession._request
 
     async def recording_request(self, method, str_or_url, *args, **kwargs):
