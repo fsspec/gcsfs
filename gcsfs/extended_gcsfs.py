@@ -2099,6 +2099,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         By default, files in Zonal buckets are left *unfinalized* (unless
         `finalize_on_close` is set to True), whereas files in RCU buckets are
         finalized on close by default.
+        On Zonal and RCU buckets an overwrite replaces the existing object as
+        soon as the writer opens, so a failed write leaves the partially written
+        object in its place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
         Parameters
@@ -2196,6 +2199,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         By default, files in Zonal buckets are left *unfinalized* (unless
         `finalize_on_close` is set to True), whereas files in RCU buckets are
         finalized on close by default.
+        On Zonal and RCU buckets an overwrite replaces the existing object as
+        soon as the writer opens, so a failed write leaves the partially written
+        object in its place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
         Parameters
@@ -2651,6 +2657,9 @@ async def simple_upload(
     By default, files in Zonal buckets are left *unfinalized* (unless
     `finalize_on_close` is set to True), whereas files in RCU buckets are
     finalized on close by default. A failed upload is never finalized.
+    On Zonal and RCU buckets an overwrite replaces the existing object as soon
+    as the writer opens, so a failed write leaves the partially written object
+    in its place, unfinalized.
     Delegates to core simple_upload implementation for other buckets.
 
     Parameters

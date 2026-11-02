@@ -252,8 +252,10 @@ async def close_mrd(mrd):
 
 async def close_aaow(aaow, finalize_on_close=False):
     """
-    Closes the AsyncAppendableObjectWriter gracefully.
-    Logs a warning if closing fails, instead of raising an exception.
+    Closes the AsyncAppendableObjectWriter.
+    Logs a warning if closing fails, and re-raises the error when finalizing,
+    so that a failed finalize is not reported as a successful write. Closes
+    that do not finalize, such as the abort paths, stay best-effort.
     """
     if aaow:
         try:
@@ -262,6 +264,8 @@ async def close_aaow(aaow, finalize_on_close=False):
             logger.warning(
                 f"Error closing AsyncAppendableObjectWriter for {aaow.bucket_name}/{aaow.object_name}: {e}"
             )
+            if finalize_on_close:
+                raise
 
 
 # Default timeout for synchronous teardowns when no explicit timeout is configured.

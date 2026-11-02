@@ -62,6 +62,9 @@ class ZonalFile(GCSFile):
         `False`, exiting a `with` block or closing the file will not
         automatically finalize it; to finalize the write, `.commit()` must be
         called explicitly or `finalize_on_close` must be set to `True`.
+        On Zonal and RCU buckets an overwrite replaces the existing object as
+        soon as the writer opens, so a failed write leaves the partially
+        written object in its place, unfinalized.
 
         For Zonal and RCU buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
@@ -190,14 +193,20 @@ class ZonalFile(GCSFile):
 
     def _ensure_aaow(self):
         if self.aaow is None:
-            self.aaow = asyn.sync(
-                self.gcsfs.loop,
-                self._init_aaow,
-                self.bucket,
-                self.key,
-                self.generation,
-                self.flush_interval_bytes,
-            )
+            try:
+                self.aaow = asyn.sync(
+                    self.gcsfs.loop,
+                    self._init_aaow,
+                    self.bucket,
+                    self.key,
+                    self.generation,
+                    self.flush_interval_bytes,
+                )
+            except BaseException:
+                # Mark the file force-flushed so that close() does not try to
+                # open the writer again.
+                self.forced = True
+                raise
 
     def _fetch_range(
         self,
@@ -402,10 +411,18 @@ class ZonalFile(GCSFile):
         )
 
     def _close_impl(self):
-        super()._close_impl()
+        errors = []
+
+        # A failed closing flush must not skip the teardown below, and the
+        # partially written object must not be finalized.
+        try:
+            super()._close_impl()
+        except Exception as e:
+            errors.append(e)
+            if not self.finalized:
+                self.finalize_on_close = False
 
         timeout = self.timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
-        errors = []
 
         # Teardown the read-side MRD pool if initialized.
         if hasattr(self, "mrd_pool") and self.mrd_pool:
