@@ -142,12 +142,18 @@ class ZonalFile(GCSFile):
             self.closed = True
             if self.mrd_pool is not None:
                 pool, self.mrd_pool = self.mrd_pool, None
-                sync_teardown(
-                    self.gcsfs.loop,
-                    pool.close,
-                    timeout=timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS,
-                    description=f"closing mrd_pool for {path} after failed open",
-                )
+                try:
+                    sync_teardown(
+                        self.gcsfs.loop,
+                        pool.close,
+                        timeout=timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS,
+                        description=f"closing mrd_pool for {path} after failed open",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to close MRD pool during failed initialization cleanup: %s",
+                        e,
+                    )
             raise
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):

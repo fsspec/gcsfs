@@ -1095,6 +1095,33 @@ def test_zonal_file_failed_init_closes_mrd_pool(mock_gcsfs):
     assert zf.closed is True
 
 
+def test_zonal_file_failed_init_preserves_exception_when_pool_close_fails(
+    mock_gcsfs, caplog
+):
+    """If MRD pool teardown fails during failed __init__, log a warning and propagate the init error."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock(side_effect=RuntimeError("pool close boom"))
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"):
+        with pytest.raises(KeyError):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode="rb",
+                cache_type="no-such-cache",
+            )
+
+    pool.close.assert_awaited_once()
+    assert zf.mrd_pool is None
+    assert zf.closed is True
+    assert any(
+        r.levelno == logging.WARNING and "pool close boom" in r.message
+        for r in caplog.records
+    )
+
+
 @pytest.mark.parametrize("mode", ["r+", "rb+", "w+", "wb+", "a+", "ab+", "x+", "xb+"])
 def test_zonal_file_plus_modes_rejected_before_pool_or_super_init(mock_gcsfs, mode):
     """Unsupported '+' modes fail before checking out an MRD pool or arming __del__."""
