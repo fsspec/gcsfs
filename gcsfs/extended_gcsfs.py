@@ -622,6 +622,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if_generation_match=if_generation_match,
                 storage_class="RAPID" if is_rcu else None,
             )
+        # Once RCU is disabled, new objects fail with InvalidArgument ("Project ...
+        # may not create storageClass RAPID buckets with locationConstraint ...") and
+        # appends with FailedPrecondition ("Cannot write rapid object to zone ...").
         except api_exceptions.GoogleAPICallError as e:
             if not is_rcu:
                 raise
@@ -2206,7 +2209,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(rpath)
-        if await self._uses_grpc_data_path(bucket):
+        layout = await self._lookup_bucket_layout(bucket)
+        if layout.uses_grpc_data_path:
             if os.path.isdir(lpath):
                 return
 
@@ -2214,8 +2218,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 raise ValueError("Cannot write to specific object generation")
 
             finalize_on_close = self._resolve_finalize_on_close(
-                await self._lookup_bucket_layout(bucket),
-                kwargs.get("finalize_on_close"),
+                layout, kwargs.get("finalize_on_close")
             )
             with open(lpath, "rb") as f:
                 try:
@@ -2318,10 +2321,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(path)
-        if await self._uses_grpc_data_path(bucket):
+        layout = await self._lookup_bucket_layout(bucket)
+        if layout.uses_grpc_data_path:
             finalize_on_close = self._resolve_finalize_on_close(
-                await self._lookup_bucket_layout(bucket),
-                kwargs.get("finalize_on_close"),
+                layout, kwargs.get("finalize_on_close")
             )
             try:
                 writer = await self._init_aaow(
@@ -2710,36 +2713,42 @@ async def initiate_upload(
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if not await fs._uses_grpc_data_path(bucket):
-        from gcsfs.core import initiate_upload as core_initiate_upload
+    if await fs._uses_grpc_data_path(bucket):
+        try:
+            writer = await fs._init_aaow(
+                bucket,
+                key,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+            )
+        except RapidCacheUltraDisabledError as e:
+            logger.warning("%s Retrying the write over HTTP.", e)
+        else:
+            if (
+                metadata
+                or fixed_key_metadata
+                or kms_key_name
+                or (content_type and content_type != "application/octet-stream")
+            ):
+                logger.warning(
+                    "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
+                    "or kms_key_name during upload. These parameters will be ignored."
+                )
+            return writer
 
-        return await core_initiate_upload(
-            fs,
-            bucket,
-            key,
-            content_type,
-            metadata,
-            fixed_key_metadata,
-            mode,
-            kms_key_name,
-            if_generation_match=if_generation_match,
-        )
+    from gcsfs.core import initiate_upload as core_initiate_upload
 
-    if (
-        metadata
-        or fixed_key_metadata
-        or kms_key_name
-        or (content_type and content_type != "application/octet-stream")
-    ):
-        logger.warning(
-            "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
-            "or kms_key_name during upload. These parameters will be ignored."
-        )
-
-    return await fs._init_aaow(
+    return await core_initiate_upload(
+        fs,
         bucket,
         key,
-        if_generation_match=_resolve_generation_match(mode, if_generation_match),
+        content_type,
+        metadata,
+        fixed_key_metadata,
+        mode,
+        kms_key_name,
+        if_generation_match=if_generation_match,
     )
 
 
@@ -2792,46 +2801,53 @@ async def simple_upload(
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if not await fs._uses_grpc_data_path(bucket):
-        from gcsfs.core import simple_upload as core_simple_upload
-
-        return await core_simple_upload(
-            fs,
-            bucket,
-            key,
-            datain,
-            metadatain,
-            consistency,
-            content_type,
-            fixed_key_metadata,
-            mode,
-            kms_key_name,
-            if_generation_match=if_generation_match,
+    if await fs._uses_grpc_data_path(bucket):
+        finalize_on_close = fs._resolve_finalize_on_close(
+            await fs._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
         )
+        try:
+            writer = await fs._init_aaow(
+                bucket,
+                key,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+            )
+        except RapidCacheUltraDisabledError as e:
+            logger.warning("%s Retrying the write over HTTP.", e)
+        else:
+            if (
+                metadatain
+                or fixed_key_metadata
+                or kms_key_name
+                or consistency
+                or (content_type and content_type != "application/octet-stream")
+            ):
+                logger.warning(
+                    "Zonal and RCU buckets do not support content_type, metadatain, fixed_key_metadata, "
+                    "consistency or kms_key_name during upload. These parameters will be ignored."
+                )
+            try:
+                await writer.append(datain)
+            except BaseException:
+                # Leave a partially written object unfinalized.
+                await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+                raise
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
+            return
 
-    if (
-        metadatain
-        or fixed_key_metadata
-        or kms_key_name
-        or consistency
-        or (content_type and content_type != "application/octet-stream")
-    ):
-        logger.warning(
-            "Zonal and RCU buckets do not support content_type, metadatain, fixed_key_metadata, "
-            "consistency or kms_key_name during upload. These parameters will be ignored."
-        )
-    finalize_on_close = fs._resolve_finalize_on_close(
-        await fs._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
-    )
-    writer = await fs._init_aaow(
+    from gcsfs.core import simple_upload as core_simple_upload
+
+    return await core_simple_upload(
+        fs,
         bucket,
         key,
-        if_generation_match=_resolve_generation_match(mode, if_generation_match),
+        datain,
+        metadatain,
+        consistency,
+        content_type,
+        fixed_key_metadata,
+        mode,
+        kms_key_name,
+        if_generation_match=if_generation_match,
     )
-    try:
-        await writer.append(datain)
-    except BaseException:
-        # Leave a partially written object unfinalized.
-        await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
-        raise
-    await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)

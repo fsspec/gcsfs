@@ -3,12 +3,12 @@
 When an appendable write to a bucket cached as RCU fails to open,
 ExtendedGcsFileSystem looks the bucket layout up once more. If RCU is no
 longer enabled, it caches the fresh layout and raises
-``RapidCacheUltraDisabledError``, which ``pipe_file`` and ``put_file`` answer
-with one retry over HTTP; otherwise the original error surfaces. Writers that
-open after the cached layout was refreshed fail fast with the same error, and
-uploads that already opened keep the ``finalize_on_close`` they resolved
-before opening. The gRPC writer, the layout lookup, and the HTTP upload are
-mocked.
+``RapidCacheUltraDisabledError``, which ``pipe_file``, ``put_file``,
+``simple_upload`` and ``initiate_upload`` answer with one retry over HTTP;
+otherwise the original error surfaces. Writers that open after the cached
+layout was refreshed fail fast with the same error, and uploads that already
+opened keep the ``finalize_on_close`` they resolved before opening. The gRPC
+writer, the layout lookup, and the HTTP upload are mocked.
 """
 
 import logging
@@ -24,6 +24,7 @@ from gcsfs.extended_gcsfs import (
     BucketLayout,
     ExtendedGcsFileSystem,
     RapidCacheUltraDisabledError,
+    initiate_upload,
     simple_upload,
 )
 from gcsfs.tests import layouts
@@ -46,9 +47,10 @@ def _writer():
 
 @pytest.fixture
 def open_error():
-    """The error a writer open returns once RCU is disabled on the bucket."""
+    """The error GCS returns when a new object's writer opens after RCU was disabled."""
     return api_exceptions.InvalidArgument(
-        "This bucket does not support appendable objects."
+        "Project 123 may not create storageClass RAPID buckets with "
+        "locationConstraint US-CENTRAL1."
     )
 
 
@@ -291,6 +293,32 @@ async def test_put_file_retries_over_http_when_rcu_disabled(rcu_fs, open_error):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("func", ["simple_upload", "initiate_upload"])
+async def test_module_upload_helpers_retry_over_http_when_rcu_disabled(
+    rcu_fs, open_error, caplog, func
+):
+    """simple_upload and initiate_upload retry over HTTP after RCU was disabled."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error
+    fs._get_bucket_layout.return_value = layouts.STANDARD
+
+    with (
+        mock.patch(f"gcsfs.core.{func}", new_callable=mock.AsyncMock) as http_func,
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+    ):
+        if func == "simple_upload":
+            await simple_upload(fs, BUCKET, "key", b"data", {"k": "v"})
+        else:
+            await initiate_upload(fs, BUCKET, "key", metadata={"k": "v"})
+
+    http_func.assert_awaited_once()
+    assert {"k": "v"} in http_func.await_args.args
+    assert any("Retrying the write over HTTP" in r.getMessage() for r in caplog.records)
+    assert not any("will be ignored" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_pipe_file_rcu_still_enabled_propagates_error(rcu_fs, open_error):
     """pipe_file surfaces the open error without an HTTP retry while RCU is enabled."""
     fs, init_aaow = rcu_fs
@@ -407,3 +435,28 @@ def test_zonal_file_commit_after_rcu_error_raises_value_error(rcu_fs, open_error
 
     assert init_aaow.await_count == 1
     f.close()
+
+
+@pytest.mark.parametrize(
+    "error, fresh",
+    [
+        ("open_error", layouts.STANDARD_RCU),
+        ("open_error", BucketLayout.UNKNOWN),
+        (FileExistsError(PATH), None),
+    ],
+)
+def test_zonal_file_failed_open_is_not_retried_on_close(
+    rcu_fs, open_error, error, fresh
+):
+    """close() after a failed writer open neither reopens nor re-checks the layout."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error if error == "open_error" else error
+    fs._get_bucket_layout.return_value = fresh
+
+    with pytest.raises(type(init_aaow.side_effect)):
+        with fs.open(PATH, "wb") as f:
+            f.write(b"x")
+
+    assert init_aaow.await_count == 1
+    assert fs._get_bucket_layout.await_count == (1 if error == "open_error" else 0)
