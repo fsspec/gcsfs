@@ -235,4 +235,3 @@ def test_main_defaults_to_timestamped_run_dir(monkeypatch):
         )
     finally:
         os.rmdir(results_dir)
-

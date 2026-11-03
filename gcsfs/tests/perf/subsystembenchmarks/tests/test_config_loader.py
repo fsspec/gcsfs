@@ -198,4 +198,3 @@ def test_config_env_var_missing_file_names_the_path(tmp_path, monkeypatch):
     monkeypatch.setenv("GCSFS_SUBSYSTEM_CONFIG", "configs.missing.yaml")
     with pytest.raises(FileNotFoundError, match="configs.missing.yaml"):
         _configurator(tmp_path).generate_cases()
-
