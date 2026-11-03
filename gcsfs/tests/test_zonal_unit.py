@@ -224,7 +224,7 @@ def test_mrd_exception_handling(
         with pytest.raises(exception_to_raise, match="Test exception raised"):
             extended_gcsfs.read_block(file_path, 0, 10)
 
-        mocks["downloader"].download_ranges.call_count = 2
+        assert mocks["downloader"].download_ranges.call_count == 1
 
 
 @pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
@@ -1351,18 +1351,12 @@ async def test_get_file_incomplete_download(
     with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout):
         lpath = tmp_path / "output.txt"
 
-        # Simulate download_range returning a shorter byte string than expected
-        # by returning some data on first call, then empty bytes (EOF) on subsequent calls.
+        # Simulate download_range returning a shorter byte string than expected:
+        # every attempt gets some data for the first chunk, then empty bytes (EOF).
         # This ensures the download terminates early and raises ClientError, even if
         # the expected size happens to be a multiple of the chunk size.
-        download_called = False
-
-        async def mock_download_range(*args, **kwargs):
-            nonlocal download_called
-            if not download_called:
-                download_called = True
-                return b"short"
-            return b""
+        async def mock_download_range(offset, length, mrd):
+            return b"short" if offset == 0 else b""
 
         with (
             mock.patch(
@@ -1372,11 +1366,13 @@ async def test_get_file_incomplete_download(
             mock.patch.object(
                 async_gcs, "_info", new_callable=mock.AsyncMock
             ) as mock_info,
+            # _get_file_concurrent retries the ClientError; skip the real backoff.
+            mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock),
         ):
             mock_info.return_value = {"size": len(json_data)}
             with pytest.raises(
                 aiohttp.ClientError,
-                match="Expected .* bytes, but only received .* bytes",
+                match=f"Expected {len(json_data)} bytes, but only received 5 bytes",
             ):
                 await async_gcs._get_file(file_path, str(lpath))
 
@@ -1930,6 +1926,8 @@ async def test_get_threshold_for_disk_reads_grpc_buckets(bucket_layout):
         layouts.STANDARD,
         layouts.STANDARD_HIERARCHICAL,
         layouts.STANDARD_RAPID_CACHE,
+        layouts.HIERARCHICAL_RAPID_CACHE,
+        BucketLayout.UNKNOWN,
     ],
 )
 async def test_get_threshold_for_disk_reads_http_buckets_delegates_to_super(
@@ -1968,3 +1966,4 @@ def test_open_rcu_bucket_read_uses_zonal_file_and_write_uses_gcs_file(
         with mock.patch("gcsfs.extended_gcsfs.GCSFile") as mock_gcs_file:
             wf = extended_gcsfs._open(file_path, write_mode)
         assert wf is mock_gcs_file.return_value
+        mocks["pool_cache_get"].assert_called_once()

@@ -632,6 +632,18 @@ def skip_if_zonal(gcs):
 
 
 @pytest.fixture
+def skip_if_grpc_read(gcs):
+    """Skips tests of HTTP read mechanics; Zonal and RCU buckets read over gRPC."""
+    if (
+        hasattr(gcs, "_sync_lookup_bucket_layout")
+        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).uses_grpc_data_path
+    ):
+        pytest.skip(
+            "Test validates HTTP read mechanics; Zonal and RCU buckets read over gRPC"
+        )
+
+
+@pytest.fixture
 def mock_gcs_harness(monkeypatch):
     """
     Harness that mocks GCSFileSystem HTTP transport and records the exact

@@ -1340,9 +1340,6 @@ async def test_fetch_range_split_concurrent_success(extended_gcsfs):
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
-        )
-        stack.enter_context(
             mock.patch.object(extended_gcsfs, "_info", return_value={"size": 100})
         )
 
@@ -1382,9 +1379,6 @@ async def test_fetch_range_split_concurrent_exception(extended_gcsfs):
     extended_gcsfs._mrd_pool_cache.get = mock.AsyncMock(return_value=mock_pool)
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
-        )
         stack.enter_context(
             mock.patch.object(extended_gcsfs, "_info", return_value={"size": 100})
         )
