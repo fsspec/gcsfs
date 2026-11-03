@@ -16,6 +16,7 @@ from unittest import mock
 import fsspec.asyn
 import pytest
 from fsspec.asyn import FSTimeoutError
+from google.api_core.exceptions import NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
@@ -132,7 +133,7 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
     async def test_pipe_file_failure_closes_without_finalizing(
         self, bucket_layout, finalize_on_close
     ):
-        """A failed pipe_file closes the writer without finalizing the partial object."""
+        """A failed pipe_file closes the writer without finalizing the partial object and still updates the dircache."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         fs._grpc_client = mock.MagicMock()
         path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
@@ -157,6 +158,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                 "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
                 new_callable=mock.AsyncMock,
             ) as mock_close_aaow,
+            mock.patch.object(
+                fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+            ) as mock_update,
         ):
             with pytest.raises(ConnectionError, match="append failed"):
                 await fs._pipe_file(
@@ -164,6 +168,7 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                 )
 
         mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=False)
+        mock_update.assert_awaited_once_with(path)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("finalize_on_close", [None, True])
@@ -171,7 +176,7 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
     async def test_put_file_failure_closes_without_finalizing(
         self, bucket_layout, finalize_on_close
     ):
-        """A failed put_file closes the writer without finalizing the partial object."""
+        """A failed put_file closes the writer without finalizing the partial object and still updates the dircache."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
@@ -202,6 +207,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                     "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
                     new_callable=mock.AsyncMock,
                 ) as mock_close_aaow,
+                mock.patch.object(
+                    fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+                ) as mock_update,
             ):
                 with pytest.raises(ConnectionError, match="append failed"):
                     await fs._put_file(
@@ -209,6 +217,36 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                     )
 
         mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=False)
+        mock_update.assert_awaited_once_with(rpath)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_put_file_missing_lpath_does_not_open_writer(
+        self, bucket_layout, tmp_path
+    ):
+        """A missing local file fails before the writer replaces the object."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+
+        with (
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=bucket_layout,
+            ),
+            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                new_callable=mock.AsyncMock,
+            ) as mock_init_aaow,
+        ):
+            with pytest.raises(FileNotFoundError):
+                await fs._put_file(
+                    str(tmp_path / "missing"), f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+                )
+
+        mock_init_aaow.assert_not_awaited()
 
 
 @pytest.fixture
@@ -404,6 +442,24 @@ def test_zonal_file_failed_writer_open_is_not_retried_on_close(
             f.write(test_data)
 
     zonal_write_mocks["init_aaow"].assert_awaited_once()
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_flush_failure_invalidates_cache(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """A failed closing flush still drops the cached parent listing of the replaced object."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for closing-flush failures with mocks.")
+    path = f"{file_path}/obj"
+    extended_gcsfs.dircache[file_path] = [{"name": path, "type": "file", "size": 1}]
+    zonal_write_mocks["aaow"].flush.side_effect = NotFound("flush failed")
+
+    with pytest.raises(NotFound, match="flush failed"):
+        with extended_gcsfs.open(path, "wb") as f:
+            f.write(test_data)
+
+    assert file_path not in extended_gcsfs.dircache
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
@@ -657,14 +713,12 @@ def test_zonal_file_finalize_on_close_rcu_default_and_overrides(
 
     # 2. Direct ZonalFile instantiation also defaults to True on RCU
     aaow.close.reset_mock()
-    aaow._is_stream_open = True
     with ZonalFile(extended_gcsfs, file_path, mode="wb") as f_direct:
         assert f_direct.finalize_on_close is True
     aaow.close.assert_awaited_once_with(finalize_on_close=True)
 
     # 3. Per-call finalize_on_close=False overrides RCU default
     aaow.close.reset_mock()
-    aaow._is_stream_open = True
     with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f_false:
         assert f_false.finalize_on_close is False
     aaow.close.assert_awaited_once_with(finalize_on_close=False)
@@ -674,7 +728,6 @@ def test_zonal_file_finalize_on_close_rcu_default_and_overrides(
     try:
         extended_gcsfs.finalize_on_close = False
         aaow.close.reset_mock()
-        aaow._is_stream_open = True
         with extended_gcsfs.open(file_path, "wb") as f_fs_false:
             assert f_fs_false.finalize_on_close is False
         aaow.close.assert_awaited_once_with(finalize_on_close=False)
@@ -796,6 +849,61 @@ async def test_simple_upload_failure_closes_without_finalizing(
     mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=False)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("helper", ["_put_file", "_pipe_file", "simple_upload"])
+@pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+async def test_write_helpers_propagate_finalize_failure(
+    bucket_layout, helper, tmp_path
+):
+    """With the real close_aaow, a failed finalize propagates and the writer is closed once.
+
+    _put_file and _pipe_file still update the dircache; simple_upload leaves it
+    to its callers.
+    """
+    from gcsfs.extended_gcsfs import simple_upload
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs._grpc_client = mock.MagicMock()
+    path = f"{TEST_ZONAL_BUCKET}/k"
+    writer = mock.MagicMock(bucket_name=TEST_ZONAL_BUCKET, object_name="k")
+    writer.append = mock.AsyncMock()
+    writer.append_from_file = mock.AsyncMock()
+    writer.close = mock.AsyncMock(side_effect=NotFound("finalize failed"))
+    lpath = tmp_path / "data"
+    lpath.write_bytes(b"data")
+
+    with (
+        mock.patch.object(
+            fs,
+            "_lookup_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+        mock.patch(
+            "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+            new_callable=mock.AsyncMock,
+            return_value=writer,
+        ),
+        mock.patch.object(
+            fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+        ) as mock_update,
+    ):
+        with pytest.raises(NotFound, match="finalize failed"):
+            if helper == "_put_file":
+                await fs._put_file(str(lpath), path, finalize_on_close=True)
+            elif helper == "_pipe_file":
+                await fs._pipe_file(path, b"data", finalize_on_close=True)
+            else:
+                await simple_upload(
+                    fs, TEST_ZONAL_BUCKET, "k", b"data", finalize_on_close=True
+                )
+
+    writer.close.assert_awaited_once_with(finalize_on_close=True)
+    if helper != "simple_upload":
+        mock_update.assert_awaited_once_with(path)
+
+
 def test_zonal_file_flush_after_finalize_logs_warning(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -869,7 +977,13 @@ def test_zonal_file_overwrite(extended_gcsfs, zonal_write_mocks, file_path):
     ) as f:
         f.write(b"Sample text data.")
 
-    if not zonal_write_mocks:
+    if zonal_write_mocks:
+        # Each open finalizes its own writer on close.
+        assert (
+            zonal_write_mocks["aaow"].close.await_args_list
+            == [mock.call(finalize_on_close=True)] * 2
+        )
+    else:
         assert extended_gcsfs.cat(file_path) == b"Sample text data."
 
 

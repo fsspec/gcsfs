@@ -580,7 +580,16 @@ def zonal_write_mocks(request):
     mock_aaow = mock.AsyncMock(spec=AsyncAppendableObjectWriter)
     mock_aaow.offset = 0
     mock_aaow._is_stream_open = True
-    mock_init_aaow = mock.AsyncMock(return_value=mock_aaow)
+
+    async def init_aaow_side_effect(grpc_client, bucket_name, object_name, *a, **k):
+        # Every open gets an open writer for its own object.
+        mock_aaow._is_stream_open = True
+        mock_aaow.offset = 0
+        mock_aaow.bucket_name = bucket_name
+        mock_aaow.object_name = object_name
+        return mock_aaow
+
+    mock_init_aaow = mock.AsyncMock(side_effect=init_aaow_side_effect)
     mock_gcsfs_info = mock.AsyncMock(
         return_value={"generation": "12345", "type": "file", "name": "mock_file"}
     )
