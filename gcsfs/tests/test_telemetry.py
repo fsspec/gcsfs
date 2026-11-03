@@ -1064,7 +1064,7 @@ async def test_zonal_file_async_fetch_range_propagates_caller_framework():
         captured_context.update(get_telemetry_context())
         return b"data"
 
-    f = object.__new__(ZonalFile)
+    f = ZonalFile.__new__(ZonalFile)
     f.closed = True  # Skip finalizer cleanup for this partially-initialized file
     f.caller_framework = "jax"
     f.mrd_pool = None
@@ -1089,7 +1089,7 @@ def test_zonal_file_write_propagates_caller_framework():
     async def fake_append(data):
         captured_context.update(get_telemetry_context())
 
-    f = object.__new__(ZonalFile)
+    f = ZonalFile.__new__(ZonalFile)
     f.closed = False
     f.mode = "wb"
     f.forced = False
