@@ -4,9 +4,39 @@ import socket
 # Cap on spawned ranks to prevent OOM on test-c4-highmem.
 MAX_RANKS = 16
 
+# Concurrent benchmark processes on one VM (cloudbuild/subsystembenchmarks/scripts/run-ci.sh)
+# each get a disjoint block of ports via GCSFS_SUBSYSTEM_PORT_BASE. Without it, an
+# OS-assigned free port is probed and only bound later by the TCPStore, so two processes
+# can pick the same port and one fails with EADDRINUSE.
+PORT_BLOCK_SIZE = 16
+_next_port_offset = 0
+
+
+def _port_is_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+    return True
+
 
 def find_free_port() -> int:
     """Finds an available TCP port for the Gloo distributed backend."""
+    global _next_port_offset
+    base = os.environ.get("GCSFS_SUBSYSTEM_PORT_BASE")
+    if base:
+        # Rotate through the block so successive calls in one process (setup, then
+        # run) get different ports, and skip any still held by another socket.
+        for _ in range(PORT_BLOCK_SIZE):
+            port = int(base) + _next_port_offset % PORT_BLOCK_SIZE
+            _next_port_offset += 1
+            if _port_is_free(port):
+                return port
+        raise RuntimeError(
+            f"no free port in [{base}, {int(base) + PORT_BLOCK_SIZE}) "
+            "(GCSFS_SUBSYSTEM_PORT_BASE)"
+        )
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]

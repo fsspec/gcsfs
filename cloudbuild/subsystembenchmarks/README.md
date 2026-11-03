@@ -204,9 +204,15 @@ never fails the build.
 `_MODE=ci` runs a lightweight suite meant for pull requests: 11 small cases
 (data loading on Rapid, HNS, and Standard buckets; PyTorch Lightning and Ray
 checkpoint save/load on Rapid and Standard buckets) run concurrently on one VM.
-The case table lives in [`scripts/run-ci.sh`](scripts/run-ci.sh). Data-loading
-cases use each group's `configs.ci.yaml`; checkpoint cases use the baseline from
-`configs.yaml` with `gs://huggingface-model-weights/gpt2`.
+The case table lives in [`scripts/run-ci.sh`](scripts/run-ci.sh). Every case uses
+its group's `configs.ci.yaml`; checkpoint cases save and load
+`gs://huggingface-model-weights/gpt2` with `ddp` on 2 ranks, twice each.
+
+The `gcsfs` under test is the checkout. `fsspec` (`master`) and
+`google-cloud-storage` (`main` of `googleapis/google-cloud-python`) are installed
+from their upstream default branches, after the framework requirements, so
+unreleased upstream changes are caught too. The commits and per-venv versions
+used are recorded in `__run__/ci/versions.txt`.
 
 Each case has a 540-second limit. On timeout every Python process in the case
 dumps all thread stacks into `__run__/ci/<case>/run.log`. The build fails if any
