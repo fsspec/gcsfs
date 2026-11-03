@@ -421,6 +421,11 @@ class ZonalFile(GCSFile):
             errors.append(e)
             if not self.finalized:
                 self.finalize_on_close = False
+            if self.aaow is not None:
+                # fsspec skips its cache invalidation when the closing flush
+                # fails, but the open writer has already replaced the object.
+                self.fs.invalidate_cache(self.path)
+                self.fs.invalidate_cache(self.fs._parent(self.path))
 
         timeout = self.timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
 

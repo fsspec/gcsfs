@@ -2163,22 +2163,28 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         finalize_on_close = self._resolve_finalize_on_close(
             await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
         )
-        writer = await self._init_aaow(
-            bucket,
-            key,
-            if_generation_match=_resolve_generation_match(mode, if_generation_match),
-        )
-
-        try:
-            with open(lpath, "rb") as f:
-                await writer.append_from_file(f, block_size=chunksize)
-        except BaseException:
-            # Leave a partially written object unfinalized.
-            await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
-            raise
-        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
-
-        await self._write_file_cache_update(rpath)
+        with open(lpath, "rb") as f:
+            writer = await self._init_aaow(
+                bucket,
+                key,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+            )
+            # The open writer has already replaced the object, so update the
+            # cache even if the write fails.
+            try:
+                try:
+                    await writer.append_from_file(f, block_size=chunksize)
+                except BaseException:
+                    # Leave a partially written object unfinalized.
+                    await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+                    raise
+                await zb_hns_utils.close_aaow(
+                    writer, finalize_on_close=finalize_on_close
+                )
+            finally:
+                await self._write_file_cache_update(rpath)
 
     async def _pipe_file(
         self,
@@ -2256,17 +2262,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             key,
             if_generation_match=_resolve_generation_match(mode, if_generation_match),
         )
+        # The open writer has already replaced the object, so update the cache
+        # even if the write fails.
         try:
-            with memoryview(data) as data_view:
-                for i in range(0, len(data_view), chunksize):
-                    await writer.append(data_view[i : i + chunksize])
-        except BaseException:
-            # Leave a partially written object unfinalized.
-            await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
-            raise
-        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
-
-        await self._write_file_cache_update(path)
+            try:
+                with memoryview(data) as data_view:
+                    for i in range(0, len(data_view), chunksize):
+                        await writer.append(data_view[i : i + chunksize])
+            except BaseException:
+                # Leave a partially written object unfinalized.
+                await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+                raise
+            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
+        finally:
+            await self._write_file_cache_update(path)
 
     async def _get_file_request(
         self, rpath, lpath, *args, headers=None, callback=None, **kwargs
