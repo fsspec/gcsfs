@@ -3,6 +3,8 @@ import collections
 import concurrent.futures
 import contextlib
 import ctypes
+import functools
+import inspect
 import logging
 import os
 import sys
@@ -30,6 +32,7 @@ except ImportError:  # releases before googleapis/google-cloud-python#18641
     Preconditions = None
 
 MRD_MAX_RANGES = 1000  # MRD supports up to 1000 ranges per request
+ZERO_COPY_BIDI_READ_ENV_VAR = "GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ"
 try:
     DEFAULT_CONCURRENCY = int(os.environ.get("DEFAULT_GCSFS_CONCURRENCY", "4"))
 except ValueError:
@@ -39,18 +42,84 @@ logger = logging.getLogger("gcsfs")
 
 
 try:
-    PyBytes_FromStringAndSize = ctypes.pythonapi.PyBytes_FromStringAndSize
+    # A private handle to the interpreter: ctypes.pythonapi shares one function
+    # object per symbol with every other library in the process, so setting
+    # argtypes there would be a process-wide mutation.
+    _pythonapi = ctypes.PyDLL(ctypes.pythonapi._name, handle=ctypes.pythonapi._handle)
+
+    PyBytes_FromStringAndSize = _pythonapi.PyBytes_FromStringAndSize
     PyBytes_FromStringAndSize.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t)
     PyBytes_FromStringAndSize.restype = ctypes.py_object
 
-    PyBytes_AsString = ctypes.pythonapi.PyBytes_AsString
+    PyBytes_AsString = _pythonapi.PyBytes_AsString
     PyBytes_AsString.argtypes = (ctypes.py_object,)
     PyBytes_AsString.restype = ctypes.c_void_p
+
+    class _PyBuffer(ctypes.Structure):
+        _fields_ = [
+            ("buf", ctypes.c_void_p),
+            ("obj", ctypes.c_void_p),
+            ("len", ctypes.c_ssize_t),
+            ("itemsize", ctypes.c_ssize_t),
+            ("readonly", ctypes.c_int),
+            ("ndim", ctypes.c_int),
+            ("format", ctypes.c_char_p),
+            ("shape", ctypes.c_void_p),
+            ("strides", ctypes.c_void_p),
+            ("suboffsets", ctypes.c_void_p),
+            ("internal", ctypes.c_void_p),
+        ]
+
+    # PyDLL raises the pending Python exception itself when a call returns -1,
+    # so PyObject_GetBuffer needs no return-code check at the call site.
+    PyObject_GetBuffer = _pythonapi.PyObject_GetBuffer
+    PyObject_GetBuffer.argtypes = (
+        ctypes.py_object,
+        ctypes.POINTER(_PyBuffer),
+        ctypes.c_int,
+    )
+    PyObject_GetBuffer.restype = ctypes.c_int
+    PyBuffer_Release = _pythonapi.PyBuffer_Release
+    PyBuffer_Release.argtypes = (ctypes.POINTER(_PyBuffer),)
+    PyBuffer_Release.restype = None
     HAS_CPYTHON_API = True
 except Exception:
     PyBytes_FromStringAndSize = None
     PyBytes_AsString = None
+    PyObject_GetBuffer = None
+    PyBuffer_Release = None
     HAS_CPYTHON_API = False
+
+
+def _enable_zero_copy_bidi_read():
+    """Opt into google-cloud-storage's zero-copy BidiReadObject parser unless already set."""
+    os.environ.setdefault(ZERO_COPY_BIDI_READ_ENV_VAR, "1")
+
+
+@functools.lru_cache(maxsize=32)
+def _method_accepts_memoryview(download_ranges_attr):
+    try:
+        params = inspect.signature(download_ranges_attr).parameters
+    except (TypeError, ValueError):
+        return False
+    return "accepts_memoryview" in params
+
+
+def _download_ranges_kwargs(mrd_type):
+    """Extra keyword arguments for ``mrd_type.download_ranges()``.
+
+    google-cloud-storage releases with ``download_ranges(accepts_memoryview=)``
+    can hand each chunk over as a memoryview of the received gRPC message
+    instead of copying it into ``bytes`` first; the zonal read sinks
+    (``BytesIO``, ``PartialView``, ``DirectMemmoveBuffer``) copy from any
+    buffer, so ask for that. Older releases get no extra argument.
+    """
+    attr = getattr(mrd_type, "download_ranges", None)
+    try:
+        supported = _method_accepts_memoryview(attr)
+    except TypeError:
+        supported = False
+    return {"accepts_memoryview": True} if supported else {}
 
 
 async def init_mrd(
@@ -66,6 +135,8 @@ async def init_mrd(
     Wraps Google API errors into standard Python exceptions.
     """
     from gcsfs.core import _get_cache_type_header_value
+
+    _enable_zero_copy_bidi_read()
 
     metadata = None
     cache_val = _get_cache_type_header_value(cache_type, cache_source)
@@ -94,7 +165,9 @@ async def download_range(offset, length, mrd):
     if length == 0:
         return b""
     buffer = BytesIO()
-    await mrd.download_ranges([(offset, length, buffer)])
+    await mrd.download_ranges(
+        [(offset, length, buffer)], **_download_ranges_kwargs(type(mrd))
+    )
     data = buffer.getvalue()
     bytes_downloaded = len(data)
 
@@ -140,7 +213,10 @@ async def download_ranges(ranges, mrd):
     if tasks:
         # The MRD expects list of (offset, length, buffer)
         # We extract these from our task list
-        await mrd.download_ranges([(off, length, buf) for _, off, length, buf in tasks])
+        await mrd.download_ranges(
+            [(off, length, buf) for _, off, length, buf in tasks],
+            **_download_ranges_kwargs(type(mrd)),
+        )
 
     # Map results back to their original positions
     results = [b""] * len(ranges)
@@ -388,23 +464,43 @@ class PartialView:
         """
         Schedules a write operation to memory mapping.
         """
-        if not isinstance(data, bytes):
-            raise ValueError(f"Expected bytes, but got {type(data)}")
+        owned_view = None
+        if type(data) is not bytes:
+            # Any C-contiguous buffer-protocol object, as an unsigned-byte view
+            # so len() is the byte count the memmove and accounting rely on.
+            try:
+                with memoryview(data) as view:
+                    if not view.c_contiguous:
+                        raise TypeError("underlying buffer is not C-contiguous")
+                    if view.nbytes == 0:
+                        data = b""
+                    else:
+                        owned_view = view.cast("B")
+                        data = owned_view
+            except (TypeError, BufferError) as e:
+                raise ValueError(
+                    f"Expected a contiguous bytes-like object, but got {type(data)}: {e}"
+                ) from None
 
-        size = len(data)
-        with self._view_lock:
-            if self.current_offset + size > self.expected_size:
-                error_msg = (
-                    f"Attempted to write {size} bytes "
-                    f"at offset {self.current_offset}. "
-                    f"Max capacity is {self.expected_size} bytes."
-                )
-                raise BufferError(error_msg)
+        try:
+            size = len(data)
+            with self._view_lock:
+                if self.current_offset + size > self.expected_size:
+                    error_msg = (
+                        f"Attempted to write {size} bytes "
+                        f"at offset {self.current_offset}. "
+                        f"Max capacity is {self.expected_size} bytes."
+                    )
+                    raise BufferError(error_msg)
 
-            abs_offset = self.start_offset + self.current_offset
-            self.current_offset += size
+                abs_offset = self.start_offset + self.current_offset
+                self.current_offset += size
 
-        return self.parent._submit_write(abs_offset, data, size)
+            return self.parent._submit_write(abs_offset, data, size)
+        except BaseException:
+            if owned_view is not None:
+                owned_view.release()
+            raise
 
     def close(self):
         """
@@ -431,6 +527,13 @@ class DirectMemmoveBuffer:
     Memory allocation is natively deferred. If the payload precisely aligns
     with expected bounds sequentially, it gracefully overrides manual memmoves
     using true Zero-Copy payload replacement safely under the hood.
+
+    A chunk handed to `write()` may be copied on an executor thread after the
+    call returns, so its memory must stay valid and unchanged until the
+    returned future completes. `bytes` chunks are immutable; the memoryview
+    chunks of google-cloud-storage's zero-copy parser reference the received
+    message, which is immutable and kept alive by the view (documented on
+    `AsyncMultiRangeDownloader.download_ranges`).
 
     Note: This class is now strictly Thread-Safe
     """
@@ -506,7 +609,7 @@ class DirectMemmoveBuffer:
             if self._pending_count == 0:
                 self._done_event.set()
 
-    def _submit_write(self, dest_offset, data_bytes, size):
+    def _submit_write(self, dest_offset, data, size):
         if size == 0:
             with self._lock:
                 if self._stop_accepting_writes or self._is_closed:
@@ -529,9 +632,15 @@ class DirectMemmoveBuffer:
                     raise self._error
 
                 if self._result_bytes is None:
-                    if dest_offset == 0 and size == self.expected_size:
-                        # fastpath: return buffer directly
-                        self._result_bytes = data_bytes
+                    if (
+                        dest_offset == 0
+                        and size == self.expected_size
+                        and type(data) is bytes
+                    ):
+                        # fastpath: a bytes chunk covering the whole buffer is the
+                        # result itself. Not taken for memoryview chunks (the
+                        # zero-copy parser), which alias the gRPC message.
+                        self._result_bytes = data
                         self.semaphore.release()  # Release because we skip the executor
                         fut = concurrent.futures.Future()
                         fut.set_result(None)
@@ -565,7 +674,7 @@ class DirectMemmoveBuffer:
         if size <= self.THRESHOLD_BYTES_FOR_SCHEDULING:
             # Fast path, no need to send it to executor
             try:
-                self._do_memmove(dest_offset, data_bytes, size)
+                self._do_memmove(dest_offset, data, size)
             except BaseException:
                 # The exception is already captured in self._error by _do_memmove
                 pass
@@ -580,16 +689,14 @@ class DirectMemmoveBuffer:
         else:
             try:
                 # Slow path, schedule it on executor.
-                return self.executor.submit(
-                    self._do_memmove, dest_offset, data_bytes, size
-                )
+                return self.executor.submit(self._do_memmove, dest_offset, data, size)
             except BaseException as e:
                 with self._lock:
                     self._error = e
                 self._decrement_pending()
                 raise e
 
-    def _do_memmove(self, dest_offset, data_bytes, size):
+    def _do_memmove(self, dest_offset, data, size):
         try:
             with self._lock:
                 if self._error:
@@ -599,11 +706,20 @@ class DirectMemmoveBuffer:
             # PyPy uses memory-safe native slice assignment.
             if HAS_CPYTHON_API:
                 dest = self._start_address + dest_offset
-                ctypes.memmove(dest, data_bytes, size)
+                if type(data) is bytes:
+                    ctypes.memmove(dest, data, size)
+                else:
+                    # ctypes.memmove only accepts bytes; borrow the raw
+                    # pointer of any other buffer via the buffer protocol
+                    # (PyObject_GetBuffer raises if data does not support it).
+                    view = _PyBuffer()
+                    PyObject_GetBuffer(data, ctypes.byref(view), 0)
+                    try:
+                        ctypes.memmove(dest, view.buf, size)
+                    finally:
+                        PyBuffer_Release(ctypes.byref(view))
             else:
-                memoryview(self._result_bytes)[
-                    dest_offset : dest_offset + size
-                ] = data_bytes
+                memoryview(self._result_bytes)[dest_offset : dest_offset + size] = data
 
             with self._lock:
                 self._total_bytes_written += size

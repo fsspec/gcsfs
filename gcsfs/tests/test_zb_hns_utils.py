@@ -1,13 +1,21 @@
+import array
 import asyncio
 import collections
 import concurrent.futures
+import contextlib
 import dataclasses
+import importlib
 import logging
+import os
+import sys
 from typing import Optional
 from unittest import mock
 
 import pytest
 from google.api_core.exceptions import FailedPrecondition, NotFound
+from google.cloud.storage.asyncio.async_multi_range_downloader import (
+    AsyncMultiRangeDownloader,
+)
 
 from gcsfs import zb_hns_utils
 from gcsfs.retry import GenerationMismatchError
@@ -938,6 +946,404 @@ def test_direct_memmove_buffer():
     result_bytes = buf.get_value()
     assert result_bytes == b"helloworld"
 
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_accepts_memoryview_slices():
+    # The storage SDK's zero-copy read path hands chunks over as memoryview
+    # slices of the gRPC message; halves above THRESHOLD_BYTES_FOR_SCHEDULING
+    # go through the executor, so this covers the scheduled memmove path.
+    data = bytes(range(256)) * 2048
+    size = len(data)
+    half = size // 2
+    assert half > DirectMemmoveBuffer.THRESHOLD_BYTES_FOR_SCHEDULING
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    view.write(memoryview(data)[:half]).result()
+    view.write(memoryview(data)[half:]).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_copies_whole_buffer_memoryview():
+    # A bytes payload covering the whole buffer is kept by reference; a
+    # memoryview must be copied during write() and release its buffer export
+    # once the copy completes so the caller can resize or overwrite the source.
+    data = bytes(range(256)) * 4
+    source = bytearray(data)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(memoryview(source)).result()
+    source[:] = b"\x00" * len(source)
+    source.clear()
+
+    view.close()
+    buf.close()
+    result = buf.get_value()
+    assert isinstance(result, bytes)
+    assert result == data
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_memoryview_after_module_reexecution():
+    # gcsfs/tests/test_init.py drops every gcsfs module from sys.modules and
+    # imports the package again, then restores the originals. The module body
+    # runs twice in one process; each run binds its own private PyDLL
+    # functions, so the second run must not break the first module's calls.
+    import gcsfs
+
+    saved_module = sys.modules.pop("gcsfs.zb_hns_utils")
+    saved_attr = gcsfs.zb_hns_utils
+    try:
+        importlib.import_module("gcsfs.zb_hns_utils")
+    finally:
+        sys.modules["gcsfs.zb_hns_utils"] = saved_module
+        gcsfs.zb_hns_utils = saved_attr
+
+    data = bytes(range(256)) * 4
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(memoryview(data)).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["text", 123, memoryview(b"abcdef")[::2], memoryview(b"abcdef")[0:0:2]],
+    ids=["str", "int", "non_contiguous_memoryview", "empty_non_contiguous_memoryview"],
+)
+def test_partial_view_write_rejects_non_contiguous_or_non_buffer(bad):
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(4, executor, max_pending=2)
+    view = buf.get_view(0, 4)
+
+    with pytest.raises(ValueError, match="Expected a contiguous bytes-like object"):
+        view.write(bad)
+
+    executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "make",
+    [bytearray, lambda data: array.array("I", data)],
+    ids=["bytearray", "array_uint32"],
+)
+def test_partial_view_write_accepts_any_contiguous_buffer(make):
+    data = bytes(range(256)) * 4
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(make(data)).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "make_view",
+    [
+        lambda data: memoryview(data).cast("I"),
+        lambda data: memoryview(data).cast("B", [4, len(data) // 4]),
+    ],
+    ids=["cast_uint32", "two_dimensional"],
+)
+def test_partial_view_write_sizes_memoryview_in_bytes(make_view):
+    # len() of these views is a fraction of their byte size; the whole payload
+    # must still be copied and accounted for.
+    data = bytes(range(256)) * 4
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(make_view(data)).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+def test_partial_view_write_handles_bytes_subclass_and_empty_2d_view():
+    class _LyingBytes(bytes):
+        def __len__(self):
+            return 64
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        # Whole-buffer write of a bytes subclass returns plain bytes sized by
+        # its true buffer export rather than Python __len__.
+        whole = DirectMemmoveBuffer(4, executor, max_pending=2)
+        wv = whole.get_view(0, 4)
+        wv.write(_LyingBytes(b"abcd")).result()
+        wv.close()
+        whole.close()
+        res = whole.get_value()
+        assert type(res) is bytes and res == b"abcd"
+
+        # Multi-view write + empty 2D C-contiguous view does not over-read or fail.
+        split = DirectMemmoveBuffer(8, executor, max_pending=2)
+        v1 = split.get_view(0, 4)
+        v2 = split.get_view(4, 4)
+        empty_2d = memoryview(b"abcd").cast("B", [1, 4])[:0]
+        v1.write(empty_2d).result()
+        v1.write(_LyingBytes(b"efgh")).result()
+        v2.write(b"ijkl").result()
+        v1.close()
+        v2.close()
+        split.close()
+        assert split.get_value() == b"efghijkl"
+    finally:
+        executor.shutdown()
+
+
+def test_partial_view_write_error_does_not_pin_buffer():
+    # PartialView.write casts non-bytes inputs to an internal byte memoryview;
+    # if write() fails, the exception traceback must not keep that export open
+    # while the caller holds the exception (e.g. cat_ranges on_error="return"),
+    # nor release a memoryview owned by the caller.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        buf = DirectMemmoveBuffer(4, executor, max_pending=2)
+        view = buf.get_view(0, 4)
+
+        overflow_src = bytearray(b"abcdef")
+        caller_mv = memoryview(overflow_src)
+        with pytest.raises(BufferError) as overflow_exc:
+            view.write(caller_mv)
+        assert "Max capacity is 4 bytes" in str(overflow_exc.value)
+        assert caller_mv.tobytes() == b"abcdef"
+        caller_mv.release()
+        overflow_src.clear()
+
+        buf.close()
+        closed_src = bytearray(b"abcd")
+        with pytest.raises(ValueError) as closed_exc:
+            view.write(closed_src)
+        assert "closed buffer" in str(closed_exc.value)
+        closed_src.clear()
+    finally:
+        executor.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing, expected", [(None, "1"), ("0", "0")])
+async def test_init_mrd_enables_zero_copy_bidi_read(monkeypatch, existing, expected):
+    # The opt-in happens before create_mrd opens the stream, and an explicit
+    # setting in the environment wins.
+    name = zb_hns_utils.ZERO_COPY_BIDI_READ_ENV_VAR
+    if existing is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, existing)
+
+    seen_in_create_mrd = []
+
+    async def _fake_create_mrd(*args, **kwargs):
+        seen_in_create_mrd.append(os.environ.get(name))
+        return mock.Mock()
+
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        side_effect=_fake_create_mrd,
+    ):
+        await zb_hns_utils.init_mrd(mock_grpc_client, bucket_name, object_name)
+
+    assert seen_in_create_mrd == [expected]
+    assert os.environ.get(name) == expected
+
+
+def test_import_does_not_enable_zero_copy_bidi_read(monkeypatch):
+    # Importing gcsfs must not change the SDK's behaviour for processes that
+    # never open a gRPC MRD read stream (Rapid or Rapid Cache Ultra).
+    import gcsfs
+
+    name = zb_hns_utils.ZERO_COPY_BIDI_READ_ENV_VAR
+    monkeypatch.delenv(name, raising=False)
+
+    saved_module = sys.modules.pop("gcsfs.zb_hns_utils")
+    saved_attr = gcsfs.zb_hns_utils
+    try:
+        importlib.import_module("gcsfs.zb_hns_utils")
+    finally:
+        sys.modules["gcsfs.zb_hns_utils"] = saved_module
+        gcsfs.zb_hns_utils = saved_attr
+
+    assert name not in os.environ
+
+
+class _MemoryviewDownloader:
+    """download_ranges() of a google-cloud-storage with accepts_memoryview=."""
+
+    bucket_name = "bucket"
+    object_name = "obj"
+
+    def __init__(self):
+        self.accepts_memoryview_args = []
+
+    async def download_ranges(self, read_ranges, accepts_memoryview=False):
+        self.accepts_memoryview_args.append(accepts_memoryview)
+        for _, length, buffer in read_ranges:
+            buffer.write(memoryview(b"x" * length))
+
+
+class _LegacyDownloader:
+    """download_ranges() of a google-cloud-storage without the keyword."""
+
+    bucket_name = "bucket"
+    object_name = "obj"
+
+    def __init__(self):
+        self.calls = 0
+
+    async def download_ranges(self, read_ranges):
+        self.calls += 1
+        for _, length, buffer in read_ranges:
+            buffer.write(b"x" * length)
+
+
+def test_download_ranges_kwargs_follow_the_downloader_signature():
+    first = zb_hns_utils._download_ranges_kwargs(_MemoryviewDownloader)
+    second = zb_hns_utils._download_ranges_kwargs(_MemoryviewDownloader)
+    assert first == {"accepts_memoryview": True}
+    assert second == {"accepts_memoryview": True}
+    assert first is not second
+    assert zb_hns_utils._download_ranges_kwargs(_LegacyDownloader) == {}
+    # Mock downloaders in tests carry download_ranges on the instance only.
+    assert zb_hns_utils._download_ranges_kwargs(type(mock.MagicMock())) == {}
+
+    class _UnhashableCallable:
+        __hash__ = None
+
+        async def __call__(self, read_ranges):
+            pass
+
+    class _UnhashableDownloader:
+        download_ranges = _UnhashableCallable()
+
+    assert zb_hns_utils._download_ranges_kwargs(_UnhashableDownloader) == {}
+
+
+@pytest.mark.asyncio
+async def test_download_range_requests_memoryview_chunks_when_supported():
+    mrd = _MemoryviewDownloader()
+    assert await zb_hns_utils.download_range(0, 4, mrd) == b"xxxx"
+    assert mrd.accepts_memoryview_args == [True]
+
+
+@pytest.mark.asyncio
+async def test_download_range_passes_no_keyword_to_older_sdks():
+    mrd = _LegacyDownloader()
+    assert await zb_hns_utils.download_range(0, 4, mrd) == b"xxxx"
+    assert mrd.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_download_ranges_requests_memoryview_chunks_when_supported():
+    mrd = _MemoryviewDownloader()
+    assert await zb_hns_utils.download_ranges([(0, 2), (5, 3)], mrd) == [
+        b"xx",
+        b"xxx",
+    ]
+    assert mrd.accepts_memoryview_args == [True]
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_mrd_downloads_forward_accepts_memoryview():
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    fs = ExtendedGcsFileSystem.__new__(ExtendedGcsFileSystem)
+    fs._memmove_executor = executor
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = (
+        ExtendedGcsFileSystem.MIN_CHUNK_SIZE_FOR_CONCURRENCY
+    )
+
+    def _pool_for(mrd):
+        pool = mock.MagicMock(spec=MRDPool)
+
+        @contextlib.asynccontextmanager
+        async def _get_mrd():
+            yield mrd
+
+        pool.get_mrd.side_effect = _get_mrd
+        return pool
+
+    try:
+        mv_mrd = _MemoryviewDownloader()
+        mv_pool = _pool_for(mv_mrd)
+        assert await fs._concurrent_mrd_fetch(0, 6, 1, mv_pool) == b"xxxxxx"
+        assert await fs._download_range_group(mv_pool, [(0, 0, 2), (1, 4, 3)]) == [
+            b"xx",
+            b"xxx",
+        ]
+        assert mv_mrd.accepts_memoryview_args == [True, True]
+
+        legacy_mrd = _LegacyDownloader()
+        legacy_pool = _pool_for(legacy_mrd)
+        assert await fs._concurrent_mrd_fetch(0, 5, 1, legacy_pool) == b"xxxxx"
+        assert await fs._download_range_group(legacy_pool, [(0, 0, 4)]) == [b"xxxx"]
+        assert legacy_mrd.calls == 2
+    finally:
+        executor.shutdown()
+
+
+def test_direct_memmove_buffer_copies_real_zero_copy_parser_chunks(monkeypatch):
+    # The chunk shape google-cloud-storage's zero-copy parser produces: a
+    # read-only view aliasing the whole received message. The copy must be
+    # correct and independent of the message, which the view keeps alive.
+    parser = pytest.importorskip("google.cloud.storage.asyncio._zero_copy_bidi_read")
+    from google.cloud import _storage_v2
+
+    assert zb_hns_utils.ZERO_COPY_BIDI_READ_ENV_VAR == parser._ENV_VAR
+    assert zb_hns_utils._download_ranges_kwargs(AsyncMultiRangeDownloader) == {
+        "accepts_memoryview": True
+    }
+
+    monkeypatch.setattr(parser, "_memoryview_supported", True)
+    payload = bytes(range(256)) * 1024
+    message = _storage_v2.BidiReadObjectResponse.serialize(
+        _storage_v2.BidiReadObjectResponse(
+            object_data_ranges=[
+                _storage_v2.ObjectRangeData(
+                    checksummed_data=_storage_v2.ChecksummedData(content=payload),
+                    read_range=_storage_v2.ReadRange(
+                        read_offset=0, read_length=len(payload), read_id=1
+                    ),
+                    range_end=True,
+                )
+            ]
+        )
+    )
+    response = parser.deserialize(message)
+    content = response.object_data_ranges[0].checksummed_data.content
+    assert isinstance(content, memoryview) and content.readonly
+    assert content.obj is message and len(content) == len(payload)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(payload), executor, max_pending=2)
+    view = buf.get_view(0, len(payload))
+    view.write(content).result()
+    view.close()
+    buf.close()
+    result = buf.get_value()
+    del response, content, message
+    assert result == payload
     executor.shutdown()
 
 
@@ -1894,8 +2300,8 @@ def test_direct_memmove_buffer_pypy_fallback():
     falls back to using bytearray.
     """
     data1 = b"pypy_"
-    data2 = b"fallback"
-    size = len(data1) + len(data2)
+    source2 = bytearray(b"fallback")
+    size = len(data1) + len(source2)
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     # Use max_pending=2 and split the write to prevent the zero-copy fast path
@@ -1904,10 +2310,12 @@ def test_direct_memmove_buffer_pypy_fallback():
     view = buf.get_view(0, size)
 
     future1 = view.write(data1)
-    future2 = view.write(data2)
+    future2 = view.write(memoryview(source2))
 
     future1.result()
     future2.result()
+    source2[:] = b"\x00" * len(source2)
+    source2.clear()
 
     view.close()
     buf.close()

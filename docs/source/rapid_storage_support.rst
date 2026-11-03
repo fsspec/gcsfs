@@ -169,6 +169,25 @@ To reproduce using more combinations, please see the `gcsfs/perf/microbenchmarks
      - 4722
      - ~2x
 
+Zero-copy reads
+---------------
+
+Each ``BidiReadObject`` response from a Rapid bucket carries up to 2 MiB of data. Older ``google-cloud-storage``
+releases parse the response into a protobuf object and copy the data out of it as ``bytes`` before it reaches
+``gcsfs``. Releases with the zero-copy ``BidiReadObject`` parser and ``AsyncMultiRangeDownloader.download_ranges(accepts_memoryview=...)``
+parse the response in place and, when asked, hand each chunk over as a ``memoryview`` of the received message
+(when ``google-crc32c`` can hash a ``memoryview``, or as a single ``bytes`` slice on older ``google-crc32c`` releases);
+the zonal read sinks in ``gcsfs`` copy straight from that view into the destination buffer, avoiding intermediate copies.
+CRC32C verification stays with the SDK.
+
+* When opening a gRPC read stream (``init_mrd``, used for Rapid and Rapid Cache Ultra buckets), ``gcsfs`` sets
+  ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=1`` if unset so ``google-cloud-storage`` enables its zero-copy parser;
+  importing ``gcsfs`` without opening a gRPC read stream leaves the environment unchanged. Set
+  ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=0`` explicitly in the environment to keep the SDK's generated parser.
+* ``gcsfs`` passes ``accepts_memoryview=True`` on every ``download_ranges`` call when the installed
+  ``google-cloud-storage`` accepts the keyword, and nothing otherwise. Other callers of ``download_ranges`` in the
+  same process keep receiving ``bytes`` unless they also pass ``accepts_memoryview=True``.
+
 Multiprocessing and gRPC
 ----------------------------------------------
 

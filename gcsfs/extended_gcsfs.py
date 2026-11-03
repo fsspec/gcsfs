@@ -837,7 +837,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         f"mrd path: {m_client.object_name} | "
                         f"Requested range: [({o}, {s})]"
                     )
-                await m_client.download_ranges([(o, s, view)])
+                await m_client.download_ranges(
+                    [(o, s, view)],
+                    **zb_hns_utils._download_ranges_kwargs(type(m_client)),
+                )
 
         for relative_offset, actual_size in ranges:
             part_offset = offset + relative_offset
@@ -1042,7 +1045,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                             f"{[(group[k][1], group[k][2]) for k in chunk]}"
                         )
                     await mrd.download_ranges(
-                        [(group[k][1], group[k][2], views[k]) for k in chunk]
+                        [(group[k][1], group[k][2], views[k]) for k in chunk],
+                        **zb_hns_utils._download_ranges_kwargs(type(mrd)),
                     )
             # Raises BufferError if a range came back short.
             for view in views:
