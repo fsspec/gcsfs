@@ -1774,11 +1774,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         # Separate files and directories based on their type. Directories are
         # sorted in reverse so they are deleted from the deepest first.
-        files = list({p["name"] for p in paths if p["type"] == "file"})
+        files = {p["name"] for p in paths if p["type"] == "file"}
         dirs = sorted(
             {p["name"] for p in paths if p["type"] == "directory"},
             reverse=True,
         )
+
+        # In HNS buckets an object "a" and a folder "a/" can coexist, but the
+        # name-keyed listings used to expand `path` collapse them into a single
+        # "directory" entry, hiding the object. Like the parent `_rm`, also
+        # delete every directory name as an object; "not found" errors for
+        # names without an object are ignored by `_perform_rm`.
+        files = list(files.union(d for d in dirs if self.split_path(d)[1]))
 
         # When recursive=True and maxdepth is None, _find lists all placeholder
         # objects ("dir/") in `files`, so _delete_files already batch-deletes

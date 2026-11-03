@@ -2698,7 +2698,12 @@ class TestExtendedGcsFileSystemRm:
                 [base_dir], recursive=True, maxdepth=None, detail=True
             )
             mocks["info"].assert_not_called()
-            files_to_delete = sorted([file_path, nested_file1, nested_file2])
+            # Directory names are also deleted as objects (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            files_to_delete = sorted(
+                [file_path, nested_file1, nested_file2]
+                + [base_dir, nested_dir1, nested_dir2]
+            )
             mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
             assert sorted(mock_delete_files.await_args[0][0]) == files_to_delete
             expected_delete_folder_requests = [
@@ -2721,6 +2726,70 @@ class TestExtendedGcsFileSystemRm:
             mocks["control_client"].delete_folder.assert_has_calls(
                 expected_delete_folder_requests
             )
+
+    def test_rm_recursive_deletes_object_sharing_name_with_folder(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """
+        Test that recursive rm also deletes each directory name as an object.
+
+        In HNS buckets an object 'a' and a folder 'a/' can coexist, but the
+        name-keyed listings rm expands paths with collapse them into a single
+        directory entry, so the object only survives as a directory name.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
+        shared = f"{base_dir}/a"
+        nested_dir = f"{shared}/b"
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mock_expand.return_value = [
+                {"name": base_dir, "type": "directory"},
+                {"name": shared, "type": "directory"},
+                {"name": nested_dir, "type": "directory"},
+            ]
+            mock_delete_files.return_value = []
+
+            gcsfs.rm(base_dir, recursive=True)
+
+            mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
+                [base_dir, shared, nested_dir]
+            )
+            assert mocks["control_client"].delete_folder.call_count == 3
+
+    def test_rm_recursive_bucket_root_not_deleted_as_object(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """Test that recursive rm never deletes the bucket name as an object."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/dir"
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mock_expand.return_value = [
+                {"name": TEST_HNS_BUCKET, "type": "directory"},
+                {"name": dir_path, "type": "directory"},
+            ]
+            mock_delete_files.return_value = []
+
+            gcsfs.rm(TEST_HNS_BUCKET, recursive=True)
+
+            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+            mocks["super_rmdir"].assert_awaited_once_with(TEST_HNS_BUCKET)
 
     def test_rm_non_hns_fallback(self, gcs_hns, gcs_hns_mocks):
         """Test that sync rm falls back to the parent implementation for non-HNS buckets."""
@@ -2777,7 +2846,9 @@ class TestExtendedGcsFileSystemRm:
             mock_expand.assert_awaited_once_with(
                 [dir_path], recursive=True, maxdepth=None, detail=True
             )
-            mock_delete_files.assert_awaited_once_with([], self.BATCH_SIZE)
+            # The directory name is also deleted as an object (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2846,7 +2917,9 @@ class TestExtendedGcsFileSystemRm:
             )
             mock_delete_files.assert_awaited_once()
             args, _ = mock_delete_files.await_args
-            assert sorted(args[0]) == sorted([file_path1, file_path2])
+            # Directory names are also deleted as objects (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            assert sorted(args[0]) == sorted([file_path1, file_path2, dir_path])
 
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
@@ -3009,12 +3082,14 @@ class TestExtendedGcsFileSystemRm:
             with pytest.raises(OSError, match="boom"):
                 gcsfs.rm([flat_file, hns_file])
 
+    # Directory names are also batch-deleted as objects (see
+    # test_rm_recursive_deletes_object_sharing_name_with_folder).
     @pytest.mark.parametrize(
         "recursive, maxdepth, expected_batch_files, expected_rm_files, expected_folder_deletes",
         [
-            (True, None, ["dir/sub/"], [], 2),
-            (True, 1, [], ["dir/sub/", "dir/"], 2),
-            (False, None, [], ["dir/"], 1),
+            (True, None, ["dir/sub/", "dir", "dir/sub"], [], 2),
+            (True, 1, ["dir", "dir/sub"], ["dir/sub/", "dir/"], 2),
+            (False, None, ["dir"], ["dir/"], 1),
         ],
     )
     def test_rm_placeholder_delete_behavior(
@@ -3054,9 +3129,9 @@ class TestExtendedGcsFileSystemRm:
 
             gcsfs.rm(dir_path, recursive=recursive, maxdepth=maxdepth)
 
-            assert mock_delete_files.await_args[0][0] == [
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
                 f"{TEST_HNS_BUCKET}/{k}" for k in expected_batch_files
-            ]
+            )
             assert sorted(c.args[0] for c in mock_rm_file.await_args_list) == sorted(
                 f"{TEST_HNS_BUCKET}/{k}" for k in expected_rm_files
             )

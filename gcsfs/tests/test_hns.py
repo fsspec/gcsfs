@@ -826,6 +826,34 @@ class TestExtendedGcsFileSystemRm:
         assert not gcsfs.exists(nested_dir)
         assert not gcsfs.exists(nested_file)
 
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            pytest.param("", id="parent_dir"),
+            pytest.param("/*", id="glob"),
+            pytest.param("/a", id="shared_name"),
+        ],
+    )
+    def test_rm_recursive_object_and_folder_sharing_name(self, gcs_hns, suffix):
+        """
+        Test that recursive rm deletes an object that shares its name with a
+        folder (object 'a' and folder 'a/'), which can coexist in HNS buckets.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_shared_name"
+        shared = f"{base_dir}/a"
+        gcsfs.pipe(shared, b"file")  # object 'a'
+        gcsfs.makedirs(f"{shared}/b")  # folders 'a/' and 'a/b/'
+        gcsfs.invalidate_cache()
+
+        gcsfs.rm(f"{base_dir}{suffix}", recursive=True)
+
+        gcsfs.invalidate_cache()
+        # exists() is True while either the object 'a' or the folder 'a/' exists.
+        assert not gcsfs.exists(shared)
+        # Only removing the parent directory itself deletes it.
+        assert gcsfs.exists(base_dir) == bool(suffix)
+
     def test_rm_folder_with_placeholder(self, gcs_hns):
         """
         Test deleting a folder that contains a placeholder object.
