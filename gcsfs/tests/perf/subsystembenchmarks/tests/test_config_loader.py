@@ -176,3 +176,26 @@ def test_unknown_sweep_axis_is_rejected(tmp_path, monkeypatch):
         ValueError, match=r"unknown sweep axis.*workers.*baseline.*color"
     ):
         _configurator(tmp_path).generate_cases()
+
+
+def test_config_defaults_to_configs_yaml(tmp_path, monkeypatch):
+    monkeypatch.delenv("GCSFS_SUBSYSTEM_CONFIG", raising=False)
+    cases = _configurator(tmp_path).generate_cases()
+    assert cases[0].name == "case-red-3"
+
+
+def test_config_env_var_selects_alternate_file(tmp_path, monkeypatch):
+    (tmp_path / "configs.yaml").write_text(_YAML)
+    (tmp_path / "configs.ci.yaml").write_text(
+        _YAML.replace('color: "red"', 'color: "green"')
+    )
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_CONFIG", "configs.ci.yaml")
+    cases = _C(str(tmp_path / "configs.py")).generate_cases()
+    assert cases[0].name == "case-green-3"
+
+
+def test_config_env_var_missing_file_names_the_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_CONFIG", "configs.missing.yaml")
+    with pytest.raises(FileNotFoundError, match="configs.missing.yaml"):
+        _configurator(tmp_path).generate_cases()
+

@@ -33,7 +33,11 @@ def filter_cases_by_sweep_axis(cases):
 
 class BaseBenchmarkConfigurator:
     def __init__(self, module_file):
-        self.config_path = os.path.join(os.path.dirname(module_file), "configs.yaml")
+        # GCSFS_SUBSYSTEM_CONFIG names an alternate config file in the group directory,
+        # e.g. configs.ci.yaml for the per-PR suite (cloudbuild/subsystembenchmarks/
+        # scripts/run-ci.sh). A missing file raises instead of falling back.
+        config_name = os.environ.get("GCSFS_SUBSYSTEM_CONFIG") or "configs.yaml"
+        self.config_path = os.path.join(os.path.dirname(module_file), config_name)
 
     def _load_config(self):
         with open(self.config_path, "r") as f:
