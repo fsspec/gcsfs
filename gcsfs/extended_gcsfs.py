@@ -622,9 +622,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if_generation_match=if_generation_match,
                 storage_class="RAPID" if is_rcu else None,
             )
-        # Once RCU is disabled, new objects fail with InvalidArgument ("Project ...
-        # may not create storageClass RAPID buckets with locationConstraint ...") and
-        # appends with FailedPrecondition ("Cannot write rapid object to zone ...").
+        # Catch every API error on purpose: once RCU is disabled the server rejects
+        # writes with more than one status, e.g. InvalidArgument for new objects
+        # ("Project ... may not create storageClass RAPID buckets ...") and
+        # FailedPrecondition for appends ("Cannot write rapid object to zone ...").
         except api_exceptions.GoogleAPICallError as e:
             if not is_rcu:
                 raise
@@ -2713,7 +2714,8 @@ async def initiate_upload(
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if await fs._uses_grpc_data_path(bucket):
+    layout = await fs._lookup_bucket_layout(bucket)
+    if layout.uses_grpc_data_path:
         try:
             writer = await fs._init_aaow(
                 bucket,
@@ -2801,9 +2803,10 @@ async def simple_upload(
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if await fs._uses_grpc_data_path(bucket):
+    layout = await fs._lookup_bucket_layout(bucket)
+    if layout.uses_grpc_data_path:
         finalize_on_close = fs._resolve_finalize_on_close(
-            await fs._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
+            layout, kwargs.get("finalize_on_close")
         )
         try:
             writer = await fs._init_aaow(

@@ -1191,7 +1191,9 @@ async def test_simple_upload_delegates_to_core_for_non_zonal(async_gcs):
     data = b"test data"
 
     with (
-        mock.patch.object(async_gcs, "_uses_grpc_data_path", return_value=False),
+        mock.patch.object(
+            async_gcs, "_lookup_bucket_layout", return_value=layouts.STANDARD
+        ),
         mock.patch(
             "gcsfs.core.simple_upload", new_callable=mock.AsyncMock
         ) as mock_core_simple,
@@ -1236,7 +1238,9 @@ async def test_initiate_upload_delegates_to_core_for_non_zonal(async_gcs):
     key = "test-key"
 
     with (
-        mock.patch.object(async_gcs, "_uses_grpc_data_path", return_value=False),
+        mock.patch.object(
+            async_gcs, "_lookup_bucket_layout", return_value=layouts.STANDARD
+        ),
         mock.patch(
             "gcsfs.core.initiate_upload", new_callable=mock.AsyncMock
         ) as mock_core_initiate,

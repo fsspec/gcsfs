@@ -1653,7 +1653,7 @@ def test_open_if_generation_match(gcs, skip_if_zonal):
     )
     with (
         mock.patch(
-            "gcsfs.core.initiate_upload",
+            "gcsfs.core._http_initiate_upload",
             new_callable=mock.AsyncMock,
             return_value=location,
         ) as mock_init,

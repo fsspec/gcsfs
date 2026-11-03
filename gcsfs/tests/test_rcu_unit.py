@@ -20,6 +20,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
 )
 
+from gcsfs import core
 from gcsfs.extended_gcsfs import (
     BucketLayout,
     ExtendedGcsFileSystem,
@@ -45,13 +46,27 @@ def _writer():
     return writer
 
 
-@pytest.fixture
-def open_error():
-    """The error GCS returns when a new object's writer opens after RCU was disabled."""
-    return api_exceptions.InvalidArgument(
-        "Project 123 may not create storageClass RAPID buckets with "
-        "locationConstraint US-CENTRAL1."
-    )
+@pytest.fixture(
+    params=[
+        (
+            api_exceptions.InvalidArgument,
+            "Project 123 may not create storageClass RAPID buckets with "
+            "locationConstraint US-CENTRAL1.",
+        ),
+        (
+            api_exceptions.FailedPrecondition,
+            "Cannot write rapid object to zone: us-central1-a",
+        ),
+    ],
+    ids=["new_object", "append"],
+)
+def open_error(request):
+    """The error GCS returns when a writer opens after RCU was disabled.
+
+    New objects fail with InvalidArgument, appends with FailedPrecondition.
+    """
+    error_cls, message = request.param
+    return error_cls(message)
 
 
 @pytest.fixture
@@ -111,7 +126,7 @@ async def test_init_aaow_rcu_still_enabled_reraises(rcu_fs, open_error):
     init_aaow.side_effect = open_error
     fs._get_bucket_layout.return_value = layouts.STANDARD_RCU
 
-    with pytest.raises(api_exceptions.InvalidArgument) as excinfo:
+    with pytest.raises(type(open_error)) as excinfo:
         await fs._init_aaow(BUCKET, "key")
 
     assert excinfo.value is open_error
@@ -127,7 +142,7 @@ async def test_init_aaow_rcu_open_failure_lookup_unknown_reraises(rcu_fs, open_e
     init_aaow.side_effect = open_error
     fs._get_bucket_layout.return_value = BucketLayout.UNKNOWN
 
-    with pytest.raises(api_exceptions.InvalidArgument) as excinfo:
+    with pytest.raises(type(open_error)) as excinfo:
         await fs._init_aaow(BUCKET, "key")
 
     assert excinfo.value is open_error
@@ -142,7 +157,7 @@ async def test_init_aaow_zonal_open_failure_skips_recheck(rcu_fs, open_error):
     fs._storage_layout_cache[BUCKET] = layouts.ZONAL_HIERARCHICAL
     init_aaow.side_effect = open_error
 
-    with pytest.raises(api_exceptions.InvalidArgument) as excinfo:
+    with pytest.raises(type(open_error)) as excinfo:
         await fs._init_aaow(BUCKET, "key")
 
     assert excinfo.value is open_error
@@ -319,6 +334,25 @@ async def test_module_upload_helpers_retry_over_http_when_rcu_disabled(
 
 
 @pytest.mark.asyncio
+async def test_core_simple_upload_hand_off_ends_after_one_http_post(rcu_fs, open_error):
+    """core.simple_upload hands off to gRPC and back once, then posts over HTTP."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error
+    fs._get_bucket_layout.return_value = layouts.STANDARD
+
+    with mock.patch.object(
+        fs, "_call", new_callable=mock.AsyncMock, return_value={}
+    ) as http_call:
+        await core.simple_upload(fs, BUCKET, "key", b"data")
+
+    http_call.assert_awaited_once()
+    assert http_call.await_args.kwargs["uploadType"] == "multipart"
+    init_aaow.assert_awaited_once()
+    assert fs._storage_layout_cache[BUCKET] == layouts.STANDARD
+
+
+@pytest.mark.asyncio
 async def test_pipe_file_rcu_still_enabled_propagates_error(rcu_fs, open_error):
     """pipe_file surfaces the open error without an HTTP retry while RCU is enabled."""
     fs, init_aaow = rcu_fs
@@ -329,7 +363,7 @@ async def test_pipe_file_rcu_still_enabled_propagates_error(rcu_fs, open_error):
     with mock.patch(
         "gcsfs.core.GCSFileSystem._pipe_file", new_callable=mock.AsyncMock
     ) as http_pipe_file:
-        with pytest.raises(api_exceptions.InvalidArgument) as excinfo:
+        with pytest.raises(type(open_error)) as excinfo:
             await fs._pipe_file(PATH, b"data")
 
     assert excinfo.value is open_error
@@ -349,7 +383,7 @@ async def test_pipe_file_append_failure_after_open_does_not_retry(rcu_fs, open_e
     with mock.patch(
         "gcsfs.core.GCSFileSystem._pipe_file", new_callable=mock.AsyncMock
     ) as http_pipe_file:
-        with pytest.raises(api_exceptions.InvalidArgument) as excinfo:
+        with pytest.raises(type(open_error)) as excinfo:
             await fs._pipe_file(PATH, b"data")
 
     assert excinfo.value is open_error
@@ -460,3 +494,54 @@ def test_zonal_file_failed_open_is_not_retried_on_close(
 
     assert init_aaow.await_count == 1
     assert fs._get_bucket_layout.await_count == (1 if error == "open_error" else 0)
+
+
+def test_zonal_file_empty_after_rcu_disabled_raises_on_close(rcu_fs, open_error):
+    """Closing an empty handle after RCU was disabled raises once and closes it."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error
+    fs._get_bucket_layout.return_value = layouts.STANDARD
+
+    with pytest.raises(RapidCacheUltraDisabledError):
+        with fs.open(PATH, "wb") as f:
+            pass
+
+    assert f.closed
+    f.close()  # A second close is a no-op.
+    assert init_aaow.await_count == 1
+
+
+def test_gcs_file_opened_before_rcu_enabled_keeps_http_upload(rcu_fs):
+    """A GCSFile opened before the layout changed to RCU still uploads over HTTP."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD
+    fs._get_bucket_layout.return_value = layouts.STANDARD_RCU
+    location = (
+        f"https://storage.googleapis.com/upload/storage/v1/b/{BUCKET}/o?upload_id=1"
+    )
+
+    with (
+        mock.patch.object(
+            fs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            return_value=({"Location": location}, b""),
+        ) as http_call,
+        # fsspec's sync call() wraps the original _call, so patch it too.
+        mock.patch.object(
+            fs, "call", return_value=({}, '{"generation": "1"}')
+        ) as http_upload,
+    ):
+        f = fs.open(PATH, "wb")
+        # RCU was enabled on the bucket after the handle opened.
+        fs.invalidate_storage_layout_cache(BUCKET)
+        with f:
+            f.write(b"data")
+
+    init_aaow.assert_not_awaited()
+    http_call.assert_awaited_once()
+    assert http_call.await_args.kwargs["uploadType"] == "resumable"
+    assert http_upload.call_args.args[:2] == ("POST", location)
+    # call_args holds a memoryview of the upload buffer.
+    http_upload.reset_mock()

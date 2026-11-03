@@ -2872,7 +2872,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """Create multi-upload"""
         self.location = asyn.sync(
             self.gcsfs.loop,
-            initiate_upload,
+            _http_initiate_upload,
             self.gcsfs,
             self.bucket,
             self.key,
@@ -3138,7 +3138,31 @@ async def initiate_upload(
             kms_key_name,
             if_generation_match=if_generation_match,
         )
+    return await _http_initiate_upload(
+        fs,
+        bucket,
+        key,
+        content_type,
+        metadata,
+        fixed_key_metadata,
+        mode,
+        kms_key_name,
+        if_generation_match=if_generation_match,
+    )
 
+
+async def _http_initiate_upload(
+    fs,
+    bucket,
+    key,
+    content_type="application/octet-stream",
+    metadata=None,
+    fixed_key_metadata=None,
+    mode="overwrite",
+    kms_key_name=None,
+    if_generation_match=None,
+):
+    """Start a resumable upload over HTTP and return its session URL."""
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
