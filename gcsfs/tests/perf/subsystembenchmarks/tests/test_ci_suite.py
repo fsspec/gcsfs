@@ -89,3 +89,43 @@ def test_run_ci_dataloading_groups_have_ci_configs():
 def test_run_ci_is_valid_bash():
     subprocess.run(["bash", "-n", _RUN_CI], check=True)
 
+
+_CLOUDBUILD = os.path.join(
+    _REPO_ROOT,
+    "cloudbuild",
+    "subsystembenchmarks",
+    "subsystembenchmarks-cloudbuild.yaml",
+)
+
+
+def _cloudbuild_yaml():
+    with open(_CLOUDBUILD) as f:
+        return f.read()
+
+
+def test_cloudbuild_mode_defaults_to_nightly_and_rejects_unknown_modes():
+    cb = _cloudbuild_yaml()
+    assert '_MODE: "nightly"' in cb
+    assert "nightly|ci) ;;" in cb
+    assert "printf 'export MODE=%q\\n' \"$${_MODE}\"" in cb
+
+
+def test_cloudbuild_ci_mode_runs_run_ci_and_nightly_keeps_setup():
+    cb = _cloudbuild_yaml()
+    branch = cb.split('if [ "$$MODE" = "ci" ]; then', 1)[1].split("\n        fi\n", 1)[0]
+    ci_branch, nightly_branch = branch.split("\n        else\n", 1)
+    assert "scripts/run-ci.sh" in ci_branch
+    assert "scripts/setup.sh" not in ci_branch
+    assert "scripts/setup.sh" in nightly_branch
+    assert "scripts/run-benchmarks.sh" in nightly_branch
+
+
+def test_upload_results_works_without_nightly_venv():
+    path = os.path.join(
+        _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "upload-results.sh"
+    )
+    with open(path) as f:
+        text = f.read()
+    assert "if [[ -f env/bin/activate ]]; then" in text
+
+

@@ -143,6 +143,7 @@ normalized override are published with every result row.
 | `_MACHINE_TYPE` | `c4-standard-192` | Compute Engine machine type used for the benchmark VM. |
 | `_REQUIREMENTS` | empty | Whitespace-separated pip requirement specs installed last. Use this to select the `gcsfs` build under test. |
 | `_SWEEP_AXES` | empty | Whitespace-separated configuration-axis names. Empty runs all configured cases; any selection still includes the implicit baseline case. |
+| `_MODE` | `nightly` | `nightly` runs `_GROUP` as configured. `ci` runs the fixed per-PR suite in `scripts/run-ci.sh` and ignores `_GROUP`, `_BUCKET_TYPE`, `_FILTER`, `_SWEEP_AXES`, `_MODEL_ID`, and `_REQUIREMENTS`. |
 
 `PROJECT_ID`, `LOCATION`, `BUILD_ID`, `BRANCH_NAME`, and `COMMIT_SHA` are Cloud
 Build built-ins rather than custom substitutions.
@@ -197,6 +198,23 @@ rows that still lack GCS read metrics after the wait and retry fail the run. A
 nonzero build therefore indicates execution, correctness, infrastructure,
 upload, or required-metric failure. A historical performance change by itself
 never fails the build.
+
+## Per-PR CI mode
+
+`_MODE=ci` runs a lightweight suite meant for pull requests: 11 small cases
+(data loading on Rapid, HNS, and Standard buckets; PyTorch Lightning and Ray
+checkpoint save/load on Rapid and Standard buckets) run concurrently on one VM.
+The case table lives in [`scripts/run-ci.sh`](scripts/run-ci.sh). Data-loading
+cases use each group's `configs.ci.yaml`; checkpoint cases use the baseline from
+`configs.yaml` with `gs://huggingface-model-weights/gpt2`.
+
+Each case has a 540-second limit. On timeout every Python process in the case
+dumps all thread stacks into `__run__/ci/<case>/run.log`. The build fails if any
+case fails or times out; throughput and read amplification are never gated.
+
+Give the CI trigger its own `_INFRA_PREFIX` (for example `gcsfs-ci-ssb`) so its
+VMs, buckets, and `gs://<_INFRA_PREFIX>-run-results` artifacts stay separate
+from nightly runs and are never picked up by BigQuery ingestion.
 
 ## BigQuery ingestion
 

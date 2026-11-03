@@ -11,6 +11,7 @@ substitutions:
   _HF_TOKEN: ""
   _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
   _BOOT_DISK_SIZE: "200GB"
+  _MODE: "nightly"  # nightly | ci (per-PR lightweight suite: scripts/run-ci.sh runs fixed cases; _GROUP/_BUCKET_TYPE/_FILTER/_SWEEP_AXES/_MODEL_ID/_REQUIREMENTS are ignored)
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -58,6 +59,7 @@ steps:
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_BOOT_DISK_SIZE=${_BOOT_DISK_SIZE}"
+      - "_MODE=${_MODE}"
       - "PROJECT_ID=${PROJECT_ID}"
     args:
       - "-c"
@@ -77,6 +79,11 @@ steps:
         case "$${_BUCKET_TYPE}" in
           regional|zonal|hns|rapid_cache_cold|rapid_cache_warm) ;;
           *) echo "ERROR: unknown _BUCKET_TYPE '$${_BUCKET_TYPE}'"; exit 1;;
+        esac
+
+        case "$${_MODE}" in
+          nightly|ci) ;;
+          *) echo "ERROR: unknown _MODE '$${_MODE}' (expected nightly or ci)"; exit 1;;
         esac
 
         ZONE="$${_ZONE}"
@@ -107,6 +114,7 @@ steps:
           printf 'export HF_TOKEN=%q\n' "$${_HF_TOKEN}"
           printf 'export MODEL_ID=%q\n' "$${_MODEL_ID}"
           printf 'export BOOT_DISK_SIZE=%q\n' "$${_BOOT_DISK_SIZE}"
+          printf 'export MODE=%q\n' "$${_MODE}"
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
@@ -261,14 +269,20 @@ steps:
           --project="${PROJECT_ID}" --zone=$$ZONE --internal-ip \
           --ssh-key-file=/workspace/.ssh/google_compute_engine
 
-        $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/setup.sh"
         # A case failure makes run.py exit nonzero here. Don't let that skip the upload below
         # via `set -e` -- the run that most needs diagnosing would
         # leave its CSV/JSON stranded on the VM that cleanup-vm deletes minutes later.
         # Capture the status, upload unconditionally, then re-raise it at the end.
         RUN_RC=0
-        $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/run-benchmarks.sh" \
-          || { RUN_RC=$$?; record_failure; }
+        if [ "$$MODE" = "ci" ]; then
+          # Per-PR suite: run-ci.sh builds its own per-group venvs and runs fixed cases.
+          $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/run-ci.sh" \
+            || { RUN_RC=$$?; record_failure; }
+        else
+          $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/setup.sh"
+          $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/run-benchmarks.sh" \
+            || { RUN_RC=$$?; record_failure; }
+        fi
         $$SSH --command="cd ~/gcsfs && bash cloudbuild/subsystembenchmarks/scripts/upload-results.sh"
         exit $$RUN_RC
     waitFor: ["create-vm", "create-buckets", "generate-ssh-key"]
