@@ -242,6 +242,7 @@ Contents
    retries
    fuse
    Read Optimization: Prefetching <prefetcher>
+   Workload I/O Tracer & Visualizer <iotracer>
    release
    changelog
    code-of-conduct
