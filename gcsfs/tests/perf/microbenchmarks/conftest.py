@@ -83,10 +83,10 @@ def _write_file(gcs, path, file_size, chunk_size):
 
 
 def _init_pool_worker():
-    """Initializer for spawned pool workers to bypass _get_bucket_type calls on emulator."""
-    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
+    """Initializer for spawned pool workers to bypass _get_bucket_layout calls on emulator."""
+    from gcsfs.tests.utils import _patch_get_bucket_layout_for_emulator
 
-    patch = _patch_get_bucket_type_for_emulator()
+    patch = _patch_get_bucket_layout_for_emulator()
     if patch:
         patch.start()
 
