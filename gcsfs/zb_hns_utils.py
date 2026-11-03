@@ -12,7 +12,6 @@ from io import BytesIO
 
 from fsspec.asyn import FSTimeoutError
 from google.api_core.exceptions import FailedPrecondition, NotFound
-from google.cloud.storage.asyncio import async_appendable_object_writer as _aaow_mod
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
@@ -23,7 +22,12 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 
 from gcsfs.retry import GenerationMismatchError
 
-Preconditions = getattr(_aaow_mod, "Preconditions", None)
+try:
+    from google.cloud.storage.asyncio.async_appendable_object_writer import (
+        Preconditions,
+    )
+except ImportError:  # releases before googleapis/google-cloud-python#18641
+    Preconditions = None
 
 MRD_MAX_RANGES = 1000  # MRD supports up to 1000 ranges per request
 try:
@@ -190,8 +194,9 @@ async def init_aaow(
         writer_options["FLUSH_INTERVAL_BYTES"] = flush_interval_bytes
     kwargs = {}
     if generation and if_generation_match is not None:
-        # generation > 0 appends to an existing object (AppendObjectSpec), which
-        # ignores generation preconditions, so the SDK would silently ignore it.
+        # generation > 0 appends to an existing object, so a generation
+        # precondition cannot apply. Check here because if_generation_match=0
+        # is mapped to generation=0 below, which would hide the conflict.
         raise ValueError(
             "if_generation_match cannot be combined with an explicit generation"
         )
