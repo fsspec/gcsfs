@@ -419,8 +419,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Default to UNKNOWN in case bucket layout is not obtained
             return BucketLayout.UNKNOWN
 
-    # Plain sync method (not covered by mirror_gcs_methods): scope telemetry for the whole open,
-    # so bucket-type lookup, metadata/MRD-pool requests and GCSFile.__init__ share one detection.
+    # Plain sync method (not covered by mirror_gcs_methods). The bucket-layout lookup and, for Rapid
+    # (zonal) reads, the MRD pool's `_info` request in ZonalFile.__init__ run before GCSFile.__init__
+    # caches `caller_framework`; scope telemetry for the whole open so they carry the caller's
+    # framework (detected once, on the caller thread) and GCSFile.__init__ reuses it.
     @with_telemetry_context
     def _open(
         self,

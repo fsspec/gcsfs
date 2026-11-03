@@ -946,23 +946,30 @@ def test_filesystem_methods_are_telemetry_wrapped(fs_cls_path):
     ), f"{cls_name} methods missing telemetry wrappers: {sorted(unwrapped)}"
 
 
-def test_zonal_open_propagates_caller_framework(monkeypatch):
+def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     """
-    Opening a Rapid (zonal) file for read issues a JSON API `_info` request from
-    `ZonalFile.__init__` (MRD pool setup) before any file method runs. `_open` must
-    scope telemetry so that request carries the caller framework and detection never
-    runs on the fsspecIO loop thread.
+    Across a Rapid (zonal) file's whole life (open -> read -> seek -> read -> info ->
+    close), the caller framework is detected exactly once, on the caller thread, and
+    every operation runs with it.
+
+    Opening for read issues a JSON API `_info` request from `ZonalFile.__init__` (MRD
+    pool setup) before `GCSFile.__init__` caches `caller_framework`, so `_open` must scope
+    telemetry; afterwards the wrapped file methods reuse the cached value.
     """
     from gcsfs import zb_hns_utils
     from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
     from gcsfs.tests import layouts
 
-    detector = _CallerThreadOnlyDetector("test-zonal-open")
+    fw = "test-zonal-lifecycle"
+    data = b"0123456789"
+    detector = _CallerThreadOnlyDetector(fw)
     monkeypatch.setattr(
         manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
     )
     user_agents = []
+    # (operation, framework in the active telemetry context) for gRPC-side operations
+    grpc_ops = []
 
     async def fake_call(self, method, path, *args, **kwargs):
         user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
@@ -970,7 +977,7 @@ def test_zonal_open_propagates_caller_framework(monkeypatch):
             "kind": "storage#object",
             "name": "obj",
             "bucket": "zonal-bucket",
-            "size": "10",
+            "size": str(len(data)),
             "generation": "1",
             "timeFinalized": "2026-01-01T00:00:00.000Z",
         }
@@ -981,24 +988,52 @@ def test_zonal_open_propagates_caller_framework(monkeypatch):
     async def fake_mrd_pool_initialize(self):
         return None
 
+    async def fake_mrd_pool_close(self):
+        grpc_ops.append(("mrd_pool.close", get_telemetry_context().get("fw")))
+
+    async def fake_cat_file(self, path, start=None, end=None, **kwargs):
+        # Zonal reads go through the gRPC MRD path; record the context they run with
+        grpc_ops.append(("_cat_file", get_telemetry_context().get("fw")))
+        return data[start:end]
+
     monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
     monkeypatch.setattr(
         ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
     )
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
     monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "persisted_size", 10, raising=False)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
+    monkeypatch.setattr(
+        zb_hns_utils.MRDPool, "persisted_size", len(data), raising=False
+    )
 
     fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-    f = fs.open("zonal-bucket/obj", "rb")
+    f = fs.open("zonal-bucket/obj", "rb", cache_type="none")
     try:
-        assert f.caller_framework == "test-zonal-open"
+        # Open: MRD pool `_info` request is tagged; GCSFile.__init__ reused the detection
+        assert f.caller_framework == fw
         assert user_agents, "zonal open did not issue any JSON API requests"
-        assert all(
-            "fw/test-zonal-open" in ua for ua in user_agents
-        ), f"zonal open sent requests without the framework token: {user_agents}"
         assert detector.thread_names == [threading.current_thread().name]
+
+        assert f.read(4) == data[:4]
+        f.seek(0)
+        assert f.read(2) == data[:2]
+        assert f.info()["size"] == len(data)
     finally:
-        f.closed = True  # Skip MRD pool teardown for the mocked pool
+        f.close()
+
+    # Detected exactly once (at open, on the caller thread) for the file's whole life
+    assert detector.thread_names == [
+        threading.current_thread().name
+    ], f"framework detection ran more than once: {detector.thread_names}"
+    assert all(
+        f"fw/{fw}" in ua for ua in user_agents
+    ), f"zonal file sent HTTP requests without the framework token: {user_agents}"
+    assert [op for op, _ in grpc_ops].count("_cat_file") == 2
+    assert ("mrd_pool.close", fw) in grpc_ops
+    assert all(
+        ctx_fw == fw for _, ctx_fw in grpc_ops
+    ), f"zonal operations ran without the framework context: {grpc_ops}"
     assert get_telemetry_context() == {}
 
 

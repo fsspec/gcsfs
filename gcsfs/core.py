@@ -50,7 +50,6 @@ from .telemetry.wrapper import (
     _run_sync,
     bind_gcs_sync_methods,
     mirror_gcs_methods,
-    with_telemetry_context,
     wrap_file_methods,
 )
 from .utils import is_empty_range
@@ -2367,9 +2366,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 os.remove(lpath)
             raise
 
-    # Plain sync method (not covered by mirror_gcs_methods): scope telemetry for the whole open,
-    # so bucket-type lookup, metadata/MRD-pool requests and GCSFile.__init__ share one detection.
-    @with_telemetry_context
     def _open(
         self,
         path,
