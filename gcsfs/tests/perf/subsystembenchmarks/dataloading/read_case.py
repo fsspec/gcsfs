@@ -1,8 +1,10 @@
 """Per-case benchmark lifecycle runner: bucket management, corpus ingestion, driver timing, and metric publishing."""
 
+import contextlib
 import dataclasses
 import functools
 import math
+import os
 import statistics
 import time
 
@@ -76,8 +78,21 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
         )
 
         expected_rows = manifest["sample_count"]
+        trace_out_dir = os.environ.get("GCSFS_IO_TRACE_DIR_OUT")
+        if trace_out_dir:
+            from gcsfs.tests.perf._common.io_vis.io_tracer import trace_io
+
+            os.makedirs(trace_out_dir, exist_ok=True)
+            trace_html = os.path.join(trace_out_dir, f"{run_params.name}.html")
+            trace_ctx = trace_io(
+                trace_html,
+                title=f"Subsystem Benchmark I/O Trace: {run_params.name}",
+            )
+        else:
+            trace_ctx = contextlib.nullcontext()
+
         window_start = time.time()
-        with monitor() as m:
+        with monitor() as m, trace_ctx:
             result = driver.run_read(prefix, run_params, manifest)
         window_end = time.time()
 
