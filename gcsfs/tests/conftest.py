@@ -746,11 +746,11 @@ def mock_gcs_harness(request, monkeypatch):
     if fs_kind == "extended":
         fs_cls = ExtendedGcsFileSystem
 
-        async def mock_lookup_bucket_type(self, bucket):
-            return BucketType.NON_HIERARCHICAL
+        async def mock_lookup_bucket_layout(self, bucket):
+            return layouts.STANDARD
 
         monkeypatch.setattr(
-            ExtendedGcsFileSystem, "_lookup_bucket_type", mock_lookup_bucket_type
+            ExtendedGcsFileSystem, "_lookup_bucket_layout", mock_lookup_bucket_layout
         )
     else:
         fs_cls = CoreGCSFileSystem

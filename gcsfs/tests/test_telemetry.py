@@ -955,7 +955,8 @@ def test_zonal_open_propagates_caller_framework(monkeypatch):
     """
     from gcsfs import zb_hns_utils
     from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
-    from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+    from gcsfs.tests import layouts
 
     detector = _CallerThreadOnlyDetector("test-zonal-open")
     monkeypatch.setattr(
@@ -974,15 +975,15 @@ def test_zonal_open_propagates_caller_framework(monkeypatch):
             "timeFinalized": "2026-01-01T00:00:00.000Z",
         }
 
-    async def fake_lookup_bucket_type(self, bucket):
-        return BucketType.ZONAL_HIERARCHICAL
+    async def fake_lookup_bucket_layout(self, bucket):
+        return layouts.ZONAL_HIERARCHICAL
 
     async def fake_mrd_pool_initialize(self):
         return None
 
     monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
     monkeypatch.setattr(
-        ExtendedGcsFileSystem, "_lookup_bucket_type", fake_lookup_bucket_type
+        ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
     )
     monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
     monkeypatch.setattr(zb_hns_utils.MRDPool, "persisted_size", 10, raising=False)
