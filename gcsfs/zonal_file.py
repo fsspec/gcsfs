@@ -104,15 +104,6 @@ class ZonalFile(GCSFile):
                 cache_type=resolved_cache_type,
                 cache_source=resolved_cache_source,
             )
-            if getattr(self.mrd_pool, "details", None) is not None:
-                self._details = self.mrd_pool.details
-            object_size = self.mrd_pool.persisted_size
-
-            if object_size is None:
-                logger.warning(
-                    "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
-                    "This may result in incorrect behavior for unfinalized objects."
-                )
         elif self.mode in ("wb", "ab", "xb"):
             pass
         else:
@@ -120,7 +111,19 @@ class ZonalFile(GCSFile):
                 "Only read, write and append operations are currently supported for Zonal buckets."
             )
 
+        # Everything after the pool checkout runs under the cleanup below.
         try:
+            if self.mrd_pool is not None:
+                if getattr(self.mrd_pool, "details", None) is not None:
+                    self._details = self.mrd_pool.details
+                object_size = self.mrd_pool.persisted_size
+
+                if object_size is None:
+                    logger.warning(
+                        "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
+                        "This may result in incorrect behavior for unfinalized objects."
+                    )
+
             super().__init__(
                 gcsfs,
                 path,
@@ -147,18 +150,14 @@ class ZonalFile(GCSFile):
         except BaseException:
             self.closed = True
             # GCSFile.__init__ leaves the prefetcher to _close_impl(), which a
-            # file marked closed never reaches, so stop it here.
+            # file marked closed never reaches, so stop it here. Like
+            # _close_impl(), rely on BackgroundPrefetcher.close() to log its
+            # own teardown errors.
             cache = getattr(self, "cache", None)
             prefetcher = getattr(cache, "_prefetcher", None)
             if prefetcher is not None:
                 cache._prefetcher = None
-                try:
-                    prefetcher.close()
-                except Exception as e:
-                    logger.warning(
-                        "Failed to close prefetcher during failed initialization cleanup: %s",
-                        e,
-                    )
+                prefetcher.close()
             if self.mrd_pool is not None:
                 pool, self.mrd_pool = self.mrd_pool, None
                 try:

@@ -246,9 +246,10 @@ def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
 
 
 def test_open_with_size_zb(extended_gcsfs, gcs_bucket_mocks):
-    """A caller-supplied size= is accepted when opening a zonal read handle."""
+    """A caller-supplied size= is accepted, and the MRD's persisted_size takes precedence."""
     with gcs_bucket_mocks(json_data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
-        with extended_gcsfs.open(file_path, "rb", size=file_size) as f:
+        # A wrong size must not truncate the read.
+        with extended_gcsfs.open(file_path, "rb", size=1) as f:
             assert isinstance(f, ZonalFile)
             assert f.read() == json_data
 
