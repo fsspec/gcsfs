@@ -1248,8 +1248,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
         return await super()._mv(path1, path2, **kwargs)
 
-    mv = asyn.sync_wrapper(_mv)
-
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
         try:
             return await super()._list_objects(
@@ -1422,8 +1420,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 f"mkdir for '{path}' failed due to a precondition error: {e}"
             ) from e
 
-    mkdir = asyn.sync_wrapper(_mkdir)
-
     async def _makedirs(self, path, exist_ok=False):
         """Recursively make directories.
 
@@ -1474,8 +1470,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         await self._create_hns_folder(
             path, bucket, key, create_parents=True, exist_ok=exist_ok
         )
-
-    makedirs = asyn.sync_wrapper(_makedirs)
 
     async def _get_directory_info(self, path, bucket, key, generation):
         """
@@ -1615,8 +1609,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         except Exception as e:
             logger.error(f"HNS rmdir: Failed to delete folder '{path}': {e}")
             raise
-
-    rmdir = asyn.sync_wrapper(_rmdir)
 
     # TODO: This method is only added to be used in rm method, can be deleted once
     # rm method is integrated with recursive API
@@ -1884,8 +1876,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             and not isinstance(e, (FileNotFoundError, api_exceptions.NotFound))
             and "No such object" not in str(e)
         ]
-
-    rm = asyn.sync_wrapper(_rm)
 
     async def _find(
         self,
@@ -2480,8 +2470,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
 
         return await super()._merge(path, paths, acl=acl)
-
-    merge = asyn.sync_wrapper(_merge)
 
 
 # Wrap ExtendedGcsFileSystem's own sync/async overrides (e.g. `mv`, `rm`, `_cat_file`, `_find`)
