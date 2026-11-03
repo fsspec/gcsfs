@@ -144,6 +144,7 @@ normalized override are published with every result row.
 | `_REQUIREMENTS` | empty | Whitespace-separated pip requirement specs installed last. Use this to select the `gcsfs` build under test. |
 | `_SWEEP_AXES` | empty | Whitespace-separated configuration-axis names. Empty runs all configured cases; any selection still includes the implicit baseline case. |
 | `_MODE` | `nightly` | `nightly` runs `_GROUP` as configured. `ci` runs the fixed per-PR suite in `scripts/run-ci.sh` and ignores `_GROUP`, `_BUCKET_TYPE`, `_FILTER`, `_SWEEP_AXES`, `_MODEL_ID`, and `_REQUIREMENTS`. |
+| `_CI_MODEL_ID` | empty | `_MODE=ci` only: `gs://` copy of `gpt2` that `_VM_SERVICE_ACCOUNT` can read. Empty uses `gs://huggingface-model-weights/gpt2`. |
 
 `PROJECT_ID`, `LOCATION`, `BUILD_ID`, `BRANCH_NAME`, and `COMMIT_SHA` are Cloud
 Build built-ins rather than custom substitutions.
@@ -205,8 +206,9 @@ never fails the build.
 (data loading on Rapid, HNS, and Standard buckets; PyTorch Lightning and Ray
 checkpoint save/load on Rapid and Standard buckets) run concurrently on one VM.
 The case table lives in [`scripts/run-ci.sh`](scripts/run-ci.sh). Every case uses
-its group's `configs.ci.yaml`; checkpoint cases save and load
-`gs://huggingface-model-weights/gpt2` with `ddp` on 2 ranks, twice each.
+its group's `configs.ci.yaml`; checkpoint cases save and load `gpt2` (from
+`_CI_MODEL_ID`, default `gs://huggingface-model-weights/gpt2`) with `ddp` on 2
+ranks, twice each.
 
 The `gcsfs` under test is the checkout. `fsspec` (`master`) and
 `google-cloud-storage` (`main` of `googleapis/google-cloud-python`) are installed

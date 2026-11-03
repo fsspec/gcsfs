@@ -17,7 +17,9 @@ CI_DIR="$SSB/__run__/ci"
 VENV_ROOT="$HOME/venvs"
 UPSTREAM="$HOME/upstream"
 CASE_TIMEOUT_SECONDS=540
-CI_MODEL_ID="gs://huggingface-model-weights/gpt2"
+# _CI_MODEL_ID (subsystembenchmarks-cloudbuild.yaml) points each CI project at a copy its VM
+# service account can read.
+CI_MODEL_ID="${CI_MODEL_ID:-gs://huggingface-model-weights/gpt2}"
 FSSPEC_GIT="https://github.com/fsspec/filesystem_spec.git"
 FSSPEC_REF="master"
 # google-cloud-storage moved from the archived googleapis/python-storage into this monorepo.
@@ -121,9 +123,10 @@ cat "$VERSIONS"
 
 # Checkpoint code reads a gs:// model id from /tmp/<dir> (checkpointing/*/common.py).
 # Download into $HOME first: the image's snap-packaged gcloud has a private /tmp.
-rm -rf "$HOME/gpt2" /tmp/gpt2
-gcloud storage cp --recursive "$CI_MODEL_ID" "$HOME/"
-mv "$HOME/gpt2" /tmp/gpt2
+MODEL_DIR=$(basename "${CI_MODEL_ID%/}")
+rm -rf "${HOME:?}/$MODEL_DIR" "/tmp/$MODEL_DIR"
+gcloud storage cp --recursive "${CI_MODEL_ID%/}" "$HOME/"
+mv "$HOME/$MODEL_DIR" "/tmp/$MODEL_DIR"
 
 # --- Run all cases concurrently ------------------------------------------------------
 export PYTHONPATH="$HOME/gcsfs"

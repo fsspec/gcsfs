@@ -200,6 +200,24 @@ def test_cloudbuild_ci_mode_runs_run_ci_and_nightly_keeps_setup():
     assert "scripts/run-benchmarks.sh" in nightly_branch
 
 
+def test_cloudbuild_passes_the_ci_model_id_to_run_ci():
+    # Each CI project points the suite at a model copy its VM service account can read.
+    cb = _cloudbuild_yaml()
+    assert '_CI_MODEL_ID: ""' in cb
+    assert '"_CI_MODEL_ID=${_CI_MODEL_ID}"' in cb
+    assert "printf 'export CI_MODEL_ID=%q\\n' \"$${_CI_MODEL_ID}\"" in cb
+    text = _run_ci_text()
+    assert 'CI_MODEL_ID="${CI_MODEL_ID:-gs://huggingface-model-weights/gpt2}"' in text
+
+
+def test_run_ci_stages_the_model_under_its_own_basename():
+    # checkpointing/*/common.py loads a gs:// model id from /tmp/<basename>.
+    text = _run_ci_text()
+    assert 'MODEL_DIR=$(basename "${CI_MODEL_ID%/}")' in text
+    assert 'mv "$HOME/$MODEL_DIR" "/tmp/$MODEL_DIR"' in text
+    assert '"$HOME/gpt2"' not in text
+
+
 def test_upload_results_works_without_nightly_venv():
     path = os.path.join(
         _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "upload-results.sh"
