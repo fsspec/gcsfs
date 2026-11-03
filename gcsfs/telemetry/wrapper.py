@@ -48,7 +48,7 @@ def _run_sync(
         return fsspec.asyn.sync(loop, func, *args, **kwargs)
 
 
-def _gcs_async_wrapper(func: Callable) -> Callable:
+def _gcs_async_wrapper(func: Callable, super_cls: Optional[type] = None) -> Callable:
     """
     GCS-specific async wrapper for coroutines and async generators that scopes telemetry
     context during native async execution, avoiding repetitive stack-walking across
@@ -57,13 +57,19 @@ def _gcs_async_wrapper(func: Callable) -> Callable:
     if getattr(func, "_is_gcs_async_wrapped", False):
         return func
 
+    def _resolve(args: tuple) -> tuple[Callable, tuple]:
+        if super_cls is not None and args:
+            return getattr(super(super_cls, args[0]), func.__name__), args[1:]
+        return func, args
+
     if inspect.isasyncgenfunction(func):
 
         @functools.wraps(func)
         async def gen_wrapper(*args, **kwargs):
+            target, pass_args = _resolve(args)
             # Detect once per iteration; scope context to each step so it never leaks to the consumer
             tokens_map = manager.default_usage_tracker.collect_tokens_map()
-            gen = func(*args, **kwargs)
+            gen = target(*pass_args, **kwargs)
             try:
                 while True:
                     with _telemetry_context(tokens_map):
@@ -80,11 +86,12 @@ def _gcs_async_wrapper(func: Callable) -> Callable:
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
+        target, pass_args = _resolve(args)
         # O(1) fast path for nested calls (already inside _run_sync or another wrapped call)
         if has_telemetry_context():
-            return await func(*args, **kwargs)
+            return await target(*pass_args, **kwargs)
         with _telemetry_context():
-            return await func(*args, **kwargs)
+            return await target(*pass_args, **kwargs)
 
     wrapper._is_gcs_async_wrapped = True
     return wrapper
@@ -195,7 +202,8 @@ def mirror_gcs_methods(obj: type) -> None:
             # Wrap each native async method once. Skip ones a parent already wrapped, so subclasses
             # inherit the parent's wrapper instead of a copy that would hide patches on the parent.
             if not getattr(async_fn, "_is_gcs_async_wrapped", False):
-                async_fn = _gcs_async_wrapper(async_fn)
+                super_cls = None if method in obj.__dict__ else obj
+                async_fn = _gcs_async_wrapper(async_fn, super_cls=super_cls)
                 setattr(obj, method, async_fn)
             if is_public_sync:
                 mth = _gcs_sync_wrapper(async_fn)
@@ -249,13 +257,8 @@ def _file_telemetry_wrapper(func: Callable) -> Callable:
     return sync_wrapper
 
 
-def wrap_file_methods(cls: Any = None) -> None:
-    """Wrap all callable methods and properties on a File class (`GCSFile` by default, or `ZonalFile`)."""
-    if cls is None:
-        from gcsfs.core import GCSFile
-
-        cls = GCSFile
-
+def wrap_file_methods(cls: Any) -> None:
+    """Wrap all callable methods and properties on a File class (e.g. `GCSFile` or `ZonalFile`)."""
     for name, attr in list(cls.__dict__.items()):
         if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
             continue

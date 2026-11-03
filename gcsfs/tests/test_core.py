@@ -4521,6 +4521,89 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
         assert any("cache_type/readahead:e" in ua for ua in user_agents)
 
 
+@pytest.mark.parametrize(
+    "input_headers,cache_type,cache_source,framework,expected_in,expected_not_in",
+    [
+        (None, None, None, None, ["python-gcsfs/"], ["cache_type"]),
+        (
+            None,
+            "readahead",
+            "explicit",
+            None,
+            ["python-gcsfs/", "cache_type/readahead:e"],
+            [],
+        ),
+        (
+            None,
+            "none",
+            "default",
+            None,
+            ["python-gcsfs/", "cache_type/none:d"],
+            [],
+        ),
+        (None, None, None, "torch", ["python-gcsfs/", "fw/torch"], []),
+        (
+            {"User-Agent": "my-custom-agent"},
+            None,
+            None,
+            "pandas",
+            ["my-custom-agent"],
+            ["fw/pandas"],
+        ),
+    ],
+)
+def test_user_agent_telemetry_integration(
+    gcs,
+    input_headers,
+    cache_type,
+    cache_source,
+    framework,
+    expected_in,
+    expected_not_in,
+):
+    """Verify that gcs._get_headers builds User-Agent with cache/telemetry tokens and preserves overrides."""
+    import contextlib
+
+    from gcsfs.telemetry.context import Dimension
+    from gcsfs.telemetry.wrapper import _telemetry_context
+
+    ctx = (
+        _telemetry_context({Dimension.FRAMEWORK.value: framework})
+        if framework
+        else contextlib.nullcontext()
+    )
+    with ctx:
+        headers = gcs._get_headers(
+            input_headers, cache_type=cache_type, cache_source=cache_source
+        )
+
+    ua = headers["User-Agent"]
+    for token in expected_in:
+        assert token in ua
+    for token in expected_not_in:
+        assert token not in ua
+
+
+def test_no_eager_property_evaluation_on_init(monkeypatch):
+    """
+    Verify that instantiating GCSFileSystem does NOT eagerly invoke
+    properties like `fs.buckets`, which would trigger network I/O.
+    """
+    from gcsfs.core import GCSFileSystem
+
+    buckets_called = False
+
+    async def mock_list_buckets(self, *args, **kwargs):
+        nonlocal buckets_called
+        buckets_called = True
+        return []
+
+    monkeypatch.setattr(GCSFileSystem, "_list_buckets", mock_list_buckets)
+
+    _ = GCSFileSystem(token="anon", project="test-project")
+    assert not buckets_called, "GCSFileSystem.__init__ eagerly evaluated fs.buckets!"
+
+
 def test_process_object_structure(gcs):
     bucket = "my-bucket"
     metadata = {
