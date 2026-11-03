@@ -7,6 +7,7 @@ import contextlib
 import io
 import multiprocessing
 import os
+import pickle
 import random
 import threading
 import uuid
@@ -38,6 +39,7 @@ from gcsfs.tests.conftest import csv_files, files, requires_rapid, text_files
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
+from gcsfs.zonal_file import ZonalFile
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -241,6 +243,23 @@ def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
             result = f.readline()
             expected = b"ab"
             assert result == expected
+
+
+def test_open_with_size_zb(extended_gcsfs, gcs_bucket_mocks):
+    """A caller-supplied size= is accepted when opening a zonal read handle."""
+    with gcs_bucket_mocks(json_data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
+        with extended_gcsfs.open(file_path, "rb", size=file_size) as f:
+            assert isinstance(f, ZonalFile)
+            assert f.read() == json_data
+
+
+def test_pickle_read_handle_zb(extended_gcsfs, gcs_bucket_mocks):
+    """A zonal read handle can be pickled and reopened, as DataLoader and Dask do."""
+    with gcs_bucket_mocks(json_data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
+        with extended_gcsfs.open(file_path, "rb") as f:
+            assert isinstance(f, ZonalFile)
+            with pickle.loads(pickle.dumps(f)) as f2:
+                assert f2.read() == json_data
 
 
 def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):

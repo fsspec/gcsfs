@@ -83,6 +83,8 @@ class ZonalFile(GCSFile):
         self.flush_interval_bytes = flush_interval_bytes
         self.gcsfs = gcsfs
         self.pool_size = pool_size
+        caller_size = kwargs.pop("size", None)
+        kwargs.pop("_supports_append", None)  # replayed by fsspec.spec.reopen
         object_size = None
         if self.mode == "rb":
             resolved_cache_type, resolved_cache_source = (
@@ -135,7 +137,7 @@ class ZonalFile(GCSFile):
                 # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
                 _supports_append="a" in mode,
                 # pass persisted_size here so that Cache is initialized with correct object size
-                size=object_size,
+                size=object_size if object_size is not None else caller_size,
                 **kwargs,
             )
         except BaseException:
