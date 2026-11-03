@@ -1,6 +1,7 @@
 import logging
 
 from fsspec import asyn
+from fsspec.caching import caches
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
@@ -90,6 +91,9 @@ class ZonalFile(GCSFile):
             resolved_cache_type, resolved_cache_source = (
                 _get_prefetcher_and_cache_config(cache_type)
             )
+            # Reject an unknown cache type before checking out a pool and stream.
+            if resolved_cache_type not in caches:
+                raise KeyError(resolved_cache_type)
             self.mrd_pool = asyn.sync(
                 self.gcsfs.loop,
                 self.gcsfs._mrd_pool_cache.get,
@@ -142,6 +146,19 @@ class ZonalFile(GCSFile):
             )
         except BaseException:
             self.closed = True
+            # GCSFile.__init__ leaves the prefetcher to _close_impl(), which a
+            # file marked closed never reaches, so stop it here.
+            cache = getattr(self, "cache", None)
+            prefetcher = getattr(cache, "_prefetcher", None)
+            if prefetcher is not None:
+                cache._prefetcher = None
+                try:
+                    prefetcher.close()
+                except Exception as e:
+                    logger.warning(
+                        "Failed to close prefetcher during failed initialization cleanup: %s",
+                        e,
+                    )
             if self.mrd_pool is not None:
                 pool, self.mrd_pool = self.mrd_pool, None
                 try:

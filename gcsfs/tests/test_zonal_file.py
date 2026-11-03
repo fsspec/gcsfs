@@ -1075,24 +1075,26 @@ def test_sync_teardown_accepts_coroutine_object():
 
 
 def test_zonal_file_failed_init_closes_mrd_pool(mock_gcsfs):
-    """If GCSFile.__init__ fails after the MRD pool is checked out, the pool is closed."""
+    """If GCSFile.__init__ fails after the MRD pool is checked out, the pool and prefetcher are closed."""
     mock_gcsfs.loop = fsspec.asyn.get_loop()
     pool = mock_gcsfs._mrd_pool_cache.get.return_value
     pool.close = mock.AsyncMock()
     zf = ZonalFile.__new__(ZonalFile)
 
-    with pytest.raises(KeyError):
+    # An invalid fixed_key_metadata fails in GCSFile.__init__ after the cache is built.
+    with pytest.raises(TypeError):
         zf.__init__(
             gcsfs=mock_gcsfs,
             path="gs://test-bucket/test-key",
             mode="rb",
-            cache_type="no-such-cache",
+            fixed_key_metadata=123,
         )
 
     mock_gcsfs._mrd_pool_cache.get.assert_awaited_once()
     pool.close.assert_awaited_once()
     assert zf.mrd_pool is None
     assert zf.closed is True
+    assert zf.cache._prefetcher is None
 
 
 def test_zonal_file_failed_init_preserves_exception_when_pool_close_fails(
@@ -1105,12 +1107,12 @@ def test_zonal_file_failed_init_preserves_exception_when_pool_close_fails(
     zf = ZonalFile.__new__(ZonalFile)
 
     with caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"):
-        with pytest.raises(KeyError):
+        with pytest.raises(TypeError):
             zf.__init__(
                 gcsfs=mock_gcsfs,
                 path="gs://test-bucket/test-key",
                 mode="rb",
-                cache_type="no-such-cache",
+                fixed_key_metadata=123,
             )
 
     pool.close.assert_awaited_once()
@@ -1122,9 +1124,43 @@ def test_zonal_file_failed_init_preserves_exception_when_pool_close_fails(
     )
 
 
-@pytest.mark.parametrize("mode", ["r+", "rb+", "w+", "wb+", "a+", "ab+", "x+", "xb+"])
+def test_zonal_file_unknown_cache_type_fails_before_pool_checkout(mock_gcsfs):
+    """An unknown cache_type fails before checking out an MRD pool or arming __del__."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(KeyError, match="no-such-cache"):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="no-such-cache",
+        )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_not_called()
+    assert "_closed" not in zf.__dict__
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "r+",
+        "rb+",
+        "r+b",
+        "w+",
+        "wb+",
+        "w+b",
+        "a+",
+        "ab+",
+        "a+b",
+        "x+",
+        "xb+",
+        "x+b",
+        "rwb",
+    ],
+)
 def test_zonal_file_plus_modes_rejected_before_pool_or_super_init(mock_gcsfs, mode):
-    """Unsupported '+' modes fail before checking out an MRD pool or arming __del__."""
+    """Unsupported modes ('+' modes or 'rwb') fail before checking out an MRD pool or arming __del__."""
     mock_gcsfs.loop = fsspec.asyn.get_loop()
     zf = ZonalFile.__new__(ZonalFile)
 
@@ -1136,7 +1172,7 @@ def test_zonal_file_plus_modes_rejected_before_pool_or_super_init(mock_gcsfs, mo
         )
 
     mock_gcsfs._mrd_pool_cache.get.assert_not_called()
-    assert getattr(zf, "closed", True) is True
+    assert "_closed" not in zf.__dict__
 
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
