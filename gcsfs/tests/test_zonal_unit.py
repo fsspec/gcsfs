@@ -1930,6 +1930,8 @@ async def test_get_threshold_for_disk_reads_grpc_buckets(bucket_layout):
         layouts.STANDARD,
         layouts.STANDARD_HIERARCHICAL,
         layouts.STANDARD_RAPID_CACHE,
+        layouts.HIERARCHICAL_RAPID_CACHE,
+        BucketLayout.UNKNOWN,
     ],
 )
 async def test_get_threshold_for_disk_reads_http_buckets_delegates_to_super(

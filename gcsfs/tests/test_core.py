@@ -3427,7 +3427,7 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
         gcs.version_aware = original_version_aware
 
 
-def test_cat_file_routing_and_thresholds(gcs, skip_if_zonal, monkeypatch):
+def test_cat_file_routing_and_thresholds(gcs, skip_if_grpc_read, monkeypatch):
     monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
     fn = f"{TEST_BUCKET}/core_routing.txt"
     data = b"0123456789abcdefghijk"
@@ -3575,7 +3575,7 @@ def test_cat_file_default_concurrency(gcs, skip_if_zonal):
     assert mock_conc.call_count == 0
 
 
-def test_cat_file_explicit_concurrency(gcs, skip_if_zonal):
+def test_cat_file_explicit_concurrency(gcs, skip_if_grpc_read):
     # Arrange
     fn = f"{TEST_BUCKET}/test_cat_explicit_concurrency.txt"
     gcs.pipe(fn, b"cat test data")
@@ -4451,14 +4451,9 @@ def test_get_headers_includes_cache_type(gcs):
     assert headers_preset["User-Agent"] == "custom-ua"
 
 
-def test_user_agent_includes_cache_type_and_source_in_read(gcs):
+def test_user_agent_includes_cache_type_and_source_in_read(gcs, skip_if_grpc_read):
     # TODO(lankita): Remove this skip when User-Agent is updated to include cache_type for gRPC/rapid buckets.
-    # Zonal buckets currently use the gRPC path which does not use the HTTP client.
-    if hasattr(gcs, "_is_zonal_bucket") and sync(
-        gcs.loop, gcs._is_zonal_bucket, TEST_BUCKET
-    ):
-        pytest.skip("Zonal buckets use gRPC, skipping HTTP User-Agent test")
-
+    # Zonal and RCU buckets currently read over gRPC, which does not use the HTTP client.
     fn = TEST_BUCKET + "/2014-01-01.csv"
 
     # 1. Explicit cache_type="mmap" -> User-Agent contains cache_type/mmap:e
