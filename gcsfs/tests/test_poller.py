@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import math
 from types import SimpleNamespace
 from unittest import mock
@@ -12,6 +13,7 @@ from gcsfs.poller import (
     _BACKGROUND_TASKS,
     _calculate_poll_delay,
     _poll_until,
+    _wait_keeping_cancel,
     poll_lro,
     unwrap_operation_result,
 )
@@ -386,6 +388,34 @@ class TestPollRunners:
             timeout=5.0,
         )
         lro.cancel_operation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_wait_keeping_cancel_reads_error_that_lands_with_the_cancel(self):
+        """A status check that fails in the same loop step as the cancel still
+        has its error read, so asyncio does not log it as never retrieved."""
+        loop = asyncio.get_running_loop()
+        logged = []
+        loop.set_exception_handler(lambda _loop, ctx: logged.append(ctx["message"]))
+
+        async def failing_check():
+            raise api_exceptions.ServiceUnavailable("blip")
+
+        try:
+            waiter = asyncio.create_task(
+                _wait_keeping_cancel(failing_check(), timeout=10.0)
+            )
+            # The waiter starts the check; cancel it before the check runs, so
+            # the check fails in the step that delivers the cancel.
+            await asyncio.sleep(0)
+            waiter.cancel()
+            await asyncio.wait({waiter})
+            assert waiter.cancelled()
+            del waiter
+            gc.collect()
+        finally:
+            loop.set_exception_handler(None)
+
+        assert not [m for m in logged if "never retrieved" in m]
 
     @pytest.mark.asyncio
     async def test_poll_lro_keeps_cancel_that_races_a_finished_status_check(

@@ -92,11 +92,25 @@ Waiting for Folder Renames
 
 A folder rename runs as a long-running operation on the server. ``ExtendedGcsFileSystem`` checks its status every 0.2 s at first, then waits about 20% of the elapsed time between checks (at most 30 s, with random jitter), and backs off when status checks keep failing with transient errors. If the rename has not finished after 300 s, ``mv`` raises ``TimeoutError``; the rename may still complete on the server, so check the destination before retrying.
 
-To wait with ``google-api-core``'s ``operation.result()`` instead, pass ``fast_lro_polling=False``, or set it through the ``fsspec`` configuration. In this mode ``mv`` has no time limit, status checks follow ``google-api-core``'s retry rules, and cancelling ``mv`` does not cancel the rename on the server. For example:
+To wait with ``google-api-core``'s ``operation.result()`` instead, pass ``fast_lro_polling=False``, or set it through the ``fsspec`` configuration. In this mode ``mv`` has no time limit, status checks follow ``google-api-core``'s retry rules, and cancelling ``mv`` does not cancel the rename on the server.
+
+.. code-block:: python
+
+    import fsspec
+
+    # For one filesystem
+    fs = fsspec.filesystem("gcs", fast_lro_polling=False)
+
+    # For every gcs filesystem created after this
+    fsspec.config.conf.setdefault("gcs", {})["fast_lro_polling"] = False
+
+Or with an environment variable:
 
 .. code-block:: bash
 
     export FSSPEC_GCS_FAST_LRO_POLLING=false
+
+``fsspec`` parses the environment variable as JSON, so use ``true`` or ``false``. Other spellings such as ``False`` or ``no`` arrive as strings and leave fast polling on.
 
 Disabling HNS Support
 ------------------------------

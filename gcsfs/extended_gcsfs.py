@@ -52,21 +52,6 @@ STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
 
 
-def _parse_bool(value, name):
-    """Returns ``value`` as a bool, accepting the strings fsspec config can pass."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("1", "true", "yes", "on"):
-            return True
-        if lowered in ("0", "false", "no", "off"):
-            return False
-    raise ValueError(f"{name} must be a boolean, got {value!r}")
-
-
 class StorageClass(Enum):
     RAPID = "RAPID"
     STANDARD = "STANDARD"
@@ -207,7 +192,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             - retry_multiplier: Multiplier for delay between retries.
             These map to `google.api_core.retry.AsyncRetry` arguments (without 'retry_' prefix).
         """
-        self.fast_lro_polling = _parse_bool(fast_lro_polling, "fast_lro_polling")
+        self.fast_lro_polling = fast_lro_polling
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v

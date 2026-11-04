@@ -173,6 +173,8 @@ async def _wait_keeping_cancel(aw: Awaitable[T], timeout: float) -> T:
         if not task.done():
             task.cancel()
             task.add_done_callback(_retrieve_outcome)
+        else:
+            _retrieve_outcome(task)
     if not done:
         raise asyncio.TimeoutError(f"Status check exceeded {timeout:.2f}s.")
     return task.result()

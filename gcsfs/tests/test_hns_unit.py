@@ -18,6 +18,7 @@ import sys
 import uuid
 from unittest import mock
 
+import fsspec
 import pytest
 from fsspec.asyn import FSTimeoutError
 from google.api_core import exceptions as api_exceptions
@@ -1020,35 +1021,16 @@ class TestExtendedGcsFileSystemMv:
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         assert fs.fast_lro_polling is True
 
-    @pytest.mark.parametrize(
-        "value, expected",
-        [
-            pytest.param(False, False, id="bool"),
-            pytest.param(0, False, id="json-int"),
-            pytest.param("False", False, id="string-false"),
-            pytest.param("yes", True, id="string-true"),
-        ],
-    )
-    def test_fast_lro_polling_accepts_config_strings(self, value, expected):
-        """fsspec config can pass the flag as a string (INI files, or env
-        values that are not JSON, such as "False")."""
-        fs = ExtendedGcsFileSystem(
-            token="anon", skip_instance_cache=True, fast_lro_polling=value
-        )
-        assert fs.fast_lro_polling is expected
+    def test_fast_lro_polling_env_var_false_turns_polling_off(self, monkeypatch):
+        """FSSPEC_GCS_FAST_LRO_POLLING=false reaches the constructor through
+        fsspec's config, which parses the value as JSON."""
+        conf = {}
+        fsspec.config.set_conf_env(conf, {"FSSPEC_GCS_FAST_LRO_POLLING": "false"})
+        monkeypatch.setattr(fsspec.config, "conf", conf)
 
-    @pytest.mark.parametrize(
-        "value",
-        [
-            pytest.param("maybe", id="unknown-string"),
-            pytest.param(None, id="none"),
-        ],
-    )
-    def test_fast_lro_polling_rejects_non_boolean(self, value):
-        with pytest.raises(ValueError, match="fast_lro_polling must be a boolean"):
-            ExtendedGcsFileSystem(
-                token="anon", skip_instance_cache=True, fast_lro_polling=value
-            )
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+
+        assert fs.fast_lro_polling is False
 
     def test_hns_rename_with_fast_lro_polling_off_uses_operation_result(
         self, gcs_hns, gcs_hns_mocks
