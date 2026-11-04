@@ -76,15 +76,14 @@ def test_spawn_split_reports_before_join(fake_spawn):
 def port_block(monkeypatch):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
 
-    monkeypatch.setattr(_dist, "_next_port_offset", 0)
     monkeypatch.setenv("GCSFS_SUBSYSTEM_PORT_BASE", "21000")
     busy = set()
     monkeypatch.setattr(_dist, "_port_is_free", lambda port: port not in busy)
     return busy
 
 
-def test_find_free_port_hands_out_distinct_ports_from_the_block(port_block):
-    assert [find_free_port() for _ in range(3)] == [21000, 21001, 21002]
+def test_find_free_port_returns_the_first_port_of_the_block(port_block):
+    assert find_free_port() == 21000
 
 
 def test_find_free_port_skips_a_port_in_use(port_block):
@@ -92,12 +91,20 @@ def test_find_free_port_skips_a_port_in_use(port_block):
     assert find_free_port() == 21002
 
 
-def test_find_free_port_wraps_around_the_block(port_block):
+def test_find_free_port_reuses_a_port_once_it_is_released(port_block):
+    # setup (a spawned process) and run (the parent) of one case may share a port.
+    port_block.add(21000)
+    assert find_free_port() == 21001
+    port_block.discard(21000)
+    assert find_free_port() == 21000
+
+
+def test_find_free_port_stays_inside_the_block(port_block):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import PORT_BLOCK_SIZE
 
-    ports = [find_free_port() for _ in range(PORT_BLOCK_SIZE + 1)]
-    assert ports[-1] == 21000
-    assert all(21000 <= p < 21000 + PORT_BLOCK_SIZE for p in ports)
+    last = 21000 + PORT_BLOCK_SIZE - 1
+    port_block.update(range(21000, last))
+    assert find_free_port() == last
 
 
 def test_find_free_port_fails_when_the_block_is_exhausted(port_block, monkeypatch):
@@ -113,6 +120,22 @@ def test_port_is_free_detects_a_bound_socket():
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as busy:
         busy.bind(("", 0))
+        busy.listen()
+        assert not _port_is_free(busy.getsockname()[1])
+
+
+@pytest.mark.skipif(not socket.has_ipv6, reason="needs IPv6")
+def test_port_is_free_detects_a_dual_stack_listener():
+    # torch's TCPStore listens on [::]:port with IPV6_V6ONLY off.
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import _port_is_free
+
+    try:
+        busy = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        pytest.skip("IPv6 sockets unavailable")
+    with busy:
+        busy.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        busy.bind(("::", 0))
         busy.listen()
         assert not _port_is_free(busy.getsockname()[1])
 
