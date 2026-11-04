@@ -236,6 +236,9 @@ async def test_init_aaow_failed_precondition(if_generation_match, expected):
     if if_generation_match is None:
         # No precondition was requested, so the SDK error is not translated.
         assert excinfo.value is mock_writer_instance.open.side_effect
+    elif if_generation_match == 7:
+        assert excinfo.value.generation == 7
+        assert excinfo.value.__cause__ is mock_writer_instance.open.side_effect
 
 
 @pytest.mark.asyncio
