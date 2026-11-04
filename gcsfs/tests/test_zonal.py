@@ -255,12 +255,23 @@ def test_open_with_size_zb(extended_gcsfs, gcs_bucket_mocks):
 
 
 def test_pickle_read_handle_zb(extended_gcsfs, gcs_bucket_mocks):
-    """A zonal read handle can be pickled and reopened, as DataLoader and Dask do."""
+    """A zonal read handle can be pickled and reopened, as DataLoader and Dask do.
+
+    The reopened handle keeps its position and the options it was opened with.
+    """
+    generation = extended_gcsfs.info(file_path)["generation"]
     with gcs_bucket_mocks(json_data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
-        with extended_gcsfs.open(file_path, "rb") as f:
+        with extended_gcsfs.open(
+            file_path, "rb", generation=generation, pool_size=2
+        ) as f:
             assert isinstance(f, ZonalFile)
+            assert f.read(10) == json_data[:10]
             with pickle.loads(pickle.dumps(f)) as f2:
-                assert f2.read() == json_data
+                assert f2.tell() == 10
+                assert f2.generation == generation
+                assert f2.pool_size == 2
+                assert f2.cache_source == "default"
+                assert f2.read() == json_data[10:]
 
 
 def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):

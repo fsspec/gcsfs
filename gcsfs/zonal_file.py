@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from fsspec import asyn
 from fsspec.caching import caches
@@ -72,6 +73,10 @@ class ZonalFile(GCSFile):
         generation = _coalesce_generation(generation, path_generation)
         if not key:
             raise OSError("Attempt to open a bucket")
+        if mode not in ("rb", "wb", "ab", "xb"):
+            raise NotImplementedError(
+                "Only read, write and append operations are currently supported for Zonal buckets."
+            )
         # GCSFile.__init__ resolves the precondition as well, but only after the
         # MRD pool below has been opened; validate first so an invalid value
         # fails without a lookup.
@@ -85,7 +90,6 @@ class ZonalFile(GCSFile):
         self.gcsfs = gcsfs
         self.pool_size = pool_size
         caller_size = kwargs.pop("size", None)
-        kwargs.pop("_supports_append", None)  # replayed by fsspec.spec.reopen
         object_size = None
         if self.mode == "rb":
             resolved_cache_type, resolved_cache_source = (
@@ -94,9 +98,14 @@ class ZonalFile(GCSFile):
             # Reject an unknown cache type before checking out a pool and stream.
             if resolved_cache_type not in caches:
                 raise KeyError(resolved_cache_type)
-            self.mrd_pool = asyn.sync(
-                self.gcsfs.loop,
-                self.gcsfs._mrd_pool_cache.get,
+
+        # asyn.sync() does not cancel the checkout when the caller is interrupted
+        # (e.g. by Ctrl-C), so whichever side sees the abort closes the pool.
+        handoff_lock = threading.Lock()
+        handoff = {"aborted": False, "pool": None}
+
+        async def _checkout_pool():
+            pool = await self.gcsfs._mrd_pool_cache.get(
                 bucket,
                 key,
                 generation,
@@ -104,15 +113,16 @@ class ZonalFile(GCSFile):
                 cache_type=resolved_cache_type,
                 cache_source=resolved_cache_source,
             )
-        elif self.mode in ("wb", "ab", "xb"):
-            pass
-        else:
-            raise NotImplementedError(
-                "Only read, write and append operations are currently supported for Zonal buckets."
-            )
+            with handoff_lock:
+                if not handoff["aborted"]:
+                    handoff["pool"] = pool
+                    return pool
+            await pool.close()  # The caller already gave up.
 
-        # Everything after the pool checkout runs under the cleanup below.
+        # The pool checkout and everything after it run under the cleanup below.
         try:
+            if self.mode == "rb":
+                self.mrd_pool = asyn.sync(self.gcsfs.loop, _checkout_pool)
             if self.mrd_pool is not None:
                 if getattr(self.mrd_pool, "details", None) is not None:
                     self._details = self.mrd_pool.details
@@ -148,6 +158,10 @@ class ZonalFile(GCSFile):
                 **kwargs,
             )
         except BaseException:
+            with handoff_lock:
+                handoff["aborted"] = True
+                if self.mrd_pool is None:
+                    self.mrd_pool = handoff["pool"]
             self.closed = True
             # GCSFile.__init__ leaves the prefetcher to _close_impl(), which a
             # file marked closed never reaches, so stop it here. Like
@@ -173,6 +187,9 @@ class ZonalFile(GCSFile):
                         e,
                     )
             raise
+
+    def _reopen_kwargs(self):
+        return {**super()._reopen_kwargs(), "pool_size": self.pool_size}
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """
