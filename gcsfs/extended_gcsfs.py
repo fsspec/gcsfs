@@ -7,8 +7,10 @@ import uuid
 import weakref
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from enum import Enum
 from glob import has_magic
+from typing import ClassVar
 
 import aiohttp
 import fsspec
@@ -65,19 +67,56 @@ def _parse_bool(value, name):
     raise ValueError(f"{name} must be a boolean, got {value!r}")
 
 
-class BucketType(Enum):
-    ZONAL_HIERARCHICAL = "ZONAL_HIERARCHICAL"
+class StorageClass(Enum):
+    RAPID = "RAPID"
+    STANDARD = "STANDARD"
+    UNKNOWN = "UNKNOWN"
+
+
+class CachingTier(Enum):
+    RAPID_CACHE = "RAPID_CACHE"
+    RAPID_CACHE_ULTRA = "RAPID_CACHE_ULTRA"
+    NONE = "NONE"
+
+
+class NamespaceLayout(Enum):
     HIERARCHICAL = "HIERARCHICAL"
     NON_HIERARCHICAL = "NON_HIERARCHICAL"
     UNKNOWN = "UNKNOWN"
 
 
-gcs_file_types = {
-    BucketType.ZONAL_HIERARCHICAL: ZonalFile,
-    BucketType.NON_HIERARCHICAL: GCSFile,
-    BucketType.HIERARCHICAL: GCSFile,
-    BucketType.UNKNOWN: GCSFile,
-}
+@dataclass(frozen=True)
+class BucketLayout:
+    storage_class: StorageClass
+    caching_tier: CachingTier
+    namespace_layout: NamespaceLayout
+
+    UNKNOWN: ClassVar["BucketLayout"]
+
+    @property
+    def is_zonal(self):
+        """Whether the bucket is zonal (``RAPID`` storage class)."""
+        return self.storage_class == StorageClass.RAPID
+
+    @property
+    def is_rcu(self):
+        """Whether the bucket has Rapid Cache Ultra."""
+        return self.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+
+    @property
+    def is_hierarchical(self):
+        """Whether the bucket has Hierarchical Namespace enabled."""
+        return self.namespace_layout == NamespaceLayout.HIERARCHICAL
+
+    @property
+    def uses_grpc_data_path(self):
+        """Whether the bucket is zonal or has Rapid Cache Ultra."""
+        return self.is_zonal or self.is_rcu
+
+
+BucketLayout.UNKNOWN = BucketLayout(
+    StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN
+)
 
 
 @contextlib.asynccontextmanager
@@ -333,21 +372,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 logger.warning(f"Failed to close grpc_client: {e}")
             self._grpc_client = None
 
-    async def _lookup_bucket_type(self, bucket):
+    async def _lookup_bucket_layout(self, bucket):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
-        bucket_type = await self._get_bucket_type(bucket)
-        # Don't cache UNKNOWN type.
+        bucket_layout = await self._get_bucket_layout(bucket)
+        # Don't cache UNKNOWN storage class.
         # This ensures that subsequent operations will retry the lookup,
         # allowing it to recover when the transient error resolves.
-        if bucket_type == BucketType.UNKNOWN:
-            return bucket_type
-        self._storage_layout_cache[bucket] = bucket_type
+        if bucket_layout.storage_class == StorageClass.UNKNOWN:
+            return bucket_layout
+        self._storage_layout_cache[bucket] = bucket_layout
         return self._storage_layout_cache[bucket]
 
-    _sync_lookup_bucket_type = asyn.sync_wrapper(_lookup_bucket_type)
+    _sync_lookup_bucket_layout = asyn.sync_wrapper(_lookup_bucket_layout)
 
-    async def _get_bucket_type(self, bucket):
+    async def _get_bucket_layout(self, bucket):
         try:
             client = await self._get_control_plane_client()
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
@@ -359,25 +398,35 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
 
             if response.location_type == "zone":
-                return BucketType.ZONAL_HIERARCHICAL
-            if (
+                storage_class = StorageClass.RAPID
+            else:
+                storage_class = StorageClass.STANDARD
+
+            if response.location_type == "zone" or (
                 response.hierarchical_namespace
                 and response.hierarchical_namespace.enabled
             ):
-                return BucketType.HIERARCHICAL
-            return BucketType.NON_HIERARCHICAL
+                namespace_layout = NamespaceLayout.HIERARCHICAL
+            else:
+                namespace_layout = NamespaceLayout.NON_HIERARCHICAL
+
+            return BucketLayout(
+                storage_class=storage_class,
+                caching_tier=CachingTier.NONE,
+                namespace_layout=namespace_layout,
+            )
         except api_exceptions.NotFound:
             logger.warning(
                 f"Error: Bucket {bucket} not found or you lack permissions for "
-                f"storage layout api used to detect bucket type. Falling back to GCSFileSystem."
+                f"storage layout api used to detect bucket layout. Falling back to GCSFileSystem."
             )
-            return BucketType.UNKNOWN
+            return BucketLayout.UNKNOWN
         except Exception as e:
             logger.warning(
-                f"Could not determine bucket type for bucket name {bucket}: {e}, falling back to GCSFileSystem"
+                f"Could not determine bucket layout for bucket name {bucket}: {e}, falling back to GCSFileSystem"
             )
-            # Default to UNKNOWN in case bucket type is not obtained
-            return BucketType.UNKNOWN
+            # Default to UNKNOWN in case bucket layout is not obtained
+            return BucketLayout.UNKNOWN
 
     def _open(
         self,
@@ -397,9 +446,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         Open a file.
         """
         bucket, _, _ = self.split_path(path)
-        bucket_type = self._sync_lookup_bucket_type(bucket)
+        bucket_layout = self._sync_lookup_bucket_layout(bucket)
+        file_cls = ZonalFile if bucket_layout.is_zonal else GCSFile
 
-        return gcs_file_types[bucket_type](
+        return file_cls(
             self,
             path,
             mode,
@@ -469,8 +519,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     )
 
     async def _is_zonal_bucket(self, bucket):
-        bucket_type = await self._lookup_bucket_type(bucket)
-        return bucket_type == BucketType.ZONAL_HIERARCHICAL
+        bucket_layout = await self._lookup_bucket_layout(bucket)
+        return bucket_layout.is_zonal
+
+    async def _is_rcu_bucket(self, bucket):
+        bucket_layout = await self._lookup_bucket_layout(bucket)
+        return bucket_layout.is_rcu
+
+    async def _uses_grpc_data_path(self, bucket):
+        bucket_layout = await self._lookup_bucket_layout(bucket)
+        return bucket_layout.uses_grpc_data_path
 
     @staticmethod
     def _resolve_cache_config(kwargs):
@@ -1087,7 +1145,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
         try:
-            bucket_type = await self._lookup_bucket_type(bucket)
+            bucket_layout = await self._lookup_bucket_layout(bucket)
         except Exception as e:
             logger.warning(
                 f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS: {e}",
@@ -1095,7 +1153,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
             return False
 
-        return bucket_type in [BucketType.ZONAL_HIERARCHICAL, BucketType.HIERARCHICAL]
+        return bucket_layout.is_hierarchical
 
     async def _wait_for_folder_rename(self, operation, path1, path2, request_id):
         """Waits for a RenameFolder operation with poll_lro; raises TimeoutError on timeout."""

@@ -19,7 +19,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import GCSFileSystem
-from gcsfs.extended_gcsfs import BucketType
+from gcsfs.tests import layouts
 from gcsfs.tests.lro_fakes import FakeLroFactory
 from gcsfs.tests.settings import (
     TEST_BUCKET,
@@ -127,11 +127,11 @@ def _avoid_adc_timeout(monkeypatch):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _mock_get_bucket_type_on_emulator():
-    """Mock _get_bucket_type to return UNKNOWN instantly on emulator."""
-    from gcsfs.tests.utils import _patch_get_bucket_type_for_emulator
+def _mock_get_bucket_layout_on_emulator():
+    """Mock _get_bucket_layout to return UNKNOWN instantly on emulator."""
+    from gcsfs.tests.utils import _patch_get_bucket_layout_for_emulator
 
-    patch = _patch_get_bucket_type_for_emulator()
+    patch = _patch_get_bucket_layout_for_emulator()
     if patch:
         with patch:
             yield
@@ -556,8 +556,8 @@ def zonal_write_mocks():
         yield None
         return
 
-    patch_target_get_bucket_type = (
-        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type"
+    patch_target_get_bucket_layout = (
+        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout"
     )
     patch_target_init_aaow = "gcsfs.zb_hns_utils.init_aaow"
     patch_target_gcsfs_info = "gcsfs.core.GCSFileSystem._info"
@@ -588,8 +588,8 @@ def zonal_write_mocks():
 
     with (
         mock.patch(
-            patch_target_get_bucket_type,
-            return_value=BucketType.ZONAL_HIERARCHICAL,
+            patch_target_get_bucket_layout,
+            return_value=layouts.ZONAL_HIERARCHICAL,
         ),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),
         mock.patch(patch_target_init_aaow, mock_init_aaow),
@@ -659,12 +659,110 @@ async def async_gcs():
 def skip_if_zonal(gcs):
     """Skips tests that validate HTTP REST mechanics specific to standard regional buckets."""
     if (
-        hasattr(gcs, "_sync_lookup_bucket_type")
-        and gcs._sync_lookup_bucket_type(TEST_BUCKET) == BucketType.ZONAL_HIERARCHICAL
+        hasattr(gcs, "_sync_lookup_bucket_layout")
+        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).is_zonal
     ):
         pytest.skip(
             "Test validates HTTP REST mechanics specific to standard regional buckets"
         )
+
+
+@pytest.fixture
+def mock_gcs_harness(monkeypatch):
+    """
+    Harness that mocks GCSFileSystem HTTP transport and records the exact
+    User-Agent header sent on every outgoing GCS request.
+    """
+    captured_user_agents = []
+    sample_pt_data = b"MOCK_PT_BINARY_DATA_FOR_TORCH_LOADER_TESTING_12345"
+    sample_csv_data = b"col1,col2,col3\n1,2,3\n4,5,6\n"
+
+    async def mock_call(self, method, path, *args, **kwargs):
+        if args:
+            path = path.format(*args)
+        # Capture the User-Agent header
+        headers = kwargs.get("headers") or {}
+        ua = headers.get("User-Agent")
+        if not ua:
+            ua = self._get_headers(
+                headers,
+                cache_type=kwargs.get("cache_type"),
+                cache_source=kwargs.get("cache_source"),
+            ).get("User-Agent")
+        captured_user_agents.append(ua or "")
+
+        # Mock initiate_upload (resumable upload session)
+        if kwargs.get("uploadType") == "resumable":
+            return {
+                "Location": "http://mock-gcs/upload/session-12345678901234567890"
+            }, b""
+
+        # Mock upload chunk / upload completion
+        if "http://mock-gcs/upload" in str(path):
+            return {}, b'{"generation": "1"}'
+
+        # Mock object metadata response (json_out=True returns dict directly)
+        if kwargs.get("json_out"):
+            if path in ["b", "b?"] or str(path).startswith("b?"):
+                return {"kind": "storage#buckets", "items": [{"name": "test-bucket"}]}
+            if str(path).startswith("b/") and "/o" not in str(path):
+                return {
+                    "kind": "storage#bucket",
+                    "name": "test-bucket",
+                    "items": [{"name": "test-bucket"}],
+                }
+            if str(path).endswith("/o") or "/o?" in str(path):
+                return {
+                    "items": [
+                        {
+                            "name": "model.pt" if "model" in str(path) else "file.txt",
+                            "bucket": "test-bucket",
+                            "size": str(len(sample_pt_data)),
+                            "generation": "1",
+                        }
+                    ]
+                }
+            obj_name = path.split("/o/")[-1] if "/o/" in path else path.split("/")[-1]
+            size = len(sample_csv_data) if "csv" in obj_name else len(sample_pt_data)
+            return {
+                "name": obj_name,
+                "bucket": "test-bucket",
+                "size": str(size),
+                "generation": "1",
+                "timeCreated": "2026-01-01T00:00:00.000Z",
+                "updated": "2026-01-01T00:00:00.000Z",
+            }
+
+        # Mock object data content
+        if "csv" in str(path):
+            return {}, sample_csv_data
+        return {}, sample_pt_data
+
+    from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+
+    monkeypatch.setattr(CoreGCSFileSystem, "_call", mock_call)
+    for proto in ("gcs", "gs"):
+        fsspec.register_implementation(proto, CoreGCSFileSystem, clobber=True)
+
+    class Harness:
+        def __init__(self):
+            self.user_agents = captured_user_agents
+            self.fs = CoreGCSFileSystem(
+                token="anon", project="test-project", consistency="none"
+            )
+
+        def clear(self):
+            self.user_agents.clear()
+
+        def last_user_agent(self) -> str:
+            assert len(self.user_agents) > 0, "No User-Agent was captured!"
+            return self.user_agents[-1]
+
+    try:
+        yield Harness()
+    finally:
+        for proto in ("gcs", "gs"):
+            fsspec.register_implementation(proto, GCSFileSystem, clobber=True)
 
 
 def pytest_addoption(parser):
