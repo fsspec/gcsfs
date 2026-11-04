@@ -130,8 +130,8 @@ mv "$HOME/$MODEL_DIR" "/tmp/$MODEL_DIR"
 
 # --- Run all cases concurrently ------------------------------------------------------
 export PYTHONPATH="$HOME/gcsfs"
-# On timeout, SIGABRT goes to the case's whole process group; faulthandler makes every
-# Python process in it (pytest, ranks, DataLoader workers) dump all thread stacks first.
+# On timeout, run_case_with_timeout SIGABRTs every process in the case (run.py, pytest,
+# ranks, DataLoader workers); faulthandler makes each dump all thread stacks first.
 export PYTHONFAULTHANDLER=1
 # Five Ray-based cases each start a local Ray cluster on this VM; keep each object store
 # small so they do not compete for /dev/shm.
@@ -143,14 +143,57 @@ export RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION=0.05
 PORT_BLOCK_START=21000
 PORT_BLOCK_SIZE=16
 
+# run_case_with_timeout <timeout_s> <marker> <cmd...>: runs cmd in its own process group
+# and returns its exit status, or 124 once timeout_s has passed. `timeout --signal=ABRT`
+# would signal the whole group at once, and the concurrent faulthandler dumps interleave
+# mid-line in the shared run.log. Instead the group is frozen, then each process gets
+# SIGABRT + SIGCONT on its own, so every dump is written alone; SIGKILL ends the rest.
+run_case_with_timeout() {
+  local timeout_s=$1 marker=$2
+  shift 2
+  rm -f "$marker"
+  # No job control in a script, so setsid execs in place and $! leads the new group.
+  setsid "$@" &
+  local pid=$!
+  (
+    sleeper=""
+    trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+    sleep "$timeout_s" &
+    sleeper=$!
+    wait "$sleeper"
+    # From here on finish the dumps even if the case ends and the caller stops us.
+    trap '' TERM
+    kill -0 "$pid" 2>/dev/null || exit 0
+    touch "$marker"
+    echo "===== TIMEOUT after ${timeout_s}s: stack dumps follow, one process at a time ====="
+    kill -STOP -- "-$pid" 2>/dev/null || true
+    for p in $(pgrep -g "$pid" | sort -rn); do
+      echo "===== pid $p: $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | cut -c1-200)"
+      kill -ABRT "$p" 2>/dev/null || true
+      kill -CONT "$p" 2>/dev/null || true
+      sleep 0.5
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || true
+  ) &
+  local watchdog=$!
+  local rc=0
+  wait "$pid" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  if [[ -e "$marker" ]]; then
+    return 124
+  fi
+  return "$rc"
+}
+
 CASE_PIDS=()
 for i in "${!CASES[@]}"; do
   IFS='|' read -r name group bucket_type filter <<<"${CASES[$i]}"
   out="$CI_DIR/$name"
   mkdir -p "$out"
-  GCSFS_SUBSYSTEM_CONFIG="configs.ci.yaml" \
+  run_case_with_timeout "$CASE_TIMEOUT_SECONDS" "$out/timed_out" \
+    env GCSFS_SUBSYSTEM_CONFIG="configs.ci.yaml" \
     GCSFS_SUBSYSTEM_PORT_BASE="$((PORT_BLOCK_START + i * PORT_BLOCK_SIZE))" \
-    timeout --signal=ABRT --kill-after=30 "$CASE_TIMEOUT_SECONDS" \
     "$(venv_of "$group")/bin/python" "$SSB/run.py" \
     "--group=$group" \
     "--sweep-axes=baseline" \
@@ -178,7 +221,7 @@ for i in "${!CASES[@]}"; do
   wait "${CASE_PIDS[$i]}" || rc=$?
   case "$rc" in
     0) result="PASS" ;;
-    124 | 137) result="TIMEOUT (${CASE_TIMEOUT_SECONDS}s)" ;;
+    124) result="TIMEOUT (${CASE_TIMEOUT_SECONDS}s)" ;;
     *) result="FAIL (exit $rc)" ;;
   esac
   if [[ "$rc" != 0 ]]; then
@@ -188,8 +231,15 @@ for i in "${!CASES[@]}"; do
 done
 
 for name in "${FAILED_CASES[@]}"; do
-  echo "===== $name: last 50 lines of $CI_DIR/$name/run.log ====="
-  tail -n 50 "$CI_DIR/$name/run.log" || true
+  log="$CI_DIR/$name/run.log"
+  if [[ -e "$CI_DIR/$name/timed_out" ]]; then
+    # Every process's stack dump; a 2-rank case writes a few hundred lines.
+    echo "===== $name: $log from the timeout on ====="
+    sed -n '/^===== TIMEOUT after/,$p' "$log" || true
+  else
+    echo "===== $name: last 200 lines of $log ====="
+    tail -n 200 "$log" || true
+  fi
 done
 echo "===== Per-PR subsystem benchmark summary ====="
 cat "$SUMMARY"

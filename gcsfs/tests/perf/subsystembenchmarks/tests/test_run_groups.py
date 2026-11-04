@@ -182,7 +182,7 @@ def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
     )
     assert "HAS_CACHE=" in cb_yaml
     assert (
-        "^${_INFRA_PREFIX}-(regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
+        "^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
         in cb_yaml
     )
 

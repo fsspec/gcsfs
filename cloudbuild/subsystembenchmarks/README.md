@@ -216,13 +216,17 @@ from their upstream default branches, after the framework requirements, so
 unreleased upstream changes are caught too. The commits and per-venv versions
 used are recorded in `__run__/ci/versions.txt`.
 
-Each case has a 540-second limit. On timeout every Python process in the case
-dumps all thread stacks into `__run__/ci/<case>/run.log`. The build fails if any
-case fails or times out; throughput and read amplification are never gated.
+Each case has a 540-second limit. On timeout the case's processes are frozen and
+then aborted one at a time, so each Python process writes its own thread-stack
+dump to `__run__/ci/<case>/run.log` without interleaving, and the build log
+prints that log from the timeout on. The build fails if any case fails or times
+out; throughput and read amplification are never gated.
 
-Give the CI trigger its own `_INFRA_PREFIX` (for example `gcsfs-ci-ssb`) so its
-VMs, buckets, and `gs://<_INFRA_PREFIX>-run-results` artifacts stay separate
-from nightly runs and are never picked up by BigQuery ingestion.
+Case buckets are named `<_INFRA_PREFIX>-ci-<build>-<case>-<suffix>` (each case
+picks its own bucket type), and artifacts go to
+`gs://<_INFRA_PREFIX>-run-results/subsystembenchmarks-ci/`, a prefix BigQuery
+ingestion never reads. Still give the CI trigger its own `_INFRA_PREFIX` (for
+example `gcsfs-ci-ssb`) so its VMs and buckets stay separate from nightly runs.
 
 ## BigQuery ingestion
 

@@ -78,15 +78,22 @@ steps:
           exit 1
         fi
 
-        case "$${_BUCKET_TYPE}" in
-          regional|zonal|hns|rapid_cache_cold|rapid_cache_warm) ;;
-          *) echo "ERROR: unknown _BUCKET_TYPE '$${_BUCKET_TYPE}'"; exit 1;;
-        esac
-
         case "$${_MODE}" in
           nightly|ci) ;;
           *) echo "ERROR: unknown _MODE '$${_MODE}' (expected nightly or ci)"; exit 1;;
         esac
+
+        # _MODE=ci picks each case's bucket type itself (scripts/run-ci.sh), so _BUCKET_TYPE
+        # is neither checked nor part of its bucket names.
+        if [ "$${_MODE}" = "ci" ]; then
+          BUCKET_KIND=ci
+        else
+          case "$${_BUCKET_TYPE}" in
+            regional|zonal|hns|rapid_cache_cold|rapid_cache_warm) ;;
+            *) echo "ERROR: unknown _BUCKET_TYPE '$${_BUCKET_TYPE}'"; exit 1;;
+          esac
+          BUCKET_KIND=$${_BUCKET_TYPE}
+        fi
 
         ZONE="$${_ZONE}"
         REGION="$${ZONE%-*}"
@@ -94,7 +101,7 @@ steps:
         # The benchmark creates a bucket PER CASE (read amplification is only attributable
         # that way -- see dataloading/bucket.py), so cloudbuild hands it a name prefix
         # instead of a bucket, and sweeps anything the run leaks at the end.
-        BUCKET_PREFIX=$${_INFRA_PREFIX}-$${_BUCKET_TYPE}-$${SHORT_BUILD_ID}
+        BUCKET_PREFIX=$${_INFRA_PREFIX}-$${BUCKET_KIND}-$${SHORT_BUILD_ID}
         RESULTS_BUCKET=$${_INFRA_PREFIX}-run-results
         VM_NAME=$${_INFRA_PREFIX}-vm-$${SHORT_BUILD_ID}
         {
@@ -155,7 +162,7 @@ steps:
           CLEAN_NAME="$${name#gs://}"
           CLEAN_NAME="$${CLEAN_NAME%/}"
           if [ "$$CLEAN_NAME" = "$${RESULTS_BUCKET}" ] || [ "$$CLEAN_NAME" = "${_INFRA_PREFIX}-run-results" ]; then continue; fi
-          if [[ ! "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}-(regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}- ]]; then continue; fi
+          if [[ ! "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}- ]]; then continue; fi
 
           CREATION_SECONDS=$$(date -d "$$creation_time" +%s 2>/dev/null) || continue
           AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
