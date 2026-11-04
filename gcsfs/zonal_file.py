@@ -63,8 +63,10 @@ class ZonalFile(GCSFile):
         automatically finalize it; to finalize the write, `.commit()` must be
         called explicitly or `finalize_on_close` must be set to `True`.
         On Zonal and RCU buckets an overwrite replaces the existing object as
-        soon as the writer opens, so a failed write leaves the partially
-        written object in its place, unfinalized.
+        soon as the writer opens, so a failed append, flush or commit leaves
+        the partially written object in its place, unfinalized. An exception
+        raised by other code inside a `with` block still closes the file, which
+        finalizes the partial object when `finalize_on_close` is `True`.
 
         For Zonal and RCU buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
