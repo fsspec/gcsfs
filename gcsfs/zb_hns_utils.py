@@ -762,13 +762,13 @@ class MRDPool:
     def _is_stale(self, mrd):
         """True if an idle cached MRD was opened before the object grew.
 
-        Appends keep an unfinalized object's generation, so the cache can hold
-        idle MRDs under this pool's key whose persisted_size is older than the
-        one this pool was initialized with.
+        Appends keep an unfinalized object's generation, and so does finalizing
+        it afterwards, so the cache can hold idle MRDs under this pool's key
+        whose persisted_size is older than the one this pool was initialized
+        with.
         """
         return (
-            not self.finalized
-            and isinstance(self.persisted_size, int)
+            isinstance(self.persisted_size, int)
             and isinstance(mrd.persisted_size, int)
             and mrd.persisted_size < self.persisted_size
         )
@@ -786,16 +786,6 @@ class MRDPool:
                 return mrd
             self._stale_mrds.append(mrd)
 
-    async def _get_or_create_mrd(self):
-        """Gets an MRD from the cache or creates a new one."""
-        mrd = None
-        if self._cache is not None:
-            mrd = self._cache.get_idle_mrd(self._key)
-        if mrd is None:
-            mrd = await self._create_mrd()
-        self._all_mrds.append(mrd)
-        return mrd
-
     async def initialize(self):
         """Initializes the MRDPool by creating the first downloader instance."""
         async with self._cond:
@@ -804,11 +794,16 @@ class MRDPool:
 
             if not self._initialized and self._active_count == 0:
                 if self.finalized:
-                    mrd = await self._get_or_create_mrd()
+                    # Reuse an idle cached MRD unless it was opened before the
+                    # object reached its finalized size.
+                    size = (self.details or {}).get("size")
+                    if isinstance(size, int):
+                        self.persisted_size = size
+                    mrd = self._take_idle_mrd() or await self._create_mrd()
                 else:
                     # Always create a new MRD for unfinalized objects to get the up-to-date persisted_size
                     mrd = await self._create_mrd()
-                    self._all_mrds.append(mrd)
+                self._all_mrds.append(mrd)
                 self.persisted_size = mrd.persisted_size
                 self._free_mrds.put_nowait(mrd)
                 self._active_count += 1
@@ -822,8 +817,8 @@ class MRDPool:
 
         If a downloader is available in the pool, it is yielded immediately. If the
         pool is empty but hasn't reached `pool_size`, a new downloader is spawned
-        on demand or fetched from the cache. For unfinalized objects, cached
-        downloaders opened before the object grew are skipped. Automatically
+        on demand or fetched from the cache. Cached downloaders opened before
+        the object grew are skipped. Automatically
         returns the downloader to the free queue upon exit.
 
         Yields:
