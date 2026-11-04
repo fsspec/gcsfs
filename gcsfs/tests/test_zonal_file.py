@@ -463,6 +463,52 @@ def test_zonal_file_flush_failure_invalidates_cache(
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@pytest.mark.parametrize(
+    "failing_call, closes_stream",
+    [("append", True), ("flush", True), ("finalize", True), ("flush", False)],
+    ids=["append", "flush", "finalize", "flush-stream-left-open"],
+)
+def test_zonal_file_failed_writer_call_surfaces_its_error_without_finalizing(
+    extended_gcsfs, zonal_write_mocks, file_path, failing_call, closes_stream
+):
+    """A failed append, flush or finalize raises its own error, and close() neither
+    retries the call nor finalizes the partial object."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for writer failures with mocks.")
+    aaow = zonal_write_mocks["aaow"]
+    calls = {"failed": False}
+
+    async def closed_stream_flush():
+        # The SDK refuses to flush a stream that a failed call has closed.
+        if not aaow._is_stream_open:
+            raise ValueError("Stream is not open. Call open() before flush().")
+
+    async def fail_once(*args, **kwargs):
+        if calls["failed"]:
+            return await closed_stream_flush()
+        calls["failed"] = True
+        if closes_stream:
+            aaow._is_stream_open = False
+        raise NotFound("writer call failed")
+
+    aaow.flush.side_effect = closed_stream_flush
+    getattr(aaow, failing_call).side_effect = fail_once
+
+    with pytest.raises(NotFound, match="writer call failed"):
+        with extended_gcsfs.open(file_path, "wb") as f:
+            f.write(test_data)
+            if failing_call == "flush":
+                f.flush()
+            elif failing_call == "finalize":
+                f.commit()
+
+    assert getattr(aaow, failing_call).await_count == 1
+    assert not any(
+        c.kwargs.get("finalize_on_close") for c in aaow.close.await_args_list
+    )
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode_with_if_generation_match(
     extended_gcsfs, zonal_write_mocks, file_path
 ):

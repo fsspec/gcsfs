@@ -300,7 +300,11 @@ class ZonalFile(GCSFile):
         # Lazily initialize the AsyncAppendableObjectWriter on the first write to avoid
         # unnecessary object creation for files that are opened but never written to.
         self._ensure_aaow()
-        asyn.sync(self.gcsfs.loop, self.aaow.append, data)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.append, data)
+        except BaseException:
+            self._abort_write()
+            raise
         bytes_written = len(data)
         self.loc += bytes_written
         return bytes_written
@@ -334,7 +338,11 @@ class ZonalFile(GCSFile):
         # and to flush any buffered data if it exists.
         self._ensure_aaow()
 
-        asyn.sync(self.gcsfs.loop, self.aaow.flush)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.flush)
+        except BaseException:
+            self._abort_write()
+            raise
 
     def commit(self):
         """
@@ -350,10 +358,24 @@ class ZonalFile(GCSFile):
             return
 
         self._ensure_aaow()
-        asyn.sync(self.gcsfs.loop, self.aaow.finalize)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.finalize)
+        except BaseException:
+            self._abort_write()
+            raise
         self.finalized = True
         # File is already finalized, avoid finalizing again on close
         self.finalize_on_close = False
+
+    def _abort_write(self):
+        """Makes the file close-only after a failed append, flush or finalize.
+
+        The SDK may have closed the stream, so close() must not flush it again,
+        and the partially written object is not finalized.
+        """
+        if not self.finalized:
+            self.finalize_on_close = False
+        self.forced = True
 
     def discard(self):
         """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""
