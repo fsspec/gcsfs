@@ -193,10 +193,10 @@ async def init_aaow(
     if flush_interval_bytes and flush_interval_bytes != _DEFAULT_FLUSH_INTERVAL_BYTES:
         writer_options["FLUSH_INTERVAL_BYTES"] = flush_interval_bytes
     kwargs = {}
-    if generation and if_generation_match is not None:
-        # generation > 0 appends to an existing object, so a generation
-        # precondition cannot apply. Check here because if_generation_match=0
-        # is mapped to generation=0 below, which would hide the conflict.
+    if generation is not None and if_generation_match is not None:
+        # generation > 0 appends to an existing object and generation=0 already
+        # means create-only, so a generation precondition cannot apply. Check
+        # here because if_generation_match=0 is mapped to generation=0 below.
         raise ValueError(
             "if_generation_match cannot be combined with an explicit generation"
         )

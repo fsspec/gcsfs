@@ -106,6 +106,10 @@ class _FakePreconditions:
     if_generation_match: Optional[int] = None
 
 
+# The real class once google-cloud-storage ships it, so CI builds it too.
+_Preconditions = zb_hns_utils.Preconditions or _FakePreconditions
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "if_generation_match, expected_kwargs",
@@ -115,7 +119,7 @@ class _FakePreconditions:
             7,
             {
                 "generation": None,
-                "preconditions": _FakePreconditions(if_generation_match=7),
+                "preconditions": _Preconditions(if_generation_match=7),
             },
         ),
     ],
@@ -123,7 +127,7 @@ class _FakePreconditions:
 async def test_init_aaow_if_generation_match(if_generation_match, expected_kwargs):
     mock_writer_instance = mock.AsyncMock()
     with (
-        mock.patch.object(zb_hns_utils, "Preconditions", _FakePreconditions),
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
         mock.patch(
             "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
             new_callable=mock.Mock,
@@ -146,12 +150,13 @@ async def test_init_aaow_if_generation_match(if_generation_match, expected_kwarg
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("generation", [0, 123])
 @pytest.mark.parametrize("if_generation_match", [0, 7])
 async def test_init_aaow_rejects_generation_with_if_generation_match(
-    if_generation_match,
+    generation, if_generation_match
 ):
-    # generation > 0 selects an existing object to append to, which carries no
-    # precondition, so the combination must not silently drop the precondition.
+    # A set generation selects an existing object (or, for 0, already means
+    # create-only), so the combination must not silently drop the precondition.
     with mock.patch(
         "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter", new_callable=mock.Mock
     ) as mock_writer_class:
@@ -160,7 +165,7 @@ async def test_init_aaow_rejects_generation_with_if_generation_match(
                 mock_grpc_client,
                 bucket_name,
                 object_name,
-                generation=123,
+                generation=generation,
                 if_generation_match=if_generation_match,
             )
         mock_writer_class.assert_not_called()
@@ -214,7 +219,7 @@ async def test_init_aaow_failed_precondition(if_generation_match, expected):
     mock_writer_instance = mock.AsyncMock()
     mock_writer_instance.open.side_effect = FailedPrecondition("exists")
     with (
-        mock.patch.object(zb_hns_utils, "Preconditions", _FakePreconditions),
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
         mock.patch(
             "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
             new_callable=mock.Mock,

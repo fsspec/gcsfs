@@ -173,14 +173,20 @@ class ZonalFile(GCSFile):
 
     def _ensure_aaow(self):
         if self.aaow is None:
-            self.aaow = asyn.sync(
-                self.gcsfs.loop,
-                self._init_aaow,
-                self.bucket,
-                self.key,
-                self.generation,
-                self.flush_interval_bytes,
-            )
+            try:
+                self.aaow = asyn.sync(
+                    self.gcsfs.loop,
+                    self._init_aaow,
+                    self.bucket,
+                    self.key,
+                    self.generation,
+                    self.flush_interval_bytes,
+                )
+            except Exception:
+                # Like fsspec's flush() when _initiate_upload() fails: mark the
+                # file closed so that close() does not open the writer again.
+                self.closed = True
+                raise
 
     def _fetch_range(
         self,
