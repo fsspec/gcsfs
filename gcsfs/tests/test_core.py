@@ -1745,9 +1745,7 @@ def test_write_if_generation_match(gcs):
     try:
         gcs.pipe_file(fn, b"v2", if_generation_match=gen)
     except NotImplementedError:
-        pytest.skip(
-            "zonal CAS needs a google-cloud-storage release with if_generation_match"
-        )
+        pytest.skip("zonal CAS needs a google-cloud-storage release with Preconditions")
     assert gcs.cat(fn) == b"v2"
     with pytest.raises(GenerationMismatchError):
         gcs.pipe_file(fn, b"v3", if_generation_match=gen)
