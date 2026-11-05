@@ -143,6 +143,8 @@ normalized override are published with every result row.
 | `_MACHINE_TYPE` | `c4-standard-192` | Compute Engine machine type used for the benchmark VM. |
 | `_REQUIREMENTS` | empty | Whitespace-separated pip requirement specs installed last. Use this to select the `gcsfs` build under test. |
 | `_SWEEP_AXES` | empty | Whitespace-separated configuration-axis names. Empty runs all configured cases; any selection still includes the implicit baseline case. |
+| `_MODE` | `nightly` | `nightly` runs `_GROUP` as configured. `ci` runs the fixed per-PR suite in `scripts/run-ci.sh` and ignores `_GROUP`, `_BUCKET_TYPE`, `_FILTER`, `_SWEEP_AXES`, `_MODEL_ID`, and `_REQUIREMENTS`. |
+| `_CI_MODEL_ID` | empty | `_MODE=ci` only: `gs://` copy of `gpt2` that `_VM_SERVICE_ACCOUNT` can read. Empty uses `gs://huggingface-model-weights/gpt2`. |
 
 `PROJECT_ID`, `LOCATION`, `BUILD_ID`, `BRANCH_NAME`, and `COMMIT_SHA` are Cloud
 Build built-ins rather than custom substitutions.
@@ -197,6 +199,34 @@ rows that still lack GCS read metrics after the wait and retry fail the run. A
 nonzero build therefore indicates execution, correctness, infrastructure,
 upload, or required-metric failure. A historical performance change by itself
 never fails the build.
+
+## Per-PR CI mode
+
+`_MODE=ci` runs a lightweight suite meant for pull requests: 11 small cases
+(data loading on Rapid, HNS, and Standard buckets; PyTorch Lightning and Ray
+checkpoint save/load on Rapid and Standard buckets) run concurrently on one VM.
+The case table lives in [`scripts/run-ci.sh`](scripts/run-ci.sh). Every case uses
+its group's `configs.ci.yaml`; checkpoint cases save and load `gpt2` (from
+`_CI_MODEL_ID`, default `gs://huggingface-model-weights/gpt2`) with `ddp` on 2
+ranks, twice each.
+
+The `gcsfs` under test is the checkout. `fsspec` (`master`) and
+`google-cloud-storage` (`main` of `googleapis/google-cloud-python`) are installed
+from their upstream default branches, after the framework requirements, so
+unreleased upstream changes are caught too. The commits and per-venv versions
+used are recorded in `__run__/ci/versions.txt`.
+
+Each case has a 540-second limit. On timeout the case's processes are frozen and
+then aborted one at a time, so each Python process writes its own thread-stack
+dump to `__run__/ci/<case>/run.log` without interleaving, and the build log
+prints that log from the timeout on. The build fails if any case fails or times
+out; throughput and read amplification are never gated.
+
+Case buckets are named `<_INFRA_PREFIX>-ci-<build>-<case>-<suffix>` (each case
+picks its own bucket type), and artifacts go to
+`gs://<_INFRA_PREFIX>-run-results/subsystembenchmarks-ci/`, a prefix BigQuery
+ingestion never reads. Still give the CI trigger its own `_INFRA_PREFIX` (for
+example `gcsfs-ci-ssb`) so its VMs and buckets stay separate from nightly runs.
 
 ## BigQuery ingestion
 
