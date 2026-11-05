@@ -4,6 +4,7 @@ Google Cloud Storage pythonic interface
 
 import asyncio
 import contextlib
+import ctypes
 import io
 import json
 import logging
@@ -482,6 +483,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self._use_client_cert = _use_client_cert()
         self._use_mtls_endpoint = self._use_client_cert and _use_mtls_endpoint()
         self._ssl_context_task = None
+        self._finalizers = []
+        _live_filesystems[id(self)] = self
 
         if check_connection:
             warnings.warn(
@@ -580,9 +583,11 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     return self._session
                 kwargs = {**kwargs, "connector": aiohttp.TCPConnector(ssl=ssl_context)}
             self._session = await get_client(**kwargs)
-            weakref.finalize(
+            finalizer = weakref.finalize(
                 self, self.close_session, self.loop, self._session, self.asynchronous
             )
+            if hasattr(self, "_finalizers"):
+                self._finalizers.append(finalizer)
         return self._session
 
     @property
@@ -2534,6 +2539,47 @@ mirror_gcs_methods(GCSFileSystem)
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
 _deferred_close_queue = None
 _deferred_close_lock = threading.Lock()
+_live_filesystems = weakref.WeakValueDictionary()
+_fork_retained_filesystems = []
+_child_leaked_filesystems = []
+
+
+def _before_fork():
+    # Hold strong references across fork() so fsspec's after_in_child handler
+    # (_reset_instances_lock -> cls._cache.clear()) does not drop parent-created
+    # filesystems to refcount 0 in the child before _after_fork_in_child runs.
+    _fork_retained_filesystems.extend(_live_filesystems.values())
+
+
+def _after_fork_in_parent():
+    _fork_retained_filesystems.clear()
+
+
+def _after_fork_in_child():
+    global _deferred_close_queue, _deferred_close_lock
+    _deferred_close_queue = None
+    _deferred_close_lock = threading.Lock()
+    while _fork_retained_filesystems:
+        fs = _fork_retained_filesystems.pop()
+        for finalizer in getattr(fs, "_finalizers", ()):
+            finalizer.detach()
+        # Prevent the child process (including Py_FinalizeEx on sys.exit) from
+        # deallocating inherited Cython gRPC objects (cygrpc.AioChannel /
+        # PollerCompletionQueue), whose __dealloc__ deadlocks or segfaults
+        # when the parent's gRPC poller thread does not exist in the child.
+        if hasattr(ctypes, "pythonapi"):
+            ctypes.pythonapi.Py_IncRef(ctypes.py_object(fs))
+        else:  # pragma: no cover
+            _child_leaked_filesystems.append(fs)
+    _live_filesystems.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_in_parent,
+        after_in_child=_after_fork_in_child,
+    )
 
 
 def _deferred_close_worker(work):
@@ -2584,7 +2630,12 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """Defer finalizer cleanup so it never waits on the I/O loop."""
         if getattr(self, "closed", True) or getattr(self, "_close_deferred", False):
             return
-        if sys.is_finalizing() or _deferred_close_queue is None:
+        fs_pid = getattr(getattr(self, "gcsfs", None), "_pid", None)
+        if (
+            sys.is_finalizing()
+            or _deferred_close_queue is None
+            or (isinstance(fs_pid, int) and fs_pid != os.getpid())
+        ):
             self.closed = True
             return
         self._close_deferred = True

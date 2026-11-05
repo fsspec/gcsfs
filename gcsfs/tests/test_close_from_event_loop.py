@@ -1,8 +1,11 @@
 import asyncio
 import gc
+import os
+import subprocess
 import sys
 import threading
 import time
+import weakref
 from unittest import mock
 
 import fsspec.asyn
@@ -324,3 +327,73 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(
                 thread2.join(timeout=5)
             if not loop2.is_running():
                 loop2.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_cached_filesystem_with_grpc_survives_fork_and_popen():
+    import gcsfs
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    async def init_clients(fs):
+        await fs._set_session()
+        await fs._get_control_plane_client()
+        await fs._get_grpc_client()
+
+    ExtendedGcsFileSystem.clear_instance_cache()
+
+    def make_cached_only_fs():
+        fs = gcsfs.GCSFileSystem(token="anon")
+        fsspec.asyn.sync(fs.loop, init_clients, fs)
+        return weakref.ref(fs), fs._session
+
+    fs_ref, session = make_cached_only_fs()
+    assert fs_ref() is not None
+
+    # 1. subprocess.Popen with preexec_fn triggers PyOS_AfterFork_Child in the
+    # forked child before execve, where fsspec's _reset_instances_lock clears
+    # cls._cache. This must not deallocate the parent's gRPC/aiohttp resources
+    # in the child or deadlock/segfault.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        preexec_fn=lambda: None,
+    )
+    assert proc.wait(timeout=5) == 0
+    assert not session.closed
+
+    # 2. A forked child running gc.collect() must not run parent finalizers or
+    # hang in gRPC deallocation.
+    pid = os.fork()
+    if pid == 0:
+        gc.collect()
+        os._exit(0)
+
+    deadline = time.monotonic() + 5.0
+    exited_pid, status = 0, 0
+    while time.monotonic() < deadline:
+        exited_pid, status = os.waitpid(pid, os.WNOHANG)
+        if exited_pid == pid:
+            break
+        time.sleep(0.02)
+    else:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        pytest.fail("Forked child hung during gc.collect()")
+
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    assert not session.closed
+
+    # 3. In the parent process, clearing the cache must still collect and
+    # finalize the filesystem instance normally.
+    ExtendedGcsFileSystem.clear_instance_cache()
+    gc.collect()
+    assert fs_ref() is None
+    assert wait_until(lambda: session.closed, timeout=5.0)
+
+
+def test_gcsfile_finalizer_skips_when_forked_from_parent_pid(fake_fs, monkeypatch):
+    fake_fs._pid = os.getpid() + 1
+    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="readahead")
+    with mock.patch.object(core, "_defer_close") as mock_defer:
+        f.__del__()
+        assert f.closed is True
+        mock_defer.assert_not_called()
