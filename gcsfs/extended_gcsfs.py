@@ -2163,7 +2163,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         finalize_on_close = self._resolve_finalize_on_close(
             await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
         )
+        callback = callback or NoOpCallback()
         with open(lpath, "rb") as f:
+            callback.set_size(os.fstat(f.fileno()).st_size)
             writer = await self._init_aaow(
                 bucket,
                 key,
@@ -2175,7 +2177,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # cache even if the write fails.
             try:
                 try:
-                    await writer.append_from_file(f, block_size=chunksize)
+                    while chunk := f.read(chunksize):
+                        await writer.append(chunk)
+                        callback.relative_update(len(chunk))
                 except BaseException:
                     # Leave a partially written object unfinalized.
                     await zb_hns_utils.close_aaow(writer, finalize_on_close=False)

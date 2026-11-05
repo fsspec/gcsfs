@@ -318,8 +318,10 @@ class ZonalFile(GCSFile):
         """
         if self.closed:
             raise ValueError("Flush on closed file.")
-        if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once.")
+        if self.forced:
+            if force:
+                raise ValueError("Force flush cannot be called more than once.")
+            return
         if self.finalized:
             logger.warning("File is already finalized. Ignoring flush call.")
             return

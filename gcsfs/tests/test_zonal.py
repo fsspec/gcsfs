@@ -931,14 +931,7 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
                 if_generation_match=None,
                 storage_class=zonal_write_mocks["storage_class"],
             )
-            zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
-            args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
-
-            file_obj_arg = args[0]
-            assert hasattr(file_obj_arg, "read"), "Argument must be a file-like object"
-            assert (
-                file_obj_arg.name == lpath
-            ), "File object must point to the correct path"
+            zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
 
             zonal_write_mocks["aaow"].close.assert_awaited_once_with(
                 finalize_on_close=True

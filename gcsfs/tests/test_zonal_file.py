@@ -16,6 +16,7 @@ from unittest import mock
 import fsspec.asyn
 import pytest
 from fsspec.asyn import FSTimeoutError
+from fsspec.callbacks import Callback
 from google.api_core.exceptions import NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
@@ -91,7 +92,7 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
         writer = mock.MagicMock()
-        writer.append_from_file = mock.AsyncMock()
+        writer.append = mock.AsyncMock()
 
         with tmpfile() as lpath:
             with open(lpath, "wb") as f:
@@ -126,6 +127,67 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
             "RAPID" if expected_rcu else None
         )
         mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=expected_rcu)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload, expected_chunks, expected_updates",
+        [
+            (
+                b"hello world",
+                [b"hell", b"o wo", b"rld"],
+                [(11, 0), (11, 4), (11, 8), (11, 11)],
+            ),
+            (b"", [], [(0, 0)]),
+        ],
+        ids=["chunked", "empty"],
+    )
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_put_file_updates_callback(
+        self, bucket_layout, payload, expected_chunks, expected_updates
+    ):
+        """_put_file sets the callback size and updates progress after each chunk."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append = mock.AsyncMock()
+        updates = []
+        cb = Callback(
+            hooks={"progress": lambda size, value, **_: updates.append((size, value))}
+        )
+
+        with tmpfile() as lpath:
+            with open(lpath, "wb") as f:
+                f.write(payload)
+
+            with (
+                mock.patch.object(
+                    fs,
+                    "_lookup_bucket_layout",
+                    new_callable=mock.AsyncMock,
+                    return_value=bucket_layout,
+                ),
+                mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                    new_callable=mock.AsyncMock,
+                    return_value=writer,
+                ),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                    new_callable=mock.AsyncMock,
+                ),
+                mock.patch.object(
+                    fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+                ),
+            ):
+                await fs._put_file(lpath, rpath, chunksize=4, callback=cb)
+
+        assert cb.size == len(payload)
+        assert cb.value == len(payload)
+        assert updates == expected_updates
+        assert [c.args[0] for c in writer.append.await_args_list] == expected_chunks
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("finalize_on_close", [None, True])
@@ -182,9 +244,7 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
         writer = mock.MagicMock()
-        writer.append_from_file = mock.AsyncMock(
-            side_effect=ConnectionError("append failed")
-        )
+        writer.append = mock.AsyncMock(side_effect=ConnectionError("append failed"))
 
         with tmpfile() as lpath:
             with open(lpath, "wb") as f:
@@ -503,6 +563,43 @@ def test_zonal_file_failed_writer_call_surfaces_its_error_without_finalizing(
                 f.commit()
 
     assert getattr(aaow, failing_call).await_count == 1
+    assert not any(
+        c.kwargs.get("finalize_on_close") for c in aaow.close.await_args_list
+    )
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_text_mode_failed_write_surfaces_its_error(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """TextIOWrapper.close() calls flush(force=False) before close(), which must not
+    call aaow.flush() on an aborted stream and mask the original write error."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for text-mode writer failures with mocks.")
+    aaow = zonal_write_mocks["aaow"]
+    append_calls = 0
+
+    async def closed_stream_flush():
+        if not aaow._is_stream_open:
+            raise ValueError("Stream is not open. Call open() before flush().")
+
+    async def fail_second_append(data):
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 2:
+            aaow._is_stream_open = False
+            raise NotFound("second append failed")
+
+    aaow.flush.side_effect = closed_stream_flush
+    aaow.append.side_effect = fail_second_append
+
+    with pytest.raises(NotFound, match="second append failed"):
+        with extended_gcsfs.open(file_path, "w") as f:
+            f.write("a" * 9000)
+            f.write("b" * 9000)
+
+    assert aaow.append.await_count == 2
+    aaow.flush.assert_not_awaited()
     assert not any(
         c.kwargs.get("finalize_on_close") for c in aaow.close.await_args_list
     )
@@ -913,7 +1010,6 @@ async def test_write_helpers_propagate_finalize_failure(
     path = f"{TEST_ZONAL_BUCKET}/k"
     writer = mock.MagicMock(bucket_name=TEST_ZONAL_BUCKET, object_name="k")
     writer.append = mock.AsyncMock()
-    writer.append_from_file = mock.AsyncMock()
     writer.close = mock.AsyncMock(side_effect=NotFound("finalize failed"))
     lpath = tmp_path / "data"
     lpath.write_bytes(b"data")
