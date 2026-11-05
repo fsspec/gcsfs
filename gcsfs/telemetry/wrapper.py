@@ -231,6 +231,12 @@ def bind_gcs_sync_methods(fs: Any) -> None:
     referenced must not be torn down there, because deallocating its inherited `grpc.aio` channel
     in the child hangs or crashes.
 
+    This only protects children that exec right away (CPython disables the cyclic GC in the child
+    around `preexec_fn`). A forked child that keeps running Python, such as a fork-mode
+    `multiprocessing` or PyTorch `DataLoader` worker, can still collect an inherited instance once
+    ordinary allocations trigger the cyclic GC, and hang the same way. That was also the case
+    before the wrappers moved to the class; use the "spawn" or "forkserver" start method there.
+
     Methods a subclass overrides with a plain sync function are left alone.
     """
     cls = type(fs)
