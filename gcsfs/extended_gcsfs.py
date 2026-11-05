@@ -1140,15 +1140,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return bucket_layout.is_hierarchical
 
-    async def _wait_for_folder_rename(self, operation, path1, path2, request_id):
+    async def _wait_for_folder_rename(
+        self, operation, path1, path2, request_id, timeout
+    ):
         """Waits for a RenameFolder operation with poll_lro; raises TimeoutError on timeout."""
         try:
-            await poll_lro(operation, timeout=_HNS_RENAME_FOLDER_LRO_TIMEOUT)
+            await poll_lro(operation, timeout=timeout)
         except asyncio.TimeoutError as e:
             op_name = operation.operation.name or request_id
             raise TimeoutError(
                 f"HNS folder rename from '{path1}' to '{path2}' (op: {op_name}) "
-                f"did not finish within {_HNS_RENAME_FOLDER_LRO_TIMEOUT:g}s. The rename "
+                f"did not finish within {timeout:g}s. The rename "
                 "may still complete on the server; check the destination before "
                 "retrying."
             ) from e
@@ -1159,7 +1161,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         optimized, atomic implementation for renaming folders and moving files
         in HNS-enabled buckets. Falls back to the parent's object-level
         copy-and-delete implementation for non-HNS buckets.
+
+        Pass ``poll_timeout`` (seconds, default 300, ``None`` for no
+        limit) to change how long an HNS folder rename waits before raising
+        ``TimeoutError``. It has no effect when ``fast_lro_polling`` is False.
         """
+        # Strip the folder-only option before any fallback delegates to object copy.
+        poll_timeout = kwargs.pop("poll_timeout", _HNS_RENAME_FOLDER_LRO_TIMEOUT)
+        if poll_timeout is not None and (
+            isinstance(poll_timeout, bool) or not (0 < poll_timeout < float("inf"))
+        ):
+            raise ValueError(
+                "poll_timeout must be a finite positive number of seconds, "
+                f"or None for no limit; got {poll_timeout!r}"
+            )
+
         if path1 == path2:
             logger.debug(
                 "%s mv: The paths are the same, so no files/directories were moved.",
@@ -1216,7 +1232,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 try:
                     if self.fast_lro_polling:
                         await self._wait_for_folder_rename(
-                            operation, path1, path2, request.request_id
+                            operation,
+                            path1,
+                            path2,
+                            request.request_id,
+                            poll_timeout,
                         )
                     else:
                         await unwrap_operation_result(operation)

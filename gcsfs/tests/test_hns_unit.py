@@ -697,7 +697,6 @@ class TestExtendedGcsFileSystemMv:
         path2 = f"{TEST_HNS_BUCKET}/dst_timeout"
         name = "projects/_/buckets/b/operations/op-timeout"
         monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.05)
-        monkeypatch.setattr("gcsfs.extended_gcsfs._HNS_RENAME_FOLDER_LRO_TIMEOUT", 0.2)
         lro = fake_lro.pending(name=name)
 
         with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
@@ -708,7 +707,7 @@ class TestExtendedGcsFileSystemMv:
             gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
 
             with pytest.raises(TimeoutError) as exc_info:
-                gcsfs.mv(path1, path2)
+                gcsfs.mv(path1, path2, poll_timeout=0.2)
 
             mocks["super_mv"].assert_not_called()
             assert path1 not in gcsfs.dircache
@@ -1031,6 +1030,63 @@ class TestExtendedGcsFileSystemMv:
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
 
         assert fs.fast_lro_polling is False
+
+    @pytest.mark.parametrize(
+        "poll_timeout, expected_timeout",
+        [(600, 600), (None, None)],
+        ids=["custom_limit", "none_means_no_limit"],
+    )
+    def test_hns_rename_passes_poll_timeout_to_poll_lro(
+        self, gcs_hns, gcs_hns_mocks, poll_timeout, expected_timeout
+    ):
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch(
+                "gcsfs.extended_gcsfs.poll_lro", new_callable=mock.AsyncMock
+            ) as mock_poll_lro,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            gcsfs.mv(path1, path2, poll_timeout=poll_timeout)
+
+            operation = mocks["control_client"].rename_folder.return_value
+            mock_poll_lro.assert_awaited_once_with(operation, timeout=expected_timeout)
+
+    @pytest.mark.parametrize(
+        "bad_timeout",
+        [0, -1, float("inf"), float("nan"), True],
+        ids=["zero", "negative", "inf", "nan", "bool"],
+    )
+    def test_poll_timeout_rejects_non_finite_non_positive_or_bool(
+        self, gcs_hns, gcs_hns_mocks, bad_timeout
+    ):
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            with pytest.raises(ValueError, match="poll_timeout"):
+                gcsfs.mv(path1, path2, poll_timeout=bad_timeout)
+
+            mocks["control_client"].rename_folder.assert_not_called()
+            mocks["super_mv"].assert_not_called()
+
+    def test_poll_timeout_is_not_passed_to_object_level_mv(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """On a flat bucket mv falls back to object copies, which must not
+        receive the folder rename option."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
+            gcsfs.mv(path1, path2, poll_timeout=600)
+
+            mocks["super_mv"].assert_called_once_with(path1, path2)
 
     def test_hns_rename_with_fast_lro_polling_off_uses_operation_result(
         self, gcs_hns, gcs_hns_mocks

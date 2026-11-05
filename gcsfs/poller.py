@@ -49,10 +49,11 @@ def _is_transient_poll_exception(exc: Exception) -> bool:
 async def _poll_until(
     check_fn: Callable[[], Awaitable[Tuple[bool, T]]],
     *,
-    timeout: float,
+    timeout: Optional[float],
     description: Optional[str] = None,
 ) -> T:
     """Sleeps, then calls ``check_fn``, until it reports done or ``timeout`` passes."""
+    budget = float("inf") if timeout is None else timeout
     start_time = _monotonic()
     op_desc = f" for '{description}'" if description else ""
     logger.debug("Starting polling%s...", op_desc)
@@ -62,7 +63,7 @@ async def _poll_until(
     last_exc: Optional[Exception] = None
     while True:
         elapsed = _monotonic() - start_time
-        remaining = timeout - elapsed
+        remaining = budget - elapsed
         if remaining <= 0:
             checks = attempts - 1
             checks_desc = f"{checks} status check{'' if checks == 1 else 's'}"
@@ -180,26 +181,19 @@ async def _wait_keeping_cancel(aw: Awaitable[T], timeout: float) -> T:
     return task.result()
 
 
-async def poll_lro(operation: AsyncOperation, *, timeout: float) -> Any:
+async def poll_lro(operation: AsyncOperation, *, timeout: Optional[float]) -> Any:
     """Waits for a GAPIC ``AsyncOperation`` to finish and returns its result.
 
     Args:
         operation: The operation to wait for.
-        timeout: Overall limit in seconds; use ``math.inf`` for no limit.
+        timeout: Overall limit in seconds, or ``None`` for no limit.
 
     Raises:
-        ValueError: If ``timeout`` is not a positive number.
         asyncio.TimeoutError: If ``timeout`` passes before the operation ends.
         asyncio.CancelledError: If cancelled; ``operation.cancel()`` is then
             sent in the background.
         google.api_core.exceptions.GoogleAPICallError: If the operation failed.
     """
-    if not timeout > 0:
-        raise ValueError(
-            "timeout must be a positive number of seconds, or math.inf for no "
-            f"limit; got {timeout!r}"
-        )
-
     op_id = operation.operation.name or "LRO"
 
     if operation.operation.done:
@@ -209,10 +203,11 @@ async def poll_lro(operation: AsyncOperation, *, timeout: float) -> Any:
         )
         return await unwrap_operation_result(operation)
 
+    budget = float("inf") if timeout is None else timeout
     start_time = _monotonic()
 
     async def lro_complete() -> Tuple[bool, None]:
-        remaining_budget = max(0.0, timeout - (_monotonic() - start_time))
+        remaining_budget = max(0.0, budget - (_monotonic() - start_time))
         rpc_timeout = min(
             _PER_POLL_RPC_TIMEOUT, max(_MIN_PER_POLL_RPC_TIMEOUT, remaining_budget)
         )

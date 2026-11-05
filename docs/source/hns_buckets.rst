@@ -90,9 +90,21 @@ Before routing directory-level or file-level operations, the ``ExtendedGcsFileSy
 Waiting for Folder Renames
 --------------------------
 
-A folder rename runs as a long-running operation on the server. ``ExtendedGcsFileSystem`` checks its status every 0.2 s at first, then waits about 20% of the elapsed time between checks (at most 30 s, with random jitter), and backs off when status checks keep failing with transient errors. If the rename has not finished after 300 s, ``mv`` raises ``TimeoutError``; the rename may still complete on the server, so check the destination before retrying.
+A folder rename runs as a long-running operation on the server. ``ExtendedGcsFileSystem`` checks its status every 0.2 s at first, then waits about 20% of the elapsed time between checks (at most 30 s, with random jitter), and backs off when status checks keep failing with transient errors. If the rename has not finished after 300 s, ``mv`` raises ``TimeoutError``; the rename may still complete on the server, so check the destination before retrying. To change the limit, pass ``poll_timeout`` to ``mv`` in seconds, or ``None`` for no limit.
 
-To wait with ``google-api-core``'s ``operation.result()`` instead, pass ``fast_lro_polling=False``, or set it through the ``fsspec`` configuration. In this mode ``mv`` has no time limit, status checks follow ``google-api-core``'s retry rules, and cancelling ``mv`` does not cancel the rename on the server.
+.. code-block:: python
+
+    import fsspec
+
+    fs = fsspec.filesystem("gcs")
+
+    # Wait up to 10 minutes
+    fs.mv("my-bucket/src_dir", "my-bucket/dst_dir", poll_timeout=600)
+
+    # No limit
+    fs.mv("my-bucket/src_dir", "my-bucket/dst_dir", poll_timeout=None)
+
+To wait with ``google-api-core``'s ``operation.result()`` instead, pass ``fast_lro_polling=False``, or set it through the ``fsspec`` configuration. In this mode ``mv`` has no time limit, status checks follow ``google-api-core``'s retry rules, and cancelling ``mv`` does not cancel the rename on the server. ``poll_timeout`` has no effect in this mode.
 
 .. code-block:: python
 

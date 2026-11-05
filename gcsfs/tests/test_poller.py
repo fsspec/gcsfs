@@ -1,6 +1,5 @@
 import asyncio
 import gc
-import math
 from types import SimpleNamespace
 from unittest import mock
 
@@ -61,7 +60,7 @@ class TestPollRunners:
         folder = storage_control_v2.Folder(name="projects/_/buckets/b/folders/dst/")
         lro = fake_lro.succeeded(folder, name="projects/_/buckets/b/operations/op-fast")
 
-        res = await poll_lro(lro.op, timeout=math.inf)
+        res = await poll_lro(lro.op, timeout=None)
 
         assert res == folder
         assert fake_clock.sleeps == []
@@ -97,9 +96,9 @@ class TestPollRunners:
         monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 1e3)
         lro = fake_lro.succeeded(after=3)
 
-        await poll_lro(lro.op, timeout=math.inf)
+        await poll_lro(lro.op, timeout=None)
 
-        # math.inf never clamps a sleep.
+        # None never clamps a sleep.
         assert fake_clock.sleeps == [1e3] * 3
 
     @pytest.mark.asyncio
@@ -118,7 +117,7 @@ class TestPollRunners:
             ]
         )
 
-        res = await _poll_until(check, timeout=math.inf, description="op-flaky")
+        res = await _poll_until(check, timeout=None, description="op-flaky")
 
         assert res == "recovered"
         assert check.await_count == 6
@@ -135,7 +134,7 @@ class TestPollRunners:
             side_effect=[unavailable] * 3 + [(False, None), unavailable, (True, "ok")]
         )
 
-        res = await _poll_until(check, timeout=math.inf)
+        res = await _poll_until(check, timeout=None)
 
         assert res == "ok"
         # Doubles per consecutive error; the (False, None) check resets it.
@@ -151,7 +150,7 @@ class TestPollRunners:
             side_effect=[api_exceptions.TooManyRequests("429")] * 12 + [(True, "ok")]
         )
 
-        await _poll_until(check, timeout=math.inf)
+        await _poll_until(check, timeout=None)
 
         # Even at the top of the jitter range the wait stops at the 30 s cap.
         assert fake_clock.sleeps[-1] == 30.0
@@ -182,7 +181,7 @@ class TestPollRunners:
         )
 
         with pytest.raises(api_exceptions.PermissionDenied):
-            await _poll_until(check, timeout=math.inf)
+            await _poll_until(check, timeout=None)
 
         assert check.await_count == 2
         assert len(fake_clock.sleeps) == 2
@@ -196,7 +195,7 @@ class TestPollRunners:
             side_effect=[api_exceptions.Unknown("transport reset"), (True, "ok")]
         )
 
-        res = await _poll_until(check, timeout=math.inf)
+        res = await _poll_until(check, timeout=None)
 
         assert res == "ok"
         assert check.await_count == 2
@@ -209,7 +208,7 @@ class TestPollRunners:
         check = mock.AsyncMock(side_effect=api_exceptions.NotFound("no such op"))
 
         with pytest.raises(api_exceptions.NotFound, match="no such op"):
-            await _poll_until(check, timeout=math.inf)
+            await _poll_until(check, timeout=None)
 
         check.assert_awaited_once()
         assert len(fake_clock.sleeps) == 1
@@ -290,21 +289,6 @@ class TestPollRunners:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "bad_timeout", [0, -1.0, math.nan], ids=["zero", "negative", "nan"]
-    )
-    async def test_poll_lro_rejects_invalid_timeout_before_any_rpc(
-        self, fake_lro, fake_clock, bad_timeout
-    ):
-        lro = fake_lro.pending()
-
-        with pytest.raises(ValueError, match="timeout must be a positive number"):
-            await poll_lro(lro.op, timeout=bad_timeout)
-
-        lro.get_operation.assert_not_awaited()
-        assert fake_clock.sleeps == []
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
         "code, expected_cls",
         [
             (code_pb2.ALREADY_EXISTS, api_exceptions.AlreadyExists),
@@ -357,7 +341,7 @@ class TestPollRunners:
 
         with caplog.at_level("WARNING", logger="gcsfs"):
             with pytest.raises(asyncio.CancelledError):
-                await poll_lro(lro.op, timeout=math.inf)
+                await poll_lro(lro.op, timeout=None)
 
         await asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True)
         lro.cancel_operation.assert_awaited_once()
@@ -381,7 +365,7 @@ class TestPollRunners:
         lro.cancel_operation.side_effect = hung_cancel
 
         with pytest.raises(asyncio.CancelledError):
-            await poll_lro(lro.op, timeout=math.inf)
+            await poll_lro(lro.op, timeout=None)
 
         await asyncio.wait_for(
             asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True),
@@ -476,7 +460,7 @@ class TestPollRunners:
         lro.get_operation.side_effect = first_check_hangs
 
         # With no overall limit, a hung check is still cut off per poll.
-        await poll_lro(lro.op, timeout=math.inf)
+        await poll_lro(lro.op, timeout=None)
 
         await asyncio.wait_for(hung_check_cancelled.wait(), timeout=5.0)
         assert lro.get_operation.await_count == 2
@@ -530,7 +514,7 @@ class TestPollLatencyBudget:
         async def check():
             return fake_clock.now >= server_seconds, None
 
-        await _poll_until(check, timeout=math.inf)
+        await _poll_until(check, timeout=None)
 
         lag = fake_clock.now - server_seconds
         assert lag <= min(max(0.25 * server_seconds, 0.25), 30.0)
