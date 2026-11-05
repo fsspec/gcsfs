@@ -65,6 +65,8 @@ jobs:
           -n auto \
           gcsfs/
       - name: Run Benchmark Infrastructure Unit Tests
+        # The microbenchmark requirements pin numpy 2.4.4, which needs Python >= 3.11.
+        if: matrix.python-version != '3.10'
         run: |
           pip install -r gcsfs/tests/perf/microbenchmarks/requirements.txt
           pytest gcsfs/tests/perf/microbenchmarks --run-benchmarks-infra
