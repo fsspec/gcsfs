@@ -388,12 +388,3 @@ def test_cached_filesystem_with_grpc_survives_fork_and_popen():
     gc.collect()
     assert fs_ref() is None
     assert wait_until(lambda: session.closed, timeout=5.0)
-
-
-def test_gcsfile_finalizer_skips_when_forked_from_parent_pid(fake_fs, monkeypatch):
-    fake_fs._pid = os.getpid() + 1
-    f = core.GCSFile(fake_fs, "gs://b/test-key", mode="rb", cache_type="readahead")
-    with mock.patch.object(core, "_defer_close") as mock_defer:
-        f.__del__()
-        assert f.closed is True
-        mock_defer.assert_not_called()

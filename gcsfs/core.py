@@ -4,7 +4,6 @@ Google Cloud Storage pythonic interface
 
 import asyncio
 import contextlib
-import ctypes
 import io
 import json
 import logging
@@ -484,7 +483,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self._use_mtls_endpoint = self._use_client_cert and _use_mtls_endpoint()
         self._ssl_context_task = None
         self._finalizers = []
-        _live_filesystems[id(self)] = self
+        _register_live_filesystem(self)
 
         if check_connection:
             warnings.warn(
@@ -2539,16 +2538,37 @@ mirror_gcs_methods(GCSFileSystem)
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
 _deferred_close_queue = None
 _deferred_close_lock = threading.Lock()
-_live_filesystems = weakref.WeakValueDictionary()
+
+# Fork safety for filesystem instances.
+#
+# fsspec's after_in_child hook (``_reset_instances_lock``) clears
+# ``cls._cache`` in a forked child. If the cache held the last reference to a
+# filesystem, the instance is torn down in the child, before any ``execve``:
+# its finalizers act on the parent's event loop and sockets (which the child
+# shares), and the Cython teardown of an inherited ``grpc.aio`` channel waits
+# for a gRPC poller thread that does not exist in the child, so the child
+# hangs or crashes. ``subprocess.Popen(..., preexec_fn=...)`` (e.g. in
+# ``ray.init()``) and ``multiprocessing`` fork workers both hit this.
+#
+# Inherited instances cannot be used in the child anyway (``fs.loop`` raises),
+# so the child keeps them alive and detaches their finalizers instead.
+_live_filesystems = {}  # id(fs) -> weakref.ref(fs)
 _fork_retained_filesystems = []
-_child_leaked_filesystems = []
+_inherited_filesystems = []
+
+
+def _register_live_filesystem(fs):
+    key = id(fs)
+    _live_filesystems[key] = weakref.ref(
+        fs, lambda _, key=key: _live_filesystems.pop(key, None)
+    )
 
 
 def _before_fork():
-    # Hold strong references across fork() so fsspec's after_in_child handler
-    # (_reset_instances_lock -> cls._cache.clear()) does not drop parent-created
-    # filesystems to refcount 0 in the child before _after_fork_in_child runs.
-    _fork_retained_filesystems.extend(_live_filesystems.values())
+    # fsspec's after_in_child hook runs before ours, so take the strong
+    # references here, before fork().
+    refs = list(_live_filesystems.values())
+    _fork_retained_filesystems.extend(fs for fs in (r() for r in refs) if fs)
 
 
 def _after_fork_in_parent():
@@ -2556,21 +2576,11 @@ def _after_fork_in_parent():
 
 
 def _after_fork_in_child():
-    global _deferred_close_queue, _deferred_close_lock
-    _deferred_close_queue = None
-    _deferred_close_lock = threading.Lock()
-    while _fork_retained_filesystems:
-        fs = _fork_retained_filesystems.pop()
+    for fs in _fork_retained_filesystems:
         for finalizer in getattr(fs, "_finalizers", ()):
             finalizer.detach()
-        # Prevent the child process (including Py_FinalizeEx on sys.exit) from
-        # deallocating inherited Cython gRPC objects (cygrpc.AioChannel /
-        # PollerCompletionQueue), whose __dealloc__ deadlocks or segfaults
-        # when the parent's gRPC poller thread does not exist in the child.
-        if hasattr(ctypes, "pythonapi"):
-            ctypes.pythonapi.Py_IncRef(ctypes.py_object(fs))
-        else:  # pragma: no cover
-            _child_leaked_filesystems.append(fs)
+    _inherited_filesystems.extend(_fork_retained_filesystems)
+    _fork_retained_filesystems.clear()
     _live_filesystems.clear()
 
 
@@ -2630,12 +2640,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """Defer finalizer cleanup so it never waits on the I/O loop."""
         if getattr(self, "closed", True) or getattr(self, "_close_deferred", False):
             return
-        fs_pid = getattr(getattr(self, "gcsfs", None), "_pid", None)
-        if (
-            sys.is_finalizing()
-            or _deferred_close_queue is None
-            or (isinstance(fs_pid, int) and fs_pid != os.getpid())
-        ):
+        if sys.is_finalizing() or _deferred_close_queue is None:
             self.closed = True
             return
         self._close_deferred = True
