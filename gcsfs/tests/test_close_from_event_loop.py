@@ -331,7 +331,6 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_cached_filesystem_with_grpc_survives_fork_and_popen():
-    import gcsfs
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
     async def init_clients(fs):
@@ -342,7 +341,10 @@ def test_cached_filesystem_with_grpc_survives_fork_and_popen():
     ExtendedGcsFileSystem.clear_instance_cache()
 
     def make_cached_only_fs():
-        fs = gcsfs.GCSFileSystem(token="anon")
+        # Use ExtendedGcsFileSystem directly: gcsfs.GCSFileSystem is the base
+        # class (without gRPC clients) when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT
+        # is off.
+        fs = ExtendedGcsFileSystem(token="anon")
         fsspec.asyn.sync(fs.loop, init_clients, fs)
         return weakref.ref(fs), fs._session
 
@@ -388,3 +390,38 @@ def test_cached_filesystem_with_grpc_survives_fork_and_popen():
     gc.collect()
     assert fs_ref() is None
     assert wait_until(lambda: session.closed, timeout=5.0)
+
+
+def test_before_fork_snapshots_each_cache_once_and_retries_on_mutation():
+    class FlakyCache(dict):
+        """Raises once on values() as if mutated during iteration."""
+
+        failed = False
+
+        def values(self):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("dictionary changed size during iteration")
+            return super().values()
+
+    sentinel = object()
+    shared_cache = FlakyCache(token=sentinel)
+
+    class A(core.GCSFileSystem):
+        pass
+
+    class B(A):
+        pass
+
+    # fsspec's metaclass gives each class its own cache; force them to share
+    # one after class creation to exercise deduplication.
+    A._cache = B._cache = shared_cache
+
+    try:
+        core._before_fork()
+        assert [x for x in core._fork_pending if x is sentinel] == [sentinel]
+    finally:
+        core._after_fork_in_parent()
+        del A, B
+        gc.collect()
+    assert core._fork_pending == []

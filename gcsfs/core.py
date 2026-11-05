@@ -2545,9 +2545,23 @@ _fork_inherited = []
 
 def _before_fork():
     classes = [GCSFileSystem]
+    seen_caches = set()
     for cls in classes:
         classes.extend(cls.__subclasses__())
-        _fork_pending.extend(list(cls._cache.values()))
+        # A class may be reached more than once (e.g. diamond inheritance) and
+        # subclasses may share a cache object, so snapshot each cache only once.
+        cache = getattr(cls, "_cache", None)
+        if cache is None or id(cache) in seen_caches:
+            continue
+        seen_caches.add(id(cache))
+        # Another thread (free-threaded builds) or GC (fsspec's
+        # ``weakref_instance_cache`` option) may mutate the cache mid-snapshot.
+        for _ in range(3):
+            try:
+                _fork_pending.extend(list(cache.values()))
+                break
+            except RuntimeError:
+                continue
 
 
 def _after_fork_in_parent():
