@@ -26,4 +26,8 @@ dependencies:
   - requests
   - ujson
   - pip:
-      - git+https://github.com/fsspec/filesystem_spec
+      # fsspec master requires Python >= 3.11, so Python 3.10 tests against
+      # fsspec 2026.9.0, the latest release that supports it. Drop the 3.10
+      # pin (and the 3.10 CI job) once gcsfs requires a newer fsspec.
+      - fsspec @ git+https://github.com/fsspec/filesystem_spec ; python_version >= "3.11"
+      - fsspec==2026.9.0 ; python_version < "3.11"
