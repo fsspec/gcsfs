@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import inspect
+import types
 from typing import Any, Callable, Dict, Optional
 
 from gcsfs.telemetry import manager
@@ -180,6 +181,7 @@ def mirror_gcs_methods(obj: type) -> None:
     # Bind the wrappers for valid methods
     from fsspec.spec import AbstractFileSystem
 
+    sync_method_names = set(getattr(obj, "_gcs_sync_method_names", ()))
     for method in method_names:
         smethod = method[
             1:
@@ -212,6 +214,30 @@ def mirror_gcs_methods(obj: type) -> None:
                         getattr(AbstractFileSystem, smethod, None), "__doc__", ""
                     )
                 setattr(obj, smethod, mth)
+                sync_method_names.add(smethod)
+    obj._gcs_sync_method_names = frozenset(sync_method_names)
+
+
+def bind_gcs_sync_methods(fs: Any) -> None:
+    """
+    Bind the class-level telemetry sync wrappers set by `mirror_gcs_methods` onto `fs`.
+
+    This matches `fsspec.asyn.mirror_sync_methods`, which fsspec runs for every async filesystem
+    instance (and which bound GCSFileSystem's sync methods before they moved to the class). The
+    bound methods stored in `fs.__dict__` reference `fs`, so the instance is only freed by the
+    cyclic garbage collector rather than as soon as its last outside reference is dropped. This
+    matters after `fork()`: fsspec clears `cls._cache` in the child (e.g. in
+    `subprocess.Popen(..., preexec_fn=...)`, used by `ray.init()`), and an instance only the cache
+    referenced must not be torn down there, because deallocating its inherited `grpc.aio` channel
+    in the child hangs or crashes.
+
+    Methods a subclass overrides with a plain sync function are left alone.
+    """
+    cls = type(fs)
+    for name in getattr(cls, "_gcs_sync_method_names", ()):
+        method = getattr(cls, name, None)
+        if getattr(method, "_is_gcs_sync_wrapped", False):
+            setattr(fs, name, types.MethodType(method, fs))
 
 
 def _setup_file_telemetry(file_obj) -> Optional[Any]:

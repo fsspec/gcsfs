@@ -46,7 +46,12 @@ from .retry import (
 )
 from .telemetry.context import Dimension
 from .telemetry.manager import default_usage_tracker
-from .telemetry.wrapper import _run_sync, mirror_gcs_methods, wrap_file_methods
+from .telemetry.wrapper import (
+    _run_sync,
+    bind_gcs_sync_methods,
+    mirror_gcs_methods,
+    wrap_file_methods,
+)
 from .utils import is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
@@ -492,6 +497,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
+        bind_gcs_sync_methods(self)
 
     @property
     def _location(self):
@@ -2531,55 +2537,6 @@ def _get_prefetcher_and_cache_config(cache_type=None):
 
 
 mirror_gcs_methods(GCSFileSystem)
-
-# In a forked child, fsspec's after_in_child hook clears ``cls._cache``. If the
-# cache held the last reference to a filesystem, the instance is torn down in
-# the child before any ``execve``: the Cython teardown of an inherited
-# ``grpc.aio`` channel waits for a gRPC poller thread that does not exist in
-# the child, so the child hangs or crashes (e.g. ``ray.init()``, which forks
-# via ``subprocess.Popen(..., preexec_fn=...)``). Inherited instances cannot be
-# used in the child anyway, so keep them alive there instead.
-_fork_pending = []
-_fork_inherited = []
-
-
-def _before_fork():
-    classes = [GCSFileSystem]
-    seen_caches = set()
-    for cls in classes:
-        classes.extend(cls.__subclasses__())
-        # A class may be reached more than once (e.g. diamond inheritance) and
-        # subclasses may share a cache object, so snapshot each cache only once.
-        cache = getattr(cls, "_cache", None)
-        if cache is None or id(cache) in seen_caches:
-            continue
-        seen_caches.add(id(cache))
-        # Another thread (free-threaded builds) or GC (fsspec's
-        # ``weakref_instance_cache`` option) may mutate the cache mid-snapshot.
-        for _ in range(3):
-            try:
-                _fork_pending.extend(list(cache.values()))
-                break
-            except RuntimeError:
-                continue
-
-
-def _after_fork_in_parent():
-    _fork_pending.clear()
-
-
-def _after_fork_in_child():
-    _fork_inherited.extend(_fork_pending)
-    _fork_pending.clear()
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(
-        before=_before_fork,
-        after_in_parent=_after_fork_in_parent,
-        after_in_child=_after_fork_in_child,
-    )
-
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
 _deferred_close_queue = None
 _deferred_close_lock = threading.Lock()

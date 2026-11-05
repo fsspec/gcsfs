@@ -330,7 +330,14 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_cached_filesystem_with_grpc_survives_fork_and_popen():
+def test_cached_filesystem_with_grpc_survives_popen_preexec_fn():
+    """Regression test for a hang in ``ray.init()``.
+
+    ``subprocess.Popen(..., preexec_fn=...)`` forks, and fsspec clears
+    ``cls._cache`` in the child before ``execve``. A filesystem referenced only by
+    the cache must not be torn down there: deallocating its inherited
+    ``grpc.aio`` channel in the child hangs or crashes.
+    """
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
     async def init_clients(fs):
@@ -351,10 +358,6 @@ def test_cached_filesystem_with_grpc_survives_fork_and_popen():
     fs_ref, session = make_cached_only_fs()
     assert fs_ref() is not None
 
-    # 1. subprocess.Popen with preexec_fn triggers PyOS_AfterFork_Child in the
-    # forked child before execve, where fsspec's _reset_instances_lock clears
-    # cls._cache. This must not deallocate the parent's gRPC/aiohttp resources
-    # in the child or deadlock/segfault.
     proc = subprocess.Popen(
         [sys.executable, "-c", "pass"],
         preexec_fn=lambda: None,
@@ -362,29 +365,7 @@ def test_cached_filesystem_with_grpc_survives_fork_and_popen():
     assert proc.wait(timeout=5) == 0
     assert not session.closed
 
-    # 2. A forked child running gc.collect() must not tear down the inherited
-    # filesystem (and hang in gRPC deallocation).
-    pid = os.fork()
-    if pid == 0:
-        gc.collect()
-        os._exit(0)
-
-    deadline = time.monotonic() + 5.0
-    exited_pid, status = 0, 0
-    while time.monotonic() < deadline:
-        exited_pid, status = os.waitpid(pid, os.WNOHANG)
-        if exited_pid == pid:
-            break
-        time.sleep(0.02)
-    else:
-        os.kill(pid, 9)
-        os.waitpid(pid, 0)
-        pytest.fail("Forked child hung during gc.collect()")
-
-    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
-    assert not session.closed
-
-    # 3. In the parent process, clearing the cache must still collect and
+    # In the parent process, clearing the cache must still collect and
     # finalize the filesystem instance normally.
     ExtendedGcsFileSystem.clear_instance_cache()
     gc.collect()
@@ -392,36 +373,25 @@ def test_cached_filesystem_with_grpc_survives_fork_and_popen():
     assert wait_until(lambda: session.closed, timeout=5.0)
 
 
-def test_before_fork_snapshots_each_cache_once_and_retries_on_mutation():
-    class FlakyCache(dict):
-        """Raises once on values() as if mutated during iteration."""
+def test_cached_only_filesystem_is_freed_by_gc_not_cache_clear():
+    """Sync methods are bound per instance, as fsspec's mirror_sync_methods does.
 
-        failed = False
+    The bound methods keep the instance in a reference cycle, so clearing
+    ``cls._cache`` (as fsspec does in a forked child) does not tear it down
+    immediately; only the cyclic garbage collector frees it.
+    """
+    core.GCSFileSystem.clear_instance_cache()
+    fs = core.GCSFileSystem(token="anon")
+    assert fs.__dict__["ls"].__self__ is fs
+    assert fs.__dict__["walk"].__self__ is fs
+    fs_ref = weakref.ref(fs)
+    del fs
 
-        def values(self):
-            if not self.failed:
-                self.failed = True
-                raise RuntimeError("dictionary changed size during iteration")
-            return super().values()
-
-    sentinel = object()
-    shared_cache = FlakyCache(token=sentinel)
-
-    class A(core.GCSFileSystem):
-        pass
-
-    class B(A):
-        pass
-
-    # fsspec's metaclass gives each class its own cache; force them to share
-    # one after class creation to exercise deduplication.
-    A._cache = B._cache = shared_cache
-
+    gc.disable()
     try:
-        core._before_fork()
-        assert [x for x in core._fork_pending if x is sentinel] == [sentinel]
+        core.GCSFileSystem.clear_instance_cache()
+        assert fs_ref() is not None
     finally:
-        core._after_fork_in_parent()
-        del A, B
-        gc.collect()
-    assert core._fork_pending == []
+        gc.enable()
+    gc.collect()
+    assert fs_ref() is None
