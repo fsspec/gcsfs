@@ -1,8 +1,11 @@
 import asyncio
 import gc
+import os
+import subprocess
 import sys
 import threading
 import time
+import weakref
 from unittest import mock
 
 import fsspec.asyn
@@ -324,3 +327,71 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(
                 thread2.join(timeout=5)
             if not loop2.is_running():
                 loop2.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_cached_filesystem_with_grpc_survives_popen_preexec_fn():
+    """Regression test for a hang in ``ray.init()``.
+
+    ``subprocess.Popen(..., preexec_fn=...)`` forks, and fsspec clears
+    ``cls._cache`` in the child before ``execve``. A filesystem referenced only by
+    the cache must not be torn down there: deallocating its inherited
+    ``grpc.aio`` channel in the child hangs or crashes.
+    """
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    async def init_clients(fs):
+        await fs._set_session()
+        await fs._get_control_plane_client()
+        await fs._get_grpc_client()
+
+    ExtendedGcsFileSystem.clear_instance_cache()
+
+    def make_cached_only_fs():
+        # Use ExtendedGcsFileSystem directly: gcsfs.GCSFileSystem is the base
+        # class (without gRPC clients) when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT
+        # is off.
+        fs = ExtendedGcsFileSystem(token="anon")
+        fsspec.asyn.sync(fs.loop, init_clients, fs)
+        return weakref.ref(fs), fs._session
+
+    fs_ref, session = make_cached_only_fs()
+    assert fs_ref() is not None
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        preexec_fn=lambda: None,
+    )
+    assert proc.wait(timeout=5) == 0
+    assert not session.closed
+
+    # In the parent process, clearing the cache must still collect and
+    # finalize the filesystem instance normally.
+    ExtendedGcsFileSystem.clear_instance_cache()
+    gc.collect()
+    assert fs_ref() is None
+    assert wait_until(lambda: session.closed, timeout=5.0)
+
+
+def test_cached_only_filesystem_is_freed_by_gc_not_cache_clear():
+    """Sync methods are bound per instance, as fsspec's mirror_sync_methods does.
+
+    The bound methods keep the instance in a reference cycle, so clearing
+    ``cls._cache`` (as fsspec does in a forked child) does not tear it down
+    immediately; only the cyclic garbage collector frees it.
+    """
+    core.GCSFileSystem.clear_instance_cache()
+    fs = core.GCSFileSystem(token="anon")
+    assert fs.__dict__["ls"].__self__ is fs
+    assert fs.__dict__["walk"].__self__ is fs
+    fs_ref = weakref.ref(fs)
+    del fs
+
+    gc.disable()
+    try:
+        core.GCSFileSystem.clear_instance_cache()
+        assert fs_ref() is not None
+    finally:
+        gc.enable()
+    gc.collect()
+    assert fs_ref() is None
