@@ -207,19 +207,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self._memmove_executor = ThreadPoolExecutor(
             max_workers=kwargs.get("memmove_max_workers", 8)
         )
-        self._finalizers.append(weakref.finalize(self, self._memmove_executor.shutdown))
+        weakref.finalize(self, self._memmove_executor.shutdown)
         self._mrd_pool_cache = zb_hns_utils.MRDPoolCache(
             self,
             max_idle_pools=mrd_pool_cache_size,
             max_queue_size=max_mrd_pool_cache_queue_size,
         )
-        self._finalizers.append(
-            weakref.finalize(
-                self,
-                self._finalize_mrd_pool_cache,
-                self.loop,
-                self._mrd_pool_cache,
-            )
+        weakref.finalize(
+            self,
+            self._finalize_mrd_pool_cache,
+            self.loop,
+            self._mrd_pool_cache,
         )
 
     async def _get_threshold_for_disk_reads(self, bucket):

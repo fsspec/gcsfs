@@ -360,8 +360,8 @@ def test_cached_filesystem_with_grpc_survives_fork_and_popen():
     assert proc.wait(timeout=5) == 0
     assert not session.closed
 
-    # 2. A forked child running gc.collect() must not run parent finalizers or
-    # hang in gRPC deallocation.
+    # 2. A forked child running gc.collect() must not tear down the inherited
+    # filesystem (and hang in gRPC deallocation).
     pid = os.fork()
     if pid == 0:
         gc.collect()

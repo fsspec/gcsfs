@@ -482,8 +482,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self._use_client_cert = _use_client_cert()
         self._use_mtls_endpoint = self._use_client_cert and _use_mtls_endpoint()
         self._ssl_context_task = None
-        self._finalizers = []
-        _register_live_filesystem(self)
 
         if check_connection:
             warnings.warn(
@@ -582,11 +580,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     return self._session
                 kwargs = {**kwargs, "connector": aiohttp.TCPConnector(ssl=ssl_context)}
             self._session = await get_client(**kwargs)
-            finalizer = weakref.finalize(
+            weakref.finalize(
                 self, self.close_session, self.loop, self._session, self.asynchronous
             )
-            if hasattr(self, "_finalizers"):
-                self._finalizers.append(finalizer)
         return self._session
 
     @property
@@ -2535,53 +2531,32 @@ def _get_prefetcher_and_cache_config(cache_type=None):
 
 
 mirror_gcs_methods(GCSFileSystem)
-_DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
-_deferred_close_queue = None
-_deferred_close_lock = threading.Lock()
 
-# Fork safety for filesystem instances.
-#
-# fsspec's after_in_child hook (``_reset_instances_lock``) clears
-# ``cls._cache`` in a forked child. If the cache held the last reference to a
-# filesystem, the instance is torn down in the child, before any ``execve``:
-# its finalizers act on the parent's event loop and sockets (which the child
-# shares), and the Cython teardown of an inherited ``grpc.aio`` channel waits
-# for a gRPC poller thread that does not exist in the child, so the child
-# hangs or crashes. ``subprocess.Popen(..., preexec_fn=...)`` (e.g. in
-# ``ray.init()``) and ``multiprocessing`` fork workers both hit this.
-#
-# Inherited instances cannot be used in the child anyway (``fs.loop`` raises),
-# so the child keeps them alive and detaches their finalizers instead.
-_live_filesystems = {}  # id(fs) -> weakref.ref(fs)
-_fork_retained_filesystems = []
-_inherited_filesystems = []
-
-
-def _register_live_filesystem(fs):
-    key = id(fs)
-    _live_filesystems[key] = weakref.ref(
-        fs, lambda _, key=key: _live_filesystems.pop(key, None)
-    )
+# In a forked child, fsspec's after_in_child hook clears ``cls._cache``. If the
+# cache held the last reference to a filesystem, the instance is torn down in
+# the child before any ``execve``: the Cython teardown of an inherited
+# ``grpc.aio`` channel waits for a gRPC poller thread that does not exist in
+# the child, so the child hangs or crashes (e.g. ``ray.init()``, which forks
+# via ``subprocess.Popen(..., preexec_fn=...)``). Inherited instances cannot be
+# used in the child anyway, so keep them alive there instead.
+_fork_pending = []
+_fork_inherited = []
 
 
 def _before_fork():
-    # fsspec's after_in_child hook runs before ours, so take the strong
-    # references here, before fork().
-    refs = list(_live_filesystems.values())
-    _fork_retained_filesystems.extend(fs for fs in (r() for r in refs) if fs)
+    classes = [GCSFileSystem]
+    for cls in classes:
+        classes.extend(cls.__subclasses__())
+        _fork_pending.extend(list(cls._cache.values()))
 
 
 def _after_fork_in_parent():
-    _fork_retained_filesystems.clear()
+    _fork_pending.clear()
 
 
 def _after_fork_in_child():
-    for fs in _fork_retained_filesystems:
-        for finalizer in getattr(fs, "_finalizers", ()):
-            finalizer.detach()
-    _inherited_filesystems.extend(_fork_retained_filesystems)
-    _fork_retained_filesystems.clear()
-    _live_filesystems.clear()
+    _fork_inherited.extend(_fork_pending)
+    _fork_pending.clear()
 
 
 if hasattr(os, "register_at_fork"):
@@ -2590,6 +2565,10 @@ if hasattr(os, "register_at_fork"):
         after_in_parent=_after_fork_in_parent,
         after_in_child=_after_fork_in_child,
     )
+
+_DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
+_deferred_close_queue = None
+_deferred_close_lock = threading.Lock()
 
 
 def _deferred_close_worker(work):
