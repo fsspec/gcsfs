@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -396,7 +397,11 @@ def test_cached_filesystem_with_grpc_survives_popen_preexec_fn():
     try:
         output, _ = proc.communicate(timeout=60)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, 9)
+        try:
+            # Also kills the hung forked grandchild, which shares the process group.
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass  # The group already exited; still report the hang below.
         output, _ = proc.communicate()
         pytest.fail(
             "Popen(preexec_fn=...) hung with a cached gRPC-holding filesystem "
