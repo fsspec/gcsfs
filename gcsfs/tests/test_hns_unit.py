@@ -2783,6 +2783,26 @@ class TestExtendedGcsFileSystemRm:
                 ["a/b", "a"],
                 id="subfolder_and_object-shared_name",
             ),
+            # The object 'a/b' shares its name with the nested folder 'a/b/',
+            # whose parent 'a' is also removed, so only the recursive listing
+            # of 'a' (not a top-level blind delete) can find the object.
+            pytest.param(
+                ["a/b"],
+                "",
+                ["a/b", ""],
+                ["a/b", "a", ""],
+                id="nested_shared_name-parent_dir",
+            ),
+            pytest.param(
+                ["a/b"], "/*", ["a/b", "a"], ["a/b", "a"], id="nested_shared_name-glob"
+            ),
+            pytest.param(
+                ["a/b"],
+                "/a",
+                ["a/b", "a"],
+                ["a/b", "a"],
+                id="nested_shared_name-shared_name",
+            ),
         ],
     )
     def test_rm_recursive_deletes_object_sharing_name_with_folder(
@@ -2849,21 +2869,22 @@ class TestExtendedGcsFileSystemRm:
         self, gcs_hns, gcs_hns_mocks
     ):
         """
-        Test that when the object delete for a directory name returns "not
-        found" and the folder delete then fails, the directory entry stays
-        in the cache, since only "file" entries are evicted for the object
-        delete.
+        Test that when the object sharing a directory's name is deleted and
+        the folder delete then fails, only the "file" entry is evicted from
+        the cached parent listing and the "directory" entry stays.
         """
         gcsfs = gcs_hns
         base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
         dir_path = f"{base_dir}/sub"
         dir_entry = {"name": dir_path, "type": "directory", "size": 0}
-        gcsfs.dircache[base_dir] = [dir_entry]
+        file_entry = {"name": dir_path, "type": "file", "size": 4}
+        # A listing of `base_dir` caches both entries for the shared name.
+        gcsfs.dircache[base_dir] = [dir_entry, file_entry]
 
         async def fake_delete_files(files, batchsize):
-            # Emulates a batch delete where GCS confirms the objects are absent.
+            # Emulates a successful batch delete of the objects.
             await gcsfs._rm_files_cache_update(files)
-            return [FileNotFoundError(f) for f in files]
+            return list(files)
 
         try:
             with (
@@ -2888,8 +2909,19 @@ class TestExtendedGcsFileSystemRm:
         finally:
             gcsfs.invalidate_cache()
 
+    @pytest.mark.parametrize(
+        "maxdepth, expected_files",
+        [
+            # Unbounded: 'dir' is listed below the bucket root, so it is not
+            # also deleted as an object.
+            pytest.param(None, [], id="unbounded"),
+            # Bounded: every directory name except the bucket root is also
+            # deleted as an object.
+            pytest.param(1, [f"{TEST_HNS_BUCKET}/dir"], id="maxdepth"),
+        ],
+    )
     def test_rm_recursive_bucket_root_not_deleted_as_object(
-        self, gcs_hns, gcs_hns_mocks
+        self, gcs_hns, gcs_hns_mocks, maxdepth, expected_files
     ):
         """Test that recursive rm never deletes the bucket name as an object."""
         gcsfs = gcs_hns
@@ -2902,18 +2934,21 @@ class TestExtendedGcsFileSystemRm:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+            # With maxdepth set, _hns_rmdir also deletes the placeholder.
+            mock.patch.object(
+                gcsfs, "_rm_file", new_callable=mock.AsyncMock
+            ) as mock_rm_file,
         ):
             mock_expand.return_value = [
                 {"name": TEST_HNS_BUCKET, "type": "directory"},
                 {"name": dir_path, "type": "directory"},
             ]
             mock_delete_files.return_value = []
+            mock_rm_file.side_effect = FileNotFoundError
 
-            # With maxdepth set, every directory name except the bucket root
-            # is also deleted as an object.
-            gcsfs.rm(TEST_HNS_BUCKET, recursive=True, maxdepth=1)
+            gcsfs.rm(TEST_HNS_BUCKET, recursive=True, maxdepth=maxdepth)
 
-            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(expected_files, self.BATCH_SIZE)
             mocks["super_rmdir"].assert_awaited_once_with(TEST_HNS_BUCKET)
 
     def test_rm_non_hns_fallback(self, gcs_hns, gcs_hns_mocks):
