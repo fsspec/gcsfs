@@ -834,25 +834,51 @@ class TestExtendedGcsFileSystemRm:
             pytest.param("/a", id="shared_name"),
         ],
     )
-    def test_rm_recursive_object_and_folder_sharing_name(self, gcs_hns, suffix):
+    @pytest.mark.parametrize(
+        "with_nested_object",
+        [
+            pytest.param(False, id="subfolder_only"),
+            pytest.param(True, id="subfolder_and_object"),
+        ],
+    )
+    def test_rm_recursive_object_and_folder_sharing_name(
+        self, gcs_hns, suffix, with_nested_object
+    ):
         """
         Test that recursive rm deletes an object that shares its name with a
         folder (object 'a' and folder 'a/'), which can coexist in HNS buckets.
+
+        With `with_nested_object`, folder 'a/' also contains the object
+        'a/x.txt', so listing the prefix 'a/' does not return the object 'a'.
         """
         gcsfs = gcs_hns
         base_dir = f"{TEST_HNS_BUCKET}/rm_shared_name"
         shared = f"{base_dir}/a"
         gcsfs.pipe(shared, b"file")  # object 'a'
         gcsfs.makedirs(f"{shared}/b")  # folders 'a/' and 'a/b/'
+        if with_nested_object:
+            gcsfs.pipe(f"{shared}/x.txt", b"nested")  # object 'a/x.txt'
         gcsfs.invalidate_cache()
+        # Populate the cached parent listing, which holds entries for 'a'.
+        assert shared in gcsfs.ls(base_dir)
 
         gcsfs.rm(f"{base_dir}{suffix}", recursive=True)
 
+        def assert_removed():
+            # exists() is True while either the object 'a' or the folder 'a/'
+            # exists.
+            assert not gcsfs.exists(shared)
+            if suffix:
+                assert gcsfs.ls(base_dir) == []
+            else:
+                # Only removing the parent directory itself deletes it.
+                assert not gcsfs.exists(base_dir)
+
+        # Check the cached state first, so that a stale cache entry left
+        # behind by rm is caught, then the actual bucket state.
+        assert_removed()
         gcsfs.invalidate_cache()
-        # exists() is True while either the object 'a' or the folder 'a/' exists.
-        assert not gcsfs.exists(shared)
-        # Only removing the parent directory itself deletes it.
-        assert gcsfs.exists(base_dir) == bool(suffix)
+        assert_removed()
 
     def test_rm_folder_with_placeholder(self, gcs_hns):
         """

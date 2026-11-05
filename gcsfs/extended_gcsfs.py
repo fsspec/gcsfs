@@ -1599,9 +1599,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         Expand path with details, similar to `_expand_path` but returning full details.
 
-        This method is used in `_rm` to get a list of files and directories to delete.
+        This method is used in `_rm` to get a list of files and directories to delete
+        in HNS-enabled buckets.
         It handles special characters in filenames by avoiding re-globbing concrete paths
         found during recursive expansion.
+
+        With ``detail=True``, an object "a" and a folder "a/" that coexist below a
+        recursively expanded directory are returned as two separate entries (one
+        "file" and one "directory") rather than being collapsed by name.
 
         Parameters
         ----------
@@ -1630,6 +1635,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 assume_literal=assume_literal,
             )
         else:
+            # With detail=True, entries are keyed by (name, type) so that an
+            # object and a folder sharing a name are both kept.
             out = {} if detail else set()
             path = [self._strip_protocol(p) for p in path]
 
@@ -1637,7 +1644,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if not assume_literal and has_magic(p):
                     bit = await self._glob(p, maxdepth=maxdepth, detail=detail)
                     if detail:
-                        out.update(bit)
+                        for info in bit.values():
+                            out[(info["name"], info["type"])] = info
                         bit_paths = list(bit.keys())
                     else:
                         bit_set = set(bit)
@@ -1656,28 +1664,33 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         )
                         if detail:
                             for info in rec:
-                                out[info["name"]] = info
+                                out[(info["name"], info["type"])] = info
                         else:
                             out |= set(rec)
                     continue
                 elif recursive:
-                    rec = await self._find(
-                        p, maxdepth=maxdepth, withdirs=True, detail=detail
-                    )
                     if detail:
-                        out.update(rec)
+                        bucket, _, _ = self.split_path(p)
+                        rec = await self._find_hns_entries(
+                            p, bucket, withdirs=True, maxdepth=maxdepth
+                        )
+                        for info in rec:
+                            out[(info["name"], info["type"])] = info
                     else:
+                        rec = await self._find(
+                            p, maxdepth=maxdepth, withdirs=True, detail=detail
+                        )
                         out |= set(rec)
 
-                if p not in out:
-                    if detail:
+                if detail:
+                    if (p, "file") not in out and (p, "directory") not in out:
                         try:
                             info = await self._info(p)
-                            out[p] = info
+                            out[(info["name"], info["type"])] = info
                         except (FileNotFoundError, OSError):
                             pass
-                    elif recursive is False or (await self._exists(p)):
-                        out.add(p)
+                elif p not in out and (recursive is False or (await self._exists(p))):
+                    out.add(p)
 
             if detail:
                 out = list(out.values())
@@ -1775,17 +1788,27 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # Separate files and directories based on their type. Directories are
         # sorted in reverse so they are deleted from the deepest first.
         files = {p["name"] for p in paths if p["type"] == "file"}
-        dirs = sorted(
-            {p["name"] for p in paths if p["type"] == "directory"},
-            reverse=True,
-        )
+        dir_names = {p["name"] for p in paths if p["type"] == "directory"}
+        dirs = sorted(dir_names, reverse=True)
 
-        # In HNS buckets an object "a" and a folder "a/" can coexist, but the
-        # name-keyed listings used to expand `path` collapse them into a single
-        # "directory" entry, hiding the object. Like the parent `_rm`, also
-        # delete every directory name as an object; "not found" errors for
-        # names without an object are ignored by `_perform_rm`.
-        files = list(files.union(d for d in dirs if self.split_path(d)[1]))
+        # In HNS buckets an object "a" and a folder "a/" can coexist. For a
+        # directory listed below another directory being removed, the
+        # recursive listing returns the object as a separate "file" entry, so
+        # it is already in `files`. Otherwise (explicit targets, glob matches,
+        # or any directory when the expansion is not an unbounded recursive
+        # listing) the object may be hidden: e.g. for `rm("run/a",
+        # recursive=True)` the object "run/a" sits next to the prefix "run/a/"
+        # and isn't listed when that prefix contains objects. Delete those
+        # directory names as objects too; "not found" errors for names
+        # without an object are ignored by `_perform_rm`.
+        listed_below_parent = recursive and maxdepth is None
+        files.update(
+            d
+            for d in dir_names
+            if self.split_path(d)[1]
+            and not (listed_below_parent and self._parent(d) in dir_names)
+        )
+        files = list(files)
 
         # When recursive=True and maxdepth is None, _find lists all placeholder
         # objects ("dir/") in `files`, so _delete_files already batch-deletes
@@ -1906,6 +1929,54 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 **kwargs,
             )
 
+        all_objects = await self._find_hns_entries(
+            path,
+            bucket,
+            withdirs=withdirs,
+            prefix=prefix,
+            versions=versions,
+            maxdepth=maxdepth,
+            **kwargs,
+        )
+
+        if detail:
+            if versions:
+                return {
+                    (
+                        f"{o['name']}#{o['generation']}"
+                        if "generation" in o
+                        else o["name"]
+                    ): o
+                    for o in all_objects
+                }
+            return {o["name"]: o for o in all_objects}
+
+        if versions:
+            return [
+                f"{o['name']}#{o['generation']}" if "generation" in o else o["name"]
+                for o in all_objects
+            ]
+        return [o["name"] for o in all_objects]
+
+    async def _find_hns_entries(
+        self,
+        path,
+        bucket,
+        withdirs=False,
+        prefix="",
+        versions=False,
+        maxdepth=None,
+        **kwargs,
+    ):
+        """
+        List the file and folder entries under `path` in an HNS bucket.
+
+        `path` must already be stripped of its protocol. Returns a list of
+        detail dicts sorted by name. Unlike the name-keyed mapping returned
+        by `_find(detail=True)`, an object "a" and a folder "a/", which can
+        coexist in HNS buckets and share the name "a", are returned as two
+        separate entries (one "file" and one "directory").
+        """
         # Hybrid approach for HNS enabled buckets
         # 1. Fetch all files from super find() method by passing withdirs as False.
         # We pass maxdepth as None here to ensure we fetch all files for caching,
@@ -1943,30 +2014,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         all_objects.sort(key=lambda o: o["name"])
 
-        # Final filtering and formatting. `all_objects` now contains a complete
-        # list of all files and folders.
+        # Final filtering. `all_objects` now contains a complete list of all
+        # files and folders.
         if maxdepth:
             depth = path.rstrip("/").count("/") + maxdepth
             all_objects = [o for o in all_objects if o["name"].count("/") <= depth]
 
-        if detail:
-            if versions:
-                return {
-                    (
-                        f"{o['name']}#{o['generation']}"
-                        if "generation" in o
-                        else o["name"]
-                    ): o
-                    for o in all_objects
-                }
-            return {o["name"]: o for o in all_objects}
-
-        if versions:
-            return [
-                f"{o['name']}#{o['generation']}" if "generation" in o else o["name"]
-                for o in all_objects
-            ]
-        return [o["name"] for o in all_objects]
+        return all_objects
 
     async def _get_all_folders(self, path, bucket, prefix=""):
         """

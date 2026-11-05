@@ -2698,11 +2698,12 @@ class TestExtendedGcsFileSystemRm:
                 [base_dir], recursive=True, maxdepth=None, detail=True
             )
             mocks["info"].assert_not_called()
-            # Directory names are also deleted as objects (see
+            # Only the target directory name is also deleted as an object;
+            # nested directories are not, since the recursive listing would
+            # have returned any coexisting object (see
             # test_rm_recursive_deletes_object_sharing_name_with_folder).
             files_to_delete = sorted(
-                [file_path, nested_file1, nested_file2]
-                + [base_dir, nested_dir1, nested_dir2]
+                [file_path, nested_file1, nested_file2] + [base_dir]
             )
             mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
             assert sorted(mock_delete_files.await_args[0][0]) == files_to_delete
@@ -2727,32 +2728,79 @@ class TestExtendedGcsFileSystemRm:
                 expected_delete_folder_requests
             )
 
+    @staticmethod
+    def _fake_object_listing(objects):
+        """
+        Emulates the object listing of core `GCSFileSystem._find` over the
+        object names in `objects`: it lists the prefix "path/" and only falls
+        back to the object "path" itself when that prefix has no objects.
+        """
+
+        async def fake_find(path, **kwargs):
+            path = path.rstrip("/")
+            names = [o for o in objects if o.startswith(f"{path}/")]
+            if not names:
+                names = [o for o in objects if o == path]
+            return {n: {"name": n, "type": "file", "size": 4} for n in names}
+
+        return fake_find
+
     @pytest.mark.parametrize(
-        "suffix, expected_dirs",
+        "objects, suffix, expected_files, expected_dirs",
         [
+            # Folder 'a/' only contains the subfolder 'b/'.
             pytest.param(
-                "", ["dir_to_rm/a/b", "dir_to_rm/a", "dir_to_rm"], id="parent_dir"
+                ["a"],
+                "",
+                ["a", ""],
+                ["a/b", "a", ""],
+                id="subfolder_only-parent_dir",
             ),
-            pytest.param("/*", ["dir_to_rm/a/b", "dir_to_rm/a"], id="glob"),
-            pytest.param("/a", ["dir_to_rm/a/b", "dir_to_rm/a"], id="shared_name"),
+            pytest.param(["a"], "/*", ["a"], ["a/b", "a"], id="subfolder_only-glob"),
+            pytest.param(
+                ["a"], "/a", ["a"], ["a/b", "a"], id="subfolder_only-shared_name"
+            ),
+            # Folder 'a/' also contains the object 'a/x.txt', so the listing of
+            # the prefix 'a/' does not include the object 'a'.
+            pytest.param(
+                ["a", "a/x.txt"],
+                "",
+                ["a", "a/x.txt", ""],
+                ["a/b", "a", ""],
+                id="subfolder_and_object-parent_dir",
+            ),
+            pytest.param(
+                ["a", "a/x.txt"],
+                "/*",
+                ["a", "a/x.txt"],
+                ["a/b", "a"],
+                id="subfolder_and_object-glob",
+            ),
+            pytest.param(
+                ["a", "a/x.txt"],
+                "/a",
+                ["a", "a/x.txt"],
+                ["a/b", "a"],
+                id="subfolder_and_object-shared_name",
+            ),
         ],
     )
     def test_rm_recursive_deletes_object_sharing_name_with_folder(
-        self, gcs_hns, gcs_hns_mocks, suffix, expected_dirs
+        self, gcs_hns, gcs_hns_mocks, objects, suffix, expected_files, expected_dirs
     ):
         """
         Test that recursive rm deletes an object that shares its name with a
-        folder (object 'a' and folder 'a/'), which can coexist in HNS buckets.
+        folder (object 'a' and folder 'a/'), which can coexist in HNS buckets,
+        without deleting nested directory names as objects.
 
-        `_expand_path_with_details` is not mocked so that the name-keyed
-        listings in `_find`/`_glob` collapse the object 'a' (from the object
-        listing) and the folder 'a' (from the folder listing) into a single
-        directory entry, as they do against a real bucket.
+        `_expand_path_with_details` is not mocked so that the real listings
+        in `_find`/`_glob` are exercised against an emulated bucket.
         """
         gcsfs = gcs_hns
         base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
-        shared = f"{base_dir}/a"
-        expected_paths = [f"{TEST_HNS_BUCKET}/{d}" for d in expected_dirs]
+
+        def to_paths(names):
+            return [f"{base_dir}/{n}" if n else base_dir for n in names]
 
         mock_delete_files = mock.AsyncMock(return_value=[])
 
@@ -2760,9 +2808,9 @@ class TestExtendedGcsFileSystemRm:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
-            mocks["super_find"].return_value = {
-                shared: {"name": shared, "type": "file", "size": 4},
-            }
+            mocks["super_find"].side_effect = self._fake_object_listing(
+                to_paths(objects)
+            )
             mocks["control_client"].list_folders.side_effect = (
                 lambda *args, **kwargs: AsyncIter(
                     [
@@ -2776,22 +2824,69 @@ class TestExtendedGcsFileSystemRm:
             gcsfs.rm(f"{base_dir}{suffix}", recursive=True)
 
             mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
-            # The coexisting object is deleted along with the directory names.
-            assert sorted(mock_delete_files.await_args[0][0]) == sorted(expected_paths)
+            # The coexisting object 'a' is deleted, but the nested folder name
+            # 'a/b' is never deleted as an object.
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
+                to_paths(expected_files)
+            )
+            expected_dir_paths = to_paths(expected_dirs)
             expected_delete_folder_requests = [
                 mock.call(
                     request=self._get_delete_folder_request(gcsfs, d),
                     retry=mock.ANY,
                     timeout=mock.ANY,
                 )
-                for d in expected_paths
+                for d in expected_dir_paths
             ]
             mocks["control_client"].delete_folder.assert_has_calls(
                 expected_delete_folder_requests
             )
             assert mocks["control_client"].delete_folder.call_count == len(
-                expected_paths
+                expected_dir_paths
             )
+
+    def test_rm_object_sharing_name_with_folder_keeps_dir_cache_on_failure(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """
+        Test that when the object delete for a directory name returns "not
+        found" and the folder delete then fails, the directory entry stays
+        in the cache, since only "file" entries are evicted for the object
+        delete.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
+        dir_path = f"{base_dir}/sub"
+        dir_entry = {"name": dir_path, "type": "directory", "size": 0}
+        gcsfs.dircache[base_dir] = [dir_entry]
+
+        async def fake_delete_files(files, batchsize):
+            # Emulates a batch delete where GCS confirms the objects are absent.
+            await gcsfs._rm_files_cache_update(files)
+            return [FileNotFoundError(f) for f in files]
+
+        try:
+            with (
+                gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+                mock.patch.object(
+                    gcsfs, "_expand_path_with_details", new_callable=mock.AsyncMock
+                ) as mock_expand,
+                mock.patch.object(
+                    gcsfs, "_delete_files", side_effect=fake_delete_files
+                ) as mock_delete_files,
+            ):
+                mock_expand.return_value = [dir_entry]
+                mocks["control_client"].delete_folder.side_effect = (
+                    api_exceptions.FailedPrecondition("folder not empty")
+                )
+
+                with pytest.raises(OSError, match="Pre condition failed"):
+                    gcsfs.rm(dir_path, recursive=True)
+
+                mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+                assert gcsfs.dircache[base_dir] == [dir_entry]
+        finally:
+            gcsfs.invalidate_cache()
 
     def test_rm_recursive_bucket_root_not_deleted_as_object(
         self, gcs_hns, gcs_hns_mocks
@@ -2814,7 +2909,9 @@ class TestExtendedGcsFileSystemRm:
             ]
             mock_delete_files.return_value = []
 
-            gcsfs.rm(TEST_HNS_BUCKET, recursive=True)
+            # With maxdepth set, every directory name except the bucket root
+            # is also deleted as an object.
+            gcsfs.rm(TEST_HNS_BUCKET, recursive=True, maxdepth=1)
 
             mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
             mocks["super_rmdir"].assert_awaited_once_with(TEST_HNS_BUCKET)
@@ -3115,12 +3212,14 @@ class TestExtendedGcsFileSystemRm:
             with pytest.raises(OSError, match="boom"):
                 gcsfs.rm([flat_file, hns_file])
 
-    # Directory names are also batch-deleted as objects (see
+    # Directory names that are not listed below another removed directory
+    # (all of them unless recursive=True and maxdepth=None) are also
+    # batch-deleted as objects (see
     # test_rm_recursive_deletes_object_sharing_name_with_folder).
     @pytest.mark.parametrize(
         "recursive, maxdepth, expected_batch_files, expected_rm_files, expected_folder_deletes",
         [
-            (True, None, ["dir/sub/", "dir", "dir/sub"], [], 2),
+            (True, None, ["dir/sub/", "dir"], [], 2),
             (True, 1, ["dir", "dir/sub"], ["dir/sub/", "dir/"], 2),
             (False, None, ["dir"], ["dir/"], 1),
         ],
