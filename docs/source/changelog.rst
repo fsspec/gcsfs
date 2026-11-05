@@ -15,6 +15,39 @@ Unreleased
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
 
+2026.11.0
+---------
+
+* ci(subsystembenchmarks): add per-PR lightweight CI suite (_MODE=ci) (#1141)
+* feat(telemetry): integrate upstream framework telemetry into User-Agent header (3/3) (#1054)
+* refactor(extended_gcsfs): replace BucketType with BucketLayout and routing helpers (#1133)
+* fix(macrobenchmarks): retry GKE control plane in other zones on stockout (#1132)
+* fix(benchmarks): finalize Zonal gcloud fixture uploads and filter incomplete timed-out benchmarks (#1126)
+* test(micro): pin microbenchmark requirements to match subsystem benchmarks (#1130)
+* macrobenchmarks: add TorchTitan Llama 3.1 70B GPU macrobenchmark workload (#1103)
+* fix(zonal): use MRD `persisted_size` in `_get_file_concurrent` (#1125)
+* test(micro): Skip invalid `files < folders` combinations in listing/delete microbenchmarks (#1124)
+* fix(hns): update cached ancestor dircache listings on recursive folder creation (#1120)
+* fix(hns): strip trailing slash in folder operations for dircache updates (#1119)
+* feat(telemetry): add sync/async method wrappers and context propagation helpers (2/3) (#1098)
+* Perf: Skip redundant placeholder deletion in _rmdir during unbounded recursive rm (#1117)
+* test: set a real event loop on mocked GCSFileSystem in prefetcher tests (#1105)
+* Align ExtendedGcsFileSystem._rm default batchsize to 100 (#1116)
+* Accept if_generation_match on writes (compare-and-swap) (#1102)
+* fix(cloudbuild): retry OS Login ssh-key import on concurrent-mutation conflict (#1108)
+* feat: sign URLs through the IAM signBlob API when credentials have no private key (#1100)
+* Raise ChecksumError for SizeChecker mismatches (#1107)
+* fix: bind AdaptiveReadaheadCache prefetcher to gcsfs.loop after reset_lock (#1104)
+* feat(subsystembenchmarks): expert-parallel case on OLMoE for checkpointing/pytorch (#1091)
+* feat(telemetry): add core telemetry context, framework detector, and usage tracker (1/3) (#1097)
+* feat(subsystembenchmarks): add PyTorch DCP checkpoint load benchmark (#1088)
+* perf(zonal): split cat_ranges across pooled MRD streams (#1078)
+* bench(cat_ranges): add many-range and large-range microbenchmark scenarios (#1093)
+* refactor(subsystembenchmarks): share checkpoint dist helpers and let drivers own the size filter (#1087)
+* docs(perf): rewrite subsystem and macro benchmark READMEs (#1090)
+* feat(subsystembenchmarks): add per-case rapid_cache_cold and rapid_cache_warm bucket types (#1085)
+* perf(zonal): open MRDPool streams in parallel outside the pool lock (#1077)
+
 2026.10.0
 ---------
 
