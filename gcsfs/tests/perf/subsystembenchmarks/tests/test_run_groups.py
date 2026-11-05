@@ -182,6 +182,56 @@ def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
     )
     assert "HAS_CACHE=" in cb_yaml
     assert (
-        "^${_INFRA_PREFIX}-(regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
+        "^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
         in cb_yaml
     )
+
+
+_RUN_ENV_KEYS = (
+    "GCSFS_SUBSYSTEM_BUCKET_PREFIX",
+    "GCSFS_SUBSYSTEM_BUCKET_TYPE",
+    "GCSFS_SUBSYSTEM_PROJECT",
+    "GCSFS_SUBSYSTEM_LOCATION",
+    "GCSFS_SUBSYSTEM_ZONE",
+    "GCSFS_SUBSYSTEM_SWEEP_AXES",
+    "GCSFS_SUBSYSTEM_MODEL_ID",
+    "GCSFS_SUBSYSTEM_GROUP",
+    "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT",
+    "STORAGE_EMULATOR_HOST",
+)
+
+
+def _run_main_capturing_results_dir(monkeypatch, extra_args):
+    # delenv registers each key for restoration, so main()'s os.environ writes
+    # do not leak into other tests.
+    for key in _RUN_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    seen = {}
+
+    def fake_run_suite(suite_dir, results_dir, filter_expr=None):
+        seen["results_dir"] = results_dir
+        return 0, None
+
+    monkeypatch.setattr(run.cli, "run_suite", fake_run_suite)
+    with pytest.raises(SystemExit):
+        run.main(["--group=dataloading/huggingface_datasets"] + _REQUIRED + extra_args)
+    return seen["results_dir"]
+
+
+def test_main_uses_and_creates_results_dir(monkeypatch, tmp_path):
+    target = tmp_path / "nested" / "case"
+    results_dir = _run_main_capturing_results_dir(
+        monkeypatch, [f"--results-dir={target}"]
+    )
+    assert results_dir == str(target)
+    assert target.is_dir()
+
+
+def test_main_defaults_to_timestamped_run_dir(monkeypatch):
+    results_dir = _run_main_capturing_results_dir(monkeypatch, [])
+    try:
+        assert os.path.dirname(results_dir) == os.path.join(
+            os.path.dirname(run.__file__), "__run__"
+        )
+    finally:
+        os.rmdir(results_dir)

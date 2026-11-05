@@ -92,6 +92,12 @@ def _build_parser():
         action="store_true",
         help="fail when eligible rows still lack amplification metrics",
     )
+    parser.add_argument(
+        "--results-dir",
+        default="",
+        help="directory for results.json/results.csv (default: __run__/<timestamp>); "
+        "concurrent runs need distinct directories",
+    )
     return parser
 
 
@@ -198,8 +204,11 @@ def main(argv=None):
     _setup_environment(args)
     os.environ["GCSFS_SUBSYSTEM_GROUP"] = args.group
     suite_dir = os.path.join(os.path.dirname(__file__), args.group)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    results_dir = os.path.join(os.path.dirname(__file__), "__run__", timestamp)
+    if args.results_dir:
+        results_dir = args.results_dir
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        results_dir = os.path.join(os.path.dirname(__file__), "__run__", timestamp)
     os.makedirs(results_dir, exist_ok=True)
 
     rc, csv_path = cli.run_suite(suite_dir, results_dir, filter_expr=args.filter)
