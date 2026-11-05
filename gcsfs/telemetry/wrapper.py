@@ -242,7 +242,12 @@ def bind_gcs_sync_methods(fs: Any) -> None:
     cls = type(fs)
     for name in getattr(cls, "_gcs_sync_method_names", ()):
         method = getattr(cls, name, None)
-        if getattr(method, "_is_gcs_sync_wrapped", False):
+        # Require a real function carrying the marker: mocks (e.g. `mock.patch.object(cls, "ls")`)
+        # auto-create any attribute, and binding one would pass `fs` as an extra positional arg.
+        if (
+            inspect.isfunction(method)
+            and getattr(method, "_is_gcs_sync_wrapped", False) is True
+        ):
             setattr(fs, name, types.MethodType(method, fs))
 
 
