@@ -1029,7 +1029,7 @@ def test_get_list_from_zonal_bucket(extended_gcsfs):
     mock_create_mrd = mock.AsyncMock(side_effect=create_mrd_side_effect)
     with (
         mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._uses_grpc_data_path",
             return_value=True,
         ),
         mock.patch(
@@ -1074,7 +1074,7 @@ def test_get_directory_from_zonal_bucket(extended_gcsfs):
 
     with (
         mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._uses_grpc_data_path",
             return_value=True,
         ),
         mock.patch(
@@ -1379,9 +1379,6 @@ async def test_fetch_range_split_concurrent_success(extended_gcsfs):
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
-        )
-        stack.enter_context(
             mock.patch.object(extended_gcsfs, "_info", return_value={"size": 100})
         )
 
@@ -1422,9 +1419,6 @@ async def test_fetch_range_split_concurrent_exception(extended_gcsfs):
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
-        )
-        stack.enter_context(
             mock.patch.object(extended_gcsfs, "_info", return_value={"size": 100})
         )
 
@@ -1452,7 +1446,7 @@ async def test_cat_file_zero_length_read(extended_gcsfs):
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
+            mock.patch.object(extended_gcsfs, "_uses_grpc_data_path", return_value=True)
         )
         stack.enter_context(
             mock.patch("gcsfs.extended_gcsfs._get_mrd_size", return_value=100)
@@ -1493,7 +1487,7 @@ async def test_cat_file_delegates_resolved_range_to_mrd_fetch(
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
+            mock.patch.object(extended_gcsfs, "_uses_grpc_data_path", return_value=True)
         )
         stack.enter_context(
             mock.patch("gcsfs.extended_gcsfs._get_mrd_size", return_value=5000)
@@ -1595,7 +1589,9 @@ async def test_cat_file_non_zonal_fallback(extended_gcsfs):
     """Tests that _cat_file delegates to the parent class for non-zonal buckets."""
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=False)
+            mock.patch.object(
+                extended_gcsfs, "_uses_grpc_data_path", return_value=False
+            )
         )
         mock_super_cat = stack.enter_context(
             mock.patch(
