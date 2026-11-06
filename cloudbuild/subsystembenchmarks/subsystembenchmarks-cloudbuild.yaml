@@ -169,7 +169,10 @@ steps:
 
           if [ $$AGE -gt $$THRESHOLD ]; then
             echo "Deleting leaked bucket: gs://$$CLEAN_NAME (Age: $$AGE seconds)"
-            for z in $$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" < /dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+            # This image ships no python3: list caches with gcloud (zone<TAB>state)
+            # and pick the not-yet-disabled ones with awk.
+            for z in $$(gcloud storage buckets anywhere-caches list "gs://$$CLEAN_NAME" --format="value(zone,state)" < /dev/null \
+                | awk 'toupper($$2) != "DISABLED" && toupper($$2) != "PAUSED" {print $$1}' || true); do
               echo "Disabling leaked anywhere-cache on gs://$$CLEAN_NAME in zone $$z"
               curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
             done
@@ -333,14 +336,15 @@ steps:
         for b in $$LEAKED; do
           CLEAN_NAME="$${b#gs://}"
           CLEAN_NAME="$${CLEAN_NAME%/}"
-          CACHES_JSON=$$(curl -s -H "Authorization: Bearer $$TOKEN" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches" < /dev/null || echo "{}")
-          for z in $$(printf '%s' "$$CACHES_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(i['zone'] for i in d.get('items',[]) if i.get('state','').upper() not in ('DISABLED','PAUSED')))" 2>/dev/null || true); do
+          # This image ships no python3: list caches with gcloud (one zone<TAB>state
+          # line per cache) and pick the not-yet-disabled ones with awk.
+          CACHES=$$(gcloud storage buckets anywhere-caches list "gs://$$CLEAN_NAME" --format="value(zone,state)" < /dev/null || true)
+          for z in $$(printf '%s\n' "$$CACHES" | awk 'NF && toupper($$2) != "DISABLED" && toupper($$2) != "PAUSED" {print $$1}'); do
             echo "Disabling active anywhere-cache on $$b in zone $$z"
             curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
           done
           gcloud storage rm --recursive "$$b/**" < /dev/null 2>/dev/null || true
-          HAS_CACHE=$$(printf '%s' "$$CACHES_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if d.get('items') else 'no')" 2>/dev/null || echo "no")
-          if [ "$$HAS_CACHE" = "yes" ]; then
+          if [ -n "$$CACHES" ]; then
             echo "Objects removed from $$b; retaining empty bucket during 1-hour Rapid Cache disable grace period (will be reaped by cleanup-leaked-resources)"
           else
             echo "sweeping leaked benchmark bucket $$b"
