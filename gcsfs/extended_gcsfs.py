@@ -1340,9 +1340,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return await super()._mv(path1, path2, **kwargs)
 
         rename_submitted = False
+        # Set once the folder rename has succeeded and an object with the same
+        # name still has to be moved alongside it.
+        folder_dest = None
         try:
-            info1 = await self._info(path1)
-            is_folder = info1.get("type") == "directory"
+            object_info, folder_info = await self._get_hns_mv_sources(path1)
+            is_folder = folder_info is not None
 
             # We only use HNS rename if the source is a folder and the move is
             # within the same bucket.
@@ -1398,7 +1401,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
                 )
-                return
+                if object_info is None:
+                    return
+                folder_dest = f"{bucket2}/{destination_folder_id.rstrip('/')}"
             elif not is_folder:
                 await self._mv_file(path1, path2)
                 return
@@ -1429,10 +1434,148 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
+        if folder_dest is not None:
+            # Done outside the try block above: the folder has already been
+            # renamed, so a failure here must not be mapped to a "source not
+            # found" error or fall back to an object-level move.
+            await self._mv_coexisting_object(path1, folder_dest)
+            return
+
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
         return await super()._mv(path1, path2, **kwargs)
 
     mv = asyn.sync_wrapper(_mv)
+
+    async def _get_hns_mv_sources(self, path):
+        """
+        Look up the object and the folder that ``path`` refers to in an HNS
+        bucket, for ``_mv``.
+
+        In HNS buckets an object "a" and a folder "a/" can coexist, and both
+        normalize to the name "a". ``_info`` returns only one of them (the
+        first matching entry in the cached parent listing, or whichever
+        request answers first), so ``_mv`` looks up both. A trailing slash on
+        ``path`` refers to the folder only.
+
+        Uses the parent's cached listing when available. Otherwise fetches the
+        object and the folder concurrently, bypassing the cache.
+
+        Returns
+        -------
+        tuple
+            ``(object_info, folder_info)``; either may be None, but not both.
+
+        Raises
+        ------
+        FileNotFoundError
+            If neither an object nor a folder exists at ``path``.
+        """
+        stripped = self._strip_protocol(path)
+        folder_only = stripped.endswith("/")
+        bucket, key, generation = self.split_path(stripped.rstrip("/"))
+        key = key.rstrip("/")
+        # Cached entries and `_info` results are named "bucket/key", without
+        # a trailing slash or generation suffix.
+        name = f"{bucket}/{key}"
+
+        if not key:
+            # Bucket root: there is no object to look for.
+            return None, await self._info(name)
+
+        parent = self._parent(name)
+        if parent in self.dircache:
+            object_info = folder_info = None
+            for entry in self.dircache[parent]:
+                if entry.get("name") != name:
+                    continue
+                if entry.get("type") == "directory" and not generation:
+                    folder_info = entry
+                elif (
+                    entry.get("type") == "file"
+                    and not folder_only
+                    and (not generation or entry.get("generation") == generation)
+                ):
+                    object_info = entry
+            if object_info is not None or folder_info is not None:
+                return object_info, folder_info
+            # Neither is cached: fall through to the requests below, like
+            # `_info`, in case the source was created after the listing.
+
+        async def _get_object():
+            if folder_only:
+                return None
+            try:
+                # Not `_get_object`: it treats a cached listing of the folder
+                # "name/" as the parent listing and would miss the object.
+                res = await self._call(
+                    "GET",
+                    "b/{}/o/{}",
+                    bucket,
+                    key,
+                    json_out=True,
+                    generation=generation,
+                )
+                return self._process_object(bucket, res)
+            except FileNotFoundError:
+                return None
+            except OSError as e:
+                if not str(e).startswith("Forbidden"):
+                    raise
+            # No storage.objects.get permission: `_get_object` falls back to
+            # a filtered bucket listing.
+            try:
+                return await self._get_object(stripped.rstrip("/"))
+            except FileNotFoundError:
+                return None
+
+        async def _get_folder():
+            if generation:
+                # Folders have no generations; "name#gen" is an object.
+                return None
+            try:
+                return await self._get_directory_info(name, bucket, key, None)
+            except FileNotFoundError:
+                return None
+
+        # return_exceptions=True so that a failure of one request neither
+        # leaves the other unawaited nor hides its result.
+        object_res, folder_res = await asyncio.gather(
+            _get_object(), _get_folder(), return_exceptions=True
+        )
+        if isinstance(object_res, BaseException):
+            raise object_res
+        if isinstance(folder_res, BaseException):
+            if object_res is None:
+                raise folder_res
+            # Like `_info`, which returns a found object without waiting for
+            # the folder lookup: still move the object (e.g. for callers
+            # without Storage Control permissions).
+            logger.warning(
+                f"Could not check for a folder sharing its name with object "
+                f"'{name}'; moving the object only: {folder_res!r}"
+            )
+            folder_res = None
+        object_info, folder_info = object_res, folder_res
+        if object_info is None and folder_info is None:
+            raise FileNotFoundError(path)
+        return object_info, folder_info
+
+    async def _mv_coexisting_object(self, path1, path2):
+        """
+        Move the object that shares its name with a folder that ``_mv`` has
+        already renamed from ``path1`` to ``path2``.
+        """
+        src = self._strip_protocol(path1).rstrip("/")
+        try:
+            await self._mv_file(src, path2)
+        except FileNotFoundError:
+            # The object was removed after it was looked up; nothing to move.
+            logger.debug(f"Object '{src}' no longer exists; only the folder moved.")
+        except Exception as e:
+            raise OSError(
+                f"Moved folder '{src}/' to '{path2}/', but failed to move the "
+                f"object '{src}' that shares its name: {e}"
+            ) from e
 
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
         try:

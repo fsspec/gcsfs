@@ -276,6 +276,61 @@ class TestExtendedGcsFileSystemMv:
         assert gcsfs.cat(dest_file) == data
         assert gcsfs.exists(f"{dest_placeholder}/")
 
+    @pytest.mark.parametrize(
+        "warm_cache",
+        [
+            pytest.param(False, id="uncached"),
+            pytest.param(True, id="cached_parent"),
+        ],
+    )
+    def test_mv_object_and_folder_sharing_name(self, gcs_hns, warm_cache):
+        """
+        Test that mv moves both an object 'a' and a folder 'a/', which can
+        coexist in HNS buckets, regardless of what is cached.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/mv_shared_name"
+        src = f"{base_dir}/a"
+        dest = f"{base_dir}/z"
+        gcsfs.pipe(src, b"object")  # object 'a'
+        gcsfs.pipe(f"{src}/x.txt", b"nested")  # folder 'a/' with an object
+        gcsfs.makedirs(f"{src}/b", exist_ok=True)  # and an empty subfolder
+        gcsfs.invalidate_cache()
+        if warm_cache:
+            gcsfs.ls(base_dir)
+
+        gcsfs.mv(src, dest)
+
+        for refresh in (False, True):
+            if refresh:
+                gcsfs.invalidate_cache()
+            # exists() is True while either the object or the folder exists.
+            assert not gcsfs.exists(src)
+            assert gcsfs.cat(dest) == b"object"
+            assert gcsfs.cat(f"{dest}/x.txt") == b"nested"
+            assert gcsfs.isdir(f"{dest}/b")
+
+    def test_mv_trailing_slash_moves_only_folder_sharing_name(self, gcs_hns):
+        """
+        Test that a trailing slash on the source moves only the folder 'a/',
+        leaving an object 'a' with the same name in place.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/mv_shared_name_slash"
+        src = f"{base_dir}/a"
+        dest = f"{base_dir}/z"
+        gcsfs.pipe(src, b"object")
+        gcsfs.pipe(f"{src}/x.txt", b"nested")
+        gcsfs.invalidate_cache()
+
+        gcsfs.mv(f"{src}/", dest)
+
+        gcsfs.invalidate_cache()
+        assert gcsfs.cat(src) == b"object"
+        assert not gcsfs.exists(f"{src}/x.txt")
+        assert gcsfs.cat(f"{dest}/x.txt") == b"nested"
+        assert not gcsfs.isfile(dest)  # the object was not moved
+
     def test_hns_mv_file_cache_update(self, gcs_hns):
         """Test that mv_file updates the cache correctly."""
         gcsfs = gcs_hns
