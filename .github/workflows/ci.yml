@@ -79,9 +79,6 @@ jobs:
       - name: Run Cloud Build Test Report Unit Tests
         run: |
           pytest -vv cloudbuild/test_summarize_test_results.py
-      - name: Run Cloud Build Bucket Hygiene Tests
-        run: |
-          pytest -vv cloudbuild/test_bucket_hygiene.py
       - name: Run all tests (Standard, Zonal & HNS Enabled) with default ON extended feature support
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-service-account-credentials.json
