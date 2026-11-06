@@ -36,8 +36,27 @@ class _FakeFS:
         return {"state": "RUNNING"}
 
 
-def test_regional_body_is_plain():
-    assert bucket.bucket_kwargs(_spec()) == {}
+_PAP_ENFORCED = {"publicAccessPrevention": "enforced"}
+
+
+def test_regional_body_only_enforces_pap():
+    assert bucket.bucket_kwargs(_spec()) == {"iam_configuration": _PAP_ENFORCED}
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {},
+        {"bucket_type": "hns"},
+        {"bucket_type": "zonal", "zone": "us-central1-a"},
+        {"bucket_type": "rapid_cache_cold", "zone": "us-central1-a"},
+        {"bucket_type": "rapid_cache_warm", "zone": "us-central1-a"},
+    ],
+)
+def test_every_bucket_type_enforces_pap(over):
+    # Security scanners flag deleted buckets whose own PAP is not "enforced".
+    body = bucket.bucket_kwargs(_spec(**over))
+    assert body["iam_configuration"]["publicAccessPrevention"] == "enforced"
 
 
 def test_hns_body_enables_hns_and_ubla():
@@ -142,7 +161,7 @@ def test_rapid_cache_types_require_zone_and_use_regional_bucket_body(bucket_type
         _spec(bucket_type=bucket_type).validate()
     spec = _spec(bucket_type=bucket_type, zone="us-central1-a")
     spec.validate()
-    assert bucket.bucket_kwargs(spec) == {}
+    assert bucket.bucket_kwargs(spec) == {"iam_configuration": _PAP_ENFORCED}
 
 
 def test_case_bucket_creates_waits_and_disables_rapid_cache():

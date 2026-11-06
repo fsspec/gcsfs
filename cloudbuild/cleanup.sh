@@ -43,16 +43,37 @@ wait_for_background_jobs() {
     return "${status}"
 }
 
+delete_bucket() {
+    local bucket="$1"
+    shift
+    local err
+    err="$(mktemp)"
+
+    if gcloud storage rm --recursive "${bucket}" --project="${PROJECT_ID}" "$@" 2> "${err}"; then
+        rm -f "${err}"
+        return 0
+    fi
+    # 404: the bucket was never created (e.g. create-buckets failed early).
+    if grep -q "not found: 404" "${err}"; then
+        rm -f "${err}"
+        return 0
+    fi
+    # Anything else (e.g. a 403 on the requester-pays billing project) means the
+    # bucket leaks. Report it instead of swallowing it: leaked buckets that are
+    # deleted after more than 14 days get flagged by security scanners as dangling.
+    echo "ERROR: failed to delete ${bucket}: $(cat "${err}")" >&2
+    rm -f "${err}"
+    return 1
+}
+
 delete_bucket_variants() {
     local workers="$1"
     local bucket_base="$2"
     shift 2
 
     while IFS= read -r suffix; do
-        if gcloud storage buckets describe "gs://${bucket_base}${suffix}" --project="${PROJECT_ID}" "$@" &>/dev/null; then
-            gcloud storage rm --recursive "gs://${bucket_base}${suffix}" --project="${PROJECT_ID}" "$@" &
-            BACKGROUND_PIDS+=("$!")
-        fi
+        delete_bucket "gs://${bucket_base}${suffix}" "$@" &
+        BACKGROUND_PIDS+=("$!")
     done < <(worker_suffixes "${workers}")
 }
 
@@ -80,5 +101,10 @@ delete_bucket_variants "${WORKERS_STANDARD}" "gcsfs-test-standard-req-pay-${SHOR
 
 if ! wait_for_background_jobs; then
     echo "ALERT: GCSFS E2E Cleanup Failed. Some testing resources may have leaked."
+    # Surface the leak in the check-failure step instead of passing silently.
+    FAILED_FILE="${FAILED_FILE:-/workspace/FAILED}"
+    if [[ -d "$(dirname "${FAILED_FILE}")" ]]; then
+        echo "cleanup (leaked resources)" >> "${FAILED_FILE}"
+    fi
     exit 0
 fi

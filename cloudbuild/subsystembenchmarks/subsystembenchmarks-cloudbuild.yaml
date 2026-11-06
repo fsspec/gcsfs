@@ -204,7 +204,7 @@ steps:
         if gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
           echo "Results bucket gs://$${RESULTS_BUCKET} already exists"
         else
-          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${PROJECT_ID} \
+          gcloud storage buckets create gs://$$RESULTS_BUCKET --public-access-prevention --project=${PROJECT_ID} \
             --location=$$REGION --enable-hierarchical-namespace --uniform-bucket-level-access
         fi
     waitFor: ["init-variables"]

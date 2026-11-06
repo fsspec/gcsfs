@@ -122,18 +122,18 @@ steps:
 
         # Create Test Buckets, in parallel
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
-          gcloud storage buckets create gs://$$REGIONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} &
+          gcloud storage buckets create gs://$$REGIONAL_BUCKET --public-access-prevention --project=${PROJECT_ID} --location=${LOCATION} &
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
-          gcloud storage buckets create gs://$$ZONAL_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
+          gcloud storage buckets create gs://$$ZONAL_BUCKET --public-access-prevention --project=${PROJECT_ID} --location=${LOCATION} --placement=${_ZONE} --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access &
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
-          gcloud storage buckets create gs://$$HNS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+          gcloud storage buckets create gs://$$HNS_BUCKET --public-access-prevention --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         fi
 
         # Create HNS Results Bucket (Persistent)
         if ! gcloud storage buckets describe gs://$$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
-          gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
+          gcloud storage buckets create gs://$$RESULTS_BUCKET --public-access-prevention --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access &
         else
           echo "Results bucket gs://$${RESULTS_BUCKET} already exists"
         fi

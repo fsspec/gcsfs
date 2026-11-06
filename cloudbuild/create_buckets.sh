@@ -63,9 +63,12 @@ create_bucket_variants() {
     shift 2
 
     while IFS= read -r suffix; do
+        # PAP must be enforced on the bucket itself (not just inherited from the org
+        # policy): security scanners flag deleted buckets without it as dangling.
         gcloud storage buckets create "gs://${bucket_base}${suffix}" \
             --project="${PROJECT_ID}" \
             --location="${REGION}" \
+            --public-access-prevention \
             "$@" &
         BACKGROUND_PIDS+=("$!")
     done < <(worker_suffixes "${workers}")

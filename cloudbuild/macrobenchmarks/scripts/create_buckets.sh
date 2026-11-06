@@ -45,5 +45,5 @@ if gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${PROJECT_ID} 
     exit 1
   fi
 else
-  gcloud storage buckets create gs://$RESULTS_BUCKET --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access
+  gcloud storage buckets create gs://$RESULTS_BUCKET --public-access-prevention --project=${PROJECT_ID} --location=${LOCATION} --enable-hierarchical-namespace --uniform-bucket-level-access
 fi
