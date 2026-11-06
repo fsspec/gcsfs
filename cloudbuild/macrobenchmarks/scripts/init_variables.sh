@@ -95,14 +95,15 @@ fi
 # Validate that operator-supplied buckets actually match _BUCKET_TYPE and the
 # run's region/zone. Project-owned buckets are describable by the build SA
 # (storage admin), so these are hard fail-fast (nothing is provisioned yet).
-# Field-name-robust: one JSON describe, then grep the JSON for RAPID / the zone
-# and read location explicitly.
+# Field-name-robust: one JSON describe, then grep the JSON for RAPID / the zone,
+# and read location explicitly via gcloud's formatter (this step runs on the
+# gcloud image, which has no python3).
 validate_bucket() {
   BPATH="$1"; KIND="$2"
   BUCKET=$(echo "$BPATH" | sed -E 's#^gs://([^/]+).*#\1#')
   JSON=$(gcloud storage buckets describe "gs://$BUCKET" --project=${PROJECT_ID} --format=json 2>/dev/null) || {
     echo "ERROR: cannot describe $KIND bucket gs://$BUCKET (missing or no read access)."; exit 1; }
-  LOC=$(echo "$JSON" | python3 -c "import sys,json;print((json.load(sys.stdin).get('location') or '').lower())")
+  LOC=$(gcloud storage buckets describe "gs://$BUCKET" --project=${PROJECT_ID} --format='value(location)' 2>/dev/null | tr '[:upper:]' '[:lower:]')
   IS_RAPID=no; echo "$JSON" | grep -qiF 'RAPID' && IS_RAPID=yes
   if [ "$KIND" = dataset ]; then
     echo "export DATASET_SRC_IS_RAPID=${IS_RAPID}" >> "${BUILD_VARS_FILE}"

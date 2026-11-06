@@ -180,7 +180,10 @@ def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
         'gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null'
         in cb_yaml
     )
-    assert "HAS_CACHE=" in cb_yaml
+    # The steps run on the cloud-sdk image, which ships no system python3:
+    # caches must be listed with gcloud, not parsed with `python3 -c`.
+    assert cb_yaml.count("gcloud storage buckets anywhere-caches list") >= 2
+    assert "python3 -c" not in cb_yaml
     assert (
         "^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
         in cb_yaml

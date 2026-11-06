@@ -150,6 +150,32 @@ async def test_init_aaow_if_generation_match(if_generation_match, expected_kwarg
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "storage_class, expected_kwargs",
+    [("RAPID", {"storage_class": "RAPID"}), (None, {})],
+)
+async def test_init_aaow_storage_class(storage_class, expected_kwargs):
+    """storage_class is forwarded to the writer only when it is set."""
+    mock_writer_instance = mock.AsyncMock()
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+        new_callable=mock.Mock,
+        return_value=mock_writer_instance,
+    ) as mock_writer_class:
+        await zb_hns_utils.init_aaow(
+            mock_grpc_client, "bucket", "object", storage_class=storage_class
+        )
+        mock_writer_class.assert_called_once_with(
+            client=mock_grpc_client,
+            bucket_name="bucket",
+            object_name="object",
+            generation=None,
+            writer_options={},
+            **expected_kwargs,
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("generation", [0, 123])
 @pytest.mark.parametrize("if_generation_match", [0, 7])
 async def test_init_aaow_rejects_generation_with_if_generation_match(
@@ -339,7 +365,7 @@ async def test_init_mrd_not_found():
 
 @pytest.mark.asyncio
 async def test_close_aaow(caplog):
-    """Tests all graceful closing scenarios for AsyncAppendableObjectWriter."""
+    """Tests the closing scenarios for AsyncAppendableObjectWriter."""
     # 1. Handles None gracefully
     await zb_hns_utils.close_aaow(None)
 
@@ -360,6 +386,21 @@ async def test_close_aaow(caplog):
     mock_aaow.close.assert_awaited_once_with(finalize_on_close=False)
     assert (
         "Error closing AsyncAppendableObjectWriter for test-bucket/test-object: Close failed"
+        in caplog.text
+    )
+
+    # 4. Logs and re-raises a failed finalize, so the write is not reported as successful
+    mock_aaow.reset_mock()
+    mock_aaow.close.side_effect = NotFound("Object deleted before finalize")
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        with pytest.raises(NotFound, match="Object deleted before finalize"):
+            await zb_hns_utils.close_aaow(mock_aaow, finalize_on_close=True)
+
+    mock_aaow.close.assert_awaited_once_with(finalize_on_close=True)
+    assert (
+        "Error closing AsyncAppendableObjectWriter for test-bucket/test-object"
         in caplog.text
     )
 
@@ -1763,11 +1804,18 @@ async def test_mrd_pool_unfinalized_scale_up_skips_stale_idle_mrd(
 
 
 @pytest.mark.asyncio
-async def test_mrd_pool_finalized_scale_up_reuses_any_idle_mrd(mock_cache):
-    idle_mrd = _mrd_with_size(100)
-    mock_cache.queue.append(idle_mrd)
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_finalized_scale_up_skips_stale_idle_mrd(
+    init_mrd_mock, mock_cache, mock_gcsfs
+):
+    # Finalizing after an append keeps the generation, so idle MRDs opened
+    # before the append are still cached under the finalized pool's key.
+    stale_mrd = _mrd_with_size(100)
+    mock_cache.queue.append(stale_mrd)
+    created_mrd = _mrd_with_size(200)
+    init_mrd_mock.return_value = created_mrd
     pool = MRDPool(
-        mock.Mock(),
+        mock_gcsfs,
         "bucket",
         "obj",
         "123",
@@ -1778,8 +1826,38 @@ async def test_mrd_pool_finalized_scale_up_reuses_any_idle_mrd(mock_cache):
     pool.persisted_size = 200
 
     async with pool.get_mrd() as mrd:
-        assert mrd is idle_mrd
-    assert pool._stale_mrds == []
+        assert mrd is created_mrd
+    assert pool._stale_mrds == [stale_mrd]
+
+
+@pytest.mark.asyncio
+@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
+async def test_mrd_pool_cache_get_finalized_after_append_skips_stale_idle_mrd(
+    init_mrd_mock, mock_gcsfs
+):
+    # A reader leaves an idle MRD opened at 100 bytes; the object then grows to
+    # 150 bytes and is finalized under the same generation (same cache key).
+    old_mrd = _mrd_with_size(100)
+    new_mrd = _mrd_with_size(150)
+    init_mrd_mock.side_effect = [old_mrd, new_mrd]
+    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
+
+    mock_gcsfs._info.return_value = {"generation": "123", "size": 100}
+    pool = await cache.get("bucket", "obj", "123", pool_size=1)
+    await pool.close()
+
+    mock_gcsfs._info.return_value = {
+        "generation": "123",
+        "size": 150,
+        "timeFinalized": "2026-11-04T00:00:00Z",
+    }
+    pool = await cache.get("bucket", "obj", "123", pool_size=1)
+
+    assert pool.persisted_size == 150
+    async with pool.get_mrd() as mrd:
+        assert mrd is new_mrd
+    await pool.close()
+    old_mrd.close.assert_awaited_once()
 
 
 @mock.patch("gcsfs.zb_hns_utils.HAS_CPYTHON_API", False)

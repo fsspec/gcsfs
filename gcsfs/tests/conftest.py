@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import shlex
@@ -18,7 +19,9 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import GCSFileSystem
+from gcsfs.extended_gcsfs import CachingTier
 from gcsfs.tests import layouts
+from gcsfs.tests.lro_fakes import FakeLroFactory
 from gcsfs.tests.settings import (
     TEST_BUCKET,
     TEST_HNS_BUCKET,
@@ -546,11 +549,27 @@ def flat_bucket(flat_bucket_name, gcs_factory):
         _close_gcs(gcs)
 
 
+# Bucket layouts whose appendable writes use the gRPC writer; pass them to
+# ``zonal_write_mocks`` as indirect params.
+RAPID_WRITE_LAYOUTS = [
+    layouts.ZONAL_HIERARCHICAL,
+    layouts.STANDARD_RCU,
+    layouts.HIERARCHICAL_RCU,
+]
+
+
 @pytest.fixture
-def zonal_write_mocks():
-    """A fixture for mocking Zonal bucket write functionality."""
+def zonal_write_mocks(request):
+    """A fixture for mocking Zonal and RCU bucket write functionality.
+
+    Accepts an indirect ``BucketLayout`` param (default ``ZONAL_HIERARCHICAL``).
+    On real GCS it yields ``None`` for the zonal layout and skips the others.
+    """
+    layout = getattr(request, "param", layouts.ZONAL_HIERARCHICAL)
 
     if is_real_gcs():
+        if layout != layouts.ZONAL_HIERARCHICAL:
+            pytest.skip("Live write tests only run against the zonal test bucket")
         yield None
         return
 
@@ -563,7 +582,16 @@ def zonal_write_mocks():
     mock_aaow = mock.AsyncMock(spec=AsyncAppendableObjectWriter)
     mock_aaow.offset = 0
     mock_aaow._is_stream_open = True
-    mock_init_aaow = mock.AsyncMock(return_value=mock_aaow)
+
+    async def init_aaow_side_effect(grpc_client, bucket_name, object_name, *a, **k):
+        # Every open gets an open writer for its own object.
+        mock_aaow._is_stream_open = True
+        mock_aaow.offset = 0
+        mock_aaow.bucket_name = bucket_name
+        mock_aaow.object_name = object_name
+        return mock_aaow
+
+    mock_init_aaow = mock.AsyncMock(side_effect=init_aaow_side_effect)
     mock_gcsfs_info = mock.AsyncMock(
         return_value={"generation": "12345", "type": "file", "name": "mock_file"}
     )
@@ -585,10 +613,7 @@ def zonal_write_mocks():
     mock_aaow.finalize.side_effect = finalize_side_effect
 
     with (
-        mock.patch(
-            patch_target_get_bucket_layout,
-            return_value=layouts.ZONAL_HIERARCHICAL,
-        ),
+        mock.patch(patch_target_get_bucket_layout, return_value=layout),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),
         mock.patch(patch_target_init_aaow, mock_init_aaow),
     ):
@@ -596,8 +621,47 @@ def zonal_write_mocks():
             "aaow": mock_aaow,
             "init_aaow": mock_init_aaow,
             "_gcsfs_info": mock_gcsfs_info,
+            "storage_class": (
+                "RAPID"
+                if layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+                else None
+            ),
         }
         yield mocks
+
+
+@pytest.fixture
+def fake_lro():
+    """Factory for LRO test doubles (see gcsfs/tests/lro_fakes.py)."""
+    return FakeLroFactory()
+
+
+class FakeClock:
+    """Virtual clock for ``gcsfs.poller``: sleeps return at once and advance ``now``."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+        # Yield like asyncio.sleep, so a pending cancel is delivered here.
+        await asyncio.sleep(0)
+
+    def patch(self, monkeypatch) -> "FakeClock":
+        monkeypatch.setattr("gcsfs.poller._monotonic", self.time)
+        monkeypatch.setattr("gcsfs.poller._sleep", self.sleep)
+        return self
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """Virtual clock for gcsfs.poller's polling loop."""
+    return FakeClock().patch(monkeypatch)
 
 
 @pytest.fixture

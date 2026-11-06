@@ -11,14 +11,19 @@ in test_dircache.py, and zonal-specific filesystem routing belongs in
 test_zonal.py or test_zonal_file.py.
 """
 
+import asyncio
 import contextlib
 import os
+import sys
 import uuid
 from unittest import mock
 
+import fsspec
 import pytest
+from fsspec.asyn import FSTimeoutError
 from google.api_core import exceptions as api_exceptions
 from google.cloud import storage_control_v2
+from google.rpc import code_pb2
 
 from gcsfs.extended_gcsfs import (
     BucketLayout,
@@ -27,9 +32,11 @@ from gcsfs.extended_gcsfs import (
     NamespaceLayout,
     StorageClass,
 )
+from gcsfs.poller import _BACKGROUND_TASKS
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
 from gcsfs.tests import layouts
 from gcsfs.tests.conftest import requires_hns
+from gcsfs.tests.lro_fakes import operation_pb
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 from gcsfs.tests.utils import is_real_gcs
 
@@ -630,6 +637,540 @@ class TestExtendedGcsFileSystemMv:
             mocks["info"].assert_awaited_with(path1)
             mocks["super_mv"].assert_not_called()
             mocks["control_client"].rename_folder.assert_called()
+
+    def test_hns_rename_polls_pending_operation_with_poll_lro(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """A sync mv drives the real poll_lro: one GetOperation per poll, each
+        without the GAPIC default retry, then the dircache is updated."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.succeeded(after=2)
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+
+            gcsfs.mv(path1, path2)
+
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [path2]
+            mocks["super_mv"].assert_not_called()
+
+        assert lro.get_operation.await_count == 2
+        for call in lro.get_operation.await_args_list:
+            assert call.kwargs["retry"] is None
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_waits_with_poll_lro_and_default_timeout(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """The rename waits with poll_lro, bounded by _HNS_RENAME_FOLDER_LRO_TIMEOUT,
+        instead of operation.result()."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch(
+                "gcsfs.extended_gcsfs.poll_lro", new_callable=mock.AsyncMock
+            ) as mock_poll_lro,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            gcsfs.mv(path1, path2)
+
+            operation = mocks["control_client"].rename_folder.return_value
+            mock_poll_lro.assert_awaited_once_with(operation, timeout=300.0)
+            operation.result.assert_not_called()
+            mocks["super_mv"].assert_not_called()
+
+    def test_hns_rename_poll_timeout_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """A poll_lro timeout raises TimeoutError with a hint, invalidates the
+        dircache and neither falls back nor cancels the server-side rename."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_timeout"
+        path2 = f"{TEST_HNS_BUCKET}/dst_timeout"
+        name = "projects/_/buckets/b/operations/op-timeout"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.05)
+        lro = fake_lro.pending(name=name)
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(TimeoutError) as exc_info:
+                gcsfs.mv(path1, path2, poll_timeout=0.2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        err = exc_info.value
+        if sys.version_info >= (3, 11):
+            # fsspec's sync() rewrites any asyncio.TimeoutError, which is the
+            # built-in TimeoutError from 3.11, to an empty FSTimeoutError.
+            assert type(err) is FSTimeoutError
+            assert str(err) == ""
+            err = err.__cause__
+        assert type(err) is TimeoutError
+        assert str(err) == (
+            f"HNS folder rename from '{path1}' to '{path2}' (op: {name}) did not "
+            "finish within 0.2s. The rename may still complete on the server; "
+            "check the destination before retrying."
+        )
+        assert isinstance(err.__cause__, asyncio.TimeoutError)
+        assert lro.get_operation.await_count >= 1
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_timeout_outside_polling_still_falls_back(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """Only a poll_lro timeout skips the fallback; a timeout raised by an
+        earlier step keeps the existing fallback to object-level mv."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].side_effect = asyncio.TimeoutError("info timed out")
+
+            gcsfs.mv(path1, path2)
+
+            mocks["control_client"].rename_folder.assert_not_called()
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+
+    @pytest.mark.parametrize("after", [0, 1], ids=["done_at_t0", "done_on_poll"])
+    @pytest.mark.parametrize(
+        "code, expected_exc, match",
+        [
+            (code_pb2.ALREADY_EXISTS, FileExistsError, "HNS rename failed due to"),
+            (code_pb2.NOT_FOUND, FileNotFoundError, "Source .* not found"),
+            (code_pb2.FAILED_PRECONDITION, OSError, "HNS rename failed: 400"),
+            (code_pb2.ABORTED, FileExistsError, "HNS rename failed due to"),
+        ],
+        ids=["already_exists", "not_found", "failed_precondition", "aborted"],
+    )
+    def test_hns_rename_typed_operation_error_is_mapped_without_fallback(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+        fake_lro,
+        monkeypatch,
+        after,
+        code,
+        expected_exc,
+        match,
+    ):
+        """poll_lro raises operation errors as typed exceptions, so the
+        existing NotFound, Conflict and FailedPrecondition mappings apply, and
+        the cached listings for both paths are dropped."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.failed(code, after=after)
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(expected_exc, match=match):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        assert lro.get_operation.await_count == after
+
+    @pytest.mark.parametrize("after", [0, 1], ids=["done_at_t0", "done_on_poll"])
+    @pytest.mark.parametrize(
+        "code",
+        [code_pb2.PERMISSION_DENIED, code_pb2.INTERNAL],
+        ids=["permission_denied", "internal"],
+    )
+    def test_hns_rename_unmapped_operation_error_falls_back(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+        fake_lro,
+        monkeypatch,
+        after,
+        code,
+    ):
+        """An operation that finished with an unmapped error renamed nothing,
+        so mv drops the cached listings and falls back to object-level mv."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.failed(code, after=after)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+
+            gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+            mock_mv_file.assert_not_called()
+            assert path1 not in gcsfs.dircache
+
+        assert lro.get_operation.await_count == after
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_status_check_error_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """A non-transient GetOperation error while the rename is pending is
+        raised without falling back and without cancelling the rename."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        error = api_exceptions.PermissionDenied("no access to operation")
+        lro = fake_lro.sequence([error])
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+
+            with pytest.raises(api_exceptions.PermissionDenied) as exc_info:
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            mock_mv_file.assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        assert exc_info.value is error
+        assert lro.get_operation.await_count == 1
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_dircache_update_error_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro
+    ):
+        """If the dircache update fails after the rename finished, the error
+        is raised and the cached listings are dropped; falling back would try
+        to move a source that is gone."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        lro = fake_lro.succeeded()
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs,
+                "_update_dircache_after_rename",
+                side_effect=RuntimeError("cache update failed"),
+            ),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(RuntimeError, match="cache update failed"):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+    def test_hns_rename_request_error_still_falls_back(self, gcs_hns, gcs_hns_mocks):
+        """An unmapped error from the rename_folder call itself means no
+        rename was started, so the object-level fallback is still used."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.side_effect = (
+                api_exceptions.PermissionDenied("rename not allowed")
+            )
+
+            gcsfs.mv(path1, path2)
+
+            mocks["control_client"].rename_folder.assert_called_once()
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+
+    def test_hns_rename_transient_status_check_error_keeps_waiting(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, fake_clock, monkeypatch
+    ):
+        """A transient GetOperation error (ServiceUnavailable) moves on to the
+        next check instead of ending the wait and falling back."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.sequence(
+            [
+                api_exceptions.ServiceUnavailable("transient"),
+                operation_pb(done=True),
+            ]
+        )
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+
+            gcsfs.mv(path1, path2)
+
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [path2]
+            mocks["super_mv"].assert_not_called()
+            mock_mv_file.assert_not_called()
+
+        assert lro.get_operation.await_count == 2
+        # The second check waits for the first backoff step (0.5 s +-25%).
+        first, backoff = fake_clock.sleeps
+        assert first == 0.0
+        assert 0.375 <= backoff <= 0.625
+        lro.cancel_operation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_hns_rename_cancelled_while_polling_sends_cancel(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """Cancelling mv during poll_lro sends CancelOperation once, drops the
+        cached listings and propagates CancelledError without falling back."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_cancel"
+        path2 = f"{TEST_HNS_BUCKET}/dst_cancel"
+        waiting_after_first_poll = asyncio.Event()
+
+        delay_calls = 0
+
+        def cadence(elapsed):
+            nonlocal delay_calls
+            delay_calls += 1
+            if delay_calls == 1:
+                return 0.0
+            # Cancel while _poll_until sleeps, after a status check has
+            # finished. test_poller covers a cancel that races a check.
+            waiting_after_first_poll.set()
+            return 5.0
+
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", cadence)
+        lro = fake_lro.pending()
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            task = asyncio.create_task(gcsfs._mv(path1, path2))
+            await asyncio.wait_for(waiting_after_first_poll.wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(
+                asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True),
+                timeout=5.0,
+            )
+            await asyncio.sleep(0)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        lro.cancel_operation.assert_awaited_once()
+        assert not _BACKGROUND_TASKS
+
+    def test_fast_lro_polling_is_on_by_default(self, gcs_hns):
+        assert gcs_hns.fast_lro_polling is True
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        assert fs.fast_lro_polling is True
+
+    def test_fast_lro_polling_env_var_false_turns_polling_off(self, monkeypatch):
+        """FSSPEC_GCS_FAST_LRO_POLLING=false reaches the constructor through
+        fsspec's config, which parses the value as JSON."""
+        conf = {}
+        fsspec.config.set_conf_env(conf, {"FSSPEC_GCS_FAST_LRO_POLLING": "false"})
+        monkeypatch.setattr(fsspec.config, "conf", conf)
+
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+
+        assert fs.fast_lro_polling is False
+
+    @pytest.mark.parametrize(
+        "poll_timeout, expected_timeout",
+        [(600, 600), (None, None)],
+        ids=["custom_limit", "none_means_no_limit"],
+    )
+    def test_hns_rename_passes_poll_timeout_to_poll_lro(
+        self, gcs_hns, gcs_hns_mocks, poll_timeout, expected_timeout
+    ):
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch(
+                "gcsfs.extended_gcsfs.poll_lro", new_callable=mock.AsyncMock
+            ) as mock_poll_lro,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            gcsfs.mv(path1, path2, poll_timeout=poll_timeout)
+
+            operation = mocks["control_client"].rename_folder.return_value
+            mock_poll_lro.assert_awaited_once_with(operation, timeout=expected_timeout)
+
+    @pytest.mark.parametrize(
+        "bad_timeout",
+        [0, -1, float("inf"), float("nan"), True],
+        ids=["zero", "negative", "inf", "nan", "bool"],
+    )
+    def test_poll_timeout_rejects_non_finite_non_positive_or_bool(
+        self, gcs_hns, gcs_hns_mocks, bad_timeout
+    ):
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            with pytest.raises(ValueError, match="poll_timeout"):
+                gcsfs.mv(path1, path2, poll_timeout=bad_timeout)
+
+            mocks["control_client"].rename_folder.assert_not_called()
+            mocks["super_mv"].assert_not_called()
+
+    def test_poll_timeout_is_not_passed_to_object_level_mv(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """On a flat bucket mv falls back to object copies, which must not
+        receive the folder rename option."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
+            gcsfs.mv(path1, path2, poll_timeout=600)
+
+            mocks["super_mv"].assert_called_once_with(path1, path2)
+
+    def test_hns_rename_with_fast_lro_polling_off_uses_operation_result(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """With fast_lro_polling off, the rename waits with operation.result()
+        and never calls poll_lro."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch(
+                "gcsfs.extended_gcsfs.poll_lro", new_callable=mock.AsyncMock
+            ) as mock_poll_lro,
+            mock.patch.object(gcsfs, "fast_lro_polling", False),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+
+            gcsfs.mv(path1, path2)
+
+            operation = mocks["control_client"].rename_folder.return_value
+            operation.result.assert_awaited_once_with()
+            mock_poll_lro.assert_not_awaited()
+            mocks["super_mv"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [path2]
+
+    @pytest.mark.parametrize(
+        "code, expected_exc",
+        [
+            (code_pb2.ALREADY_EXISTS, FileExistsError),
+            (code_pb2.NOT_FOUND, FileNotFoundError),
+        ],
+        ids=["already_exists", "not_found"],
+    )
+    def test_hns_rename_with_fast_lro_polling_off_maps_operation_errors(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, code, expected_exc
+    ):
+        """With polling off, operation errors are still typed and mapped, so
+        they raise without falling back and drop the cached listings."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        lro = fake_lro.failed(code, after=1)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "fast_lro_polling", False),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(expected_exc):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+
+    def test_hns_rename_with_fast_lro_polling_off_falls_back_on_unmapped_error(
+        self, gcs_hns, gcs_hns_mocks, fake_lro
+    ):
+        """With polling off, an operation that finished with an unmapped error
+        still falls back to object-level mv, as with polling on."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        lro = fake_lro.failed(code_pb2.INTERNAL, after=1)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "fast_lro_polling", False),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+
+            gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+            assert path1 not in gcsfs.dircache
 
 
 class TestExtendedGcsFileSystemMvFile:
@@ -2708,7 +3249,13 @@ class TestExtendedGcsFileSystemRm:
                 [base_dir], recursive=True, maxdepth=None, detail=True
             )
             mocks["info"].assert_not_called()
-            files_to_delete = sorted([file_path, nested_file1, nested_file2])
+            # Only the target directory name is also deleted as an object;
+            # nested directories are not, since the recursive listing would
+            # have returned any coexisting object (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            files_to_delete = sorted(
+                [file_path, nested_file1, nested_file2] + [base_dir]
+            )
             mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
             assert sorted(mock_delete_files.await_args[0][0]) == files_to_delete
             expected_delete_folder_requests = [
@@ -2731,6 +3278,229 @@ class TestExtendedGcsFileSystemRm:
             mocks["control_client"].delete_folder.assert_has_calls(
                 expected_delete_folder_requests
             )
+
+    @staticmethod
+    def _fake_object_listing(objects):
+        """
+        Emulates the object listing of core `GCSFileSystem._find` over the
+        object names in `objects`: it lists the prefix "path/" and only falls
+        back to the object "path" itself when that prefix has no objects.
+        """
+
+        async def fake_find(path, **kwargs):
+            path = path.rstrip("/")
+            names = [o for o in objects if o.startswith(f"{path}/")]
+            if not names:
+                names = [o for o in objects if o == path]
+            return {n: {"name": n, "type": "file", "size": 4} for n in names}
+
+        return fake_find
+
+    @pytest.mark.parametrize(
+        "objects, suffix, expected_files, expected_dirs",
+        [
+            # Folder 'a/' only contains the subfolder 'b/'.
+            pytest.param(
+                ["a"],
+                "",
+                ["a", ""],
+                ["a/b", "a", ""],
+                id="subfolder_only-parent_dir",
+            ),
+            pytest.param(["a"], "/*", ["a"], ["a/b", "a"], id="subfolder_only-glob"),
+            pytest.param(
+                ["a"], "/a", ["a"], ["a/b", "a"], id="subfolder_only-shared_name"
+            ),
+            # Folder 'a/' also contains the object 'a/x.txt', so the listing of
+            # the prefix 'a/' does not include the object 'a'.
+            pytest.param(
+                ["a", "a/x.txt"],
+                "",
+                ["a", "a/x.txt", ""],
+                ["a/b", "a", ""],
+                id="subfolder_and_object-parent_dir",
+            ),
+            pytest.param(
+                ["a", "a/x.txt"],
+                "/*",
+                ["a", "a/x.txt"],
+                ["a/b", "a"],
+                id="subfolder_and_object-glob",
+            ),
+            pytest.param(
+                ["a", "a/x.txt"],
+                "/a",
+                ["a", "a/x.txt"],
+                ["a/b", "a"],
+                id="subfolder_and_object-shared_name",
+            ),
+            # The object 'a/b' shares its name with the nested folder 'a/b/',
+            # whose parent 'a' is also removed, so only the recursive listing
+            # of 'a' (not a top-level blind delete) can find the object.
+            pytest.param(
+                ["a/b"],
+                "",
+                ["a/b", ""],
+                ["a/b", "a", ""],
+                id="nested_shared_name-parent_dir",
+            ),
+            pytest.param(
+                ["a/b"], "/*", ["a/b", "a"], ["a/b", "a"], id="nested_shared_name-glob"
+            ),
+            pytest.param(
+                ["a/b"],
+                "/a",
+                ["a/b", "a"],
+                ["a/b", "a"],
+                id="nested_shared_name-shared_name",
+            ),
+        ],
+    )
+    def test_rm_recursive_deletes_object_sharing_name_with_folder(
+        self, gcs_hns, gcs_hns_mocks, objects, suffix, expected_files, expected_dirs
+    ):
+        """
+        Test that recursive rm deletes an object that shares its name with a
+        folder (object 'a' and folder 'a/'), which can coexist in HNS buckets,
+        without deleting nested directory names as objects.
+
+        `_expand_path_with_details` is not mocked so that the real listings
+        in `_find`/`_glob` are exercised against an emulated bucket.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
+
+        def to_paths(names):
+            return [f"{base_dir}/{n}" if n else base_dir for n in names]
+
+        mock_delete_files = mock.AsyncMock(return_value=[])
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mocks["super_find"].side_effect = self._fake_object_listing(
+                to_paths(objects)
+            )
+            mocks["control_client"].list_folders.side_effect = (
+                lambda *args, **kwargs: AsyncIter(
+                    [
+                        get_mock_folder("dir_to_rm"),
+                        get_mock_folder("dir_to_rm/a"),
+                        get_mock_folder("dir_to_rm/a/b"),
+                    ]
+                )
+            )
+
+            gcsfs.rm(f"{base_dir}{suffix}", recursive=True)
+
+            mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
+            # The coexisting object 'a' is deleted, but the nested folder name
+            # 'a/b' is never deleted as an object.
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
+                to_paths(expected_files)
+            )
+            expected_dir_paths = to_paths(expected_dirs)
+            expected_delete_folder_requests = [
+                mock.call(
+                    request=self._get_delete_folder_request(gcsfs, d),
+                    retry=mock.ANY,
+                    timeout=mock.ANY,
+                )
+                for d in expected_dir_paths
+            ]
+            mocks["control_client"].delete_folder.assert_has_calls(
+                expected_delete_folder_requests
+            )
+            assert mocks["control_client"].delete_folder.call_count == len(
+                expected_dir_paths
+            )
+
+    def test_rm_object_sharing_name_with_folder_keeps_dir_cache_on_failure(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """
+        Test that when the object sharing a directory's name is deleted and
+        the folder delete then fails, only the "file" entry is evicted from
+        the cached parent listing and the "directory" entry stays.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
+        dir_path = f"{base_dir}/sub"
+        dir_entry = {"name": dir_path, "type": "directory", "size": 0}
+        file_entry = {"name": dir_path, "type": "file", "size": 4}
+        # A listing of `base_dir` caches both entries for the shared name.
+        gcsfs.dircache[base_dir] = [dir_entry, file_entry]
+
+        async def fake_delete_files(files, batchsize):
+            # Emulates a successful batch delete of the objects.
+            await gcsfs._rm_files_cache_update(files)
+            return list(files)
+
+        try:
+            with (
+                gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+                mock.patch.object(
+                    gcsfs, "_expand_path_with_details", new_callable=mock.AsyncMock
+                ) as mock_expand,
+                mock.patch.object(
+                    gcsfs, "_delete_files", side_effect=fake_delete_files
+                ) as mock_delete_files,
+            ):
+                mock_expand.return_value = [dir_entry]
+                mocks["control_client"].delete_folder.side_effect = (
+                    api_exceptions.FailedPrecondition("folder not empty")
+                )
+
+                with pytest.raises(OSError, match="Pre condition failed"):
+                    gcsfs.rm(dir_path, recursive=True)
+
+                mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+                assert gcsfs.dircache[base_dir] == [dir_entry]
+        finally:
+            gcsfs.invalidate_cache()
+
+    @pytest.mark.parametrize(
+        "maxdepth, expected_files",
+        [
+            # Unbounded: 'dir' is listed below the bucket root, so it is not
+            # also deleted as an object.
+            pytest.param(None, [], id="unbounded"),
+            # Bounded: every directory name except the bucket root is also
+            # deleted as an object.
+            pytest.param(1, [f"{TEST_HNS_BUCKET}/dir"], id="maxdepth"),
+        ],
+    )
+    def test_rm_recursive_bucket_root_not_deleted_as_object(
+        self, gcs_hns, gcs_hns_mocks, maxdepth, expected_files
+    ):
+        """Test that recursive rm never deletes the bucket name as an object."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/dir"
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+            # With maxdepth set, _hns_rmdir also deletes the placeholder.
+            mock.patch.object(
+                gcsfs, "_rm_file", new_callable=mock.AsyncMock
+            ) as mock_rm_file,
+        ):
+            mock_expand.return_value = [
+                {"name": TEST_HNS_BUCKET, "type": "directory"},
+                {"name": dir_path, "type": "directory"},
+            ]
+            mock_delete_files.return_value = []
+            mock_rm_file.side_effect = FileNotFoundError
+
+            gcsfs.rm(TEST_HNS_BUCKET, recursive=True, maxdepth=maxdepth)
+
+            mock_delete_files.assert_awaited_once_with(expected_files, self.BATCH_SIZE)
+            mocks["super_rmdir"].assert_awaited_once_with(TEST_HNS_BUCKET)
 
     def test_rm_non_hns_fallback(self, gcs_hns, gcs_hns_mocks):
         """Test that sync rm falls back to the parent implementation for non-HNS buckets."""
@@ -2787,7 +3557,9 @@ class TestExtendedGcsFileSystemRm:
             mock_expand.assert_awaited_once_with(
                 [dir_path], recursive=True, maxdepth=None, detail=True
             )
-            mock_delete_files.assert_awaited_once_with([], self.BATCH_SIZE)
+            # The directory name is also deleted as an object (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2799,10 +3571,12 @@ class TestExtendedGcsFileSystemRm:
         dir_path = f"{TEST_HNS_BUCKET}/non_empty_dir"
 
         mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock(return_value=[])
 
         with (
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
             # Mock expand_path to return the directory itself
             mock_expand.return_value = [{"name": dir_path, "type": "directory"}]
@@ -2818,6 +3592,9 @@ class TestExtendedGcsFileSystemRm:
             mock_expand.assert_called_once_with(
                 [dir_path], recursive=False, maxdepth=None, detail=True
             )
+            # The directory name is also deleted as an object (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2856,7 +3633,9 @@ class TestExtendedGcsFileSystemRm:
             )
             mock_delete_files.assert_awaited_once()
             args, _ = mock_delete_files.await_args
-            assert sorted(args[0]) == sorted([file_path1, file_path2])
+            # Directory names are also deleted as objects (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            assert sorted(args[0]) == sorted([file_path1, file_path2, dir_path])
 
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
@@ -3019,12 +3798,16 @@ class TestExtendedGcsFileSystemRm:
             with pytest.raises(OSError, match="boom"):
                 gcsfs.rm([flat_file, hns_file])
 
+    # Directory names that are not listed below another removed directory
+    # (all of them unless recursive=True and maxdepth=None) are also
+    # batch-deleted as objects (see
+    # test_rm_recursive_deletes_object_sharing_name_with_folder).
     @pytest.mark.parametrize(
         "recursive, maxdepth, expected_batch_files, expected_rm_files, expected_folder_deletes",
         [
-            (True, None, ["dir/sub/"], [], 2),
-            (True, 1, [], ["dir/sub/", "dir/"], 2),
-            (False, None, [], ["dir/"], 1),
+            (True, None, ["dir/sub/", "dir"], [], 2),
+            (True, 1, ["dir", "dir/sub"], ["dir/sub/", "dir/"], 2),
+            (False, None, ["dir"], ["dir/"], 1),
         ],
     )
     def test_rm_placeholder_delete_behavior(
@@ -3064,9 +3847,9 @@ class TestExtendedGcsFileSystemRm:
 
             gcsfs.rm(dir_path, recursive=recursive, maxdepth=maxdepth)
 
-            assert mock_delete_files.await_args[0][0] == [
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
                 f"{TEST_HNS_BUCKET}/{k}" for k in expected_batch_files
-            ]
+            )
             assert sorted(c.args[0] for c in mock_rm_file.await_args_list) == sorted(
                 f"{TEST_HNS_BUCKET}/{k}" for k in expected_rm_files
             )
@@ -3437,7 +4220,7 @@ class TestExtendedGcsFileSystemBucketLayout:
         self, extended_gcsfs
     ):
         fs = extended_gcsfs
-        fs._storage_layout_cache.clear()
+        fs.invalidate_storage_layout_cache()
 
         with mock.patch.object(
             fs,
@@ -3466,6 +4249,52 @@ class TestExtendedGcsFileSystemBucketLayout:
             # Third lookup hits the cache without calling _get_bucket_layout again
             res3 = await fs._lookup_bucket_layout("transient-bucket")
             assert res3 == layouts.STANDARD_HIERARCHICAL
+            assert mock_get_layout.await_count == 2
+
+    def test_invalidate_storage_layout_cache_single_bucket(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache = {
+            "bucket-a": layouts.STANDARD_RCU,
+            "bucket-b": layouts.STANDARD_HIERARCHICAL,
+        }
+
+        fs.invalidate_storage_layout_cache("bucket-a")
+        assert fs._storage_layout_cache == {"bucket-b": layouts.STANDARD_HIERARCHICAL}
+
+        # A path inside the bucket drops that bucket's entry.
+        fs.invalidate_storage_layout_cache("gs://bucket-b/some/key")
+        assert fs._storage_layout_cache == {}
+
+        # Invalidating a bucket that is not cached is a no-op.
+        fs.invalidate_storage_layout_cache("missing-bucket")
+        assert fs._storage_layout_cache == {}
+
+    def test_invalidate_storage_layout_cache_all(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache = {
+            "bucket-a": layouts.STANDARD_RCU,
+            "bucket-b": layouts.STANDARD_HIERARCHICAL,
+        }
+
+        fs.invalidate_storage_layout_cache()
+
+        assert fs._storage_layout_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_lookup_after_invalidate_requeries(self, extended_gcsfs):
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            side_effect=[layouts.STANDARD_RCU, layouts.STANDARD],
+        ) as mock_get_layout:
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD_RCU
+
+            fs.invalidate_storage_layout_cache("bucket")
+
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD
             assert mock_get_layout.await_count == 2
 
     def test_bucket_layout_presets(self):

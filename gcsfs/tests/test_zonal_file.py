@@ -16,14 +16,18 @@ from unittest import mock
 import fsspec.asyn
 import pytest
 from fsspec.asyn import FSTimeoutError
+from fsspec.callbacks import Callback
+from fsspec.prefetcher import BackgroundPrefetcher
+from google.api_core.exceptions import NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
 
 from gcsfs import zb_hns_utils
-from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.extended_gcsfs import CachingTier, ExtendedGcsFileSystem
 from gcsfs.retry import GenerationMismatchError, HttpError
-from gcsfs.tests.conftest import requires_rapid
+from gcsfs.tests import layouts
+from gcsfs.tests.conftest import RAPID_WRITE_LAYOUTS, requires_rapid
 from gcsfs.tests.settings import TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS
@@ -36,7 +40,10 @@ pytestmark = [requires_rapid]
 
 class TestZonalGcsFileSystemWriteFileCacheUpdate:
     @pytest.mark.asyncio
-    async def test_pipe_file_zonal_routes_through_write_cache_update(self):
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_pipe_file_zonal_routes_through_write_cache_update(
+        self, bucket_layout
+    ):
         """The zonal pipe_file path routes through the shared cache updater."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         fs._grpc_client = mock.MagicMock()
@@ -46,17 +53,22 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         writer.append = mock.AsyncMock()
 
         with (
-            mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=bucket_layout,
+            ),
             mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
             mock.patch(
                 "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
                 new_callable=mock.AsyncMock,
                 return_value=writer,
-            ),
+            ) as mock_init_aaow,
             mock.patch(
                 "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
                 new_callable=mock.AsyncMock,
-            ),
+            ) as mock_close_aaow,
             mock.patch.object(
                 fs, "_write_file_cache_update", new_callable=mock.AsyncMock
             ) as mock_update,
@@ -64,23 +76,99 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
             await fs._pipe_file(path, b"some-data")
 
         mock_update.assert_awaited_once_with(path)
+        expected_rcu = bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+        assert mock_init_aaow.await_args.kwargs["storage_class"] == (
+            "RAPID" if expected_rcu else None
+        )
+        mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=expected_rcu)
 
     @pytest.mark.asyncio
-    async def test_put_file_zonal_routes_through_write_cache_update(self):
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_put_file_zonal_routes_through_write_cache_update(
+        self, bucket_layout
+    ):
         """The zonal put_file path routes through the shared cache updater."""
         fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
         writer = mock.MagicMock()
-        writer.append_from_file = mock.AsyncMock()
+        writer.append = mock.AsyncMock()
 
         with tmpfile() as lpath:
             with open(lpath, "wb") as f:
                 f.write(b"some-data")
 
             with (
-                mock.patch.object(fs, "_is_zonal_bucket", return_value=True),
+                mock.patch.object(
+                    fs,
+                    "_lookup_bucket_layout",
+                    new_callable=mock.AsyncMock,
+                    return_value=bucket_layout,
+                ),
+                mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                    new_callable=mock.AsyncMock,
+                    return_value=writer,
+                ) as mock_init_aaow,
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                    new_callable=mock.AsyncMock,
+                ) as mock_close_aaow,
+                mock.patch.object(
+                    fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+                ) as mock_update,
+            ):
+                await fs._put_file(lpath, rpath)
+
+        mock_update.assert_awaited_once_with(rpath)
+        expected_rcu = bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+        assert mock_init_aaow.await_args.kwargs["storage_class"] == (
+            "RAPID" if expected_rcu else None
+        )
+        mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=expected_rcu)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload, expected_chunks, expected_updates",
+        [
+            (
+                b"hello world",
+                [b"hell", b"o wo", b"rld"],
+                [(11, 0), (11, 4), (11, 8), (11, 11)],
+            ),
+            (b"", [], [(0, 0)]),
+        ],
+        ids=["chunked", "empty"],
+    )
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_put_file_updates_callback(
+        self, bucket_layout, payload, expected_chunks, expected_updates
+    ):
+        """_put_file sets the callback size and updates progress after each chunk."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append = mock.AsyncMock()
+        updates = []
+        cb = Callback(
+            hooks={"progress": lambda size, value, **_: updates.append((size, value))}
+        )
+
+        with tmpfile() as lpath:
+            with open(lpath, "wb") as f:
+                f.write(payload)
+
+            with (
+                mock.patch.object(
+                    fs,
+                    "_lookup_bucket_layout",
+                    new_callable=mock.AsyncMock,
+                    return_value=bucket_layout,
+                ),
                 mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
                 mock.patch(
                     "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
@@ -93,11 +181,133 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                 ),
                 mock.patch.object(
                     fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+                ),
+            ):
+                await fs._put_file(lpath, rpath, chunksize=4, callback=cb)
+
+        assert cb.size == len(payload)
+        assert cb.value == len(payload)
+        assert updates == expected_updates
+        assert [c.args[0] for c in writer.append.await_args_list] == expected_chunks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("finalize_on_close", [None, True])
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_pipe_file_failure_closes_without_finalizing(
+        self, bucket_layout, finalize_on_close
+    ):
+        """A failed pipe_file closes the writer without finalizing the partial object and still updates the dircache."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append = mock.AsyncMock(side_effect=ConnectionError("append failed"))
+
+        with (
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=bucket_layout,
+            ),
+            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                new_callable=mock.AsyncMock,
+                return_value=writer,
+            ),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                new_callable=mock.AsyncMock,
+            ) as mock_close_aaow,
+            mock.patch.object(
+                fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+            ) as mock_update,
+        ):
+            with pytest.raises(ConnectionError, match="append failed"):
+                await fs._pipe_file(
+                    path, b"some-data", finalize_on_close=finalize_on_close
+                )
+
+        mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=False)
+        mock_update.assert_awaited_once_with(path)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("finalize_on_close", [None, True])
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_put_file_failure_closes_without_finalizing(
+        self, bucket_layout, finalize_on_close
+    ):
+        """A failed put_file closes the writer without finalizing the partial object and still updates the dircache."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+        rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+
+        writer = mock.MagicMock()
+        writer.append = mock.AsyncMock(side_effect=ConnectionError("append failed"))
+
+        with tmpfile() as lpath:
+            with open(lpath, "wb") as f:
+                f.write(b"some-data")
+
+            with (
+                mock.patch.object(
+                    fs,
+                    "_lookup_bucket_layout",
+                    new_callable=mock.AsyncMock,
+                    return_value=bucket_layout,
+                ),
+                mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                    new_callable=mock.AsyncMock,
+                    return_value=writer,
+                ),
+                mock.patch(
+                    "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+                    new_callable=mock.AsyncMock,
+                ) as mock_close_aaow,
+                mock.patch.object(
+                    fs, "_write_file_cache_update", new_callable=mock.AsyncMock
                 ) as mock_update,
             ):
-                await fs._put_file(lpath, rpath)
+                with pytest.raises(ConnectionError, match="append failed"):
+                    await fs._put_file(
+                        lpath, rpath, finalize_on_close=finalize_on_close
+                    )
 
+        mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=False)
         mock_update.assert_awaited_once_with(rpath)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    async def test_put_file_missing_lpath_does_not_open_writer(
+        self, bucket_layout, tmp_path
+    ):
+        """A missing local file fails before the writer replaces the object."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs._grpc_client = mock.MagicMock()
+
+        with (
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=bucket_layout,
+            ),
+            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                new_callable=mock.AsyncMock,
+            ) as mock_init_aaow,
+        ):
+            with pytest.raises(FileNotFoundError):
+                await fs._put_file(
+                    str(tmp_path / "missing"), f"{TEST_ZONAL_BUCKET}/dir/file.txt"
+                )
+
+        mock_init_aaow.assert_not_awaited()
 
 
 @pytest.fixture
@@ -118,20 +328,18 @@ def mock_gcsfs():
     return fs
 
 
-@mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
+def test_zonal_file_generation_kwarg_handling(mock_gcsfs):
     """Test that ZonalFile explicitly provided generation kwarg is not dropped."""
     from gcsfs.zonal_file import ZonalFile
 
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
     # split_path returns None for generation when it's not in the path
     mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", None)
     zf = ZonalFile(
         gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb", generation="456"
     )
 
-    expected_call = mock.call(
-        mock_gcsfs.loop,
-        mock_gcsfs._mrd_pool_cache.get,
+    mock_gcsfs._mrd_pool_cache.get.assert_awaited_once_with(
         "test-bucket",
         "test-key",
         "456",
@@ -139,21 +347,18 @@ def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
         cache_type=mock.ANY,
         cache_source=mock.ANY,
     )
-    assert expected_call in mock_sync.call_args_list
     zf.close()
 
 
-@mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
+def test_zonal_file_generation_path_handling(mock_gcsfs):
     """Test that ZonalFile parses generation from the path when provided."""
     from gcsfs.zonal_file import ZonalFile
 
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
     mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", "123")
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key#123", mode="rb")
 
-    expected_call = mock.call(
-        mock_gcsfs.loop,
-        mock_gcsfs._mrd_pool_cache.get,
+    mock_gcsfs._mrd_pool_cache.get.assert_awaited_once_with(
         "test-bucket",
         "test-key",
         "123",
@@ -161,7 +366,6 @@ def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
         cache_type=mock.ANY,
         cache_source=mock.ANY,
     )
-    assert expected_call in mock_sync.call_args_list
     zf.close()
 
 
@@ -208,6 +412,7 @@ def test_zonal_file_write_success(extended_gcsfs, zonal_write_mocks, file_path):
         assert extended_gcsfs.cat(file_path) == data1 + data2
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that opening a ZonalFile in write mode initializes the writer."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
@@ -222,11 +427,13 @@ def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks, file_path
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.exists(file_path)
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -249,11 +456,13 @@ def test_zonal_file_open_write_mode_with_custom_flush_interval_bytes(
             None,
             custom_flush_interval_bytes,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.exists(file_path)
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_create_mode(extended_gcsfs, zonal_write_mocks, file_path):
     """mode="xb" opens the writer with the exclusive-create precondition."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
@@ -268,11 +477,114 @@ def test_zonal_file_open_create_mode(extended_gcsfs, zonal_write_mocks, file_pat
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=0,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.exists(file_path)
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_flush_failure_invalidates_cache(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """A failed closing flush still drops the cached parent listing of the replaced object."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for closing-flush failures with mocks.")
+    path = f"{file_path}/obj"
+    extended_gcsfs.dircache[file_path] = [{"name": path, "type": "file", "size": 1}]
+    zonal_write_mocks["aaow"].flush.side_effect = NotFound("flush failed")
+
+    with pytest.raises(NotFound, match="flush failed"):
+        with extended_gcsfs.open(path, "wb") as f:
+            f.write(test_data)
+
+    assert file_path not in extended_gcsfs.dircache
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@pytest.mark.parametrize(
+    "failing_call, closes_stream",
+    [("append", True), ("flush", True), ("finalize", True), ("flush", False)],
+    ids=["append", "flush", "finalize", "flush-stream-left-open"],
+)
+def test_zonal_file_failed_writer_call_surfaces_its_error_without_finalizing(
+    extended_gcsfs, zonal_write_mocks, file_path, failing_call, closes_stream
+):
+    """A failed append, flush or finalize raises its own error, and close() neither
+    retries the call nor finalizes the partial object."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for writer failures with mocks.")
+    aaow = zonal_write_mocks["aaow"]
+    calls = {"failed": False}
+
+    async def closed_stream_flush():
+        # The SDK refuses to flush a stream that a failed call has closed.
+        if not aaow._is_stream_open:
+            raise ValueError("Stream is not open. Call open() before flush().")
+
+    async def fail_once(*args, **kwargs):
+        if calls["failed"]:
+            return await closed_stream_flush()
+        calls["failed"] = True
+        if closes_stream:
+            aaow._is_stream_open = False
+        raise NotFound("writer call failed")
+
+    aaow.flush.side_effect = closed_stream_flush
+    getattr(aaow, failing_call).side_effect = fail_once
+
+    with pytest.raises(NotFound, match="writer call failed"):
+        with extended_gcsfs.open(file_path, "wb") as f:
+            f.write(test_data)
+            if failing_call == "flush":
+                f.flush()
+            elif failing_call == "finalize":
+                f.commit()
+
+    assert getattr(aaow, failing_call).await_count == 1
+    assert not any(
+        c.kwargs.get("finalize_on_close") for c in aaow.close.await_args_list
+    )
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_text_mode_failed_write_surfaces_its_error(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """TextIOWrapper.close() calls flush(force=False) before close(), which must not
+    call aaow.flush() on an aborted stream and mask the original write error."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for text-mode writer failures with mocks.")
+    aaow = zonal_write_mocks["aaow"]
+    append_calls = 0
+
+    async def closed_stream_flush():
+        if not aaow._is_stream_open:
+            raise ValueError("Stream is not open. Call open() before flush().")
+
+    async def fail_second_append(data):
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 2:
+            aaow._is_stream_open = False
+            raise NotFound("second append failed")
+
+    aaow.flush.side_effect = closed_stream_flush
+    aaow.append.side_effect = fail_second_append
+
+    with pytest.raises(NotFound, match="second append failed"):
+        with extended_gcsfs.open(file_path, "w") as f:
+            f.write("a" * 9000)
+            f.write("b" * 9000)
+
+    assert aaow.append.await_count == 2
+    aaow.flush.assert_not_awaited()
+    assert not any(
+        c.kwargs.get("finalize_on_close") for c in aaow.close.await_args_list
+    )
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode_with_if_generation_match(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -290,6 +602,7 @@ def test_zonal_file_open_write_mode_with_if_generation_match(
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=7,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         # file_path does not exist, so generation 7 cannot match.
@@ -305,6 +618,7 @@ def test_zonal_file_open_write_mode_with_if_generation_match(
             )
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @pytest.mark.parametrize(
     "mode, kwargs, error",
     [
@@ -345,6 +659,7 @@ def test_zonal_file_rejects_if_generation_match_before_opening_pool(
     mock_sync.assert_not_called()
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that opening a ZonalFile in append mode initializes the writer with generation."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
@@ -362,11 +677,13 @@ def test_zonal_file_open_append_mode(extended_gcsfs, zonal_write_mocks, file_pat
             "12345",
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
     else:
         assert extended_gcsfs.cat(file_path) == b"data"
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_append_mode_nonexistent_file(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -394,11 +711,65 @@ def test_zonal_file_open_append_mode_nonexistent_file(
             None,
             _DEFAULT_FLUSH_INTERVAL_BYTES,
             if_generation_match=None,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         # _info is called to get the generation, but it fails
         extended_gcsfs._info.assert_awaited_once()
     else:
         assert extended_gcsfs.cat(file_path) == test_data
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+@pytest.mark.parametrize(
+    "zonal_write_mocks",
+    [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],
+    indirect=True,
+)
+def test_open_write_modes_use_zonal_file_on_rcu(
+    extended_gcsfs, zonal_write_mocks, file_path, mode
+):
+    """Every write mode on an RCU bucket opens a ZonalFile that writes RAPID and finalizes on close by default."""
+    with extended_gcsfs.open(file_path, mode) as f:
+        assert isinstance(f, ZonalFile)
+        assert f.finalize_on_close is True
+        f.write(test_data)
+
+    assert zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"] == "RAPID"
+    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
+
+
+@pytest.mark.parametrize(
+    "kwargs, warns",
+    [
+        ({"metadata": {"k": "v"}}, True),
+        ({"fixed_key_metadata": {"cache_control": "no-cache"}}, True),
+        ({"kms_key_name": "projects/p/locations/l/keyRings/r/cryptoKeys/k"}, True),
+        ({"content_type": "text/plain"}, True),
+        ({"content_type": "application/octet-stream"}, False),
+        ({}, False),
+    ],
+    ids=[
+        "metadata",
+        "fixed_key_metadata",
+        "kms_key_name",
+        "content_type",
+        "default_content_type",
+        "no_params",
+    ],
+)
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_write_mode_warns_on_ignored_upload_params(
+    extended_gcsfs, zonal_write_mocks, file_path, caplog, kwargs, warns
+):
+    """Write modes warn when an upload parameter the appendable writer ignores is set."""
+    with caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"):
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True, **kwargs):
+            pass
+    warned = any(
+        "These parameters will be ignored" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+    assert warned is warns
 
 
 def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks, file_path):
@@ -410,6 +781,7 @@ def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks, file_path):
         zonal_write_mocks["aaow"].flush.assert_awaited()
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_lazy_init_creates_empty_file_on_close(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -426,10 +798,15 @@ def test_zonal_file_lazy_init_creates_empty_file_on_close(
 
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once()
+        assert (
+            zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"]
+            == zonal_write_mocks["storage_class"]
+        )
     else:
         assert extended_gcsfs.exists(file_path)
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_commit(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that commit finalizes the write, sets finalized to True and does not finalize on close."""
     with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
@@ -459,11 +836,222 @@ def test_zonal_file_finalize_on_close_true(
 def test_zonal_file_finalize_on_close_default_false(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
-    """Test that finalize_on_close is False by default."""
+    """Test that finalize_on_close is False by default for Zonal buckets."""
     with extended_gcsfs.open(file_path, "wb") as f:
         assert f.finalize_on_close is False
     if zonal_write_mocks:
         zonal_write_mocks["aaow"].close.assert_awaited_with(finalize_on_close=False)
+
+
+@pytest.mark.parametrize(
+    "zonal_write_mocks",
+    [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],
+    indirect=True,
+)
+def test_zonal_file_finalize_on_close_rcu_default_and_overrides(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """On RCU buckets finalize_on_close defaults to True, but explicit False overrides it."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for finalize_on_close resolution with mocks.")
+
+    aaow = zonal_write_mocks["aaow"]
+
+    # 1. Default via open() is True
+    with extended_gcsfs.open(file_path, "wb") as f:
+        assert f.finalize_on_close is True
+    aaow.close.assert_awaited_once_with(finalize_on_close=True)
+
+    # 2. Direct ZonalFile instantiation also defaults to True on RCU
+    aaow.close.reset_mock()
+    with ZonalFile(extended_gcsfs, file_path, mode="wb") as f_direct:
+        assert f_direct.finalize_on_close is True
+    aaow.close.assert_awaited_once_with(finalize_on_close=True)
+
+    # 3. Per-call finalize_on_close=False overrides RCU default
+    aaow.close.reset_mock()
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f_false:
+        assert f_false.finalize_on_close is False
+    aaow.close.assert_awaited_once_with(finalize_on_close=False)
+
+    # 4. Filesystem-level finalize_on_close=False overrides RCU default
+    orig = getattr(extended_gcsfs, "finalize_on_close", None)
+    try:
+        extended_gcsfs.finalize_on_close = False
+        aaow.close.reset_mock()
+        with extended_gcsfs.open(file_path, "wb") as f_fs_false:
+            assert f_fs_false.finalize_on_close is False
+        aaow.close.assert_awaited_once_with(finalize_on_close=False)
+    finally:
+        extended_gcsfs.finalize_on_close = orig
+
+
+@pytest.mark.parametrize("call_value", [None, True, False])
+@pytest.mark.parametrize("fs_value", [None, True, False])
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_finalize_on_close_precedence(
+    extended_gcsfs, zonal_write_mocks, file_path, fs_value, call_value
+):
+    """A per-call finalize_on_close wins over the filesystem value, which wins over the bucket default."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for finalize_on_close resolution with mocks.")
+    if call_value is not None:
+        expected = call_value
+    elif fs_value is not None:
+        expected = fs_value
+    else:
+        # Only RCU layouts finalize by default; they are also the only ones
+        # for which zonal_write_mocks expects storage_class "RAPID".
+        expected = zonal_write_mocks["storage_class"] == "RAPID"
+
+    orig = getattr(extended_gcsfs, "finalize_on_close", None)
+    try:
+        extended_gcsfs.finalize_on_close = fs_value
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=call_value) as f:
+            assert f.finalize_on_close is expected
+    finally:
+        extended_gcsfs.finalize_on_close = orig
+    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+async def test_simple_upload_finalize_on_close_defaults_by_bucket_layout(bucket_layout):
+    """simple_upload defaults finalize_on_close to True on RCU and False on Zonal, with override support."""
+    from gcsfs.extended_gcsfs import simple_upload
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs._grpc_client = mock.MagicMock()
+    writer = mock.MagicMock()
+    writer.append = mock.AsyncMock()
+    expected_rcu = bucket_layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+
+    with (
+        mock.patch.object(
+            fs,
+            "_lookup_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+        mock.patch(
+            "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+            new_callable=mock.AsyncMock,
+            return_value=writer,
+        ),
+        mock.patch(
+            "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+            new_callable=mock.AsyncMock,
+        ) as mock_close_aaow,
+    ):
+        await simple_upload(fs, TEST_ZONAL_BUCKET, "k", b"data")
+        mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=expected_rcu)
+
+        mock_close_aaow.reset_mock()
+        await simple_upload(
+            fs, TEST_ZONAL_BUCKET, "k", b"data", finalize_on_close=not expected_rcu
+        )
+        mock_close_aaow.assert_awaited_once_with(
+            writer, finalize_on_close=not expected_rcu
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finalize_on_close", [None, True])
+@pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+async def test_simple_upload_failure_closes_without_finalizing(
+    bucket_layout, finalize_on_close
+):
+    """A failed simple_upload closes the writer without finalizing the partial object."""
+    from gcsfs.extended_gcsfs import simple_upload
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs._grpc_client = mock.MagicMock()
+    writer = mock.MagicMock()
+    writer.append = mock.AsyncMock(side_effect=ConnectionError("append failed"))
+
+    with (
+        mock.patch.object(
+            fs,
+            "_lookup_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+        mock.patch(
+            "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+            new_callable=mock.AsyncMock,
+            return_value=writer,
+        ),
+        mock.patch(
+            "gcsfs.extended_gcsfs.zb_hns_utils.close_aaow",
+            new_callable=mock.AsyncMock,
+        ) as mock_close_aaow,
+    ):
+        with pytest.raises(ConnectionError, match="append failed"):
+            await simple_upload(
+                fs,
+                TEST_ZONAL_BUCKET,
+                "k",
+                b"data",
+                finalize_on_close=finalize_on_close,
+            )
+
+    mock_close_aaow.assert_awaited_once_with(writer, finalize_on_close=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("helper", ["_put_file", "_pipe_file", "simple_upload"])
+@pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+async def test_write_helpers_propagate_finalize_failure(
+    bucket_layout, helper, tmp_path
+):
+    """With the real close_aaow, a failed finalize propagates and the writer is closed once.
+
+    _put_file and _pipe_file still update the dircache; simple_upload leaves it
+    to its callers.
+    """
+    from gcsfs.extended_gcsfs import simple_upload
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs._grpc_client = mock.MagicMock()
+    path = f"{TEST_ZONAL_BUCKET}/k"
+    writer = mock.MagicMock(bucket_name=TEST_ZONAL_BUCKET, object_name="k")
+    writer.append = mock.AsyncMock()
+    writer.close = mock.AsyncMock(side_effect=NotFound("finalize failed"))
+    lpath = tmp_path / "data"
+    lpath.write_bytes(b"data")
+
+    with (
+        mock.patch.object(
+            fs,
+            "_lookup_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+        mock.patch(
+            "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+            new_callable=mock.AsyncMock,
+            return_value=writer,
+        ),
+        mock.patch.object(
+            fs, "_write_file_cache_update", new_callable=mock.AsyncMock
+        ) as mock_update,
+    ):
+        with pytest.raises(NotFound, match="finalize failed"):
+            if helper == "_put_file":
+                await fs._put_file(str(lpath), path, finalize_on_close=True)
+            elif helper == "_pipe_file":
+                await fs._pipe_file(path, b"data", finalize_on_close=True)
+            else:
+                await simple_upload(
+                    fs, TEST_ZONAL_BUCKET, "k", b"data", finalize_on_close=True
+                )
+
+    writer.close.assert_awaited_once_with(finalize_on_close=True)
+    if helper != "simple_upload":
+        mock_update.assert_awaited_once_with(path)
 
 
 def test_zonal_file_flush_after_finalize_logs_warning(
@@ -514,7 +1102,7 @@ def test_zonal_file_discard(extended_gcsfs, zonal_write_mocks, file_path):
             f.discard()
         mock_logger.warning.assert_called_once()
         assert (
-            "Discard is not applicable for Zonal Buckets"
+            "Discard is not applicable for Zonal and RCU buckets"
             in mock_logger.warning.call_args[0][0]
         )
 
@@ -539,7 +1127,13 @@ def test_zonal_file_overwrite(extended_gcsfs, zonal_write_mocks, file_path):
     ) as f:
         f.write(b"Sample text data.")
 
-    if not zonal_write_mocks:
+    if zonal_write_mocks:
+        # Each open finalizes its own writer on close.
+        assert (
+            zonal_write_mocks["aaow"].close.await_args_list
+            == [mock.call(finalize_on_close=True)] * 2
+        )
+    else:
         assert extended_gcsfs.cat(file_path) == b"Sample text data."
 
 
@@ -1102,6 +1696,216 @@ def test_sync_teardown_accepts_coroutine_object():
     assert result == ["done"]
 
 
+def test_zonal_file_failed_init_closes_mrd_pool(mock_gcsfs):
+    """If GCSFile.__init__ fails after the MRD pool is checked out, the pool and prefetcher are closed."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock()
+    zf = ZonalFile.__new__(ZonalFile)
+    real_close = BackgroundPrefetcher.close
+
+    with mock.patch.object(
+        BackgroundPrefetcher, "close", autospec=True, side_effect=real_close
+    ) as prefetcher_close:
+        # An invalid fixed_key_metadata fails in GCSFile.__init__ after the cache is built.
+        with pytest.raises(TypeError):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode="rb",
+                fixed_key_metadata=123,
+            )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_awaited_once()
+    pool.close.assert_awaited_once()
+    prefetcher_close.assert_called_once()
+    assert zf.mrd_pool is None
+    assert zf.closed is True
+    assert zf.cache._prefetcher is None
+
+
+def test_zonal_file_failed_init_preserves_exception_when_pool_close_fails(
+    mock_gcsfs, caplog
+):
+    """If MRD pool teardown fails during failed __init__, log a warning and propagate the init error."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock(side_effect=RuntimeError("pool close boom"))
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"):
+        with pytest.raises(TypeError):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode="rb",
+                fixed_key_metadata=123,
+            )
+
+    pool.close.assert_awaited_once()
+    assert zf.mrd_pool is None
+    assert zf.closed is True
+    assert any(
+        r.levelno == logging.WARNING and "pool close boom" in r.message
+        for r in caplog.records
+    )
+
+
+def test_zonal_file_interrupt_after_pool_checkout_closes_mrd_pool(mock_gcsfs):
+    """A KeyboardInterrupt right after the MRD pool is checked out still releases the pool."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock()
+    # Ctrl-C arriving while the pool's size is read, before GCSFile.__init__ runs.
+    type(pool).persisted_size = mock.PropertyMock(side_effect=KeyboardInterrupt)
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(KeyboardInterrupt):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+        )
+
+    pool.close.assert_awaited_once()
+    assert zf.mrd_pool is None
+
+
+@pytest.mark.parametrize(
+    "checkout_finished", [False, True], ids=["during_checkout", "after_checkout"]
+)
+def test_zonal_file_interrupt_while_waiting_for_pool_checkout_closes_mrd_pool(
+    mock_gcsfs, checkout_finished
+):
+    """A Ctrl-C while asyn.sync() waits for the pool checkout still releases the pool.
+
+    asyn.sync() does not cancel the coroutine it scheduled, so the checkout can
+    finish after the caller has already given up.
+    """
+    loop = fsspec.asyn.get_loop()
+    mock_gcsfs.loop = loop
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock()
+    release = asyncio.Event()
+
+    async def slow_get(*args, **kwargs):
+        await release.wait()
+        return pool
+
+    mock_gcsfs._mrd_pool_cache.get.side_effect = slow_get
+    checkouts = []
+
+    def interrupted_sync(loop, func, *args, **kwargs):
+        # Like asyn.sync(), schedule the checkout, then get Ctrl-C while waiting.
+        checkouts.append(asyncio.run_coroutine_threadsafe(func(*args, **kwargs), loop))
+        if checkout_finished:
+            loop.call_soon_threadsafe(release.set)
+            checkouts[0].result(timeout=5)
+        raise KeyboardInterrupt
+
+    zf = ZonalFile.__new__(ZonalFile)
+    with mock.patch("gcsfs.zonal_file.asyn.sync", side_effect=interrupted_sync):
+        with pytest.raises(KeyboardInterrupt):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode="rb",
+            )
+
+    # Let a checkout that is still running finish after the caller gave up.
+    loop.call_soon_threadsafe(release.set)
+    checkouts[0].result(timeout=5)
+    pool.close.assert_awaited_once()
+    assert zf.mrd_pool is None
+
+
+def test_zonal_file_failed_write_init_is_marked_closed(mock_gcsfs):
+    """A failed write-mode open is marked closed so __del__ never flushes (creates) the object."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(TypeError):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="wb",
+            fixed_key_metadata=123,
+        )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_not_called()
+    # AbstractBufferedFile.__init__ already set _closed = False, so this is not the default.
+    assert zf.closed is True
+
+
+def test_zonal_file_unknown_cache_type_fails_before_pool_checkout(mock_gcsfs):
+    """An unknown cache_type fails before checking out an MRD pool or arming __del__."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(KeyError, match="no-such-cache"):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="no-such-cache",
+        )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_not_called()
+    assert "_closed" not in zf.__dict__
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "r+",
+        "rb+",
+        "r+b",
+        "w+",
+        "wb+",
+        "w+b",
+        "a+",
+        "ab+",
+        "a+b",
+        "x+",
+        "xb+",
+        "x+b",
+        "rwb",
+    ],
+)
+def test_zonal_file_plus_modes_rejected_before_pool_or_super_init(mock_gcsfs, mode):
+    """Unsupported modes ('+' modes or 'rwb') fail before checking out an MRD pool or arming __del__."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(NotImplementedError):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode=mode,
+        )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_not_called()
+    assert "_closed" not in zf.__dict__
+
+
+@pytest.mark.parametrize(
+    "mode, if_generation_match", [("r+b", 5), ("w+b", -1), ("x+b", 5)]
+)
+def test_zonal_file_unsupported_mode_checked_before_if_generation_match(
+    mock_gcsfs, mode, if_generation_match
+):
+    """An unsupported mode raises NotImplementedError, not an if_generation_match error."""
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(NotImplementedError):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode=mode,
+            if_generation_match=if_generation_match,
+        )
+
+
 @mock.patch("gcsfs.zonal_file.asyn.sync")
 def test_close_impl_mrd_pool_failure_does_not_skip_aaow(mock_sync, mock_gcsfs):
     """Verify that if mrd_pool.close fails, aaow teardown is still executed."""
@@ -1144,6 +1948,27 @@ def test_close_impl_aaow_failure_raises(mock_sync, mock_gcsfs):
     with mock.patch("gcsfs.zb_hns_utils.close_aaow", side_effect=failing_close_aaow):
         with pytest.raises(RuntimeError, match="aaow close failed"):
             zf._close_impl()
+
+
+def test_close_impl_flush_failure_still_closes_aaow(mock_gcsfs):
+    """If the closing flush fails, the writer is closed without finalizing and the flush error is raised."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="wb",
+        finalize_on_close=True,
+    )
+    aaow = mock.Mock(_is_stream_open=True)
+    aaow.flush = mock.AsyncMock(side_effect=RuntimeError("flush failed"))
+    aaow.close = mock.AsyncMock()
+    zf.aaow = aaow
+
+    with pytest.raises(RuntimeError, match="flush failed"):
+        zf.close()
+
+    aaow.close.assert_awaited_once_with(finalize_on_close=False)
+    assert zf.closed
 
 
 def test_zonal_file_fetch_range_unhandled_runtime_error(mock_gcsfs):

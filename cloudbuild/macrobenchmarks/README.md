@@ -119,7 +119,8 @@ Before creating the triggers, set up the following in your GCP project.
 | `create-cluster` | Creates the dedicated VPC/subnet, the GKE cluster + a `_MACHINE_TYPE` node pool in `_ZONE` (with TIER_1 networking when enabled), and installs the JobSet controller. If the control plane can't be created in `_ZONE`, it retries in the region's other zones. |
 | `seed-checkpoint` | When `_SEED_CHECKPOINT=true` and no external checkpoint is given, generates a per-run checkpoint so the measured run exercises the **restore** path. |
 | `run-workload` | `helm install`s the chart and polls the JobSet to completion, recording start/end timestamps for the scrape. |
-| `scrape-metrics` | Parses Cloud Logging into raw CSVs, aggregates them into one summary row (retrying for ingestion lag), folds in system metrics, and uploads the summary to the results bucket. |
+| `scrape-metrics` | Parses Cloud Logging into raw CSVs, aggregates them into one summary row (retrying for ingestion lag), and folds in system metrics. Runs on `python:3.12-slim` (the gcloud image ships no system `python3`). |
+| `upload-summary` | Uploads the summary CSV from `scrape-metrics` to the results bucket. |
 | `cleanup-helm` / `cleanup-cluster` / `delete-buckets` | Tear down the workload, cluster/network, and per-run buckets (skipped when `_SKIP_CLEANUP=true`). |
 | `check-failure` | Fails the build if any earlier step recorded a failure (steps run with `allowFailure` so cleanup always happens). |
 

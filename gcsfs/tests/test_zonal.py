@@ -7,6 +7,7 @@ import contextlib
 import io
 import multiprocessing
 import os
+import pickle
 import random
 import threading
 import uuid
@@ -34,10 +35,17 @@ from gcsfs.extended_gcsfs import (
     upload_chunk,
 )
 from gcsfs.tests import layouts
-from gcsfs.tests.conftest import csv_files, files, requires_rapid, text_files
+from gcsfs.tests.conftest import (
+    RAPID_WRITE_LAYOUTS,
+    csv_files,
+    files,
+    requires_rapid,
+    text_files,
+)
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
+from gcsfs.zonal_file import ZonalFile
 
 file = "test/accounts.1.json"
 file_path = f"{TEST_ZONAL_BUCKET}/{file}"
@@ -241,6 +249,35 @@ def test_readline_blocksize_zb(extended_gcsfs, gcs_bucket_mocks):
             result = f.readline()
             expected = b"ab"
             assert result == expected
+
+
+def test_open_with_size_zb(extended_gcsfs, gcs_bucket_mocks):
+    """A caller-supplied size= is accepted, and the MRD's persisted_size takes precedence."""
+    with gcs_bucket_mocks(json_data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
+        # A wrong size must not truncate the read.
+        with extended_gcsfs.open(file_path, "rb", size=1) as f:
+            assert isinstance(f, ZonalFile)
+            assert f.read() == json_data
+
+
+def test_pickle_read_handle_zb(extended_gcsfs, gcs_bucket_mocks):
+    """A zonal read handle can be pickled and reopened, as DataLoader and Dask do.
+
+    The reopened handle keeps its position and the options it was opened with.
+    """
+    generation = extended_gcsfs.info(file_path)["generation"]
+    with gcs_bucket_mocks(json_data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
+        with extended_gcsfs.open(
+            file_path, "rb", generation=generation, pool_size=2
+        ) as f:
+            assert isinstance(f, ZonalFile)
+            assert f.read(10) == json_data[:10]
+            with pickle.loads(pickle.dumps(f)) as f2:
+                assert f2.tell() == 10
+                assert f2.generation == generation
+                assert f2.pool_size == 2
+                assert f2.cache_source == "default"
+                assert f2.read() == json_data[10:]
 
 
 def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
@@ -775,6 +812,7 @@ _generation_match_cases = pytest.mark.parametrize(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_simple_upload_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -798,7 +836,10 @@ async def test_simple_upload_zonal(
             async_gcs.grpc_client,
             bucket,
             object_name,
+            None,
+            None,
             if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
@@ -807,6 +848,7 @@ async def test_simple_upload_zonal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_initiate_upload_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -823,7 +865,10 @@ async def test_initiate_upload_zonal(
             async_gcs.grpc_client,
             bucket,
             object_name,
+            None,
+            None,
             if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         assert writer is zonal_write_mocks["aaow"]
     else:
@@ -915,6 +960,7 @@ async def test_upload_chunk_zonal_final_chunk(async_gcs, zonal_write_mocks, file
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_put_file_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -936,16 +982,15 @@ async def test_put_file_zonal(
         if zonal_write_mocks:
             grpc_client = await async_gcs._get_grpc_client()
             zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-                grpc_client, bucket, object_name, if_generation_match=expected_match
+                grpc_client,
+                bucket,
+                object_name,
+                None,
+                None,
+                if_generation_match=expected_match,
+                storage_class=zonal_write_mocks["storage_class"],
             )
-            zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
-            args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
-
-            file_obj_arg = args[0]
-            assert hasattr(file_obj_arg, "read"), "Argument must be a file-like object"
-            assert (
-                file_obj_arg.name == lpath
-            ), "File object must point to the correct path"
+            zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
 
             zonal_write_mocks["aaow"].close.assert_awaited_once_with(
                 finalize_on_close=True
@@ -955,6 +1000,7 @@ async def test_put_file_zonal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_pipe_file_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -970,7 +1016,13 @@ async def test_pipe_file_zonal(
     if zonal_write_mocks:
         grpc_client = await async_gcs._get_grpc_client()
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            grpc_client, bucket, object_name, if_generation_match=expected_match
+            grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)

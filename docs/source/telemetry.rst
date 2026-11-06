@@ -34,8 +34,8 @@ If no recognized framework is present on the call stack (e.g. pure Python script
 
    The framework token is attached to JSON API (HTTP) requests only. gRPC requests use a ``User-Agent`` fixed
    when the gRPC client is created and do not yet carry the framework token. This includes Rapid (zonal) reads
-   and writes, Rapid Cache Ultra reads, and Storage Control API calls (bucket layout lookups and HNS folder
-   operations such as ``mkdir``, ``rmdir`` and ``mv``).
+   and writes, Rapid Cache Ultra reads and writes, and Storage Control API calls (bucket layout lookups and HNS
+   folder operations such as ``mkdir``, ``rmdir`` and ``mv``).
 
 Privacy & Security Guarantees
 -----------------------------
