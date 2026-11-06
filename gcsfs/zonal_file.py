@@ -205,9 +205,9 @@ class ZonalFile(GCSFile):
                     self.flush_interval_bytes,
                 )
             except BaseException:
-                # Mark the file force-flushed so that close() does not try to
-                # open the writer again.
-                self.forced = True
+                # Like fsspec's flush() when _initiate_upload() fails: mark the
+                # file closed so that close() does not open the writer again.
+                self.closed = True
                 raise
 
     def _fetch_range(

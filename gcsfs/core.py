@@ -46,7 +46,12 @@ from .retry import (
 )
 from .telemetry.context import Dimension
 from .telemetry.manager import default_usage_tracker
-from .telemetry.wrapper import _run_sync, mirror_gcs_methods, wrap_file_methods
+from .telemetry.wrapper import (
+    _run_sync,
+    bind_gcs_sync_methods,
+    mirror_gcs_methods,
+    wrap_file_methods,
+)
 from .utils import is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
@@ -492,6 +497,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
+        bind_gcs_sync_methods(self)
 
     @property
     def _location(self):

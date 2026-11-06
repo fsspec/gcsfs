@@ -489,22 +489,6 @@ def test_zonal_file_open_create_mode(extended_gcsfs, zonal_write_mocks, file_pat
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
-def test_zonal_file_failed_writer_open_is_not_retried_on_close(
-    extended_gcsfs, zonal_write_mocks, file_path
-):
-    """A writer that fails to open raises once; close() does not try to open it again."""
-    if not zonal_write_mocks:
-        pytest.skip("Unit test for writer open failures with mocks.")
-    zonal_write_mocks["init_aaow"].side_effect = FileExistsError(file_path)
-
-    with pytest.raises(FileExistsError):
-        with extended_gcsfs.open(file_path, "xb") as f:
-            f.write(test_data)
-
-    zonal_write_mocks["init_aaow"].assert_awaited_once()
-
-
-@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_flush_failure_invalidates_cache(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
@@ -626,13 +610,42 @@ def test_zonal_file_open_write_mode_with_if_generation_match(
             storage_class=zonal_write_mocks["storage_class"],
         )
     else:
-        # file_path does not exist, so generation 7 cannot match; SDK releases
-        # whose writer lacks the parameter raise NotImplementedError instead.
-        with pytest.raises((NotImplementedError, GenerationMismatchError)):
-            with extended_gcsfs.open(
-                file_path, "wb", finalize_on_close=True, if_generation_match=7
-            ) as f:
-                f.write(test_data)
+        # file_path does not exist, so generation 7 cannot match.
+        try:
+            with pytest.raises(GenerationMismatchError):
+                with extended_gcsfs.open(
+                    file_path, "wb", finalize_on_close=True, if_generation_match=7
+                ) as f:
+                    f.write(test_data)
+        except NotImplementedError:
+            pytest.skip(
+                "zonal CAS needs a google-cloud-storage release with Preconditions"
+            )
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@pytest.mark.parametrize(
+    "mode, kwargs, error",
+    [
+        ("xb", {}, FileExistsError("exists")),
+        ("wb", {"if_generation_match": 7}, GenerationMismatchError("path", 7)),
+        ("wb", {"if_generation_match": 7}, NotImplementedError("no Preconditions")),
+    ],
+)
+def test_zonal_file_failed_writer_open_is_not_retried_on_close(
+    extended_gcsfs, zonal_write_mocks, file_path, mode, kwargs, error
+):
+    """A writer that fails to open raises once; close() does not open it again."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for writer open failures with mocks.")
+    zonal_write_mocks["init_aaow"].side_effect = error
+
+    with pytest.raises(type(error)):
+        with extended_gcsfs.open(file_path, mode, **kwargs) as f:
+            f.write(test_data)
+
+    zonal_write_mocks["init_aaow"].assert_awaited_once()
+    assert f.closed
 
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
