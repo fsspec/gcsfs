@@ -1745,9 +1745,7 @@ def test_write_if_generation_match(gcs):
     try:
         gcs.pipe_file(fn, b"v2", if_generation_match=gen)
     except NotImplementedError:
-        pytest.skip(
-            "zonal CAS needs a google-cloud-storage release with if_generation_match"
-        )
+        pytest.skip("zonal CAS needs a google-cloud-storage release with Preconditions")
     assert gcs.cat(fn) == b"v2"
     with pytest.raises(GenerationMismatchError):
         gcs.pipe_file(fn, b"v3", if_generation_match=gen)
@@ -3427,7 +3425,7 @@ def test_mv_file_raises_error_for_specific_generation(gcs):
         gcs.version_aware = original_version_aware
 
 
-def test_cat_file_routing_and_thresholds(gcs, skip_if_zonal, monkeypatch):
+def test_cat_file_routing_and_thresholds(gcs, skip_if_grpc_read, monkeypatch):
     monkeypatch.setattr(gcs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 5)
     fn = f"{TEST_BUCKET}/core_routing.txt"
     data = b"0123456789abcdefghijk"
@@ -3559,7 +3557,7 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.read() == b"HelloWorld"
 
 
-def test_cat_file_default_concurrency(gcs, skip_if_zonal):
+def test_cat_file_default_concurrency(gcs, skip_if_grpc_read):
     # Arrange
     fn = f"{TEST_BUCKET}/test_cat_default_concurrency.txt"
     gcs.pipe(fn, b"cat test data")
@@ -3575,7 +3573,7 @@ def test_cat_file_default_concurrency(gcs, skip_if_zonal):
     assert mock_conc.call_count == 0
 
 
-def test_cat_file_explicit_concurrency(gcs, skip_if_zonal):
+def test_cat_file_explicit_concurrency(gcs, skip_if_grpc_read):
     # Arrange
     fn = f"{TEST_BUCKET}/test_cat_explicit_concurrency.txt"
     gcs.pipe(fn, b"cat test data")
@@ -4451,14 +4449,9 @@ def test_get_headers_includes_cache_type(gcs):
     assert headers_preset["User-Agent"] == "custom-ua"
 
 
-def test_user_agent_includes_cache_type_and_source_in_read(gcs):
+def test_user_agent_includes_cache_type_and_source_in_read(gcs, skip_if_grpc_read):
     # TODO(lankita): Remove this skip when User-Agent is updated to include cache_type for gRPC/rapid buckets.
-    # Zonal buckets currently use the gRPC path which does not use the HTTP client.
-    if hasattr(gcs, "_is_zonal_bucket") and sync(
-        gcs.loop, gcs._is_zonal_bucket, TEST_BUCKET
-    ):
-        pytest.skip("Zonal buckets use gRPC, skipping HTTP User-Agent test")
-
+    # Zonal and RCU buckets currently read over gRPC, which does not use the HTTP client.
     fn = TEST_BUCKET + "/2014-01-01.csv"
 
     # 1. Explicit cache_type="mmap" -> User-Agent contains cache_type/mmap:e
@@ -4519,6 +4512,89 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs):
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:e" in ua for ua in user_agents)
+
+
+@pytest.mark.parametrize(
+    "input_headers,cache_type,cache_source,framework,expected_in,expected_not_in",
+    [
+        (None, None, None, None, ["python-gcsfs/"], ["cache_type"]),
+        (
+            None,
+            "readahead",
+            "explicit",
+            None,
+            ["python-gcsfs/", "cache_type/readahead:e"],
+            [],
+        ),
+        (
+            None,
+            "none",
+            "default",
+            None,
+            ["python-gcsfs/", "cache_type/none:d"],
+            [],
+        ),
+        (None, None, None, "torch", ["python-gcsfs/", "fw/torch"], []),
+        (
+            {"User-Agent": "my-custom-agent"},
+            None,
+            None,
+            "pandas",
+            ["my-custom-agent"],
+            ["fw/pandas"],
+        ),
+    ],
+)
+def test_user_agent_telemetry_integration(
+    gcs,
+    input_headers,
+    cache_type,
+    cache_source,
+    framework,
+    expected_in,
+    expected_not_in,
+):
+    """Verify that gcs._get_headers builds User-Agent with cache/telemetry tokens and preserves overrides."""
+    import contextlib
+
+    from gcsfs.telemetry.context import Dimension
+    from gcsfs.telemetry.wrapper import _telemetry_context
+
+    ctx = (
+        _telemetry_context({Dimension.FRAMEWORK.value: framework})
+        if framework
+        else contextlib.nullcontext()
+    )
+    with ctx:
+        headers = gcs._get_headers(
+            input_headers, cache_type=cache_type, cache_source=cache_source
+        )
+
+    ua = headers["User-Agent"]
+    for token in expected_in:
+        assert token in ua
+    for token in expected_not_in:
+        assert token not in ua
+
+
+def test_no_eager_property_evaluation_on_init(monkeypatch):
+    """
+    Verify that instantiating GCSFileSystem does NOT eagerly invoke
+    properties like `fs.buckets`, which would trigger network I/O.
+    """
+    from gcsfs.core import GCSFileSystem
+
+    buckets_called = False
+
+    async def mock_list_buckets(self, *args, **kwargs):
+        nonlocal buckets_called
+        buckets_called = True
+        return []
+
+    monkeypatch.setattr(GCSFileSystem, "_list_buckets", mock_list_buckets)
+
+    _ = GCSFileSystem(token="anon", project="test-project")
+    assert not buckets_called, "GCSFileSystem.__init__ eagerly evaluated fs.buckets!"
 
 
 def test_process_object_structure(gcs):
