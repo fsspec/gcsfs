@@ -285,10 +285,11 @@ def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
     if not extended_gcsfs.on_google:
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
 
-    # Files are not finalized by default
-    with extended_gcsfs.open(file_path, "wb") as f:
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
         f.write(b"Hello, ")
         f.write(b"world!")
+
+    assert extended_gcsfs.info(file_path).get("timeFinalized") is None
 
     with extended_gcsfs.open(file_path, "rb") as f:
         assert f.read() == b"Hello, world!"
@@ -303,8 +304,8 @@ def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
     if not extended_gcsfs.on_google:
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
 
-    # Files are not finalized by default
-    extended_gcsfs.pipe({file_path: b"Hello, world!"})
+    extended_gcsfs.pipe({file_path: b"Hello, world!"}, finalize_on_close=False)
+    assert extended_gcsfs.info(file_path).get("timeFinalized") is None
 
     data = extended_gcsfs.cat(file_path)
     assert data == b"Hello, world!"
@@ -1167,6 +1168,9 @@ async def test_cp_file_not_implemented_error(
     """
     Tests _cp_file behavior for combinations of Zonal and Standard buckets.
     """
+    if is_real_gcs() and not await async_gcs._is_zonal_bucket(TEST_ZONAL_BUCKET):
+        pytest.skip("_cp_file NotImplementedError only applies to Zonal buckets")
+
     short_uuid = str(uuid.uuid4())[:8]
     source_path = f"{source_bucket}/source_{short_uuid}"
     dest_path = f"{dest_bucket}/dest_{short_uuid}"

@@ -734,8 +734,16 @@ def test_open_write_modes_use_zonal_file_on_rcu(
         assert f.finalize_on_close is True
         f.write(test_data)
 
-    assert zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"] == "RAPID"
-    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
+    if zonal_write_mocks:
+        assert (
+            zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"] == "RAPID"
+        )
+        zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
+    else:
+        info = extended_gcsfs.info(file_path)
+        assert info.get("storageClass") == "RAPID"
+        assert info.get("timeFinalized") is not None
+        assert extended_gcsfs.cat(file_path) == test_data
 
 
 @pytest.mark.parametrize(
@@ -836,9 +844,14 @@ def test_zonal_file_finalize_on_close_true(
 def test_zonal_file_finalize_on_close_default_false(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
-    """Test that finalize_on_close is False by default for Zonal buckets."""
+    """Test default finalize_on_close (False for Zonal, True for RCU)."""
+    expected = (
+        False
+        if zonal_write_mocks
+        else extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu
+    )
     with extended_gcsfs.open(file_path, "wb") as f:
-        assert f.finalize_on_close is False
+        assert f.finalize_on_close is expected
     if zonal_write_mocks:
         zonal_write_mocks["aaow"].close.assert_awaited_with(finalize_on_close=False)
 
@@ -1154,7 +1167,7 @@ def test_zonal_file_append_multiple(extended_gcsfs, zonal_write_mocks, file_path
     data2 = b"appended data."
     data3 = b"more appended data."
 
-    with extended_gcsfs.open(file_path, "wb") as f:
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
         f.write(data1)
 
     with extended_gcsfs.open(file_path, "ab", finalize_on_close=True) as f:
@@ -1173,7 +1186,7 @@ def test_zonal_file_append_to_empty(extended_gcsfs, zonal_write_mocks, file_path
         pass
 
     if not zonal_write_mocks:
-        with extended_gcsfs.open(file_path, "wb") as f:
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
             f.write(b"")
 
     with extended_gcsfs.open(file_path, "ab", finalize_on_close=True) as f:

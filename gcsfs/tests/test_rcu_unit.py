@@ -544,3 +544,102 @@ def test_gcs_file_opened_before_rcu_enabled_keeps_http_upload(rcu_fs):
     assert http_upload.call_args.args[:2] == ("POST", location)
     # call_args holds a memoryview of the upload buffer.
     http_upload.reset_mock()
+
+
+def test_cross_zone_rcu_bucket_setting_ignores_xdist_worker_suffix(monkeypatch):
+    """TEST_CROSS_ZONE_RCU_BUCKET reads GCSFS_CROSS_ZONE_RCU_TEST_BUCKET without -gwN."""
+    import importlib
+
+    from gcsfs.tests import settings
+
+    try:
+        with monkeypatch.context() as mp:
+            mp.setenv("PYTEST_XDIST_WORKER", "gw2")
+            mp.delenv("GCSFS_CROSS_ZONE_RCU_TEST_BUCKET", raising=False)
+            importlib.reload(settings)
+            assert settings.TEST_CROSS_ZONE_RCU_BUCKET == ""
+
+            mp.setenv("GCSFS_CROSS_ZONE_RCU_TEST_BUCKET", "my-cross-zone-rcu")
+            importlib.reload(settings)
+            assert settings.TEST_CROSS_ZONE_RCU_BUCKET == "my-cross-zone-rcu"
+    finally:
+        importlib.reload(settings)
+
+
+@pytest.mark.parametrize("layout", layouts.ALL_BUCKET_LAYOUTS)
+def test_skip_if_zonal_skips_all_grpc_data_path_layouts(layout):
+    """skip_if_zonal skips HTTP-mechanics tests on both Zonal and RCU buckets."""
+    from _pytest.outcomes import Skipped
+
+    from gcsfs.tests import conftest
+
+    fake_gcs = mock.MagicMock()
+    fake_gcs._sync_lookup_bucket_layout.return_value = layout
+
+    if layout.uses_grpc_data_path:
+        with pytest.raises(Skipped):
+            conftest.skip_if_zonal.__wrapped__(fake_gcs)
+    else:
+        conftest.skip_if_zonal.__wrapped__(fake_gcs)
+
+
+@pytest.mark.parametrize("live_layout", layouts.ALL_BUCKET_LAYOUTS)
+def test_zonal_write_mocks_live_gcs_matches_layout_or_grpc_data_path(
+    monkeypatch, live_layout
+):
+    """On real GCS, zonal_write_mocks runs matching param layouts and unparametrized gRPC layouts."""
+    from types import SimpleNamespace
+
+    from _pytest.outcomes import Skipped
+
+    from gcsfs.tests import conftest
+
+    monkeypatch.setattr(conftest, "is_real_gcs", lambda: True)
+    monkeypatch.setattr(conftest, "_live_bucket_layouts", {})
+    fake_fs = mock.MagicMock()
+    fake_fs._sync_lookup_bucket_layout.return_value = live_layout
+    monkeypatch.setattr(conftest, "ExtendedGcsFileSystem", lambda **kw: fake_fs)
+    monkeypatch.setattr(conftest, "_close_gcs", lambda fs: None)
+
+    # Unparametrized request: runs iff live_layout.uses_grpc_data_path.
+    unparam_gen = conftest.zonal_write_mocks.__wrapped__(SimpleNamespace())
+    if live_layout.uses_grpc_data_path:
+        assert next(unparam_gen) is None
+    else:
+        with pytest.raises(Skipped):
+            next(unparam_gen)
+
+    # Parametrized request: runs iff request.param == live_layout.
+    for target in conftest.RAPID_WRITE_LAYOUTS:
+        param_gen = conftest.zonal_write_mocks.__wrapped__(
+            SimpleNamespace(param=target)
+        )
+        if live_layout == target:
+            assert next(param_gen) is None
+        else:
+            with pytest.raises(Skipped):
+                next(param_gen)
+
+
+@pytest.mark.parametrize("layout", layouts.ALL_BUCKET_LAYOUTS)
+def test_rcu_fs_fixture_skips_non_rcu_buckets(monkeypatch, layout):
+    """rcu_fs yields ExtendedGcsFileSystem only when TEST_ZONAL_BUCKET is an RCU bucket."""
+    from _pytest.outcomes import Skipped
+
+    from gcsfs.tests import test_rcu
+
+    fake_fs = mock.MagicMock()
+    fake_fs._sync_lookup_bucket_layout.return_value = layout
+    closed = []
+    monkeypatch.setattr(test_rcu, "ExtendedGcsFileSystem", lambda **kw: fake_fs)
+    monkeypatch.setattr(test_rcu, "_close_gcs", lambda fs: closed.append(fs))
+
+    gen = test_rcu.rcu_fs.__wrapped__()
+    if layout.is_rcu:
+        assert next(gen) is fake_fs
+        with pytest.raises(StopIteration):
+            next(gen)
+    else:
+        with pytest.raises(Skipped):
+            next(gen)
+    assert closed == [fake_fs]
