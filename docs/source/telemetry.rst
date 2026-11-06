@@ -28,7 +28,7 @@ The detector recognizes major ecosystem libraries, including:
 - **Data Processing & Analytics:** ``pandas`` (``fw/pandas``), ``polars`` (``fw/polars``), ``dask`` (``fw/dask``), ``ray`` (``fw/ray``), ``pyspark`` (``fw/spark``), ``pyarrow`` (``fw/pyarrow``), ``duckdb`` (``fw/duckdb``), ``xarray`` (``fw/xarray``), ``fastparquet`` (``fw/fastparquet``).
 - **Machine Learning & Deep Learning:** ``torch`` (``fw/torch``), ``torchdata`` (``fw/torchdata``), ``lightning`` / ``pytorch_lightning`` (``fw/lightning``), ``datasets`` (``fw/datasets``), ``transformers`` (``fw/transformers``), ``orbax`` (``fw/orbax``), ``tensorstore`` (``fw/tensorstore``), ``tensorflow`` (``fw/tensorflow``), ``jax`` (``fw/jax``).
 
-If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header.
+If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only a single token for the outermost recognized framework (``fw/dask``) is included.
 
 Compute Environments
 ~~~~~~~~~~~~~~~~~~~~
@@ -70,7 +70,9 @@ Kubernetes pod).
    Telemetry tokens are attached to JSON API (HTTP) requests only. gRPC requests use a ``User-Agent`` fixed
    when the gRPC client is created and do not yet carry telemetry tokens. This includes Rapid (zonal) reads
    and writes, Rapid Cache Ultra reads (and writes when ``rcu_rapid_write=True``), and Storage Control API calls
-   (bucket layout lookups and HNS folder operations such as ``mkdir``, ``rmdir`` and ``mv``).
+   (bucket layout lookups and HNS folder operations such as ``mkdir``, ``rmdir`` and ``mv``). Operations on
+   those buckets that use the JSON API over HTTP (such as object metadata lookups, listings, and deletions)
+   continue to include telemetry tokens.
 
 Privacy & Security Guarantees
 -----------------------------
@@ -87,9 +89,9 @@ Telemetry collection is strictly limited to open-source library names and enviro
 How It Works
 ------------
 
-1. **Zero Configuration:** Upstream libraries do not need any code changes or special configuration. Detection occurs transparently when filesystem methods (e.g. ``fs.ls``, ``fs.cat_file``, ``fs.open``, ``df.to_parquet``, ``torch.load``) are called.
-2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread. ``gcsfs`` captures caller identity on the user's thread and safely propagates it to the background event loop via Python ``contextvars``.
-3. **Performance & Caching:** Detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread). Active ``GCSFile`` instances cache their framework attribution so subsequent chunk downloads and background prefetching operations execute with zero stack-walking overhead (:math:`O(1)`).
+1. **Zero Configuration:** Upstream libraries do not need any code changes or special configuration. Detection occurs transparently when ``gcsfs`` is initialized and filesystem methods (e.g. ``fs.ls``, ``fs.cat_file``, ``fs.open``, ``df.to_parquet``, ``torch.load``) are called.
+2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread (``fsspecIO`` by default). ``gcsfs`` captures the calling framework on the user's thread and safely propagates it to the background event loop via Python ``contextvars``.
+3. **Performance & Caching:** Framework detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread). Compute environment detection runs once per process in the background and caches its result in memory. Active ``GCSFile`` instances cache their initial framework attribution (including when none is detected) so subsequent chunk reads, writes, and background prefetching execute with zero stack-walking overhead (``O(1)``); ``ZonalFile`` similarly caches attribution for HTTP metadata lookups during its lifecycle (gRPC bidi reads and writes do not yet emit telemetry tokens).
 
 Disabling Telemetry
 -------------------
@@ -99,7 +101,7 @@ Telemetry collection is enabled by default, but you can opt out at any time by s
 Using Environment Variables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Set ``GCSFS_NO_TELEMETRY=true`` or the standard ``DO_NOT_TRACK=1`` in your shell environment:
+Set ``GCSFS_NO_TELEMETRY=true`` or the standard ``DO_NOT_TRACK=1`` (accepts ``1``, ``true``, or ``yes``, case-insensitive) in your shell environment:
 
 .. code-block:: bash
 
@@ -123,5 +125,5 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- Outgoing requests contain only standard ``python-gcsfs/<version>`` headers.
+- Outgoing ``User-Agent`` headers omit ``fw/`` and ``env/`` telemetry tokens (custom ``User-Agent`` headers passed by callers are always preserved as-is).
 - ``gcsfs`` sends no requests to the metadata server.
