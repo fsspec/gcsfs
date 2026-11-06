@@ -10,8 +10,9 @@
 # Cross-step state files live on the /workspace volume that Cloud Build shares
 # between steps. The defaults are overridable so the scripts can be exercised
 # outside Cloud Build (e.g. unit tests) without writing to /workspace.
-FAILED_FILE="${FAILED_FILE:-/workspace/FAILED}"
-BUILD_VARS_FILE="${BUILD_VARS_FILE:-/workspace/build_vars.env}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
+FAILED_FILE="${FAILED_FILE:-${WORKSPACE_DIR}/FAILED}"
+BUILD_VARS_FILE="${BUILD_VARS_FILE:-${WORKSPACE_DIR}/build_vars.env}"
 
 # Default the workload in one place so every step script agrees when it is
 # unset/empty, then normalize the legacy name so existing callers or triggers
