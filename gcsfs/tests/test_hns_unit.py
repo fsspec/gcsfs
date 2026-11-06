@@ -3514,6 +3514,34 @@ class TestExtendedGcsFileSystemBucketLayout:
             assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD
             assert mock_get_layout.await_count == 2
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target", ["bucket", None], ids=["one", "all"])
+    async def test_lookup_in_flight_during_invalidate_is_not_cached(
+        self, extended_gcsfs, target
+    ):
+        fs = extended_gcsfs
+
+        async def invalidate_then_return(bucket):
+            # The cache is invalidated while this lookup waits for the RPC.
+            fs.invalidate_storage_layout_cache(target)
+            return layouts.STANDARD_RCU
+
+        with mock.patch.object(
+            fs,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            side_effect=invalidate_then_return,
+        ) as mock_get_layout:
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD_RCU
+            assert "bucket" not in fs._storage_layout_cache
+
+            # The next lookup sends a new request and caches its result.
+            mock_get_layout.side_effect = None
+            mock_get_layout.return_value = layouts.STANDARD
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD
+            assert fs._storage_layout_cache["bucket"] == layouts.STANDARD
+            assert mock_get_layout.await_count == 2
+
     def test_bucket_layout_presets(self):
         assert BucketLayout.UNKNOWN == BucketLayout(
             StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN

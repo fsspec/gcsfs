@@ -224,6 +224,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if self.credentials.token == "anon":
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
+        # Bumped when cached layouts are invalidated or refreshed, so that a
+        # lookup that started earlier does not cache a stale layout.
+        self._storage_layout_epoch = 0
         self._memmove_executor = ThreadPoolExecutor(
             max_workers=kwargs.get("memmove_max_workers", 8)
         )
@@ -369,11 +372,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _lookup_bucket_layout(self, bucket):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
+        epoch = self._storage_layout_epoch
         bucket_layout = await self._get_bucket_layout(bucket)
         # Don't cache UNKNOWN storage class.
         # This ensures that subsequent operations will retry the lookup,
         # allowing it to recover when the transient error resolves.
         if bucket_layout.storage_class == StorageClass.UNKNOWN:
+            return bucket_layout
+        # Don't cache a layout looked up before the cache was invalidated or
+        # refreshed while this lookup was in flight.
+        if epoch != self._storage_layout_epoch:
             return bucket_layout
         self._storage_layout_cache[bucket] = bucket_layout
         return self._storage_layout_cache[bucket]
@@ -400,6 +408,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             ``"gs://bucket/key"``. When omitted, the cached layouts of all
             buckets are dropped. A bucket without a cached layout is ignored.
         """
+        self._storage_layout_epoch += 1
         if bucket is None:
             self._storage_layout_cache.clear()
             return
@@ -632,13 +641,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             cached_layout = self._storage_layout_cache.get(bucket)
             if cached_layout is None or cached_layout.is_rcu:
                 # No other write has refreshed the layout yet: look it up once.
+                epoch = self._storage_layout_epoch
                 fresh_layout = await self._get_bucket_layout(bucket)
                 if (
                     fresh_layout.storage_class == StorageClass.UNKNOWN
                     or fresh_layout.is_rcu
                 ):
                     raise
-                self._storage_layout_cache[bucket] = fresh_layout
+                # Skip the update if the cache was invalidated or refreshed
+                # while the lookup was in flight.
+                if epoch == self._storage_layout_epoch:
+                    self._storage_layout_cache[bucket] = fresh_layout
+                    self._storage_layout_epoch += 1
             raise _rapid_cache_ultra_disabled_error(bucket) from e
 
     @staticmethod

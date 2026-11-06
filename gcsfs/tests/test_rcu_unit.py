@@ -230,6 +230,53 @@ async def test_init_aaow_rcu_failure_reuses_layout_refreshed_by_another_writer(
 
 
 @pytest.mark.asyncio
+async def test_lookup_in_flight_keeps_layout_refreshed_by_failed_write(
+    rcu_fs, open_error
+):
+    """A lookup in flight does not overwrite the layout a failed write re-checked."""
+    fs, init_aaow = rcu_fs
+    init_aaow.side_effect = open_error
+
+    async def refresh_then_return(bucket):
+        # While this lookup waits for the RPC, a write to the bucket cached as
+        # RCU fails to open and caches the re-checked layout.
+        fs._storage_layout_cache[bucket] = layouts.STANDARD_RCU
+        fs._get_bucket_layout.side_effect = None
+        fs._get_bucket_layout.return_value = layouts.STANDARD
+        with pytest.raises(RapidCacheUltraDisabledError):
+            await fs._init_aaow(bucket, "key")
+        return layouts.STANDARD_RCU
+
+    fs._get_bucket_layout.side_effect = refresh_then_return
+
+    assert await fs._lookup_bucket_layout(BUCKET) == layouts.STANDARD_RCU
+    assert fs._storage_layout_cache[BUCKET] == layouts.STANDARD
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_recheck_in_flight_during_invalidate_is_not_cached(
+    rcu_fs, open_error
+):
+    """A re-check in flight when the cache is invalidated does not cache its layout."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error
+
+    async def invalidate_then_return(bucket):
+        # The cache is invalidated while the re-check waits for the RPC.
+        fs.invalidate_storage_layout_cache(bucket)
+        return layouts.STANDARD
+
+    fs._get_bucket_layout.side_effect = invalidate_then_return
+
+    with pytest.raises(RapidCacheUltraDisabledError) as excinfo:
+        await fs._init_aaow(BUCKET, "key")
+
+    assert excinfo.value.__cause__ is open_error
+    assert BUCKET not in fs._storage_layout_cache
+
+
+@pytest.mark.asyncio
 async def test_pipe_file_retries_over_http_when_rcu_disabled(
     rcu_fs, open_error, caplog
 ):
