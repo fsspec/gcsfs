@@ -18,7 +18,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import GCSFileSystem
-from gcsfs.extended_gcsfs import CachingTier
+from gcsfs.extended_gcsfs import BucketLayout, CachingTier, ExtendedGcsFileSystem
 from gcsfs.tests import layouts
 from gcsfs.tests.settings import (
     TEST_BUCKET,
@@ -191,7 +191,7 @@ def docker_gcs():
 
 
 @pytest.fixture(scope="session")
-def gcs_factory(docker_gcs):
+def _session_gcs_factory(docker_gcs):
     params["endpoint_url"] = docker_gcs
     if is_real_gcs():
         params["default_location"] = TEST_REGION
@@ -204,6 +204,22 @@ def gcs_factory(docker_gcs):
         return fsspec.filesystem("gcs", **combined_params)
 
     return factory
+
+
+@pytest.fixture
+def gcs_factory(_session_gcs_factory):
+    created_instances = []
+
+    def factory(**kwargs):
+        fs = _session_gcs_factory(**kwargs)
+        created_instances.append(fs)
+        return fs
+
+    try:
+        yield factory
+    finally:
+        for fs in {id(fs): fs for fs in created_instances}.values():
+            _close_gcs(fs)
 
 
 @pytest.fixture(scope="session")
@@ -357,7 +373,7 @@ async def _close_gcs_async(gcs):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def final_cleanup(gcs_factory, buckets_to_delete):
+def final_cleanup(_session_gcs_factory, buckets_to_delete):
     """
     A session-scoped, auto-use fixture that deletes all buckets registered
     in the `buckets_to_delete` set after the entire test session is complete.
@@ -365,17 +381,22 @@ def final_cleanup(gcs_factory, buckets_to_delete):
     yield
     # This code runs after the entire test session finishes
 
-    gcs = gcs_factory(requester_pays=True)
-    for bucket in buckets_to_delete:
-        # The cleanup logic attempts to delete every bucket that was
-        # added to the set during the session. For real GCS, only delete if
-        # created by the test suite.
-        try:
-            if gcs.exists(bucket):
-                gcs.rm(bucket, recursive=True)
-                logging.info(f"Cleaned up bucket: {bucket}")
-        except Exception as e:
-            logging.error(f"Failed to perform final cleanup for bucket {bucket}: {e}")
+    gcs = _session_gcs_factory(requester_pays=True)
+    try:
+        for bucket in buckets_to_delete:
+            # The cleanup logic attempts to delete every bucket that was
+            # added to the set during the session. For real GCS, only delete if
+            # created by the test suite.
+            try:
+                if gcs.exists(bucket):
+                    gcs.rm(bucket, recursive=True)
+                    logging.info(f"Cleaned up bucket: {bucket}")
+            except Exception as e:
+                logging.error(
+                    f"Failed to perform final cleanup for bucket {bucket}: {e}"
+                )
+    finally:
+        _close_gcs(gcs)
 
 
 @pytest.fixture
@@ -517,11 +538,11 @@ def gcs_hns(gcs_factory, buckets_to_delete):
 
 
 @pytest.fixture(scope="session")
-def flat_bucket_name(gcs_factory, buckets_to_delete):
+def flat_bucket_name(_session_gcs_factory, buckets_to_delete):
     """
     Creates a dedicated standard (non-HNS) bucket once per test session.
     """
-    gcs = gcs_factory()
+    gcs = _session_gcs_factory()
     try:
         bucket_name = f"gcsfs-test-flat-{uuid.uuid4().hex}"
         gcs.mkdir(bucket_name)
@@ -556,18 +577,46 @@ RAPID_WRITE_LAYOUTS = [
 ]
 
 
+_live_bucket_layouts: dict[str, BucketLayout] = {}
+
+
+def _get_live_zonal_bucket_layout() -> BucketLayout:
+    cached = _live_bucket_layouts.get(TEST_ZONAL_BUCKET)
+    if cached is not None:
+        return cached
+    fs = ExtendedGcsFileSystem(project=TEST_PROJECT, skip_instance_cache=True)
+    try:
+        layout = fs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET)
+    finally:
+        _close_gcs(fs)
+    if layout != BucketLayout.UNKNOWN:
+        _live_bucket_layouts[TEST_ZONAL_BUCKET] = layout
+    return layout
+
+
 @pytest.fixture
 def zonal_write_mocks(request):
     """A fixture for mocking Zonal and RCU bucket write functionality.
 
-    Accepts an indirect ``BucketLayout`` param (default ``ZONAL_HIERARCHICAL``).
-    On real GCS it yields ``None`` for the zonal layout and skips the others.
+    Accepts an optional indirect ``BucketLayout`` param (default ``ZONAL_HIERARCHICAL``).
+    On real GCS it yields ``None`` when the live bucket matches the requested
+    layout (or uses the gRPC data path when unparametrized) and skips otherwise.
     """
+    has_param = hasattr(request, "param")
     layout = getattr(request, "param", layouts.ZONAL_HIERARCHICAL)
 
     if is_real_gcs():
-        if layout != layouts.ZONAL_HIERARCHICAL:
-            pytest.skip("Live write tests only run against the zonal test bucket")
+        live_layout = _get_live_zonal_bucket_layout()
+        if has_param:
+            if live_layout != layout:
+                pytest.skip(
+                    f"Live bucket {TEST_ZONAL_BUCKET} has layout {live_layout}, "
+                    f"skipping {layout} case"
+                )
+        elif not live_layout.uses_grpc_data_path:
+            pytest.skip(
+                f"Live write tests require a Zonal or RCU bucket, got {live_layout}"
+            )
         yield None
         return
 
@@ -652,10 +701,10 @@ def skip_if_zonal(gcs):
     """Skips tests that validate HTTP REST mechanics specific to standard regional buckets."""
     if (
         hasattr(gcs, "_sync_lookup_bucket_layout")
-        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).is_zonal
+        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).uses_grpc_data_path
     ):
         pytest.skip(
-            "Test validates HTTP REST mechanics specific to standard regional buckets"
+            "Test validates HTTP REST mechanics specific to non-gRPC regional buckets"
         )
 
 

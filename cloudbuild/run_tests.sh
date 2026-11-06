@@ -68,7 +68,64 @@ run_pytest() {
   { kill "${heartbeat_pid}" && wait "${heartbeat_pid}"; } 2>/dev/null
   return "${status}"
 }
+
+raise_fd_limit() {
+  # DirectPath gRPC xDS channels (especially on regional RCU buckets where xDS
+  # opens subchannels across both regional and zonal backends) can exceed 4096 FDs.
+  local target=65536
+  local soft hard
+  soft=$(ulimit -Sn)
+  hard=$(ulimit -Hn)
+  if [[ "${soft}" == "unlimited" || "${soft}" -ge "${target}" ]]; then
+    return 0
+  fi
+  if [[ "${hard}" != "unlimited" && "${hard}" -lt "${target}" ]]; then
+    target="${hard}"
+  fi
+  ulimit -Sn "${target}"
+}
 STATUS=0
+
+# Core test deselections shared by buckets whose writes go through the gRPC
+# appendable writer (Zonal and Rapid Cache Ultra).
+# 1. KMS & Metadata Support: gRPC appendable writes do not forward 'kmsKeyName',
+#    'contentType', or custom metadata.
+# 2. Copy/Merge: Server-side Rewrite/Compose are not supported on RAPID objects.
+# 3. Write/Flush Mechanics: ZonalFile flushes directly to GCS via the SDK writer
+#    rather than GCSFile's HTTP resumable buffer, does not support transaction
+#    discard or x-mode MPU, and bypasses HTTP upload_chunk.
+# 4. Auth/Regional/Requester-pays: test_sign needs a private key, test_mv_file_cache
+#    targets standard HTTP buckets, and requester-pays buckets are not provisioned
+#    for Rapid suites.
+RAPID_CORE_DESELECTS=(
+  "--deselect=gcsfs/tests/test_core.py::test_simple_upload_with_kms"
+  "--deselect=gcsfs/tests/test_core.py::test_large_upload_with_kms"
+  "--deselect=gcsfs/tests/test_core.py::test_multi_upload_with_kms"
+  "--deselect=gcsfs/tests/test_core.py::test_multi_upload"
+  "--deselect=gcsfs/tests/test_core.py::test_fixed_key_metadata"
+  "--deselect=gcsfs/tests/test_core.py::test_content_type_set"
+  "--deselect=gcsfs/tests/test_core.py::test_content_type_default"
+  "--deselect=gcsfs/tests/test_core.py::test_content_type_guess"
+  "--deselect=gcsfs/tests/test_core.py::test_content_type_put_guess"
+  "--deselect=gcsfs/tests/test_core.py::test_attrs"
+  "--deselect=gcsfs/tests/test_core.py::test_copy"
+  "--deselect=gcsfs/tests/test_core.py::test_copy_recursive"
+  "--deselect=gcsfs/tests/test_core.py::test_copy_errors"
+  "--deselect=gcsfs/tests/test_core.py::test_cp_directory_recursive"
+  "--deselect=gcsfs/tests/test_core.py::test_cp_two_files"
+  "--deselect=gcsfs/tests/test_core.py::test_copy_cache_invalidated"
+  "--deselect=gcsfs/tests/test_core.py::test_merge"
+  "--deselect=gcsfs/tests/test_core.py::test_flush"
+  "--deselect=gcsfs/tests/test_core.py::test_write_blocks"
+  "--deselect=gcsfs/tests/test_core.py::test_write_blocks2"
+  "--deselect=gcsfs/tests/test_core.py::test_transaction"
+  "--deselect=gcsfs/tests/test_core.py::test_array"
+  "--deselect=gcsfs/tests/test_core.py::test_sign"
+  "--deselect=gcsfs/tests/test_core.py::test_mv_file_cache"
+  "--deselect=gcsfs/tests/test_core.py::test_write_x_mpu"
+  "--deselect=gcsfs/tests/test_core.py::test_put_file_resumable_upload_cleanup_on_chunk_failure"
+  "--deselect=gcsfs/tests/test_core.py::test_requester_pays_fails_without_user_project"
+)
 
 echo "--- Running Test Suite: ${TEST_SUITE} ---"
 
@@ -85,7 +142,7 @@ case "$TEST_SUITE" in
     export GCSFS_ZONAL_TEST_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_REQ_PAYS_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
-    ulimit -n 4096
+    raise_fd_limit
     export GCSFS_RUN_HNS_TESTS="true"
     export GCSFS_RUN_RAPID_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
@@ -128,67 +185,51 @@ case "$TEST_SUITE" in
     export GCSFS_TEST_BUCKET="gcsfs-test-zonal-core-${SHORT_BUILD_ID}"
     export GCSFS_TEST_REQ_PAYS_BUCKET="gcsfs-test-zonal-core-${SHORT_BUILD_ID}"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
-    ulimit -n 4096
+    raise_fd_limit
 
-    # Zonal Core Deselections
-    # -----------------------
-    # 1. KMS & Metadata Support: Zonal buckets do not support uploading with
-    # 'kmsKeyName', 'contentType', or custom metadata.
     ZONAL_DESELECTS=(
-      "--deselect=gcsfs/tests/test_core.py::test_simple_upload_with_kms"
-      "--deselect=gcsfs/tests/test_core.py::test_large_upload_with_kms"
-      "--deselect=gcsfs/tests/test_core.py::test_multi_upload_with_kms"
-      "--deselect=gcsfs/tests/test_core.py::test_multi_upload"
-      "--deselect=gcsfs/tests/test_core.py::test_fixed_key_metadata"
-      "--deselect=gcsfs/tests/test_core.py::test_content_type_set"
-      "--deselect=gcsfs/tests/test_core.py::test_content_type_default"
-      "--deselect=gcsfs/tests/test_core.py::test_content_type_guess"
-      "--deselect=gcsfs/tests/test_core.py::test_content_type_put_guess"
-      "--deselect=gcsfs/tests/test_core.py::test_attrs"
-    )
-
-    # 2. Copy/Move/Merge: Not implemented for Zonal (requires _cp_file or Compose).
-    ZONAL_DESELECTS+=(
-      "--deselect=gcsfs/tests/test_core.py::test_copy"
-      "--deselect=gcsfs/tests/test_core.py::test_copy_recursive"
-      "--deselect=gcsfs/tests/test_core.py::test_copy_errors"
-      "--deselect=gcsfs/tests/test_core.py::test_cp_directory_recursive"
-      "--deselect=gcsfs/tests/test_core.py::test_cp_two_files"
-      "--deselect=gcsfs/tests/test_core.py::test_copy_cache_invalidated"
-      "--deselect=gcsfs/tests/test_core.py::test_merge"
-    )
-
-    # 3. Write/Flush Mechanics:
-    # - test_flush fails because ZonalFile.flush flushes directly to GCS whereas
-    # GCSFile.flush defers write on small block (<blocksize)
-    # - test_write_blocks/2 fail since it checks buffer location and zonal write
-    # uses SDK buffer directly, not the GCSFile buffer
-    # - test_transaction fails since discard is not supported in Zonal
-    # - test_array fails due to CRC32C TypeError with array objects.
-    # - test_sign fails because it requires a private key
-    # - test_mv_file_cache: Integration test only applicable for regional buckets.
-    # - test_rm_wildcards_non_recursive: HNS buckets have different behavior for non-recursive wildcard deletion.
-    # - test_write_x_mpu fails because zonal files do not support x mode.
-    # - test_put_file_resumable_upload_cleanup_on_chunk_failure: Zonal uploads use gRPC and bypass upload_chunk, so mock is not triggered.
-    ZONAL_DESELECTS+=(
-      "--deselect=gcsfs/tests/test_core.py::test_flush"
-      "--deselect=gcsfs/tests/test_core.py::test_write_blocks"
-      "--deselect=gcsfs/tests/test_core.py::test_write_blocks2"
-      "--deselect=gcsfs/tests/test_core.py::test_transaction"
-      "--deselect=gcsfs/tests/test_core.py::test_array"
-      "--deselect=gcsfs/tests/test_core.py::test_sign"
-      "--deselect=gcsfs/tests/test_core.py::test_mv_file_cache"
+      "${RAPID_CORE_DESELECTS[@]}"
+      # HNS buckets have different behavior for non-recursive wildcard deletion.
       "--deselect=gcsfs/tests/test_core.py::test_rm_wildcards_non_recursive"
-      "--deselect=gcsfs/tests/test_core.py::test_write_x_mpu"
-      "--deselect=gcsfs/tests/test_core.py::test_put_file_resumable_upload_cleanup_on_chunk_failure"
-    )
-
-    # Zonal buckets do not support the requester pays feature
-    ZONAL_DESELECTS+=(
-      "--deselect=gcsfs/tests/test_core.py::test_requester_pays_fails_without_user_project"
     )
 
     run_pytest "${ARGS[@]}" "${ZONAL_DESELECTS[@]}" gcsfs/tests/test_core.py || STATUS=$?
+    ;;
+
+  "rcu")
+    export GCSFS_TEST_BUCKET="gcsfs-test-rcu-${SHORT_BUILD_ID}"
+    export GCSFS_ZONAL_TEST_BUCKET="gcsfs-test-rcu-${SHORT_BUILD_ID}"
+    export GCSFS_TEST_REQ_PAYS_BUCKET="gcsfs-test-rcu-${SHORT_BUILD_ID}"
+    export GCSFS_CROSS_ZONE_RCU_TEST_BUCKET="gcsfs-test-rcu-cross-zone-${SHORT_BUILD_ID}"
+    raise_fd_limit
+    export GCSFS_RUN_RAPID_TESTS="true"
+    export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
+
+    run_pytest "${ARGS[@]}" "${RAPID_CORE_DESELECTS[@]}" \
+      gcsfs/tests/test_rcu.py \
+      gcsfs/tests/test_zonal.py \
+      gcsfs/tests/test_zonal_file.py \
+      gcsfs/tests/test_core.py || STATUS=$?
+    ;;
+
+  "hns-rcu")
+    export GCSFS_TEST_BUCKET="gcsfs-test-hns-rcu-${SHORT_BUILD_ID}"
+    export GCSFS_ZONAL_TEST_BUCKET="gcsfs-test-hns-rcu-${SHORT_BUILD_ID}"
+    export GCSFS_HNS_TEST_BUCKET="gcsfs-test-hns-rcu-${SHORT_BUILD_ID}"
+    export GCSFS_HNS_TEST_REQ_PAYS_BUCKET="gcsfs-test-hns-rcu-${SHORT_BUILD_ID}"
+    raise_fd_limit
+    export GCSFS_RUN_HNS_TESTS="true"
+    export GCSFS_RUN_RAPID_TESTS="true"
+    export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
+
+    run_pytest "${ARGS[@]}" \
+      gcsfs/tests/test_rcu.py \
+      gcsfs/tests/test_zonal.py \
+      gcsfs/tests/test_zonal_file.py \
+      gcsfs/tests/test_async.py \
+      gcsfs/tests/test_hns.py \
+      --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_mkdir_fails_without_quota_project \
+      --deselect gcsfs/tests/test_hns.py::TestExtendedGcsFileSystemHnsRequesterPays::test_hns_bucket_type_detection_with_req_pays || STATUS=$?
     ;;
 esac
 
