@@ -862,7 +862,7 @@ def test_get_bucket_name_filters_by_benchmark_bucket_types(
 
 
 def test_rcu_bucket_types_in_shipped_yaml_configs():
-    """Verify all 11 active microbenchmark groups include the expected RCU bucket_types and open stays untouched."""
+    """Verify the 11 RCU-enabled groups include expected bucket_types while open and comparison stay untouched."""
     all_six_rcu = {
         "standard_rcu_z",
         "standard_rcu_warm",
@@ -908,43 +908,6 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             rcu_types = {c.bucket_type for c in get_fn()} & all_six_rcu
             assert rcu_types == write_rcu
 
-        # Comparison group
-        comp_cases = get_comparison_benchmark_cases()
-        dl_large = [c for c in comp_cases if c.scenario == "download_large_file"]
-        for b_type in (
-            "standard_rcu_warm",
-            "standard_rcu_cold",
-            "hns_rcu_warm",
-            "hns_rcu_cold",
-        ):
-            sizes_mb = {
-                c.file_size_bytes // MB for c in dl_large if c.bucket_type == b_type
-            }
-            assert sizes_mb == {1024, 10240, 51200, 102400}
-        for b_type in ("standard_rcu_z", "hns_rcu_z"):
-            sizes_mb = {
-                c.file_size_bytes // MB for c in dl_large if c.bucket_type == b_type
-            }
-            assert sizes_mb == {1024, 10240, 51200, 102400, 204800}
-
-        dl_small_types = {
-            c.bucket_type for c in comp_cases if c.scenario == "download_small_files"
-        }
-        assert dl_small_types == {"regional", "zonal"} | all_six_rcu
-
-        ul_large = [c for c in comp_cases if c.scenario == "upload_large_file"]
-        assert ({c.bucket_type for c in ul_large} & all_six_rcu) == write_rcu
-        for b_type in ("standard_rcu_z", "hns_rcu_z"):
-            sizes_mb = {
-                c.file_size_bytes // MB for c in ul_large if c.bucket_type == b_type
-            }
-            assert sizes_mb == {1024, 10240, 51200, 102400, 204800}
-
-        ul_small_types = {
-            c.bucket_type for c in comp_cases if c.scenario == "upload_small_files"
-        }
-        assert ul_small_types == {"regional", "zonal"} | write_rcu
-
         # 0-byte Metadata groups: *_rcu_z and *_rcu_cold, never *_rcu_warm
         for get_fn in (
             get_listing_benchmark_cases,
@@ -956,6 +919,8 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             rcu_types = {c.bucket_type for c in get_fn()} & all_six_rcu
             assert rcu_types == metadata_rcu
 
-        # Open group stays untouched
+        # Open and comparison groups stay untouched
         open_types = {c.bucket_type for c in get_open_benchmark_cases()}
         assert open_types == {"regional", "zonal", "hns"}
+        comp_types = {c.bucket_type for c in get_comparison_benchmark_cases()}
+        assert comp_types == {"regional", "zonal"}

@@ -1,5 +1,4 @@
 import datetime
-import importlib
 import unittest.mock as mock
 from types import SimpleNamespace
 
@@ -7,13 +6,11 @@ import google.oauth2.credentials
 import pytest
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-from gcsfs.tests.conftest import BUCKET_NAME_MAP
 from gcsfs.tests.perf.microbenchmarks import conftest as bench_conftest
 from gcsfs.tests.perf.microbenchmarks.cat import test_cat as cat_bench
 from gcsfs.tests.perf.microbenchmarks.cat_ranges import (
     test_cat_ranges as cat_ranges_bench,
 )
-from gcsfs.tests.perf.microbenchmarks.comparison import test_comparison
 from gcsfs.tests.perf.microbenchmarks.read import test_read as read_bench
 from gcsfs.tests.settings import TEST_BUCKET
 
@@ -191,68 +188,6 @@ def test_benchmark_io_fixture_rcu_warm_reads_on_isolated_fs_closes_it_and_sleeps
         finally:
             with pytest.raises(StopIteration):
                 next(gen)
-
-
-def test_comparison_download_fixtures_warm_rcu_and_route_uploads(extended_gcs_factory):
-    """Comparison download fixtures must route uploads by bucket_type and warm *_rcu_warm."""
-    warm_params = SimpleNamespace(
-        name="dl_large_hns_rcu_warm",
-        bucket_name=TEST_BUCKET,
-        bucket_type="hns_rcu_warm",
-        files=1,
-        file_size_bytes=256,
-        rounds=1,
-    )
-    cold_params = SimpleNamespace(
-        name="dl_small_standard_rcu_cold",
-        bucket_name=TEST_BUCKET,
-        bucket_type="standard_rcu_cold",
-        files=2,
-        file_size_bytes=128,
-        rounds=1,
-    )
-
-    with (
-        mock.patch.object(
-            test_comparison, "_prepare_files", wraps=bench_conftest._prepare_files
-        ) as spy_prepare,
-        mock.patch.object(
-            test_comparison, "_warm_rcu_files", wraps=bench_conftest._warm_rcu_files
-        ) as spy_warm,
-        mock.patch.object(bench_conftest, "RCU_WARMUP_SETTLE_SECONDS", 0.0),
-    ):
-        large_gen = (
-            test_comparison.gcsfs_benchmark_comparison_download_large.__wrapped__(
-                extended_gcs_factory, SimpleNamespace(param=warm_params)
-            )
-        )
-        _, remote_path, _, _ = next(large_gen)
-        try:
-            spy_prepare.assert_called_once()
-            assert spy_prepare.call_args.kwargs.get("bucket_type") == "hns_rcu_warm"
-            spy_warm.assert_called_once_with(extended_gcs_factory, [remote_path], 256)
-        finally:
-            with pytest.raises(StopIteration):
-                next(large_gen)
-
-        spy_prepare.reset_mock()
-        spy_warm.reset_mock()
-
-        small_gen = (
-            test_comparison.gcsfs_benchmark_comparison_download_small.__wrapped__(
-                extended_gcs_factory, SimpleNamespace(param=cold_params)
-            )
-        )
-        next(small_gen)
-        try:
-            spy_prepare.assert_called_once()
-            assert (
-                spy_prepare.call_args.kwargs.get("bucket_type") == "standard_rcu_cold"
-            )
-            spy_warm.assert_not_called()
-        finally:
-            with pytest.raises(StopIteration):
-                next(small_gen)
 
 
 def test_benchmark_io_fixture_rcu_cold_stages_distinct_objects_per_round(
@@ -494,51 +429,6 @@ def test_read_cat_and_cat_ranges_rotate_rcu_cold_files_each_round(extended_gcs_f
     finally:
         with pytest.raises(StopIteration):
             next(gen_r)
-
-
-def _parametrize_cases(fn):
-    for mark in getattr(fn, "pytestmark", ()):
-        if mark.name == "parametrize":
-            return mark.args[1]
-    raise AssertionError(f"No parametrize mark found on {fn}")
-
-
-def test_comparison_gcloud_upload_excludes_rcu_z_cases():
-    """gcloud storage cp writes STANDARD on RCU buckets, so gcloud upload tests must skip *_rcu_z."""
-    patched_buckets = {
-        "regional": "b-reg",
-        "zonal": "b-zonal",
-        "hns": "b-hns",
-        "standard_rcu_z": "b-std-rcu",
-        "hns_rcu_z": "b-hns-rcu",
-    }
-    try:
-        with mock.patch.dict(BUCKET_NAME_MAP, patched_buckets, clear=True):
-            reloaded = importlib.reload(test_comparison)
-
-        gcsfs_large_types = {
-            c.bucket_type
-            for c in _parametrize_cases(reloaded.test_upload_large_file_gcsfs_put)
-        }
-        gcsfs_small_types = {
-            c.bucket_type
-            for c in _parametrize_cases(reloaded.test_upload_small_files_gcsfs_put)
-        }
-        assert {"standard_rcu_z", "hns_rcu_z"} <= gcsfs_large_types
-        assert {"standard_rcu_z", "hns_rcu_z"} <= gcsfs_small_types
-
-        gcloud_large_types = {
-            c.bucket_type
-            for c in _parametrize_cases(reloaded.test_upload_large_file_gcloud_cp)
-        }
-        gcloud_small_types = {
-            c.bucket_type
-            for c in _parametrize_cases(reloaded.test_upload_small_files_gcloud_cp)
-        }
-        assert gcloud_large_types == {"regional", "zonal"}
-        assert gcloud_small_types == {"regional", "zonal"}
-    finally:
-        importlib.reload(test_comparison)
 
 
 def test_http_gcs_from_reuses_authenticated_credentials_without_reconnecting(
