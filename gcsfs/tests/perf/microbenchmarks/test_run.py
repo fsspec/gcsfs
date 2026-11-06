@@ -31,6 +31,54 @@ def test_setup_environment_missing_buckets():
         run._setup_environment(args)
 
 
+@pytest.mark.parametrize(
+    "cli_argv,expected_env",
+    [
+        (
+            [
+                "run.py",
+                "--standard-rcu-bucket=std-rcu-bkt",
+                "--bucket-types",
+                "standard_rcu_z",
+                "standard_rcu_warm",
+            ],
+            {
+                "GCSFS_STANDARD_RCU_TEST_BUCKET": "std-rcu-bkt",
+                "GCSFS_HNS_RCU_TEST_BUCKET": "",
+                "GCSFS_BENCHMARK_BUCKET_TYPES": "standard_rcu_z,standard_rcu_warm",
+            },
+        ),
+        (
+            [
+                "run.py",
+                "--hns-rcu-bucket=hns-rcu-bkt",
+            ],
+            {
+                "GCSFS_STANDARD_RCU_TEST_BUCKET": "",
+                "GCSFS_HNS_RCU_TEST_BUCKET": "hns-rcu-bkt",
+            },
+        ),
+    ],
+)
+def test_main_rcu_cli_args_and_environment(cli_argv, expected_env, tmp_path):
+    with (
+        mock.patch("sys.argv", cli_argv),
+        mock.patch.dict(
+            os.environ,
+            {"GCSFS_BENCHMARK_BUCKET_TYPES": "stale_type"},
+            clear=True,
+        ),
+        mock.patch.object(run, "_run_benchmarks", return_value=None) as mock_run_bench,
+        mock.patch("os.makedirs"),
+    ):
+        run.main()
+        mock_run_bench.assert_called_once()
+        for key, value in expected_env.items():
+            assert os.environ[key] == value
+        if "GCSFS_BENCHMARK_BUCKET_TYPES" not in expected_env:
+            assert "GCSFS_BENCHMARK_BUCKET_TYPES" not in os.environ
+
+
 @mock.patch("subprocess.run")
 @mock.patch("os.path.isdir", return_value=True)
 def test_run_benchmarks(mock_isdir, mock_subprocess):
