@@ -52,8 +52,39 @@ How It Works
 ------------
 
 1. **Zero Configuration:** Upstream libraries do not need any code changes or special configuration. Detection occurs transparently when filesystem methods (e.g. ``fs.ls``, ``fs.cat_file``, ``fs.open``, ``df.to_parquet``, ``torch.load``) are called.
-2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread. ``gcsfs`` captures caller identity on the user's thread and safely propagates it to the background event loop via Python ``contextvars``.
-3. **Performance & Caching:** Detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread). Active ``GCSFile`` instances cache their framework attribution so subsequent chunk downloads and background prefetching operations execute with zero stack-walking overhead (:math:`O(1)`).
+2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread (``fsspecIO``). ``gcsfs`` captures caller identity on the user's thread and safely propagates it to the background event loop via Python ``contextvars``.
+3. **Performance & Caching:** Detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread). Active ``GCSFile`` / ``ZonalFile`` instances cache their framework attribution so subsequent chunk downloads and background prefetching operations execute with zero stack-walking overhead (:math:`O(1)`).
+
+Execution Flows
+~~~~~~~~~~~~~~~
+
+All methods in ``gcsfs`` follow one of three telemetry execution paths (implemented in ``gcsfs/telemetry/wrapper.py``):
+
+.. code-block:: text
+
+   1. Synchronous FileSystem Call (e.g. fs.ls(), pd.read_csv())
+      [Caller Thread]
+        fs.ls() -> _gcs_sync_wrapper
+          -> _run_sync(): walks caller stack ONCE & sets ContextVar
+          -> fsspec.asyn.sync(): copies ContextVar to fsspecIO thread
+      [fsspecIO Event Loop Thread]
+        fs._ls() -> _gcs_async_wrapper (ContextVar already set -> O(1) no-op)
+          -> _get_headers(): reads ContextVar -> attaches "fw/pandas"
+
+   2. Native Asynchronous FileSystem Call (e.g. await fs._cat(...))
+      [Event Loop Thread]
+        await fs._cat() -> _gcs_async_wrapper
+          -> _telemetry_context(): walks stack ONCE & sets ContextVar
+          -> inner await fs._cat_file() (ContextVar already set -> O(1) no-op)
+          -> _get_headers(): reads ContextVar -> attaches "fw/..."
+
+   3. GCSFile / ZonalFile Lifecycle (e.g. with fs.open(...) as f: f.read())
+      - Open (GCSFile.__init__):
+          Captures self.caller_framework ONCE on the file instance.
+      - Read / Write / Background Prefetch / Deferred Close (_file_telemetry_wrapper):
+          Restores self.caller_framework into ContextVar for every chunk fetch,
+          background prefetcher task (_async_fetch_range), or deferred close thread,
+          even when the original caller stack is no longer present.
 
 Disabling Telemetry
 -------------------
