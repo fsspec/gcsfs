@@ -1,5 +1,10 @@
 import datetime
+import json
 import os
+import socket
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, patch
 
 import pytest
@@ -231,3 +236,122 @@ def test_raw_token_credentials_init_raises_on_short_lived_token(
             GoogleCredentials(
                 project="my-project", token="short_lived_token", access="read_only"
             )
+
+
+class _MetadataHandler(BaseHTTPRequestHandler):
+    """Answers like a GCE metadata server for the default service account."""
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/":
+            body = b""
+        elif path == "/computeMetadata/v1/instance/service-accounts/default/":
+            body = json.dumps(
+                {"email": "sa@my-project.iam.gserviceaccount.com", "scopes": []}
+            ).encode()
+        elif path == "/computeMetadata/v1/instance/service-accounts/default/token":
+            body = json.dumps(
+                {"access_token": "metadata-token", "expires_in": 3600}
+            ).encode()
+        else:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Metadata-Flavor", "Google")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def _point_metadata_at(monkeypatch, host):
+    # google-auth reads GCE_METADATA_IP on each request, but GCE_METADATA_HOST
+    # only on import
+    monkeypatch.setenv("GCE_METADATA_IP", host)
+    monkeypatch.setattr("google.auth.compute_engine._metadata._GCE_METADATA_HOST", host)
+    monkeypatch.setattr(
+        "google.auth.compute_engine._metadata.detect_gce_residency_linux",
+        lambda: False,
+    )
+    monkeypatch.delenv("NO_GCE_CHECK", raising=False)
+    # leave "cloud" as the only method before "anon", as on GCE when
+    # google_default finds a different project
+    monkeypatch.setattr(
+        GoogleCredentials, "_connect_google_default", Mock(side_effect=ValueError)
+    )
+    monkeypatch.setattr(
+        GoogleCredentials, "_connect_cache", Mock(side_effect=ValueError)
+    )
+
+
+@pytest.fixture
+def fake_metadata_server(monkeypatch):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _MetadataHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    _point_metadata_at(monkeypatch, "127.0.0.1:%d" % server.server_port)
+    yield
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
+def no_metadata_server(monkeypatch):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    # nothing listens on this port, so connections are refused
+    _point_metadata_at(monkeypatch, "127.0.0.1:%d" % port)
+
+
+def test_connect_without_metadata_server_is_fast(no_metadata_server):
+    start = time.monotonic()
+    cred = GoogleCredentials(project="myproject", token=None, access="read_only")
+    elapsed = time.monotonic() - start
+
+    assert cred.method == "anon"
+    # google-auth retries a failed token request with backoff for ~15s
+    assert elapsed < 5
+
+
+def test_connect_cloud_on_gce_vm_when_ping_fails(no_metadata_server, monkeypatch):
+    # on a GCE VM, the token request is still made (and retried by google-auth)
+    monkeypatch.setattr(
+        "google.auth.compute_engine._metadata.detect_gce_residency_linux",
+        lambda: True,
+    )
+    with patch("google.auth.compute_engine.Credentials") as mock_creds_class:
+        cred = GoogleCredentials(project="myproject", token=None, access="read_only")
+
+    assert cred.method == "cloud"
+    assert mock_creds_class.return_value.refresh.called
+
+
+@pytest.mark.parametrize("helper", ["ping", "detect_gce_residency_linux"])
+def test_connect_cloud_without_private_metadata_helpers(
+    no_metadata_server, monkeypatch, helper
+):
+    # if google-auth drops its private helpers, "cloud" is tried as before
+    monkeypatch.delattr("google.auth.compute_engine._metadata." + helper)
+    with patch("google.auth.compute_engine.Credentials") as mock_creds_class:
+        cred = GoogleCredentials(project="myproject", token=None, access="read_only")
+
+    assert cred.method == "cloud"
+    assert mock_creds_class.return_value.refresh.called
+
+
+def test_connect_cloud_with_metadata_server(fake_metadata_server):
+    cred = GoogleCredentials(project="myproject", token=None, access="read_only")
+
+    assert cred.method == "cloud"
+    assert cred.credentials.token == "metadata-token"
+    assert (
+        cred.credentials.service_account_email
+        == "sa@my-project.iam.gserviceaccount.com"
+    )
+    headers = {}
+    cred.apply(headers)
+    assert headers["authorization"] == "Bearer metadata-token"

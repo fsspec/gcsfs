@@ -15,6 +15,12 @@ Unreleased
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
 
+* Creating a ``GCSFileSystem`` with the default ``token=None`` off GCE no
+  longer waits ~15s for the "cloud" (metadata server) method to fail. One ping
+  of the metadata server with a 1s timeout now decides whether that method is
+  tried; on a GCE VM it is always tried, as before. An explicit
+  ``token="cloud"`` is unchanged (fsspec/filesystem_spec#1768).
+
 2026.10.0
 ---------
 
