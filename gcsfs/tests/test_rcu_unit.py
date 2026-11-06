@@ -643,3 +643,69 @@ def test_rcu_fs_fixture_skips_non_rcu_buckets(monkeypatch, layout):
         with pytest.raises(Skipped):
             next(gen)
     assert closed == [fake_fs]
+
+
+def test_gcs_factory_closes_created_instances_on_teardown(monkeypatch):
+    """Function-scoped gcs_factory closes every unique instance it created on teardown."""
+    from gcsfs.tests import conftest
+
+    fs1 = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs2 = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    grpc_close = mock.AsyncMock()
+    ctrl_close = mock.AsyncMock()
+    fs1._grpc_client = mock.MagicMock()
+    fs1._grpc_client.grpc_client.transport.close = grpc_close
+    fs2._storage_control_client = mock.MagicMock()
+    fs2._storage_control_client.transport.close = ctrl_close
+
+    calls = iter([fs1, fs2, fs1])
+    gen = conftest.gcs_factory.__wrapped__(lambda **kw: next(calls))
+    factory = next(gen)
+
+    assert factory() is fs1
+    assert factory(requester_pays=True) is fs2
+    assert factory() is fs1
+    # Simulate a fixture (such as `gcs`) closing fs1 before gcs_factory teardown runs.
+    conftest._close_gcs(fs1)
+
+    with pytest.raises(StopIteration):
+        next(gen)
+
+    assert fs1._mrd_pool_cache._closed is True
+    assert fs2._mrd_pool_cache._closed is True
+    assert fs1._grpc_client is None
+    assert fs2._storage_control_client is None
+    grpc_close.assert_awaited_once()
+    ctrl_close.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "fn_name",
+    ["test_read_unfinalized_file_using_mrd", "test_cat_file_on_unfinalized_file"],
+)
+@pytest.mark.parametrize(
+    "layout",
+    [layouts.ZONAL_HIERARCHICAL, layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],
+)
+def test_unfinalized_read_tests_skip_on_rcu_buckets(fn_name, layout):
+    """Unfinalized size-less read tests skip on RCU buckets and run on Zonal buckets."""
+    from _pytest.outcomes import Skipped
+
+    from gcsfs.tests import test_zonal
+
+    sentinel = RuntimeError("reached_write")
+    fake_fs = mock.MagicMock()
+    fake_fs.on_google = True
+    fake_fs._sync_lookup_bucket_layout.return_value = layout
+    fake_fs.open.side_effect = sentinel
+    fake_fs.pipe.side_effect = sentinel
+
+    fn = getattr(test_zonal, fn_name)
+    if layout.is_rcu:
+        with pytest.raises(Skipped):
+            fn(fake_fs, "bucket/key")
+        fake_fs.open.assert_not_called()
+        fake_fs.pipe.assert_not_called()
+    else:
+        with pytest.raises(RuntimeError, match="reached_write"):
+            fn(fake_fs, "bucket/key")

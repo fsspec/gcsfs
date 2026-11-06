@@ -68,6 +68,22 @@ run_pytest() {
   { kill "${heartbeat_pid}" && wait "${heartbeat_pid}"; } 2>/dev/null
   return "${status}"
 }
+
+raise_fd_limit() {
+  # DirectPath gRPC xDS channels (especially on regional RCU buckets where xDS
+  # opens subchannels across both regional and zonal backends) can exceed 4096 FDs.
+  local target=65536
+  local soft hard
+  soft=$(ulimit -Sn)
+  hard=$(ulimit -Hn)
+  if [[ "${soft}" == "unlimited" || "${soft}" -ge "${target}" ]]; then
+    return 0
+  fi
+  if [[ "${hard}" != "unlimited" && "${hard}" -lt "${target}" ]]; then
+    target="${hard}"
+  fi
+  ulimit -Sn "${target}"
+}
 STATUS=0
 
 # Core test deselections shared by buckets whose writes go through the gRPC
@@ -126,7 +142,7 @@ case "$TEST_SUITE" in
     export GCSFS_ZONAL_TEST_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_REQ_PAYS_BUCKET="gcsfs-test-zonal-${SHORT_BUILD_ID}"
-    ulimit -n 4096
+    raise_fd_limit
     export GCSFS_RUN_HNS_TESTS="true"
     export GCSFS_RUN_RAPID_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
@@ -169,7 +185,7 @@ case "$TEST_SUITE" in
     export GCSFS_TEST_BUCKET="gcsfs-test-zonal-core-${SHORT_BUILD_ID}"
     export GCSFS_TEST_REQ_PAYS_BUCKET="gcsfs-test-zonal-core-${SHORT_BUILD_ID}"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
-    ulimit -n 4096
+    raise_fd_limit
 
     ZONAL_DESELECTS=(
       "${RAPID_CORE_DESELECTS[@]}"
@@ -185,7 +201,7 @@ case "$TEST_SUITE" in
     export GCSFS_ZONAL_TEST_BUCKET="gcsfs-test-rcu-${SHORT_BUILD_ID}"
     export GCSFS_TEST_REQ_PAYS_BUCKET="gcsfs-test-rcu-${SHORT_BUILD_ID}"
     export GCSFS_CROSS_ZONE_RCU_TEST_BUCKET="gcsfs-test-rcu-cross-zone-${SHORT_BUILD_ID}"
-    ulimit -n 4096
+    raise_fd_limit
     export GCSFS_RUN_RAPID_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
 
@@ -201,7 +217,7 @@ case "$TEST_SUITE" in
     export GCSFS_ZONAL_TEST_BUCKET="gcsfs-test-hns-rcu-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_BUCKET="gcsfs-test-hns-rcu-${SHORT_BUILD_ID}"
     export GCSFS_HNS_TEST_REQ_PAYS_BUCKET="gcsfs-test-hns-rcu-${SHORT_BUILD_ID}"
-    ulimit -n 4096
+    raise_fd_limit
     export GCSFS_RUN_HNS_TESTS="true"
     export GCSFS_RUN_RAPID_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'

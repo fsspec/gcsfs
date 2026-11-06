@@ -284,6 +284,11 @@ def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
     "Tests that mrd can read from an unfinalized file successfully"
     if not extended_gcsfs.on_google:
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+    if extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu:
+        pytest.skip(
+            "Unfinalized RCU objects report size 0 over HTTP and omit "
+            "persisted_size on redirected DirectPath MRD opens."
+        )
 
     with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
         f.write(b"Hello, ")
@@ -303,6 +308,11 @@ def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
     """
     if not extended_gcsfs.on_google:
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+    if extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu:
+        pytest.skip(
+            "Unfinalized RCU objects report size 0 over HTTP and omit "
+            "persisted_size on redirected DirectPath MRD opens."
+        )
 
     extended_gcsfs.pipe({file_path: b"Hello, world!"}, finalize_on_close=False)
     assert extended_gcsfs.info(file_path).get("timeFinalized") is None

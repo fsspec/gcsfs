@@ -191,7 +191,7 @@ def docker_gcs():
 
 
 @pytest.fixture(scope="session")
-def gcs_factory(docker_gcs):
+def _session_gcs_factory(docker_gcs):
     params["endpoint_url"] = docker_gcs
     if is_real_gcs():
         params["default_location"] = TEST_REGION
@@ -204,6 +204,22 @@ def gcs_factory(docker_gcs):
         return fsspec.filesystem("gcs", **combined_params)
 
     return factory
+
+
+@pytest.fixture
+def gcs_factory(_session_gcs_factory):
+    created_instances = []
+
+    def factory(**kwargs):
+        fs = _session_gcs_factory(**kwargs)
+        created_instances.append(fs)
+        return fs
+
+    try:
+        yield factory
+    finally:
+        for fs in {id(fs): fs for fs in created_instances}.values():
+            _close_gcs(fs)
 
 
 @pytest.fixture(scope="session")
@@ -357,7 +373,7 @@ async def _close_gcs_async(gcs):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def final_cleanup(gcs_factory, buckets_to_delete):
+def final_cleanup(_session_gcs_factory, buckets_to_delete):
     """
     A session-scoped, auto-use fixture that deletes all buckets registered
     in the `buckets_to_delete` set after the entire test session is complete.
@@ -365,17 +381,22 @@ def final_cleanup(gcs_factory, buckets_to_delete):
     yield
     # This code runs after the entire test session finishes
 
-    gcs = gcs_factory(requester_pays=True)
-    for bucket in buckets_to_delete:
-        # The cleanup logic attempts to delete every bucket that was
-        # added to the set during the session. For real GCS, only delete if
-        # created by the test suite.
-        try:
-            if gcs.exists(bucket):
-                gcs.rm(bucket, recursive=True)
-                logging.info(f"Cleaned up bucket: {bucket}")
-        except Exception as e:
-            logging.error(f"Failed to perform final cleanup for bucket {bucket}: {e}")
+    gcs = _session_gcs_factory(requester_pays=True)
+    try:
+        for bucket in buckets_to_delete:
+            # The cleanup logic attempts to delete every bucket that was
+            # added to the set during the session. For real GCS, only delete if
+            # created by the test suite.
+            try:
+                if gcs.exists(bucket):
+                    gcs.rm(bucket, recursive=True)
+                    logging.info(f"Cleaned up bucket: {bucket}")
+            except Exception as e:
+                logging.error(
+                    f"Failed to perform final cleanup for bucket {bucket}: {e}"
+                )
+    finally:
+        _close_gcs(gcs)
 
 
 @pytest.fixture
@@ -517,11 +538,11 @@ def gcs_hns(gcs_factory, buckets_to_delete):
 
 
 @pytest.fixture(scope="session")
-def flat_bucket_name(gcs_factory, buckets_to_delete):
+def flat_bucket_name(_session_gcs_factory, buckets_to_delete):
     """
     Creates a dedicated standard (non-HNS) bucket once per test session.
     """
-    gcs = gcs_factory()
+    gcs = _session_gcs_factory()
     try:
         bucket_name = f"gcsfs-test-flat-{uuid.uuid4().hex}"
         gcs.mkdir(bucket_name)

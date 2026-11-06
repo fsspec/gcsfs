@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import resource
 import stat
 import subprocess
 from datetime import datetime, timezone
@@ -270,6 +271,78 @@ print("=== 10 passed, 1 skipped in 1.23s ===")
         "gcsfs/tests/test_hns.py",
     ):
         assert target in hns_inv["argv"]
+
+
+def test_run_tests_grpc_suites_raise_soft_fd_limit_without_lowering(tmp_path):
+    venv_bin = tmp_path / "env" / "bin"
+    venv_bin.mkdir(parents=True)
+    dump_path = tmp_path / "rlimit.json"
+
+    (venv_bin / "activate").write_text(f'export PATH="{venv_bin}:$PATH"\n')
+    _write_executable(
+        venv_bin / "pytest",
+        f"""#!{os.sys.executable}
+import json, pathlib, resource
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+pathlib.Path({str(dump_path)!r}).write_text(json.dumps({{"soft": soft, "hard": hard}}))
+print("=== 1 passed in 0.10s ===")
+""",
+    )
+
+    base_env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        "PROJECT_ID": "test-proj",
+        "REGION": "us-central1",
+        "KEY_RING": "ring",
+        "KEY_NAME": "key",
+        "SHORT_BUILD_ID": "deadbeef",
+        "PYTEST_XDIST_WORKERS": "2",
+    }
+
+    _, current_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    expected_raised = (
+        65536 if current_hard == resource.RLIM_INFINITY else min(65536, current_hard)
+    )
+
+    for suite in ("zonal", "zonal-core", "rcu", "hns-rcu"):
+        if dump_path.exists():
+            dump_path.unlink()
+        proc = subprocess.run(
+            ["bash", str(CLOUDBUILD_DIR / "run_tests.sh")],
+            cwd=tmp_path,
+            env={**base_env, "TEST_SUITE": suite},
+            preexec_fn=lambda: resource.setrlimit(
+                resource.RLIMIT_NOFILE, (min(1024, current_hard), current_hard)
+            ),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, f"{suite}: {proc.stderr}"
+        observed = json.loads(dump_path.read_text())
+        assert observed["soft"] == expected_raised, suite
+        assert observed["hard"] == current_hard, suite
+
+    if current_hard == resource.RLIM_INFINITY or current_hard > 65536:
+        high_soft = (
+            131072
+            if current_hard == resource.RLIM_INFINITY
+            else min(131072, current_hard)
+        )
+        dump_path.unlink()
+        proc = subprocess.run(
+            ["bash", str(CLOUDBUILD_DIR / "run_tests.sh")],
+            cwd=tmp_path,
+            env={**base_env, "TEST_SUITE": "rcu"},
+            preexec_fn=lambda: resource.setrlimit(
+                resource.RLIMIT_NOFILE, (high_soft, current_hard)
+            ),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        observed = json.loads(dump_path.read_text())
+        assert observed["soft"] == high_soft
 
 
 def test_cleanup_disables_rcu_caches_and_reaps_only_stale_leaked_rcu_buckets(tmp_path):
