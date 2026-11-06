@@ -8,8 +8,9 @@ Where these run:
 - Cloud Build e2e `hns` suite: real GCS, HNS bucket.
 - GitHub CI: the fake GCS emulator.
 
-Rapid (zonal) buckets are intentionally not covered: their data path uses gRPC
-bidi streaming APIs, which don't go through the HTTP User-Agent path at all.
+Rapid (zonal) and Rapid Cache Ultra buckets are intentionally not covered: their
+data path uses gRPC bidi streaming APIs, which don't go through the HTTP User-Agent
+path at all.
 
 Unlike `test_upstream_frameworks_real.py`, nothing in gcsfs is mocked here. Requests
 go through the real `_call` / `_request` / aiohttp path, and the `User-Agent` header is
