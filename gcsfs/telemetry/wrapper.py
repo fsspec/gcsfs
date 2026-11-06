@@ -1,4 +1,31 @@
-"""Method wrappers and cross-thread context propagation helpers for telemetry."""
+"""
+Method wrappers and cross-thread context propagation helpers for telemetry.
+
+Overview of the 3 Execution Flows
+---------------------------------
+1. Synchronous FileSystem Call (e.g. `fs.ls()`, `pd.read_csv()`):
+   [Caller Thread]
+     fs.ls() -> _gcs_sync_wrapper
+       -> _run_sync(): walks caller stack ONCE & sets ContextVar
+       -> fsspec.asyn.sync(): copies ContextVar to fsspecIO thread
+   [fsspecIO Event Loop Thread]
+     fs._ls() -> _gcs_async_wrapper (sees ContextVar already set -> fast-path O(1))
+       -> _get_headers(): reads ContextVar -> attaches "fw/pandas"
+
+2. Native Asynchronous FileSystem Call (e.g. `await fs._cat(...)`):
+   [Event Loop Thread]
+     await fs._cat() -> _gcs_async_wrapper
+       -> _telemetry_context(): walks stack ONCE & sets ContextVar
+       -> inner `await fs._cat_file()` sees ContextVar already set -> fast-path O(1)
+       -> _get_headers(): reads ContextVar -> attaches "fw/..."
+
+3. GCSFile / ZonalFile Lifecycle (e.g. `with fs.open(...) as f: f.read()`):
+   - Open (`GCSFile.__init__`): captures `self.caller_framework` ONCE on the file instance.
+   - Read / Write / Prefetch / Deferred Close (`_file_telemetry_wrapper`):
+     restores `self.caller_framework` into ContextVar for every chunk fetch,
+     background prefetcher task (`_async_fetch_range`), or deferred close thread,
+     even when the original caller stack is no longer present.
+"""
 
 from __future__ import annotations
 
