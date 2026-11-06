@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     env:
       STORAGE_EMULATOR_HOST: http://localhost:4443
 
@@ -37,8 +37,9 @@ jobs:
         uses: conda-incubator/setup-miniconda@v3
         with:
           environment-file: environment_gcsfs.yaml
-          python-version: ${{ matrix.PY }}
+          python-version: ${{ matrix.python-version }}
           activate-environment: gcsfs_test
+          conda-remove-defaults: "true"
 
       - name: Conda info
         run: |
