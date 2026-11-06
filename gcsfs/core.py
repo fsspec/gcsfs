@@ -44,6 +44,14 @@ from .retry import (
     retry_request,
     validate_response,
 )
+from .telemetry.context import Dimension
+from .telemetry.manager import default_usage_tracker
+from .telemetry.wrapper import (
+    _run_sync,
+    bind_gcs_sync_methods,
+    mirror_gcs_methods,
+    wrap_file_methods,
+)
 from .utils import is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
@@ -278,6 +286,21 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
+def _build_user_agent(cache_type=None, cache_source=None):
+    """Build the standard User-Agent header string for HTTP requests."""
+    tokens = [f"python-gcsfs/{version}"]
+
+    cache_val = _get_cache_type_header_value(cache_type, cache_source)
+    if cache_val:
+        tokens.append(cache_val)
+
+    telemetry_tokens = default_usage_tracker.get_tokens()
+    if telemetry_tokens:
+        tokens.extend(telemetry_tokens)
+
+    return " ".join(tokens)
+
+
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -474,6 +497,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
+        bind_gcs_sync_methods(self)
 
     @property
     def _location(self):
@@ -610,11 +634,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if headers is not None:
             out.update(headers)
         if "User-Agent" not in out:
-            ua = "python-gcsfs/" + version
-            cache_val = _get_cache_type_header_value(cache_type, cache_source)
-            if cache_val:
-                ua += f" {cache_val}"
-            out["User-Agent"] = ua
+            out["User-Agent"] = _build_user_agent(
+                cache_type=cache_type,
+                cache_source=cache_source,
+            )
         self.credentials.apply(out)
         return out
 
@@ -682,7 +705,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """Return list of available project buckets."""
         return [
             b["name"]
-            for b in asyn.sync(self.loop, self._list_buckets, timeout=self.timeout)
+            for b in _run_sync(self.loop, self._list_buckets, timeout=self.timeout)
         ]
 
     def _process_object(self, bucket, object_metadata):
@@ -2513,6 +2536,7 @@ def _get_prefetcher_and_cache_config(cache_type=None):
     return "adaptive", "default"
 
 
+mirror_gcs_methods(GCSFileSystem)
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
 _deferred_close_queue = None
 _deferred_close_lock = threading.Lock()
@@ -2647,6 +2671,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
+        # "" acts as a negative cache value so subsequent chunk reads / background fetches don't re-walk the stack.
+        self.caller_framework = (
+            default_usage_tracker.get_dimension(Dimension.FRAMEWORK) or ""
+        )
         self.generation = _coalesce_generation(generation, path_generation)
         self.if_generation_match = _resolve_open_generation_match(
             mode, if_generation_match
@@ -3263,3 +3291,6 @@ async def simple_upload(
     checker.update(datain)
     checker.validate_json_response(j)
     return j
+
+
+wrap_file_methods(GCSFile)

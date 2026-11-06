@@ -405,7 +405,6 @@ async def test_layout_invalidated_during_upload_keeps_finalize_on_close(rcu_fs, 
         fs.invalidate_storage_layout_cache(BUCKET)
 
     writer.append.side_effect = invalidate
-    writer.append_from_file.side_effect = invalidate
     init_aaow.return_value = writer
 
     if method == "pipe_file":
@@ -464,7 +463,7 @@ def test_zonal_file_commit_after_rcu_error_raises_value_error(rcu_fs, open_error
     with pytest.raises(RapidCacheUltraDisabledError):
         f.write(b"x")
 
-    with pytest.raises(ValueError, match="force-flushed"):
+    with pytest.raises(ValueError, match="I/O operation on closed file"):
         f.commit()
 
     assert init_aaow.await_count == 1

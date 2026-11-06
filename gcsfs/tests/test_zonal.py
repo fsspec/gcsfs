@@ -772,10 +772,23 @@ def test_multiprocess_error_handling_zb(extended_gcsfs):
 
 
 # =========================== Zonal Upload Tests ===========================
+# Write kwargs and the if_generation_match the caller must pass to init_aaow.
+_generation_match_cases = pytest.mark.parametrize(
+    "write_kwargs, expected_match",
+    [({}, None), ({"mode": "create"}, 0), ({"if_generation_match": "7"}, 7)],
+    ids=["default", "create", "if_generation_match"],
+)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
-async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
+@_generation_match_cases
+async def test_simple_upload_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test simple_upload for Zonal buckets calls the correct writer methods."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     data = b"test data for simple_upload"
     bucket, object_name, _ = async_gcs.split_path(file_path)
 
@@ -785,6 +798,7 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
         key=object_name,
         datain=data,
         finalize_on_close=True,  # Finalize on close to make the object immediately readable
+        **write_kwargs,
     )
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
@@ -793,7 +807,7 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
             object_name,
             None,
             None,
-            if_generation_match=None,
+            if_generation_match=expected_match,
             storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
@@ -804,10 +818,17 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
-async def test_initiate_upload_zonal(async_gcs, zonal_write_mocks, file_path):
+@_generation_match_cases
+async def test_initiate_upload_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test initiate_upload for Zonal buckets returns a writer instance."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     bucket, object_name, _ = async_gcs.split_path(file_path)
-    writer = await initiate_upload(fs=async_gcs, bucket=bucket, key=object_name)
+    writer = await initiate_upload(
+        fs=async_gcs, bucket=bucket, key=object_name, **write_kwargs
+    )
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
             async_gcs.grpc_client,
@@ -815,7 +836,7 @@ async def test_initiate_upload_zonal(async_gcs, zonal_write_mocks, file_path):
             object_name,
             None,
             None,
-            if_generation_match=None,
+            if_generation_match=expected_match,
             storage_class=zonal_write_mocks["storage_class"],
         )
         assert writer is zonal_write_mocks["aaow"]
@@ -909,8 +930,13 @@ async def test_upload_chunk_zonal_final_chunk(async_gcs, zonal_write_mocks, file
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
-async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
+@_generation_match_cases
+async def test_put_file_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test _put_file for Zonal buckets."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     data = b"test data for put_file"
     bucket, object_name, _ = async_gcs.split_path(file_path)
     with tmpfile() as lpath:
@@ -918,7 +944,9 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
             f.write(data)
 
         # Finalize on close to make the object immediately readable
-        await async_gcs._put_file(lpath, file_path, finalize_on_close=True)
+        await async_gcs._put_file(
+            lpath, file_path, finalize_on_close=True, **write_kwargs
+        )
 
         if zonal_write_mocks:
             grpc_client = await async_gcs._get_grpc_client()
@@ -928,17 +956,10 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
                 object_name,
                 None,
                 None,
-                if_generation_match=None,
+                if_generation_match=expected_match,
                 storage_class=zonal_write_mocks["storage_class"],
             )
-            zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
-            args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
-
-            file_obj_arg = args[0]
-            assert hasattr(file_obj_arg, "read"), "Argument must be a file-like object"
-            assert (
-                file_obj_arg.name == lpath
-            ), "File object must point to the correct path"
+            zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
 
             zonal_write_mocks["aaow"].close.assert_awaited_once_with(
                 finalize_on_close=True
@@ -949,12 +970,17 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
-async def test_pipe_file_zonal(async_gcs, zonal_write_mocks, file_path):
+@_generation_match_cases
+async def test_pipe_file_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test _pipe_file for Zonal buckets."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     data = b"test data for pipe_file"
     bucket, object_name, _ = async_gcs.split_path(file_path)
     # Finalize on close to make the object immediately readable
-    await async_gcs._pipe_file(file_path, data, finalize_on_close=True)
+    await async_gcs._pipe_file(file_path, data, finalize_on_close=True, **write_kwargs)
 
     if zonal_write_mocks:
         grpc_client = await async_gcs._get_grpc_client()
@@ -964,7 +990,7 @@ async def test_pipe_file_zonal(async_gcs, zonal_write_mocks, file_path):
             object_name,
             None,
             None,
-            if_generation_match=None,
+            if_generation_match=expected_match,
             storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)

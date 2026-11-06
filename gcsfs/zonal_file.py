@@ -63,8 +63,10 @@ class ZonalFile(GCSFile):
         automatically finalize it; to finalize the write, `.commit()` must be
         called explicitly or `finalize_on_close` must be set to `True`.
         On Zonal and RCU buckets an overwrite replaces the existing object as
-        soon as the writer opens, so a failed write leaves the partially
-        written object in its place, unfinalized.
+        soon as the writer opens, so a failed append, flush or commit leaves
+        the partially written object in its place, unfinalized. An exception
+        raised by other code inside a `with` block still closes the file, which
+        finalizes the partial object when `finalize_on_close` is `True`.
 
         For Zonal and RCU buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
@@ -203,9 +205,9 @@ class ZonalFile(GCSFile):
                     self.flush_interval_bytes,
                 )
             except BaseException:
-                # Mark the file force-flushed so that close() does not try to
-                # open the writer again.
-                self.forced = True
+                # Like fsspec's flush() when _initiate_upload() fails: mark the
+                # file closed so that close() does not open the writer again.
+                self.closed = True
                 raise
 
     def _fetch_range(
@@ -300,7 +302,11 @@ class ZonalFile(GCSFile):
         # Lazily initialize the AsyncAppendableObjectWriter on the first write to avoid
         # unnecessary object creation for files that are opened but never written to.
         self._ensure_aaow()
-        asyn.sync(self.gcsfs.loop, self.aaow.append, data)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.append, data)
+        except BaseException:
+            self._abort_write()
+            raise
         bytes_written = len(data)
         self.loc += bytes_written
         return bytes_written
@@ -312,8 +318,10 @@ class ZonalFile(GCSFile):
         """
         if self.closed:
             raise ValueError("Flush on closed file.")
-        if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once.")
+        if self.forced:
+            if force:
+                raise ValueError("Force flush cannot be called more than once.")
+            return
         if self.finalized:
             logger.warning("File is already finalized. Ignoring flush call.")
             return
@@ -334,12 +342,18 @@ class ZonalFile(GCSFile):
         # and to flush any buffered data if it exists.
         self._ensure_aaow()
 
-        asyn.sync(self.gcsfs.loop, self.aaow.flush)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.flush)
+        except BaseException:
+            self._abort_write()
+            raise
 
     def commit(self):
         """
         Commits the write by finalizing the AsyncAppendableObjectWriter.
         """
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
         if not self.writable():  # No-op
             logger.warning("File not in write mode. Ignoring commit call.")
             return
@@ -348,16 +362,26 @@ class ZonalFile(GCSFile):
                 "This file has already been finalized. Ignoring commit call."
             )
             return
-        if self.forced and self.aaow is None:
-            # The writer failed to open on an earlier write or force-flush, so
-            # there is nothing to finalize and the file can only be closed.
-            raise ValueError("This file has been force-flushed, can only close")
 
         self._ensure_aaow()
-        asyn.sync(self.gcsfs.loop, self.aaow.finalize)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.finalize)
+        except BaseException:
+            self._abort_write()
+            raise
         self.finalized = True
         # File is already finalized, avoid finalizing again on close
         self.finalize_on_close = False
+
+    def _abort_write(self):
+        """Makes the file close-only after a failed append, flush or finalize.
+
+        The SDK may have closed the stream, so close() must not flush it again,
+        and the partially written object is not finalized.
+        """
+        if not self.finalized:
+            self.finalize_on_close = False
+        self.forced = True
 
     def discard(self):
         """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""

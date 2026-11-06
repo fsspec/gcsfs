@@ -2246,9 +2246,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         )
                     # The open writer has already replaced the object, so update
                     # the cache even if the write fails.
+                    callback = callback or NoOpCallback()
+                    callback.set_size(os.fstat(f.fileno()).st_size)
                     try:
                         try:
-                            await writer.append_from_file(f, block_size=chunksize)
+                            while chunk := f.read(chunksize):
+                                await writer.append(chunk)
+                                callback.relative_update(len(chunk))
                         except BaseException:
                             # Leave a partially written object unfinalized.
                             await zb_hns_utils.close_aaow(
