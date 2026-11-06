@@ -3437,7 +3437,7 @@ class TestExtendedGcsFileSystemBucketLayout:
         self, extended_gcsfs
     ):
         fs = extended_gcsfs
-        fs._storage_layout_cache.clear()
+        fs.invalidate_storage_layout_cache()
 
         with mock.patch.object(
             fs,
@@ -3466,6 +3466,52 @@ class TestExtendedGcsFileSystemBucketLayout:
             # Third lookup hits the cache without calling _get_bucket_layout again
             res3 = await fs._lookup_bucket_layout("transient-bucket")
             assert res3 == layouts.STANDARD_HIERARCHICAL
+            assert mock_get_layout.await_count == 2
+
+    def test_invalidate_storage_layout_cache_single_bucket(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache = {
+            "bucket-a": layouts.STANDARD_RCU,
+            "bucket-b": layouts.STANDARD_HIERARCHICAL,
+        }
+
+        fs.invalidate_storage_layout_cache("bucket-a")
+        assert fs._storage_layout_cache == {"bucket-b": layouts.STANDARD_HIERARCHICAL}
+
+        # A path inside the bucket drops that bucket's entry.
+        fs.invalidate_storage_layout_cache("gs://bucket-b/some/key")
+        assert fs._storage_layout_cache == {}
+
+        # Invalidating a bucket that is not cached is a no-op.
+        fs.invalidate_storage_layout_cache("missing-bucket")
+        assert fs._storage_layout_cache == {}
+
+    def test_invalidate_storage_layout_cache_all(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache = {
+            "bucket-a": layouts.STANDARD_RCU,
+            "bucket-b": layouts.STANDARD_HIERARCHICAL,
+        }
+
+        fs.invalidate_storage_layout_cache()
+
+        assert fs._storage_layout_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_lookup_after_invalidate_requeries(self, extended_gcsfs):
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            side_effect=[layouts.STANDARD_RCU, layouts.STANDARD],
+        ) as mock_get_layout:
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD_RCU
+
+            fs.invalidate_storage_layout_cache("bucket")
+
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD
             assert mock_get_layout.await_count == 2
 
     def test_bucket_layout_presets(self):

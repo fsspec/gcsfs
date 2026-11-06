@@ -29,7 +29,7 @@ logger = logging.getLogger("gcsfs.zonal_file")
 class ZonalFile(GCSFile):
     """
     ZonalFile is subclass of GCSFile and handles data operations from
-    Zonal buckets only using a high-performance gRPC path.
+    Zonal and RCU buckets using a high-performance gRPC path.
     """
 
     def __init__(
@@ -51,20 +51,26 @@ class ZonalFile(GCSFile):
         kms_key_name=None,
         if_generation_match=None,
         pool_size=zb_hns_utils.DEFAULT_CONCURRENCY,
-        finalize_on_close=False,
+        finalize_on_close=None,
         flush_interval_bytes=_DEFAULT_FLUSH_INTERVAL_BYTES,
         **kwargs,
     ):
         """
         Initializes the ZonalFile object.
 
-        For Zonal buckets, `finalize_on_close` is set to `False` by default to optimize
-        for write throughput and keep the file appendable. This means that when exiting
-        a `with` block or closing, the file will not be automatically finalized. To
-        ensure the write is finalized, `.commit()` must be called explicitly or
-        `finalize_on_close` must be set to `True` when opening the file.
+        For Zonal buckets, `finalize_on_close` defaults to `False` to optimize
+        for write throughput and keep the file appendable. For RCU buckets,
+        `finalize_on_close` defaults to `True`. When `finalize_on_close` is
+        `False`, exiting a `with` block or closing the file will not
+        automatically finalize it; to finalize the write, `.commit()` must be
+        called explicitly or `finalize_on_close` must be set to `True`.
+        On Zonal and RCU buckets an overwrite replaces the existing object as
+        soon as the writer opens, so a failed append, flush or commit leaves
+        the partially written object in its place, unfinalized. An exception
+        raised by other code inside a `with` block still closes the file, which
+        finalizes the partial object when `finalize_on_close` is `True`.
 
-        For Zonal buckets, `flush_interval_bytes` controls the write buffer size before
+        For Zonal and RCU buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
         of `_MAX_CHUNK_SIZE_BYTES` (2 MiB). Note that this higher default value may
         increase memory usage.
@@ -75,12 +81,21 @@ class ZonalFile(GCSFile):
             raise OSError("Attempt to open a bucket")
         if mode not in ("rb", "wb", "ab", "xb"):
             raise NotImplementedError(
-                "Only read, write and append operations are currently supported for Zonal buckets."
+                "Only read, write and append operations are currently supported for Zonal and RCU buckets."
             )
         # GCSFile.__init__ resolves the precondition as well, but only after the
         # MRD pool below has been opened; validate first so an invalid value
         # fails without a lookup.
         _resolve_open_generation_match(mode, if_generation_match)
+        if finalize_on_close is None:
+            from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+            if isinstance(gcsfs, ExtendedGcsFileSystem):
+                finalize_on_close = gcsfs._resolve_finalize_on_close(
+                    gcsfs._sync_lookup_bucket_layout(bucket)
+                )
+            else:
+                finalize_on_close = False
         self.aaow = None
         self.mrd_pool = None
         self.finalize_on_close = finalize_on_close
@@ -98,6 +113,16 @@ class ZonalFile(GCSFile):
             # Reject an unknown cache type before checking out a pool and stream.
             if resolved_cache_type not in caches:
                 raise KeyError(resolved_cache_type)
+        elif (
+            metadata
+            or fixed_key_metadata
+            or kms_key_name
+            or (content_type and content_type != "application/octet-stream")
+        ):
+            logger.warning(
+                "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
+                "or kms_key_name during upload. These parameters will be ignored."
+            )
 
         # asyn.sync() does not cancel the checkout when the caller is interrupted
         # (e.g. by Ctrl-C), so whichever side sees the abort closes the pool.
@@ -215,9 +240,7 @@ class ZonalFile(GCSFile):
             except FileNotFoundError:
                 # if file doesn't exist, we don't need generation
                 pass
-        await self.gcsfs._get_grpc_client()
-        return await zb_hns_utils.init_aaow(
-            self.gcsfs.grpc_client,
+        return await self.gcsfs._init_aaow(
             bucket_name,
             object_name,
             generation,
@@ -236,7 +259,7 @@ class ZonalFile(GCSFile):
                     self.generation,
                     self.flush_interval_bytes,
                 )
-            except Exception:
+            except BaseException:
                 # Like fsspec's flush() when _initiate_upload() fails: mark the
                 # file closed so that close() does not open the writer again.
                 self.closed = True
@@ -334,7 +357,11 @@ class ZonalFile(GCSFile):
         # Lazily initialize the AsyncAppendableObjectWriter on the first write to avoid
         # unnecessary object creation for files that are opened but never written to.
         self._ensure_aaow()
-        asyn.sync(self.gcsfs.loop, self.aaow.append, data)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.append, data)
+        except BaseException:
+            self._abort_write()
+            raise
         bytes_written = len(data)
         self.loc += bytes_written
         return bytes_written
@@ -346,8 +373,10 @@ class ZonalFile(GCSFile):
         """
         if self.closed:
             raise ValueError("Flush on closed file.")
-        if force and self.forced:
-            raise ValueError("Force flush cannot be called more than once.")
+        if self.forced:
+            if force:
+                raise ValueError("Force flush cannot be called more than once.")
+            return
         if self.finalized:
             logger.warning("File is already finalized. Ignoring flush call.")
             return
@@ -368,12 +397,18 @@ class ZonalFile(GCSFile):
         # and to flush any buffered data if it exists.
         self._ensure_aaow()
 
-        asyn.sync(self.gcsfs.loop, self.aaow.flush)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.flush)
+        except BaseException:
+            self._abort_write()
+            raise
 
     def commit(self):
         """
         Commits the write by finalizing the AsyncAppendableObjectWriter.
         """
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
         if not self.writable():  # No-op
             logger.warning("File not in write mode. Ignoring commit call.")
             return
@@ -384,20 +419,34 @@ class ZonalFile(GCSFile):
             return
 
         self._ensure_aaow()
-        asyn.sync(self.gcsfs.loop, self.aaow.finalize)
+        try:
+            asyn.sync(self.gcsfs.loop, self.aaow.finalize)
+        except BaseException:
+            self._abort_write()
+            raise
         self.finalized = True
         # File is already finalized, avoid finalizing again on close
         self.finalize_on_close = False
 
+    def _abort_write(self):
+        """Makes the file close-only after a failed append, flush or finalize.
+
+        The SDK may have closed the stream, so close() must not flush it again,
+        and the partially written object is not finalized.
+        """
+        if not self.finalized:
+            self.finalize_on_close = False
+        self.forced = True
+
     def discard(self):
-        """Discard is not applicable for Zonal Buckets. Log a warning instead."""
+        """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""
         logger.warning(
-            "Discard is not applicable for Zonal Buckets. \
+            "Discard is not applicable for Zonal and RCU buckets. \
             Data is uploaded via streaming and cannot be cancelled."
         )
 
     def _initiate_upload(self):
-        """Initiates the upload for Zonal buckets using gRPC."""
+        """Initiates the upload for Zonal and RCU buckets using gRPC."""
         from gcsfs.extended_gcsfs import initiate_upload
 
         self.location = asyn.sync(
@@ -416,7 +465,7 @@ class ZonalFile(GCSFile):
         )
 
     def _simple_upload(self):
-        """Performs a simple upload for Zonal buckets using gRPC."""
+        """Performs a simple upload for Zonal and RCU buckets using gRPC."""
         from gcsfs.extended_gcsfs import simple_upload
 
         self.buffer.seek(0)
@@ -445,10 +494,23 @@ class ZonalFile(GCSFile):
         )
 
     def _close_impl(self):
-        super()._close_impl()
+        errors = []
+
+        # A failed closing flush must not skip the teardown below, and the
+        # partially written object must not be finalized.
+        try:
+            super()._close_impl()
+        except Exception as e:
+            errors.append(e)
+            if not self.finalized:
+                self.finalize_on_close = False
+            if self.aaow is not None:
+                # fsspec skips its cache invalidation when the closing flush
+                # fails, but the open writer has already replaced the object.
+                self.fs.invalidate_cache(self.path)
+                self.fs.invalidate_cache(self.fs._parent(self.path))
 
         timeout = self.timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
-        errors = []
 
         # Teardown the read-side MRD pool if initialized.
         if hasattr(self, "mrd_pool") and self.mrd_pool:

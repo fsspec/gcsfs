@@ -2936,7 +2936,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """Create multi-upload"""
         self.location = asyn.sync(
             self.gcsfs.loop,
-            initiate_upload,
+            _http_initiate_upload,
             self.gcsfs,
             self.bucket,
             self.key,
@@ -3071,7 +3071,7 @@ def _convert_fixed_key_metadata(metadata, *, from_google=False):
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
     Uploads a chunk of data. This function has a conditional path to support
-    experimental features for Zonal buckets to append data using gRPC.
+    experimental features for Zonal and RCU buckets to append data using gRPC.
     """
     from google.cloud.storage.asyncio.async_appendable_object_writer import (
         AsyncAppendableObjectWriter,
@@ -3181,7 +3181,7 @@ async def initiate_upload(
 ):
     """
     Initiates a resumable upload. This function has a conditional path to support
-    experimental features for Zonal buckets to append data using gRPC, returning an
+    experimental features for Zonal and RCU buckets to append data using gRPC, returning an
     "AsyncAppendableObjectWriter" instance as location.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
@@ -3189,7 +3189,7 @@ async def initiate_upload(
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
 
         return await ext_initiate_upload(
             fs,
@@ -3202,7 +3202,31 @@ async def initiate_upload(
             kms_key_name,
             if_generation_match=if_generation_match,
         )
+    return await _http_initiate_upload(
+        fs,
+        bucket,
+        key,
+        content_type,
+        metadata,
+        fixed_key_metadata,
+        mode,
+        kms_key_name,
+        if_generation_match=if_generation_match,
+    )
 
+
+async def _http_initiate_upload(
+    fs,
+    bucket,
+    key,
+    content_type="application/octet-stream",
+    metadata=None,
+    fixed_key_metadata=None,
+    mode="overwrite",
+    kms_key_name=None,
+    if_generation_match=None,
+):
+    """Start a resumable upload over HTTP and return its session URL."""
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
@@ -3242,14 +3266,14 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload. This function has a conditional path to support
-    experimental features for Zonal buckets to upload data using gRPC.
+    experimental features for Zonal and RCU buckets to upload data using gRPC.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
 
         return await ext_simple_upload(
             fs,

@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 # scrape-metrics: scrape Cloud Logging into raw CSVs and aggregate them into one
-# summary row, retrying for Cloud Logging ingestion lag, then upload the summary
-# to the results bucket. calculate exits non-zero until the required metrics are
-# complete, gating the upload.
+# summary row, retrying for Cloud Logging ingestion lag. calculate exits non-zero
+# until the required metrics are complete, gating the hand-off.
+#
+# Runs on a Python image (not the gcloud image, which ships no system python3),
+# so it must not call gcloud: it records the summary's local path and
+# destination in the build vars file, and the upload-summary step (gcloud
+# image) copies it to the results bucket.
 set -e
 source "$(dirname "$0")/lib.sh"
 trap 'record_failure scrape-metrics' ERR
 skip_if_failed
 source "${BUILD_VARS_FILE}"
-pip3 install --break-system-packages --quiet -r cloudbuild/macrobenchmarks/metrics/requirements.txt
-START_TIME=$(cat /workspace/start_time.txt)
-END_TIME=$(cat /workspace/end_time.txt)
-RAW_DIR=/workspace/raw_metrics
+python3 -m pip install --quiet --no-cache-dir --disable-pip-version-check --root-user-action=ignore -r cloudbuild/macrobenchmarks/metrics/requirements.txt
+START_TIME=$(cat "${WORKSPACE_DIR}/start_time.txt")
+END_TIME=$(cat "${WORKSPACE_DIR}/end_time.txt")
+RAW_DIR="${WORKSPACE_DIR}/raw_metrics"
 cd cloudbuild/macrobenchmarks
 DATE_DIR=$(date +%Y%m%d)
 TS_DIR=$(date +%Y%m%d-%H%M%S)
-SUMMARY=/workspace/${TS_DIR}.csv
+SUMMARY="${WORKSPACE_DIR}/${TS_DIR}.csv"
 MIN_WRITE_DATAPOINTS=$((${_STEPS} / ${_CHECKPOINT_INTERVAL}))
 if [ "$MIN_WRITE_DATAPOINTS" -lt 1 ]; then
   MIN_WRITE_DATAPOINTS=1
@@ -133,4 +137,5 @@ python3 -m metrics.monitoring \
   --out-dir "$RAW_DIR" || true
 run_calculate "$SUMMARY" \
   || echo "Warning: recompute with system metrics failed; uploading summary without them."
-gcloud storage cp "$SUMMARY" "gs://$RESULTS_BUCKET/branch=$BRANCH_NAME/$DATE_DIR/$RUN_ID/${TS_DIR}.csv"
+echo "export SUMMARY_FILE=${SUMMARY}" >> "${BUILD_VARS_FILE}"
+echo "export SUMMARY_URI=gs://${RESULTS_BUCKET}/branch=${BRANCH_NAME}/${DATE_DIR}/${RUN_ID}/${TS_DIR}.csv" >> "${BUILD_VARS_FILE}"
