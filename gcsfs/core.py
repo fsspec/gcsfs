@@ -2693,6 +2693,16 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 )
             else:
                 kwargs.pop("max_prefetch_size", None)
+        # Kept so that a pickled read handle reopens with the same cache options.
+        self._reopen_cache_options = dict(cache_options)
+
+        # _supports_append is an internal argument not meant to be used directly.
+        # If True, allows opening file in append mode. This is generally not supported
+        # by GCS, but may be supported by subclasses (e.g. ZonalFile). This flag should
+        # be set by subclasses that support append operations. Otherwise, the mode
+        # will be overwritten to "wb" mode with a warning. Pop it before
+        # super().__init__() so that it stays out of self.kwargs.
+        _supports_append = kwargs.pop("_supports_append", False)
 
         fs_loop = getattr(gcsfs, "loop", None)
         has_usable_fs_loop = (
@@ -2760,12 +2770,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
                 cache.close = lambda: None
 
-        # _supports_append is an internal argument not meant to be used directly.
-        # If True, allows opening file in append mode. This is generally not supported
-        # by GCS, but may be supported by subclasses (e.g. ZonalFile). This flag should
-        # be set by subclasses that support append operations. Otherwise, the mode
-        # will be overwritten to "wb" mode with a warning.
-        _supports_append = kwargs.pop("_supports_append", False)
         if "a" in self.mode and not _supports_append:
             warnings.warn(
                 "Append mode 'a' is not supported in GCS. Using overwrite mode instead."
@@ -2793,6 +2797,38 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
+
+    def _reopen_kwargs(self):
+        """Keyword arguments that reopen this file with the options it was opened with."""
+        kwargs = dict(self.kwargs)
+        if self.generation is not None:
+            kwargs["generation"] = self.generation
+        if self._reopen_cache_options:
+            kwargs["cache_options"] = dict(self._reopen_cache_options)
+        kwargs["consistency"] = self.consistency
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
+        return kwargs
+
+    def __reduce__(self):
+        # AbstractBufferedFile.__reduce__ replays only self.kwargs, which misses the
+        # named arguments above (so the reopened file could read a newer
+        # generation), and replays the cache name, which makes a default cache
+        # explicit.
+        if self.mode != "rb":
+            raise RuntimeError("Pickling a writeable file is not supported")
+        cache_type = None if self.cache_source == "default" else self.cache_type
+        return fsspec.spec.reopen, (
+            self.fs,
+            self.path,
+            self.mode,
+            self.blocksize,
+            self.loc,
+            self.size,
+            self.autocommit,
+            cache_type,
+            self._reopen_kwargs(),
+        )
 
     @property
     def details(self):

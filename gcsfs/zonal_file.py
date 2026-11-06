@@ -1,6 +1,8 @@
 import logging
+import threading
 
 from fsspec import asyn
+from fsspec.caching import caches
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
 )
@@ -77,6 +79,10 @@ class ZonalFile(GCSFile):
         generation = _coalesce_generation(generation, path_generation)
         if not key:
             raise OSError("Attempt to open a bucket")
+        if mode not in ("rb", "wb", "ab", "xb"):
+            raise NotImplementedError(
+                "Only read, write and append operations are currently supported for Zonal and RCU buckets."
+            )
         # GCSFile.__init__ resolves the precondition as well, but only after the
         # MRD pool below has been opened; validate first so an invalid value
         # fails without a lookup.
@@ -91,20 +97,40 @@ class ZonalFile(GCSFile):
             else:
                 finalize_on_close = False
         self.aaow = None
+        self.mrd_pool = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
         self.mode = mode
         self.flush_interval_bytes = flush_interval_bytes
         self.gcsfs = gcsfs
         self.pool_size = pool_size
+        caller_size = kwargs.pop("size", None)
         object_size = None
-        if "r" in self.mode:
+        if self.mode == "rb":
             resolved_cache_type, resolved_cache_source = (
                 _get_prefetcher_and_cache_config(cache_type)
             )
-            self.mrd_pool = asyn.sync(
-                self.gcsfs.loop,
-                self.gcsfs._mrd_pool_cache.get,
+            # Reject an unknown cache type before checking out a pool and stream.
+            if resolved_cache_type not in caches:
+                raise KeyError(resolved_cache_type)
+        elif (
+            metadata
+            or fixed_key_metadata
+            or kms_key_name
+            or (content_type and content_type != "application/octet-stream")
+        ):
+            logger.warning(
+                "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
+                "or kms_key_name during upload. These parameters will be ignored."
+            )
+
+        # asyn.sync() does not cancel the checkout when the caller is interrupted
+        # (e.g. by Ctrl-C), so whichever side sees the abort closes the pool.
+        handoff_lock = threading.Lock()
+        handoff = {"aborted": False, "pool": None}
+
+        async def _checkout_pool():
+            pool = await self.gcsfs._mrd_pool_cache.get(
                 bucket,
                 key,
                 generation,
@@ -112,54 +138,83 @@ class ZonalFile(GCSFile):
                 cache_type=resolved_cache_type,
                 cache_source=resolved_cache_source,
             )
-            if getattr(self.mrd_pool, "details", None) is not None:
-                self._details = self.mrd_pool.details
-            object_size = self.mrd_pool.persisted_size
+            with handoff_lock:
+                if not handoff["aborted"]:
+                    handoff["pool"] = pool
+                    return pool
+            await pool.close()  # The caller already gave up.
 
-            if object_size is None:
-                logger.warning(
-                    "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
-                    "This may result in incorrect behavior for unfinalized objects."
-                )
-        elif "w" in self.mode or "a" in self.mode or "x" in self.mode:
-            if (
-                metadata
-                or fixed_key_metadata
-                or kms_key_name
-                or (content_type and content_type != "application/octet-stream")
-            ):
-                logger.warning(
-                    "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
-                    "or kms_key_name during upload. These parameters will be ignored."
-                )
-        else:
-            raise NotImplementedError(
-                "Only read, write and append operations are currently supported for Zonal and RCU buckets."
+        # The pool checkout and everything after it run under the cleanup below.
+        try:
+            if self.mode == "rb":
+                self.mrd_pool = asyn.sync(self.gcsfs.loop, _checkout_pool)
+            if self.mrd_pool is not None:
+                if getattr(self.mrd_pool, "details", None) is not None:
+                    self._details = self.mrd_pool.details
+                object_size = self.mrd_pool.persisted_size
+
+                if object_size is None:
+                    logger.warning(
+                        "AsyncMultiRangeDownloader (MRD) exists but has no 'persisted_size'. "
+                        "This may result in incorrect behavior for unfinalized objects."
+                    )
+
+            super().__init__(
+                gcsfs,
+                path,
+                mode,
+                block_size,
+                autocommit,
+                cache_type,
+                cache_options,
+                acl,
+                consistency,
+                metadata,
+                content_type,
+                timeout,
+                fixed_key_metadata,
+                generation,
+                kms_key_name,
+                if_generation_match=if_generation_match,
+                # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
+                _supports_append="a" in mode,
+                # pass persisted_size here so that Cache is initialized with correct object size
+                size=object_size if object_size is not None else caller_size,
+                **kwargs,
             )
+        except BaseException:
+            with handoff_lock:
+                handoff["aborted"] = True
+                if self.mrd_pool is None:
+                    self.mrd_pool = handoff["pool"]
+            self.closed = True
+            # GCSFile.__init__ leaves the prefetcher to _close_impl(), which a
+            # file marked closed never reaches, so stop it here. Like
+            # _close_impl(), rely on BackgroundPrefetcher.close() to log its
+            # own teardown errors.
+            cache = getattr(self, "cache", None)
+            prefetcher = getattr(cache, "_prefetcher", None)
+            if prefetcher is not None:
+                cache._prefetcher = None
+                prefetcher.close()
+            if self.mrd_pool is not None:
+                pool, self.mrd_pool = self.mrd_pool, None
+                try:
+                    sync_teardown(
+                        self.gcsfs.loop,
+                        pool.close,
+                        timeout=timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS,
+                        description=f"closing mrd_pool for {path} after failed open",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to close MRD pool during failed initialization cleanup: %s",
+                        e,
+                    )
+            raise
 
-        super().__init__(
-            gcsfs,
-            path,
-            mode,
-            block_size,
-            autocommit,
-            cache_type,
-            cache_options,
-            acl,
-            consistency,
-            metadata,
-            content_type,
-            timeout,
-            fixed_key_metadata,
-            generation,
-            kms_key_name,
-            if_generation_match=if_generation_match,
-            # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
-            _supports_append="a" in mode,
-            # pass persisted_size here so that Cache is initialized with correct object size
-            size=object_size,
-            **kwargs,
-        )
+    def _reopen_kwargs(self):
+        return {**super()._reopen_kwargs(), "pool_size": self.pool_size}
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """

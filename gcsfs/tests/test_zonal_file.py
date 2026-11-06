@@ -17,6 +17,7 @@ import fsspec.asyn
 import pytest
 from fsspec.asyn import FSTimeoutError
 from fsspec.callbacks import Callback
+from fsspec.prefetcher import BackgroundPrefetcher
 from google.api_core.exceptions import NotFound
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
@@ -327,20 +328,18 @@ def mock_gcsfs():
     return fs
 
 
-@mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
+def test_zonal_file_generation_kwarg_handling(mock_gcsfs):
     """Test that ZonalFile explicitly provided generation kwarg is not dropped."""
     from gcsfs.zonal_file import ZonalFile
 
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
     # split_path returns None for generation when it's not in the path
     mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", None)
     zf = ZonalFile(
         gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb", generation="456"
     )
 
-    expected_call = mock.call(
-        mock_gcsfs.loop,
-        mock_gcsfs._mrd_pool_cache.get,
+    mock_gcsfs._mrd_pool_cache.get.assert_awaited_once_with(
         "test-bucket",
         "test-key",
         "456",
@@ -348,21 +347,18 @@ def test_zonal_file_generation_kwarg_handling(mock_sync, mock_gcsfs):
         cache_type=mock.ANY,
         cache_source=mock.ANY,
     )
-    assert expected_call in mock_sync.call_args_list
     zf.close()
 
 
-@mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
+def test_zonal_file_generation_path_handling(mock_gcsfs):
     """Test that ZonalFile parses generation from the path when provided."""
     from gcsfs.zonal_file import ZonalFile
 
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
     mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", "123")
     zf = ZonalFile(gcsfs=mock_gcsfs, path="gs://test-bucket/test-key#123", mode="rb")
 
-    expected_call = mock.call(
-        mock_gcsfs.loop,
-        mock_gcsfs._mrd_pool_cache.get,
+    mock_gcsfs._mrd_pool_cache.get.assert_awaited_once_with(
         "test-bucket",
         "test-key",
         "123",
@@ -370,7 +366,6 @@ def test_zonal_file_generation_path_handling(mock_sync, mock_gcsfs):
         cache_type=mock.ANY,
         cache_source=mock.ANY,
     )
-    assert expected_call in mock_sync.call_args_list
     zf.close()
 
 
@@ -1699,6 +1694,216 @@ def test_sync_teardown_accepts_coroutine_object():
         description="coro object teardown",
     )
     assert result == ["done"]
+
+
+def test_zonal_file_failed_init_closes_mrd_pool(mock_gcsfs):
+    """If GCSFile.__init__ fails after the MRD pool is checked out, the pool and prefetcher are closed."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock()
+    zf = ZonalFile.__new__(ZonalFile)
+    real_close = BackgroundPrefetcher.close
+
+    with mock.patch.object(
+        BackgroundPrefetcher, "close", autospec=True, side_effect=real_close
+    ) as prefetcher_close:
+        # An invalid fixed_key_metadata fails in GCSFile.__init__ after the cache is built.
+        with pytest.raises(TypeError):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode="rb",
+                fixed_key_metadata=123,
+            )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_awaited_once()
+    pool.close.assert_awaited_once()
+    prefetcher_close.assert_called_once()
+    assert zf.mrd_pool is None
+    assert zf.closed is True
+    assert zf.cache._prefetcher is None
+
+
+def test_zonal_file_failed_init_preserves_exception_when_pool_close_fails(
+    mock_gcsfs, caplog
+):
+    """If MRD pool teardown fails during failed __init__, log a warning and propagate the init error."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock(side_effect=RuntimeError("pool close boom"))
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"):
+        with pytest.raises(TypeError):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode="rb",
+                fixed_key_metadata=123,
+            )
+
+    pool.close.assert_awaited_once()
+    assert zf.mrd_pool is None
+    assert zf.closed is True
+    assert any(
+        r.levelno == logging.WARNING and "pool close boom" in r.message
+        for r in caplog.records
+    )
+
+
+def test_zonal_file_interrupt_after_pool_checkout_closes_mrd_pool(mock_gcsfs):
+    """A KeyboardInterrupt right after the MRD pool is checked out still releases the pool."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock()
+    # Ctrl-C arriving while the pool's size is read, before GCSFile.__init__ runs.
+    type(pool).persisted_size = mock.PropertyMock(side_effect=KeyboardInterrupt)
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(KeyboardInterrupt):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+        )
+
+    pool.close.assert_awaited_once()
+    assert zf.mrd_pool is None
+
+
+@pytest.mark.parametrize(
+    "checkout_finished", [False, True], ids=["during_checkout", "after_checkout"]
+)
+def test_zonal_file_interrupt_while_waiting_for_pool_checkout_closes_mrd_pool(
+    mock_gcsfs, checkout_finished
+):
+    """A Ctrl-C while asyn.sync() waits for the pool checkout still releases the pool.
+
+    asyn.sync() does not cancel the coroutine it scheduled, so the checkout can
+    finish after the caller has already given up.
+    """
+    loop = fsspec.asyn.get_loop()
+    mock_gcsfs.loop = loop
+    pool = mock_gcsfs._mrd_pool_cache.get.return_value
+    pool.close = mock.AsyncMock()
+    release = asyncio.Event()
+
+    async def slow_get(*args, **kwargs):
+        await release.wait()
+        return pool
+
+    mock_gcsfs._mrd_pool_cache.get.side_effect = slow_get
+    checkouts = []
+
+    def interrupted_sync(loop, func, *args, **kwargs):
+        # Like asyn.sync(), schedule the checkout, then get Ctrl-C while waiting.
+        checkouts.append(asyncio.run_coroutine_threadsafe(func(*args, **kwargs), loop))
+        if checkout_finished:
+            loop.call_soon_threadsafe(release.set)
+            checkouts[0].result(timeout=5)
+        raise KeyboardInterrupt
+
+    zf = ZonalFile.__new__(ZonalFile)
+    with mock.patch("gcsfs.zonal_file.asyn.sync", side_effect=interrupted_sync):
+        with pytest.raises(KeyboardInterrupt):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode="rb",
+            )
+
+    # Let a checkout that is still running finish after the caller gave up.
+    loop.call_soon_threadsafe(release.set)
+    checkouts[0].result(timeout=5)
+    pool.close.assert_awaited_once()
+    assert zf.mrd_pool is None
+
+
+def test_zonal_file_failed_write_init_is_marked_closed(mock_gcsfs):
+    """A failed write-mode open is marked closed so __del__ never flushes (creates) the object."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(TypeError):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="wb",
+            fixed_key_metadata=123,
+        )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_not_called()
+    # AbstractBufferedFile.__init__ already set _closed = False, so this is not the default.
+    assert zf.closed is True
+
+
+def test_zonal_file_unknown_cache_type_fails_before_pool_checkout(mock_gcsfs):
+    """An unknown cache_type fails before checking out an MRD pool or arming __del__."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(KeyError, match="no-such-cache"):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode="rb",
+            cache_type="no-such-cache",
+        )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_not_called()
+    assert "_closed" not in zf.__dict__
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "r+",
+        "rb+",
+        "r+b",
+        "w+",
+        "wb+",
+        "w+b",
+        "a+",
+        "ab+",
+        "a+b",
+        "x+",
+        "xb+",
+        "x+b",
+        "rwb",
+    ],
+)
+def test_zonal_file_plus_modes_rejected_before_pool_or_super_init(mock_gcsfs, mode):
+    """Unsupported modes ('+' modes or 'rwb') fail before checking out an MRD pool or arming __del__."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(NotImplementedError):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode=mode,
+        )
+
+    mock_gcsfs._mrd_pool_cache.get.assert_not_called()
+    assert "_closed" not in zf.__dict__
+
+
+@pytest.mark.parametrize(
+    "mode, if_generation_match", [("r+b", 5), ("w+b", -1), ("x+b", 5)]
+)
+def test_zonal_file_unsupported_mode_checked_before_if_generation_match(
+    mock_gcsfs, mode, if_generation_match
+):
+    """An unsupported mode raises NotImplementedError, not an if_generation_match error."""
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with pytest.raises(NotImplementedError):
+        zf.__init__(
+            gcsfs=mock_gcsfs,
+            path="gs://test-bucket/test-key",
+            mode=mode,
+            if_generation_match=if_generation_match,
+        )
 
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
