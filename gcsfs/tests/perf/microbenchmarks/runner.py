@@ -290,6 +290,7 @@ def run_multi_process(
         extended_gcs_factory(**gcs_kwargs) for _ in range(params.processes)
     ]
 
+    pass_round = _accepts_round_num(args_builder)
     results = []
     with monitor_cls() as m:
         for round_num in range(params.rounds):
@@ -312,7 +313,6 @@ def run_multi_process(
                         affinity_set = True
 
             try:
-                pass_round = _accepts_round_num(args_builder)
                 for i in range(params.processes):
                     # Build arguments specific to this process (e.g. file slice)
                     if pass_round:
