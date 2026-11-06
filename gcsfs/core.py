@@ -44,8 +44,8 @@ from .retry import (
     retry_request,
     validate_response,
 )
+from .telemetry import manager as telemetry_manager
 from .telemetry.context import Dimension
-from .telemetry.manager import default_usage_tracker
 from .telemetry.wrapper import (
     _run_sync,
     bind_gcs_sync_methods,
@@ -294,7 +294,7 @@ def _build_user_agent(cache_type=None, cache_source=None):
     if cache_val:
         tokens.append(cache_val)
 
-    telemetry_tokens = default_usage_tracker.get_tokens()
+    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens()
     if telemetry_tokens:
         tokens.extend(telemetry_tokens)
 
@@ -2519,6 +2519,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         )
 
 
+# Wrap sync and native async methods so they propagate caller framework telemetry.
+mirror_gcs_methods(GCSFileSystem)
+
 GoogleCredentials.load_tokens()
 
 
@@ -2536,7 +2539,6 @@ def _get_prefetcher_and_cache_config(cache_type=None):
     return "adaptive", "default"
 
 
-mirror_gcs_methods(GCSFileSystem)
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
 _deferred_close_queue = None
 _deferred_close_lock = threading.Lock()
@@ -2673,7 +2675,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             raise OSError("Attempt to open a bucket")
         # "" acts as a negative cache value so subsequent chunk reads / background fetches don't re-walk the stack.
         self.caller_framework = (
-            default_usage_tracker.get_dimension(Dimension.FRAMEWORK) or ""
+            telemetry_manager.default_usage_tracker.get_dimension(Dimension.FRAMEWORK)
+            or ""
         )
         self.generation = _coalesce_generation(generation, path_generation)
         self.if_generation_match = _resolve_open_generation_match(

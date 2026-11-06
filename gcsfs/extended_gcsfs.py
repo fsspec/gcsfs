@@ -42,6 +42,11 @@ from gcsfs.core import (
 )
 from gcsfs.poller import poll_lro, unwrap_operation_result
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.telemetry.wrapper import (
+    _gcs_sync_wrapper,
+    mirror_gcs_methods,
+    with_telemetry_context,
+)
 from gcsfs.zb_hns_utils import MRD_MAX_RANGES, DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
 
@@ -389,7 +394,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self._storage_layout_cache[bucket] = bucket_layout
         return self._storage_layout_cache[bucket]
 
-    _sync_lookup_bucket_layout = asyn.sync_wrapper(_lookup_bucket_layout)
+    # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
+    _sync_lookup_bucket_layout = _gcs_sync_wrapper(_lookup_bucket_layout)
 
     def invalidate_storage_layout_cache(self, bucket=None):
         """Forget cached bucket layouts so the next operation looks them up again.
@@ -470,6 +476,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Default to UNKNOWN in case bucket layout is not obtained
             return BucketLayout.UNKNOWN
 
+    # Plain sync method (not covered by mirror_gcs_methods). The bucket-layout lookup and, for Rapid
+    # (zonal) reads, the MRD pool's `_info` request in ZonalFile.__init__ run before GCSFile.__init__
+    # caches `caller_framework`; scope telemetry for the whole open so they carry the caller's
+    # framework (detected once, on the caller thread) and GCSFile.__init__ reuses it.
+    @with_telemetry_context
     def _open(
         self,
         path,
@@ -560,7 +571,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return offset, length
 
-    sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
+    # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
+    sync_process_limits_to_offset_and_length = _gcs_sync_wrapper(
         _process_limits_to_offset_and_length
     )
 
@@ -1432,8 +1444,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
         return await super()._mv(path1, path2, **kwargs)
 
-    mv = asyn.sync_wrapper(_mv)
-
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
         try:
             return await super()._list_objects(
@@ -1606,8 +1616,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 f"mkdir for '{path}' failed due to a precondition error: {e}"
             ) from e
 
-    mkdir = asyn.sync_wrapper(_mkdir)
-
     async def _makedirs(self, path, exist_ok=False):
         """Recursively make directories.
 
@@ -1658,8 +1666,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         await self._create_hns_folder(
             path, bucket, key, create_parents=True, exist_ok=exist_ok
         )
-
-    makedirs = asyn.sync_wrapper(_makedirs)
 
     async def _get_directory_info(self, path, bucket, key, generation):
         """
@@ -1799,8 +1805,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         except Exception as e:
             logger.error(f"HNS rmdir: Failed to delete folder '{path}': {e}")
             raise
-
-    rmdir = asyn.sync_wrapper(_rmdir)
 
     # TODO: This method is only added to be used in rm method, can be deleted once
     # rm method is integrated with recursive API
@@ -2098,8 +2102,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             and not isinstance(e, (FileNotFoundError, api_exceptions.NotFound))
             and "No such object" not in str(e)
         ]
-
-    rm = asyn.sync_wrapper(_rm)
 
     async def _find(
         self,
@@ -2771,7 +2773,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return await super()._merge(path, paths, acl=acl)
 
-    merge = asyn.sync_wrapper(_merge)
+
+# Wrap ExtendedGcsFileSystem's own sync/async overrides (e.g. `mv`, `rm`, `_cat_file`, `_find`)
+# so they propagate caller framework telemetry; inherited GCSFileSystem methods are already wrapped.
+mirror_gcs_methods(ExtendedGcsFileSystem)
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
