@@ -3035,7 +3035,7 @@ def _convert_fixed_key_metadata(metadata, *, from_google=False):
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
     Uploads a chunk of data. This function has a conditional path to support
-    experimental features for Zonal buckets to append data using gRPC.
+    experimental features for Zonal and RCU buckets to append data using gRPC.
     """
     from google.cloud.storage.asyncio.async_appendable_object_writer import (
         AsyncAppendableObjectWriter,
@@ -3145,7 +3145,7 @@ async def initiate_upload(
 ):
     """
     Initiates a resumable upload. This function has a conditional path to support
-    experimental features for Zonal buckets to append data using gRPC, returning an
+    experimental features for Zonal and RCU buckets to append data using gRPC, returning an
     "AsyncAppendableObjectWriter" instance as location.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
@@ -3153,7 +3153,7 @@ async def initiate_upload(
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
 
         return await ext_initiate_upload(
             fs,
@@ -3206,14 +3206,14 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload. This function has a conditional path to support
-    experimental features for Zonal buckets to upload data using gRPC.
+    experimental features for Zonal and RCU buckets to upload data using gRPC.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
 
         return await ext_simple_upload(
             fs,

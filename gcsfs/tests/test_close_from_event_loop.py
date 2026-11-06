@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -329,7 +330,52 @@ def test_gcsfile_adaptive_cache_binds_to_fs_loop_after_reset_lock(
                 loop2.close()
 
 
+# Runs in a separate interpreter: if the regression returns, the forked child hangs before
+# `execve` and `subprocess.Popen()` itself blocks (so `proc.wait(timeout=...)` is never reached).
+_POPEN_PREEXEC_SCENARIO = """
+import gc, subprocess, sys, time, weakref
+
+import fsspec.asyn
+
+from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+
+async def init_clients(fs):
+    await fs._set_session()
+    await fs._get_control_plane_client()
+    await fs._get_grpc_client()
+
+
+def make_cached_only_fs():
+    # Use ExtendedGcsFileSystem directly: gcsfs.GCSFileSystem is the base class
+    # (without gRPC clients) when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT is off.
+    fs = ExtendedGcsFileSystem(token="anon")
+    fsspec.asyn.sync(fs.loop, init_clients, fs)
+    return weakref.ref(fs), fs._session
+
+
+ExtendedGcsFileSystem.clear_instance_cache()
+fs_ref, session = make_cached_only_fs()
+assert fs_ref() is not None
+
+proc = subprocess.Popen([sys.executable, "-c", "pass"], preexec_fn=lambda: None)
+assert proc.wait(timeout=30) == 0
+assert not session.closed
+
+# In the parent, clearing the cache must still collect and finalize the instance.
+ExtendedGcsFileSystem.clear_instance_cache()
+gc.collect()
+assert fs_ref() is None
+deadline = time.monotonic() + 5
+while not session.closed and time.monotonic() < deadline:
+    time.sleep(0.01)
+assert session.closed
+print("SCENARIO_OK")
+"""
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.timeout(120)
 def test_cached_filesystem_with_grpc_survives_popen_preexec_fn():
     """Regression test for a hang in ``ray.init()``.
 
@@ -337,40 +383,47 @@ def test_cached_filesystem_with_grpc_survives_popen_preexec_fn():
     ``cls._cache`` in the child before ``execve``. A filesystem referenced only by
     the cache must not be torn down there: deallocating its inherited
     ``grpc.aio`` channel in the child hangs or crashes.
+
+    The scenario runs in its own process group with a timeout, so a regression
+    fails fast instead of hanging the test run (and leaving a spinning child).
     """
-    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
-
-    async def init_clients(fs):
-        await fs._set_session()
-        await fs._get_control_plane_client()
-        await fs._get_grpc_client()
-
-    ExtendedGcsFileSystem.clear_instance_cache()
-
-    def make_cached_only_fs():
-        # Use ExtendedGcsFileSystem directly: gcsfs.GCSFileSystem is the base
-        # class (without gRPC clients) when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT
-        # is off.
-        fs = ExtendedGcsFileSystem(token="anon")
-        fsspec.asyn.sync(fs.loop, init_clients, fs)
-        return weakref.ref(fs), fs._session
-
-    fs_ref, session = make_cached_only_fs()
-    assert fs_ref() is not None
-
     proc = subprocess.Popen(
-        [sys.executable, "-c", "pass"],
-        preexec_fn=lambda: None,
+        [sys.executable, "-c", _POPEN_PREEXEC_SCENARIO],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
     )
-    assert proc.wait(timeout=5) == 0
-    assert not session.closed
+    try:
+        output, _ = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        try:
+            # Also kills the hung forked grandchild, which shares the process group.
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass  # The group already exited; still report the hang below.
+        output, _ = proc.communicate()
+        pytest.fail(
+            "Popen(preexec_fn=...) hung with a cached gRPC-holding filesystem "
+            f"(fork-child teardown regression). Output:\n{output}"
+        )
+    assert proc.returncode == 0 and "SCENARIO_OK" in output, output
 
-    # In the parent process, clearing the cache must still collect and
-    # finalize the filesystem instance normally.
-    ExtendedGcsFileSystem.clear_instance_cache()
-    gc.collect()
-    assert fs_ref() is None
-    assert wait_until(lambda: session.closed, timeout=5.0)
+
+def test_bind_gcs_sync_methods_ignores_mocked_class_methods():
+    """Mocks patched onto the class must not be bound to the instance.
+
+    MagicMock auto-creates ``_is_gcs_sync_wrapped``; binding it would pass the
+    filesystem as an extra positional argument and break call assertions.
+    """
+    core.GCSFileSystem.clear_instance_cache()
+    with mock.patch.object(core.GCSFileSystem, "ls", return_value=["x"]) as mocked:
+        fs = core.GCSFileSystem(token="anon", skip_instance_cache=True)
+        assert "ls" not in fs.__dict__
+        assert fs.ls("bucket/path") == ["x"]
+        mocked.assert_called_once_with("bucket/path")
+    # Real telemetry wrappers are still bound per instance.
+    assert fs.__dict__["walk"].__self__ is fs
 
 
 def test_cached_only_filesystem_is_freed_by_gc_not_cache_clear():

@@ -18,6 +18,7 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import GCSFileSystem
+from gcsfs.extended_gcsfs import CachingTier
 from gcsfs.tests import layouts
 from gcsfs.tests.settings import (
     TEST_BUCKET,
@@ -546,11 +547,27 @@ def flat_bucket(flat_bucket_name, gcs_factory):
         _close_gcs(gcs)
 
 
+# Bucket layouts whose appendable writes use the gRPC writer; pass them to
+# ``zonal_write_mocks`` as indirect params.
+RAPID_WRITE_LAYOUTS = [
+    layouts.ZONAL_HIERARCHICAL,
+    layouts.STANDARD_RCU,
+    layouts.HIERARCHICAL_RCU,
+]
+
+
 @pytest.fixture
-def zonal_write_mocks():
-    """A fixture for mocking Zonal bucket write functionality."""
+def zonal_write_mocks(request):
+    """A fixture for mocking Zonal and RCU bucket write functionality.
+
+    Accepts an indirect ``BucketLayout`` param (default ``ZONAL_HIERARCHICAL``).
+    On real GCS it yields ``None`` for the zonal layout and skips the others.
+    """
+    layout = getattr(request, "param", layouts.ZONAL_HIERARCHICAL)
 
     if is_real_gcs():
+        if layout != layouts.ZONAL_HIERARCHICAL:
+            pytest.skip("Live write tests only run against the zonal test bucket")
         yield None
         return
 
@@ -563,7 +580,16 @@ def zonal_write_mocks():
     mock_aaow = mock.AsyncMock(spec=AsyncAppendableObjectWriter)
     mock_aaow.offset = 0
     mock_aaow._is_stream_open = True
-    mock_init_aaow = mock.AsyncMock(return_value=mock_aaow)
+
+    async def init_aaow_side_effect(grpc_client, bucket_name, object_name, *a, **k):
+        # Every open gets an open writer for its own object.
+        mock_aaow._is_stream_open = True
+        mock_aaow.offset = 0
+        mock_aaow.bucket_name = bucket_name
+        mock_aaow.object_name = object_name
+        return mock_aaow
+
+    mock_init_aaow = mock.AsyncMock(side_effect=init_aaow_side_effect)
     mock_gcsfs_info = mock.AsyncMock(
         return_value={"generation": "12345", "type": "file", "name": "mock_file"}
     )
@@ -585,10 +611,7 @@ def zonal_write_mocks():
     mock_aaow.finalize.side_effect = finalize_side_effect
 
     with (
-        mock.patch(
-            patch_target_get_bucket_layout,
-            return_value=layouts.ZONAL_HIERARCHICAL,
-        ),
+        mock.patch(patch_target_get_bucket_layout, return_value=layout),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),
         mock.patch(patch_target_init_aaow, mock_init_aaow),
     ):
@@ -596,6 +619,11 @@ def zonal_write_mocks():
             "aaow": mock_aaow,
             "init_aaow": mock_init_aaow,
             "_gcsfs_info": mock_gcsfs_info,
+            "storage_class": (
+                "RAPID"
+                if layout.caching_tier == CachingTier.RAPID_CACHE_ULTRA
+                else None
+            ),
         }
         yield mocks
 
@@ -628,6 +656,18 @@ def skip_if_zonal(gcs):
     ):
         pytest.skip(
             "Test validates HTTP REST mechanics specific to standard regional buckets"
+        )
+
+
+@pytest.fixture
+def skip_if_grpc_read(gcs):
+    """Skips tests of HTTP read mechanics; Zonal and RCU buckets read over gRPC."""
+    if (
+        hasattr(gcs, "_sync_lookup_bucket_layout")
+        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).uses_grpc_data_path
+    ):
+        pytest.skip(
+            "Test validates HTTP read mechanics; Zonal and RCU buckets read over gRPC"
         )
 
 

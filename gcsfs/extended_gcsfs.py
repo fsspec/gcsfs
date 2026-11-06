@@ -159,7 +159,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     def __init__(
         self,
         *args,
-        finalize_on_close=False,
+        finalize_on_close=None,
         mrd_pool_cache_size=16,
         max_mrd_pool_cache_queue_size=16,
         **kwargs,
@@ -167,8 +167,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         Parameters
         ----------
-        finalize_on_close : bool, default False
-            By default, files in zonal buckets are left unfinalized to allow appends.
+        finalize_on_close : bool, optional
+            If set, overrides the default finalization behavior when closing
+            appendable gRPC writers. When ``None`` (the default), files in
+            Zonal buckets default to ``False`` (left unfinalized to allow
+            appends) and files in RCU buckets default to ``True``.
         mrd_pool_cache_size : int, default 16
             Maximum number of idle pools to retain in the cache.
         max_mrd_pool_cache_queue_size : int, default 16
@@ -189,7 +192,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if k.startswith("retry_") and k[6:] in valid_keys and v is not None
         }
         super().__init__(*args, **kwargs)
-        # By default, files in zonal buckets are left unfinalized to allow appends.
+        # When None, defaults to False for Zonal buckets and True for RCU buckets.
         self.finalize_on_close = finalize_on_close
         self._grpc_client = None
         self._storage_control_client = None
@@ -221,7 +224,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         )
 
     async def _get_threshold_for_disk_reads(self, bucket):
-        if await self._is_zonal_bucket(bucket):
+        if await self._uses_grpc_data_path(bucket):
             return (
                 5 * 1024 * 1024
             )  # Thanks to our in house, zero copy DirectMemmoveBuffer
@@ -384,9 +387,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             else:
                 namespace_layout = NamespaceLayout.NON_HIERARCHICAL
 
+            rapid_cache_info = getattr(response, "rapid_cache_info", None)
+            cache_type = (
+                getattr(rapid_cache_info, "cache_type", "") if rapid_cache_info else ""
+            )
+            if cache_type == "rapid-cache-ultra":
+                caching_tier = CachingTier.RAPID_CACHE_ULTRA
+            elif cache_type == "rapid-cache":
+                caching_tier = CachingTier.RAPID_CACHE
+            else:
+                caching_tier = CachingTier.NONE
+
             return BucketLayout(
                 storage_class=storage_class,
-                caching_tier=CachingTier.NONE,
+                caching_tier=caching_tier,
                 namespace_layout=namespace_layout,
             )
         except api_exceptions.NotFound:
@@ -421,7 +435,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_layout = self._sync_lookup_bucket_layout(bucket)
-        file_cls = ZonalFile if bucket_layout.is_zonal else GCSFile
+        use_zonal_file = "+" not in mode and bucket_layout.uses_grpc_data_path
+        file_cls = ZonalFile if use_zonal_file else GCSFile
+        finalize_on_close = self._resolve_finalize_on_close(
+            bucket_layout, kwargs.pop("finalize_on_close", None)
+        )
 
         return file_cls(
             self,
@@ -435,7 +453,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             autocommit=autocommit,
             fixed_key_metadata=fixed_key_metadata,
             generation=generation,
-            finalize_on_close=kwargs.pop("finalize_on_close", self.finalize_on_close),
+            finalize_on_close=finalize_on_close,
             **kwargs,
         )
 
@@ -503,6 +521,43 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _uses_grpc_data_path(self, bucket):
         bucket_layout = await self._lookup_bucket_layout(bucket)
         return bucket_layout.uses_grpc_data_path
+
+    def _resolve_finalize_on_close(self, bucket_layout, finalize_on_close=None):
+        """Return the per-call value, else the filesystem default, else True for RCU."""
+        if finalize_on_close is not None:
+            return finalize_on_close
+        fs_default = getattr(self, "finalize_on_close", None)
+        if fs_default is not None:
+            return fs_default
+        return bucket_layout.is_rcu
+
+    async def _init_aaow(
+        self,
+        bucket,
+        key,
+        generation=None,
+        flush_interval_bytes=None,
+        if_generation_match=None,
+    ):
+        """Open an AsyncAppendableObjectWriter for ``bucket/key``.
+
+        RCU buckets default new objects to the ``STANDARD`` storage class,
+        which appendable writes reject, so writes to them request
+        ``storage_class="RAPID"``: the object lands in the zonal cache and the
+        server later copies it to regional storage. Zonal buckets already
+        default to ``RAPID``, so their writes leave ``storage_class`` unset.
+        """
+        await self._get_grpc_client()
+        storage_class = "RAPID" if await self._is_rcu_bucket(bucket) else None
+        return await zb_hns_utils.init_aaow(
+            self.grpc_client,
+            bucket,
+            key,
+            generation,
+            flush_interval_bytes,
+            if_generation_match=if_generation_match,
+            storage_class=storage_class,
+        )
 
     @staticmethod
     def _resolve_cache_config(kwargs):
@@ -677,16 +732,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         mrd=None,
         **kwargs,
     ):
-        """Fetch a file's contents as bytes, with an optimized path for Zonal buckets.
+        """Fetch a file's contents as bytes, with an optimized path for Zonal and RCU buckets.
 
-        This method overrides the parent `_cat_file` to read objects in Zonal buckets using gRPC.
+        This method overrides the parent `_cat_file` to read objects in Zonal and RCU buckets using gRPC.
 
         Args:
             path (str): The full GCS path to the file (e.g., "bucket/object").
             start (int, optional): The starting byte position to read from.
             end (int, optional): The ending byte position to read to.
             mrd (AsyncMultiRangeDownloader, MRDPool, optional): An existing multi-range
-                downloader instance or a pool of MRD. If not provided, a new one will be created for Zonal buckets.
+                downloader instance or a pool of MRD. If not provided, a new one will be
+                created for Zonal and RCU buckets.
 
         Returns:
             bytes: The content of the file or file range.
@@ -701,8 +757,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         if mrd is None:
             bucket, object_name, generation = self.split_path(path)
-            if not await self._is_zonal_bucket(bucket):
-                # Fall back to default implementation if not a zonal bucket
+            if not await self._uses_grpc_data_path(bucket):
+                # Fall back to default implementation if not a Zonal or RCU bucket
                 return await super()._cat_file(
                     path, start=start, end=end, concurrency=concurrency, **kwargs
                 )
@@ -968,19 +1024,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Get the contents of byte ranges from one or more files.
 
-        For Zonal buckets, ranges are grouped per object and served by a single
+        For Zonal and RCU buckets, ranges are grouped per object and served by a single
         MRD pool per object. Each object's ranges are split into byte-balanced
         groups, one per pooled MRD, and every group is sent as one multi-range
         ``download_ranges`` call. ``batch_size`` bounds the total number of
         concurrent MRD streams across all objects, subject to the per-object
         cap (``-1`` means at most one per range; ``None`` or ``0`` select the
-        fsspec default). Non-zonal paths, and any call with ``max_gap`` set,
+        fsspec default). Paths in other buckets, and any call with ``max_gap`` set,
         use the default fsspec implementation.
 
-        Zonal-only keyword arguments:
+        Zonal and RCU keyword arguments:
             concurrency (int, optional): Maximum MRD streams per object,
                 instead of ``MAX_ZONAL_STREAMS_PER_OBJECT``. Also forwarded to
-                the fsspec path for non-zonal files.
+                the fsspec path for files in other buckets.
 
         With ``on_error="return"``, a failure while downloading a group of
         ranges is returned for every range in that group, and a failure to
@@ -1015,7 +1071,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         zonal, other = {}, []
         for p, idxs in by_path.items():
             bucket, _, _ = self.split_path(p)
-            if await self._is_zonal_bucket(bucket):
+            if await self._uses_grpc_data_path(bucket):
                 zonal[p] = idxs
             else:
                 other.extend(idxs)
@@ -2039,10 +2095,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Upload a local file.
 
-        This method is optimized for Zonal buckets, using gRPC for uploads.
-        In zonal buckets, file is left *unfinalized* by default unless
-        `finalize_on_close` is set to True.
-        For non-Zonal buckets, it delegates to the parent class's implementation.
+        This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
+        By default, files in Zonal buckets are left *unfinalized* (unless
+        `finalize_on_close` is set to True), whereas files in RCU buckets are
+        finalized on close by default.
+        On Zonal and RCU buckets an overwrite replaces the existing object as
+        soon as the writer opens, so a failed write leaves the partially written
+        object in its place, unfinalized.
+        For other buckets, it delegates to the parent class's implementation.
 
         Parameters
         ----------
@@ -2051,24 +2111,24 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         rpath: str
             Path on GCS to upload the file to.
         metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         consistency: str, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         content_type: str, optional
-            Unsupported for Zonal buckets and will be ignored except for the default.
+            Unsupported for Zonal and RCU buckets and will be ignored except for the default.
         chunksize: int, optional
             The size of chunks to upload data in.
         callback: fsspec.callbacks.Callback, optional
             Callback to monitor the upload progress.
         fixed_key_metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         mode: str, optional
             The write mode, either 'overwrite' or 'create'.
         if_generation_match: int, optional
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(rpath)
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._put_file(
                 lpath,
                 rpath,
@@ -2096,26 +2156,39 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             or (content_type and content_type != "application/octet-stream")
         ):
             logger.warning(
-                "Zonal buckets do not support content_type, metadata, "
+                "Zonal and RCU buckets do not support content_type, metadata, "
                 "fixed_key_metadata or consistency during upload. "
                 "These parameters will be ignored."
             )
-        await self._get_grpc_client()
-        writer = await zb_hns_utils.init_aaow(
-            self.grpc_client,
-            bucket,
-            key,
-            if_generation_match=_resolve_generation_match(mode, if_generation_match),
+        finalize_on_close = self._resolve_finalize_on_close(
+            await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
         )
-
-        try:
-            with open(lpath, "rb") as f:
-                await writer.append_from_file(f, block_size=chunksize)
-        finally:
-            finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
-            await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
-
-        await self._write_file_cache_update(rpath)
+        callback = callback or NoOpCallback()
+        with open(lpath, "rb") as f:
+            callback.set_size(os.fstat(f.fileno()).st_size)
+            writer = await self._init_aaow(
+                bucket,
+                key,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+            )
+            # The open writer has already replaced the object, so update the
+            # cache even if the write fails.
+            try:
+                try:
+                    while chunk := f.read(chunksize):
+                        await writer.append(chunk)
+                        callback.relative_update(len(chunk))
+                except BaseException:
+                    # Leave a partially written object unfinalized.
+                    await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+                    raise
+                await zb_hns_utils.close_aaow(
+                    writer, finalize_on_close=finalize_on_close
+                )
+            finally:
+                await self._write_file_cache_update(rpath)
 
     async def _pipe_file(
         self,
@@ -2132,10 +2205,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Upload bytes to a file.
 
-        This method is optimized for Zonal buckets, using gRPC for uploads.
-        In zonal buckets, file is left *unfinalized* by default unless
-        `finalize_on_close` is set to True.
-        For non-Zonal buckets, it delegates to the parent class's implementation.
+        This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
+        By default, files in Zonal buckets are left *unfinalized* (unless
+        `finalize_on_close` is set to True), whereas files in RCU buckets are
+        finalized on close by default.
+        On Zonal and RCU buckets an overwrite replaces the existing object as
+        soon as the writer opens, so a failed write leaves the partially written
+        object in its place, unfinalized.
+        For other buckets, it delegates to the parent class's implementation.
 
         Parameters
         ----------
@@ -2144,13 +2221,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         data: bytes
             The content to write to the file.
         metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         consistency: str, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         content_type: str, optional
-            Unsupported for Zonal buckets and will be ignored, except for the default.
+            Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
         fixed_key_metadata: dict, optional
-            Unsupported for Zonal buckets and will be ignored.
+            Unsupported for Zonal and RCU buckets and will be ignored.
         chunksize: int, optional
             The size of chunks to upload data in.
         mode: str, optional
@@ -2159,7 +2236,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Only write if the object's current generation matches this value.
         """
         bucket, key, generation = self.split_path(path)
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._pipe_file(
                 path,
                 data,
@@ -2178,25 +2255,31 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             or (content_type and content_type != "application/octet-stream")
         ):
             logger.warning(
-                "Zonal buckets do not support content_type, metadata or "
+                "Zonal and RCU buckets do not support content_type, metadata or "
                 "fixed_key_metadata during upload. These parameters will be ignored."
             )
-        await self._get_grpc_client()
-        writer = await zb_hns_utils.init_aaow(
-            self.grpc_client,
+        finalize_on_close = self._resolve_finalize_on_close(
+            await self._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
+        )
+        writer = await self._init_aaow(
             bucket,
             key,
             if_generation_match=_resolve_generation_match(mode, if_generation_match),
         )
+        # The open writer has already replaced the object, so update the cache
+        # even if the write fails.
         try:
-            with memoryview(data) as data_view:
-                for i in range(0, len(data_view), chunksize):
-                    await writer.append(data_view[i : i + chunksize])
-        finally:
-            finalize_on_close = kwargs.get("finalize_on_close", self.finalize_on_close)
+            try:
+                with memoryview(data) as data_view:
+                    for i in range(0, len(data_view), chunksize):
+                        await writer.append(data_view[i : i + chunksize])
+            except BaseException:
+                # Leave a partially written object unfinalized.
+                await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+                raise
             await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
-
-        await self._write_file_cache_update(path)
+        finally:
+            await self._write_file_cache_update(path)
 
     async def _get_file_request(
         self, rpath, lpath, *args, headers=None, callback=None, **kwargs
@@ -2204,8 +2287,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         Downloads a file from GCS to a local path.
 
-        For Zonal buckets, it uses gRPC client for optimized downloads.
-        For Standard buckets, it delegates to the parent class implementation.
+        For Zonal and RCU buckets, it uses gRPC client for optimized downloads.
+        For other buckets, it delegates to the parent class implementation.
 
         Parameters
         ----------
@@ -2216,12 +2299,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         callback: fsspec.callbacks.Callback, optional
             Callback to monitor the download progress.
         **kwargs:
-            For Zonal buckets, `chunksize` bytes (int) can be provided to control
+            For Zonal and RCU buckets, `chunksize` bytes (int) can be provided to control
             the download chunk size (default is 128KB).
         """
         bucket, key, path_generation = self.split_path(rpath)
 
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._get_file_request(
                 rpath, lpath, *args, headers=headers, callback=callback, **kwargs
             )
@@ -2304,7 +2387,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket, key, path_generation = self.split_path(rpath)
 
         # Delegate standard buckets to the original implementation
-        if not await self._is_zonal_bucket(bucket):
+        if not await self._uses_grpc_data_path(bucket):
             return await super()._get_file_concurrent(
                 rpath,
                 lpath,
@@ -2459,9 +2542,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
-    Uploads a chunk of data using AsyncAppendableObjectWriter for zonal buckets.
+    Uploads a chunk of data using AsyncAppendableObjectWriter for Zonal and RCU buckets.
     Finalizes the upload when the total uploaded data size reaches the specified size.
-    Delegates to core upload_chunk implementation for Non-Zonal buckets.
+    Delegates to core upload_chunk implementation for other buckets.
     """
     # If `location` is an HTTP resumable-upload URL (string), delegate to core upload_chunk
     # for Standard buckets.
@@ -2472,12 +2555,13 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
 
     if not isinstance(location, AsyncAppendableObjectWriter):
         raise TypeError(
-            "upload_chunk for Zonal buckets expects an AsyncAppendableObjectWriter instance."
+            "upload_chunk for Zonal and RCU buckets expects an AsyncAppendableObjectWriter instance."
         )
 
     if offset or size or content_type:
         logger.warning(
-            "Zonal buckets do not support offset, or content_type during upload. These parameters will be ignored."
+            "Zonal and RCU buckets do not support offset, or content_type during upload. "
+            "These parameters will be ignored."
         )
 
     if not location._is_stream_open:
@@ -2510,8 +2594,8 @@ async def initiate_upload(
     if_generation_match=None,
 ):
     """
-    Initiates an upload for Zonal buckets by creating an AsyncAppendableObjectWriter.
-    Delegates to core initiate_upload implementation for Non-Zonal buckets.
+    Initiates an upload for Zonal and RCU buckets by creating an AsyncAppendableObjectWriter.
+    Delegates to core initiate_upload implementation for other buckets.
 
     Parameters
     ----------
@@ -2522,19 +2606,19 @@ async def initiate_upload(
     key: str
         The target object key.
     content_type: str, optional
-        Unsupported for Zonal buckets and will be ignored, except for the default.
+        Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
     metadata: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     fixed_key_metadata: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if not await fs._is_zonal_bucket(bucket):
+    if not await fs._uses_grpc_data_path(bucket):
         from gcsfs.core import initiate_upload as core_initiate_upload
 
         return await core_initiate_upload(
@@ -2556,13 +2640,11 @@ async def initiate_upload(
         or (content_type and content_type != "application/octet-stream")
     ):
         logger.warning(
-            "Zonal buckets do not support content_type, metadata, fixed_key_metadata, "
+            "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
             "or kms_key_name during upload. These parameters will be ignored."
         )
 
-    await fs._get_grpc_client()
-    return await zb_hns_utils.init_aaow(
-        fs.grpc_client,
+    return await fs._init_aaow(
         bucket,
         key,
         if_generation_match=_resolve_generation_match(mode, if_generation_match),
@@ -2584,10 +2666,14 @@ async def simple_upload(
     **kwargs,
 ):
     """
-    Performs a simple, single-request upload to Zonal bucket using gRPC.
-    In zonal buckets, file is left *unfinalized* by default unless
-    `finalize_on_close` is set to True.
-    Delegates to core simple_upload implementation for Non-Zonal buckets.
+    Performs a simple, single-request upload to Zonal and RCU buckets using gRPC.
+    By default, files in Zonal buckets are left *unfinalized* (unless
+    `finalize_on_close` is set to True), whereas files in RCU buckets are
+    finalized on close by default. A failed upload is never finalized.
+    On Zonal and RCU buckets an overwrite replaces the existing object as soon
+    as the writer opens, so a failed write leaves the partially written object
+    in its place, unfinalized.
+    Delegates to core simple_upload implementation for other buckets.
 
     Parameters
     ----------
@@ -2600,21 +2686,21 @@ async def simple_upload(
     datain: bytes
         The data to be uploaded.
     metadatain: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     consistency: str, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     content_type: str, optional
-        Unsupported for Zonal buckets and will be ignored, except for the default.
+        Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
     fixed_key_metadata: dict, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Unsupported for Zonal buckets and will be ignored.
+        Unsupported for Zonal and RCU buckets and will be ignored.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
-    if not await fs._is_zonal_bucket(bucket):
+    if not await fs._uses_grpc_data_path(bucket):
         from gcsfs.core import simple_upload as core_simple_upload
 
         return await core_simple_upload(
@@ -2639,19 +2725,21 @@ async def simple_upload(
         or (content_type and content_type != "application/octet-stream")
     ):
         logger.warning(
-            "Zonal buckets do not support content_type, metadatain, fixed_key_metadata, "
+            "Zonal and RCU buckets do not support content_type, metadatain, fixed_key_metadata, "
             "consistency or kms_key_name during upload. These parameters will be ignored."
         )
-    await fs._get_grpc_client()
-    writer = await zb_hns_utils.init_aaow(
-        fs.grpc_client,
+    finalize_on_close = fs._resolve_finalize_on_close(
+        await fs._lookup_bucket_layout(bucket), kwargs.get("finalize_on_close")
+    )
+    writer = await fs._init_aaow(
         bucket,
         key,
         if_generation_match=_resolve_generation_match(mode, if_generation_match),
     )
     try:
         await writer.append(datain)
-    finally:
-        default_finalize = getattr(fs, "finalize_on_close", False)
-        finalize_on_close = kwargs.get("finalize_on_close", default_finalize)
-        await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)
+    except BaseException:
+        # Leave a partially written object unfinalized.
+        await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
+        raise
+    await zb_hns_utils.close_aaow(writer, finalize_on_close=finalize_on_close)

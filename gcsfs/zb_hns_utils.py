@@ -22,6 +22,13 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 
 from gcsfs.retry import GenerationMismatchError
 
+try:
+    from google.cloud.storage.asyncio.async_appendable_object_writer import (
+        Preconditions,
+    )
+except ImportError:  # releases before googleapis/google-cloud-python#18641
+    Preconditions = None
+
 MRD_MAX_RANGES = 1000  # MRD supports up to 1000 ranges per request
 try:
     DEFAULT_CONCURRENCY = int(os.environ.get("DEFAULT_GCSFS_CONCURRENCY", "4"))
@@ -169,16 +176,22 @@ async def init_aaow(
     generation=None,
     flush_interval_bytes=None,
     if_generation_match=None,
+    storage_class=None,
 ):
     """
     Creates and opens the AsyncAppendableObjectWriter.
 
     ``if_generation_match=0`` creates the object only if it does not exist;
     a positive value overwrites only that generation (requires a
-    google-cloud-storage release whose writer accepts ``if_generation_match``).
+    google-cloud-storage release whose writer accepts ``preconditions``).
     A failed precondition raises ``FileExistsError`` for ``0`` and
     ``GenerationMismatchError`` otherwise; without ``if_generation_match`` the
     SDK's ``FailedPrecondition`` propagates unchanged.
+
+    ``storage_class`` is passed to the writer only when set. RCU buckets
+    default new objects to ``STANDARD``, which appendable writes reject, so
+    writes to them must request ``"RAPID"``; Zonal buckets already default to
+    ``RAPID`` and leave it unset.
     """
     writer_options = {}
     # Only pass flush_interval_bytes if the user explicitly provided a
@@ -186,9 +199,10 @@ async def init_aaow(
     if flush_interval_bytes and flush_interval_bytes != _DEFAULT_FLUSH_INTERVAL_BYTES:
         writer_options["FLUSH_INTERVAL_BYTES"] = flush_interval_bytes
     kwargs = {}
-    if generation and if_generation_match is not None:
-        # generation > 0 appends to an existing object (AppendObjectSpec), which
-        # carries no precondition, so the SDK would silently ignore it.
+    if generation is not None and if_generation_match is not None:
+        # generation > 0 appends to an existing object and generation=0 already
+        # means create-only, so a generation precondition cannot apply. Check
+        # here because if_generation_match=0 is mapped to generation=0 below.
         raise ValueError(
             "if_generation_match cannot be combined with an explicit generation"
         )
@@ -196,23 +210,22 @@ async def init_aaow(
         # Every SDK release maps generation=0 to WriteObjectSpec(if_generation_match=0).
         generation = 0
     elif if_generation_match is not None:
-        kwargs["if_generation_match"] = if_generation_match
-    try:
-        writer = AsyncAppendableObjectWriter(
-            client=grpc_client,
-            bucket_name=bucket_name,
-            object_name=object_name,
-            generation=generation,
-            writer_options=writer_options,
-            **kwargs,
-        )
-    except TypeError as e:
-        if "if_generation_match" not in str(e):
-            raise
-        raise NotImplementedError(
-            "if_generation_match > 0 on zonal buckets requires a google-cloud-storage "
-            "release whose AsyncAppendableObjectWriter accepts if_generation_match"
-        ) from e
+        if Preconditions is None:
+            raise NotImplementedError(
+                "if_generation_match > 0 on zonal and RCU buckets requires a google-cloud-storage "
+                "release whose AsyncAppendableObjectWriter accepts Preconditions"
+            )
+        kwargs["preconditions"] = Preconditions(if_generation_match=if_generation_match)
+    if storage_class is not None:
+        kwargs["storage_class"] = storage_class
+    writer = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+        generation=generation,
+        writer_options=writer_options,
+        **kwargs,
+    )
     try:
         await writer.open()
     except FailedPrecondition as e:
@@ -244,8 +257,10 @@ async def close_mrd(mrd):
 
 async def close_aaow(aaow, finalize_on_close=False):
     """
-    Closes the AsyncAppendableObjectWriter gracefully.
-    Logs a warning if closing fails, instead of raising an exception.
+    Closes the AsyncAppendableObjectWriter.
+    Logs a warning if closing fails, and re-raises the error when finalizing,
+    so that a failed finalize is not reported as a successful write. Closes
+    that do not finalize, such as the abort paths, stay best-effort.
     """
     if aaow:
         try:
@@ -254,6 +269,8 @@ async def close_aaow(aaow, finalize_on_close=False):
             logger.warning(
                 f"Error closing AsyncAppendableObjectWriter for {aaow.bucket_name}/{aaow.object_name}: {e}"
             )
+            if finalize_on_close:
+                raise
 
 
 # Default timeout for synchronous teardowns when no explicit timeout is configured.
@@ -750,13 +767,13 @@ class MRDPool:
     def _is_stale(self, mrd):
         """True if an idle cached MRD was opened before the object grew.
 
-        Appends keep an unfinalized object's generation, so the cache can hold
-        idle MRDs under this pool's key whose persisted_size is older than the
-        one this pool was initialized with.
+        Appends keep an unfinalized object's generation, and so does finalizing
+        it afterwards, so the cache can hold idle MRDs under this pool's key
+        whose persisted_size is older than the one this pool was initialized
+        with.
         """
         return (
-            not self.finalized
-            and isinstance(self.persisted_size, int)
+            isinstance(self.persisted_size, int)
             and isinstance(mrd.persisted_size, int)
             and mrd.persisted_size < self.persisted_size
         )
@@ -774,16 +791,6 @@ class MRDPool:
                 return mrd
             self._stale_mrds.append(mrd)
 
-    async def _get_or_create_mrd(self):
-        """Gets an MRD from the cache or creates a new one."""
-        mrd = None
-        if self._cache is not None:
-            mrd = self._cache.get_idle_mrd(self._key)
-        if mrd is None:
-            mrd = await self._create_mrd()
-        self._all_mrds.append(mrd)
-        return mrd
-
     async def initialize(self):
         """Initializes the MRDPool by creating the first downloader instance."""
         async with self._cond:
@@ -792,11 +799,16 @@ class MRDPool:
 
             if not self._initialized and self._active_count == 0:
                 if self.finalized:
-                    mrd = await self._get_or_create_mrd()
+                    # Reuse an idle cached MRD unless it was opened before the
+                    # object reached its finalized size.
+                    size = (self.details or {}).get("size")
+                    if isinstance(size, int):
+                        self.persisted_size = size
+                    mrd = self._take_idle_mrd() or await self._create_mrd()
                 else:
                     # Always create a new MRD for unfinalized objects to get the up-to-date persisted_size
                     mrd = await self._create_mrd()
-                    self._all_mrds.append(mrd)
+                self._all_mrds.append(mrd)
                 self.persisted_size = mrd.persisted_size
                 self._free_mrds.put_nowait(mrd)
                 self._active_count += 1
@@ -810,8 +822,8 @@ class MRDPool:
 
         If a downloader is available in the pool, it is yielded immediately. If the
         pool is empty but hasn't reached `pool_size`, a new downloader is spawned
-        on demand or fetched from the cache. For unfinalized objects, cached
-        downloaders opened before the object grew are skipped. Automatically
+        on demand or fetched from the cache. Cached downloaders opened before
+        the object grew are skipped. Automatically
         returns the downloader to the free queue upon exit.
 
         Yields:

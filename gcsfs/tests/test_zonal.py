@@ -34,7 +34,13 @@ from gcsfs.extended_gcsfs import (
     upload_chunk,
 )
 from gcsfs.tests import layouts
-from gcsfs.tests.conftest import csv_files, files, requires_rapid, text_files
+from gcsfs.tests.conftest import (
+    RAPID_WRITE_LAYOUTS,
+    csv_files,
+    files,
+    requires_rapid,
+    text_files,
+)
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
@@ -766,9 +772,23 @@ def test_multiprocess_error_handling_zb(extended_gcsfs):
 
 
 # =========================== Zonal Upload Tests ===========================
+# Write kwargs and the if_generation_match the caller must pass to init_aaow.
+_generation_match_cases = pytest.mark.parametrize(
+    "write_kwargs, expected_match",
+    [({}, None), ({"mode": "create"}, 0), ({"if_generation_match": "7"}, 7)],
+    ids=["default", "create", "if_generation_match"],
+)
+
+
 @pytest.mark.asyncio
-async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@_generation_match_cases
+async def test_simple_upload_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test simple_upload for Zonal buckets calls the correct writer methods."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     data = b"test data for simple_upload"
     bucket, object_name, _ = async_gcs.split_path(file_path)
 
@@ -778,10 +798,17 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
         key=object_name,
         datain=data,
         finalize_on_close=True,  # Finalize on close to make the object immediately readable
+        **write_kwargs,
     )
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            async_gcs.grpc_client, bucket, object_name, if_generation_match=None
+            async_gcs.grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
@@ -790,13 +817,27 @@ async def test_simple_upload_zonal(async_gcs, zonal_write_mocks, file_path):
 
 
 @pytest.mark.asyncio
-async def test_initiate_upload_zonal(async_gcs, zonal_write_mocks, file_path):
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@_generation_match_cases
+async def test_initiate_upload_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test initiate_upload for Zonal buckets returns a writer instance."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     bucket, object_name, _ = async_gcs.split_path(file_path)
-    writer = await initiate_upload(fs=async_gcs, bucket=bucket, key=object_name)
+    writer = await initiate_upload(
+        fs=async_gcs, bucket=bucket, key=object_name, **write_kwargs
+    )
     if zonal_write_mocks:
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            async_gcs.grpc_client, bucket, object_name, if_generation_match=None
+            async_gcs.grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         assert writer is zonal_write_mocks["aaow"]
     else:
@@ -888,8 +929,14 @@ async def test_upload_chunk_zonal_final_chunk(async_gcs, zonal_write_mocks, file
 
 
 @pytest.mark.asyncio
-async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@_generation_match_cases
+async def test_put_file_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test _put_file for Zonal buckets."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     data = b"test data for put_file"
     bucket, object_name, _ = async_gcs.split_path(file_path)
     with tmpfile() as lpath:
@@ -897,21 +944,22 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
             f.write(data)
 
         # Finalize on close to make the object immediately readable
-        await async_gcs._put_file(lpath, file_path, finalize_on_close=True)
+        await async_gcs._put_file(
+            lpath, file_path, finalize_on_close=True, **write_kwargs
+        )
 
         if zonal_write_mocks:
             grpc_client = await async_gcs._get_grpc_client()
             zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-                grpc_client, bucket, object_name, if_generation_match=None
+                grpc_client,
+                bucket,
+                object_name,
+                None,
+                None,
+                if_generation_match=expected_match,
+                storage_class=zonal_write_mocks["storage_class"],
             )
-            zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
-            args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
-
-            file_obj_arg = args[0]
-            assert hasattr(file_obj_arg, "read"), "Argument must be a file-like object"
-            assert (
-                file_obj_arg.name == lpath
-            ), "File object must point to the correct path"
+            zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
 
             zonal_write_mocks["aaow"].close.assert_awaited_once_with(
                 finalize_on_close=True
@@ -921,17 +969,29 @@ async def test_put_file_zonal(async_gcs, zonal_write_mocks, file_path):
 
 
 @pytest.mark.asyncio
-async def test_pipe_file_zonal(async_gcs, zonal_write_mocks, file_path):
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@_generation_match_cases
+async def test_pipe_file_zonal(
+    async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
+):
     """Test _pipe_file for Zonal buckets."""
+    if write_kwargs and not zonal_write_mocks:
+        pytest.skip("Precondition forwarding is checked with the mocked writer.")
     data = b"test data for pipe_file"
     bucket, object_name, _ = async_gcs.split_path(file_path)
     # Finalize on close to make the object immediately readable
-    await async_gcs._pipe_file(file_path, data, finalize_on_close=True)
+    await async_gcs._pipe_file(file_path, data, finalize_on_close=True, **write_kwargs)
 
     if zonal_write_mocks:
         grpc_client = await async_gcs._get_grpc_client()
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            grpc_client, bucket, object_name, if_generation_match=None
+            grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
@@ -990,7 +1050,7 @@ def test_get_list_from_zonal_bucket(extended_gcsfs):
     mock_create_mrd = mock.AsyncMock(side_effect=create_mrd_side_effect)
     with (
         mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._uses_grpc_data_path",
             return_value=True,
         ),
         mock.patch(
@@ -1035,7 +1095,7 @@ def test_get_directory_from_zonal_bucket(extended_gcsfs):
 
     with (
         mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._is_zonal_bucket",
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._uses_grpc_data_path",
             return_value=True,
         ),
         mock.patch(
@@ -1340,9 +1400,6 @@ async def test_fetch_range_split_concurrent_success(extended_gcsfs):
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
-        )
-        stack.enter_context(
             mock.patch.object(extended_gcsfs, "_info", return_value={"size": 100})
         )
 
@@ -1383,9 +1440,6 @@ async def test_fetch_range_split_concurrent_exception(extended_gcsfs):
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
-        )
-        stack.enter_context(
             mock.patch.object(extended_gcsfs, "_info", return_value={"size": 100})
         )
 
@@ -1413,7 +1467,7 @@ async def test_cat_file_zero_length_read(extended_gcsfs):
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
+            mock.patch.object(extended_gcsfs, "_uses_grpc_data_path", return_value=True)
         )
         stack.enter_context(
             mock.patch("gcsfs.extended_gcsfs._get_mrd_size", return_value=100)
@@ -1454,7 +1508,7 @@ async def test_cat_file_delegates_resolved_range_to_mrd_fetch(
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=True)
+            mock.patch.object(extended_gcsfs, "_uses_grpc_data_path", return_value=True)
         )
         stack.enter_context(
             mock.patch("gcsfs.extended_gcsfs._get_mrd_size", return_value=5000)
@@ -1556,7 +1610,9 @@ async def test_cat_file_non_zonal_fallback(extended_gcsfs):
     """Tests that _cat_file delegates to the parent class for non-zonal buckets."""
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(extended_gcsfs, "_is_zonal_bucket", return_value=False)
+            mock.patch.object(
+                extended_gcsfs, "_uses_grpc_data_path", return_value=False
+            )
         )
         mock_super_cat = stack.enter_context(
             mock.patch(
