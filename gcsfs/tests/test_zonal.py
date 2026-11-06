@@ -34,7 +34,13 @@ from gcsfs.extended_gcsfs import (
     upload_chunk,
 )
 from gcsfs.tests import layouts
-from gcsfs.tests.conftest import csv_files, files, requires_rapid, text_files
+from gcsfs.tests.conftest import (
+    RAPID_WRITE_LAYOUTS,
+    csv_files,
+    files,
+    requires_rapid,
+    text_files,
+)
 from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
@@ -775,6 +781,7 @@ _generation_match_cases = pytest.mark.parametrize(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_simple_upload_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -798,7 +805,10 @@ async def test_simple_upload_zonal(
             async_gcs.grpc_client,
             bucket,
             object_name,
+            None,
+            None,
             if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
@@ -807,6 +817,7 @@ async def test_simple_upload_zonal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_initiate_upload_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -823,7 +834,10 @@ async def test_initiate_upload_zonal(
             async_gcs.grpc_client,
             bucket,
             object_name,
+            None,
+            None,
             if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         assert writer is zonal_write_mocks["aaow"]
     else:
@@ -915,6 +929,7 @@ async def test_upload_chunk_zonal_final_chunk(async_gcs, zonal_write_mocks, file
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_put_file_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -936,16 +951,15 @@ async def test_put_file_zonal(
         if zonal_write_mocks:
             grpc_client = await async_gcs._get_grpc_client()
             zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-                grpc_client, bucket, object_name, if_generation_match=expected_match
+                grpc_client,
+                bucket,
+                object_name,
+                None,
+                None,
+                if_generation_match=expected_match,
+                storage_class=zonal_write_mocks["storage_class"],
             )
-            zonal_write_mocks["aaow"].append_from_file.assert_awaited_once()
-            args, kwargs = zonal_write_mocks["aaow"].append_from_file.call_args
-
-            file_obj_arg = args[0]
-            assert hasattr(file_obj_arg, "read"), "Argument must be a file-like object"
-            assert (
-                file_obj_arg.name == lpath
-            ), "File object must point to the correct path"
+            zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
 
             zonal_write_mocks["aaow"].close.assert_awaited_once_with(
                 finalize_on_close=True
@@ -955,6 +969,7 @@ async def test_put_file_zonal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @_generation_match_cases
 async def test_pipe_file_zonal(
     async_gcs, zonal_write_mocks, file_path, write_kwargs, expected_match
@@ -970,7 +985,13 @@ async def test_pipe_file_zonal(
     if zonal_write_mocks:
         grpc_client = await async_gcs._get_grpc_client()
         zonal_write_mocks["init_aaow"].assert_awaited_once_with(
-            grpc_client, bucket, object_name, if_generation_match=expected_match
+            grpc_client,
+            bucket,
+            object_name,
+            None,
+            None,
+            if_generation_match=expected_match,
+            storage_class=zonal_write_mocks["storage_class"],
         )
         zonal_write_mocks["aaow"].append.assert_awaited_once_with(data)
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
