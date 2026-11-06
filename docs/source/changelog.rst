@@ -7,6 +7,12 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* ``ExtendedGcsFileSystem`` now passes anonymous credentials to its gRPC and
+  Storage Control clients whenever its HTTP requests are anonymous, including
+  when ``token=None`` falls back to anonymous access because no credentials
+  were found. Before, only ``token="anon"`` did, and the clients looked for
+  credentials again (#1109).
+
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
