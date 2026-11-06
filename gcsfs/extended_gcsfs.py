@@ -1543,6 +1543,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             _get_object(), _get_folder(), return_exceptions=True
         )
         if isinstance(object_res, BaseException):
+            # Not tolerated even if the folder exists: moving only the folder
+            # could leave a same-name object behind. `_info` also raises any
+            # object lookup error other than FileNotFoundError.
             raise object_res
         if isinstance(folder_res, BaseException):
             if object_res is None:

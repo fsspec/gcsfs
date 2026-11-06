@@ -1461,6 +1461,30 @@ class TestExtendedGcsFileSystemMvSharedName:
             with pytest.raises(api_exceptions.PermissionDenied):
                 self._get_sources(gcsfs, self.SRC)
 
+    def test_sources_object_lookup_error_raises_even_if_folder_exists(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """An object lookup error is raised even when the folder exists, as
+        `_info` does: moving only the folder could leave a same-name object
+        behind."""
+        gcsfs = gcs_hns
+        error = OSError("Service Unavailable")
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
+            mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(
+                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+            ) as get_dir,
+        ):
+            gcsfs.dircache.clear()
+            call.side_effect = error
+            get_dir.return_value = self._folder_info(self.SRC)
+
+            with pytest.raises(OSError) as exc_info:
+                self._get_sources(gcsfs, self.SRC)
+
+            assert exc_info.value is error
+
     def test_sources_uncached_finds_both(self, gcs_hns, gcs_hns_mocks):
         """Without a cached parent both are fetched. A cached listing of the
         folder itself must not hide the object (`_get_object` would treat it
