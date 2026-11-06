@@ -23,7 +23,7 @@ def test_e2e_yaml_substitutions_and_rcu_steps():
     cfg = yaml.safe_load(raw)
 
     subs = cfg["substitutions"]
-    assert subs["_ZONE"] == "us-central1-c"
+    assert subs["_ZONE"] == "us-central1-a"
     assert subs["_RCU_CROSS_ZONE"] == "us-central1-b"
     assert subs["_WORKERS_RCU"] == "2"
     assert subs["_WORKERS_HNS_RCU"] == "2"
