@@ -352,6 +352,8 @@ class ZonalFile(GCSFile):
         """
         Commits the write by finalizing the AsyncAppendableObjectWriter.
         """
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
         if not self.writable():  # No-op
             logger.warning("File not in write mode. Ignoring commit call.")
             return
