@@ -7,6 +7,10 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* On HNS buckets, ``mv`` now moves both an object ``a`` and a folder ``a/``
+  that share a name, instead of only one of them depending on the directory
+  cache. A trailing slash on the source (``mv("bucket/a/", ...)``) moves only
+  the folder; previously it could raise ``FileNotFoundError`` (#1154).
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API

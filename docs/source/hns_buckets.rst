@@ -57,7 +57,8 @@ While ``gcsfs`` aims to abstract the differences via the ``fsspec`` API, you sho
 3. **No mixing or toggling:** You cannot toggle HNS on an existing flat-namespace bucket. You must create a new HNS bucket and migrate your data.
 4. **Object naming:** Object names in HNS cannot end with a slash (``/``) unless without the creation of physical folder resources.
 5. **Non-Recursive Wildcard Deletions:** When using wildcard deletions without recursion (e.g., ``gcs.rm("bucket/dir/*", recursive=False)``), if the pattern matches a non-empty directory, HNS buckets will raise an error (typically surfaced as an ``OSError`` due to a failed precondition). In contrast, standard flat-namespace buckets silently ignore non-empty directories under the same circumstances.
-6. **Rename Operation Benchmarks**
+6. **Objects and folders with the same name:** An HNS bucket can hold an object ``a`` and a folder ``a/`` at the same time. ``mv("bucket/a", "bucket/b")`` moves both: it renames the folder, then moves the object to the same new name. These are two separate operations, so the move as a whole is not atomic. If moving the object fails after the folder was renamed, ``mv`` raises an ``OSError`` that says so. As with any object move, an existing object at the destination is overwritten. To move only the folder, add a trailing slash: ``mv("bucket/a/", "bucket/b")``.
+7. **Rename Operation Benchmarks**
 
 The following benchmarks show the time taken (in seconds) to rename a directory containing a large number of files (spread across 256 folders and 8 levels) in a standard Regional bucket versus an HNS bucket (can be replicated using `gcsfs/tests/perf/microbenchmarks/rename`):
 

@@ -1338,6 +1338,53 @@ class TestExtendedGcsFileSystemMvSharedName:
 
     # --- _get_hns_mv_sources ---
 
+    @pytest.mark.parametrize(
+        "has_object, has_folder",
+        [
+            pytest.param(True, False, id="object_only"),
+            pytest.param(False, True, id="folder_only"),
+            pytest.param(True, True, id="both"),
+        ],
+    )
+    def test_mv_with_real_source_lookup(
+        self, gcs_hns, gcs_hns_mocks, has_object, has_folder
+    ):
+        """`_mv` end to end with the real `_get_hns_mv_sources` (the fixture
+        derives it from the `info` mock for the other `_mv` tests)."""
+        gcsfs = gcs_hns
+        real_lookup = ExtendedGcsFileSystem._get_hns_mv_sources
+
+        async def lookup(path):
+            return await real_lookup(gcsfs, path)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
+            ) as get_dir,
+            mock.patch.object(gcsfs, "_mv_file", new_callable=mock.AsyncMock) as mv,
+        ):
+            mocks["mv_sources"].side_effect = lookup
+            gcsfs.dircache.clear()
+            if has_object:
+                call.return_value = {"name": "run/a", "size": "4"}
+            else:
+                call.side_effect = FileNotFoundError(self.SRC)
+            if has_folder:
+                get_dir.return_value = self._folder_info(self.SRC)
+            else:
+                get_dir.side_effect = FileNotFoundError(self.SRC)
+
+            gcsfs.mv(self.SRC, self.DEST)
+
+            assert mocks["control_client"].rename_folder.called == has_folder
+            if has_object:
+                mv.assert_awaited_once_with(self.SRC, self.DEST)
+            else:
+                mv.assert_not_awaited()
+            mocks["super_mv"].assert_not_called()
+
     def _get_sources(self, gcsfs, path):
         # The fixture replaces `_get_hns_mv_sources` on the instance only, so
         # call the real method through the class.
@@ -1359,7 +1406,7 @@ class TestExtendedGcsFileSystemMvSharedName:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
             mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
             ) as get_dir,
         ):
             gcsfs.dircache[parent] = [
@@ -1382,7 +1429,7 @@ class TestExtendedGcsFileSystemMvSharedName:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
             mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
             ) as get_dir,
         ):
             gcsfs.dircache[f"{TEST_HNS_BUCKET}/run"] = [
@@ -1416,7 +1463,7 @@ class TestExtendedGcsFileSystemMvSharedName:
                 gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
                 mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
                 mock.patch.object(
-                    gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                    gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
                 ) as get_dir,
             ):
                 gcsfs.dircache[f"{TEST_HNS_BUCKET}/run"] = [
@@ -1446,7 +1493,7 @@ class TestExtendedGcsFileSystemMvSharedName:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
             mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
             ) as get_dir,
         ):
             gcsfs.dircache.clear()
@@ -1473,7 +1520,7 @@ class TestExtendedGcsFileSystemMvSharedName:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
             mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
             ) as get_dir,
         ):
             gcsfs.dircache.clear()
@@ -1486,19 +1533,16 @@ class TestExtendedGcsFileSystemMvSharedName:
             assert exc_info.value is error
 
     def test_sources_uncached_finds_both(self, gcs_hns, gcs_hns_mocks):
-        """Without a cached parent both are fetched. A cached listing of the
-        folder itself must not hide the object (`_get_object` would treat it
-        as the parent listing)."""
+        """Without cached listings both are fetched."""
         gcsfs = gcs_hns
         with (
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
             mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
             ) as get_dir,
         ):
             gcsfs.dircache.clear()
-            gcsfs.dircache[self.SRC] = [self._object_info(f"{self.SRC}/b")]
             call.return_value = {"name": "run/a", "size": "4"}
             get_dir.return_value = self._folder_info(self.SRC)
 
@@ -1514,7 +1558,39 @@ class TestExtendedGcsFileSystemMvSharedName:
                 json_out=True,
                 generation=None,
             )
-            get_dir.assert_awaited_once_with(self.SRC, TEST_HNS_BUCKET, "run/a", None)
+            get_dir.assert_awaited_once_with(self.SRC, TEST_HNS_BUCKET, "run/a")
+
+    @pytest.mark.parametrize(
+        "path, object_found",
+        [
+            pytest.param(SRC, True, id="object_lookup"),
+            pytest.param(f"{SRC}/", False, id="trailing_slash_no_requests"),
+        ],
+    )
+    def test_sources_with_cached_folder_listing(
+        self, gcs_hns, gcs_hns_mocks, path, object_found
+    ):
+        """A cached listing of the folder itself means the folder exists, so
+        `get_folder` is skipped, like `_info` does. It must not hide the
+        object either (`_get_object` would treat it as the parent listing)."""
+        gcsfs = gcs_hns
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
+            mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
+            ) as get_dir,
+        ):
+            gcsfs.dircache.clear()
+            gcsfs.dircache[self.SRC] = [self._object_info(f"{self.SRC}/b")]
+            call.return_value = {"name": "run/a", "size": "4"}
+
+            obj, folder = self._get_sources(gcsfs, path)
+
+            assert folder["type"] == "directory" and folder["name"] == self.SRC
+            assert (obj is not None) == object_found
+            assert call.await_count == (1 if object_found else 0)
+            get_dir.assert_not_awaited()
 
     def test_sources_uncached_trailing_slash_skips_object(self, gcs_hns, gcs_hns_mocks):
         gcsfs = gcs_hns
@@ -1522,7 +1598,7 @@ class TestExtendedGcsFileSystemMvSharedName:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
             mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
             ) as get_dir,
         ):
             gcsfs.dircache.clear()
@@ -1539,7 +1615,7 @@ class TestExtendedGcsFileSystemMvSharedName:
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
             mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
             ) as get_dir,
         ):
             gcsfs.dircache.clear()
@@ -1549,9 +1625,10 @@ class TestExtendedGcsFileSystemMvSharedName:
             with pytest.raises(FileNotFoundError):
                 self._get_sources(gcsfs, self.SRC)
 
-    def test_sources_uncached_forbidden_falls_back_to_get_object(
-        self, gcs_hns, gcs_hns_mocks
-    ):
+    def test_sources_forbidden_falls_back_to_listing(self, gcs_hns, gcs_hns_mocks):
+        """Without storage.objects.get the object is found in a filtered
+        listing, without going through `_get_object` and the cache (a cached
+        listing of the folder itself would hide the object there)."""
         gcsfs = gcs_hns
         with (
             gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
@@ -1559,19 +1636,104 @@ class TestExtendedGcsFileSystemMvSharedName:
             mock.patch.object(
                 gcsfs, "_get_object", new_callable=mock.AsyncMock
             ) as get_object,
-            mock.patch.object(
-                gcsfs, "_get_directory_info", new_callable=mock.AsyncMock
-            ) as get_dir,
         ):
             gcsfs.dircache.clear()
-            call.side_effect = OSError("Forbidden: no storage.objects.get")
-            get_object.return_value = self._object_info(self.SRC)
-            get_dir.side_effect = FileNotFoundError(self.SRC)
+            gcsfs.dircache[self.SRC] = [self._object_info(f"{self.SRC}/b")]
+            call.side_effect = [
+                OSError("Forbidden: no storage.objects.get"),
+                {"items": [{"name": "run/a", "size": "4"}]},
+            ]
 
             obj, folder = self._get_sources(gcsfs, self.SRC)
 
-            assert obj == self._object_info(self.SRC) and folder is None
-            get_object.assert_awaited_once_with(self.SRC)
+            assert obj["name"] == self.SRC and folder is not None
+            assert call.await_args_list[1] == mock.call(
+                "GET",
+                "b/{}/o",
+                TEST_HNS_BUCKET,
+                json_out=True,
+                prefix="run/a",
+                maxResults=1,
+                versions=None,
+            )
+            get_object.assert_not_awaited()
+
+    def test_sources_forbidden_listing_without_object(self, gcs_hns, gcs_hns_mocks):
+        gcsfs = gcs_hns
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
+            mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(
+                gcsfs, "_get_hns_folder_info", new_callable=mock.AsyncMock
+            ) as get_dir,
+        ):
+            gcsfs.dircache.clear()
+            call.side_effect = [
+                OSError("Forbidden: no storage.objects.get"),
+                {"items": [{"name": "run/a/x.txt", "size": "4"}]},
+            ]
+            get_dir.return_value = self._folder_info(self.SRC)
+
+            obj, folder = self._get_sources(gcsfs, self.SRC)
+
+            assert obj is None and folder is not None
+
+    def test_sources_slow_folder_lookup_does_not_delay_object(
+        self, gcs_hns, gcs_hns_mocks, caplog
+    ):
+        """Once the object is found, a slow or retrying folder lookup is
+        abandoned after the grace period and only the object is returned."""
+        gcsfs = gcs_hns
+        folder_cancelled = asyncio.Event()
+
+        async def slow_folder(*args):
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                folder_cancelled.set()
+                raise
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
+            mock.patch("gcsfs.extended_gcsfs._HNS_MV_FOLDER_PROBE_GRACE", 0.05),
+            mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(gcsfs, "_get_hns_folder_info", new=slow_folder),
+            caplog.at_level("DEBUG", logger="gcsfs"),
+        ):
+            gcsfs.dircache.clear()
+            call.return_value = {"name": "run/a", "size": "4"}
+
+            obj, folder = self._get_sources(gcsfs, self.SRC)
+
+            assert obj["name"] == self.SRC and folder is None
+            assert folder_cancelled.is_set()
+            assert not [
+                r for r in caplog.records if r.levelname in ("WARNING", "ERROR")
+            ]
+
+    def test_sources_slow_folder_lookup_awaited_when_no_object(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """Without an object the folder lookup is the only answer, so it is
+        not cut short."""
+        gcsfs = gcs_hns
+
+        async def slow_folder(*args):
+            await asyncio.sleep(0.2)
+            return self._folder_info(self.SRC)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
+            mock.patch("gcsfs.extended_gcsfs._HNS_MV_FOLDER_PROBE_GRACE", 0.01),
+            mock.patch.object(gcsfs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(gcsfs, "_get_hns_folder_info", new=slow_folder),
+        ):
+            gcsfs.dircache.clear()
+            call.side_effect = FileNotFoundError(self.SRC)
+
+            obj, folder = self._get_sources(gcsfs, self.SRC)
+
+            assert obj is None and folder is not None
 
 
 class TestExtendedGcsFileSystemMvFile:

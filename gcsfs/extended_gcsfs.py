@@ -50,6 +50,9 @@ logger = logging.getLogger("gcsfs")
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
+# How long `mv` waits for the folder lookup once it has found an object at the
+# source, see `ExtendedGcsFileSystem._get_hns_mv_sources`.
+_HNS_MV_FOLDER_PROBE_GRACE = 1.0
 
 
 class StorageClass(Enum):
@@ -1452,13 +1455,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket, for ``_mv``.
 
         In HNS buckets an object "a" and a folder "a/" can coexist, and both
-        normalize to the name "a". ``_info`` returns only one of them (the
-        first matching entry in the cached parent listing, or whichever
-        request answers first), so ``_mv`` looks up both. A trailing slash on
-        ``path`` refers to the folder only.
+        normalize to the name "a". ``_info`` returns only one of them: the
+        first matching entry of a cached parent listing (the folder), or else
+        the object if it exists. So ``_mv`` looks up both. A trailing slash on
+        ``path`` refers to the folder only, and a generation to the object
+        only.
 
-        Uses the parent's cached listing when available. Otherwise fetches the
-        object and the folder concurrently, bypassing the cache.
+        Uses cached listings when they answer the question. Otherwise sends an
+        object GET and a ``get_folder`` request concurrently. Once the object
+        is found, the folder lookup gets at most
+        ``_HNS_MV_FOLDER_PROBE_GRACE`` more seconds, so that a slow or failing
+        Storage Control API does not hold up a plain file move; if it does not
+        answer in time or fails, only the object is moved, as before.
 
         Returns
         -------
@@ -1482,9 +1490,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Bucket root: there is no object to look for.
             return None, await self._info(name)
 
+        object_info = folder_info = None
         parent = self._parent(name)
         if parent in self.dircache:
-            object_info = folder_info = None
             for entry in self.dircache[parent]:
                 if entry.get("name") != name:
                     continue
@@ -1500,6 +1508,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 return object_info, folder_info
             # Neither is cached: fall through to the requests below, like
             # `_info`, in case the source was created after the listing.
+
+        if not generation and self.dircache.get(name):
+            # The folder's own listing is cached, so it exists (as `_info`
+            # assumes too); only the object still needs to be looked up.
+            folder_info = {
+                "bucket": bucket,
+                "name": name,
+                "size": 0,
+                "storageClass": "DIRECTORY",
+                "type": "directory",
+            }
+            if folder_only:
+                return None, folder_info
 
         async def _get_object():
             if folder_only:
@@ -1521,44 +1542,67 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             except OSError as e:
                 if not str(e).startswith("Forbidden"):
                     raise
-            # No storage.objects.get permission: `_get_object` falls back to
-            # a filtered bucket listing.
-            try:
-                return await self._get_object(stripped.rstrip("/"))
-            except FileNotFoundError:
-                return None
+            # No storage.objects.get permission: find the object in a filtered
+            # listing, like `_get_object` does.
+            resp = await self._call(
+                "GET",
+                "b/{}/o",
+                bucket,
+                json_out=True,
+                prefix=key,
+                maxResults=1 if not generation else None,
+                versions="true" if generation else None,
+            )
+            for item in resp.get("items", []):
+                if item["name"] == key and (
+                    not generation or item.get("generation") == generation
+                ):
+                    return self._process_object(bucket, item)
+            return None
 
         async def _get_folder():
             if generation:
                 # Folders have no generations; "name#gen" is an object.
                 return None
             try:
-                return await self._get_directory_info(name, bucket, key, None)
+                return await self._get_hns_folder_info(name, bucket, key)
             except FileNotFoundError:
                 return None
 
-        # return_exceptions=True so that a failure of one request neither
-        # leaves the other unawaited nor hides its result.
-        object_res, folder_res = await asyncio.gather(
-            _get_object(), _get_folder(), return_exceptions=True
-        )
-        if isinstance(object_res, BaseException):
-            # Not tolerated even if the folder exists: moving only the folder
-            # could leave a same-name object behind. `_info` also raises any
-            # object lookup error other than FileNotFoundError.
-            raise object_res
-        if isinstance(folder_res, BaseException):
-            if object_res is None:
-                raise folder_res
-            # Like `_info`, which returns a found object without waiting for
-            # the folder lookup: still move the object (e.g. for callers
-            # without Storage Control permissions).
-            logger.warning(
-                f"Could not check for a folder sharing its name with object "
-                f"'{name}'; moving the object only: {folder_res!r}"
-            )
-            folder_res = None
-        object_info, folder_info = object_res, folder_res
+        if folder_info is not None:
+            object_info = await _get_object()
+            return object_info, folder_info
+
+        object_task = asyncio.create_task(_get_object())
+        folder_task = asyncio.create_task(_get_folder())
+        try:
+            # An object lookup error is raised even if the folder exists:
+            # moving only the folder could leave a same-name object behind.
+            # As with an `_info` error, `_mv` then falls back to an
+            # object-level move.
+            object_info = await object_task
+            if object_info is None:
+                folder_info = await folder_task
+            else:
+                try:
+                    folder_info = await asyncio.wait_for(
+                        folder_task, _HNS_MV_FOLDER_PROBE_GRACE
+                    )
+                except Exception as e:
+                    # E.g. no storage.folders.get permission, or the Storage
+                    # Control API is slow or unavailable. Logged at debug
+                    # level: `_info` did not wait for this lookup either.
+                    logger.debug(
+                        f"Could not check for a folder sharing its name with "
+                        f"object '{name}'; moving the object only: {e!r}"
+                    )
+                    folder_info = None
+        finally:
+            for task in (object_task, folder_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(object_task, folder_task, return_exceptions=True)
+
         if object_info is None and folder_info is None:
             raise FileNotFoundError(path)
         return object_info, folder_info
@@ -1574,10 +1618,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         except FileNotFoundError:
             # The object was removed after it was looked up; nothing to move.
             logger.debug(f"Object '{src}' no longer exists; only the folder moved.")
-        except Exception as e:
+        except BaseException as e:
+            # The move may have partly happened (e.g. `_mv_file`'s copy and
+            # delete fallback, or a cancelled request that completes on the
+            # server), so cached listings can't be trusted.
+            self.invalidate_cache(self._parent(src))
+            self.invalidate_cache(self._parent(path2))
+            if not isinstance(e, Exception):
+                raise
             raise OSError(
                 f"Moved folder '{src}/' to '{path2}/', but failed to move the "
-                f"object '{src}' that shares its name: {e}"
+                f"object '{src}' that shares its name; check both paths: {e}"
             ) from e
 
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
@@ -1807,6 +1858,40 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     makedirs = asyn.sync_wrapper(_makedirs)
 
+    async def _get_hns_folder_info(self, path, bucket, key):
+        """
+        Return directory info for the folder ``key`` in the HNS bucket
+        ``bucket`` using the Storage Control ``get_folder`` API.
+
+        Raises FileNotFoundError if the folder does not exist; other errors
+        are raised unchanged and are not logged.
+        """
+        # folder_id is the path relative to the bucket
+        folder_id = key.rstrip("/")
+        request = storage_control_v2.GetFolderRequest(
+            name=f"projects/_/buckets/{bucket}/folders/{folder_id}",
+            request_id=str(uuid.uuid4()),
+        )
+        client = await self._get_control_plane_client()
+        try:
+            response = await client.get_folder(
+                request=request,
+                retry=self._get_retry_config(),
+                timeout=STORAGE_CONTROL_RPC_TIMEOUT,
+            )
+        except api_exceptions.NotFound:
+            raise FileNotFoundError(path)
+        return {
+            "bucket": bucket,
+            "name": path,
+            "size": 0,
+            "storageClass": "DIRECTORY",
+            "type": "directory",
+            "ctime": response.create_time,
+            "mtime": response.update_time,
+            "metageneration": response.metageneration,
+        }
+
     async def _get_directory_info(self, path, bucket, key, generation):
         """
         Override to use Storage Control API's get_folder for HNS buckets.
@@ -1817,38 +1902,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # If bucket is HNS, use get folder metadata api to determine a directory
         if is_hns:
             try:
-                # folder_id is the path relative to the bucket
-                folder_id = key.rstrip("/")
-                folder_resource_name = (
-                    f"projects/_/buckets/{bucket}/folders/{folder_id}"
-                )
-
-                request = storage_control_v2.GetFolderRequest(
-                    name=folder_resource_name, request_id=str(uuid.uuid4())
-                )
-
-                # Verify existence using get_folder API
-                client = await self._get_control_plane_client()
-                response = await client.get_folder(
-                    request=request,
-                    retry=self._get_retry_config(),
-                    timeout=STORAGE_CONTROL_RPC_TIMEOUT,
-                )
-
-                # If successful, return directory metadata
-                return {
-                    "bucket": bucket,
-                    "name": path,
-                    "size": 0,
-                    "storageClass": "DIRECTORY",
-                    "type": "directory",
-                    "ctime": response.create_time,
-                    "mtime": response.update_time,
-                    "metageneration": response.metageneration,
-                }
-            except api_exceptions.NotFound:
-                # If get_folder fails, the folder does not exist.
-                raise FileNotFoundError(path)
+                return await self._get_hns_folder_info(path, bucket, key)
+            except FileNotFoundError:
+                raise
             except Exception as e:
                 # Log unexpected errors
                 logger.error(f"Error fetching folder metadata for {path}: {e}")
