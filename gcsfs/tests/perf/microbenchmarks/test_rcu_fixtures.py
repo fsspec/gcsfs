@@ -282,6 +282,49 @@ def test_benchmark_io_fixture_rcu_cold_stages_distinct_objects_per_round(
         assert not gcs.exists(p)
 
 
+@pytest.mark.parametrize(
+    "bucket_type, file_size_bytes, primes",
+    [
+        ("standard_rcu_warm", 64, True),
+        ("hns_rcu_cold", bench_conftest.SMALL_FILE_UPLOAD_LIMIT, True),
+        ("standard_rcu_cold", 2 * bench_conftest.MB, False),
+        ("standard_rcu_z", 64, False),
+        ("zonal", 64, False),
+        ("regional", 64, False),
+    ],
+)
+def test_benchmark_io_fixture_primes_client_for_small_rcu_warm_and_cold_files(
+    bucket_type, file_size_bytes, primes
+):
+    """Small *_rcu_warm/*_rcu_cold files are staged on other clients, so the benchmarked one is primed."""
+    gcs = mock.MagicMock(spec=ExtendedGcsFileSystem)
+    params = SimpleNamespace(
+        name=f"cat_{bucket_type}",
+        bucket_name=TEST_BUCKET,
+        bucket_type=bucket_type,
+        files=2,
+        file_size_bytes=file_size_bytes,
+        rounds=1,
+    )
+
+    with (
+        mock.patch.object(bench_conftest, "_prepare_files"),
+        mock.patch.object(bench_conftest, "_warm_rcu_files"),
+    ):
+        gen = bench_conftest._benchmark_io_fixture_helper(
+            lambda **kwargs: gcs, params, "benchmark-prime", create_files=True
+        )
+        _, file_paths, _ = next(gen)
+        with pytest.raises(StopIteration):
+            next(gen)
+
+    prefix = file_paths[0].rsplit("/", 1)[0]
+    if primes:
+        gcs.pipe_file.assert_called_once_with(f"{prefix}/_client_warmup", b"\0")
+    else:
+        gcs.pipe_file.assert_not_called()
+
+
 def test_read_cat_and_cat_ranges_rotate_rcu_cold_files_each_round(extended_gcs_factory):
     """read, cat, and cat_ranges must read each round's staged object paths on *_rcu_cold."""
     # 1. cat single-threaded & multi-threaded

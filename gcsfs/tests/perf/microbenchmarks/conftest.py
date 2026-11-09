@@ -330,6 +330,14 @@ def _benchmark_io_fixture_helper(
                     extended_gcs_factory, file_paths, params.file_size_bytes
                 )
 
+            if (
+                _uses_http_standard_upload(bucket_type)
+                and params.file_size_bytes <= SMALL_FILE_UPLOAD_LIMIT
+            ):
+                # Other bucket types stage small files with gcs itself, so write one
+                # tiny object to keep client setup out of the first timed round.
+                gcs.pipe_file(f"{prefix}/_client_warmup", b"\0")
+
             duration_ms = (time.perf_counter() - start_time) * 1000
             logging.info(
                 f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
