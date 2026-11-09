@@ -872,12 +872,6 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
         "hns_rcu_cold",
     }
     write_rcu = {"standard_rcu_z", "hns_rcu_z"}
-    metadata_rcu = {
-        "standard_rcu_z",
-        "standard_rcu_cold",
-        "hns_rcu_z",
-        "hns_rcu_cold",
-    }
 
     with (
         mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""),
@@ -887,17 +881,17 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
     ):
         # Read groups: all 6 RCU bucket types (including read_reopen_fixed_duration)
         read_cases = get_read_benchmark_cases()
-        assert all_six_rcu.issubset({c.bucket_type for c in read_cases})
+        assert ({c.bucket_type for c in read_cases} & all_six_rcu) == all_six_rcu
         reopen_types = {
             c.bucket_type
             for c in read_cases
             if c.name.startswith("read_reopen_fixed_duration")
         }
-        assert all_six_rcu.issubset(reopen_types)
+        assert (reopen_types & all_six_rcu) == all_six_rcu
 
         for get_fn in (get_cat_benchmark_cases, get_cat_ranges_benchmark_cases):
             types = {c.bucket_type for c in get_fn()}
-            assert all_six_rcu.issubset(types)
+            assert (types & all_six_rcu) == all_six_rcu
 
         # Write groups: only *_rcu_z among RCU types
         for get_fn in (
@@ -908,7 +902,7 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             rcu_types = {c.bucket_type for c in get_fn()} & all_six_rcu
             assert rcu_types == write_rcu
 
-        # 0-byte Metadata groups: *_rcu_z and *_rcu_cold, never *_rcu_warm
+        # Metadata groups: all 6 RCU bucket types
         for get_fn in (
             get_listing_benchmark_cases,
             get_glob_benchmark_cases,
@@ -917,7 +911,7 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             get_rename_benchmark_cases,
         ):
             rcu_types = {c.bucket_type for c in get_fn()} & all_six_rcu
-            assert rcu_types == metadata_rcu
+            assert rcu_types == all_six_rcu
 
         # Open and comparison groups stay untouched
         open_types = {c.bucket_type for c in get_open_benchmark_cases()}

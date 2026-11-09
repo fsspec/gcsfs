@@ -139,6 +139,75 @@ def test_benchmark_listing_fixture_rcu_cold_uses_http_upload(
 
 
 @pytest.mark.parametrize("bucket_type", ["standard_rcu_warm", "hns_rcu_warm"])
+def test_benchmark_listing_fixture_rcu_warm_reads_on_isolated_fs_closes_it_and_sleeps(
+    extended_gcs_factory, bucket_type
+):
+    """Metadata fixtures on *_rcu_warm upload via HTTP, warm on isolated fs, close it, and sleep."""
+    created = []
+    warmed_paths = []
+
+    def tracking_factory(**kwargs):
+        fs = extended_gcs_factory(**kwargs)
+        if kwargs.get("skip_instance_cache"):
+            orig_cat_file = fs.cat_file
+            fs.cat_file = mock.Mock(
+                side_effect=lambda p, *a, **kw: (
+                    warmed_paths.append(p),
+                    orig_cat_file(p, *a, **kw),
+                )[1]
+            )
+        created.append((kwargs, fs))
+        return fs
+
+    params = SimpleNamespace(
+        name=f"listing_{bucket_type}",
+        bucket_name=TEST_BUCKET,
+        bucket_type=bucket_type,
+        files=2,
+        folders=1,
+        depth=0,
+        file_size_bytes=0,
+        rounds=1,
+    )
+
+    with (
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_pipe_file",
+            side_effect=AssertionError("ExtendedGcsFileSystem._pipe_file must not run"),
+        ),
+        mock.patch.object(bench_conftest, "RCU_WARMUP_SETTLE_SECONDS", 12.5),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.conftest.time.sleep"
+        ) as mock_sleep,
+    ):
+        gen = bench_conftest._benchmark_listing_fixture_helper(
+            tracking_factory,
+            params,
+            "benchmark-listing-rcu-warm",
+            teardown=True,
+            require_file_paths=True,
+        )
+        yielded_gcs, _, file_paths, _, _ = next(gen)
+        try:
+            assert len(created) == 2
+            _, bench_fs = created[0]
+            warm_kwargs, warm_fs = created[1]
+            assert bench_fs is yielded_gcs
+            assert warm_fs is not yielded_gcs
+            assert warm_kwargs.get("skip_instance_cache") is True
+            assert sorted(warmed_paths) == sorted(file_paths)
+            assert warm_fs._mrd_pool_cache._closed is True
+            assert yielded_gcs._mrd_pool_cache._closed is False
+            mock_sleep.assert_called_once_with(12.5)
+            for path in file_paths:
+                assert yielded_gcs.exists(path)
+        finally:
+            with pytest.raises(StopIteration):
+                next(gen)
+
+
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_warm", "hns_rcu_warm"])
 def test_benchmark_io_fixture_rcu_warm_reads_on_isolated_fs_closes_it_and_sleeps(
     extended_gcs_factory, bucket_type
 ):

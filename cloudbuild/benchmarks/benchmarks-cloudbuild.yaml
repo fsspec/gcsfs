@@ -107,6 +107,7 @@ steps:
           fi
         done <<< "$$VMS"
 
+        # Clean up leaked test buckets (disabling any active RCU caches first).
         BUCKETS=$$(gcloud storage buckets list "gs://${_INFRA_PREFIX}-*" --project="${PROJECT_ID}" --format="value(name,creation_time)" --quiet || true)
 
         while read -r name creation_time; do

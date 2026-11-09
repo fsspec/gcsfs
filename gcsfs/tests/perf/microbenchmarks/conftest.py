@@ -590,13 +590,17 @@ def _benchmark_listing_fixture_helper(
             f"folders and with {files_per_folder} files per folder."
         )
 
+        bucket_type = getattr(params, "bucket_type", None)
+        file_size_bytes = getattr(params, "file_size_bytes", 0)
         start_time = time.perf_counter()
         _prepare_files(
             gcs,
             file_paths,
-            getattr(params, "file_size_bytes", 0),
-            bucket_type=getattr(params, "bucket_type", None),
+            file_size_bytes,
+            bucket_type=bucket_type,
         )
+        if _is_rcu_warm(bucket_type):
+            _warm_rcu_files(extended_gcs_factory, file_paths, file_size_bytes)
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         logging.info(
