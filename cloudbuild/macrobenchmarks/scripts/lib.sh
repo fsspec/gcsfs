@@ -72,13 +72,28 @@ create_typed_bucket() {
 
 # Add an admit-on-first-miss Rapid Cache Ultra cache in ${_ZONE}, the zone of
 # the workload node pool, and wait until it is running: gcsfs only uses the RCU
-# data path while it is.
+# data path while it is. Creation is tried up to 3 times.
 create_rapid_cache() {
-  local bucket="$1" state="" i
-  gcloud alpha storage buckets rapid-caches create "gs://$bucket" "${_ZONE}" --project="${PROJECT_ID}" \
-    --cache-type=rapid-cache-ultra --admission-policy=admit-on-first-miss --no-async --quiet
+  local bucket="$1" attempt=0 output state="" i
+  until output=$(gcloud alpha storage buckets rapid-caches create "gs://$bucket" "${_ZONE}" --project="${PROJECT_ID}" \
+      --cache-type=rapid-cache-ultra --admission-policy=admit-on-first-miss --no-async --quiet 2>&1); do
+    echo "$output" >&2
+    # An earlier attempt may have created the cache before it failed.
+    if (( attempt > 0 )) && grep -qi "already exists" <<< "$output"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    if (( attempt >= 3 )); then
+      echo "ERROR: could not create a rapid cache for gs://$bucket in ${_ZONE} after $attempt attempts." >&2
+      return 1
+    fi
+    echo "Rapid cache create failed for gs://$bucket in ${_ZONE} (attempt $attempt/3), retrying..." >&2
+    sleep $((RANDOM % 8 + 3))
+  done
+  echo "$output"
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    state=$(gcloud alpha storage buckets rapid-caches describe "$bucket/${_ZONE}" --project="${PROJECT_ID}" --format="value(state)")
+    # A failed describe counts as not running yet.
+    state=$(gcloud alpha storage buckets rapid-caches describe "$bucket/${_ZONE}" --project="${PROJECT_ID}" --format="value(state)" || true)
     [ "${state,,}" = running ] && return 0
     sleep 30
   done

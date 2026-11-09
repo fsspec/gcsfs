@@ -41,11 +41,15 @@ RCU_TYPES = [
 SEED = "gs://ckpt-bucket/seed/buildid-test-seed/model.ckpt"
 GiB = 1 << 30
 
-# STUB_FAIL is a regex matched against the arguments; the STUB_* outputs are
-# printed verbatim.
+# STUB_FAIL is a regex matched against the arguments (its error message is
+# STUB_FAIL_MESSAGE); STUB_FAIL_ONCE fails only the first matching call. The
+# STUB_* outputs are printed verbatim.
 GCLOUD_STUB = r"""#!/usr/bin/env bash
 echo "gcloud $*" >> "$STUB_LOG"
-if [[ -n "$STUB_FAIL" && "$*" =~ $STUB_FAIL ]]; then exit 1; fi
+if [[ -n "$STUB_FAIL_ONCE" && "$*" =~ $STUB_FAIL_ONCE && ! -e "$STUB_LOG.failed" ]]; then
+  touch "$STUB_LOG.failed"; echo "ERROR: transient error" >&2; exit 1
+fi
+if [[ -n "$STUB_FAIL" && "$*" =~ $STUB_FAIL ]]; then echo "$STUB_FAIL_MESSAGE" >&2; exit 1; fi
 case "$*" in
   "storage objects list"*) [ -n "$STUB_LIST" ] && printf '%s\n' "$STUB_LIST" ;;
   "storage buckets describe"*"value(location)"*) echo "US-CENTRAL1" ;;
@@ -319,6 +323,74 @@ def test_create_buckets_records_failure_when_cache_is_not_running(env, stub):
     assert proc.returncode != 0
     assert _failures(env) == ["create-buckets"]
     assert _copies(calls) == []
+
+
+def _cache_creates(calls, bucket):
+    return _calls(
+        calls, f"gcloud alpha storage buckets rapid-caches create gs://{bucket} "
+    )
+
+
+def test_create_buckets_retries_a_failed_rapid_cache_create(env):
+    proc, calls = _run_step(
+        "create-buckets",
+        env,
+        _BUCKET_TYPE="standard_rcu_warm",
+        STUB_FAIL_ONCE="rapid-caches create",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _failures(env) == []
+    first, second = [
+        i for i, c in enumerate(calls) if c in _cache_creates(calls, "ckpt-bucket")
+    ]
+    assert [c.split()[0] for c in calls[first + 1 : second]] == ["sleep"]
+    assert len(_cache_creates(calls, "dataset-bucket")) == 1
+
+
+def test_create_buckets_treats_already_exists_on_a_retry_as_created(env):
+    proc, calls = _run_step(
+        "create-buckets",
+        env,
+        _BUCKET_TYPE="hns_rcu_cold",
+        STUB_FAIL_ONCE="rapid-caches create gs://ckpt-bucket ",
+        STUB_FAIL="rapid-caches create gs://ckpt-bucket ",
+        STUB_FAIL_MESSAGE="ERROR: HTTPError 409: The rapid cache already exists.",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _failures(env) == []
+    assert len(_cache_creates(calls, "ckpt-bucket")) == 2
+
+
+def test_create_buckets_gives_up_after_three_rapid_cache_create_attempts(env):
+    proc, calls = _run_step(
+        "create-buckets",
+        env,
+        _BUCKET_TYPE="standard_rcu_z",
+        STUB_FAIL="rapid-caches create",
+    )
+
+    assert proc.returncode != 0
+    assert _failures(env) == ["create-buckets"]
+    assert len(_cache_creates(calls, "ckpt-bucket")) == 3
+    assert _calls(calls, "gcloud storage buckets create gs://dataset-bucket ") == []
+
+
+def test_create_buckets_keeps_polling_after_a_failed_describe(env):
+    proc, calls = _run_step(
+        "create-buckets",
+        env,
+        _BUCKET_TYPE="standard_rcu_warm",
+        STUB_FAIL_ONCE="rapid-caches describe",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _failures(env) == []
+    describes = _calls(
+        calls, "gcloud alpha storage buckets rapid-caches describe ckpt-bucket/"
+    )
+    assert len(describes) == 2
 
 
 @pytest.mark.parametrize("bucket_type", ["standard_rcu_z", "hns_rcu_z"])
