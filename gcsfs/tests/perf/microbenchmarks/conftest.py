@@ -599,8 +599,6 @@ def _benchmark_listing_fixture_helper(
             file_size_bytes,
             bucket_type=bucket_type,
         )
-        if _is_rcu_warm(bucket_type):
-            _warm_rcu_files(extended_gcs_factory, file_paths, file_size_bytes)
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         logging.info(
