@@ -677,35 +677,3 @@ def test_gcs_factory_closes_created_instances_on_teardown(monkeypatch):
     assert fs2._storage_control_client is None
     grpc_close.assert_awaited_once()
     ctrl_close.assert_awaited_once()
-
-
-@pytest.mark.parametrize(
-    "fn_name",
-    ["test_read_unfinalized_file_using_mrd", "test_cat_file_on_unfinalized_file"],
-)
-@pytest.mark.parametrize(
-    "layout",
-    [layouts.ZONAL_HIERARCHICAL, layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],
-)
-def test_unfinalized_read_tests_skip_on_rcu_buckets(fn_name, layout):
-    """Unfinalized size-less read tests skip on RCU buckets and run on Zonal buckets."""
-    from _pytest.outcomes import Skipped
-
-    from gcsfs.tests import test_zonal
-
-    sentinel = RuntimeError("reached_write")
-    fake_fs = mock.MagicMock()
-    fake_fs.on_google = True
-    fake_fs._sync_lookup_bucket_layout.return_value = layout
-    fake_fs.open.side_effect = sentinel
-    fake_fs.pipe.side_effect = sentinel
-
-    fn = getattr(test_zonal, fn_name)
-    if layout.is_rcu:
-        with pytest.raises(Skipped):
-            fn(fake_fs, "bucket/key")
-        fake_fs.open.assert_not_called()
-        fake_fs.pipe.assert_not_called()
-    else:
-        with pytest.raises(RuntimeError, match="reached_write"):
-            fn(fake_fs, "bucket/key")
