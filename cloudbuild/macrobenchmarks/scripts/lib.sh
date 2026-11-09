@@ -22,6 +22,14 @@ if [[ "${_WORKLOAD}" == "hf-pytorch-lightning-cpu" ]]; then
   _WORKLOAD="hf-datasets-pytorch-lightning"
 fi
 
+# Object state the Rapid Cache Ultra (RCU) bucket types measure reads from:
+# z (written RAPID), warm (STANDARD, ingested into the cache before the run) or
+# cold (STANDARD, never read in the cache zone). Empty for the other types.
+RCU_STATE=""
+if [[ "${_BUCKET_TYPE:-}" == *_rcu_* ]]; then
+  RCU_STATE="${_BUCKET_TYPE##*_rcu_}"
+fi
+
 # Record a step id in the failure ledger. The allowFailure provisioning steps
 # append here on error so the final check-failure step can fail the build with
 # the list of culprits.
@@ -39,7 +47,8 @@ skip_if_failed() {
   fi
 }
 
-# Create a per-run bucket per _BUCKET_TYPE (regional | zonal-RAPID | hns).
+# Create a per-run bucket per _BUCKET_TYPE (regional | zonal-RAPID | hns |
+# regional or HNS with a Rapid Cache Ultra cache).
 create_typed_bucket() {
   local bucket="$1"
   case "${_BUCKET_TYPE}" in
@@ -49,10 +58,70 @@ create_typed_bucket() {
       gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --placement="${_ZONE}" --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access ;;
     hns)
       gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --enable-hierarchical-namespace --uniform-bucket-level-access ;;
+    standard_rcu_*)
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --uniform-bucket-level-access
+      create_rapid_cache "$bucket" ;;
+    hns_rcu_*)
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --enable-hierarchical-namespace --uniform-bucket-level-access
+      create_rapid_cache "$bucket" ;;
     *)
-      echo "ERROR: unknown _BUCKET_TYPE='${_BUCKET_TYPE}' (expected regional|zonal|hns)" >&2
+      echo "ERROR: unknown _BUCKET_TYPE='${_BUCKET_TYPE}' (expected regional|zonal|hns|{standard,hns}_rcu_{z,warm,cold})" >&2
       return 1 ;;
   esac
+}
+
+# Add an admit-on-first-miss Rapid Cache Ultra cache in ${_ZONE}, the zone of
+# the workload node pool, and wait until it is running: gcsfs only uses the RCU
+# data path while it is.
+create_rapid_cache() {
+  local bucket="$1" state="" i
+  gcloud alpha storage buckets rapid-caches create "gs://$bucket" "${_ZONE}" --project="${PROJECT_ID}" \
+    --cache-type=rapid-cache-ultra --admission-policy=admit-on-first-miss --no-async --quiet
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    state=$(gcloud alpha storage buckets rapid-caches describe "$bucket/${_ZONE}" --project="${PROJECT_ID}" --format="value(state)")
+    [ "${state,,}" = running ] && return 0
+    sleep 30
+  done
+  echo "ERROR: rapid cache $bucket/${_ZONE} is '$state', not running." >&2
+  return 1
+}
+
+# Best-effort delete of a per-run bucket of any type: its objects first, then
+# its Rapid Cache Ultra caches (disable runs async), then the bucket. The bucket
+# delete fails while a disable is still running; cleanup-leaked-resources
+# retries it in a later build.
+delete_bucket_and_caches() {
+  local bucket="$1" cache_id
+  gcloud storage rm --recursive --project="${PROJECT_ID}" "gs://$bucket" || true
+  while read -r cache_id _; do
+    [ -n "$cache_id" ] || continue
+    gcloud alpha storage buckets rapid-caches disable "$cache_id" --project="${PROJECT_ID}" --quiet || true
+  done <<< "$(gcloud alpha storage buckets rapid-caches list "gs://$bucket" --project="${PROJECT_ID}" --format="value(id,state)" || true)"
+  gcloud storage buckets delete "gs://$bucket" --project="${PROJECT_ID}" --quiet || true
+}
+
+# Copy _DATASET_PATH into the per-run dataset bucket with gcloud, which writes
+# STANDARD objects (RAPID on a zonal bucket).
+copy_dataset_into_run_bucket() {
+  local src_object_path dest_parent
+  src_object_path=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
+  if [ "${_BUCKET_TYPE}" = "zonal" ] || [ "${DATASET_SRC_IS_RAPID:-no}" = "yes" ]; then
+    # RAPID (zonal) objects lack the server-side rewrite rsync uses, so daisy-chain
+    # (download+reupload)
+    ulimit -n 65536
+    dest_parent="${src_object_path%/*}"
+    [ "$dest_parent" = "$src_object_path" ] && dest_parent=""
+    # `cp --recursive` on a directory/bucket source without a trailing wildcard
+    # copies the source's own name into the destination (e.g. _DATASET_PATH
+    # "gs://bucket" would land at "gs://DATASET_BUCKET/bucket/..."); "/*" makes
+    # it copy the source's contents instead.
+    CLOUDSDK_STORAGE_PROCESS_COUNT=16 CLOUDSDK_STORAGE_THREAD_COUNT=16 \
+    CLOUDSDK_STORAGE_ATTEMPT_GRPC_DIRECT_PATH=False \
+      gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH%/}/*" "gs://${DATASET_BUCKET}${dest_parent:+/$dest_parent}"
+  else
+    # Regional/HNS support server-side copy; rsync mirrors the source into the dest.
+    gcloud storage rsync --recursive "${_DATASET_PATH}" "gs://${DATASET_BUCKET}/${src_object_path}"
+  fi
 }
 
 shared_workload_helm_args() {
