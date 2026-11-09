@@ -44,11 +44,11 @@ create_typed_bucket() {
   local bucket="$1"
   case "${_BUCKET_TYPE}" in
     regional)
-      gcloud storage buckets create "gs://$bucket" --public-access-prevention --project="${PROJECT_ID}" --location="$REGION" ;;
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" ;;
     zonal)
-      gcloud storage buckets create "gs://$bucket" --public-access-prevention --project="${PROJECT_ID}" --location="$REGION" --placement="${_ZONE}" --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access ;;
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --placement="${_ZONE}" --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access ;;
     hns)
-      gcloud storage buckets create "gs://$bucket" --public-access-prevention --project="${PROJECT_ID}" --location="$REGION" --enable-hierarchical-namespace --uniform-bucket-level-access ;;
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --enable-hierarchical-namespace --uniform-bucket-level-access ;;
     *)
       echo "ERROR: unknown _BUCKET_TYPE='${_BUCKET_TYPE}' (expected regional|zonal|hns)" >&2
       return 1 ;;

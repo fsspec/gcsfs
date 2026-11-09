@@ -21,10 +21,6 @@ TEST_REQUESTER_PAYS_BUCKET = _get_bucket_name(
 TEST_HNS_REQUESTER_PAYS_BUCKET = _get_bucket_name(
     "GCSFS_HNS_TEST_REQ_PAYS_BUCKET", "gcsfs_hns_test_req_pays"
 )
-# Pass as `iam_configuration=` when a test creates its own bucket. PAP must be
-# enforced on the bucket itself (an org-policy-inherited PAP reads "inherited"):
-# security scanners flag deleted buckets without it as dangling.
-PAP_ENFORCED = {"publicAccessPrevention": "enforced"}
 TEST_KMS_KEY = os.getenv(
     "GCSFS_TEST_KMS_KEY",
     f"projects/{TEST_PROJECT}/locations/{TEST_REGION}/keyRings/gcsfs_test/cryptoKeys/gcsfs_test_key",

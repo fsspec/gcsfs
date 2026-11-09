@@ -83,16 +83,11 @@ class BucketSpec:
 
 def bucket_kwargs(spec):
     """buckets.insert body for this bucket type (gcsfs.mkdir forwards these verbatim)."""
-    # Enforce PAP on the bucket itself: an org-policy-inherited PAP still reads as
-    # "inherited", and security scanners flag deleted buckets without "enforced"
-    # as dangling.
-    iam_configuration = {"publicAccessPrevention": "enforced"}
     if spec.bucket_type in ("regional", *rapid_cache.RAPID_CACHE_BUCKET_TYPES):
-        return {"iam_configuration": iam_configuration}
-    # HNS requires uniform bucket-level access.
-    iam_configuration["uniformBucketLevelAccess"] = {"enabled": True}
+        return {}
     body = {
-        "iam_configuration": iam_configuration,
+        # HNS requires uniform bucket-level access.
+        "iam_configuration": {"uniformBucketLevelAccess": {"enabled": True}},
         "hierarchicalNamespace": {"enabled": True},
     }
     if spec.bucket_type == "zonal":

@@ -21,7 +21,6 @@ from gcsfs import GCSFileSystem
 from gcsfs.extended_gcsfs import CachingTier
 from gcsfs.tests import layouts
 from gcsfs.tests.settings import (
-    PAP_ENFORCED,
     TEST_BUCKET,
     TEST_HNS_BUCKET,
     TEST_HNS_REQUESTER_PAYS_BUCKET,
@@ -525,7 +524,7 @@ def flat_bucket_name(gcs_factory, buckets_to_delete):
     gcs = gcs_factory()
     try:
         bucket_name = f"gcsfs-test-flat-{uuid.uuid4().hex}"
-        gcs.mkdir(bucket_name, iam_configuration=PAP_ENFORCED)
+        gcs.mkdir(bucket_name)
         buckets_to_delete.add(bucket_name)
         yield bucket_name
     finally:

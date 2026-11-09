@@ -38,7 +38,6 @@ from gcsfs.tests.conftest import (
     requires_real_gcs,
     text_files,
 )
-from gcsfs.tests.settings import PAP_ENFORCED
 from gcsfs.tests.utils import tempdir, tmpfile
 from gcsfs.zb_hns_utils import MAX_PREFETCH_SIZE
 
@@ -699,7 +698,7 @@ def test_rm_wildcard_bucket_non_recursive(gcs):
     """Tests non-recursive rm with a wildcard at the bucket root."""
     # Test 'bucket/*' (non-recursive)
     new_bucket = f"gcsfs-test-rm-{uuid.uuid4().hex}"
-    gcs.mkdir(new_bucket, iam_configuration=PAP_ENFORCED)
+    gcs.mkdir(new_bucket)
     try:
         gcs.touch(f"{new_bucket}/file1")
         gcs.touch(f"{new_bucket}/subdir/file2")
@@ -714,7 +713,7 @@ def test_rm_wildcard_bucket_recursive(gcs):
     """Tests recursive rm with a wildcard at the bucket root."""
     # Test 'bucket/*' (recursive)
     new_bucket = f"gcsfs-test-rm-recursive-{uuid.uuid4().hex}"
-    gcs.mkdir(new_bucket, iam_configuration=PAP_ENFORCED)
+    gcs.mkdir(new_bucket)
     try:
         gcs.touch(f"{new_bucket}/file1")
         gcs.touch(f"{new_bucket}/subdir/file2")
