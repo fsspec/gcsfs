@@ -7,6 +7,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 CLOUDBUILD_DIR = Path(__file__).resolve().parent
@@ -182,6 +183,88 @@ PY
         assert "--cache-type=rapid-cache-ultra" in c
         assert "--admission-policy=admit-on-first-miss" in c
         assert "--no-async" in c
+
+
+def _run_create_buckets_with_cache_create_results(tmp_path, results):
+    """Run create_buckets.sh with a fake gcloud whose rapid-cache creates for the
+    flat RCU bucket fail with ``results[i]`` on call ``i`` (``None`` succeeds; the
+    last entry repeats). Returns the process and that bucket's cache create calls.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls_file = tmp_path / "gcloud_calls.jsonl"
+    attempts_file = tmp_path / "cache_create_attempts"
+    cache_create = [
+        "alpha",
+        "storage",
+        "buckets",
+        "rapid-caches",
+        "create",
+        "gs://gcsfs-test-rcu-deadbeef-gw0",
+    ]
+
+    _write_executable(
+        bin_dir / "gcloud",
+        f"""#!/bin/bash
+set -e
+"{os.sys.executable}" - "$@" <<'PY'
+import json, pathlib, sys
+args = sys.argv[1:]
+with pathlib.Path({str(calls_file)!r}).open("a") as f:
+    f.write(json.dumps(args) + "\\n")
+
+if args[:6] == {cache_create!r}:
+    attempts = pathlib.Path({str(attempts_file)!r})
+    attempt = int(attempts.read_text()) if attempts.exists() else 0
+    attempts.write_text(str(attempt + 1))
+    results = {results!r}
+    error = results[min(attempt, len(results) - 1)]
+    if error is not None:
+        sys.stderr.write(error + "\\n")
+        sys.exit(1)
+PY
+""",
+    )
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PROJECT_ID": "test-proj",
+        "REGION": "us-central1",
+        "ZONE": "us-central1-c",
+        "SHORT_BUILD_ID": "deadbeef",
+        "BUCKET_CREATE_MAX_ATTEMPTS": "3",
+        "BUCKET_CREATE_RETRY_MAX_SLEEP": "0",
+    }
+    proc = subprocess.run(
+        ["bash", str(CLOUDBUILD_DIR / "create_buckets.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    calls = [json.loads(line) for line in calls_file.read_text().splitlines()]
+    return proc, [c for c in calls if c[:6] == cache_create]
+
+
+@pytest.mark.parametrize(
+    "retry_error", [None, "HTTPError 409: The rapid cache already exists."]
+)
+def test_create_buckets_retries_failed_rapid_cache_create(tmp_path, retry_error):
+    proc, cache_creates = _run_create_buckets_with_cache_create_results(
+        tmp_path, ["HTTPError 503: Service Unavailable", retry_error]
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert len(cache_creates) == 2
+
+
+def test_create_buckets_fails_when_rapid_cache_create_keeps_failing(tmp_path):
+    proc, cache_creates = _run_create_buckets_with_cache_create_results(
+        tmp_path, ["HTTPError 503: Service Unavailable"]
+    )
+
+    assert proc.returncode != 0
+    assert len(cache_creates) == 3  # BUCKET_CREATE_MAX_ATTEMPTS
 
 
 def test_run_tests_rcu_and_hns_rcu_suites(tmp_path):

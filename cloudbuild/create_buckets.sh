@@ -93,18 +93,43 @@ create_bucket_variants() {
     done < <(worker_suffixes "${workers}")
 }
 
+create_rapid_cache_with_retry() {
+    local bucket_uri="$1"
+    local cache_zone="$2"
+    local attempt=0
+    local output
+
+    until output="$(gcloud alpha storage buckets rapid-caches create "${bucket_uri}" "${cache_zone}" \
+        --project="${PROJECT_ID}" \
+        --cache-type=rapid-cache-ultra \
+        --admission-policy=admit-on-first-miss \
+        --no-async \
+        --quiet 2>&1)"; do
+        echo "${output}" >&2
+        # An earlier attempt may have created the cache before it failed.
+        if (( attempt > 0 )) && grep -qi "already exists" <<< "${output}"; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        if (( attempt >= BUCKET_CREATE_MAX_ATTEMPTS )); then
+            echo "ERROR: Failed to create rapid cache for ${bucket_uri} in ${cache_zone} after ${attempt} attempts." >&2
+            return 1
+        fi
+        echo "Rapid cache create failed for ${bucket_uri} in ${cache_zone} (attempt ${attempt}/${BUCKET_CREATE_MAX_ATTEMPTS}), retrying..." >&2
+        if (( BUCKET_CREATE_RETRY_MAX_SLEEP > 0 )); then
+            sleep $((RANDOM % BUCKET_CREATE_RETRY_MAX_SLEEP + 3))
+        fi
+    done
+    echo "${output}"
+}
+
 create_rcu_bucket() {
     local bucket_uri="$1"
     local cache_zone="$2"
     shift 2
 
     create_bucket_with_retry "${bucket_uri}" --uniform-bucket-level-access "$@" &&
-        gcloud alpha storage buckets rapid-caches create "${bucket_uri}" "${cache_zone}" \
-            --project="${PROJECT_ID}" \
-            --cache-type=rapid-cache-ultra \
-            --admission-policy=admit-on-first-miss \
-            --no-async \
-            --quiet
+        create_rapid_cache_with_retry "${bucket_uri}" "${cache_zone}"
 }
 
 create_rcu_bucket_variants() {
