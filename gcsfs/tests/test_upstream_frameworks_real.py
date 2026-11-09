@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import pytest
 
+# Run every test against both gcsfs.core.GCSFileSystem and ExtendedGcsFileSystem
+pytestmark = pytest.mark.parametrize(
+    "mock_gcs_harness", ["core", "extended"], indirect=True, ids=["core", "extended"]
+)
+
 # ============================================================================
 # 1. PyTorch Lightning Integration Test
 # ============================================================================
 
 
-def test_pytorch_lightning_real_invocation(mock_gcs_harness):
+def test_pytorch_lightning_real_invocation(mock_gcs_harness, tmp_path):
     """
     Verify that when PyTorch Lightning triggers dataset/file loading,
     'fw/lightning' is accurately detected as the top-most orchestrator.
@@ -65,6 +70,7 @@ def test_pytorch_lightning_real_invocation(mock_gcs_harness):
         logger=False,
         enable_progress_bar=False,
         accelerator="cpu",
+        default_root_dir=tmp_path,
     )
 
     mock_gcs_harness.clear()
@@ -78,7 +84,7 @@ def test_pytorch_lightning_real_invocation(mock_gcs_harness):
         ), f"Expected 'fw/lightning' in User-Agent, got: '{ua}'"
 
 
-def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness):
+def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness, tmp_path):
     """
     Verify 100% framework-internal I/O where PyTorch Lightning itself
     invokes fsspec and gcsfs to save checkpoints via trainer.save_checkpoint().
@@ -92,7 +98,14 @@ def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness):
             self.layer = torch.nn.Linear(2, 1)
 
     model = SimpleModule()
-    trainer = lightning.Trainer(accelerator="cpu")
+    # Keep Lightning from writing logs/checkpoints into the current working directory
+    trainer = lightning.Trainer(
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        default_root_dir=tmp_path,
+    )
     trainer.strategy.connect(model)
 
     mock_gcs_harness.clear()

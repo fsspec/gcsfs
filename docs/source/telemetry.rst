@@ -30,6 +30,13 @@ The detector recognizes major ecosystem libraries, including:
 
 If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header.
 
+.. note::
+
+   The framework token is attached to JSON API (HTTP) requests only. gRPC requests use a ``User-Agent`` fixed
+   when the gRPC client is created and do not yet carry the framework token. This includes Rapid (zonal) reads
+   and writes, Rapid Cache Ultra reads and writes, and Storage Control API calls (bucket layout lookups and HNS
+   folder operations such as ``mkdir``, ``rmdir`` and ``mv``).
+
 Privacy & Security Guarantees
 -----------------------------
 
@@ -46,7 +53,7 @@ How It Works
 
 1. **Zero Configuration:** Upstream libraries do not need any code changes or special configuration. Detection occurs transparently when filesystem methods (e.g. ``fs.ls``, ``fs.cat_file``, ``fs.open``, ``df.to_parquet``, ``torch.load``) are called.
 2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread. ``gcsfs`` captures caller identity on the user's thread and safely propagates it to the background event loop via Python ``contextvars``.
-3. **Performance & Caching:** Detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at shallow depths. Active ``GCSFile`` instances cache their framework attribution so subsequent chunk downloads and background prefetching operations execute with zero stack-walking overhead (:math:`O(1)`).
+3. **Performance & Caching:** Detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread). Active ``GCSFile`` instances cache their framework attribution so subsequent chunk downloads and background prefetching operations execute with zero stack-walking overhead (:math:`O(1)`).
 
 Disabling Telemetry
 -------------------
@@ -67,7 +74,7 @@ Set ``GCSFS_NO_TELEMETRY=true`` or the standard ``DO_NOT_TRACK=1`` in your shell
 In Python Code
 ~~~~~~~~~~~~~~
 
-Set the environment variable before importing ``gcsfs`` or executing storage calls:
+The setting is read on every call, so it can be set (or changed) at any time before the storage calls you want to exclude:
 
 .. code-block:: python
 

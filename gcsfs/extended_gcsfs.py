@@ -40,7 +40,13 @@ from gcsfs.core import (
     _location,
     _resolve_generation_match,
 )
+from gcsfs.poller import poll_lro, unwrap_operation_result
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.telemetry.wrapper import (
+    _gcs_sync_wrapper,
+    mirror_gcs_methods,
+    with_telemetry_context,
+)
 from gcsfs.zb_hns_utils import MRD_MAX_RANGES, DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
 
@@ -48,6 +54,7 @@ logger = logging.getLogger("gcsfs")
 
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
+_HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
 
 
 class StorageClass(Enum):
@@ -179,6 +186,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         finalize_on_close=None,
         mrd_pool_cache_size=16,
         max_mrd_pool_cache_queue_size=16,
+        fast_lro_polling=True,
         **kwargs,
     ):
         """
@@ -193,6 +201,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Maximum number of idle pools to retain in the cache.
         max_mrd_pool_cache_queue_size : int, default 16
             Maximum number of idle MRDs per key in the cache.
+        fast_lro_polling : bool, default True
+            Wait for HNS folder renames with gcsfs's own poller, which checks
+            often early on and gives up after a timeout. Set to False (or set
+            ``FSSPEC_GCS_FAST_LRO_POLLING=false``) to wait with
+            ``operation.result()`` from google-api-core instead. That wait
+            has no time limit and does not cancel the rename on the server
+            if ``mv`` is cancelled.
         **kwargs : dict
             Additional arguments passed to GCSFileSystem.
             Supports retry configuration overrides for Storage Control API:
@@ -202,6 +217,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             - retry_multiplier: Multiplier for delay between retries.
             These map to `google.api_core.retry.AsyncRetry` arguments (without 'retry_' prefix).
         """
+        self.fast_lro_polling = fast_lro_polling
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -378,7 +394,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self._storage_layout_cache[bucket] = bucket_layout
         return self._storage_layout_cache[bucket]
 
-    _sync_lookup_bucket_layout = asyn.sync_wrapper(_lookup_bucket_layout)
+    # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
+    _sync_lookup_bucket_layout = _gcs_sync_wrapper(_lookup_bucket_layout)
 
     def invalidate_storage_layout_cache(self, bucket=None):
         """Forget cached bucket layouts so the next operation looks them up again.
@@ -459,6 +476,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # Default to UNKNOWN in case bucket layout is not obtained
             return BucketLayout.UNKNOWN
 
+    # Plain sync method (not covered by mirror_gcs_methods). The bucket-layout lookup and, for Rapid
+    # (zonal) reads, the MRD pool's `_info` request in ZonalFile.__init__ run before GCSFile.__init__
+    # caches `caller_framework`; scope telemetry for the whole open so they carry the caller's
+    # framework (detected once, on the caller thread) and GCSFile.__init__ reuses it.
+    @with_telemetry_context
     def _open(
         self,
         path,
@@ -549,7 +571,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return offset, length
 
-    sync_process_limits_to_offset_and_length = asyn.sync_wrapper(
+    # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
+    sync_process_limits_to_offset_and_length = _gcs_sync_wrapper(
         _process_limits_to_offset_and_length
     )
 
@@ -1267,13 +1290,42 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return bucket_layout.is_hierarchical
 
+    async def _wait_for_folder_rename(
+        self, operation, path1, path2, request_id, timeout
+    ):
+        """Waits for a RenameFolder operation with poll_lro; raises TimeoutError on timeout."""
+        try:
+            await poll_lro(operation, timeout=timeout)
+        except asyncio.TimeoutError as e:
+            op_name = operation.operation.name or request_id
+            raise TimeoutError(
+                f"HNS folder rename from '{path1}' to '{path2}' (op: {op_name}) "
+                f"did not finish within {timeout:g}s. The rename "
+                "may still complete on the server; check the destination before "
+                "retrying."
+            ) from e
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
         optimized, atomic implementation for renaming folders and moving files
         in HNS-enabled buckets. Falls back to the parent's object-level
         copy-and-delete implementation for non-HNS buckets.
+
+        Pass ``poll_timeout`` (seconds, default 300, ``None`` for no
+        limit) to change how long an HNS folder rename waits before raising
+        ``TimeoutError``. It has no effect when ``fast_lro_polling`` is False.
         """
+        # Strip the folder-only option before any fallback delegates to object copy.
+        poll_timeout = kwargs.pop("poll_timeout", _HNS_RENAME_FOLDER_LRO_TIMEOUT)
+        if poll_timeout is not None and (
+            isinstance(poll_timeout, bool) or not (0 < poll_timeout < float("inf"))
+        ):
+            raise ValueError(
+                "poll_timeout must be a finite positive number of seconds, "
+                f"or None for no limit; got {poll_timeout!r}"
+            )
+
         if path1 == path2:
             logger.debug(
                 "%s mv: The paths are the same, so no files/directories were moved.",
@@ -1299,6 +1351,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
             return await super()._mv(path1, path2, **kwargs)
 
+        rename_submitted = False
         try:
             info1 = await self._info(path1)
             is_folder = info1.get("type") == "directory"
@@ -1325,10 +1378,34 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     retry=self._get_retry_config(),
                     timeout=STORAGE_CONTROL_RPC_TIMEOUT,
                 )
-                await operation.result()
-                self._update_dircache_after_rename(
-                    path1, f"{bucket2}/{destination_folder_id.rstrip('/')}"
-                )
+                rename_submitted = True
+                try:
+                    if self.fast_lro_polling:
+                        await self._wait_for_folder_rename(
+                            operation,
+                            path1,
+                            path2,
+                            request.request_id,
+                            poll_timeout,
+                        )
+                    else:
+                        await unwrap_operation_result(operation)
+                    self._update_dircache_after_rename(
+                        path1, f"{bucket2}/{destination_folder_id.rstrip('/')}"
+                    )
+                except BaseException as e:
+                    # The rename may still be running or may already have
+                    # finished, so cached listings can't be trusted.
+                    self.invalidate_cache(path1)
+                    self.invalidate_cache(path2)
+                    logger.warning(
+                        "HNS rename '%s' -> '%s' did not complete (op: %s): %r",
+                        path1,
+                        path2,
+                        operation.operation.name or request.request_id,
+                        e,
+                    )
+                    raise
 
                 logger.debug(
                     "Successfully renamed folder from '%s' to '%s'", path1, path2
@@ -1353,13 +1430,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 ) from e
             if isinstance(e, api_exceptions.FailedPrecondition):
                 raise OSError(f"HNS rename failed: {e}") from e
+            if rename_submitted:
+                # Fall back to copy-and-delete only when the server operation failed,
+                # because after a timeout or cache error the server move may be
+                # active or complete.
+                if not (
+                    operation.operation.done and operation.operation.HasField("error")
+                ):
+                    raise
 
             logger.warning(f"Could not perform HNS-aware mv: {e}")
 
         logger.debug(f"Falling back to object-level mv for '{path1}' to '{path2}'.")
         return await super()._mv(path1, path2, **kwargs)
-
-    mv = asyn.sync_wrapper(_mv)
 
     async def _list_objects(self, path, prefix="", versions=False, **kwargs):
         try:
@@ -1533,8 +1616,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 f"mkdir for '{path}' failed due to a precondition error: {e}"
             ) from e
 
-    mkdir = asyn.sync_wrapper(_mkdir)
-
     async def _makedirs(self, path, exist_ok=False):
         """Recursively make directories.
 
@@ -1585,8 +1666,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         await self._create_hns_folder(
             path, bucket, key, create_parents=True, exist_ok=exist_ok
         )
-
-    makedirs = asyn.sync_wrapper(_makedirs)
 
     async def _get_directory_info(self, path, bucket, key, generation):
         """
@@ -1726,8 +1805,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         except Exception as e:
             logger.error(f"HNS rmdir: Failed to delete folder '{path}': {e}")
             raise
-
-    rmdir = asyn.sync_wrapper(_rmdir)
 
     # TODO: This method is only added to be used in rm method, can be deleted once
     # rm method is integrated with recursive API
@@ -2025,8 +2102,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             and not isinstance(e, (FileNotFoundError, api_exceptions.NotFound))
             and "No such object" not in str(e)
         ]
-
-    rm = asyn.sync_wrapper(_rm)
 
     async def _find(
         self,
@@ -2698,7 +2773,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         return await super()._merge(path, paths, acl=acl)
 
-    merge = asyn.sync_wrapper(_merge)
+
+# Wrap ExtendedGcsFileSystem's own sync/async overrides (e.g. `mv`, `rm`, `_cat_file`, `_find`)
+# so they propagate caller framework telemetry; inherited GCSFileSystem methods are already wrapped.
+mirror_gcs_methods(ExtendedGcsFileSystem)
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):

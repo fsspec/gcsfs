@@ -4546,7 +4546,6 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs, skip_if_grpc_rea
     ],
 )
 def test_user_agent_telemetry_integration(
-    gcs,
     input_headers,
     cache_type,
     cache_source,
@@ -4554,11 +4553,15 @@ def test_user_agent_telemetry_integration(
     expected_in,
     expected_not_in,
 ):
-    """Verify that gcs._get_headers builds User-Agent with cache/telemetry tokens and preserves overrides."""
+    """Verify that _get_headers builds User-Agent with cache/telemetry tokens and preserves overrides."""
     import contextlib
 
+    from gcsfs.core import GCSFileSystem
     from gcsfs.telemetry.context import Dimension
     from gcsfs.telemetry.wrapper import _telemetry_context
+
+    # _get_headers needs no server, so avoid the heavier emulator-backed `gcs` fixture
+    gcs = GCSFileSystem(token="anon", skip_instance_cache=True)
 
     ctx = (
         _telemetry_context({Dimension.FRAMEWORK.value: framework})
@@ -4577,10 +4580,10 @@ def test_user_agent_telemetry_integration(
         assert token not in ua
 
 
-def test_no_eager_property_evaluation_on_init(monkeypatch):
+def test_init_does_not_evaluate_buckets(monkeypatch):
     """
-    Verify that instantiating GCSFileSystem does NOT eagerly invoke
-    properties like `fs.buckets`, which would trigger network I/O.
+    Verify that creating a (telemetry-mirrored) GCSFileSystem does not evaluate
+    properties such as `fs.buckets`, which would trigger network I/O.
     """
     from gcsfs.core import GCSFileSystem
 
@@ -4593,8 +4596,8 @@ def test_no_eager_property_evaluation_on_init(monkeypatch):
 
     monkeypatch.setattr(GCSFileSystem, "_list_buckets", mock_list_buckets)
 
-    _ = GCSFileSystem(token="anon", project="test-project")
-    assert not buckets_called, "GCSFileSystem.__init__ eagerly evaluated fs.buckets!"
+    _ = GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+    assert not buckets_called, "GCSFileSystem.__init__ evaluated fs.buckets"
 
 
 def test_process_object_structure(gcs):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import threading
@@ -765,79 +766,350 @@ def _read_file_helper(fs, tmp_path, monkeypatch):
         return f.read(5)
 
 
+class _CallerThreadOnlyDetector(BaseDetector):
+    """
+    Framework detector that only "sees" a framework on the thread that created it,
+    mirroring real stack-walking: the fsspecIO loop thread never has user frames.
+    Records the thread name of every call so tests can assert detection never ran there.
+    """
+
+    name = Dimension.FRAMEWORK
+
+    def __init__(self, value):
+        self.value = value
+        self.caller_ident = threading.get_ident()
+        self.thread_names = []
+
+    def detect(self):
+        self.thread_names.append(threading.current_thread().name)
+        return self.value if threading.get_ident() == self.caller_ident else None
+
+
+_COMMON_FS_OPS = [
+    ("ls", lambda fs, tmp_path, monkeypatch: fs.ls("test-bucket")),
+    ("info", lambda fs, tmp_path, monkeypatch: fs.info("test-bucket/file.txt")),
+    ("exists", lambda fs, tmp_path, monkeypatch: fs.exists("test-bucket/file.txt")),
+    ("cat", lambda fs, tmp_path, monkeypatch: fs.cat("test-bucket/file.txt")),
+    (
+        "cat_file",
+        lambda fs, tmp_path, monkeypatch: fs.cat_file("test-bucket/file.txt"),
+    ),
+    (
+        "head",
+        lambda fs, tmp_path, monkeypatch: fs.head("test-bucket/file.txt", size=5),
+    ),
+    (
+        "tail",
+        lambda fs, tmp_path, monkeypatch: fs.tail("test-bucket/file.txt", size=5),
+    ),
+    ("find", lambda fs, tmp_path, monkeypatch: fs.find("test-bucket")),
+    ("walk", lambda fs, tmp_path, monkeypatch: list(fs.walk("test-bucket"))),
+    ("glob", lambda fs, tmp_path, monkeypatch: fs.glob("test-bucket/*")),
+    ("du", lambda fs, tmp_path, monkeypatch: fs.du("test-bucket")),
+    ("size", lambda fs, tmp_path, monkeypatch: fs.size("test-bucket/file.txt")),
+    (
+        "read_bytes",
+        lambda fs, tmp_path, monkeypatch: fs.read_bytes("test-bucket/file.txt"),
+    ),
+    (
+        "read_text",
+        lambda fs, tmp_path, monkeypatch: fs.read_text("test-bucket/file.txt"),
+    ),
+    (
+        "write_bytes",
+        lambda fs, tmp_path, monkeypatch: fs.write_bytes(
+            "test-bucket/file.txt", b"data"
+        ),
+    ),
+    (
+        "write_text",
+        lambda fs, tmp_path, monkeypatch: fs.write_text("test-bucket/file.txt", "data"),
+    ),
+    (
+        "pipe_file",
+        lambda fs, tmp_path, monkeypatch: fs.pipe_file("test-bucket/file.txt", b"x"),
+    ),
+    ("rm", lambda fs, tmp_path, monkeypatch: fs.rm("test-bucket/file.txt")),
+    ("rmdir", lambda fs, tmp_path, monkeypatch: fs.rmdir("test-bucket")),
+    (
+        "merge",
+        lambda fs, tmp_path, monkeypatch: fs.merge(
+            "test-bucket/merged.txt", ["test-bucket/a.txt", "test-bucket/b.txt"]
+        ),
+    ),
+    ("buckets", lambda fs, tmp_path, monkeypatch: fs.buckets),
+    ("open_read", _read_file_helper),
+    ("open_write", _write_file_helper),
+    ("get_file_concurrent", _get_file_concurrent_helper),
+]
+
+
 @pytest.mark.parametrize(
-    "name,op",
-    [
-        ("ls", lambda fs, tmp_path, monkeypatch: fs.ls("test-bucket")),
-        ("info", lambda fs, tmp_path, monkeypatch: fs.info("test-bucket/file.txt")),
-        ("exists", lambda fs, tmp_path, monkeypatch: fs.exists("test-bucket/file.txt")),
-        ("cat", lambda fs, tmp_path, monkeypatch: fs.cat("test-bucket/file.txt")),
-        (
-            "head",
-            lambda fs, tmp_path, monkeypatch: fs.head("test-bucket/file.txt", size=5),
-        ),
-        (
-            "tail",
-            lambda fs, tmp_path, monkeypatch: fs.tail("test-bucket/file.txt", size=5),
-        ),
-        ("find", lambda fs, tmp_path, monkeypatch: fs.find("test-bucket")),
-        ("walk", lambda fs, tmp_path, monkeypatch: list(fs.walk("test-bucket"))),
-        ("glob", lambda fs, tmp_path, monkeypatch: fs.glob("test-bucket/*")),
-        ("du", lambda fs, tmp_path, monkeypatch: fs.du("test-bucket")),
-        ("size", lambda fs, tmp_path, monkeypatch: fs.size("test-bucket/file.txt")),
-        (
-            "read_bytes",
-            lambda fs, tmp_path, monkeypatch: fs.read_bytes("test-bucket/file.txt"),
-        ),
-        (
-            "read_text",
-            lambda fs, tmp_path, monkeypatch: fs.read_text("test-bucket/file.txt"),
-        ),
-        (
-            "write_bytes",
-            lambda fs, tmp_path, monkeypatch: fs.write_bytes(
-                "test-bucket/file.txt", b"data"
-            ),
-        ),
-        (
-            "write_text",
-            lambda fs, tmp_path, monkeypatch: fs.write_text(
-                "test-bucket/file.txt", "data"
-            ),
-        ),
-        ("buckets", lambda fs, tmp_path, monkeypatch: fs.buckets),
-        ("open_read", _read_file_helper),
-        ("open_write", _write_file_helper),
-        ("get_file_concurrent", _get_file_concurrent_helper),
-    ],
+    "mock_gcs_harness", ["core", "extended"], indirect=True, ids=["core", "extended"]
+)
+@pytest.mark.parametrize(
+    "name,op", _COMMON_FS_OPS, ids=[name for name, _ in _COMMON_FS_OPS]
 )
 def test_all_parent_methods_telemetry_coverage(
     mock_gcs_harness, tmp_path, monkeypatch, name, op
 ):
     """
-    Verify that inherited and overridden FileSystem and File methods
-    correctly propagate the caller framework in outgoing User-Agent headers.
+    Verify that inherited and overridden FileSystem and File methods (on both
+    GCSFileSystem and ExtendedGcsFileSystem) detect the caller framework on the
+    caller thread and propagate it to every outgoing User-Agent header.
+
+    No telemetry context is pre-set: the detector only reports a framework on the
+    caller thread, so a method missing its telemetry wrapper would send requests
+    without the token (detection would only happen on the fsspecIO loop thread).
     """
     fs = mock_gcs_harness.fs
     captured = mock_gcs_harness.user_agents
     fs.dircache.clear()
-    captured.clear()
 
     fw_name = f"test-{name}"
-    expected_token = f"fw/{fw_name}"
-    token = set_telemetry_context(Dimension.FRAMEWORK, fw_name)
+    detector = _CallerThreadOnlyDetector(fw_name)
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[detector]),
+    )
+    captured.clear()
+
+    op(fs, tmp_path, monkeypatch)
+
+    assert len(captured) > 0, f"operation {name} did not execute any network calls"
+    assert all(
+        f"fw/{fw_name}" in ua for ua in captured
+    ), f"operation {name} had requests missing fw/{fw_name}: {captured}"
+    # Regression guard: stack-walking must never run on the fsspec loop thread,
+    # where it can't find user frames and would add per-request overhead.
+    loop_thread_name = fsspec.asyn.iothread[0].name
+    assert (
+        loop_thread_name not in detector.thread_names
+    ), f"operation {name} ran framework detection on the loop thread: {detector.thread_names}"
+    assert get_telemetry_context() == {}
+
+
+def _is_async_fn(fn) -> bool:
+    return inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)
+
+
+@pytest.mark.parametrize(
+    "fs_cls_path",
+    ["gcsfs.core.GCSFileSystem", "gcsfs.extended_gcsfs.ExtendedGcsFileSystem"],
+    ids=["core", "extended"],
+)
+def test_filesystem_methods_are_telemetry_wrapped(fs_cls_path):
+    """
+    Verify, without a hardcoded method list, that every sync bridge and eligible native
+    async method defined on the filesystem class carries a telemetry wrapper.
+
+    - Any sync function defined on the class that wraps a coroutine (e.g. a leftover
+      `foo = asyn.sync_wrapper(_foo)`, detected via `functools.wraps`' `__wrapped__`)
+      must be a `_gcs_sync_wrapper`; otherwise it would skip caller-thread detection.
+    - Any native async method that `mirror_gcs_methods` targets (public sync counterpart
+      or AsyncFileSystem method) must be async-wrapped, and its public sync
+      counterpart (if any) must be sync-wrapped.
+    """
+    import importlib
+
+    module_name, cls_name = fs_cls_path.rsplit(".", 1)
+    fs_cls = getattr(importlib.import_module(module_name), cls_name)
+
+    unwrapped = set()
+    for name, attr in fs_cls.__dict__.items():
+        if name.startswith("__") or not inspect.isfunction(attr):
+            continue
+
+        # Sync bridges over coroutines (fsspec's sync_wrapper or ours)
+        if not _is_async_fn(attr) and _is_async_fn(inspect.unwrap(attr)):
+            if not getattr(attr, "_is_gcs_sync_wrapped", False):
+                unwrapped.add(name)
+            continue
+
+        # Native async methods targeted by mirror_gcs_methods
+        if name.startswith("_") and _is_async_fn(attr):
+            smethod = name[1:]
+            has_public_sync = hasattr(fsspec.spec.AbstractFileSystem, smethod) or (
+                hasattr(fs_cls, smethod)
+            )
+            if not (has_public_sync or hasattr(fsspec.asyn.AsyncFileSystem, name)):
+                continue
+            if not getattr(attr, "_is_gcs_async_wrapped", False):
+                unwrapped.add(name)
+            public = getattr(fs_cls, smethod, None)
+            if has_public_sync and not getattr(public, "_is_gcs_sync_wrapped", False):
+                unwrapped.add(smethod)
+
+    assert (
+        not unwrapped
+    ), f"{cls_name} methods missing telemetry wrappers: {sorted(unwrapped)}"
+
+
+def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
+    """
+    Across a Rapid (zonal) file's whole life (open -> read -> seek -> read -> info ->
+    close), the caller framework is detected exactly once, on the caller thread, and
+    every operation runs with it.
+
+    Opening for read issues a JSON API `_info` request from `ZonalFile.__init__` (MRD
+    pool setup) before `GCSFile.__init__` caches `caller_framework`, so `_open` must scope
+    telemetry; afterwards the wrapped file methods reuse the cached value.
+    """
+    from gcsfs import zb_hns_utils
+    from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+    from gcsfs.tests import layouts
+
+    fw = "test-zonal-lifecycle"
+    data = b"0123456789"
+    detector = _CallerThreadOnlyDetector(fw)
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
+    )
+    user_agents = []
+    # (operation, framework in the active telemetry context) for gRPC-side operations
+    grpc_ops = []
+
+    async def fake_call(self, method, path, *args, **kwargs):
+        user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
+        return {
+            "kind": "storage#object",
+            "name": "obj",
+            "bucket": "zonal-bucket",
+            "size": str(len(data)),
+            "generation": "1",
+            "timeFinalized": "2026-01-01T00:00:00.000Z",
+        }
+
+    async def fake_lookup_bucket_layout(self, bucket):
+        return layouts.ZONAL_HIERARCHICAL
+
+    async def fake_mrd_pool_initialize(self):
+        return None
+
+    async def fake_mrd_pool_close(self):
+        grpc_ops.append(("mrd_pool.close", get_telemetry_context().get("fw")))
+
+    async def fake_cat_file(self, path, start=None, end=None, **kwargs):
+        # Zonal reads go through the gRPC MRD path; record the context they run with
+        grpc_ops.append(("_cat_file", get_telemetry_context().get("fw")))
+        return data[start:end]
+
+    monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
+    monkeypatch.setattr(
+        ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
+    )
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
+    monkeypatch.setattr(
+        zb_hns_utils.MRDPool, "persisted_size", len(data), raising=False
+    )
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    f = fs.open("zonal-bucket/obj", "rb", cache_type="none")
     try:
-        op(fs, tmp_path, monkeypatch)
-        assert len(captured) > 0, f"operation {name} did not execute any network calls"
-        assert all(
-            expected_token in ua for ua in captured
-        ), f"operation {name} had requests missing {expected_token}: {captured}"
+        # Open: MRD pool `_info` request is tagged; GCSFile.__init__ reused the detection
+        assert f.caller_framework == fw
+        assert user_agents, "zonal open did not issue any JSON API requests"
+        assert detector.thread_names == [threading.current_thread().name]
+
+        assert f.read(4) == data[:4]
+        f.seek(0)
+        assert f.read(2) == data[:2]
+        assert f.info()["size"] == len(data)
     finally:
-        reset_telemetry_context(token)
+        f.close()
+
+    # Detected exactly once (at open, on the caller thread) for the file's whole life
+    assert detector.thread_names == [
+        threading.current_thread().name
+    ], f"framework detection ran more than once: {detector.thread_names}"
+    assert all(
+        f"fw/{fw}" in ua for ua in user_agents
+    ), f"zonal file sent HTTP requests without the framework token: {user_agents}"
+    assert [op for op, _ in grpc_ops].count("_cat_file") == 2
+    assert ("mrd_pool.close", fw) in grpc_ops
+    assert all(
+        ctx_fw == fw for _, ctx_fw in grpc_ops
+    ), f"zonal operations ran without the framework context: {grpc_ops}"
+    assert get_telemetry_context() == {}
+
+
+def test_zonal_file_methods_are_wrapped():
+    """Verify every ZonalFile override carries the file telemetry wrapper."""
+    from gcsfs.zonal_file import ZonalFile
+
+    for name, attr in ZonalFile.__dict__.items():
+        if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
+            continue
+        func = attr.fget if isinstance(attr, property) else attr
+        if callable(func):
+            assert getattr(
+                func, "_is_telemetry_wrapped", False
+            ), f"ZonalFile.{name} is not telemetry-wrapped"
+
+
+@pytest.mark.asyncio
+async def test_zonal_file_async_fetch_range_propagates_caller_framework():
+    """Verify ZonalFile's own background prefetch coroutine inherits the file's framework."""
+    import unittest.mock as mock
+
+    from gcsfs.zonal_file import ZonalFile
+
+    captured_context = {}
+
+    async def fake_concurrent_mrd_fetch(*args, **kwargs):
+        captured_context.update(get_telemetry_context())
+        return b"data"
+
+    f = ZonalFile.__new__(ZonalFile)
+    f.closed = True  # Skip finalizer cleanup for this partially-initialized file
+    f.caller_framework = "jax"
+    f.mrd_pool = None
+    f.gcsfs = mock.MagicMock()
+    f.gcsfs._concurrent_mrd_fetch = mock.AsyncMock(
+        side_effect=fake_concurrent_mrd_fetch
+    )
+
+    assert await f._async_fetch_range(0, 10) == b"data"
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "jax"
+    assert get_telemetry_context() == {}
+
+
+def test_zonal_file_write_propagates_caller_framework():
+    """Verify ZonalFile.write (gRPC append on the loop thread) runs with the file's framework."""
+    import unittest.mock as mock
+
+    from gcsfs.zonal_file import ZonalFile
+
+    captured_context = {}
+
+    async def fake_append(data):
+        captured_context.update(get_telemetry_context())
+
+    f = ZonalFile.__new__(ZonalFile)
+    f.closed = False
+    f.mode = "wb"
+    f.forced = False
+    f.loc = 0
+    f.caller_framework = "ray"
+    f.aaow = mock.MagicMock()
+    f.aaow.append = fake_append
+    f.gcsfs = mock.MagicMock()
+    f.gcsfs.loop = fsspec.asyn.get_loop()
+    f._ensure_aaow = lambda: None
+    try:
+        assert f.write(b"abc") == 3
+    finally:
+        f.closed = True
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+    assert get_telemetry_context() == {}
 
 
 def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkeypatch):
-    """Verify that GCSFile.caller_framework caches empty string when None and avoids repeated detect calls."""
+    """Verify GCSFile.caller_framework caches "" when undetected so file methods never re-detect."""
     from gcsfs.core import GCSFile, GCSFileSystem
 
     detect_count = 0
@@ -851,19 +1123,18 @@ def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkey
             return None
 
     tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
-    monkeypatch.setattr("gcsfs.core.default_usage_tracker", tracker)
     monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
 
-    fs = GCSFileSystem(token="anon")
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
     f = GCSFile(fs, "bucket/test.txt", mode="wb")
 
-    # Initialized once during GCSFile.__init__
+    # Detected once during GCSFile.__init__ and cached as the "" negative sentinel
     assert detect_count == 1
     assert f.caller_framework == ""
 
-    # Subsequent reads of property must be O(1) without re-running detect()
-    for _ in range(10):
-        assert f.caller_framework == ""
+    # Wrapped file methods reuse the cached value instead of re-running detection
+    f.write(b"data")
+    f.tell()
     assert detect_count == 1
     f.closed = True
 
