@@ -70,8 +70,7 @@ run_pytest() {
 }
 
 raise_fd_limit() {
-  # DirectPath gRPC xDS channels (especially on regional RCU buckets where xDS
-  # opens subchannels across both regional and zonal backends) can exceed 4096 FDs.
+  # DirectPath gRPC xDS channels can exceed the default 4096 FD limit.
   local target=65536
   local soft hard
   soft=$(ulimit -Sn)

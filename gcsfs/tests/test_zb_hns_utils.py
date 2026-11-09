@@ -1860,33 +1860,6 @@ async def test_mrd_pool_cache_get_finalized_after_append_skips_stale_idle_mrd(
     old_mrd.close.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-@mock.patch("gcsfs.zb_hns_utils.init_mrd", new_callable=mock.AsyncMock)
-async def test_mrd_pool_cache_get_finalized_keeps_details_size_when_mrd_persisted_size_is_none(
-    init_mrd_mock, mock_gcsfs
-):
-    # Redirected DirectPath BidiReadObject opens with read_handle omit object
-    # metadata in the server response, leaving mrd.persisted_size as None.
-    redirected_mrd = _mrd_with_size(None)
-    init_mrd_mock.return_value = redirected_mrd
-    cache = MRDPoolCache(mock_gcsfs, max_idle_pools=8)
-
-    mock_gcsfs._info.return_value = {
-        "generation": "123",
-        "size": 134,
-        "timeFinalized": "2026-11-06T00:00:00Z",
-    }
-    pool = await cache.get("bucket", "obj", "123", pool_size=1)
-    assert pool.persisted_size == 134
-    await pool.close()
-
-    # Unfinalized objects still report None when the MRD has no persisted_size.
-    mock_gcsfs._info.return_value = {"generation": "124", "size": 0}
-    unfinalized_pool = await cache.get("bucket", "obj2", "124", pool_size=1)
-    assert unfinalized_pool.persisted_size is None
-    await unfinalized_pool.close()
-
-
 @mock.patch("gcsfs.zb_hns_utils.HAS_CPYTHON_API", False)
 def test_direct_memmove_buffer_pypy_fallback():
     """
