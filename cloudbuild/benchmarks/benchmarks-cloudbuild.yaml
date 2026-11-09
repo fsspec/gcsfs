@@ -153,6 +153,10 @@ steps:
         ${_SKIP_IF_FAILED}
         source /workspace/build_vars.env
 
+        # Initialize the gcloud config before the parallel gcloud calls below so
+        # they do not race to create it.
+        gcloud config list > /dev/null
+
         # Create Test Buckets, in parallel
         pids=()
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
@@ -502,6 +506,10 @@ steps:
       - |
         set -e
         source /workspace/build_vars.env
+
+        # Initialize the gcloud config before the parallel gcloud calls below so
+        # they do not race to create it.
+        gcloud config list > /dev/null || true
 
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
           (

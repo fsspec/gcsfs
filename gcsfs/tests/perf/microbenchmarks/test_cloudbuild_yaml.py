@@ -200,6 +200,8 @@ with open({str(calls_file)!r}, "a", encoding="utf-8") as f:
     calls = [
         json.loads(line) for line in calls_file.read_text(encoding="utf-8").splitlines()
     ]
+    # gcloud config must be initialized before the parallel bucket jobs start.
+    assert calls[0] == ["config", "list"]
 
     std_bucket_calls = [
         c
@@ -425,6 +427,7 @@ sys.exit(0)
     calls = [
         json.loads(line) for line in calls_file.read_text(encoding="utf-8").splitlines()
     ]
+    assert calls[0] == ["config", "list"]
     assert any(
         c[:5] == ["alpha", "storage", "buckets", "rapid-caches", "disable"]
         and "test-pfx-standard-rcu-abcdef12/us-central1-c" in c
