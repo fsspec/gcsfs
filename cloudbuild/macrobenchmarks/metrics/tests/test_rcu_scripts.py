@@ -38,6 +38,8 @@ RCU_TYPES = [
     "hns_rcu_warm",
     "hns_rcu_cold",
 ]
+SEED = "gs://ckpt-bucket/seed/buildid-test-seed/model.ckpt"
+GiB = 1 << 30
 
 # STUB_FAIL is a regex matched against the arguments; the STUB_* outputs are
 # printed verbatim.
@@ -164,6 +166,24 @@ def _add_build_vars(env, **values):
     with open(env["BUILD_VARS_FILE"], "a") as f:
         for name, value in values.items():
             f.write(f"export {name}={value}\n")
+
+
+def _job(env):
+    """The one Job applied with kubectl: (job, pod spec, container)."""
+    manifests = [
+        m for m in yaml.safe_load_all(Path(env["STUB_MANIFESTS"]).read_text()) if m
+    ]
+    (job,) = [m for m in manifests if m["kind"] == "Job"]
+    pod = job["spec"]["template"]["spec"]
+    (container,) = pod["containers"]
+    return job, pod, container
+
+
+def test_rcu_steps_run_after_provisioning_and_seeding_and_before_the_clock():
+    assert sorted(STEPS["rcu-stage"]["waitFor"]) == ["create-buckets", "create-cluster"]
+    assert STEPS["seed-checkpoint"]["waitFor"] == ["rcu-stage"]
+    assert STEPS["rcu-prepare-reads"]["waitFor"] == ["seed-checkpoint"]
+    assert STEPS["run-workload"]["waitFor"] == ["rcu-prepare-reads"]
 
 
 # --- init-variables -------------------------------------------------------
@@ -426,3 +446,281 @@ def test_reaper_deletes_old_run_buckets_and_disables_their_caches(env):
         "gs://pfx-macrobench-checkpoint-aaaaaaaa",
         "gs://pfx-macrobench-dataset-bbbbbbbb",
     ]
+
+
+# --- rcu-stage / rcu-prepare-reads ----------------------------------------
+
+
+@pytest.mark.parametrize("bucket_type", ["regional", "zonal", "hns"])
+@pytest.mark.parametrize("step", ["rcu-stage", "rcu-prepare-reads"])
+def test_rcu_steps_do_nothing_for_non_rcu_types(env, step, bucket_type):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    proc, calls = _run_step(step, env, _BUCKET_TYPE=bucket_type)
+
+    assert proc.returncode == 0, proc.stderr
+    assert calls == []
+
+
+def test_rcu_stage_z_copies_the_dataset_in_a_job_on_the_workload_pool(env):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    proc, calls = _run_step(
+        "rcu-stage",
+        env,
+        _BUCKET_TYPE="hns_rcu_z",
+        STUB_LIST="a.parquet\tRAPID\nsub/b.parquet\tRAPID",
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _failures(env) == []
+    job, pod, container = _job(env)
+    assert job["spec"]["backoffLimit"] == 0
+    assert pod["nodeSelector"] == {"cloud.google.com/gke-nodepool": "test-machine"}
+    assert container["image"] == "test-image:1"
+    assert container["args"] == [
+        "stage-rapid",
+        "gs://src-bucket",
+        "gs://dataset-bucket/",
+    ]
+    # The RAPID check lists the staged objects after the Job finished.
+    (listing,) = _calls(calls, "gcloud storage objects list")
+    assert listing.startswith("gcloud storage objects list gs://dataset-bucket/** ")
+    assert calls.index(listing) > calls.index(_calls(calls, "kubectl get job ")[-1])
+
+
+def test_rcu_job_installs_requirements_then_runs_the_mounted_prepare_py(env, tmp_path):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+    proc, calls = _run_step(
+        "rcu-stage", env, _BUCKET_TYPE="standard_rcu_z", STUB_LIST="a\tRAPID"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    _, pod, container = _job(env)
+
+    # The ConfigMap made from rcu/prepare.py is what the container mounts at /rcu.
+    (create_configmap,) = _calls(calls, "kubectl create configmap ")
+    configmap = create_configmap.split()[3]
+    source = create_configmap.split("--from-file=prepare.py=")[1].split()[0]
+    assert (
+        REPO / source
+    ).resolve() == REPO / "cloudbuild/macrobenchmarks/rcu/prepare.py"
+    (volume,) = pod["volumes"]
+    (mount,) = container["volumeMounts"]
+    assert volume["configMap"]["name"] == configmap
+    assert (mount["name"], mount["mountPath"]) == (volume["name"], "/rcu")
+
+    # Run the container command with stub pip3/python3.
+    container_bin = tmp_path / "container_bin"
+    container_bin.mkdir()
+    for tool in ("pip3", "python3"):
+        stub = container_bin / tool
+        stub.write_text(_stub(f'echo "{tool} $*" >> "{tmp_path}/container.log"'))
+        stub.chmod(0o755)
+    container_env = {e["name"]: e["value"] for e in container["env"]}
+    subprocess.run(
+        container["command"] + container["args"],
+        env={"PATH": f"{container_bin}:/usr/bin:/bin", **container_env},
+        check=True,
+    )
+    assert (tmp_path / "container.log").read_text().splitlines() == [
+        "pip3 install --no-cache-dir gcsfs-under-test other-pkg",
+        "python3 /rcu/prepare.py stage-rapid gs://src-bucket gs://dataset-bucket/",
+    ]
+
+
+@pytest.mark.parametrize(
+    "listing", ["", "a.parquet\tRAPID\nb.parquet\tSTANDARD"], ids=["empty", "standard"]
+)
+def test_rcu_stage_z_fails_unless_every_staged_object_is_rapid(env, listing):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    proc, _ = _run_step(
+        "rcu-stage", env, _BUCKET_TYPE="standard_rcu_z", STUB_LIST=listing
+    )
+
+    assert proc.returncode != 0
+    assert _failures(env) == ["rcu-stage"]
+
+
+@pytest.mark.parametrize("status", ["/1", "/"], ids=["failed", "never-finished"])
+def test_rcu_stage_records_failure_and_prints_logs_when_the_job_fails(env, status):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    proc, calls = _run_step(
+        "rcu-stage", env, _BUCKET_TYPE="standard_rcu_z", STUB_JOB_STATUS=status
+    )
+
+    assert proc.returncode != 0
+    assert _failures(env) == ["rcu-stage"]
+    assert _calls(calls, "kubectl logs job/buildid-test-rcu-")
+    assert _calls(calls, "gcloud storage objects list") == []
+
+
+def test_rcu_stage_records_failure_when_the_job_cannot_be_created(env):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    proc, calls = _run_step(
+        "rcu-stage", env, _BUCKET_TYPE="standard_rcu_z", STUB_FAIL="^apply"
+    )
+
+    assert proc.returncode != 0
+    assert _failures(env) == ["rcu-stage"]
+    assert _calls(calls, "kubectl get job") == []
+
+
+@pytest.mark.parametrize(
+    ("bucket_type", "listing", "failures"),
+    [
+        ("standard_rcu_warm", "a.parquet\tSTANDARD", []),
+        ("hns_rcu_cold", "a.parquet\tSTANDARD", []),
+        ("standard_rcu_warm", "a.parquet\tRAPID", ["rcu-stage"]),
+    ],
+)
+def test_rcu_stage_checks_warm_and_cold_datasets_are_standard_by_listing(
+    env, bucket_type, listing, failures
+):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    _, calls = _run_step("rcu-stage", env, _BUCKET_TYPE=bucket_type, STUB_LIST=listing)
+
+    assert _failures(env) == failures
+    (listing_call,) = _calls(calls, "gcloud storage objects list")
+    assert listing_call.startswith(
+        "gcloud storage objects list gs://dataset-bucket/** "
+    )
+    assert _calls(calls, "kubectl") == []
+
+
+@pytest.mark.parametrize(
+    ("listing", "failures"),
+    [("model.ckpt\tRAPID", []), ("model.ckpt\tSTANDARD", ["rcu-prepare-reads"])],
+)
+def test_prepare_reads_z_checks_the_seed_checkpoint_is_rapid(env, listing, failures):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    _, calls = _run_step(
+        "rcu-prepare-reads", env, _BUCKET_TYPE="standard_rcu_z", STUB_LIST=listing
+    )
+
+    assert _failures(env) == failures
+    (listing_call,) = _calls(calls, "gcloud storage objects list")
+    assert listing_call.startswith(f"gcloud storage objects list {SEED}** ")
+    assert _calls(calls, "kubectl") == []
+
+
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_z", "hns_rcu_cold"])
+def test_prepare_reads_does_nothing_for_fresh_z_and_cold_runs(env, bucket_type):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    proc, calls = _run_step("rcu-prepare-reads", env, _BUCKET_TYPE=bucket_type)
+
+    assert proc.returncode == 0, proc.stderr
+    assert calls == []
+
+
+def test_prepare_reads_warm_reads_dataset_and_seed_then_waits_for_ingest(env):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    proc, calls = _run_step(
+        "rcu-prepare-reads",
+        env,
+        _BUCKET_TYPE="hns_rcu_warm",
+        STUB_LIST="model.ckpt\tSTANDARD",
+        STUB_DU=f"{5 * GiB}    gs://dataset-bucket/\n{45 * GiB}    {SEED}",
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _failures(env) == []
+    _, pod, container = _job(env)
+    assert pod["nodeSelector"] == {"cloud.google.com/gke-nodepool": "test-machine"}
+    assert container["args"] == ["warm", "gs://dataset-bucket/", SEED]
+    (seed_check,) = _calls(calls, "gcloud storage objects list")
+    assert seed_check.startswith(f"gcloud storage objects list {SEED}** ")
+    assert calls.index(seed_check) < calls.index(_calls(calls, "kubectl apply")[0])
+    (du,) = _calls(calls, "gcloud storage du")
+    assert du.split()[-2:] == ["gs://dataset-bucket/", SEED]
+    # 90 s + 1.5 s per GiB read (50 GiB), after the Job finished.
+    assert calls[-1] == "sleep 165"
+
+
+def test_prepare_reads_warm_fresh_run_reads_only_the_dataset(env):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    proc, calls = _run_step(
+        "rcu-prepare-reads",
+        env,
+        _BUCKET_TYPE="standard_rcu_warm",
+        STUB_DU=f"{5 * GiB}    gs://dataset-bucket/",
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    _, _, container = _job(env)
+    assert container["args"] == ["warm", "gs://dataset-bucket/"]
+    assert _calls(calls, "gcloud storage objects list") == []
+    assert calls[-1] == "sleep 97"
+
+
+def test_prepare_reads_warm_settle_override_skips_sizing(env):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    proc, calls = _run_step(
+        "rcu-prepare-reads",
+        env,
+        _BUCKET_TYPE="standard_rcu_warm",
+        _RCU_WARMUP_SETTLE_SECONDS="7",
+        STUB_LIST="model.ckpt\tSTANDARD",
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _calls(calls, "gcloud storage du") == []
+    assert calls[-1] == "sleep 7"
+
+
+def test_prepare_reads_cold_restore_rewrites_the_dataset_and_copies_the_seed(env):
+    _add_build_vars(
+        env,
+        RUN_DATASET_PATH="gs://dataset-bucket/data",
+        SEEDED_CKPT_PATH=SEED,
+        DATASET_SRC_IS_RAPID="no",
+    )
+
+    proc, calls = _run_step(
+        "rcu-prepare-reads",
+        env,
+        _BUCKET_TYPE="standard_rcu_cold",
+        _DATASET_PATH="gs://src-bucket/data",
+        STUB_LIST="model.ckpt\tSTANDARD",
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _failures(env) == []
+    (seed_check,) = _calls(calls, "gcloud storage objects list")
+    assert seed_check.startswith(f"gcloud storage objects list {SEED}** ")
+    # rsync would skip objects that are already there, so delete them first.
+    (delete,) = _calls(calls, "gcloud storage rm")
+    assert delete.startswith("gcloud storage rm gs://dataset-bucket/data/**")
+    assert _copies(calls) == [
+        "gcloud storage rsync --recursive gs://src-bucket/data gs://dataset-bucket/data",
+        f"gcloud storage cp --recursive {SEED} gs://ckpt-bucket/seed-cold/",
+    ]
+    assert calls.index(delete) < calls.index(_copies(calls)[0])
+    assert (
+        _build_var(env, "SEEDED_CKPT_PATH") == "gs://ckpt-bucket/seed-cold/model.ckpt"
+    )
+    assert _calls(calls, "kubectl") == []
+
+
+def test_prepare_reads_cold_records_failure_when_the_dataset_copy_fails(env):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    proc, _ = _run_step(
+        "rcu-prepare-reads",
+        env,
+        _BUCKET_TYPE="hns_rcu_cold",
+        STUB_LIST="model.ckpt\tSTANDARD",
+        STUB_FAIL="storage rsync",
+    )
+
+    assert proc.returncode != 0
+    assert _failures(env) == ["rcu-prepare-reads"]
+    assert _build_var(env, "SEEDED_CKPT_PATH") == SEED

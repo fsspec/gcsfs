@@ -124,6 +124,77 @@ copy_dataset_into_run_bucket() {
   fi
 }
 
+# Fail unless every object at PATH (an object or a prefix) has storage class
+# CLASS. Lists the objects instead of describing each one: a GET from the cache
+# zone could start ingesting the object.
+verify_storage_class() {
+  local path="$1" want="$2" listing
+  listing=$(gcloud storage objects list "${path}**" --format="value(name,storage_class)")
+  if [ -z "$listing" ]; then
+    echo "ERROR: no objects at $path." >&2
+    return 1
+  fi
+  if awk -F'\t' -v want="$want" '$2 != want' <<< "$listing" | grep .; then
+    echo "ERROR: the objects above at $path are not $want." >&2
+    return 1
+  fi
+  echo "All $(wc -l <<< "$listing") objects at $path are $want."
+}
+
+# Run ../rcu/prepare.py with the given arguments in a Job on the workload node
+# pool, which is in ${_ZONE} (the RCU cache zone), and wait for it.
+# Usage: run_rcu_job <name> <prepare.py args...>
+run_rcu_job() {
+  local job="${RUN_ID}-rcu-$1" status="" i
+  shift
+  gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}"
+  kubectl create configmap "$job" --from-file=prepare.py="$(dirname "${BASH_SOURCE[0]}")/../rcu/prepare.py"
+  kubectl apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $job
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: default
+      nodeSelector:
+        cloud.google.com/gke-nodepool: "${_MACHINE_TYPE}"
+      containers:
+        - name: prepare
+          image: "${_IMAGE}"
+          command:
+            - bash
+            - -c
+            - 'pip3 install --no-cache-dir \$REQUIREMENTS && python3 /rcu/prepare.py "\$@"'
+            - prepare
+          args:
+$(printf '            - "%s"\n' "$@")
+          env:
+            - name: REQUIREMENTS
+              value: "${_REQUIREMENTS}"
+          volumeMounts:
+            - name: rcu
+              mountPath: /rcu
+      volumes:
+        - name: rcu
+          configMap:
+            name: $job
+EOF
+  for ((i = 0; i < 360; i++)); do
+    status=$(kubectl get job "$job" -o jsonpath='{.status.succeeded}/{.status.failed}' || true)
+    [[ "$status" == 1/* || "$status" == */1 ]] && break
+    sleep 10
+  done
+  kubectl logs "job/$job" || true
+  if [[ "$status" != 1/* ]]; then
+    echo "ERROR: Job $job did not succeed (succeeded/failed: '$status')." >&2
+    return 1
+  fi
+}
+
 shared_workload_helm_args() {
   SHARED_HELM_ARGS=(
     --set gcsfs.datasetPath="${RUN_DATASET_PATH:-${_DATASET_PATH}}"

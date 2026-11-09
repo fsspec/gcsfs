@@ -145,6 +145,22 @@ steps:
     args: ["cloudbuild/macrobenchmarks/scripts/create_cluster.sh"]
     waitFor: ["init-variables"]
 
+  # *_rcu_* only: stage the dataset in the state the bucket type measures.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "rcu-stage"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_DATASET_PATH=${_DATASET_PATH}"
+      - "_IMAGE=${_IMAGE}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
+    args: ["cloudbuild/macrobenchmarks/scripts/rcu_stage.sh"]
+    waitFor: ["create-cluster", "create-buckets"]
+
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "seed-checkpoint"
     entrypoint: "bash"
@@ -175,7 +191,26 @@ steps:
       - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
       - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/seed_checkpoint.sh"]
-    waitFor: ["create-cluster", "create-buckets"]
+    waitFor: ["rcu-stage"]
+
+  # *_rcu_* only: put the seed checkpoint and the dataset in the state the
+  # bucket type measures (warm-up reads, or fresh copies for cold) before
+  # run-workload starts the clock.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "rcu-prepare-reads"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_DATASET_PATH=${_DATASET_PATH}"
+      - "_IMAGE=${_IMAGE}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
+      - "_RCU_WARMUP_SETTLE_SECONDS=${_RCU_WARMUP_SETTLE_SECONDS}"
+    args: ["cloudbuild/macrobenchmarks/scripts/rcu_prepare_reads.sh"]
+    waitFor: ["seed-checkpoint"]
 
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-workload"
@@ -212,7 +247,7 @@ steps:
       - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
       - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/run_workload.sh"]
-    waitFor: ["seed-checkpoint"]
+    waitFor: ["rcu-prepare-reads"]
 
   # Runs our Python metrics code, so it uses a pinned Python image: the gcloud
   # image deliberately ships no system python3/pip3. It must not call gcloud;
