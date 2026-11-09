@@ -724,3 +724,27 @@ def test_prepare_reads_cold_records_failure_when_the_dataset_copy_fails(env):
     assert proc.returncode != 0
     assert _failures(env) == ["rcu-prepare-reads"]
     assert _build_var(env, "SEEDED_CKPT_PATH") == SEED
+
+
+# --- seed-checkpoint ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("bucket_type", "force_http"),
+    [
+        ("standard_rcu_warm", True),
+        ("hns_rcu_cold", True),
+        ("standard_rcu_z", False),
+        ("regional", False),
+    ],
+)
+def test_seed_release_writes_over_http_only_for_warm_and_cold(
+    env, bucket_type, force_http
+):
+    proc, calls = _run_step(
+        "seed-checkpoint", env, _BUCKET_TYPE=bucket_type, STUB_LS=SEED
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (install,) = _calls(calls, "helm install")
+    assert ("gcsfs.forceHttp=true" in install) == force_http

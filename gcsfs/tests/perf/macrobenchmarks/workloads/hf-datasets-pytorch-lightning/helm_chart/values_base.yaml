@@ -75,8 +75,10 @@ workload:
 
 # gcsfs-only storage configuration (gs:// via gcsfs/fsspec). The experimental
 # zonal-bucket/HNS path is on by default in gcsfs (GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT
-# defaults to "true"), so it is intentionally not set here.
+# defaults to "true"); forceHttp turns it off, e.g. so the seed release of the
+# *_rcu_warm/*_rcu_cold runs writes STANDARD objects to a Rapid Cache Ultra bucket.
 gcsfs:
   datasetPath: ""
   ckptWritePath: ""
   ckptLoadPath: ""
+  forceHttp: false
