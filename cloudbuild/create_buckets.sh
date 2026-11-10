@@ -98,6 +98,7 @@ create_rapid_cache_with_retry() {
     local cache_zone="$2"
     local attempt=0
     local output
+    local state
 
     until output="$(gcloud alpha storage buckets rapid-caches create "${bucket_uri}" "${cache_zone}" \
         --project="${PROJECT_ID}" \
@@ -106,9 +107,16 @@ create_rapid_cache_with_retry() {
         --no-async \
         --quiet 2>&1)"; do
         echo "${output}" >&2
-        # An earlier attempt may have created the cache before it failed.
+        # An earlier attempt may have created the cache before it failed, so
+        # wait for that cache to run instead of treating it as ready.
         if (( attempt > 0 )) && grep -qi "already exists" <<< "${output}"; then
-            return 0
+            for _ in $(seq 1 60); do
+                state="$(gcloud alpha storage buckets rapid-caches describe "${bucket_uri#gs://}/${cache_zone}" \
+                    --project="${PROJECT_ID}" --format='value(state)' 2>/dev/null || true)"
+                [[ "${state^^}" == RUNNING ]] && return 0
+                [[ -n "${state}" && "${state^^}" != CREATING ]] && break
+                sleep 5
+            done
         fi
         attempt=$((attempt + 1))
         if (( attempt >= BUCKET_CREATE_MAX_ATTEMPTS )); then
