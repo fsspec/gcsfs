@@ -1,3 +1,4 @@
+import logging
 import multiprocessing
 import os
 
@@ -290,6 +291,21 @@ class _FakeExtendedGCS(_FakeGCS):
         self.closed.append("grpc")
 
 
+def test_close_logs_a_failed_grpc_close_and_still_closes_the_session(caplog):
+    fs = _FakeExtendedGCS({})
+
+    async def fail():
+        raise RuntimeError("grpc close failed")
+
+    fs._close_resources = fail
+
+    with caplog.at_level(logging.WARNING):
+        rcu._close(fs)
+
+    assert fs.closed == ["session"]
+    assert any("grpc close failed" in rec.message for rec in caplog.records)
+
+
 @pytest.fixture
 def core_fs(monkeypatch):
     """Serves _FakeGCS instances as gcsfs.core.GCSFileSystem; records their kwargs."""
@@ -349,6 +365,13 @@ def test_assert_storage_class_names_objects_with_another_class(core_fs):
     assert core_fs.fake.closed == ["session"]
 
 
+def test_assert_storage_class_fails_on_an_empty_prefix(core_fs):
+    core_fs.fake = _FakeGCS({})
+
+    with pytest.raises(AssertionError, match="no objects"):
+        rcu.assert_storage_class(_PREFIX, "standard_rcu_z")
+
+
 @pytest.mark.parametrize(
     "prefix, bucket_type",
     [
@@ -405,8 +428,8 @@ def test_warm_if_needed_reads_one_mib_of_each_object_then_settles(
         ("b/case/data/small", 0, 100),
     ]
     assert url_to_fs.fake.closed == ["grpc", "session"]
-    # 90 s + 1.5 s per staged GiB.
-    assert sleeps == [pytest.approx(94.5)]
+    # 120 s + 1.5 s per staged GiB.
+    assert sleeps == [pytest.approx(124.5)]
 
 
 def test_warm_if_needed_settle_can_be_overridden(url_to_fs, monkeypatch):

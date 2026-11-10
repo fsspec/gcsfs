@@ -162,7 +162,7 @@ cache state reads start from:
 
 - `z`: the corpus or checkpoint is written as `RAPID` objects.
 - `warm`: it is written as `STANDARD` objects, and the first MiB of each object
-  is read once before timing, followed by a wait of 90 s + 1.5 s per GiB
+  is read once before timing, followed by a wait of 120 s + 1.5 s per GiB
   (`GCSFS_SUBSYSTEM_RCU_WARM_SETTLE_SECONDS` overrides it).
 - `cold`: it is written as `STANDARD` objects and not read before timing.
 

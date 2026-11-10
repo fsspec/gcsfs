@@ -71,10 +71,19 @@ def disable(fs, bucket, zone):
 
 
 def _close(fs):
-    """Close a fresh gcsfs instance's gRPC clients and HTTP session."""
+    """Close a fresh gcsfs instance's gRPC clients and HTTP session.
+
+    Logs errors instead of raising them, since it runs in finally blocks.
+    """
     if hasattr(fs, "_close_resources"):
-        fsspec.asyn.sync(fs.loop, fs._close_resources)
-    fs.close_session(fs.loop, fs._session)
+        try:
+            fsspec.asyn.sync(fs.loop, fs._close_resources)
+        except Exception as exc:
+            logging.warning("could not close the gcsfs gRPC clients: %s", exc)
+    try:
+        fs.close_session(fs.loop, fs._session)
+    except Exception as exc:
+        logging.warning("could not close the gcsfs HTTP session: %s", exc)
 
 
 def wait_for_rcu_layout(
@@ -155,10 +164,13 @@ def assert_storage_class(prefix, bucket_type):
         listing = fs.find(prefix, detail=True)
     finally:
         _close(fs)
+    objects = {name: info for name, info in listing.items() if not name.endswith("/")}
+    if not objects:
+        raise AssertionError(f"no objects found under {prefix} to check for {want}")
     wrong = sorted(
         f"{name} ({info.get('storageClass')})"
-        for name, info in listing.items()
-        if not name.endswith("/") and info.get("storageClass") != want
+        for name, info in objects.items()
+        if info.get("storageClass") != want
     )
     if wrong:
         raise AssertionError(
@@ -174,8 +186,10 @@ def warm_if_needed(prefix, bucket_type, *, sleep=time.sleep):
     so this reads the first MiB of each object. It reads through a fresh instance and
     closes it: a read stream opened before admission keeps reading regional storage,
     so the timed reads must not reuse it. Admission has no completion signal, so it
-    then sleeps 90 s + 1.5 s per GiB under prefix (a lone 1 GiB object took 77 s, a
-    100 GiB one 211 s), or GCSFS_SUBSYSTEM_RCU_WARM_SETTLE_SECONDS if set.
+    then sleeps 120 s + 1.5 s per GiB under prefix (a lone 1 GiB object took 77 s, a
+    100 GiB one 211 s), or GCSFS_SUBSYSTEM_RCU_WARM_SETTLE_SECONDS if set. The 120 s
+    floor also keeps the warm-up reads out of the case's Cloud Monitoring window
+    when they are reported a minute late.
     """
     if rcu_state(bucket_type) != "warm" or not str(prefix).startswith("gs://"):
         return
@@ -198,7 +212,7 @@ def warm_if_needed(prefix, bucket_type, *, sleep=time.sleep):
     finally:
         _close(fs)
     override = os.environ.get("GCSFS_SUBSYSTEM_RCU_WARM_SETTLE_SECONDS")
-    settle = float(override) if override else 90 + 1.5 * sum(sizes.values()) / 2**30
+    settle = float(override) if override else 120 + 1.5 * sum(sizes.values()) / 2**30
     logging.info(
         "read %d objects under %s; settling %.0f s", len(sizes), prefix, settle
     )
