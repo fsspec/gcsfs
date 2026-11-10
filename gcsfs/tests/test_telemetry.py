@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import inspect
 import os
 import sys
@@ -13,7 +14,9 @@ import fsspec.spec
 import pytest
 
 import gcsfs.telemetry.manager as manager_mod
+from gcsfs.telemetry import schema as telemetry_schema
 from gcsfs.telemetry.context import (
+    GRPC_METADATA_KEY,
     Dimension,
     get_telemetry_context,
     reset_telemetry_context,
@@ -21,6 +24,12 @@ from gcsfs.telemetry.context import (
     set_telemetry_context,
 )
 from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
+from gcsfs.telemetry.features_proto import (
+    GcsfsEnvironment,
+    GcsfsFeatures,
+    GcsfsFramework,
+    GcsfsMethod,
+)
 from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
@@ -1231,3 +1240,136 @@ async def test_gcsfs_async_wrapper_super_resolution():
         out = await sub_fs._cat_ranges(["test-bucket/f1.txt"], [0], [5])
         assert out == [b"patched"]
         mock_super.assert_awaited_once()
+
+
+# ============================================================================
+# 7. Structured Feature Encoding Tests
+# ============================================================================
+
+
+def _decode_features(encoded):
+    return GcsfsFeatures.deserialize(base64.urlsafe_b64decode(encoded))
+
+
+def test_encode_features_wire_parity(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    full_tokens = {
+        Dimension.METHOD.value: "cat",
+        Dimension.FRAMEWORK.value: "pandas",
+        Dimension.ENVIRONMENT.value: "gke",
+        Dimension.METHOD_PARAMS.value: "recursive,detail,withdirs,prefix,cache_options",
+    }
+
+    ls_enc = telemetry_schema.encode_features({Dimension.METHOD.value: "ls"})
+    fw_enc = telemetry_schema.encode_features({Dimension.FRAMEWORK.value: "pandas"})
+    env_enc = telemetry_schema.encode_features({Dimension.ENVIRONMENT.value: "oth"})
+    full_enc = telemetry_schema.encode_features(full_tokens)
+    reversed_mp = "cache_options.prefix.withdirs.detail.recursive"
+    reordered = telemetry_schema.encode_features({**full_tokens, "mp": reversed_mp})
+    single_mp = telemetry_schema.encode_features({"mp": "cache_options"})
+    unknown_mp = telemetry_schema.encode_features({"fw": "pandas", "mp": ",.unknown.,"})
+    empty_mp = telemetry_schema.encode_features({"mp": ""})
+    non_str = telemetry_schema.encode_features({"fw": 123, "mp": ["recursive"]})
+    token = set_telemetry_context({"fw": "pandas", "mp": ""})
+    try:
+        tracker_encoded = manager_mod.default_usage_tracker.encode_features()
+    finally:
+        reset_telemetry_context(token)
+
+    full_dec = _decode_features(full_enc)
+    single_mp_dec = _decode_features(single_mp)
+    mp = full_dec.method_params
+    assert f"{Dimension.FRAMEWORK}" == "fw"
+    assert str(Dimension.METHOD_PARAMS) == "mp"
+    assert GRPC_METADATA_KEY == "x-goog-storage-gcsfs-features"
+    assert (ls_enc, fw_enc, env_enc) == ("CAE=", "EAE=", "GAM=")
+    assert reordered == full_enc
+    assert unknown_mp == "EAE="
+    assert tracker_encoded == "EAE="
+    assert empty_mp is None
+    assert non_str is None
+    assert "method_params" not in _decode_features(unknown_mp)
+    assert full_dec.method == GcsfsMethod.GCSFS_METHOD_CAT
+    assert full_dec.framework == GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
+    assert full_dec.environment == GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE
+    assert "method_params" in full_dec
+    assert (mp.recursive, mp.detail, mp.withdirs, mp.prefix, mp.cache_options) == (
+        True,
+    ) * 5
+    assert single_mp_dec.method_params.cache_options is True
+    assert "recursive" not in single_mp_dec.method_params
+
+
+def test_encode_features_opt_out_and_cache(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    cache = telemetry_schema._serialize_features
+    cache.cache_clear()
+    enc = telemetry_schema.encode_features
+    tracker = manager_mod.default_usage_tracker
+    unknown = {"fw": "unknown_lib", "mp": "bogus", "env": "", "m": "unspecified"}
+    opt_out_results = []
+    opt_out_hits = []
+    reenabled_results = []
+    token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
+
+    try:
+        unknown_before = enc(unknown)
+        size_before = cache.cache_info().currsize
+        first = tracker.encode_features()
+        second = tracker.encode_features()
+        info_warm = cache.cache_info()
+        unknown_warm = enc({"fw": "unknown_lib", "mp": "bogus", "env": ""})
+        size_after_warm_unknown = cache.cache_info().currsize
+        for env_var, env_val in (("DO_NOT_TRACK", "1"), ("GCSFS_NO_TELEMETRY", "true")):
+            monkeypatch.setenv(env_var, env_val)
+            opt_out_results.append(tracker.encode_features())
+            opt_out_hits.append(cache.cache_info().hits)
+            monkeypatch.delenv(env_var, raising=False)
+            reenabled_results.append(tracker.encode_features())
+    finally:
+        reset_telemetry_context(token)
+
+    assert unknown_before is None
+    assert size_before == 0
+    assert (first, second) == ("EAE=", "EAE=")
+    assert (info_warm.misses, info_warm.hits, info_warm.currsize) == (1, 1, 1)
+    assert unknown_warm is None
+    assert size_after_warm_unknown == 1
+    assert opt_out_results == [None, None]
+    assert opt_out_hits == [info_warm.hits, info_warm.hits + 1]
+    assert reenabled_results == ["EAE=", "EAE="]
+
+
+def _max_token(enum_cls, prefix):
+    members = (m for m in enum_cls if not m.name.endswith("_UNSPECIFIED"))
+    member = max(members, key=int)
+    return member, member.name.removeprefix(prefix).lower()
+
+
+def test_encode_features_worst_case_bounds():
+    max_method, m_tok = _max_token(GcsfsMethod, "GCSFS_METHOD_")
+    max_fw, fw_tok = _max_token(GcsfsFramework, "GCSFS_FRAMEWORK_")
+    max_env, env_tok = _max_token(GcsfsEnvironment, "GCSFS_ENVIRONMENT_")
+    tokens = {
+        Dimension.METHOD.value: m_tok,
+        Dimension.FRAMEWORK.value: fw_tok,
+        Dimension.ENVIRONMENT.value: env_tok,
+        Dimension.METHOD_PARAMS.value: "recursive,detail,withdirs,prefix,cache_options",
+    }
+
+    encoded = telemetry_schema.encode_features(tokens)
+
+    assert encoded is not None
+    decoded_bytes = base64.urlsafe_b64decode(encoded)
+    assert len(decoded_bytes) <= 256
+    assert len(encoded) <= 256
+    decoded = GcsfsFeatures.deserialize(decoded_bytes)
+    mp = decoded.method_params
+    assert decoded.method == max_method
+    assert decoded.framework == max_fw
+    assert decoded.environment == max_env
+    assert (mp.recursive, mp.detail, mp.withdirs, mp.prefix, mp.cache_options) == (
+        True,
+    ) * 5
