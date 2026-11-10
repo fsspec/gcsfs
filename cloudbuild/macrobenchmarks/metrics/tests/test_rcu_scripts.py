@@ -660,7 +660,8 @@ def test_rcu_stage_checks_warm_and_cold_datasets_are_standard_by_listing(
     assert listing_call.startswith(
         "gcloud storage objects list gs://dataset-bucket/** "
     )
-    assert _calls(calls, "kubectl") == []
+    _, _, container = _job(env)
+    assert container["args"] == ["check", "gs://dataset-bucket/", "gs://ckpt-bucket"]
 
 
 @pytest.mark.parametrize(
@@ -711,8 +712,9 @@ def test_prepare_reads_warm_reads_dataset_and_seed_then_waits_for_ingest(env):
     assert calls.index(seed_check) < calls.index(_calls(calls, "kubectl apply")[0])
     (du,) = _calls(calls, "gcloud storage du")
     assert du.split()[-2:] == ["gs://dataset-bucket/", SEED]
-    # 90 s + 1.5 s per GiB read (50 GiB), after the Job finished.
-    assert calls[-1] == "sleep 165"
+    # 120 s + 1.5 s per GiB of the warmed objects (50 GiB), after the Job
+    # finished.
+    assert calls[-1] == "sleep 195"
 
 
 def test_prepare_reads_warm_fresh_run_reads_only_the_dataset(env):
@@ -729,7 +731,21 @@ def test_prepare_reads_warm_fresh_run_reads_only_the_dataset(env):
     _, _, container = _job(env)
     assert container["args"] == ["warm", "gs://dataset-bucket/"]
     assert _calls(calls, "gcloud storage objects list") == []
-    assert calls[-1] == "sleep 97"
+    assert calls[-1] == "sleep 127"
+
+
+def test_prepare_reads_warm_records_failure_when_du_fails(env):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    proc, calls = _run_step(
+        "rcu-prepare-reads", env, _BUCKET_TYPE="hns_rcu_warm", STUB_FAIL="storage du"
+    )
+
+    assert proc.returncode != 0
+    # The ERR trap also runs in the $(...) subshell, so the step is recorded
+    # twice. check-failure dedupes the ledger.
+    assert set(_failures(env)) == {"rcu-prepare-reads"}
+    assert _calls(calls, "sleep") == []
 
 
 def test_prepare_reads_warm_settle_override_skips_sizing(env):

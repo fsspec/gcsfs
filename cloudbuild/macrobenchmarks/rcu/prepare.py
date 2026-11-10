@@ -3,6 +3,9 @@
     stage-rapid SRC DST  Copy every object under SRC to the same relative path
                          under DST. gcsfs writes RAPID objects on an RCU
                          bucket; gcloud cannot.
+    check PATH...        Fail unless gcsfs sees the bucket of every PATH as an
+                         RCU bucket. A gcsfs without RCU support reads them
+                         over HTTP.
     warm PATH...         Read the first MiB of every object under each PATH.
                          An admit-on-first-miss cache then ingests the whole
                          object, as long as the read comes from the cache zone.
@@ -42,6 +45,23 @@ def stage_rapid(fs, src, dst):
     print(f"Staged {len(names)} objects from {src} to {dst}.")
 
 
+def check(fs, paths):
+    if not hasattr(fs, "_sync_lookup_bucket_layout"):
+        raise SystemExit(
+            "The gcsfs under test has no Rapid Cache Ultra support: it would "
+            "read the run buckets over HTTP."
+        )
+    buckets = [fs.split_path(path)[0] for path in paths]
+    for bucket in buckets:
+        layout = fs._sync_lookup_bucket_layout(bucket)
+        if not getattr(layout, "is_rcu", False):
+            raise SystemExit(
+                f"gcsfs does not see bucket {bucket} as a Rapid Cache Ultra "
+                f"bucket (layout: {layout})."
+            )
+    print(f"gcsfs sees {', '.join(buckets)} as Rapid Cache Ultra buckets.")
+
+
 def warm(fs, paths):
     sizes = {}
     for path in paths:
@@ -64,12 +84,15 @@ def main(argv=None):
     stage = commands.add_parser("stage-rapid")
     stage.add_argument("src")
     stage.add_argument("dst")
+    commands.add_parser("check").add_argument("paths", nargs="+")
     commands.add_parser("warm").add_argument("paths", nargs="+")
     args = parser.parse_args(argv)
 
     fs = gcsfs.GCSFileSystem()
     if args.command == "stage-rapid":
         stage_rapid(fs, args.src, args.dst)
+    elif args.command == "check":
+        check(fs, args.paths)
     else:
         warm(fs, args.paths)
 

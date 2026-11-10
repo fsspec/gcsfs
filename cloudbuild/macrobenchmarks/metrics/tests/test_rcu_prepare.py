@@ -1,23 +1,27 @@
-"""Tests for rcu/prepare.py, the Rapid Cache Ultra staging and warm-up
+"""Tests for rcu/prepare.py, the Rapid Cache Ultra staging, check and warm-up
 commands that the rcu-stage and rcu-prepare-reads steps run in an in-cluster
 Job. A dict-backed fake stands in for gcsfs.GCSFileSystem.
 """
 
 import io
+from types import SimpleNamespace
 
 import pytest
 from rcu import prepare
 
 MiB = 1 << 20
+RCU = SimpleNamespace(is_rcu=True)
+NOT_RCU = SimpleNamespace(is_rcu=False)
 
 
 class FakeGCS:
     """Objects are named "bucket/key", as gcsfs names them, and paths may
     carry the gs:// scheme. find() matches the path itself or anything below
-    it, like gcsfs."""
+    it, like gcsfs. layouts maps a bucket name to its bucket layout."""
 
-    def __init__(self, objects):
+    def __init__(self, objects, layouts=None):
         self.objects = dict(objects)
+        self.layouts = dict(layouts or {})
         self.reads = []
 
     @staticmethod
@@ -55,11 +59,18 @@ class FakeGCS:
 
         return Writer()
 
+    def split_path(self, path):
+        bucket, _, key = self._name(path).partition("/")
+        return bucket, key, None
+
+    def _sync_lookup_bucket_layout(self, bucket):
+        return self.layouts[bucket]
+
 
 @pytest.fixture
 def fake_gcs(monkeypatch):
-    def install(objects):
-        fs = FakeGCS(objects)
+    def install(objects, layouts=None):
+        fs = FakeGCS(objects, layouts)
         monkeypatch.setattr(prepare.gcsfs, "GCSFileSystem", lambda **kwargs: fs)
         return fs
 
@@ -116,3 +127,25 @@ def test_warm_reads_at_most_one_mib_of_every_object(fake_gcs):
         ("data/a.parquet", 0, 10),
         ("data/sub/b.parquet", 0, MiB),
     ]
+
+
+def test_check_passes_when_every_bucket_is_rcu(fake_gcs):
+    # The fake raises KeyError for any other bucket name.
+    fake_gcs({}, layouts={"data": RCU, "ckpt": RCU})
+
+    prepare.main(["check", "gs://data/parquet/", "gs://ckpt"])
+
+
+def test_check_fails_when_a_bucket_is_not_rcu(fake_gcs):
+    fake_gcs({}, layouts={"data": RCU, "ckpt": NOT_RCU})
+
+    with pytest.raises(SystemExit, match="ckpt"):
+        prepare.main(["check", "gs://data/parquet/", "gs://ckpt"])
+
+
+def test_check_fails_when_gcsfs_has_no_bucket_layout_lookup(fake_gcs, monkeypatch):
+    fake_gcs({})
+    monkeypatch.delattr(FakeGCS, "_sync_lookup_bucket_layout")
+
+    with pytest.raises(SystemExit, match="no Rapid Cache Ultra support"):
+        prepare.main(["check", "gs://data/parquet/", "gs://ckpt"])

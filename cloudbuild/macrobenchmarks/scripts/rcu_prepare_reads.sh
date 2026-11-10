@@ -32,10 +32,11 @@ case "${RCU_STATE}" in
     run_rcu_job warm warm "${RUN_DATASET_PATH}" ${SEED:+"$SEED"}
     SETTLE="${_RCU_WARMUP_SETTLE_SECONDS}"
     if [ -z "$SETTLE" ]; then
-      # Ingest has no completion signal: 90 s + 1.5 s per GiB read, as in the
-      # subsystem benchmarks.
-      BYTES=$(gcloud storage du -s "${RUN_DATASET_PATH}" ${SEED:+"$SEED"} | awk '{ s += $1 } END { print s + 0 }')
-      SETTLE=$(( 90 + BYTES * 3 / 2 / 1073741824 ))
+      # Ingest has no completion signal: 120 s + 1.5 s per GiB of the warmed
+      # objects, as in the subsystem benchmarks.
+      DU=$(gcloud storage du -s "${RUN_DATASET_PATH}" ${SEED:+"$SEED"})
+      BYTES=$(awk '{ s += $1 } END { print s + 0 }' <<< "$DU")
+      SETTLE=$(( 120 + BYTES * 3 / 2 / 1073741824 ))
     fi
     echo "Waiting ${SETTLE}s for the cache to ingest the warmed objects."
     sleep "$SETTLE"

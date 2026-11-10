@@ -167,7 +167,7 @@ Before creating the triggers, set up the following in your GCP project.
 | `_WORKLOAD_TIMEOUT_SECONDS` | `14400` | Workload/JobSet completion timeout in seconds (default 4 hours). |
 | `_JOBSET_VERSION` | `v0.12.0` | JobSet controller release to install. |
 | `_SKIP_CLEANUP` | `false` | Leave infra standing after the run (for debugging). |
-| `_RCU_WARMUP_SETTLE_SECONDS` | `""` | `*_rcu_warm` only: seconds to wait after the warm-up reads. Empty means 90 + 1.5 per GiB read. |
+| `_RCU_WARMUP_SETTLE_SECONDS` | `""` | `*_rcu_warm` only: seconds to wait after the warm-up reads. Empty means 120 + 1.5 per GiB of the warmed objects. |
 
 ### Interaction notes
 
@@ -199,8 +199,8 @@ measured run reads:
 * Checkpoint saves go through gcsfs and write `RAPID` objects in all three
   states, so only `z` rows measure saves. Schedule fresh runs on `z` only.
 * Requirements: the project is allowlisted for Rapid Cache Ultra (flat buckets
-  have their own allowlist), `_ZONE` supports it, and `_CHECKPOINT_LOAD_PATH`
-  is empty.
+  have their own allowlist), `_ZONE` supports it, the gcsfs in `_REQUIREMENTS`
+  supports it (`rcu-stage` checks this), and `_CHECKPOINT_LOAD_PATH` is empty.
 * Warm rows are only meaningful where the zone ingests objects on read.
 * Bucket-level read metrics may not count bytes served by the cache. Compare
   `standard_rcu_z` with a `zonal` run before trusting the read-bytes and
