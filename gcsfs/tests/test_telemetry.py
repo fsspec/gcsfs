@@ -968,7 +968,7 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     """
     Across a Rapid (zonal) file's whole life (open -> read -> seek -> read -> info ->
     close), the caller framework is detected exactly once, on the caller thread, and
-    every operation runs with it.
+    every operation (including MRD/AAOW stream opens) runs with it.
 
     Opening for read issues a JSON API `_info` request from `ZonalFile.__init__` (MRD
     pool setup) before `GCSFile.__init__` caches `caller_framework`, so `_open` must scope
@@ -979,7 +979,9 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
     from gcsfs.tests import layouts
 
-    fw = "test-zonal-lifecycle"
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    fw = "pandas"
     data = b"0123456789"
     detector = _CallerThreadOnlyDetector(fw)
     monkeypatch.setattr(
@@ -988,6 +990,8 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     user_agents = []
     # (operation, framework in the active telemetry context) for gRPC-side operations
     grpc_ops = []
+    mrd_md = []
+    aaow_md = []
 
     async def fake_call(self, method, path, *args, **kwargs):
         user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
@@ -1003,27 +1007,50 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     async def fake_lookup_bucket_layout(self, bucket):
         return layouts.ZONAL_HIERARCHICAL
 
-    async def fake_mrd_pool_initialize(self):
-        return None
+    async def fake_get_grpc_client(self):
+        self._grpc_client = object()
+        return self._grpc_client
+
+    async def fake_create_mrd(
+        grpc_client, bucket_name, object_name, generation=None, **kwargs
+    ):
+        mrd_md.append(kwargs.get("metadata"))
+        return types.SimpleNamespace(persisted_size=len(data), close=mock.AsyncMock())
+
+    orig_mrd_pool_close = zb_hns_utils.MRDPool.close
 
     async def fake_mrd_pool_close(self):
         grpc_ops.append(("mrd_pool.close", get_telemetry_context().get("fw")))
+        await orig_mrd_pool_close(self)
 
     async def fake_cat_file(self, path, start=None, end=None, **kwargs):
         # Zonal reads go through the gRPC MRD path; record the context they run with
         grpc_ops.append(("_cat_file", get_telemetry_context().get("fw")))
         return data[start:end]
 
+    async def fake_aaow_open(**kwargs):
+        aaow_md.append(kwargs.get("metadata"))
+
+    fake_writer = types.SimpleNamespace(
+        open=fake_aaow_open,
+        flush=mock.AsyncMock(),
+        close=mock.AsyncMock(),
+        _is_stream_open=True,
+    )
+
     monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
     monkeypatch.setattr(
         ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
     )
-    monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_get_grpc_client", fake_get_grpc_client)
     monkeypatch.setattr(
-        zb_hns_utils.MRDPool, "persisted_size", len(data), raising=False
+        zb_hns_utils.AsyncMultiRangeDownloader, "create_mrd", fake_create_mrd
     )
+    monkeypatch.setattr(
+        zb_hns_utils, "AsyncAppendableObjectWriter", lambda **kwargs: fake_writer
+    )
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
 
     fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
     f = fs.open("zonal-bucket/obj", "rb", cache_type="none")
@@ -1052,6 +1079,15 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     assert all(
         ctx_fw == fw for _, ctx_fw in grpc_ops
     ), f"zonal operations ran without the framework context: {grpc_ops}"
+
+    with fs.open("zonal-bucket/obj", "wb"):
+        pass
+
+    assert detector.thread_names == [threading.current_thread().name] * 2
+    assert mrd_md == [
+        [("x-goog-api-client", "cache_type/none:e"), (GRPC_METADATA_KEY, "EAE=")]
+    ]
+    assert aaow_md == [[(GRPC_METADATA_KEY, "EAE=")]]
     assert get_telemetry_context() == {}
 
 

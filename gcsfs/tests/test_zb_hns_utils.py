@@ -11,6 +11,11 @@ from google.api_core.exceptions import FailedPrecondition, NotFound
 
 from gcsfs import zb_hns_utils
 from gcsfs.retry import GenerationMismatchError
+from gcsfs.telemetry.context import (
+    Dimension,
+    reset_telemetry_context,
+    set_telemetry_context,
+)
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool, MRDPoolCache, _close_mrds
 
 mock_grpc_client = mock.Mock()
@@ -1940,3 +1945,86 @@ async def test_mrd_methods_raise_unrelated_type_error():
             await zb_hns_utils.init_mrd(
                 mock_grpc_client, "b", "o", cache_type="readahead"
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fw, dnt, ct, exp",
+    [
+        ("pandas", False, None, [("x-goog-storage-gcsfs-features", "EAE=")]),
+        (
+            "pandas",
+            False,
+            "read",
+            [
+                ("x-goog-api-client", "cache_type/read"),
+                ("x-goog-storage-gcsfs-features", "EAE="),
+            ],
+        ),
+        ("pandas", True, "read", [("x-goog-api-client", "cache_type/read")]),
+        (None, False, None, None),
+    ],
+    ids=["features_only", "features_and_cache", "opted_out_keeps_cache", "empty"],
+)
+async def test_init_mrd_attaches_features_metadata(monkeypatch, fw, dnt, ct, exp):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    if dnt:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+    mock_mrd = mock.Mock()
+    create = mock.AsyncMock(return_value=mock_mrd)
+    monkeypatch.setattr(zb_hns_utils.AsyncMultiRangeDownloader, "create_mrd", create)
+    token = set_telemetry_context(Dimension.FRAMEWORK, fw) if fw is not None else None
+
+    try:
+        res = await zb_hns_utils.init_mrd(
+            mock_grpc_client, bucket_name, object_name, generation, cache_type=ct
+        )
+    finally:
+        if token is not None:
+            reset_telemetry_context(token)
+
+    kwargs = {"metadata": exp} if exp is not None else {}
+    assert res is mock_mrd
+    create.assert_awaited_once_with(
+        mock_grpc_client, bucket_name, object_name, generation, **kwargs
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fw, dnt, exp",
+    [
+        ("pandas", False, [("x-goog-storage-gcsfs-features", "EAE=")]),
+        ("pandas", True, None),
+        (None, False, None),
+    ],
+    ids=["features_attached", "opted_out_zero_kwargs", "empty_zero_kwargs"],
+)
+async def test_init_aaow_attaches_features_metadata(monkeypatch, fw, dnt, exp):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    if dnt:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+
+    async def _zero_arg_open():
+        pass
+
+    spec = _zero_arg_open if exp is None else None
+    writer = mock.Mock(open=mock.AsyncMock(spec=spec))
+    monkeypatch.setattr(
+        zb_hns_utils, "AsyncAppendableObjectWriter", mock.Mock(return_value=writer)
+    )
+    token = set_telemetry_context(Dimension.FRAMEWORK, fw) if fw is not None else None
+
+    try:
+        res = await zb_hns_utils.init_aaow(
+            mock_grpc_client, bucket_name, object_name, generation
+        )
+    finally:
+        if token is not None:
+            reset_telemetry_context(token)
+
+    kwargs = {"metadata": exp} if exp is not None else {}
+    assert res is writer
+    writer.open.assert_awaited_once_with(**kwargs)
