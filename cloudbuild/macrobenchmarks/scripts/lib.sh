@@ -107,6 +107,8 @@ create_rapid_cache() {
 # retries it in a later build.
 delete_bucket_and_caches() {
   local bucket="$1" cache_id
+  # An empty name would make the commands below act on every bucket (gs://).
+  [ -n "$bucket" ] || return 1
   gcloud storage rm --recursive --project="${PROJECT_ID}" "gs://$bucket" || true
   while read -r cache_id _; do
     [ -n "$cache_id" ] || continue
