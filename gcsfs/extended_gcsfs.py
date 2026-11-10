@@ -42,6 +42,7 @@ from gcsfs.core import (
 )
 from gcsfs.poller import poll_lro, unwrap_operation_result
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.telemetry.grpc import ControlPlaneTelemetryInterceptor
 from gcsfs.telemetry.wrapper import (
     _gcs_sync_wrapper,
     mirror_gcs_methods,
@@ -342,6 +343,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "credentials": self.credential,
                 "options": [("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
                 "quota_project_id": self._user_project,
+                # Prepend before transport_cls(channel=...) appends its logging interceptor.
+                "interceptors": [ControlPlaneTelemetryInterceptor()],
             }
             if self._grpc_location:
                 # Extract host:port safely (strips protocol and trailing URL paths if any).
