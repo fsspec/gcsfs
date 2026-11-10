@@ -14,6 +14,19 @@ from gcsfs.tests.perf.microbenchmarks.conftest import MB
 
 MIN_TIME_THRESHOLD = 1e-6  # 1 microsecond
 
+# Each --bucket-types value and the argparse dest of the bucket flag it needs.
+BUCKET_TYPE_TO_BUCKET_ARG = {
+    "regional": "regional_bucket",
+    "zonal": "zonal_bucket",
+    "hns": "hns_bucket",
+    "standard_rcu_z": "standard_rcu_bucket",
+    "standard_rcu_warm": "standard_rcu_bucket",
+    "standard_rcu_cold": "standard_rcu_bucket",
+    "hns_rcu_z": "hns_rcu_bucket",
+    "hns_rcu_warm": "hns_rcu_bucket",
+    "hns_rcu_cold": "hns_rcu_bucket",
+}
+
 
 def _setup_environment(args):
     """
@@ -45,6 +58,20 @@ def _setup_environment(args):
             "--standard-rcu-bucket, or --hns-rcu-bucket must be provided."
         )
         sys.exit(1)
+
+    if bucket_types:
+        bucket_args = {BUCKET_TYPE_TO_BUCKET_ARG[b_type] for b_type in bucket_types}
+        missing_flags = [
+            "--" + dest.replace("_", "-")
+            for dest in sorted(bucket_args)
+            if not getattr(args, dest, None)
+        ]
+        if missing_flags:
+            logging.error(
+                f"--bucket-types {' '.join(bucket_types)} requires "
+                f"{', '.join(missing_flags)} to be provided."
+            )
+            sys.exit(1)
 
     # Set environment variables for buckets
     os.environ["GCSFS_TEST_BUCKET"] = (
@@ -412,6 +439,7 @@ def main():
     parser.add_argument(
         "--bucket-types",
         nargs="+",
+        choices=list(BUCKET_TYPE_TO_BUCKET_ARG),
         help=(
             "Optional list of bucket_type values to run "
             "(e.g., --bucket-types standard_rcu_z standard_rcu_warm)."

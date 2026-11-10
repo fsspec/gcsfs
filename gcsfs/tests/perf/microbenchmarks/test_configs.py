@@ -862,14 +862,14 @@ def test_get_bucket_name_filters_by_benchmark_bucket_types(
 
 
 def test_rcu_bucket_types_in_shipped_yaml_configs():
-    """Verify shipped YAML configs scope RCU to flat IO groups and deduplicate reopen."""
+    """Verify shipped YAML configs scope RCU to IO groups and deduplicate reopen."""
     with (
         mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""),
         mock.patch(
             "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES", ""
         ),
     ):
-        # Read IO groups: flat RCU (z, warm, cold) only; no hns_rcu_*
+        # Read IO groups: flat and HNS RCU (z, warm, cold)
         read_cases = get_read_benchmark_cases()
         assert {c.bucket_type for c in read_cases} == {
             "regional",
@@ -877,6 +877,9 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             "standard_rcu_z",
             "standard_rcu_warm",
             "standard_rcu_cold",
+            "hns_rcu_z",
+            "hns_rcu_warm",
+            "hns_rcu_cold",
         }
         assert {c.bucket_type for c in get_cat_benchmark_cases()} == {
             "regional",
@@ -884,6 +887,9 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             "standard_rcu_z",
             "standard_rcu_warm",
             "standard_rcu_cold",
+            "hns_rcu_z",
+            "hns_rcu_warm",
+            "hns_rcu_cold",
         }
         assert {c.bucket_type for c in get_cat_ranges_benchmark_cases()} == {
             "regional",
@@ -892,14 +898,17 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             "standard_rcu_z",
             "standard_rcu_warm",
             "standard_rcu_cold",
+            "hns_rcu_z",
+            "hns_rcu_warm",
+            "hns_rcu_cold",
         }
 
         # read_reopen_fixed_duration: zonal keeps mrd_pool_sizes=[1, 4]; RCU keeps z/warm with mrd_pool_sizes=[1]
         reopen_cases = [
             c for c in read_cases if c.name.startswith("read_reopen_fixed_duration")
         ]
-        assert len(reopen_cases) == 8
-        assert len({c.name for c in reopen_cases}) == 8
+        assert len(reopen_cases) == 12
+        assert len({c.name for c in reopen_cases}) == 12
         assert {
             (c.bucket_type, c.mrd_pool_cache_size, c.mrd_pool_size)
             for c in reopen_cases
@@ -912,9 +921,13 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
             ("standard_rcu_z", 0, 1),
             ("standard_rcu_warm", 16, 1),
             ("standard_rcu_warm", 0, 1),
+            ("hns_rcu_z", 16, 1),
+            ("hns_rcu_z", 0, 1),
+            ("hns_rcu_warm", 16, 1),
+            ("hns_rcu_warm", 0, 1),
         }
 
-        # Write IO groups: flat standard_rcu_z only among RCU types
+        # Write IO groups: only *_rcu_z among RCU types
         for get_fn in (
             get_write_benchmark_cases,
             get_put_benchmark_cases,
@@ -924,6 +937,7 @@ def test_rcu_bucket_types_in_shipped_yaml_configs():
                 "regional",
                 "zonal",
                 "standard_rcu_z",
+                "hns_rcu_z",
             }
 
         # Metadata, open, and comparison groups ship without RCU bucket types

@@ -79,6 +79,51 @@ def test_main_rcu_cli_args_and_environment(cli_argv, expected_env, tmp_path):
             assert "GCSFS_BENCHMARK_BUCKET_TYPES" not in os.environ
 
 
+def test_main_rejects_unknown_bucket_type(capsys):
+    cli_argv = [
+        "run.py",
+        "--standard-rcu-bucket=std-rcu-bkt",
+        "--bucket-types",
+        "standard_rcu_wram",
+    ]
+    with (
+        mock.patch("sys.argv", cli_argv),
+        mock.patch.dict(os.environ, {}, clear=True),
+        mock.patch.object(run, "_run_benchmarks", return_value=None) as mock_run_bench,
+        mock.patch("os.makedirs"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        run.main()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert "standard_rcu_wram" in err
+    mock_run_bench.assert_not_called()
+
+
+def test_main_exits_when_bucket_type_flag_missing(caplog):
+    cli_argv = [
+        "run.py",
+        "--regional-bucket=reg-bkt",
+        "--bucket-types",
+        "regional",
+        "standard_rcu_warm",
+    ]
+    with (
+        mock.patch("sys.argv", cli_argv),
+        mock.patch.dict(os.environ, {}, clear=True),
+        mock.patch.object(run, "_run_benchmarks", return_value=None) as mock_run_bench,
+        mock.patch("os.makedirs"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        run.main()
+
+    assert exc.value.code == 1
+    assert "--standard-rcu-bucket" in caplog.text
+    mock_run_bench.assert_not_called()
+
+
 @mock.patch("subprocess.run")
 @mock.patch("os.path.isdir", return_value=True)
 def test_run_benchmarks(mock_isdir, mock_subprocess):
