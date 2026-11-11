@@ -2813,6 +2813,13 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         kwargs["consistency"] = self.consistency
         if self.timeout is not None:
             kwargs["timeout"] = self.timeout
+        if getattr(self, "_telemetry_disabled", False):
+            kwargs["_reopen_telemetry"] = None
+        else:
+            kwargs["_reopen_telemetry"] = (
+                getattr(self, "caller_framework", ""),
+                getattr(self, "caller_method", "open"),
+            )
         return kwargs
 
     def __reduce__(self):

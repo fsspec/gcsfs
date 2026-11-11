@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import os
+import pickle
 import sys
 import threading
 import types
@@ -26,6 +27,7 @@ from gcsfs.telemetry.context import (
 from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
 from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
+    _file_telemetry_context,
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
     mirror_gcs_methods,
@@ -704,7 +706,7 @@ def test_file_inherited_methods_propagate_caller_framework_across_threads(detect
             t.join()
         assert out == [b"abc"], file_cls.__name__
         assert [tokens for _, tokens in fs.seen] == [("fw/torch",)], file_cls.__name__
-        assert fs.seen_telemetry == ["cat_file"], file_cls.__name__
+        assert fs.seen_telemetry == ["open"], file_cls.__name__
     assert detector.calls == []
 
 
@@ -885,6 +887,18 @@ async def test_native_async_entrypoints_and_unwrapped_private_helper(detector):
     assert get_telemetry_context() == {}
 
 
+def test_fs_open_records_open_method_and_does_not_leak(detector):
+    """Verify `fs.open` attributes init and read calls to `open` without leaking context."""
+    fs = _DummyFS(skip_instance_cache=True)
+
+    with fs.open("bucket/a.txt", "rb") as f:
+        assert get_telemetry_context() == {}
+        assert f.read() == b"abc"
+
+    assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * 2
+    assert fs.seen_telemetry == ["open", "open"]
+
+
 def test_with_telemetry_context_tracks_open_and_preserves_outer_method(detector):
     """Verify `@with_telemetry_context` tracks `_open`, skips `_helper`, and cleans up on error."""
 
@@ -947,7 +961,9 @@ async def test_preset_framework_skips_detection_while_recording_method(detector)
 
 
 def test_has_telemetry_context_and_wrapper_exception_cleanup(detector):
-    """Verify `has_telemetry_context` states and ContextVar cleanup on wrapper exceptions."""
+    """Verify `has_telemetry_context` states and ContextVar cleanup on wrapper/init exceptions."""
+    from gcsfs.core import GCSFile, GCSFileSystem
+
     assert not has_telemetry_context()
     assert not has_telemetry_context(Dimension.METHOD)
 
@@ -967,6 +983,11 @@ def test_has_telemetry_context_and_wrapper_exception_cleanup(detector):
     failing_fs = _FailingFS(skip_instance_cache=True)
     with pytest.raises(RuntimeError, match="cat failed"):
         failing_fs.cat_file("bucket/f.txt")
+    assert get_telemetry_context() == {}
+
+    real_fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    with pytest.raises(NotImplementedError):
+        GCSFile(real_fs, "bucket/f.txt", mode="invalid")
     assert get_telemetry_context() == {}
 
 
@@ -1009,7 +1030,7 @@ def test_user_agent_excludes_method_and_respects_opt_out(monkeypatch):
 
 
 def test_custom_detector_and_dimension_filtering(detector, monkeypatch):
-    """Verify custom detectors and dimension-filtered queries skip unrelated detectors."""
+    """Verify custom detectors respect dimension filtering and file handles cache missing detectors."""
 
     class _CustomAppDetector(BaseDetector):
         name = "app"
@@ -1040,6 +1061,95 @@ def test_custom_detector_and_dimension_filtering(detector, monkeypatch):
         assert multi_tracker.get_dimension(Dimension.FRAMEWORK) == "pandas"
         assert len(detector.calls) == 1
         assert env_det.calls == 0
+
+        class _ChunkFile:
+            def __init__(self):
+                self.caller_framework = "pandas"
+                self.caller_method = "open"
+
+            def read_chunks(self):
+                return [
+                    multi_tracker.get_tokens(USER_AGENT_DIMENSIONS) for _ in range(5)
+                ]
+
+        wrap_file_methods(_ChunkFile)
+        detector.calls.clear()
+        assert _ChunkFile().read_chunks() == [["fw/pandas"]] * 5
+        assert detector.calls == []
+        assert env_det.calls == 1
+
+
+def test_opted_out_fs_and_file_reopen_suppress_telemetry(
+    detector, spied_gcs_harness, monkeypatch
+):
+    """Verify opted-out FS calls, open handles, and pickled reopens suppress active contexts."""
+    gke_env = _CountingEnvDetector()
+    fs = _DummyFS(skip_instance_cache=True)
+    core_fs = spied_gcs_harness.fs
+    detector.calls.clear()
+
+    with contextlib.ExitStack() as stack:
+        with monkeypatch.context() as mp:
+            mp.setenv("DO_NOT_TRACK", "TRUE")
+            assert fs.ls("bucket") == ["bucket"]
+            assert [tokens for _, tokens in fs.seen] == [()]
+            assert fs.seen_telemetry == [None]
+            assert detector.calls == []
+
+            spied_gcs_harness.clear()
+            opted_out_file = stack.enter_context(
+                core_fs.open(
+                    "test-bucket/file.txt", "rb", block_size=2, cache_type="blockcache"
+                )
+            )
+            assert opted_out_file._telemetry_disabled is True
+            assert opted_out_file.caller_framework == ""
+            assert opted_out_file.caller_method == ""
+            assert len(opted_out_file.read(2)) == 2
+            opted_out_payload = pickle.dumps(opted_out_file)
+            assert spied_gcs_harness.seen
+            assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
+            assert detector.calls == []
+
+        monkeypatch.setattr(
+            manager_mod,
+            "default_usage_tracker",
+            UsageMetricsTracker(detectors=[detector, gke_env]),
+        )
+        spied_gcs_harness.clear()
+        detector.calls.clear()
+        assert get_telemetry_context() == {}
+        assert len(opted_out_file.read(2)) == 2
+        assert spied_gcs_harness.seen == [((), None)]
+        assert detector.calls == []
+        assert gke_env.calls == 0
+
+        spied_gcs_harness.clear()
+        detector.calls.clear()
+        with _scoped_ctx(
+            {
+                Dimension.FRAMEWORK.value: "ray",
+                Dimension.METHOD.value: "find",
+                "region": "us",
+            }
+        ):
+            assert len(opted_out_file.read(2)) == 2
+            with _file_telemetry_context(opted_out_file):
+                assert manager_mod.default_usage_tracker.get_tokens() == []
+        assert spied_gcs_harness.seen == [((), None)]
+
+    spied_gcs_harness.clear()
+    with _scoped_ctx(
+        {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "find"}
+    ):
+        with pickle.loads(opted_out_payload) as reopened_opted_out:
+            assert reopened_opted_out._telemetry_disabled is True
+            assert len(reopened_opted_out.read(2)) == 2
+    assert spied_gcs_harness.seen
+    assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
+    assert detector.calls == []
+    assert gke_env.calls == 0
+    assert get_telemetry_context() == {}
 
 
 @pytest.mark.parametrize(
@@ -1259,10 +1369,9 @@ def test_all_parent_methods_telemetry_coverage(
         f"fw/{fw_name}" in ua for ua in captured
     ), f"operation {name} had requests missing fw/{fw_name}: {captured}"
     assert len(spied_gcs_harness.seen) > 0
-    if name not in ("open_read", "open_write"):
-        assert all(
-            m == expected_method for _, m in spied_gcs_harness.seen
-        ), f"operation {name} recorded unexpected methods: {spied_gcs_harness.seen}"
+    assert all(
+        m == expected_method for _, m in spied_gcs_harness.seen
+    ), f"operation {name} recorded unexpected methods: {spied_gcs_harness.seen}"
     # Regression guard: stack-walking must never run on the fsspec loop thread,
     # where it can't find user frames and would add per-request overhead.
     loop_thread_name = fsspec.asyn.iothread[0].name
@@ -1328,32 +1437,29 @@ def test_filesystem_methods_are_telemetry_wrapped(fs_cls_path):
     ), f"{cls_name} methods missing telemetry wrappers: {sorted(unwrapped)}"
 
 
-def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
-    """
-    Across a Rapid (zonal) file's whole life (open -> read -> seek -> read -> info ->
-    close), the caller framework is detected exactly once, on the caller thread, and
-    every operation runs with it.
-
-    Opening for read issues a JSON API `_info` request from `ZonalFile.__init__` (MRD
-    pool setup) before `GCSFile.__init__` caches `caller_framework`, so `_open` must scope
-    telemetry; afterwards the wrapped file methods reuse the cached value.
-    """
+@pytest.fixture
+def zonal_fs_harness(monkeypatch):
+    """Patch Zonal/Extended GCS hooks and record telemetry across HTTP and gRPC ops."""
     from gcsfs import zb_hns_utils
     from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
     from gcsfs.tests import layouts
 
-    fw = "test-zonal-lifecycle"
     data = b"0123456789"
-    detector = _CallerThreadOnlyDetector(fw)
-    monkeypatch.setattr(
-        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
-    )
-    user_agents = []
-    # (operation, framework in the active telemetry context) for gRPC-side operations
-    grpc_ops = []
+    user_agents, grpc_ops, captured = [], [], []
+
+    def _rec(op_name):
+        tracker = manager_mod.default_usage_tracker
+        captured.append(
+            (
+                op_name,
+                tuple(tracker.get_tokens(USER_AGENT_DIMENSIONS)),
+                tracker.get_dimension(Dimension.METHOD),
+            )
+        )
 
     async def fake_call(self, method, path, *args, **kwargs):
+        _rec("http_info")
         user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
         return {
             "kind": "storage#object",
@@ -1364,58 +1470,137 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
             "timeFinalized": "2026-01-01T00:00:00.000Z",
         }
 
-    async def fake_lookup_bucket_layout(self, bucket):
+    async def fake_layout(self, bucket):
+        _rec("layout")
         return layouts.ZONAL_HIERARCHICAL
 
-    async def fake_mrd_pool_initialize(self):
-        return None
+    async def fake_mrd_init(self):
+        _rec("mrd_init")
 
-    async def fake_mrd_pool_close(self):
-        grpc_ops.append(("mrd_pool.close", get_telemetry_context().get("fw")))
+    async def fake_mrd_close(self):
+        _rec("mrd_close")
+        grpc_ops.append(("mrd_pool.close", get_telemetry_context().copy()))
 
     async def fake_cat_file(self, path, start=None, end=None, **kwargs):
-        # Zonal reads go through the gRPC MRD path; record the context they run with
-        grpc_ops.append(("_cat_file", get_telemetry_context().get("fw")))
+        _rec("cat_file")
+        grpc_ops.append(("_cat_file", get_telemetry_context().copy()))
         return data[start:end]
 
     monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
-    monkeypatch.setattr(
-        ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
-    )
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_layout)
     monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_init)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_close)
     monkeypatch.setattr(
         zb_hns_utils.MRDPool, "persisted_size", len(data), raising=False
     )
 
     fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-    f = fs.open("zonal-bucket/obj", "rb", cache_type="none")
-    try:
-        # Open: MRD pool `_info` request is tagged; GCSFile.__init__ reused the detection
-        assert f.caller_framework == fw
-        assert user_agents, "zonal open did not issue any JSON API requests"
-        assert detector.thread_names == [threading.current_thread().name]
+    return types.SimpleNamespace(
+        fs=fs,
+        data=data,
+        user_agents=user_agents,
+        grpc_ops=grpc_ops,
+        captured=captured,
+        clear=lambda: (user_agents.clear(), grpc_ops.clear(), captured.clear()),
+    )
 
+
+def test_zonal_file_lifecycle_detects_framework_once(monkeypatch, zonal_fs_harness):
+    """Verify Rapid (zonal) file lifecycle detects framework once and honors opt-out across reopen."""
+    fw = "test-zonal-lifecycle"
+    detector = _CallerThreadOnlyDetector(fw)
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
+    )
+    fs, data = zonal_fs_harness.fs, zonal_fs_harness.data
+
+    with fs.open("zonal-bucket/obj", "rb", cache_type="none") as f:
+        assert f.caller_framework == fw
+        assert f.caller_method == "open"
+        assert zonal_fs_harness.user_agents
+        assert detector.thread_names == [threading.current_thread().name]
         assert f.read(4) == data[:4]
         f.seek(0)
         assert f.read(2) == data[:2]
         assert f.info()["size"] == len(data)
-    finally:
-        f.close()
 
-    # Detected exactly once (at open, on the caller thread) for the file's whole life
-    assert detector.thread_names == [
-        threading.current_thread().name
-    ], f"framework detection ran more than once: {detector.thread_names}"
+    assert detector.thread_names == [threading.current_thread().name]
+    assert all(f"fw/{fw}" in ua for ua in zonal_fs_harness.user_agents)
+    assert [op for op, _ in zonal_fs_harness.grpc_ops].count("_cat_file") == 2
+    assert ("mrd_pool.close", fw) in [
+        (op, ctx.get("fw")) for op, ctx in zonal_fs_harness.grpc_ops
+    ]
     assert all(
-        f"fw/{fw}" in ua for ua in user_agents
-    ), f"zonal file sent HTTP requests without the framework token: {user_agents}"
-    assert [op for op, _ in grpc_ops].count("_cat_file") == 2
-    assert ("mrd_pool.close", fw) in grpc_ops
+        ctx.get("fw") == fw and ctx.get("m") == "open"
+        for _, ctx in zonal_fs_harness.grpc_ops
+    )
+    assert zonal_fs_harness.captured
+    assert all(m == "open" for _, _, m in zonal_fs_harness.captured)
+
+
+def test_zonal_file_pickle_reopen_preserves_and_opts_out_telemetry(
+    monkeypatch, zonal_fs_harness
+):
+    """Verify ZonalFile pickle reopen preserves enabled framework/method and enforces opt-out."""
+    fs, data = zonal_fs_harness.fs, zonal_fs_harness.data
+
+    class _GkeEnvDetector(BaseDetector):
+        name = Dimension.ENVIRONMENT
+
+        def __init__(self):
+            self.calls = 0
+
+        def detect(self):
+            self.calls += 1
+            return "gke"
+
+    detector = _CallerThreadOnlyDetector("pandas")
+    gke_env = _GkeEnvDetector()
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[detector, gke_env]),
+    )
+
+    with _scoped_ctx(Dimension.FRAMEWORK, "torch"):
+        with fs.open("zonal-bucket/obj", "rb", cache_type="none") as f:
+            enabled_payload = pickle.dumps(f)
+
+    detector.thread_names.clear()
+    gke_env.calls = 0
+    zonal_fs_harness.clear()
+    with _scoped_ctx({Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "cat"}):
+        with pickle.loads(enabled_payload) as reopened:
+            assert reopened.caller_framework == "torch"
+            assert reopened.caller_method == "open"
+            assert "_reopen_telemetry" not in reopened.kwargs
+            assert reopened.read(4) == data[:4]
+    assert detector.thread_names == []
+    assert zonal_fs_harness.captured
     assert all(
-        ctx_fw == fw for _, ctx_fw in grpc_ops
-    ), f"zonal operations ran without the framework context: {grpc_ops}"
+        ua == ("fw/torch", "env/gke") and m == "open"
+        for _, ua, m in zonal_fs_harness.captured
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("DO_NOT_TRACK", "1")
+        with fs.open("zonal-bucket/obj", "rb", cache_type="none") as opted_zonal:
+            opted_out_payload = pickle.dumps(opted_zonal)
+
+    detector.thread_names.clear()
+    gke_env.calls = 0
+    zonal_fs_harness.clear()
+    with _scoped_ctx(
+        {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "find"}
+    ):
+        with pickle.loads(opted_out_payload) as reopened_opted_out:
+            assert reopened_opted_out._telemetry_disabled is True
+            assert reopened_opted_out.read(4) == data[:4]
+    assert zonal_fs_harness.captured
+    assert all((ua, m) == ((), None) for _, ua, m in zonal_fs_harness.captured)
+    assert detector.thread_names == []
+    assert gke_env.calls == 0
     assert get_telemetry_context() == {}
 
 
@@ -1457,6 +1642,7 @@ async def test_zonal_file_async_fetch_range_propagates_caller_framework():
 
     assert await f._async_fetch_range(0, 10) == b"data"
     assert captured_context.get(Dimension.FRAMEWORK.value) == "jax"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
     assert get_telemetry_context() == {}
 
 
@@ -1487,6 +1673,7 @@ def test_zonal_file_write_propagates_caller_framework():
     finally:
         f.closed = True
     assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
     assert get_telemetry_context() == {}
 
 
@@ -1545,6 +1732,7 @@ async def test_async_fetch_range_propagates_caller_framework():
     await f._async_fetch_range(0, 10)
     f.closed = True
     assert captured_context.get(Dimension.FRAMEWORK.value) == "pandas"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
 
 
 def test_defer_close_propagates_caller_framework():
@@ -1576,6 +1764,7 @@ def test_defer_close_propagates_caller_framework():
 
     assert done.wait(timeout=5.0)
     assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
 
 
 @pytest.fixture
@@ -1720,3 +1909,46 @@ def test_primed_walk_generator_retains_outer_context(detector):
     assert [tokens for _, tokens in dummy_fs.seen] == [("fw/jax",)] * 3
     assert dummy_fs.seen_telemetry == ["find"] * 3
     assert detector.calls == []
+
+
+def test_gcsfile_pickle_reopen_preserves_telemetry(detector, spied_gcs_harness):
+    """Verify pickling and reopening GCSFile preserves telemetry with 0 stack walks."""
+    from gcsfs.core import GCSFile
+
+    fs = spied_gcs_harness.fs
+    with _scoped_ctx(Dimension.FRAMEWORK, "torch"):
+        with fs.open("test-bucket/file.txt", "rb", size=4, cache_type="none") as f:
+            assert len(f.read(1)) == 1
+            payload = pickle.dumps(f)
+
+    detector.calls.clear()
+    with _scoped_ctx({Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "cat"}):
+        with pickle.loads(payload) as reopened:
+            assert reopened.caller_framework == "torch"
+            assert reopened.caller_method == "open"
+            assert "_reopen_telemetry" not in reopened.kwargs
+            assert detector.calls == []
+
+            with GCSFile(
+                fs,
+                "test-bucket/file.txt",
+                "rb",
+                size=4,
+                cache_type="none",
+                _reopen_telemetry=("torch", "open", "cache_options"),
+            ) as compat_file:
+                assert compat_file.caller_framework == "torch"
+                assert compat_file.caller_method == "open"
+            with fs.open(
+                "test-bucket/file.txt",
+                "rb",
+                size=4,
+                cache_type="none",
+                _reopen_telemetry="bad",
+            ) as malformed_file:
+                assert malformed_file.caller_framework == "ray"
+                assert malformed_file.caller_method == "cat"
+
+            spied_gcs_harness.clear()
+            assert reopened.read() == b"OCK"
+            assert spied_gcs_harness.seen == [(("fw/torch",), "open")]
