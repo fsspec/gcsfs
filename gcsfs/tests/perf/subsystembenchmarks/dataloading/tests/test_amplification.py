@@ -415,3 +415,19 @@ def test_enrich_csv_leaves_hit_ratio_blank_without_data_or_for_other_buckets(tmp
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))
     assert [r["rapid_cache_hit_ratio"] for r in rows] == ["1.0", ""]
+
+
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_warm", "hns_rcu_cold"])
+def test_enrich_csv_keeps_rcu_rows_without_monitoring_data_missing(
+    tmp_path, bucket_type
+):
+    """RCU reads are ordinary bucket reads, so no data is missing data, not 0."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_rapid_cache_row(bucket_type)], _FIELDS + ["bucket_type"])
+    client = _RecordingClient()
+
+    result = amplification.enrich_csv(str(csv_path), "proj", client=client)
+
+    assert result.missing_buckets == (f"b-{bucket_type}",)
+    # No Anywhere Cache hit-ratio query either.
+    assert not [r for r in client.requests if amplification._CACHE_SENT in r["filter"]]

@@ -46,16 +46,31 @@ wait_for_background_jobs() {
     return "${status}"
 }
 
+delete_bucket() {
+    local bucket="$1"
+    shift
+    local err
+
+    if err=$(gcloud storage rm --recursive "${bucket}" --project="${PROJECT_ID}" "$@" 2>&1); then
+        return 0
+    fi
+    # Never created (e.g. create-buckets failed partway): nothing leaked.
+    if [[ "${err}" == *"${bucket} not found: 404"* ]]; then
+        return 0
+    fi
+    # gcloud's non-404 errors don't name the bucket, so prefix it here.
+    echo "ERROR: failed to delete ${bucket}: ${err}" >&2
+    return 1
+}
+
 delete_bucket_variants() {
     local workers="$1"
     local bucket_base="$2"
     shift 2
 
     while IFS= read -r suffix; do
-        if gcloud storage buckets describe "gs://${bucket_base}${suffix}" --project="${PROJECT_ID}" "$@" &>/dev/null; then
-            gcloud storage rm --recursive "gs://${bucket_base}${suffix}" --project="${PROJECT_ID}" "$@" &
-            BACKGROUND_PIDS+=("$!")
-        fi
+        delete_bucket "gs://${bucket_base}${suffix}" "$@" &
+        BACKGROUND_PIDS+=("$!")
     done < <(worker_suffixes "${workers}")
 }
 
