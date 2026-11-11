@@ -316,6 +316,65 @@ def test_benchmark_io_fixture_rcu_warm_reads_on_isolated_fs_closes_it_and_sleeps
                 next(gen)
 
 
+@pytest.mark.parametrize(
+    "bucket_type, file_size_bytes, primes",
+    [
+        ("standard_rcu_warm", 64, True),
+        ("hns_rcu_cold", bench_conftest.SMALL_FILE_UPLOAD_LIMIT, True),
+        ("standard_rcu_cold", 2 * bench_conftest.MB, False),
+        ("standard_rcu_z", 64, False),
+        ("zonal", 64, False),
+        ("regional", 64, False),
+    ],
+)
+def test_benchmark_io_fixture_primes_client_for_small_rcu_warm_and_cold_files(
+    bucket_type, file_size_bytes, primes
+):
+    """Small *_rcu_warm/*_rcu_cold runs read a sentinel via gcs to warm its gRPC client."""
+    gcs = mock.MagicMock(spec=bench_conftest.ExtendedGcsFileSystem)
+    params = SimpleNamespace(
+        name=f"cat_{bucket_type}",
+        bucket_name="my-bucket",
+        bucket_type=bucket_type,
+        files=2,
+        file_size_bytes=file_size_bytes,
+        rounds=1,
+    )
+
+    with (
+        mock.patch.object(bench_conftest, "_prepare_files"),
+        mock.patch.object(bench_conftest, "_warm_rcu_files"),
+    ):
+        gen = bench_conftest._benchmark_io_fixture_helper(
+            lambda **kwargs: gcs,
+            params,
+            "benchmark-prime",
+            create_files=True,
+        )
+        _, file_paths, yielded_params = next(gen)
+        try:
+            assert len(gcs.pipe_file.call_args_list) == (1 if primes else 0)
+            assert len(gcs.cat_file.call_args_list) == (1 if primes else 0)
+            if primes:
+                (pipe_path, payload), _ = gcs.pipe_file.call_args
+                (cat_path,), _ = gcs.cat_file.call_args
+                assert pipe_path.endswith("/_client_warmup")
+                assert pipe_path == cat_path
+                assert payload == b"\0"
+                assert pipe_path not in file_paths
+                all_round_paths = [
+                    p for rp in yielded_params.round_file_paths for p in rp
+                ]
+                assert pipe_path not in all_round_paths
+                op_names = [
+                    c[0] for c in gcs.mock_calls if c[0] in ("pipe_file", "cat_file")
+                ]
+                assert op_names == ["pipe_file", "cat_file"]
+        finally:
+            with pytest.raises(StopIteration):
+                next(gen)
+
+
 def test_benchmark_io_fixture_rcu_cold_stages_distinct_objects_per_round(
     extended_gcs_factory,
 ):

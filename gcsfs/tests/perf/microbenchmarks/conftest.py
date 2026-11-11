@@ -309,6 +309,17 @@ def _benchmark_io_fixture_helper(
                     extended_gcs_factory, file_paths, params.file_size_bytes
                 )
 
+            if (
+                _is_rcu_warm(bucket_type) or _is_rcu_cold(bucket_type)
+            ) and params.file_size_bytes <= SMALL_FILE_UPLOAD_LIMIT:
+                # Other bucket types stage small files over gRPC/HTTP with gcs itself,
+                # and _warm_rcu_files uses a separate instance, so stage and read a
+                # sentinel object via gcs (not file_paths, keeping *_rcu_cold targets
+                # unread) to initialize its gRPC data client before round 0.
+                warmup_path = f"{prefix}/_client_warmup"
+                gcs.pipe_file(warmup_path, b"\0")
+                gcs.cat_file(warmup_path)
+
             duration_ms = (time.perf_counter() - start_time) * 1000
             logging.info(
                 f"Benchmark '{params.name}' setup created {params.files} files in {duration_ms:.2f} ms."
