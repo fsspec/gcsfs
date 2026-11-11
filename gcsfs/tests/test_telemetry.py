@@ -1237,14 +1237,18 @@ def test_canonicalize_collect_tokens_and_context_mp_edge_cases(detector):
     assert canonicalize_method_params(123) == ""
 
     with _scoped_ctx(Dimension.METHOD_PARAMS, "withdirs, detail"):
-        assert manager_mod.default_usage_tracker.get_method_params() == frozenset(
-            {"detail", "withdirs"}
-        )
-        with _scoped_ctx(Dimension.METHOD_PARAMS, ""):
-            assert Dimension.METHOD_PARAMS.value not in get_telemetry_context()
+        assert get_telemetry_context() == {}
 
-        with _scoped_ctx(Dimension.METHOD_PARAMS, "unknown"):
-            assert Dimension.METHOD_PARAMS.value not in get_telemetry_context()
+    with _scoped_ctx(Dimension.METHOD, "find"):
+        with _scoped_ctx(Dimension.METHOD_PARAMS, "withdirs, detail"):
+            assert manager_mod.default_usage_tracker.get_method_params() == frozenset(
+                {"detail", "withdirs"}
+            )
+            with _scoped_ctx(Dimension.METHOD_PARAMS, ""):
+                assert Dimension.METHOD_PARAMS.value not in get_telemetry_context()
+
+            with _scoped_ctx(Dimension.METHOD_PARAMS, "unknown"):
+                assert Dimension.METHOD_PARAMS.value not in get_telemetry_context()
 
     with _scoped_ctx(
         {Dimension.METHOD.value: "", Dimension.METHOD_PARAMS.value: "detail"}
@@ -1267,6 +1271,7 @@ def test_canonicalize_collect_tokens_and_context_mp_edge_cases(detector):
     with _scoped_ctx(
         {Dimension.FRAMEWORK.value: "jax", Dimension.METHOD_PARAMS.value: "detail"}
     ):
+        assert get_telemetry_context() == {Dimension.FRAMEWORK.value: "jax"}
         assert fs.find("bucket", withdirs=True) == ["bucket/sub_file.txt"]
         assert fs._recorded() == [(("fw/jax",), "find", frozenset({"withdirs"}))]
         assert fs.find("bucket") == ["bucket/sub_file.txt"]

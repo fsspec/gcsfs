@@ -97,7 +97,7 @@ def set_telemetry_context(
         str_val = str(value) if value is not None else ""
         if tokens is Dimension.METHOD_PARAMS:
             str_val = canonicalize_method_params(str_val)
-            if str_val and current.get(Dimension.METHOD.value) != "":
+            if str_val and current.get(Dimension.METHOD.value):
                 current[tokens.value] = str_val
             else:
                 current.pop(tokens.value, None)
@@ -119,7 +119,7 @@ def set_telemetry_context(
         elif key == Dimension.METHOD.value and not sanitize_token(str_val):
             str_val = ""
         normalized[key] = str_val
-    if normalized.get(Dimension.METHOD.value) == "":
+    if not normalized.get(Dimension.METHOD.value):
         normalized.pop(Dimension.METHOD_PARAMS.value, None)
     return _current_telemetry.set(normalized)
 
