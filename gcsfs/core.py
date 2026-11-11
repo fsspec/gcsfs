@@ -1369,15 +1369,34 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         u2 = self.url(path, generation=kwargs.get("generation"))
         if start is not None or end is not None:
+            if (start is not None and start < 0 and end is not None) or (
+                end is not None and end < 0
+            ):
+                # Resolve negative offsets like a slice. A crossed range can't be
+                # sent: GCS ignores an invalid Range and returns the whole object.
+                size = (await self._info(path))["size"]
+                start, end, _ = slice(start, end).indices(size)
+                if start >= end:
+                    return b""
             head = {"Range": await self._process_limits(path, start, end)}
         else:
             head = {}
 
         cache_type = kwargs.get("cache_type")
         cache_source = kwargs.get("cache_source")
-        headers, out = await self._call(
-            "GET", u2, headers=head, cache_type=cache_type, cache_source=cache_source
-        )
+        try:
+            headers, out = await self._call(
+                "GET",
+                u2,
+                headers=head,
+                cache_type=cache_type,
+                cache_source=cache_source,
+            )
+        except HttpError as e:
+            if e.code == 416:
+                # GCS rejects a range with no bytes in it, which a slice returns empty
+                return b""
+            raise
         return out
 
     async def _cat_file_concurrent(

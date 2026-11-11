@@ -192,8 +192,9 @@ async def retry_request(func, retries=6, *args, **kwargs):
             ):
                 logger.debug("Request returned 404, no retries.")
                 raise e
-            if isinstance(e, HttpError) and e.code == 404:
-                logger.debug("Request returned 404, no retries.")
+            # A ranged read past the end gets 416, which the caller returns as b""
+            if isinstance(e, HttpError) and e.code in (404, 416):
+                logger.debug(f"Request returned {e.code}, no retries.")
                 raise e
             if retry == retries - 1:
                 logger.exception(f"{func.__name__} out of retries on exception: {e}")
