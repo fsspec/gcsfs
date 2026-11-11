@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import gc
 import inspect
 import io
 import os
@@ -1269,6 +1267,7 @@ _ENVIRONMENT_ENV_VARS = (
     "CLOUD_RUN_JOB",
     "CLOUD_RUN_EXECUTION",
     "CLOUD_RUN_WORKER_POOL",
+    "CLOUD_RUN_REVISION",
     "FUNCTION_TARGET",
     "FUNCTION_NAME",
     "GAE_SERVICE",
@@ -1374,23 +1373,6 @@ async def _settle_probe(detector: EnvironmentDetector, timeout: float = 5.0):
         if time.monotonic() > deadline:
             raise AssertionError("metadata probe did not settle")
         await asyncio.sleep(0.01)
-
-
-@contextlib.contextmanager
-def _fsspec_loop_unset():
-    saved_loop = fsspec.asyn.loop[0]
-    fsspec.asyn.loop[0] = None
-    try:
-        yield
-    finally:
-        fsspec.asyn.loop[0] = saved_loop
-
-
-@pytest.fixture
-def without_fsspec_loop():
-    """Simulate a pure-async process where fsspec never started its IO loop."""
-    with _fsspec_loop_unset():
-        yield
 
 
 @pytest.fixture
@@ -1510,11 +1492,29 @@ async def test_google_flavored_404_resolves_gce(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["", "   \n"], ids=["empty", "whitespace"])
+async def test_google_flavored_empty_200_resolves_gce_without_retry(fake_host, body):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body=body)]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gce"
+    assert len(fake_host.requests) == 1
+    assert fake_host.sleep_delays == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status, flavor",
     [
         pytest.param(403, False, id="flavorless-403"),
         pytest.param(404, False, id="flavorless-404"),
+        pytest.param(429, True, id="flavored-429"),
+        pytest.param(499, False, id="flavorless-499"),
         pytest.param(500, False, id="flavorless-500"),
         pytest.param(503, True, id="flavored-503"),
     ],
@@ -1592,7 +1592,7 @@ async def test_exhaustion_on_gcp_bios_without_kubernetes_caches_gce(fake_host):
 
 
 @pytest.mark.asyncio
-async def test_exhaustion_on_gcp_bios_kubernetes_stays_unknown(fake_host, monkeypatch):
+async def test_exhaustion_on_gcp_bios_kubernetes_caches_gke(fake_host, monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     fake_host.product_name = "Google Compute Engine"
     fake_host.outcomes = [_mds_response(403, flavor=False)]
@@ -1600,12 +1600,11 @@ async def test_exhaustion_on_gcp_bios_kubernetes_stays_unknown(fake_host, monkey
 
     detector.detect()
     await _settle_probe(detector)
-    detected_after_exhaustion = detector.detect()
+    detected = detector.detect()
 
-    assert detected_after_exhaustion is None
-    assert detector._cached_env is None
-    assert detector._probe_exhausted is True
-    assert detector._probe_task is None
+    assert detected == "gke"
+    assert detector._cached_env == "gke"
+    assert detector._probe_future is None
     assert len(fake_host.requests) == 6
 
 
@@ -1629,81 +1628,79 @@ async def test_unexpected_probe_error_falls_back_without_rescheduling(fake_host)
 
     assert first == "gce"
     assert second == "gce"
-    assert detector._probe_task is None
+    assert detector._probe_future is None
     assert len(fake_host.requests) == 1
 
 
-def test_closed_loop_with_pending_probe_is_rescheduled(fake_host, without_fsspec_loop):
-    fake_host.product_name = "Google Compute Engine"
-    fake_host.outcomes = [_mds_response(503, flavor=False)]
-    detector = EnvironmentDetector()
-
-    async def run_until_probe_sleeps():
-        probe_sleeping = asyncio.Event()
-
-        async def block_forever():
-            probe_sleeping.set()
-            await asyncio.Event().wait()
-
-        fake_host.on_sleep = block_forever
-        detector.detect()
-        await probe_sleeping.wait()
-
-    async def resolve_on_new_loop():
-        detector.detect()
-        await detector._probe_task
-        return detector.detect()
-
-    abandoned_loop = asyncio.new_event_loop()
-    abandoned_loop.run_until_complete(run_until_probe_sleeps())
-    abandoned_loop.close()
-    in_flight_after_close = detector._probe_in_flight
-    fake_host.on_sleep = None
-    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
-    resolved = asyncio.run(resolve_on_new_loop())
-
-    assert in_flight_after_close is True
-    assert resolved == "gke"
-
-
-def test_gc_of_stranded_probe_under_lock_does_not_deadlock(
-    fake_host, without_fsspec_loop
+def test_detect_inside_repeated_asyncio_run_probes_once_on_fsspec_loop(
+    fake_host, monkeypatch
 ):
     fake_host.product_name = "Google Compute Engine"
-    fake_host.outcomes = [_mds_response(503, flavor=False)]
+    started = threading.Event()
+    release = threading.Event()
+    real_probe_once = EnvironmentDetector._probe_metadata_server_once
+
+    async def gated_probe_once(url: str):
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.005)
+        return await real_probe_once(url)
+
+    monkeypatch.setattr(
+        EnvironmentDetector,
+        "_probe_metadata_server_once",
+        staticmethod(gated_probe_once),
+    )
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
     detector = EnvironmentDetector()
 
-    async def run_until_probe_sleeps():
-        probe_sleeping = asyncio.Event()
+    async def call_once():
+        return detector.detect()
 
-        async def block_forever():
-            probe_sleeping.set()
-            await asyncio.Event().wait()
+    first = asyncio.run(call_once())
+    assert first is None
+    assert started.wait(timeout=5)
+    assert detector._probe_in_flight is True
 
-        fake_host.on_sleep = block_forever
-        detector.detect()
-        await probe_sleeping.wait()
+    release.set()
+    _wait_until_probe_settles(detector)
+    second = asyncio.run(call_once())
 
-    gc.disable()
-    try:
-        abandoned_loop = asyncio.new_event_loop()
-        abandoned_loop.run_until_complete(run_until_probe_sleeps())
-        abandoned_loop.close()
-        del abandoned_loop
+    assert second == "gke"
+    assert len(fake_host.requests) == 1
 
-        def collect_while_holding_lock():
-            with detector._lock:
-                detector._probe_task = None
-                gc.collect()
 
-        worker = threading.Thread(target=collect_while_holding_lock, daemon=True)
-        worker.start()
-        worker.join(timeout=5)
-    finally:
-        gc.enable()
+def test_post_fork_gc_of_stale_generation_probe_under_lock_does_not_deadlock(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(503, flavor=False)]
+    detector = EnvironmentDetector()
+    detector._probe_generation = 1
+    detector._probe_in_flight = True
+
+    class _SuspendOnce:
+        def __await__(self):
+            yield None
+
+    async def suspend():
+        await _SuspendOnce()
+
+    fake_host.on_sleep = suspend
+    coro = detector._probe_coro(1)
+    coro.send(None)
+
+    detector._reset_after_fork()
+    assert detector._probe_generation == 2
+
+    def close_while_holding_lock():
+        with detector._lock:
+            coro.close()
+
+    worker = threading.Thread(target=close_while_holding_lock, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert detector._probe_in_flight is True
+    assert detector._probe_in_flight is False
 
 
 @pytest.mark.asyncio
@@ -1727,12 +1724,19 @@ async def test_metadata_host_override_probes_that_host_even_off_gcp(
 
 
 @pytest.mark.parametrize(
-    "serverless_var", ["K_SERVICE", "CLOUD_RUN_JOB", "FUNCTION_TARGET", "GAE_ENV"]
+    "primary_var, secondary_var",
+    [
+        ("K_SERVICE", "K_REVISION"),
+        ("CLOUD_RUN_JOB", "CLOUD_RUN_EXECUTION"),
+        ("CLOUD_RUN_WORKER_POOL", "CLOUD_RUN_REVISION"),
+        ("GAE_SERVICE", "GAE_INSTANCE"),
+    ],
 )
 def test_serverless_env_without_kubernetes_is_oth_without_io(
-    fake_host, monkeypatch, serverless_var
+    fake_host, monkeypatch, primary_var, secondary_var
 ):
-    monkeypatch.setenv(serverless_var, "value")
+    monkeypatch.setenv(primary_var, "svc")
+    monkeypatch.setenv(secondary_var, "rev")
     fake_host.product_name = "Google Compute Engine"
     detector = EnvironmentDetector()
 
@@ -1744,11 +1748,54 @@ def test_serverless_env_without_kubernetes_is_oth_without_io(
 
 
 @pytest.mark.parametrize(
-    "product_name, kubernetes_host, expected, expected_exhausted",
+    "env_vars",
     [
-        pytest.param("QEMU", None, "oth", False, id="off-gcp"),
-        pytest.param("Google Compute Engine", None, "gce", False, id="gce-vm"),
-        pytest.param("Google Compute Engine", "10.0.0.1", None, True, id="gcp-k8s"),
+        pytest.param({"K_SERVICE": "svc"}, id="k-service-only"),
+        pytest.param({"FUNCTION_TARGET": "fn"}, id="function-target-only"),
+        pytest.param({"FUNCTION_NAME": "fn"}, id="function-name-only"),
+        pytest.param({"GAE_ENV": "standard"}, id="gae-env-only"),
+        pytest.param({"CLOUD_RUN_JOB": "job"}, id="cloud-run-job-only"),
+        pytest.param(
+            {"CLOUD_RUN_WORKER_POOL": "pool"}, id="cloud-run-worker-pool-only"
+        ),
+        pytest.param({"GAE_SERVICE": "default"}, id="gae-service-only"),
+        pytest.param(
+            {"FUNCTION_TARGET": "fn", "K_SERVICE": "svc"},
+            id="function-target-without-k-revision",
+        ),
+        pytest.param(
+            {
+                "K_SERVICE": "svc",
+                "K_REVISION": "rev",
+                "KUBERNETES_SERVICE_HOST": "10.0.0.1",
+            },
+            id="serverless-pair-with-k8s",
+        ),
+    ],
+)
+def test_single_serverless_env_var_does_not_suppress_gcp_probe(
+    fake_host, monkeypatch, env_vars
+):
+    for name, value in env_vars.items():
+        monkeypatch.setenv(name, value)
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    _wait_until_probe_settles(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert len(fake_host.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "product_name, kubernetes_host, expected",
+    [
+        pytest.param("QEMU", None, "oth", id="off-gcp"),
+        pytest.param("Google Compute Engine", None, "gce", id="gce-vm"),
+        pytest.param("Google Compute Engine", "10.0.0.1", "gke", id="gcp-k8s"),
     ],
 )
 def test_no_gce_check_resolves_from_local_signals_only(
@@ -1757,7 +1804,6 @@ def test_no_gce_check_resolves_from_local_signals_only(
     product_name,
     kubernetes_host,
     expected,
-    expected_exhausted,
 ):
     monkeypatch.setenv("NO_GCE_CHECK", "true")
     if kubernetes_host is not None:
@@ -1768,7 +1814,6 @@ def test_no_gce_check_resolves_from_local_signals_only(
     detected = detector.detect()
 
     assert detected == expected
-    assert detector._probe_exhausted is expected_exhausted
     assert fake_host.opened_sessions == 0
 
 
@@ -1840,3 +1885,146 @@ def test_module_fork_hook_resets_live_detectors(fake_host):
     assert detector._cached_env == "gce"
     assert detector._probe_in_flight is False
     assert detector._probe_future is None
+
+
+def test_fs_init_warmup_and_opt_out(fake_host, monkeypatch):
+    from gcsfs.core import GCSFileSystem
+
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    fw_calls = []
+
+    class CountingFW(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            fw_calls.append(1)
+            return "pandas"
+
+    env_disabled = EnvironmentDetector()
+    disabled_tracker = UsageMetricsTracker(detectors=[CountingFW(), env_disabled])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", disabled_tracker)
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+    assert fw_calls == []
+    assert disabled_tracker.get_dimension(Dimension.FRAMEWORK) is None
+    assert disabled_tracker.get_dimension(Dimension.ENVIRONMENT) is None
+
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    env_enabled = EnvironmentDetector()
+    enabled_tracker = UsageMetricsTracker(detectors=[CountingFW(), env_enabled])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", enabled_tracker)
+    GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+
+    assert fw_calls == []
+    future = env_enabled._probe_future
+    if future is not None:
+        future.result(timeout=5)
+    assert env_enabled.detect() == "gce"
+    assert fake_host.opened_sessions == 1
+
+    assert enabled_tracker.get_dimension(Dimension.FRAMEWORK) == "pandas"
+    assert len(fw_calls) == 1
+    fresh_env = EnvironmentDetector()
+    enabled_tracker.detectors = [CountingFW(), fresh_env]
+    first_dim = enabled_tracker.get_dimension(Dimension.ENVIRONMENT)
+    if fresh_env._probe_future is not None:
+        fresh_env._probe_future.result(timeout=5)
+    assert first_dim in (None, "gce")
+    assert enabled_tracker.get_dimension(Dimension.ENVIRONMENT) == "gce"
+    assert len(fw_calls) == 1
+
+
+def test_mid_operation_probe_resolution_updates_subsequent_requests(
+    mock_gcs_harness, fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    release_probe = threading.Event()
+    real_probe_once = EnvironmentDetector._probe_metadata_server_once
+
+    async def gated_probe_once(url: str):
+        while not release_probe.is_set():
+            await asyncio.sleep(0.005)
+        return await real_probe_once(url)
+
+    monkeypatch.setattr(
+        EnvironmentDetector,
+        "_probe_metadata_server_once",
+        staticmethod(gated_probe_once),
+    )
+
+    fw_detector = _CallerThreadOnlyDetector("pandas")
+    env_detector = EnvironmentDetector()
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[fw_detector, env_detector]),
+    )
+    assert env_detector.detect() is None
+
+    fs = mock_gcs_harness.fs
+    mock_gcs_harness.clear()
+    orig_call = fs._call
+
+    async def call_then_settle(method, path, *args, **kwargs):
+        result = await orig_call(method, path, *args, **kwargs)
+        if len(mock_gcs_harness.user_agents) == 1:
+            release_probe.set()
+            await _settle_probe(env_detector)
+        return result
+
+    monkeypatch.setattr(fs, "_call", call_then_settle)
+
+    fs.cat(["test-bucket/f1.txt", "test-bucket/f2.txt"], batch_size=1)
+
+    assert len(mock_gcs_harness.user_agents) == 2
+    assert "fw/pandas" in mock_gcs_harness.user_agents[0]
+    assert "env/" not in mock_gcs_harness.user_agents[0]
+    assert "fw/pandas" in mock_gcs_harness.user_agents[1]
+    assert "env/gke" in mock_gcs_harness.user_agents[1]
+    assert len(fw_detector.thread_names) == 1
+
+
+@pytest.mark.skipif(not hasattr(asyncio, "eager_task_factory"), reason="Python 3.12+")
+def test_eager_task_factory_probe_does_not_deadlock(fake_host, monkeypatch):
+    fake_host.product_name = "Google Compute Engine"
+
+    def fail_session():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(environment_module, "_new_probe_session", fail_session)
+    loop = fsspec.asyn.get_loop()
+
+    async def swap_factory(new_factory):
+        prev = loop.get_task_factory()
+        loop.set_task_factory(new_factory)
+        return prev
+
+    prev_factory = asyncio.run_coroutine_threadsafe(
+        swap_factory(asyncio.eager_task_factory), loop
+    ).result(timeout=5)
+    try:
+        detector = EnvironmentDetector()
+        worker = threading.Thread(target=detector.detect, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        _wait_until_probe_settles(detector)
+        assert detector.detect() == "gce"
+
+        async def eager_caller():
+            asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+            detector_in_async = EnvironmentDetector()
+            detector_in_async.detect()
+            await _settle_probe(detector_in_async)
+            return detector_in_async.detect()
+
+        assert asyncio.run(eager_caller()) == "gce"
+    finally:
+        asyncio.run_coroutine_threadsafe(swap_factory(prev_factory), loop).result(
+            timeout=5
+        )

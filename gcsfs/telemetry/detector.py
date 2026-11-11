@@ -21,6 +21,7 @@ ENV_OTHER = "oth"
 
 _TRUTHY_VALUES = ("1", "true", "yes")
 _GCP_PRODUCT_NAMES = ("Google", "Google Compute Engine")
+# GKE Sandbox (gVisor) exposes this sysfs entry from the host, unlike sys_vendor.
 _DMI_PRODUCT_NAME_PATH = "/sys/class/dmi/id/product_name"
 _K8S_SERVICE_ACCOUNT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
 _METADATA_HOST_ENV_VARS = ("GCE_METADATA_HOST", "GCE_METADATA_ROOT", "GCE_METADATA_IP")
@@ -30,19 +31,11 @@ _METADATA_FLAVOR_HEADER = "Metadata-Flavor"
 _METADATA_FLAVOR_VALUE = "Google"
 _PROBE_TIMEOUT_SECONDS = 0.5
 _PROBE_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0, 4.0, 8.0)
-_SERVERLESS_ENV_VARS = (
-    "K_SERVICE",
-    "K_CONFIGURATION",
-    "K_REVISION",
-    "CLOUD_RUN_JOB",
-    "CLOUD_RUN_EXECUTION",
-    "CLOUD_RUN_WORKER_POOL",
-    "FUNCTION_TARGET",
-    "FUNCTION_NAME",
-    "GAE_SERVICE",
-    "GAE_VERSION",
-    "GAE_INSTANCE",
-    "GAE_ENV",
+_SERVERLESS_ENV_VAR_PAIRS = (
+    ("K_SERVICE", "K_REVISION"),
+    ("CLOUD_RUN_JOB", "CLOUD_RUN_EXECUTION"),
+    ("CLOUD_RUN_WORKER_POOL", "CLOUD_RUN_REVISION"),
+    ("GAE_SERVICE", "GAE_INSTANCE"),
 )
 # Only errors time can fix; others hit _probe_coro's local fallback at once.
 _PROBE_RETRYABLE_ERRORS = (aiohttp.ClientConnectionError, asyncio.TimeoutError)
@@ -85,6 +78,7 @@ class BaseDetector:
     """Base interface for extracting telemetry tokens."""
 
     name: Dimension | str = ""
+    call_scoped: bool = True
 
     def detect(self) -> Optional[str]:
         """
@@ -180,24 +174,35 @@ class EnvironmentDetector(BaseDetector):
     Returns 'gce' on Google Compute Engine VMs, 'gke' on Google Kubernetes
     Engine pods, 'oth' everywhere else (including GCP serverless runtimes), and
     None while unknown. ``detect()`` never blocks: when the metadata server must be
-    consulted, it schedules a background probe on an event loop and returns None
-    until the probe resolves.
+    consulted, it schedules a background probe on the ``fsspec`` IO loop and
+    returns None until the probe resolves.
     """
 
     name = Dimension.ENVIRONMENT
+    call_scoped = False
 
     def __init__(self):
         self._lock = threading.Lock()
         self._cached_env: Optional[str] = None
-        self._probe_exhausted = False
         self._probe_in_flight = False
-        self._probe_task: Optional[asyncio.Task] = None
         self._probe_future: Optional[concurrent.futures.Future] = None
         self._probe_generation = 0
         self._gcp_bios: Optional[bool] = None
+        self._k8s: Optional[bool] = None
+        self._serverless: Optional[bool] = None
+        self._no_gce_check: Optional[bool] = None
+        self._metadata_override: Optional[bool] = None
         _live_detectors.add(self)
 
     def detect(self) -> Optional[str]:
+        cached_env = self._cached_env
+        if cached_env is not None:
+            return cached_env
+        if self._probe_in_flight:
+            return None
+        return self._detect_slow()
+
+    def _detect_slow(self) -> Optional[str]:
         cached_env = self._cached_env
         if cached_env is not None:
             return cached_env
@@ -205,38 +210,49 @@ class EnvironmentDetector(BaseDetector):
         if self._has_serverless_env() and not self._is_kubernetes():
             return self._cache_verdict(ENV_OTHER)
 
-        if self._probe_exhausted:
-            return None
-
-        if _env_flag_enabled("NO_GCE_CHECK"):
-            return self._resolve_from_local_signals()
+        if self._is_no_gce_check():
+            return self._cache_verdict(self._local_fallback_verdict())
 
         if not self._is_gcp_bios() and not self._has_metadata_override():
             return self._cache_verdict(ENV_OTHER)
 
+        # Resolve filesystem cluster presence on the caller before background work.
+        self._is_kubernetes()
         self._schedule_probe()
-        return None
+        return self._cached_env
 
     def _reset_after_fork(self) -> None:
         self._lock = threading.Lock()
         self._probe_in_flight = False
-        self._probe_task = None
         self._probe_future = None
         self._probe_generation += 1
 
-    @staticmethod
-    def _has_serverless_env() -> bool:
-        return any(os.environ.get(name) for name in _SERVERLESS_ENV_VARS)
+    def _has_serverless_env(self) -> bool:
+        if self._serverless is None:
+            self._serverless = any(
+                bool(os.environ.get(primary)) and bool(os.environ.get(secondary))
+                for primary, secondary in _SERVERLESS_ENV_VAR_PAIRS
+            )
+        return self._serverless
 
-    @staticmethod
-    def _is_kubernetes() -> bool:
-        return bool(os.environ.get("KUBERNETES_SERVICE_HOST")) or os.path.exists(
-            _K8S_SERVICE_ACCOUNT_PATH
-        )
+    def _is_kubernetes(self) -> bool:
+        if self._k8s is None:
+            self._k8s = bool(os.environ.get("KUBERNETES_SERVICE_HOST")) or (
+                os.path.exists(_K8S_SERVICE_ACCOUNT_PATH)
+            )
+        return self._k8s
 
-    @staticmethod
-    def _has_metadata_override() -> bool:
-        return any(os.environ.get(name) for name in _METADATA_HOST_ENV_VARS)
+    def _is_no_gce_check(self) -> bool:
+        if self._no_gce_check is None:
+            self._no_gce_check = _env_flag_enabled("NO_GCE_CHECK")
+        return self._no_gce_check
+
+    def _has_metadata_override(self) -> bool:
+        if self._metadata_override is None:
+            self._metadata_override = any(
+                os.environ.get(name) for name in _METADATA_HOST_ENV_VARS
+            )
+        return self._metadata_override
 
     @staticmethod
     def _metadata_host() -> str:
@@ -258,92 +274,69 @@ class EnvironmentDetector(BaseDetector):
         product_name = _read_linux_product_name()
         return product_name is not None and product_name.strip() in _GCP_PRODUCT_NAMES
 
-    def _local_fallback_verdict(self) -> Optional[str]:
+    def _local_fallback_verdict(self) -> str:
         if not self._is_gcp_bios():
             return ENV_OTHER
-        if not self._is_kubernetes():
-            return ENV_GCE
-        return None
+        if self._is_kubernetes():
+            return ENV_GKE
+        return ENV_GCE
 
     def _cache_verdict(self, verdict: str) -> str:
         with self._lock:
             self._cached_env = verdict
         return verdict
 
-    def _resolve_from_local_signals(self) -> Optional[str]:
-        verdict = self._local_fallback_verdict()
-        with self._lock:
-            if verdict is None:
-                self._probe_exhausted = True
-            else:
-                self._cached_env = verdict
-        return verdict
-
-    def _probe_handle_is_stale(self) -> bool:
-        if self._probe_task is not None:
-            task_loop = self._probe_task.get_loop()
-            return (
-                self._probe_task.done()
-                or task_loop.is_closed()
-                or not task_loop.is_running()
-            )
-        if self._probe_future is not None:
-            return self._probe_future.done()
-        return True
-
     def _schedule_probe(self) -> None:
         with self._lock:
-            if self._cached_env is not None or self._probe_exhausted:
+            if self._cached_env is not None or self._probe_in_flight:
                 return
-            if self._probe_in_flight and not self._probe_handle_is_stale():
-                return
-
             self._probe_generation += 1
-            probe = self._probe_coro(self._probe_generation)
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-
-            fsspec_loop = fsspec.asyn.loop[0]
-            if running_loop is not None and (
-                fsspec_loop is None or running_loop is fsspec_loop
-            ):
-                self._probe_task = running_loop.create_task(probe)
-                self._probe_future = None
-            else:
-                self._probe_future = asyncio.run_coroutine_threadsafe(
-                    probe, fsspec.asyn.get_loop()
-                )
-                self._probe_task = None
+            generation = self._probe_generation
             self._probe_in_flight = True
+            self._probe_future = None
+
+        probe = self._probe_coro(generation)
+        try:
+            loop = fsspec.asyn.get_loop()
+            future = asyncio.run_coroutine_threadsafe(probe, loop)
+        except BaseException:
+            probe.close()
+            with self._lock:
+                if self._probe_generation == generation:
+                    self._probe_in_flight = False
+            raise
+
+        with self._lock:
+            if self._probe_generation == generation and self._probe_in_flight:
+                self._probe_future = future
+
+        def _clear_if_cancelled(_fut: concurrent.futures.Future) -> None:
+            if generation == self._probe_generation and self._probe_in_flight:
+                with self._lock:
+                    if generation == self._probe_generation:
+                        self._probe_in_flight = False
+                        self._probe_future = None
+
+        future.add_done_callback(_clear_if_cancelled)
 
     async def _probe_coro(self, generation: int) -> None:
         verdict: Optional[str] = None
         resolved = False
-        closed_by_loop_teardown = False
         try:
             verdict = await self._query_metadata_server()
             if verdict is None:
                 verdict = self._local_fallback_verdict()
             resolved = True
-        except GeneratorExit:
-            # GC can close() us under self._lock; locking here would deadlock.
-            closed_by_loop_teardown = True
-            raise
         except Exception:
             verdict = self._local_fallback_verdict()
             resolved = True
         finally:
-            if not closed_by_loop_teardown:
+            if generation == self._probe_generation:
                 with self._lock:
                     if generation == self._probe_generation:
-                        if resolved and verdict is not None:
+                        if resolved:
                             self._cached_env = verdict
-                        elif resolved:
-                            self._probe_exhausted = True
                         self._probe_in_flight = False
-                        self._probe_task = None
                         self._probe_future = None
 
     async def _query_metadata_server(self) -> Optional[str]:
@@ -369,7 +362,7 @@ class EnvironmentDetector(BaseDetector):
                         return None
                     if response.status == 200:
                         cluster_name = await response.text()
-                        return ENV_GKE if cluster_name.strip() else None
+                        return ENV_GKE if cluster_name.strip() else ENV_GCE
                     if response.status == 404:
                         return ENV_GCE
                     return None
