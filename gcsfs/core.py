@@ -45,7 +45,7 @@ from .retry import (
     validate_response,
 )
 from .telemetry import manager as telemetry_manager
-from .telemetry.context import Dimension
+from .telemetry.context import USER_AGENT_DIMENSIONS, Dimension
 from .telemetry.wrapper import (
     _run_sync,
     bind_gcs_sync_methods,
@@ -294,7 +294,9 @@ def _build_user_agent(cache_type=None, cache_source=None):
     if cache_val:
         tokens.append(cache_val)
 
-    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens()
+    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens(
+        USER_AGENT_DIMENSIONS
+    )
     if telemetry_tokens:
         tokens.extend(telemetry_tokens)
 
