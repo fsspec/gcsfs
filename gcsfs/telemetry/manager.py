@@ -7,6 +7,7 @@ import os
 from gcsfs.telemetry.context import (
     ALL_DIMENSIONS,
     Dimension,
+    canonicalize_method_params,
     get_telemetry_context,
     sanitize_token,
 )
@@ -33,6 +34,7 @@ class UsageMetricsTracker:
         dimensions: frozenset[Dimension] = ALL_DIMENSIONS,
         *,
         method: str | None = None,
+        method_params: str = "",
     ) -> dict[str, str]:
         """
         Collect active telemetry tokens across registered detectors.
@@ -44,6 +46,8 @@ class UsageMetricsTracker:
         method : str | None, optional
             Top-level public method name to attach under Dimension.METHOD
             (or "" as a negative-cache sentinel for untracked entry points).
+        method_params : str, optional
+            `.`-joined tracked parameter names to attach under Dimension.METHOD_PARAMS.
 
         Returns
         -------
@@ -55,8 +59,15 @@ class UsageMetricsTracker:
             return {}
 
         tokens = get_telemetry_context()
-        if method is not None and Dimension.METHOD in dimensions:
-            tokens.setdefault(Dimension.METHOD.value, method)
+        if method is not None and Dimension.METHOD.value not in tokens:
+            if Dimension.METHOD in dimensions:
+                tokens[Dimension.METHOD.value] = method
+            if Dimension.METHOD_PARAMS in dimensions:
+                canon_mp = canonicalize_method_params(method_params) if method else ""
+                if canon_mp:
+                    tokens[Dimension.METHOD_PARAMS.value] = canon_mp
+                else:
+                    tokens.pop(Dimension.METHOD_PARAMS.value, None)
 
         include_custom = dimensions == ALL_DIMENSIONS
 
@@ -116,6 +127,16 @@ class UsageMetricsTracker:
         """
         token_map = self.collect_tokens_map(dimensions=frozenset({dimension}))
         return sanitize_token(token_map.get(dimension.value))
+
+    def get_method_params(self) -> frozenset[str]:
+        """Return the active set of tracked method parameter names."""
+        if not self.is_enabled():
+            return frozenset()
+        raw = get_telemetry_context().get(Dimension.METHOD_PARAMS.value, "")
+        if not raw:
+            return frozenset()
+        canon = canonicalize_method_params(raw)
+        return frozenset(canon.split(".")) if canon else frozenset()
 
 
 # Default singleton instance pre-configured with standard framework detector
