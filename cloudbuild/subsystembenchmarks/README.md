@@ -115,7 +115,7 @@ need `roles/compute.networkUser` on the selected network or subnetwork.
 | `run-subsystembenchmarks` | Waits for SSH, copies the source, creates a virtual environment, installs dependencies and overrides, runs the group, and uploads available artifacts. |
 | `cleanup-ssh-key` | Removes the temporary OS Login key. |
 | `cleanup-vm` | Deletes the benchmark VM. |
-| `delete-buckets` | Sweeps case buckets matching this run's unique prefix. |
+| `delete-buckets` | Sweeps case buckets matching this run's unique prefix, disabling their caches first. |
 | `check-failure` | Fails the build after cleanup if an earlier step recorded a failure. |
 
 The setup script installs the copied checkout in editable mode, then the
@@ -139,7 +139,7 @@ normalized override are published with every result row.
 | Substitution | Default | Description |
 | :--- | :--- | :--- |
 | `_GROUP` | `dataloading/huggingface_datasets` | Runnable `<subsystem>/<implementation>` group. Group discovery requires a `requirements.txt` in that directory. |
-| `_BUCKET_TYPE` | `regional` | Case-bucket profile: `regional`, `zonal`, or `hns`. `zonal` creates RAPID/HNS buckets in `_ZONE`; `hns` creates regional HNS buckets. |
+| `_BUCKET_TYPE` | `regional` | Case-bucket profile: `regional`, `zonal`, `hns`, `rapid_cache_cold`, `rapid_cache_warm`, `standard_rcu_{z,warm,cold}`, or `hns_rcu_{z,warm,cold}`. `zonal` creates RAPID/HNS buckets in `_ZONE`; `hns` creates regional HNS buckets; `rapid_cache_*` add an Anywhere Cache in `_ZONE` to each case bucket, and the RCU types add a Rapid Cache Ultra cache in `_ZONE` to each case bucket (HNS buckets for `hns_rcu_*`). |
 | `_MACHINE_TYPE` | `c4-standard-192` | Compute Engine machine type used for the benchmark VM. |
 | `_REQUIREMENTS` | empty | Whitespace-separated pip requirement specs installed last. Use this to select the `gcsfs` build under test. |
 | `_SWEEP_AXES` | empty | Whitespace-separated configuration-axis names. Empty runs all configured cases; any selection still includes the implicit baseline case. |

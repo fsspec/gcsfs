@@ -143,14 +143,42 @@ For checkpointing groups:
 | `--bucket-prefix` | required | Name prefix for the per-case buckets. |
 | `--project` | required | GCP project for buckets and metrics. |
 | `--location` | required | Bucket region. |
-| `--bucket-type` | `regional` | `regional`, `zonal` (needs `--zone`), or `hns`. |
-| `--zone` | none | Zone for `zonal` buckets. |
+| `--bucket-type` | `regional` | `regional`, `zonal` (needs `--zone`), `hns`, `rapid_cache_cold` or `rapid_cache_warm` (need `--zone`), or an [RCU type](#rcu-bucket-types) (needs `--zone`). |
+| `--zone` | none | Zone for `zonal` buckets, Anywhere Caches and Rapid Cache Ultra caches. |
 | `--sweep-axes` | all | Axes to run, in addition to the baseline. |
 | `--filter` | none | pytest `-k` expression. |
 | `--model-id` | from config | Checkpointing model override. |
 | `--amplification-wait` | `300` | Seconds to wait before querying Cloud Monitoring. |
 | `--amplification-retry-wait` | `60` | Seconds to wait before one retry of missing metrics. |
 | `--require-amplification` | off | Fail if eligible rows still lack amplification metrics. |
+
+### RCU bucket types
+
+`standard_rcu_{z,warm,cold}` (flat bucket) and `hns_rcu_{z,warm,cold}` (HNS
+bucket) add a Rapid Cache Ultra cache in `--zone` to each case's bucket and
+disable it when the case ends. GCS refuses to delete the bucket for over an hour
+after that, so Cloud Build's cleanup steps remove it later. The suffix sets the
+cache state reads start from:
+
+- `z`: the corpus or checkpoint is written as `RAPID` objects.
+- `warm`: it is written as `STANDARD` objects, and the first MiB of each object
+  is read once before timing, followed by a wait of 120 s + 1.5 s per GiB
+  (`GCSFS_SUBSYSTEM_RCU_WARM_SETTLE_SECONDS` overrides it).
+- `cold`: it is written as `STANDARD` objects and not read before timing.
+
+A case fails if its staged objects have another storage class. Checkpoint saves
+run on `*_rcu_z` only. `--zone` must be the VM's zone, because reads from
+another zone never fill the cache:
+
+```bash
+python -m gcsfs.tests.perf.subsystembenchmarks.run \
+  --group=dataloading/huggingface_datasets \
+  --bucket-type=standard_rcu_warm \
+  --zone=<vm-zone> \
+  --bucket-prefix=<unique-lowercase-prefix> \
+  --project=<PROJECT_ID> \
+  --location=us-central1
+```
 
 ## Infrastructure tests
 
