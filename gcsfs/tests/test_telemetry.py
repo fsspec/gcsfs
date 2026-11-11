@@ -1873,6 +1873,45 @@ def test_concurrent_detect_launches_exactly_one_probe(fake_host, monkeypatch):
     assert len(fake_host.requests) == 1
 
 
+def test_detect_slow_race_returns_none_for_scheduler_and_verdict_for_late_peer(
+    fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(200, body="prod-cluster"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+
+    real_run_coro = asyncio.run_coroutine_threadsafe
+
+    def preempting_run_coro(coro, loop):
+        fut = real_run_coro(coro, loop)
+        fut.result(timeout=5)
+        return fut
+
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "run_coroutine_threadsafe", preempting_run_coro)
+        scheduler_detector = EnvironmentDetector()
+        assert scheduler_detector.detect() is None
+        assert scheduler_detector.detect() == "gke"
+
+    peer_detector = EnvironmentDetector()
+    real_is_k8s = peer_detector._is_kubernetes
+    settled_by_winner = False
+
+    def k8s_after_winner_resolves():
+        nonlocal settled_by_winner
+        result = real_is_k8s()
+        if not settled_by_winner:
+            settled_by_winner = True
+            assert peer_detector._schedule_probe() is True
+            _wait_until_probe_settles(peer_detector)
+        return result
+
+    monkeypatch.setattr(peer_detector, "_is_kubernetes", k8s_after_winner_resolves)
+    assert peer_detector.detect() == "gke"
+
+
 def test_module_fork_hook_resets_live_detectors(fake_host):
     detector = EnvironmentDetector()
     detector._cached_env = "gce"

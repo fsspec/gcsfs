@@ -218,7 +218,8 @@ class EnvironmentDetector(BaseDetector):
 
         # Resolve filesystem cluster presence on the caller before background work.
         self._is_kubernetes()
-        self._schedule_probe()
+        if self._schedule_probe():
+            return None
         return self._cached_env
 
     def _reset_after_fork(self) -> None:
@@ -286,10 +287,10 @@ class EnvironmentDetector(BaseDetector):
             self._cached_env = verdict
         return verdict
 
-    def _schedule_probe(self) -> None:
+    def _schedule_probe(self) -> bool:
         with self._lock:
             if self._cached_env is not None or self._probe_in_flight:
-                return
+                return False
             self._probe_generation += 1
             generation = self._probe_generation
             self._probe_in_flight = True
@@ -318,6 +319,7 @@ class EnvironmentDetector(BaseDetector):
                         self._probe_future = None
 
         future.add_done_callback(_clear_if_cancelled)
+        return True
 
     async def _probe_coro(self, generation: int) -> None:
         verdict: Optional[str] = None
