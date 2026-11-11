@@ -45,7 +45,7 @@ from .retry import (
     validate_response,
 )
 from .telemetry import manager as telemetry_manager
-from .telemetry.context import Dimension
+from .telemetry.context import HTTP_HEADER_KEY, USER_AGENT_DIMENSIONS, Dimension
 from .telemetry.wrapper import (
     _run_sync,
     bind_gcs_sync_methods,
@@ -286,7 +286,7 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
-def _build_user_agent(cache_type=None, cache_source=None):
+def _build_user_agent(cache_type=None, cache_source=None, tokens_map=None):
     """Build the standard User-Agent header string for HTTP requests."""
     tokens = [f"python-gcsfs/{version}"]
 
@@ -294,7 +294,10 @@ def _build_user_agent(cache_type=None, cache_source=None):
     if cache_val:
         tokens.append(cache_val)
 
-    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens()
+    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens(
+        dimensions=USER_AGENT_DIMENSIONS,
+        tokens_map=tokens_map,
+    )
     if telemetry_tokens:
         tokens.extend(telemetry_tokens)
 
@@ -630,14 +633,25 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         return params
 
     def _get_headers(self, headers, cache_type=None, cache_source=None):
-        out = {}
-        if headers is not None:
-            out.update(headers)
-        if "User-Agent" not in out:
-            out["User-Agent"] = _build_user_agent(
-                cache_type=cache_type,
-                cache_source=cache_source,
-            )
+        out = dict(headers) if headers is not None else {}
+        need_ua = not any(k.lower() == "user-agent" for k in out)
+        features_key_lower = HTTP_HEADER_KEY.lower()
+        has_caller_features = any(k.lower() == features_key_lower for k in out)
+        if need_ua or not has_caller_features:
+            tokens_map = telemetry_manager.default_usage_tracker.collect_tokens_map()
+            if need_ua:
+                out["User-Agent"] = _build_user_agent(
+                    cache_type=cache_type,
+                    cache_source=cache_source,
+                    tokens_map=tokens_map,
+                )
+            if not has_caller_features and any(tokens_map.values()):
+                # Lazy import avoids top-level proto descriptor registration issues on module reload.
+                from .telemetry import schema as telemetry_schema
+
+                encoded = telemetry_schema.encode_features(tokens_map)
+                if encoded:
+                    out[HTTP_HEADER_KEY] = encoded
         self.credentials.apply(out)
         return out
 

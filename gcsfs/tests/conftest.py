@@ -711,7 +711,7 @@ def skip_if_grpc_read(gcs):
 def mock_gcs_harness(request, monkeypatch):
     """
     Harness that mocks GCSFileSystem HTTP transport and records the exact
-    User-Agent header sent on every outgoing GCS request.
+    User-Agent and feature headers sent on every outgoing GCS request.
 
     Parametrize indirectly with "core" (default) or "extended" to select
     `gcsfs.core.GCSFileSystem` or `ExtendedGcsFileSystem` (on a standard,
@@ -719,22 +719,29 @@ def mock_gcs_harness(request, monkeypatch):
     """
     fs_kind = getattr(request, "param", "core")
     captured_user_agents = []
+    captured_feature_headers = []
     sample_pt_data = b"MOCK_PT_BINARY_DATA_FOR_TORCH_LOADER_TESTING_12345"
     sample_csv_data = b"col1,col2,col3\n1,2,3\n4,5,6\n"
 
     async def mock_call(self, method, path, *args, **kwargs):
+        from gcsfs.telemetry.context import HTTP_HEADER_KEY
+
         if args:
             path = path.format(*args)
-        # Capture the User-Agent header
         headers = kwargs.get("headers") or {}
-        ua = headers.get("User-Agent")
-        if not ua:
-            ua = self._get_headers(
-                headers,
-                cache_type=kwargs.get("cache_type"),
-                cache_source=kwargs.get("cache_source"),
-            ).get("User-Agent")
-        captured_user_agents.append(ua or "")
+        resolved = self._get_headers(
+            headers,
+            cache_type=kwargs.get("cache_type"),
+            cache_source=kwargs.get("cache_source"),
+        )
+        captured_user_agents.append(
+            next((v for k, v in resolved.items() if k.lower() == "user-agent"), "")
+            or ""
+        )
+        feature_key = HTTP_HEADER_KEY.lower()
+        captured_feature_headers.append(
+            next((v for k, v in resolved.items() if k.lower() == feature_key), "") or ""
+        )
 
         # Mock initiate_upload (resumable upload session)
         if kwargs.get("uploadType") == "resumable":
@@ -828,6 +835,7 @@ def mock_gcs_harness(request, monkeypatch):
     class Harness:
         def __init__(self):
             self.user_agents = captured_user_agents
+            self.feature_headers = captured_feature_headers
             self.fs = fs_cls(
                 token="anon",
                 project="test-project",
@@ -837,6 +845,7 @@ def mock_gcs_harness(request, monkeypatch):
 
         def clear(self):
             self.user_agents.clear()
+            self.feature_headers.clear()
 
         def last_user_agent(self) -> str:
             assert len(self.user_agents) > 0, "No User-Agent was captured!"
