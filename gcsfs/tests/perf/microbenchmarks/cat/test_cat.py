@@ -9,6 +9,7 @@ is exact. See fsspec/gcsfs#1048.
 import pytest
 
 from gcsfs.tests.perf.microbenchmarks.cat.configs import get_cat_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.conftest import get_round_file_paths
 from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
     run_multi_threaded,
@@ -79,6 +80,11 @@ def test_cat_single_threaded(benchmark, gcsfs_benchmark_cat, monitor):
     gcs, file_paths, params = gcsfs_benchmark_cat
 
     op, op_args = _build_cat_worker(params, gcs, file_paths)
+    round_args_builder = None
+    if len(getattr(params, "round_file_paths", ())) > 1:
+        round_args_builder = lambda r: _build_cat_worker(
+            params, gcs, get_round_file_paths(params, file_paths, r)
+        )[1]
 
     # cat() issues one request per path just as the per-path loops do, so the
     # object count is the operation count for every pattern.
@@ -90,6 +96,7 @@ def test_cat_single_threaded(benchmark, gcsfs_benchmark_cat, monitor):
         op_args,
         BENCHMARK_GROUP,
         operations_per_round=len(file_paths),
+        round_args_builder=round_args_builder,
     )
 
 
@@ -102,8 +109,16 @@ def test_cat_single_threaded(benchmark, gcsfs_benchmark_cat, monitor):
 def test_cat_multi_threaded(benchmark, gcsfs_benchmark_cat, monitor):
     gcs, file_paths, params = gcsfs_benchmark_cat
 
-    chunks = _chunk_list(file_paths, params.threads)
-    args_list = [_build_cat_worker(params, gcs, chunk)[1] for chunk in chunks]
+    def _build_thread_args(paths):
+        chunks = _chunk_list(paths, params.threads)
+        return [_build_cat_worker(params, gcs, chunk)[1] for chunk in chunks]
+
+    args_list = _build_thread_args(file_paths)
+    round_args_builder = None
+    if len(getattr(params, "round_file_paths", ())) > 1:
+        round_args_builder = lambda r: _build_thread_args(
+            get_round_file_paths(params, file_paths, r)
+        )
     op, _ = _build_cat_worker(params, gcs, file_paths)
 
     run_multi_threaded(
@@ -114,4 +129,5 @@ def test_cat_multi_threaded(benchmark, gcsfs_benchmark_cat, monitor):
         args_list,
         BENCHMARK_GROUP,
         operations_per_round=len(file_paths),
+        round_args_builder=round_args_builder,
     )
