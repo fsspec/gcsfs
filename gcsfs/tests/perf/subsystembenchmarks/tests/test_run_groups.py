@@ -1,4 +1,5 @@
 import os
+from unittest import mock
 
 import pytest
 
@@ -176,6 +177,36 @@ def test_parse_args_requires_zone_for_rcu_bucket_types(capsys, bucket_type):
     assert "--zone is required" in capsys.readouterr().err
     args = run.parse_args(argv + _REQUIRED + ["--zone=us-central1-c"])
     assert args.zone == "us-central1-c"
+
+
+@pytest.mark.parametrize(
+    "bucket_type, rcu_rapid_write",
+    [
+        ("standard_rcu_z", "true"),
+        ("hns_rcu_z", "true"),
+        ("standard_rcu_warm", None),
+        ("hns_rcu_cold", None),
+        ("zonal", None),
+        ("regional", None),
+    ],
+)
+def test_setup_environment_turns_on_rcu_rapid_write_for_rcu_z(
+    bucket_type, rcu_rapid_write
+):
+    """*_rcu_z stages and saves RAPID objects, which gcsfs writes to RCU buckets
+    only with rcu_rapid_write, so every process of the run gets the env var."""
+    args = run.parse_args(
+        [
+            "--group=dataloading/webdataset",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    with mock.patch.dict(os.environ):
+        os.environ.pop("FSSPEC_GCS_RCU_RAPID_WRITE", None)
+        run._setup_environment(args)
+        assert os.environ.get("FSSPEC_GCS_RCU_RAPID_WRITE") == rcu_rapid_write
 
 
 def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():

@@ -68,7 +68,7 @@ def run_checkpoint_case(
         if getattr(result, "verify", None) is not None:
             result.verify()
         if "write" in params.scenario:
-            # RCU saves always write RAPID objects (only *_rcu_z runs them).
+            # Saves run on *_rcu_z only, where run.py turns on RAPID writes.
             rcu.assert_storage_class(prefix, params.bucket_type)
 
         # Measure actual GCS files

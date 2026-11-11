@@ -4,7 +4,8 @@ Each case creates its own bucket (HNS for ``hns_rcu_*``) with an RCU cache in th
 run's zone and disables the cache when it ends (bucket.case_bucket). The type's
 suffix is the cache state reads start from:
 
-- ``*_rcu_z``: objects staged as RAPID (zonal) by gcsfs's appendable writer.
+- ``*_rcu_z``: objects staged as RAPID (zonal) by gcsfs's appendable writer, which
+  run.py turns on with FSSPEC_GCS_RCU_RAPID_WRITE=true.
 - ``*_rcu_warm``: objects staged as STANDARD, then admitted by one read each.
 - ``*_rcu_cold``: objects staged as STANDARD and never read before timing.
 """

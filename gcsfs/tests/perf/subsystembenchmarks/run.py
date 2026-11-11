@@ -9,7 +9,10 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
     RAPID_CACHE_BUCKET_TYPES,
 )
-from gcsfs.tests.perf.subsystembenchmarks.dataloading.rcu import RCU_BUCKET_TYPES
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.rcu import (
+    RCU_BUCKET_TYPES,
+    rcu_state,
+)
 
 
 def discover_groups():
@@ -33,6 +36,10 @@ def _setup_environment(args):
         os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
+    if rcu_state(args.bucket_type) == "z":
+        # *_rcu_z stages and saves RAPID objects, which gcsfs writes to RCU buckets
+        # only with rcu_rapid_write. The suite's processes read it from the env.
+        os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
 
 
 def _build_parser():

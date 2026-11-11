@@ -75,6 +75,62 @@ def test_prepare_files_rcu_z_skips_gcloud_and_uses_extended_gcs(bucket_type):
 
 
 @pytest.mark.parametrize(
+    "bucket_type, rcu_rapid_write",
+    [
+        ("standard_rcu_z", True),
+        ("hns_rcu_z", True),
+        ("standard_rcu_warm", False),
+        ("hns_rcu_cold", False),
+        ("zonal", False),
+        ("regional", False),
+    ],
+)
+@pytest.mark.parametrize("helper", ["io", "put", "listing"])
+def test_benchmark_fixtures_turn_on_rapid_writes_for_rcu_z(
+    helper, bucket_type, rcu_rapid_write
+):
+    """*_rcu_z cases stage and write RAPID objects, which RCU buckets only get
+    with rcu_rapid_write."""
+    created = []
+
+    def tracking_factory(**kwargs):
+        created.append(kwargs)
+        return mock.MagicMock(spec=ExtendedGcsFileSystem)
+
+    params = SimpleNamespace(
+        name=f"{helper}_{bucket_type}",
+        bucket_name=TEST_BUCKET,
+        bucket_type=bucket_type,
+        files=1,
+        folders=1,
+        depth=0,
+        file_size_bytes=0,
+        rounds=1,
+    )
+
+    with (
+        mock.patch.object(bench_conftest, "_prepare_files"),
+        mock.patch.object(bench_conftest, "_warm_rcu_files"),
+    ):
+        if helper == "io":
+            gen = bench_conftest._benchmark_io_fixture_helper(
+                tracking_factory, params, "benchmark-io", create_files=True
+            )
+        elif helper == "put":
+            gen = bench_conftest._benchmark_put_fixture_helper(
+                tracking_factory, params, "benchmark-put"
+            )
+        else:
+            gen = bench_conftest._benchmark_listing_fixture_helper(
+                tracking_factory, params, "benchmark-listing"
+            )
+        next(gen)
+        gen.close()
+
+    assert created[0].get("rcu_rapid_write", False) is rcu_rapid_write
+
+
+@pytest.mark.parametrize(
     "bucket_type",
     ["standard_rcu_warm", "standard_rcu_cold", "hns_rcu_warm", "hns_rcu_cold"],
 )

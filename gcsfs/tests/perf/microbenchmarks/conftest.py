@@ -53,6 +53,14 @@ def _uses_http_standard_upload(bucket_type: str | None) -> bool:
     return _is_rcu_warm(bucket_type) or _is_rcu_cold(bucket_type)
 
 
+def rcu_rapid_write_kwargs(bucket_type: str | None) -> dict:
+    """Filesystem kwargs for ``*_rcu_z``, whose writes must create RAPID objects.
+
+    RCU buckets get STANDARD objects over HTTP unless ``rcu_rapid_write`` is set.
+    """
+    return {"rcu_rapid_write": True} if _is_rcu_z(bucket_type) else {}
+
+
 def get_round_file_paths(params, default_file_paths, round_num: int):
     """Return the file paths to read in ``round_num`` (rotates on ``*_rcu_cold``)."""
     round_paths = getattr(params, "round_file_paths", None)
@@ -285,10 +293,10 @@ def _write_local_file(path, file_size):
 def _benchmark_io_fixture_helper(
     extended_gcs_factory, params, prefix_tag, create_files=False, gcs_kwargs=None
 ):
-    gcs_kwargs = gcs_kwargs or {}
+    bucket_type = getattr(params, "bucket_type", None)
+    gcs_kwargs = {**(gcs_kwargs or {}), **rcu_rapid_write_kwargs(bucket_type)}
     gcs = extended_gcs_factory(**gcs_kwargs)
 
-    bucket_type = getattr(params, "bucket_type", None)
     rounds = getattr(params, "rounds", 1)
     prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
     if create_files and _is_rcu_cold(bucket_type) and rounds > 1:
@@ -447,7 +455,9 @@ def gcsfs_benchmark_cat_ranges(extended_gcs_factory, request):
 
 
 def _benchmark_put_fixture_helper(extended_gcs_factory, params, prefix_tag):
-    gcs = extended_gcs_factory()
+    gcs = extended_gcs_factory(
+        **rcu_rapid_write_kwargs(getattr(params, "bucket_type", None))
+    )
 
     prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
     file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
@@ -523,7 +533,9 @@ def _benchmark_listing_fixture_helper(
     create_folders=False,
     require_file_paths=False,
 ):
-    gcs = extended_gcs_factory()
+    gcs = extended_gcs_factory(
+        **rcu_rapid_write_kwargs(getattr(params, "bucket_type", None))
+    )
 
     prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
 

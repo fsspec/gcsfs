@@ -512,3 +512,55 @@ def test_run_multi_process_passes_round_num_when_accepted(
         ("gcs_0", 0, 1),
         ("gcs_1", 1, 1),
     ]
+
+
+@pytest.mark.parametrize(
+    "bucket_type, rcu_rapid_write",
+    [
+        ("standard_rcu_z", True),
+        ("hns_rcu_z", True),
+        ("standard_rcu_warm", False),
+        ("hns_rcu_cold", False),
+        ("zonal", False),
+        ("regional", False),
+    ],
+)
+@mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
+def test_run_multi_process_workers_write_rapid_on_rcu_z(
+    mock_mp, mock_benchmark, mock_monitor, bucket_type, rcu_rapid_write
+):
+    """*_rcu_z worker filesystems turn on rcu_rapid_write to write RAPID objects."""
+    params = MockParams(processes=2, rounds=1)
+    params.bucket_type = bucket_type
+    extended_gcs_factory = mock.Mock(return_value="gcs_instance")
+
+    mock_ctx = mock.Mock()
+    mock_mp.get_context.return_value = mock_ctx
+    mock_ctx.Process.return_value = mock.Mock(exitcode=0)
+
+    class MockArray:
+        def __setitem__(self, idx, val):
+            pass
+
+        def __getitem__(self, idx):
+            if isinstance(idx, slice):
+                return [1.0, 1.0]
+            return 1.0
+
+    mock_ctx.Array.return_value = MockArray()
+
+    runner.run_multi_process(
+        mock_benchmark,
+        mock_monitor,
+        params,
+        extended_gcs_factory,
+        mock.Mock(),
+        mock.Mock(return_value=("arg1",)),
+        "write",
+        gcs_kwargs={"block_size": 10},
+    )
+
+    expected_kwargs = {"block_size": 10}
+    if rcu_rapid_write:
+        expected_kwargs["rcu_rapid_write"] = True
+    assert extended_gcs_factory.call_args_list == [mock.call(**expected_kwargs)] * 2
