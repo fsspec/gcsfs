@@ -14,6 +14,7 @@ from gcsfs.telemetry import manager
 from gcsfs.telemetry.context import (
     ALL_DIMENSIONS,
     Dimension,
+    canonicalize_method_params,
     get_telemetry_context,
     has_telemetry_context,
     reset_telemetry_context,
@@ -260,9 +261,15 @@ def _resolve_reopen_tokens(reopen_tel: Any) -> dict[str, str]:
     if not manager.default_usage_tracker.is_enabled() or reopen_tel is None:
         return _disabled_tokens_map()
     fw, method = reopen_tel[0], reopen_tel[1]
-    with _telemetry_context(
-        {Dimension.FRAMEWORK.value: fw, Dimension.METHOD.value: method}
-    ):
+    params = (
+        canonicalize_method_params(reopen_tel[2])
+        if method and len(reopen_tel) > 2
+        else ""
+    )
+    seed = {Dimension.FRAMEWORK.value: fw, Dimension.METHOD.value: method}
+    if params:
+        seed[Dimension.METHOD_PARAMS.value] = params
+    with _telemetry_context(seed):
         return manager.default_usage_tracker.collect_tokens_map()
 
 
@@ -635,28 +642,39 @@ def _setup_file_telemetry(file_obj) -> contextvars.Token | None:
     fw = getattr(file_obj, "caller_framework", None)
     has_fw = isinstance(fw, str)
     has_method = hasattr(file_obj, "caller_method")
-    if not has_fw and not has_method:
+    has_params = hasattr(file_obj, "caller_params")
+    if not has_fw and not has_method and not has_params:
         return None
 
-    if has_method:
-        method = file_obj.caller_method
+    if has_method or has_params:
+        method = getattr(file_obj, "caller_method", "open")
+        params = canonicalize_method_params(getattr(file_obj, "caller_params", ""))
     elif Dimension.METHOD.value in current:
         method = current[Dimension.METHOD.value]
+        params = canonicalize_method_params(
+            current.get(Dimension.METHOD_PARAMS.value, "")
+        )
     else:
         method = "open"
+        params = ""
+    if not method:
+        params = ""
 
     # Fast path: telemetry already active (e.g. nested file method calls), skip a redundant set/reset
     if (
         (not has_fw or current.get(Dimension.FRAMEWORK.value) == fw)
         and current.get(Dimension.METHOD.value, _UNSET) == method
-        and Dimension.METHOD_PARAMS.value not in current
+        and current.get(Dimension.METHOD_PARAMS.value, "") == params
     ):
         return None
 
     if has_fw:
         current[Dimension.FRAMEWORK.value] = fw
     current[Dimension.METHOD.value] = method
-    current.pop(Dimension.METHOD_PARAMS.value, None)
+    if params:
+        current[Dimension.METHOD_PARAMS.value] = params
+    else:
+        current.pop(Dimension.METHOD_PARAMS.value, None)
     token = set_telemetry_context(current)
 
     missing_detector = any(
@@ -711,10 +729,14 @@ def _clear_disabled_file_telemetry(file_obj) -> None:
     file_obj._telemetry_disabled = True
     file_obj.caller_framework = ""
     file_obj.caller_method = ""
+    file_obj.caller_params = ""
 
 
 def _prepare_file_init_telemetry(
-    file_obj, kwargs: dict[str, Any]
+    file_obj,
+    kwargs: dict[str, Any],
+    init_pos_spec: tuple[tuple[int, str], ...],
+    args: tuple,
 ) -> tuple[bool, Any, dict[str, str] | None]:
     """Initialize file handle telemetry attributes and capture any active outer context."""
     reopen_tel = kwargs.pop("_reopen_telemetry", _UNSET)
@@ -735,13 +757,28 @@ def _prepare_file_init_telemetry(
     if reopen_tel is not _UNSET:
         file_obj.caller_framework = reopen_tel[0]
         file_obj.caller_method = reopen_tel[1]
+        file_obj.caller_params = (
+            canonicalize_method_params(reopen_tel[2])
+            if file_obj.caller_method and len(reopen_tel) > 2
+            else ""
+        )
     ctx = get_telemetry_context() if has_telemetry_context() else None
+    has_ctx_method = ctx is not None and Dimension.METHOD.value in ctx
     if not hasattr(file_obj, "caller_method"):
         file_obj.caller_method = (
-            ctx[Dimension.METHOD.value]
-            if (ctx is not None and Dimension.METHOD.value in ctx)
-            else "open"
+            ctx[Dimension.METHOD.value] if has_ctx_method else "open"
         )
+    if not hasattr(file_obj, "caller_params"):
+        if not file_obj.caller_method:
+            file_obj.caller_params = ""
+        elif has_ctx_method:
+            file_obj.caller_params = canonicalize_method_params(
+                ctx.get(Dimension.METHOD_PARAMS.value, "")
+            )
+        else:
+            file_obj.caller_params = _extract_method_params(
+                init_pos_spec, args, kwargs, "open"
+            )
     return True, reopen_tel, ctx
 
 
@@ -754,7 +791,8 @@ def _resolve_file_init_tokens(
     if reopen_tel is not _UNSET:
         return _resolve_reopen_tokens(reopen_tel)
     return manager.default_usage_tracker.collect_tokens_map(
-        method=file_obj.caller_method
+        method=file_obj.caller_method,
+        method_params=getattr(file_obj, "caller_params", ""),
     )
 
 
@@ -766,11 +804,14 @@ def wrap_file_methods(cls: type) -> None:
 
     orig_init = cls.__dict__.get("__init__", cls.__init__)
     if not getattr(orig_init, "_is_telemetry_init_wrapped", False):
+        init_pos_spec = _positional_tracked_params(orig_init, "open")
 
         @functools.wraps(orig_init)
         def init_wrapper(*args, **kwargs):
             self = args[0]
-            enabled, reopen_tel, ctx = _prepare_file_init_telemetry(self, kwargs)
+            enabled, reopen_tel, ctx = _prepare_file_init_telemetry(
+                self, kwargs, init_pos_spec, args
+            )
             need_scope = is_gcs_file and (
                 not enabled
                 or reopen_tel is not _UNSET

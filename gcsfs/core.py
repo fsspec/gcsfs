@@ -2819,6 +2819,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             kwargs["_reopen_telemetry"] = (
                 getattr(self, "caller_framework", ""),
                 getattr(self, "caller_method", "open"),
+                getattr(self, "caller_params", ""),
             )
         return kwargs
 
