@@ -3193,8 +3193,8 @@ async def initiate_upload(
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and fs._uses_grpc_write_path(
-        await fs._lookup_bucket_layout(bucket)
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._should_use_grpc_write_path(
+        bucket
     ):
 
         return await ext_initiate_upload(
@@ -3280,8 +3280,8 @@ async def simple_upload(
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and fs._uses_grpc_write_path(
-        await fs._lookup_bucket_layout(bucket)
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._should_use_grpc_write_path(
+        bucket
     ):
 
         return await ext_simple_upload(

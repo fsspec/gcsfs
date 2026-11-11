@@ -133,6 +133,39 @@ def test_rcu_rapid_write_env_var_turns_it_on(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "raw_value, expected",
+    [
+        ("False", False),
+        ("FALSE", False),
+        ("0", False),
+        ("off", False),
+        ("", False),
+        ("True", True),
+        ("1", True),
+        ("yes", True),
+    ],
+)
+def test_rcu_rapid_write_normalizes_env_var_values(monkeypatch, raw_value, expected):
+    """Non-JSON strings like 'False' and JSON ints like 1/0 normalize to bool."""
+    monkeypatch.setenv("FSSPEC_GCS_RCU_RAPID_WRITE", raw_value)
+    conf = {}
+    fsspec.config.set_conf_env(conf)
+    monkeypatch.setattr(fsspec.config, "conf", conf)
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+
+    assert fs.rcu_rapid_write is expected
+    assert fs._uses_grpc_write_path(layouts.STANDARD_RCU) is expected
+
+
+def test_rcu_rapid_write_rejects_unrecognized_string():
+    with pytest.raises(ValueError, match="rcu_rapid_write"):
+        ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write="invalid"
+        )
+
+
+@pytest.mark.parametrize(
     "layout, expected_default, expected_rcu_rapid_write",
     [
         (layouts.ZONAL_HIERARCHICAL, True, True),
@@ -154,6 +187,24 @@ def test_uses_grpc_write_path(layout, expected_default, expected_rcu_rapid_write
 
     assert fs._uses_grpc_write_path(layout) is expected_default
     assert rapid_fs._uses_grpc_write_path(layout) is expected_rcu_rapid_write
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "layout, rcu_rapid_write, expected",
+    [
+        (layouts.ZONAL_HIERARCHICAL, False, True),
+        (layouts.STANDARD_RCU, False, False),
+        (layouts.STANDARD_RCU, True, True),
+        (layouts.STANDARD, True, False),
+    ],
+)
+async def test_should_use_grpc_write_path(layout, rcu_rapid_write, expected):
+    """_should_use_grpc_write_path resolves the bucket layout once."""
+    with _mocked_fs(rcu_rapid_write=rcu_rapid_write) as (fs, _):
+        fs._get_bucket_layout.return_value = layout
+        assert await fs._should_use_grpc_write_path(BUCKET) is expected
+        fs._get_bucket_layout.assert_awaited_once_with(BUCKET)
 
 
 @pytest.mark.parametrize("mode", ["wb", "xb", "ab"])

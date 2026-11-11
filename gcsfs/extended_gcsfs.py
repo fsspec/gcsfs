@@ -167,6 +167,18 @@ async def _close_pool(pool):
     return close_task.result()
 
 
+def _parse_bool_flag(value, name):
+    """Normalize a boolean option that may arrive as a string from config or env."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off", ""):
+            return False
+        raise ValueError(f"{name} must be a boolean, got {value!r}")
+    return bool(value)
+
+
 class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     """
     This class will be used when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT env variable is set to true.
@@ -233,7 +245,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             These map to `google.api_core.retry.AsyncRetry` arguments (without 'retry_' prefix).
         """
         self.fast_lro_polling = fast_lro_polling
-        self.rcu_rapid_write = rcu_rapid_write
+        self.rcu_rapid_write = _parse_bool_flag(rcu_rapid_write, "rcu_rapid_write")
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -614,7 +626,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         Zonal buckets always do, and RCU buckets only with ``rcu_rapid_write``.
         Other writes use the HTTP upload path.
         """
-        return bucket_layout.is_zonal or (bucket_layout.is_rcu and self.rcu_rapid_write)
+        return bool(
+            bucket_layout.is_zonal or (bucket_layout.is_rcu and self.rcu_rapid_write)
+        )
+
+    async def _should_use_grpc_write_path(self, bucket):
+        """Whether writes to ``bucket`` use the gRPC appendable writer."""
+        return self._uses_grpc_write_path(await self._lookup_bucket_layout(bucket))
 
     def _resolve_finalize_on_close(self, bucket_layout, finalize_on_close=None):
         """Return the per-call value, else the filesystem default, else True for RCU."""
