@@ -40,6 +40,8 @@ def _setup_environment(args):
         # *_rcu_z stages and saves RAPID objects, which gcsfs writes to RCU buckets
         # only with rcu_rapid_write. The suite's processes read it from the env.
         os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
+    else:
+        os.environ.pop("FSSPEC_GCS_RCU_RAPID_WRITE", None)
 
 
 def _build_parser():

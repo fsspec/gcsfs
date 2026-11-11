@@ -11,7 +11,6 @@ suffix is the cache state reads start from:
 """
 
 import concurrent.futures
-import contextlib
 import logging
 import os
 import time
@@ -28,7 +27,6 @@ RCU_BUCKET_TYPES = (
     "hns_rcu_warm",
     "hns_rcu_cold",
 )
-_ZB_HNS_FLAG = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
 _WARM_READ_BYTES = 2**20
 
 
@@ -121,31 +119,6 @@ def wait_for_rcu_layout(
             f"{bucket_type} needs an {'HNS' if want_hns else 'flat'} RCU bucket, "
             f"but {bucket!r} is {'HNS' if layout.is_hierarchical else 'flat'}"
         )
-
-
-@contextlib.contextmanager
-def http_staging_env(bucket_type):
-    """For ``*_rcu_warm`` and ``*_rcu_cold``, make processes spawned in the block stage
-    STANDARD objects.
-
-    gcsfs picks ``gcsfs.GCSFileSystem`` (which fsspec's ``gs://`` resolves to) at
-    import time: with GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false it is the HTTP-only
-    ``gcsfs.core.GCSFileSystem``, which uploads STANDARD objects to RCU buckets. The
-    harness stages in spawned processes, which copy the environment when they start,
-    so its writers need no changes. A no-op for every other bucket type.
-    """
-    if rcu_state(bucket_type) not in ("warm", "cold"):
-        yield
-        return
-    previous = os.environ.get(_ZB_HNS_FLAG)
-    os.environ[_ZB_HNS_FLAG] = "false"
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(_ZB_HNS_FLAG, None)
-        else:
-            os.environ[_ZB_HNS_FLAG] = previous
 
 
 def assert_storage_class(prefix, bucket_type):

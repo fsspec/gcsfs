@@ -515,21 +515,21 @@ def test_run_multi_process_passes_round_num_when_accepted(
 
 
 @pytest.mark.parametrize(
-    "bucket_type, rcu_rapid_write",
+    "bucket_type, expected_rcu_rapid_write",
     [
         ("standard_rcu_z", True),
         ("hns_rcu_z", True),
         ("standard_rcu_warm", False),
         ("hns_rcu_cold", False),
-        ("zonal", False),
-        ("regional", False),
+        ("zonal", None),
+        ("regional", None),
     ],
 )
 @mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
-def test_run_multi_process_workers_write_rapid_on_rcu_z(
-    mock_mp, mock_benchmark, mock_monitor, bucket_type, rcu_rapid_write
+def test_run_multi_process_workers_set_rcu_rapid_write_by_bucket_type(
+    mock_mp, mock_benchmark, mock_monitor, bucket_type, expected_rcu_rapid_write
 ):
-    """*_rcu_z worker filesystems turn on rcu_rapid_write to write RAPID objects."""
+    """*_rcu_z enables rcu_rapid_write for RAPID writes; warm/cold force False for HTTP."""
     params = MockParams(processes=2, rounds=1)
     params.bucket_type = bucket_type
     extended_gcs_factory = mock.Mock(return_value="gcs_instance")
@@ -561,6 +561,6 @@ def test_run_multi_process_workers_write_rapid_on_rcu_z(
     )
 
     expected_kwargs = {"block_size": 10}
-    if rcu_rapid_write:
-        expected_kwargs["rcu_rapid_write"] = True
+    if expected_rcu_rapid_write is not None:
+        expected_kwargs["rcu_rapid_write"] = expected_rcu_rapid_write
     assert extended_gcs_factory.call_args_list == [mock.call(**expected_kwargs)] * 2

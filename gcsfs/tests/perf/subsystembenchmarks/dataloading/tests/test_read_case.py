@@ -1,5 +1,4 @@
 import contextlib
-import os
 import statistics
 from dataclasses import dataclass
 
@@ -264,18 +263,13 @@ def test_run_read_case_forces_single_round_for_rapid_cache_cold(tmp_path, monkey
 
 
 @pytest.mark.parametrize(
-    "bucket_type, staging_flag",
-    [
-        ("standard_rcu_warm", "false"),
-        ("standard_rcu_cold", "false"),
-        ("hns_rcu_z", "true"),
-    ],
+    "bucket_type",
+    ["standard_rcu_warm", "standard_rcu_cold", "hns_rcu_z"],
 )
 def test_run_read_case_stages_checks_and_warms_rcu_corpora_before_timing(
-    tmp_path, monkeypatch, bucket_type, staging_flag
+    tmp_path, monkeypatch, bucket_type
 ):
     monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
-    monkeypatch.setenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true")
     events = []
     monkeypatch.setattr(
         read_case.rcu,
@@ -289,8 +283,7 @@ def test_run_read_case_stages_checks_and_warms_rcu_corpora_before_timing(
     )
 
     def ingest(prefix):
-        # Staging runs in processes spawned here, so they inherit this flag.
-        events.append(("ingest", os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]))
+        events.append(("ingest", prefix))
         return _DEFAULT_MANIFEST
 
     params = _params(bucket_type=bucket_type, rounds=3)
@@ -312,7 +305,7 @@ def test_run_read_case_stages_checks_and_warms_rcu_corpora_before_timing(
     prefix = f"{tmp_path}/c/data/"
     # Unlike rapid_cache_cold, rcu_cold keeps every configured round.
     assert events == [
-        ("ingest", staging_flag),
+        ("ingest", prefix),
         ("check", prefix, bucket_type),
         ("warm", prefix, bucket_type),
         ("run_read", 3),

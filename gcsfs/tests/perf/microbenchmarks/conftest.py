@@ -10,10 +10,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List
 
-import google.auth.credentials
 import pytest
 
-from gcsfs.core import GCSFileSystem as HttpGCSFileSystem
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests.conftest import _close_gcs
 from gcsfs.tests.perf._common.resource_monitor import ResourceMonitor
@@ -49,16 +47,18 @@ def _is_rcu_cold(bucket_type: str | None) -> bool:
     return bucket_type in RCU_COLD_BUCKET_TYPES
 
 
-def _uses_http_standard_upload(bucket_type: str | None) -> bool:
-    return _is_rcu_warm(bucket_type) or _is_rcu_cold(bucket_type)
-
-
 def rcu_rapid_write_kwargs(bucket_type: str | None) -> dict:
-    """Filesystem kwargs for ``*_rcu_z``, whose writes must create RAPID objects.
+    """Filesystem kwargs controlling RCU ``RAPID`` vs ``STANDARD`` writes.
 
-    RCU buckets get STANDARD objects over HTTP unless ``rcu_rapid_write`` is set.
+    ``*_rcu_z`` must stage and write ``RAPID`` objects, whereas ``*_rcu_warm``
+    and ``*_rcu_cold`` must stage ``STANDARD`` objects over HTTP even if
+    ``FSSPEC_GCS_RCU_RAPID_WRITE`` is set in the environment.
     """
-    return {"rcu_rapid_write": True} if _is_rcu_z(bucket_type) else {}
+    if _is_rcu_z(bucket_type):
+        return {"rcu_rapid_write": True}
+    if _is_rcu_warm(bucket_type) or _is_rcu_cold(bucket_type):
+        return {"rcu_rapid_write": False}
+    return {}
 
 
 def get_round_file_paths(params, default_file_paths, round_num: int):
@@ -67,25 +67,6 @@ def get_round_file_paths(params, default_file_paths, round_num: int):
     if round_paths:
         return round_paths[round_num % len(round_paths)]
     return default_file_paths
-
-
-def _http_gcs_from(gcs):
-    """Build an isolated base HTTP ``GCSFileSystem`` sharing ``gcs`` credentials."""
-    creds_obj = getattr(gcs.credentials, "credentials", None)
-    if isinstance(creds_obj, google.auth.credentials.Credentials):
-        token = creds_obj
-    else:
-        token = gcs.credentials.method or gcs.credentials.token
-    return HttpGCSFileSystem(
-        project=gcs.project,
-        access=gcs.credentials.access,
-        token=token,
-        endpoint_url=gcs._endpoint,
-        default_location=gcs.default_location,
-        requester_pays=gcs.requester_pays,
-        session_kwargs=gcs.session_kwargs,
-        skip_instance_cache=True,
-    )
 
 
 def _warm_rcu_files(extended_gcs_factory, file_paths, file_size_bytes: int) -> None:
@@ -243,39 +224,33 @@ def _prepare_files_gcloud(file_paths, file_size):
 
 
 def _prepare_files(gcs, file_paths, file_size=0, bucket_type=None):
-    http_upload = _uses_http_standard_upload(bucket_type)
-    upload_fs = _http_gcs_from(gcs) if http_upload else gcs
-    try:
-        if file_size <= SMALL_FILE_UPLOAD_LIMIT:
-            content = os.urandom(file_size) if file_size else b""
-            pipe_kwargs = (
-                {"finalize_on_close": True}
-                if isinstance(upload_fs, ExtendedGcsFileSystem)
-                else {}
-            )
-            try:
-                upload_fs.pipe({path: content for path in file_paths}, **pipe_kwargs)
-                return
-            except Exception as e:
-                pytest.fail(f"Failed to pipe files: {e}")
+    if file_size <= SMALL_FILE_UPLOAD_LIMIT:
+        content = os.urandom(file_size) if file_size else b""
+        pipe_kwargs = (
+            {"finalize_on_close": True}
+            if isinstance(gcs, ExtendedGcsFileSystem)
+            else {}
+        )
+        try:
+            gcs.pipe({path: content for path in file_paths}, **pipe_kwargs)
+            return
+        except Exception as e:
+            pytest.fail(f"Failed to pipe files: {e}")
 
-        if not _is_rcu_z(bucket_type) and len(file_paths) * file_size >= 10240 * MB:
-            if _prepare_files_gcloud(file_paths, file_size):
-                return
+    if not _is_rcu_z(bucket_type) and len(file_paths) * file_size >= 10240 * MB:
+        if _prepare_files_gcloud(file_paths, file_size):
+            return
 
-        chunk_size = min(100 * MB, file_size)
-        pool_size = 16
+    chunk_size = min(100 * MB, file_size)
+    pool_size = 16
 
-        args = [(upload_fs, path, file_size, chunk_size) for path in file_paths]
-        ctx = multiprocessing.get_context("forkserver")
-        with ctx.Pool(pool_size, initializer=_init_pool_worker) as pool:
-            try:
-                pool.starmap(_write_file, args)
-            except RuntimeError as e:
-                pytest.fail(str(e))
-    finally:
-        if http_upload:
-            _close_gcs(upload_fs)
+    args = [(gcs, path, file_size, chunk_size) for path in file_paths]
+    ctx = multiprocessing.get_context("forkserver")
+    with ctx.Pool(pool_size, initializer=_init_pool_worker) as pool:
+        try:
+            pool.starmap(_write_file, args)
+        except RuntimeError as e:
+            pytest.fail(str(e))
 
 
 def _prepare_folders(gcs, folder_paths):
@@ -323,28 +298,16 @@ def _benchmark_io_fixture_helper(
                 gcs, file_paths, params.file_size_bytes, bucket_type=bucket_type
             )
             if _is_rcu_cold(bucket_type) and rounds > 1:
-                http_gcs = _http_gcs_from(gcs)
-                try:
-                    for round_idx in range(1, rounds):
-                        http_gcs.copy(
-                            round_file_paths[0],
-                            round_file_paths[round_idx],
-                            batch_size=32,
-                        )
-                finally:
-                    _close_gcs(http_gcs)
+                for round_idx in range(1, rounds):
+                    gcs.copy(
+                        round_file_paths[0],
+                        round_file_paths[round_idx],
+                        batch_size=32,
+                    )
             elif _is_rcu_warm(bucket_type):
                 _warm_rcu_files(
                     extended_gcs_factory, file_paths, params.file_size_bytes
                 )
-
-            if (
-                _uses_http_standard_upload(bucket_type)
-                and params.file_size_bytes <= SMALL_FILE_UPLOAD_LIMIT
-            ):
-                # Other bucket types stage small files with gcs itself, so write one
-                # tiny object to keep client setup out of the first timed round.
-                gcs.pipe_file(f"{prefix}/_client_warmup", b"\0")
 
             duration_ms = (time.perf_counter() - start_time) * 1000
             logging.info(

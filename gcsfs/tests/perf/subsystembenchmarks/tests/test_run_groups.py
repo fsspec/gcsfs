@@ -208,6 +208,10 @@ def test_setup_environment_turns_on_rcu_rapid_write_for_rcu_z(
         run._setup_environment(args)
         assert os.environ.get("FSSPEC_GCS_RCU_RAPID_WRITE") == rcu_rapid_write
 
+        os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
+        run._setup_environment(args)
+        assert os.environ.get("FSSPEC_GCS_RCU_RAPID_WRITE") == rcu_rapid_write
+
 
 def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
     repo_root = os.path.abspath(

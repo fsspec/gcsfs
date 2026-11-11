@@ -47,9 +47,7 @@ def run_checkpoint_case(
 
         ctx = mp.get_context("spawn")
         p = ctx.Process(target=driver.setup, args=(prefix, params))
-        # The setup process (and its ranks and actors) picks its filesystem from the env.
-        with rcu.http_staging_env(params.bucket_type):
-            p.start()
+        p.start()
         p.join()
         if p.exitcode != 0:
             raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
