@@ -9,6 +9,7 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
     RAPID_CACHE_BUCKET_TYPES,
 )
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.rcu import RCU_BUCKET_TYPES
 
 
 def discover_groups():
@@ -68,7 +69,8 @@ def _build_parser():
     )
     parser.add_argument(
         "--zone",
-        help="placement zone; required when --bucket-type in (zonal, rapid_cache_cold, rapid_cache_warm)",
+        help="placement zone; required when --bucket-type is zonal, rapid_cache_* or "
+        "*_rcu_*",
     )
     parser.add_argument(
         "--model-id",
@@ -92,13 +94,20 @@ def _build_parser():
         action="store_true",
         help="fail when eligible rows still lack amplification metrics",
     )
+    parser.add_argument(
+        "--results-dir",
+        default="",
+        help="directory for results.json/results.csv (default: __run__/<timestamp>); "
+        "concurrent runs need distinct directories",
+    )
     return parser
 
 
 def parse_args(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.bucket_type in ("zonal", *RAPID_CACHE_BUCKET_TYPES) and not args.zone:
+    zone_types = ("zonal", *RAPID_CACHE_BUCKET_TYPES, *RCU_BUCKET_TYPES)
+    if args.bucket_type in zone_types and not args.zone:
         parser.error(f"--zone is required when --bucket-type={args.bucket_type}")
     if args.amplification_wait < 0:
         parser.error("--amplification-wait must be >= 0")
@@ -198,8 +207,11 @@ def main(argv=None):
     _setup_environment(args)
     os.environ["GCSFS_SUBSYSTEM_GROUP"] = args.group
     suite_dir = os.path.join(os.path.dirname(__file__), args.group)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    results_dir = os.path.join(os.path.dirname(__file__), "__run__", timestamp)
+    if args.results_dir:
+        results_dir = args.results_dir
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        results_dir = os.path.join(os.path.dirname(__file__), "__run__", timestamp)
     os.makedirs(results_dir, exist_ok=True)
 
     rc, csv_path = cli.run_suite(suite_dir, results_dir, filter_expr=args.filter)

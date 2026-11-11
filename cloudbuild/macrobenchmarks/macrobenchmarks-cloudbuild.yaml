@@ -210,7 +210,10 @@ steps:
     args: ["cloudbuild/macrobenchmarks/scripts/run_workload.sh"]
     waitFor: ["seed-checkpoint"]
 
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+  # Runs our Python metrics code, so it uses a pinned Python image: the gcloud
+  # image deliberately ships no system python3/pip3. It must not call gcloud;
+  # upload-summary (below) uploads its result.
+  - name: "python:3.12-slim"
     id: "scrape-metrics"
     entrypoint: "bash"
     allowFailure: true
@@ -246,6 +249,13 @@ steps:
     waitFor: ["run-workload"]
 
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "upload-summary"
+    entrypoint: "bash"
+    allowFailure: true
+    args: ["cloudbuild/macrobenchmarks/scripts/upload_summary.sh"]
+    waitFor: ["scrape-metrics"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-helm"
     entrypoint: "bash"
     env:
@@ -278,7 +288,7 @@ steps:
     id: "check-failure"
     entrypoint: "bash"
     args: ["cloudbuild/macrobenchmarks/scripts/check_failure.sh"]
-    waitFor: ["cleanup-cluster", "delete-buckets"]
+    waitFor: ["cleanup-cluster", "delete-buckets", "upload-summary"]
 
 timeout: "21600s"
 

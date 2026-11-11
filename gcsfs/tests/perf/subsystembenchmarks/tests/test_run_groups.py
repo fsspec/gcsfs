@@ -158,6 +158,26 @@ def test_parse_args_accepts_rapid_cache_with_zone(monkeypatch, bucket_type):
     assert os.environ["GCSFS_SUBSYSTEM_ZONE"] == "us-central1-a"
 
 
+_RCU_BUCKET_TYPES = [
+    "standard_rcu_z",
+    "standard_rcu_warm",
+    "standard_rcu_cold",
+    "hns_rcu_z",
+    "hns_rcu_warm",
+    "hns_rcu_cold",
+]
+
+
+@pytest.mark.parametrize("bucket_type", _RCU_BUCKET_TYPES)
+def test_parse_args_requires_zone_for_rcu_bucket_types(capsys, bucket_type):
+    argv = ["--group=dataloading/webdataset", f"--bucket-type={bucket_type}"]
+    with pytest.raises(SystemExit):
+        run.parse_args(argv + _REQUIRED)
+    assert "--zone is required" in capsys.readouterr().err
+    args = run.parse_args(argv + _REQUIRED + ["--zone=us-central1-c"])
+    assert args.zone == "us-central1-c"
+
+
 def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
@@ -180,8 +200,62 @@ def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
         'gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null'
         in cb_yaml
     )
-    assert "HAS_CACHE=" in cb_yaml
+    # The steps run on the cloud-sdk image, which ships no system python3:
+    # caches must be listed with gcloud, not parsed with `python3 -c`.
+    assert cb_yaml.count("gcloud storage buckets anywhere-caches list") >= 2
+    assert "python3 -c" not in cb_yaml
     assert (
-        "^${_INFRA_PREFIX}-(regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
-        in cb_yaml
+        "^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm"
+        "|standard_rcu_z|standard_rcu_warm|standard_rcu_cold|hns_rcu_z|hns_rcu_warm"
+        "|hns_rcu_cold)-[0-9a-f]{8}-" in cb_yaml
     )
+
+
+_RUN_ENV_KEYS = (
+    "GCSFS_SUBSYSTEM_BUCKET_PREFIX",
+    "GCSFS_SUBSYSTEM_BUCKET_TYPE",
+    "GCSFS_SUBSYSTEM_PROJECT",
+    "GCSFS_SUBSYSTEM_LOCATION",
+    "GCSFS_SUBSYSTEM_ZONE",
+    "GCSFS_SUBSYSTEM_SWEEP_AXES",
+    "GCSFS_SUBSYSTEM_MODEL_ID",
+    "GCSFS_SUBSYSTEM_GROUP",
+    "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT",
+    "STORAGE_EMULATOR_HOST",
+)
+
+
+def _run_main_capturing_results_dir(monkeypatch, extra_args):
+    # delenv registers each key for restoration, so main()'s os.environ writes
+    # do not leak into other tests.
+    for key in _RUN_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    seen = {}
+
+    def fake_run_suite(suite_dir, results_dir, filter_expr=None):
+        seen["results_dir"] = results_dir
+        return 0, None
+
+    monkeypatch.setattr(run.cli, "run_suite", fake_run_suite)
+    with pytest.raises(SystemExit):
+        run.main(["--group=dataloading/huggingface_datasets"] + _REQUIRED + extra_args)
+    return seen["results_dir"]
+
+
+def test_main_uses_and_creates_results_dir(monkeypatch, tmp_path):
+    target = tmp_path / "nested" / "case"
+    results_dir = _run_main_capturing_results_dir(
+        monkeypatch, [f"--results-dir={target}"]
+    )
+    assert results_dir == str(target)
+    assert target.is_dir()
+
+
+def test_main_defaults_to_timestamped_run_dir(monkeypatch):
+    results_dir = _run_main_capturing_results_dir(monkeypatch, [])
+    try:
+        assert os.path.dirname(results_dir) == os.path.join(
+            os.path.dirname(run.__file__), "__run__"
+        )
+    finally:
+        os.rmdir(results_dir)

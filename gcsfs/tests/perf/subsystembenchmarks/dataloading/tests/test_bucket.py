@@ -162,3 +162,51 @@ def test_case_bucket_creates_waits_and_disables_rapid_cache():
         None,
     ) in fs.api_calls
     assert fs.removed == [f"{name}/"]
+
+
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_z", "hns_rcu_cold"])
+def test_rcu_types_need_a_zone(bucket_type):
+    with pytest.raises(ValueError, match="GCSFS_SUBSYSTEM_ZONE"):
+        _spec(bucket_type=bucket_type).validate()
+    _spec(bucket_type=bucket_type, zone="us-central1-c").validate()
+
+
+@pytest.mark.parametrize(
+    "bucket_type, hns", [("standard_rcu_warm", False), ("hns_rcu_z", True)]
+)
+def test_rcu_body_enables_ubla_and_only_hns_rcu_gets_hns(bucket_type, hns):
+    body = bucket.bucket_kwargs(_spec(bucket_type=bucket_type, zone="us-central1-c"))
+    assert body["iam_configuration"]["uniformBucketLevelAccess"]["enabled"] is True
+    assert ("hierarchicalNamespace" in body) == hns
+    assert "storageClass" not in body
+    assert "customPlacementConfig" not in body
+
+
+def test_rcu_case_creates_its_cache_and_disables_it_on_the_way_out(monkeypatch):
+    waits = []
+    monkeypatch.setattr(bucket.rcu, "wait_for_rcu_layout", lambda *a: waits.append(a))
+    fs = _FakeFS()
+    spec = _spec(bucket_type="standard_rcu_warm", zone="us-central1-c")
+    with pytest.raises(RuntimeError, match="boom"):
+        with bucket.case_bucket(spec, "read-hf-x", fs=fs) as prefix:
+            name = bucket.bucket_name_of(prefix)
+            assert prefix == f"gs://{name}/data/"
+            assert fs.api_calls == [
+                (
+                    "POST",
+                    f"b/{name}/rapidCaches",
+                    {
+                        "zone": "us-central1-c",
+                        "cacheType": "rapid-cache-ultra",
+                        "admissionPolicy": "admit-on-first-miss",
+                    },
+                )
+            ]
+            # Staging must not start before gcsfs sees the bucket as RCU.
+            assert waits == [(name, "standard_rcu_warm", "proj")]
+            raise RuntimeError("boom")
+    assert fs.api_calls[1:] == [
+        ("POST", f"b/{name}/rapidCaches/us-central1-c/disable", None)
+    ]
+    assert fs.removed == [f"{name}/"]
+    assert fs.rmdirs == [name]

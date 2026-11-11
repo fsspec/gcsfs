@@ -44,6 +44,14 @@ from .retry import (
     retry_request,
     validate_response,
 )
+from .telemetry import manager as telemetry_manager
+from .telemetry.context import Dimension
+from .telemetry.wrapper import (
+    _run_sync,
+    bind_gcs_sync_methods,
+    mirror_gcs_methods,
+    wrap_file_methods,
+)
 from .utils import is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
@@ -278,6 +286,21 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
+def _build_user_agent(cache_type=None, cache_source=None):
+    """Build the standard User-Agent header string for HTTP requests."""
+    tokens = [f"python-gcsfs/{version}"]
+
+    cache_val = _get_cache_type_header_value(cache_type, cache_source)
+    if cache_val:
+        tokens.append(cache_val)
+
+    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens()
+    if telemetry_tokens:
+        tokens.extend(telemetry_tokens)
+
+    return " ".join(tokens)
+
+
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     r"""
     Connect to Google Cloud Storage.
@@ -474,6 +497,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
+        bind_gcs_sync_methods(self)
 
     @property
     def _location(self):
@@ -610,11 +634,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if headers is not None:
             out.update(headers)
         if "User-Agent" not in out:
-            ua = "python-gcsfs/" + version
-            cache_val = _get_cache_type_header_value(cache_type, cache_source)
-            if cache_val:
-                ua += f" {cache_val}"
-            out["User-Agent"] = ua
+            out["User-Agent"] = _build_user_agent(
+                cache_type=cache_type,
+                cache_source=cache_source,
+            )
         self.credentials.apply(out)
         return out
 
@@ -682,7 +705,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """Return list of available project buckets."""
         return [
             b["name"]
-            for b in asyn.sync(self.loop, self._list_buckets, timeout=self.timeout)
+            for b in _run_sync(self.loop, self._list_buckets, timeout=self.timeout)
         ]
 
     def _process_object(self, bucket, object_metadata):
@@ -2496,6 +2519,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         )
 
 
+# Wrap sync and native async methods so they propagate caller framework telemetry.
+mirror_gcs_methods(GCSFileSystem)
+
 GoogleCredentials.load_tokens()
 
 
@@ -2647,6 +2673,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         bucket, key, path_generation = gcsfs.split_path(path)
         if not key:
             raise OSError("Attempt to open a bucket")
+        # "" acts as a negative cache value so subsequent chunk reads / background fetches don't re-walk the stack.
+        self.caller_framework = (
+            telemetry_manager.default_usage_tracker.get_dimension(Dimension.FRAMEWORK)
+            or ""
+        )
         self.generation = _coalesce_generation(generation, path_generation)
         self.if_generation_match = _resolve_open_generation_match(
             mode, if_generation_match
@@ -2665,6 +2696,16 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 )
             else:
                 kwargs.pop("max_prefetch_size", None)
+        # Kept so that a pickled read handle reopens with the same cache options.
+        self._reopen_cache_options = dict(cache_options)
+
+        # _supports_append is an internal argument not meant to be used directly.
+        # If True, allows opening file in append mode. This is generally not supported
+        # by GCS, but may be supported by subclasses (e.g. ZonalFile). This flag should
+        # be set by subclasses that support append operations. Otherwise, the mode
+        # will be overwritten to "wb" mode with a warning. Pop it before
+        # super().__init__() so that it stays out of self.kwargs.
+        _supports_append = kwargs.pop("_supports_append", False)
 
         fs_loop = getattr(gcsfs, "loop", None)
         has_usable_fs_loop = (
@@ -2732,12 +2773,6 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
                 cache.close = lambda: None
 
-        # _supports_append is an internal argument not meant to be used directly.
-        # If True, allows opening file in append mode. This is generally not supported
-        # by GCS, but may be supported by subclasses (e.g. ZonalFile). This flag should
-        # be set by subclasses that support append operations. Otherwise, the mode
-        # will be overwritten to "wb" mode with a warning.
-        _supports_append = kwargs.pop("_supports_append", False)
         if "a" in self.mode and not _supports_append:
             warnings.warn(
                 "Append mode 'a' is not supported in GCS. Using overwrite mode instead."
@@ -2765,6 +2800,38 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 warnings.warn("Setting block size to minimum value, 2**18")
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
+
+    def _reopen_kwargs(self):
+        """Keyword arguments that reopen this file with the options it was opened with."""
+        kwargs = dict(self.kwargs)
+        if self.generation is not None:
+            kwargs["generation"] = self.generation
+        if self._reopen_cache_options:
+            kwargs["cache_options"] = dict(self._reopen_cache_options)
+        kwargs["consistency"] = self.consistency
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
+        return kwargs
+
+    def __reduce__(self):
+        # AbstractBufferedFile.__reduce__ replays only self.kwargs, which misses the
+        # named arguments above (so the reopened file could read a newer
+        # generation), and replays the cache name, which makes a default cache
+        # explicit.
+        if self.mode != "rb":
+            raise RuntimeError("Pickling a writeable file is not supported")
+        cache_type = None if self.cache_source == "default" else self.cache_type
+        return fsspec.spec.reopen, (
+            self.fs,
+            self.path,
+            self.mode,
+            self.blocksize,
+            self.loc,
+            self.size,
+            self.autocommit,
+            cache_type,
+            self._reopen_kwargs(),
+        )
 
     @property
     def details(self):
@@ -2872,7 +2939,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """Create multi-upload"""
         self.location = asyn.sync(
             self.gcsfs.loop,
-            initiate_upload,
+            _http_initiate_upload,
             self.gcsfs,
             self.bucket,
             self.key,
@@ -3007,7 +3074,7 @@ def _convert_fixed_key_metadata(metadata, *, from_google=False):
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
     Uploads a chunk of data. This function has a conditional path to support
-    experimental features for Zonal buckets to append data using gRPC.
+    experimental features for Zonal and RCU buckets to append data using gRPC.
     """
     from google.cloud.storage.asyncio.async_appendable_object_writer import (
         AsyncAppendableObjectWriter,
@@ -3117,7 +3184,7 @@ async def initiate_upload(
 ):
     """
     Initiates a resumable upload. This function has a conditional path to support
-    experimental features for Zonal buckets to append data using gRPC, returning an
+    experimental features for Zonal and RCU buckets to append data using gRPC, returning an
     "AsyncAppendableObjectWriter" instance as location.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
@@ -3125,7 +3192,7 @@ async def initiate_upload(
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
 
         return await ext_initiate_upload(
             fs,
@@ -3138,7 +3205,31 @@ async def initiate_upload(
             kms_key_name,
             if_generation_match=if_generation_match,
         )
+    return await _http_initiate_upload(
+        fs,
+        bucket,
+        key,
+        content_type,
+        metadata,
+        fixed_key_metadata,
+        mode,
+        kms_key_name,
+        if_generation_match=if_generation_match,
+    )
 
+
+async def _http_initiate_upload(
+    fs,
+    bucket,
+    key,
+    content_type="application/octet-stream",
+    metadata=None,
+    fixed_key_metadata=None,
+    mode="overwrite",
+    kms_key_name=None,
+    if_generation_match=None,
+):
+    """Start a resumable upload over HTTP and return its session URL."""
     j = {"name": key}
     if metadata:
         j["metadata"] = metadata
@@ -3178,14 +3269,14 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload. This function has a conditional path to support
-    experimental features for Zonal buckets to upload data using gRPC.
+    experimental features for Zonal and RCU buckets to upload data using gRPC.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._is_zonal_bucket(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
 
         return await ext_simple_upload(
             fs,
@@ -3239,3 +3330,6 @@ async def simple_upload(
     checker.update(datain)
     checker.validate_json_response(j)
     return j
+
+
+wrap_file_methods(GCSFile)

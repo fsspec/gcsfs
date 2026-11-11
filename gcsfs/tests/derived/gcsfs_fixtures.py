@@ -36,11 +36,6 @@ class GcsfsFixtures(AbstractFixtures):
 
     @pytest.fixture
     def supports_empty_directories(self, fs):
-        if hasattr(fs, "_sync_lookup_bucket_type"):
-            from gcsfs.extended_gcsfs import BucketType
-
-            return fs._sync_lookup_bucket_type(TEST_BUCKET) in (
-                BucketType.ZONAL_HIERARCHICAL,
-                BucketType.HIERARCHICAL,
-            )
+        if hasattr(fs, "_sync_lookup_bucket_layout"):
+            return fs._sync_lookup_bucket_layout(TEST_BUCKET).is_hierarchical
         return False

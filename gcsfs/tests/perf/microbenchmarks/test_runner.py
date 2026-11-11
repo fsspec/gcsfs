@@ -364,3 +364,151 @@ def test_run_single_threaded_without_op_count_skips_request_metrics(
 
     assert mock_benchmark.extra_info["requests_per_op"] == "N/A"
     assert mock_benchmark.extra_info["requests_total"] == "N/A"
+
+
+def _simulate_pedantic(target, setup=None, rounds=1, args=(), **kwargs):
+    for _ in range(rounds):
+        call_args = args
+        call_kwargs = {}
+        if setup is not None:
+            maybe = setup()
+            if maybe is not None:
+                call_args, call_kwargs = maybe
+        target(*call_args, **call_kwargs)
+
+
+def test_run_single_threaded_round_args_builder(mock_benchmark, mock_monitor):
+    params = MockParams(rounds=3)
+    mock_benchmark.pedantic.side_effect = _simulate_pedantic
+    seen = []
+
+    runner.run_single_threaded(
+        mock_benchmark,
+        mock_monitor,
+        params,
+        lambda path: seen.append(path),
+        ("fallback",),
+        "cat",
+        round_args_builder=lambda r: (f"round_{r}/file_0",),
+    )
+
+    assert seen == ["round_0/file_0", "round_1/file_0", "round_2/file_0"]
+
+
+def test_run_single_threaded_fixed_duration_round_args_builder(
+    mock_benchmark, mock_monitor
+):
+    params = MockParams(rounds=3)
+    params.runtime = 1
+    seen = []
+
+    def fake_op(path):
+        seen.append(path)
+        return 100 * len(seen)
+
+    runner.run_single_threaded_fixed_duration(
+        mock_benchmark,
+        mock_monitor,
+        params,
+        fake_op,
+        ("fallback",),
+        "read",
+        round_args_builder=lambda r: (f"round_{r}/file_0",),
+    )
+
+    assert seen == ["round_0/file_0", "round_1/file_0", "round_2/file_0"]
+    assert mock_benchmark.extra_info["runs"] == [100, 200, 300]
+
+
+def test_run_multi_threaded_round_args_builder(mock_benchmark, mock_monitor):
+    params = MockParams(threads=2, rounds=2)
+    mock_benchmark.pedantic.side_effect = _simulate_pedantic
+    seen_per_call = []
+
+    runner.run_multi_threaded(
+        mock_benchmark,
+        mock_monitor,
+        params,
+        lambda path: seen_per_call.append(path),
+        [("fallback_0",), ("fallback_1",)],
+        "cat",
+        round_args_builder=lambda r: [(f"r{r}_t0",), (f"r{r}_t1",)],
+    )
+
+    assert sorted(seen_per_call[:2]) == ["r0_t0", "r0_t1"]
+    assert sorted(seen_per_call[2:]) == ["r1_t0", "r1_t1"]
+
+
+def test_run_multi_threaded_fixed_duration_round_args_builder(
+    mock_benchmark, mock_monitor
+):
+    params = MockParams(threads=2, rounds=2)
+    params.runtime = 1
+    seen_per_call = []
+
+    def worker(path):
+        seen_per_call.append(path)
+        return 10
+
+    runner.run_multi_threaded_fixed_duration(
+        mock_benchmark,
+        mock_monitor,
+        params,
+        worker,
+        [("fallback_0",), ("fallback_1",)],
+        "read",
+        round_args_builder=lambda r: [(f"r{r}_t0",), (f"r{r}_t1",)],
+    )
+
+    assert sorted(seen_per_call[:2]) == ["r0_t0", "r0_t1"]
+    assert sorted(seen_per_call[2:]) == ["r1_t0", "r1_t1"]
+    assert mock_benchmark.extra_info["runs"] == [20, 20]
+
+
+@mock.patch("gcsfs.tests.perf.microbenchmarks.runner.multiprocessing")
+def test_run_multi_process_passes_round_num_when_accepted(
+    mock_mp, mock_benchmark, mock_monitor
+):
+    params = MockParams(processes=2, rounds=2)
+    extended_gcs_factory = mock.Mock(side_effect=["gcs_0", "gcs_1"])
+    worker_target = mock.Mock()
+
+    mock_ctx = mock.Mock()
+    mock_mp.get_context.return_value = mock_ctx
+    mock_process = mock.Mock()
+    mock_process.exitcode = 0
+    mock_ctx.Process.return_value = mock_process
+
+    class MockArray:
+        def __setitem__(self, idx, val):
+            pass
+
+        def __getitem__(self, idx):
+            if isinstance(idx, slice):
+                return [1.0, 1.0]
+            return 1.0
+
+    mock_ctx.Array.return_value = MockArray()
+
+    recorded = []
+
+    def four_arg_builder(gcs_instance, proc_idx, shared_arr, round_num):
+        recorded.append((gcs_instance, proc_idx, round_num))
+        return (gcs_instance, proc_idx, round_num)
+
+    runner.run_multi_process(
+        mock_benchmark,
+        mock_monitor,
+        params,
+        extended_gcs_factory,
+        worker_target,
+        four_arg_builder,
+        "read",
+    )
+
+    assert recorded == [
+        ("gcs_0", 0, 0),
+        ("gcs_1", 1, 0),
+        ("gcs_0", 0, 1),
+        ("gcs_1", 1, 1),
+    ]

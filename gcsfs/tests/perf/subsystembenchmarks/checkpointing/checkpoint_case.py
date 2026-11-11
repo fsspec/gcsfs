@@ -4,6 +4,7 @@ import time
 import fsspec
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointDriver
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import rcu
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
 
@@ -46,7 +47,9 @@ def run_checkpoint_case(
 
         ctx = mp.get_context("spawn")
         p = ctx.Process(target=driver.setup, args=(prefix, params))
-        p.start()
+        # The setup process (and its ranks and actors) picks its filesystem from the env.
+        with rcu.http_staging_env(params.bucket_type):
+            p.start()
         p.join()
         if p.exitcode != 0:
             raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
@@ -54,7 +57,9 @@ def run_checkpoint_case(
         if "read" in params.scenario:
             from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 
+            rcu.assert_storage_class(prefix, params.bucket_type)
             rapid_cache.warm_if_needed(prefix, params.bucket_type)
+            rcu.warm_if_needed(prefix, params.bucket_type)
 
         window_start = time.time()
         with monitor() as m:
@@ -62,6 +67,9 @@ def run_checkpoint_case(
         window_end = time.time()
         if getattr(result, "verify", None) is not None:
             result.verify()
+        if "write" in params.scenario:
+            # RCU saves always write RAPID objects (only *_rcu_z runs them).
+            rcu.assert_storage_class(prefix, params.bucket_type)
 
         # Measure actual GCS files
         physical_size_bytes = 0

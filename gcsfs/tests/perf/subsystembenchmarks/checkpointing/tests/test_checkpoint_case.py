@@ -400,3 +400,120 @@ def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypat
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
     assert warm_calls == []
+
+
+@contextlib.contextmanager
+def _rcu_case_ctx(spec, case_id, **kw):
+    yield "gs://rcu-bkt/data/"
+
+
+_RCU_PREFIX = "gs://rcu-bkt/checkpoint/"
+
+
+@pytest.fixture
+def rcu_case(monkeypatch):
+    """Serves gs:// from memory and records the RCU storage-class check and warm-up."""
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            fs, path = original_url_to_fs(url.replace("gs://", "memory://"))
+            fs.pipe_file(os.path.join(path, "model.ckpt"), b"0" * 500)
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+    events = []
+    monkeypatch.setattr(
+        checkpoint_case.rcu,
+        "assert_storage_class",
+        lambda prefix, bt: events.append(("check", prefix, bt)),
+    )
+    monkeypatch.setattr(
+        checkpoint_case.rcu,
+        "warm_if_needed",
+        lambda prefix, bt: events.append(("warm", prefix, bt)),
+    )
+    return events
+
+
+class _EventMonitor(_Monitor):
+    def __init__(self, events):
+        self.events = events
+
+    @contextlib.contextmanager
+    def __call__(self):
+        self.events.append("monitor_enter")
+        yield self
+        self.events.append("monitor_exit")
+
+
+def test_rcu_checkpoint_loads_are_checked_and_warmed_before_the_window(rcu_case):
+    params = _params(scenario="checkpoint_read", bucket_type="standard_rcu_warm")
+
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _EventMonitor(rcu_case),
+        params,
+        _FakeReadDriver(durations=[1.0]),
+        bucket_ctx=_rcu_case_ctx,
+    )
+
+    assert rcu_case == [
+        ("check", _RCU_PREFIX, "standard_rcu_warm"),
+        ("warm", _RCU_PREFIX, "standard_rcu_warm"),
+        "monitor_enter",
+        "monitor_exit",
+    ]
+
+
+def test_rcu_z_checkpoint_saves_are_checked_after_the_window(rcu_case):
+    params = _params(scenario="checkpoint_write", bucket_type="standard_rcu_z")
+
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _EventMonitor(rcu_case),
+        params,
+        _FakeWriteDriver(durations=[1.0]),
+        bucket_ctx=_rcu_case_ctx,
+    )
+
+    assert rcu_case == [
+        "monitor_enter",
+        "monitor_exit",
+        ("check", _RCU_PREFIX, "standard_rcu_z"),
+    ]
+
+
+class _FlagRecordingDriver(_FakeReadDriver):
+    """setup() runs in a spawned process and records the flag that process got."""
+
+    def __init__(self, flag_file):
+        super().__init__(durations=[1.0])
+        self.flag_file = flag_file
+
+    def setup(self, prefix, params):
+        with open(self.flag_file, "w") as f:
+            f.write(os.environ.get("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "unset"))
+
+
+@pytest.mark.parametrize(
+    "bucket_type, staging_flag",
+    [("standard_rcu_cold", "false"), ("standard_rcu_z", "true")],
+)
+def test_checkpoint_setup_stages_rcu_cold_and_warm_with_the_http_only_filesystem(
+    rcu_case, monkeypatch, tmp_path, bucket_type, staging_flag
+):
+    monkeypatch.setenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true")
+    flag_file = tmp_path / "flag"
+
+    checkpoint_case.run_checkpoint_case(
+        _Bench(),
+        _Monitor(),
+        _params(scenario="checkpoint_read", bucket_type=bucket_type),
+        _FlagRecordingDriver(str(flag_file)),
+        bucket_ctx=_rcu_case_ctx,
+    )
+
+    assert flag_file.read_text() == staging_flag

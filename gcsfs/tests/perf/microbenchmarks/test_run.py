@@ -31,6 +31,99 @@ def test_setup_environment_missing_buckets():
         run._setup_environment(args)
 
 
+@pytest.mark.parametrize(
+    "cli_argv,expected_env",
+    [
+        (
+            [
+                "run.py",
+                "--standard-rcu-bucket=std-rcu-bkt",
+                "--bucket-types",
+                "standard_rcu_z",
+                "standard_rcu_warm",
+            ],
+            {
+                "GCSFS_STANDARD_RCU_TEST_BUCKET": "std-rcu-bkt",
+                "GCSFS_HNS_RCU_TEST_BUCKET": "",
+                "GCSFS_BENCHMARK_BUCKET_TYPES": "standard_rcu_z,standard_rcu_warm",
+            },
+        ),
+        (
+            [
+                "run.py",
+                "--hns-rcu-bucket=hns-rcu-bkt",
+            ],
+            {
+                "GCSFS_STANDARD_RCU_TEST_BUCKET": "",
+                "GCSFS_HNS_RCU_TEST_BUCKET": "hns-rcu-bkt",
+            },
+        ),
+    ],
+)
+def test_main_rcu_cli_args_and_environment(cli_argv, expected_env, tmp_path):
+    with (
+        mock.patch("sys.argv", cli_argv),
+        mock.patch.dict(
+            os.environ,
+            {"GCSFS_BENCHMARK_BUCKET_TYPES": "stale_type"},
+            clear=True,
+        ),
+        mock.patch.object(run, "_run_benchmarks", return_value=None) as mock_run_bench,
+        mock.patch("os.makedirs"),
+    ):
+        run.main()
+        mock_run_bench.assert_called_once()
+        for key, value in expected_env.items():
+            assert os.environ[key] == value
+        if "GCSFS_BENCHMARK_BUCKET_TYPES" not in expected_env:
+            assert "GCSFS_BENCHMARK_BUCKET_TYPES" not in os.environ
+
+
+def test_main_rejects_unknown_bucket_type(capsys):
+    cli_argv = [
+        "run.py",
+        "--standard-rcu-bucket=std-rcu-bkt",
+        "--bucket-types",
+        "standard_rcu_wram",
+    ]
+    with (
+        mock.patch("sys.argv", cli_argv),
+        mock.patch.dict(os.environ, {}, clear=True),
+        mock.patch.object(run, "_run_benchmarks", return_value=None) as mock_run_bench,
+        mock.patch("os.makedirs"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        run.main()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert "standard_rcu_wram" in err
+    mock_run_bench.assert_not_called()
+
+
+def test_main_exits_when_bucket_type_flag_missing(caplog):
+    cli_argv = [
+        "run.py",
+        "--regional-bucket=reg-bkt",
+        "--bucket-types",
+        "regional",
+        "standard_rcu_warm",
+    ]
+    with (
+        mock.patch("sys.argv", cli_argv),
+        mock.patch.dict(os.environ, {}, clear=True),
+        mock.patch.object(run, "_run_benchmarks", return_value=None) as mock_run_bench,
+        mock.patch("os.makedirs"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        run.main()
+
+    assert exc.value.code == 1
+    assert "--standard-rcu-bucket" in caplog.text
+    mock_run_bench.assert_not_called()
+
+
 @mock.patch("subprocess.run")
 @mock.patch("os.path.isdir", return_value=True)
 def test_run_benchmarks(mock_isdir, mock_subprocess):
@@ -96,14 +189,24 @@ def test_generate_report():
         mock_file.assert_any_call(report_path, "w", newline="")
 
 
-def test_generate_report_empty_json():
+@pytest.mark.parametrize(
+    "empty_payload",
+    [
+        pytest.param({}, id="empty_dict"),
+        pytest.param({"benchmarks": []}, id="empty_benchmarks_list"),
+    ],
+)
+def test_generate_report_empty_json(empty_payload):
+    # Arrange
     with (
-        mock.patch("json.load", return_value={}),
+        mock.patch("json.load", return_value=empty_payload),
         mock.patch("builtins.open", mock.mock_open()),
     ):
-
+        # Act
         report_path = run._generate_report("results.json", "/tmp")
-        assert report_path is None
+
+    # Assert
+    assert report_path is None
 
 
 def test_format_mb():
@@ -178,3 +281,21 @@ def test_print_csv_to_shell(mock_table):
     with mock.patch("builtins.open", mock.mock_open(read_data=csv_content)):
         run._print_csv_to_shell("report.csv")
         mock_table.return_value.add_row.assert_called()
+
+
+def test_main_exits_nonzero_when_no_report(tmp_path):
+    # Arrange
+    with (
+        mock.patch("sys.argv", ["run.py", "--regional-bucket", "b"]),
+        mock.patch.object(run, "_setup_environment"),
+        mock.patch.object(
+            run, "_run_benchmarks", return_value=str(tmp_path / "results.json")
+        ),
+        mock.patch.object(run, "_generate_report", return_value=None),
+        pytest.raises(SystemExit) as exc,
+    ):
+        # Act
+        run.main()
+
+    # Assert
+    assert exc.value.code == 1

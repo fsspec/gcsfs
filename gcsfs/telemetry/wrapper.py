@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import inspect
+import types
 from typing import Any, Callable, Dict, Optional
 
 from gcsfs.telemetry import manager
@@ -34,6 +35,22 @@ def _telemetry_context(tokens_map: Optional[Dict[str, str]] = None):
         reset_telemetry_context(token)
 
 
+def with_telemetry_context(func: Callable) -> Callable:
+    """
+    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap (e.g. `_open`).
+
+    Detects the caller framework once on the caller thread and scopes it for the whole call, so
+    any requests issued underneath (including via `asyn.sync` to the loop thread) carry it.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _telemetry_context():
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
 def _run_sync(
     loop: Any,
     func: Callable,
@@ -48,7 +65,7 @@ def _run_sync(
         return fsspec.asyn.sync(loop, func, *args, **kwargs)
 
 
-def _gcs_async_wrapper(func: Callable) -> Callable:
+def _gcs_async_wrapper(func: Callable, super_cls: Optional[type] = None) -> Callable:
     """
     GCS-specific async wrapper for coroutines and async generators that scopes telemetry
     context during native async execution, avoiding repetitive stack-walking across
@@ -57,13 +74,19 @@ def _gcs_async_wrapper(func: Callable) -> Callable:
     if getattr(func, "_is_gcs_async_wrapped", False):
         return func
 
+    def _resolve(args: tuple) -> tuple[Callable, tuple]:
+        if super_cls is not None and args:
+            return getattr(super(super_cls, args[0]), func.__name__), args[1:]
+        return func, args
+
     if inspect.isasyncgenfunction(func):
 
         @functools.wraps(func)
         async def gen_wrapper(*args, **kwargs):
+            target, pass_args = _resolve(args)
             # Detect once per iteration; scope context to each step so it never leaks to the consumer
             tokens_map = manager.default_usage_tracker.collect_tokens_map()
-            gen = func(*args, **kwargs)
+            gen = target(*pass_args, **kwargs)
             try:
                 while True:
                     with _telemetry_context(tokens_map):
@@ -80,11 +103,12 @@ def _gcs_async_wrapper(func: Callable) -> Callable:
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
+        target, pass_args = _resolve(args)
         # O(1) fast path for nested calls (already inside _run_sync or another wrapped call)
         if has_telemetry_context():
-            return await func(*args, **kwargs)
+            return await target(*pass_args, **kwargs)
         with _telemetry_context():
-            return await func(*args, **kwargs)
+            return await target(*pass_args, **kwargs)
 
     wrapper._is_gcs_async_wrapped = True
     return wrapper
@@ -173,6 +197,7 @@ def mirror_gcs_methods(obj: type) -> None:
     # Bind the wrappers for valid methods
     from fsspec.spec import AbstractFileSystem
 
+    sync_method_names = set(getattr(obj, "_gcs_sync_method_names", ()))
     for method in method_names:
         smethod = method[
             1:
@@ -195,7 +220,8 @@ def mirror_gcs_methods(obj: type) -> None:
             # Wrap each native async method once. Skip ones a parent already wrapped, so subclasses
             # inherit the parent's wrapper instead of a copy that would hide patches on the parent.
             if not getattr(async_fn, "_is_gcs_async_wrapped", False):
-                async_fn = _gcs_async_wrapper(async_fn)
+                super_cls = None if method in obj.__dict__ else obj
+                async_fn = _gcs_async_wrapper(async_fn, super_cls=super_cls)
                 setattr(obj, method, async_fn)
             if is_public_sync:
                 mth = _gcs_sync_wrapper(async_fn)
@@ -204,6 +230,41 @@ def mirror_gcs_methods(obj: type) -> None:
                         getattr(AbstractFileSystem, smethod, None), "__doc__", ""
                     )
                 setattr(obj, smethod, mth)
+                sync_method_names.add(smethod)
+    obj._gcs_sync_method_names = frozenset(sync_method_names)
+
+
+def bind_gcs_sync_methods(fs: Any) -> None:
+    """
+    Bind the class-level telemetry sync wrappers set by `mirror_gcs_methods` onto `fs`.
+
+    This matches `fsspec.asyn.mirror_sync_methods`, which fsspec runs for every async filesystem
+    instance (and which bound GCSFileSystem's sync methods before they moved to the class). The
+    bound methods stored in `fs.__dict__` reference `fs`, so the instance is only freed by the
+    cyclic garbage collector rather than as soon as its last outside reference is dropped. This
+    matters after `fork()`: fsspec clears `cls._cache` in the child (e.g. in
+    `subprocess.Popen(..., preexec_fn=...)`, used by `ray.init()`), and an instance only the cache
+    referenced must not be torn down there, because deallocating its inherited `grpc.aio` channel
+    in the child hangs or crashes.
+
+    This only protects children that exec right away (CPython disables the cyclic GC in the child
+    around `preexec_fn`). A forked child that keeps running Python, such as a fork-mode
+    `multiprocessing` or PyTorch `DataLoader` worker, can still collect an inherited instance once
+    ordinary allocations trigger the cyclic GC, and hang the same way. That was also the case
+    before the wrappers moved to the class; use the "spawn" or "forkserver" start method there.
+
+    Methods a subclass overrides with a plain sync function are left alone.
+    """
+    cls = type(fs)
+    for name in getattr(cls, "_gcs_sync_method_names", ()):
+        method = getattr(cls, name, None)
+        # Require a real function carrying the marker: mocks (e.g. `mock.patch.object(cls, "ls")`)
+        # auto-create any attribute, and binding one would pass `fs` as an extra positional arg.
+        if (
+            inspect.isfunction(method)
+            and getattr(method, "_is_gcs_sync_wrapped", False) is True
+        ):
+            setattr(fs, name, types.MethodType(method, fs))
 
 
 def _setup_file_telemetry(file_obj) -> Optional[Any]:
@@ -249,13 +310,8 @@ def _file_telemetry_wrapper(func: Callable) -> Callable:
     return sync_wrapper
 
 
-def wrap_file_methods(cls: Any = None) -> None:
-    """Wrap all callable methods and properties on a File class (`GCSFile` by default, or `ZonalFile`)."""
-    if cls is None:
-        from gcsfs.core import GCSFile
-
-        cls = GCSFile
-
+def wrap_file_methods(cls: Any) -> None:
+    """Wrap all callable methods and properties on a File class (e.g. `GCSFile` or `ZonalFile`)."""
     for name, attr in list(cls.__dict__.items()):
         if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
             continue
