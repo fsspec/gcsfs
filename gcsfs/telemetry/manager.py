@@ -31,6 +31,8 @@ class UsageMetricsTracker:
     def collect_tokens_map(
         self,
         dimensions: frozenset[Dimension] = ALL_DIMENSIONS,
+        *,
+        method: str | None = None,
     ) -> dict[str, str]:
         """
         Collect active telemetry tokens across registered detectors.
@@ -39,6 +41,9 @@ class UsageMetricsTracker:
         ----------
         dimensions : frozenset[Dimension], optional
             Dimensions to collect and return. Defaults to ALL_DIMENSIONS.
+        method : str | None, optional
+            Top-level public method name to attach under Dimension.METHOD
+            (or "" as a negative-cache sentinel for untracked entry points).
 
         Returns
         -------
@@ -50,6 +55,9 @@ class UsageMetricsTracker:
             return {}
 
         tokens = get_telemetry_context()
+        if method is not None and Dimension.METHOD in dimensions:
+            tokens.setdefault(Dimension.METHOD.value, method)
+
         include_custom = dimensions == ALL_DIMENSIONS
 
         # Run registered detectors for any requested dimensions not already set
