@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Dict, List, Optional
 
-from gcsfs.telemetry.context import Dimension, get_telemetry_context, sanitize_token
+from gcsfs.telemetry.context import (
+    ALL_DIMENSIONS,
+    Dimension,
+    get_telemetry_context,
+    sanitize_token,
+)
 from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
 
 
@@ -54,20 +60,41 @@ class UsageMetricsTracker:
 
         return tokens
 
-    def get_tokens(self) -> List[str]:
+    def get_tokens(
+        self,
+        dimensions: frozenset[Dimension] = ALL_DIMENSIONS,
+        tokens_map: Optional[Mapping[str, str]] = None,
+    ) -> List[str]:
         """
-        Return a list of all active telemetry tokens to be included in HTTP User-Agent.
+        Return sanitized formatted telemetry tokens for the requested dimensions.
+
+        Parameters
+        ----------
+        dimensions:
+            Dimensions to include in the returned token list.
+        tokens_map:
+            Optional pre-collected dimension-to-token mapping to reuse without
+            re-running detectors.
 
         Returns
         -------
         List[str]: List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
-        token_map = self.collect_tokens_map()
+        if not self.is_enabled():
+            return []
+
+        if tokens_map is None:
+            tokens_map = self.collect_tokens_map()
+
+        include_custom = dimensions == ALL_DIMENSIONS
         out = []
-        for dim_key, val in token_map.items():
-            clean_val = sanitize_token(val)
-            if clean_val:
-                out.append(f"{dim_key}/{clean_val}")
+        for dim_key, val in tokens_map.items():
+            if dim_key in dimensions or (
+                include_custom and dim_key not in ALL_DIMENSIONS
+            ):
+                clean_val = sanitize_token(val)
+                if clean_val:
+                    out.append(f"{dim_key}/{clean_val}")
         return out
 
     def get_dimension(self, dimension: Dimension) -> Optional[str]:
