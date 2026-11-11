@@ -187,6 +187,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         mrd_pool_cache_size=16,
         max_mrd_pool_cache_queue_size=16,
         fast_lro_polling=True,
+        rcu_rapid_write=False,
         **kwargs,
     ):
         """
@@ -196,7 +197,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             If set, overrides the default finalization behavior when closing
             appendable gRPC writers. When ``None`` (the default), files in
             Zonal buckets default to ``False`` (left unfinalized to allow
-            appends) and files in RCU buckets default to ``True``.
+            appends) and files in RCU buckets, which use these writers only
+            with ``rcu_rapid_write=True``, default to ``True``.
         mrd_pool_cache_size : int, default 16
             Maximum number of idle pools to retain in the cache.
         max_mrd_pool_cache_queue_size : int, default 16
@@ -208,6 +210,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             ``operation.result()`` from google-api-core instead. That wait
             has no time limit and does not cancel the rename on the server
             if ``mv`` is cancelled.
+        rcu_rapid_write : bool, default False
+            Write to Rapid Cache Ultra (RCU) buckets with the gRPC appendable
+            writer, which creates ``RAPID`` objects in the zonal cache. By
+            default, writes to RCU buckets use the HTTP upload path and create
+            ``STANDARD`` objects, as on a bucket without the cache. Reads use
+            gRPC either way. A ``RAPID`` object stays in one zone until GCS
+            copies it to regional storage, and these writes ignore
+            ``content_type``, ``metadata``, ``fixed_key_metadata`` and
+            ``kms_key_name``. Can also be set with
+            ``FSSPEC_GCS_RCU_RAPID_WRITE=true`` or
+            ``fsspec.config.conf.setdefault("gcs", {})["rcu_rapid_write"] = True``.
+            Has no effect on Zonal buckets, which always use the appendable
+            writer.
         **kwargs : dict
             Additional arguments passed to GCSFileSystem.
             Supports retry configuration overrides for Storage Control API:
@@ -218,6 +233,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             These map to `google.api_core.retry.AsyncRetry` arguments (without 'retry_' prefix).
         """
         self.fast_lro_polling = fast_lro_polling
+        self.rcu_rapid_write = rcu_rapid_write
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -225,7 +241,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if k.startswith("retry_") and k[6:] in valid_keys and v is not None
         }
         super().__init__(*args, **kwargs)
-        # When None, defaults to False for Zonal buckets and True for RCU buckets.
+        # When None, gRPC writes default to False for Zonal buckets and True for
+        # RCU buckets (written over gRPC only with rcu_rapid_write).
         self.finalize_on_close = finalize_on_close
         self._grpc_client = None
         self._storage_control_client = None
@@ -500,7 +517,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, _, _ = self.split_path(path)
         bucket_layout = self._sync_lookup_bucket_layout(bucket)
-        use_zonal_file = "+" not in mode and bucket_layout.uses_grpc_data_path
+        if mode in ("wb", "ab", "xb"):
+            use_zonal_file = self._uses_grpc_write_path(bucket_layout)
+        else:
+            use_zonal_file = "+" not in mode and bucket_layout.uses_grpc_data_path
         file_cls = ZonalFile if use_zonal_file else GCSFile
         finalize_on_close = self._resolve_finalize_on_close(
             bucket_layout, kwargs.pop("finalize_on_close", None)
@@ -587,6 +607,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _uses_grpc_data_path(self, bucket):
         bucket_layout = await self._lookup_bucket_layout(bucket)
         return bucket_layout.uses_grpc_data_path
+
+    def _uses_grpc_write_path(self, bucket_layout):
+        """Whether writes to a bucket with this layout use the appendable writer.
+
+        Zonal buckets always do, and RCU buckets only with ``rcu_rapid_write``.
+        Other writes use the HTTP upload path.
+        """
+        return bucket_layout.is_zonal or (bucket_layout.is_rcu and self.rcu_rapid_write)
 
     def _resolve_finalize_on_close(self, bucket_layout, finalize_on_close=None):
         """Return the per-call value, else the filesystem default, else True for RCU."""
@@ -2313,13 +2341,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Upload a local file.
 
-        This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
-        By default, files in Zonal buckets are left *unfinalized* (unless
-        `finalize_on_close` is set to True), whereas files in RCU buckets are
-        finalized on close by default.
-        On Zonal and RCU buckets an overwrite replaces the existing object as
-        soon as the writer opens, so a failed write leaves the partially written
-        object in its place, unfinalized.
+        Uploads to Zonal buckets, and to RCU buckets with ``rcu_rapid_write``,
+        use gRPC. By default, files in Zonal buckets are left *unfinalized*
+        (unless `finalize_on_close` is set to True), whereas files in RCU
+        buckets are finalized on close by default.
+        A gRPC overwrite replaces the existing object as soon as the writer
+        opens, so a failed write leaves the partially written object in its
+        place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
         Parameters
@@ -2329,17 +2357,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         rpath: str
             Path on GCS to upload the file to.
         metadata: dict, optional
-            Unsupported for Zonal and RCU buckets and will be ignored.
+            Ignored by gRPC uploads.
         consistency: str, optional
-            Unsupported for Zonal and RCU buckets and will be ignored.
+            Ignored by gRPC uploads.
         content_type: str, optional
-            Unsupported for Zonal and RCU buckets and will be ignored except for the default.
+            Ignored by gRPC uploads, except for the default.
         chunksize: int, optional
             The size of chunks to upload data in.
         callback: fsspec.callbacks.Callback, optional
             Callback to monitor the upload progress.
         fixed_key_metadata: dict, optional
-            Unsupported for Zonal and RCU buckets and will be ignored.
+            Ignored by gRPC uploads.
         mode: str, optional
             The write mode, either 'overwrite' or 'create'.
         if_generation_match: int, optional
@@ -2347,7 +2375,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, key, generation = self.split_path(rpath)
         layout = await self._lookup_bucket_layout(bucket)
-        if layout.uses_grpc_data_path:
+        if self._uses_grpc_write_path(layout):
             if os.path.isdir(lpath):
                 return
 
@@ -2431,13 +2459,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Upload bytes to a file.
 
-        This method is optimized for Zonal and RCU buckets, using gRPC for uploads.
-        By default, files in Zonal buckets are left *unfinalized* (unless
-        `finalize_on_close` is set to True), whereas files in RCU buckets are
-        finalized on close by default.
-        On Zonal and RCU buckets an overwrite replaces the existing object as
-        soon as the writer opens, so a failed write leaves the partially written
-        object in its place, unfinalized.
+        Uploads to Zonal buckets, and to RCU buckets with ``rcu_rapid_write``,
+        use gRPC. By default, files in Zonal buckets are left *unfinalized*
+        (unless `finalize_on_close` is set to True), whereas files in RCU
+        buckets are finalized on close by default.
+        A gRPC overwrite replaces the existing object as soon as the writer
+        opens, so a failed write leaves the partially written object in its
+        place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
         Parameters
@@ -2447,13 +2475,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         data: bytes
             The content to write to the file.
         metadata: dict, optional
-            Unsupported for Zonal and RCU buckets and will be ignored.
+            Ignored by gRPC uploads.
         consistency: str, optional
-            Unsupported for Zonal and RCU buckets and will be ignored.
+            Ignored by gRPC uploads.
         content_type: str, optional
-            Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
+            Ignored by gRPC uploads, except for the default.
         fixed_key_metadata: dict, optional
-            Unsupported for Zonal and RCU buckets and will be ignored.
+            Ignored by gRPC uploads.
         chunksize: int, optional
             The size of chunks to upload data in.
         mode: str, optional
@@ -2463,7 +2491,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, key, generation = self.split_path(path)
         layout = await self._lookup_bucket_layout(bucket)
-        if layout.uses_grpc_data_path:
+        if self._uses_grpc_write_path(layout):
             finalize_on_close = self._resolve_finalize_on_close(
                 layout, kwargs.get("finalize_on_close")
             )
@@ -2833,7 +2861,8 @@ async def initiate_upload(
     if_generation_match=None,
 ):
     """
-    Initiates an upload for Zonal and RCU buckets by creating an AsyncAppendableObjectWriter.
+    Initiates a gRPC upload by creating an AsyncAppendableObjectWriter for Zonal
+    buckets, and for RCU buckets with ``rcu_rapid_write``.
     Delegates to core initiate_upload implementation for other buckets.
 
     Parameters
@@ -2845,20 +2874,20 @@ async def initiate_upload(
     key: str
         The target object key.
     content_type: str, optional
-        Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
+        Ignored by gRPC uploads, except for the default.
     metadata: dict, optional
-        Unsupported for Zonal and RCU buckets and will be ignored.
+        Ignored by gRPC uploads.
     fixed_key_metadata: dict, optional
-        Unsupported for Zonal and RCU buckets and will be ignored.
+        Ignored by gRPC uploads.
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Unsupported for Zonal and RCU buckets and will be ignored.
+        Ignored by gRPC uploads.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
     layout = await fs._lookup_bucket_layout(bucket)
-    if layout.uses_grpc_data_path:
+    if fs._uses_grpc_write_path(layout):
         try:
             writer = await fs._init_aaow(
                 bucket,
@@ -2912,13 +2941,14 @@ async def simple_upload(
     **kwargs,
 ):
     """
-    Performs a simple, single-request upload to Zonal and RCU buckets using gRPC.
+    Performs a simple, single-request gRPC upload to Zonal buckets, and to RCU
+    buckets with ``rcu_rapid_write``.
     By default, files in Zonal buckets are left *unfinalized* (unless
     `finalize_on_close` is set to True), whereas files in RCU buckets are
     finalized on close by default. A failed upload is never finalized.
-    On Zonal and RCU buckets an overwrite replaces the existing object as soon
-    as the writer opens, so a failed write leaves the partially written object
-    in its place, unfinalized.
+    A gRPC overwrite replaces the existing object as soon as the writer opens,
+    so a failed write leaves the partially written object in its place,
+    unfinalized.
     Delegates to core simple_upload implementation for other buckets.
 
     Parameters
@@ -2932,22 +2962,22 @@ async def simple_upload(
     datain: bytes
         The data to be uploaded.
     metadatain: dict, optional
-        Unsupported for Zonal and RCU buckets and will be ignored.
+        Ignored by gRPC uploads.
     consistency: str, optional
-        Unsupported for Zonal and RCU buckets and will be ignored.
+        Ignored by gRPC uploads.
     content_type: str, optional
-        Unsupported for Zonal and RCU buckets and will be ignored, except for the default.
+        Ignored by gRPC uploads, except for the default.
     fixed_key_metadata: dict, optional
-        Unsupported for Zonal and RCU buckets and will be ignored.
+        Ignored by gRPC uploads.
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Unsupported for Zonal and RCU buckets and will be ignored.
+        Ignored by gRPC uploads.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
     layout = await fs._lookup_bucket_layout(bucket)
-    if layout.uses_grpc_data_path:
+    if fs._uses_grpc_write_path(layout):
         finalize_on_close = fs._resolve_finalize_on_close(
             layout, kwargs.get("finalize_on_close")
         )

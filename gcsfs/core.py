@@ -3184,15 +3184,18 @@ async def initiate_upload(
 ):
     """
     Initiates a resumable upload. This function has a conditional path to support
-    experimental features for Zonal and RCU buckets to append data using gRPC, returning an
-    "AsyncAppendableObjectWriter" instance as location.
+    experimental features for Zonal buckets, and RCU buckets with ``rcu_rapid_write``,
+    to append data using gRPC, returning an "AsyncAppendableObjectWriter" instance as
+    location.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import initiate_upload as ext_initiate_upload
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and fs._uses_grpc_write_path(
+        await fs._lookup_bucket_layout(bucket)
+    ):
 
         return await ext_initiate_upload(
             fs,
@@ -3269,14 +3272,17 @@ async def simple_upload(
 ):
     """
     Performs a simple, single-request upload. This function has a conditional path to support
-    experimental features for Zonal and RCU buckets to upload data using gRPC.
+    experimental features for Zonal buckets, and RCU buckets with ``rcu_rapid_write``, to
+    upload data using gRPC.
     """
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
     # Explicit type checking is used to ensure only the ExtendedGcsFileSystem
     # enters this path, ruling out false positives from mocks or coincidentally matching attributes.
-    if isinstance(fs, ExtendedGcsFileSystem) and await fs._uses_grpc_data_path(bucket):
+    if isinstance(fs, ExtendedGcsFileSystem) and fs._uses_grpc_write_path(
+        await fs._lookup_bucket_layout(bucket)
+    ):
 
         return await ext_simple_upload(
             fs,

@@ -1,4 +1,8 @@
-"""Unit tests for write-open failures on Rapid Cache Ultra (RCU) buckets.
+"""Unit tests for writes to Rapid Cache Ultra (RCU) buckets.
+
+By default, writes to RCU buckets use the HTTP upload path and create
+``STANDARD`` objects. With ``rcu_rapid_write=True`` they use the gRPC
+appendable writer and create ``RAPID`` objects.
 
 When an appendable write to a bucket cached as RCU fails to open,
 ExtendedGcsFileSystem looks the bucket layout up once more. If RCU is no
@@ -11,9 +15,11 @@ opened keep the ``finalize_on_close`` they resolved before opening. The gRPC
 writer, the layout lookup, and the HTTP upload are mocked.
 """
 
+import contextlib
 import logging
 from unittest import mock
 
+import fsspec
 import pytest
 from google.api_core import exceptions as api_exceptions
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
@@ -37,6 +43,9 @@ pytestmark = pytest.mark.skipif(
 
 BUCKET = "rcu-bucket"
 PATH = f"{BUCKET}/key"
+UPLOAD_URL = (
+    f"https://storage.googleapis.com/upload/storage/v1/b/{BUCKET}/o?upload_id=1"
+)
 
 
 def _writer():
@@ -69,15 +78,15 @@ def open_error(request):
     return error_cls(message)
 
 
-@pytest.fixture
-def rcu_fs():
+@contextlib.contextmanager
+def _mocked_fs(**kwargs):
     """Yield ``(fs, init_aaow)`` with the gRPC client and layout lookup mocked.
 
     Tests seed ``fs._storage_layout_cache[BUCKET]``, set
     ``fs._get_bucket_layout.return_value`` to the layout a fresh lookup
     returns, and configure the ``gcsfs.zb_hns_utils.init_aaow`` mock.
     """
-    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True, **kwargs)
     fs._grpc_client = mock.MagicMock()
     with (
         mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
@@ -87,6 +96,229 @@ def rcu_fs():
         ) as init_aaow,
     ):
         yield fs, init_aaow
+
+
+@pytest.fixture
+def rcu_fs():
+    """``_mocked_fs`` with ``rcu_rapid_write=True``, so RCU writes use gRPC."""
+    with _mocked_fs(rcu_rapid_write=True) as fs_and_init_aaow:
+        yield fs_and_init_aaow
+
+
+@pytest.fixture
+def default_fs():
+    """``_mocked_fs`` with default options, so RCU writes use HTTP."""
+    with _mocked_fs() as fs_and_init_aaow:
+        yield fs_and_init_aaow
+
+
+def test_rcu_rapid_write_is_off_by_default():
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+
+    assert fs.rcu_rapid_write is False
+
+
+def test_rcu_rapid_write_env_var_turns_it_on(monkeypatch):
+    """FSSPEC_GCS_RCU_RAPID_WRITE=true reaches the constructor through fsspec's
+    config, which parses the value as JSON."""
+    monkeypatch.setenv("FSSPEC_GCS_RCU_RAPID_WRITE", "true")
+    # fsspec reads FSSPEC_* variables when it is imported, so read them again.
+    conf = {}
+    fsspec.config.set_conf_env(conf)
+    monkeypatch.setattr(fsspec.config, "conf", conf)
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+
+    assert fs.rcu_rapid_write is True
+
+
+@pytest.mark.parametrize(
+    "layout, expected_default, expected_rcu_rapid_write",
+    [
+        (layouts.ZONAL_HIERARCHICAL, True, True),
+        (layouts.STANDARD_RCU, False, True),
+        (layouts.HIERARCHICAL_RCU, False, True),
+        (layouts.STANDARD, False, False),
+        (layouts.STANDARD_HIERARCHICAL, False, False),
+        (layouts.STANDARD_RAPID_CACHE, False, False),
+        (layouts.HIERARCHICAL_RAPID_CACHE, False, False),
+        (BucketLayout.UNKNOWN, False, False),
+    ],
+)
+def test_uses_grpc_write_path(layout, expected_default, expected_rcu_rapid_write):
+    """Zonal buckets always write over gRPC, RCU buckets only with rcu_rapid_write."""
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    rapid_fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=True
+    )
+
+    assert fs._uses_grpc_write_path(layout) is expected_default
+    assert rapid_fs._uses_grpc_write_path(layout) is expected_rcu_rapid_write
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+@pytest.mark.parametrize(
+    "layout, rcu_rapid_write, expected_cls",
+    [
+        (layouts.STANDARD_RCU, False, "GCSFile"),
+        (layouts.HIERARCHICAL_RCU, False, "GCSFile"),
+        (layouts.STANDARD_RCU, True, "ZonalFile"),
+        (layouts.HIERARCHICAL_RCU, True, "ZonalFile"),
+        (layouts.ZONAL_HIERARCHICAL, False, "ZonalFile"),
+        (layouts.ZONAL_HIERARCHICAL, True, "ZonalFile"),
+    ],
+)
+def test_open_write_modes_follow_rcu_rapid_write(
+    layout, rcu_rapid_write, expected_cls, mode
+):
+    """Write modes open a ZonalFile on Zonal buckets, and on RCU buckets only
+    with rcu_rapid_write."""
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=rcu_rapid_write
+    )
+    fs._storage_layout_cache[BUCKET] = layout
+
+    with (
+        mock.patch("gcsfs.extended_gcsfs.GCSFile") as gcs_file,
+        mock.patch("gcsfs.extended_gcsfs.ZonalFile") as zonal_file,
+    ):
+        f = fs.open(PATH, mode)
+
+    assert (
+        f is {"GCSFile": gcs_file, "ZonalFile": zonal_file}[expected_cls].return_value
+    )
+
+
+@pytest.mark.parametrize("rcu_rapid_write", [False, True])
+@pytest.mark.parametrize("layout", [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU])
+def test_open_read_mode_on_rcu_uses_zonal_file(layout, rcu_rapid_write):
+    """Reads from RCU buckets use ZonalFile with or without rcu_rapid_write."""
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=rcu_rapid_write
+    )
+    fs._storage_layout_cache[BUCKET] = layout
+
+    with (
+        mock.patch("gcsfs.extended_gcsfs.GCSFile") as gcs_file,
+        mock.patch("gcsfs.extended_gcsfs.ZonalFile") as zonal_file,
+    ):
+        f = fs.open(PATH, "rb")
+
+    assert f is zonal_file.return_value
+    gcs_file.assert_not_called()
+
+
+def test_open_append_on_rcu_by_default_overwrites_over_http(default_fs):
+    """Without rcu_rapid_write, "ab" on an RCU bucket warns and overwrites over
+    HTTP, as on other buckets, and finalize_on_close has no effect."""
+    fs, init_aaow = default_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+
+    with (
+        mock.patch.object(
+            fs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            return_value=({"Location": UPLOAD_URL}, b""),
+        ) as http_call,
+        # fsspec's sync call() wraps the original _call, so patch it too.
+        mock.patch.object(
+            fs, "call", return_value=({}, '{"generation": "1"}')
+        ) as http_upload,
+        pytest.warns(UserWarning, match="Append mode 'a' is not supported"),
+    ):
+        with fs.open(PATH, "ab", finalize_on_close=True) as f:
+            f.write(b"data")
+
+    assert type(f) is core.GCSFile
+    assert f.mode == "wb"
+    init_aaow.assert_not_awaited()
+    assert http_call.await_args.kwargs["uploadType"] == "resumable"
+    assert http_upload.call_args.args[:2] == ("POST", UPLOAD_URL)
+    # call_args holds a memoryview of the upload buffer.
+    http_upload.reset_mock()
+
+
+async def _fake_http_call(*args, **kwargs):
+    """Start a resumable upload, or complete a multipart upload."""
+    if kwargs.get("uploadType") == "resumable":
+        return {"Location": UPLOAD_URL}, b""
+    return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU])
+@pytest.mark.parametrize(
+    "write, upload_type",
+    [
+        ("pipe_file", "multipart"),
+        ("put_file", "multipart"),
+        ("simple_upload", "multipart"),
+        ("initiate_upload", "resumable"),
+        ("core.simple_upload", "multipart"),
+        ("core.initiate_upload", "resumable"),
+    ],
+)
+async def test_rcu_writes_use_http_by_default(
+    default_fs, layout, write, upload_type, tmp_path
+):
+    """Without rcu_rapid_write, every write path uploads to RCU buckets over HTTP,
+    even with finalize_on_close=True."""
+    fs, init_aaow = default_fs
+    fs._storage_layout_cache[BUCKET] = layout
+    lpath = tmp_path / "data"
+    lpath.write_bytes(b"data")
+
+    with mock.patch.object(
+        fs, "_call", new_callable=mock.AsyncMock, side_effect=_fake_http_call
+    ) as http_call:
+        if write == "pipe_file":
+            await fs._pipe_file(PATH, b"data", finalize_on_close=True)
+        elif write == "put_file":
+            await fs._put_file(str(lpath), PATH, finalize_on_close=True)
+        elif write == "simple_upload":
+            await simple_upload(fs, BUCKET, "key", b"data", finalize_on_close=True)
+        elif write == "initiate_upload":
+            await initiate_upload(fs, BUCKET, "key")
+        elif write == "core.simple_upload":
+            await core.simple_upload(fs, BUCKET, "key", b"data")
+        else:
+            await core.initiate_upload(fs, BUCKET, "key")
+
+    init_aaow.assert_not_awaited()
+    http_call.assert_awaited_once()
+    assert http_call.await_args.kwargs["uploadType"] == upload_type
+
+
+@pytest.mark.asyncio
+async def test_rcu_http_writes_keep_upload_params_by_default(default_fs, caplog):
+    """Without rcu_rapid_write, RCU uploads keep the metadata, content type and
+    KMS key that the appendable writer would ignore."""
+    fs, init_aaow = default_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+
+    with (
+        mock.patch.object(
+            fs, "_call", new_callable=mock.AsyncMock, return_value={}
+        ) as http_call,
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+    ):
+        await simple_upload(
+            fs,
+            BUCKET,
+            "key",
+            b"data",
+            metadatain={"k": "v"},
+            content_type="text/plain",
+            kms_key_name="kms-key",
+        )
+
+    init_aaow.assert_not_awaited()
+    request = http_call.await_args.kwargs
+    assert request["kmsKeyName"] == "kms-key"
+    assert b'"metadata": {"k": "v"}' in request["data"]
+    assert b"Content-Type: text/plain" in request["data"]
+    assert not any("will be ignored" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
