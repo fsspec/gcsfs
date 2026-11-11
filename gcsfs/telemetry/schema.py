@@ -58,10 +58,9 @@ def _serialize_features(
         features.environment = env_id
     if method_params:
         # Omit False flags so optional proto3 bool fields are only serialized when True.
-        params_msg = GcsfsFeatures.MethodParams()
-        for field_name in method_params:
-            setattr(params_msg, field_name, True)
-        features.method_params = params_msg
+        features.method_params = GcsfsFeatures.MethodParams(
+            {field_name: True for field_name in method_params}
+        )
     serialized = GcsfsFeatures.serialize(features)
     if not serialized:
         return None
