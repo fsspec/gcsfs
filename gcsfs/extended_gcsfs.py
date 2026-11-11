@@ -534,9 +534,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         else:
             use_zonal_file = "+" not in mode and bucket_layout.uses_grpc_data_path
         file_cls = ZonalFile if use_zonal_file else GCSFile
-        finalize_on_close = self._resolve_finalize_on_close(
-            bucket_layout, kwargs.pop("finalize_on_close", None)
-        )
+        finalize_on_close = kwargs.pop("finalize_on_close", None)
+        if use_zonal_file:
+            kwargs["finalize_on_close"] = self._resolve_finalize_on_close(
+                bucket_layout, finalize_on_close
+            )
 
         return file_cls(
             self,
@@ -550,7 +552,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             autocommit=autocommit,
             fixed_key_metadata=fixed_key_metadata,
             generation=generation,
-            finalize_on_close=finalize_on_close,
             **kwargs,
         )
 
@@ -2827,7 +2828,8 @@ mirror_gcs_methods(ExtendedGcsFileSystem)
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
-    Uploads a chunk of data using AsyncAppendableObjectWriter for Zonal and RCU buckets.
+    Uploads a chunk of data using AsyncAppendableObjectWriter for Zonal buckets,
+    and for RCU buckets with ``rcu_rapid_write``.
     Finalizes the upload when the total uploaded data size reaches the specified size.
     Delegates to core upload_chunk implementation for other buckets.
     """

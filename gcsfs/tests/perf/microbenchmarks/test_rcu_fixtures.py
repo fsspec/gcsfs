@@ -375,6 +375,110 @@ def test_benchmark_io_fixture_primes_client_for_small_rcu_warm_and_cold_files(
                 next(gen)
 
 
+@pytest.mark.parametrize(
+    "bucket_type, bucket_layout",
+    [
+        ("standard_rcu_warm", layouts.STANDARD_RCU),
+        ("hns_rcu_cold", layouts.HIERARCHICAL_RCU),
+    ],
+)
+def test_benchmark_io_fixture_primes_grpc_client_on_extended_fs_for_small_rcu_warm_and_cold(
+    bucket_type, bucket_layout
+):
+    """Fixture setup stages over HTTP and warms gcs's gRPC client via MRD without reading target files."""
+    params = SimpleNamespace(
+        name=f"cat_{bucket_type}",
+        bucket_name="my-bucket",
+        bucket_type=bucket_type,
+        files=2,
+        file_size_bytes=64,
+        rounds=1,
+    )
+    fake_grpc_client = mock.MagicMock()
+    fake_grpc_client.grpc_client.transport.close = mock.AsyncMock()
+    fake_mrd = mock.MagicMock()
+    fake_mrd.persisted_size = 1
+    fake_mrd.is_stream_open = True
+    fake_mrd.object_name = "warmup"
+    fake_mrd.close = mock.AsyncMock()
+
+    async def _fake_download_ranges(ranges):
+        for _, length, buf in ranges:
+            buf.write(b"\0" * length)
+
+    fake_mrd.download_ranges = mock.AsyncMock(side_effect=_fake_download_ranges)
+
+    async def _fake_http_call(*args, **kwargs):
+        return {
+            "name": "obj",
+            "size": "1",
+            "generation": "1",
+            "timeFinalized": "2026-01-01T00:00:00Z",
+        }
+
+    def _make_fs(**kwargs):
+        return ExtendedGcsFileSystem(token="anon", skip_instance_cache=True, **kwargs)
+
+    with (
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_call",
+            new_callable=mock.AsyncMock,
+            side_effect=_fake_http_call,
+        ),
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_rm",
+            new_callable=mock.AsyncMock,
+        ),
+        mock.patch(
+            "gcsfs.extended_gcsfs.AsyncGrpcClient",
+            return_value=fake_grpc_client,
+        ) as grpc_client_cls,
+        mock.patch(
+            "gcsfs.zb_hns_utils.init_aaow",
+            new_callable=mock.AsyncMock,
+            side_effect=AssertionError("gRPC write must not run"),
+        ) as init_aaow,
+        mock.patch(
+            "gcsfs.zb_hns_utils.init_mrd",
+            new_callable=mock.AsyncMock,
+            return_value=fake_mrd,
+        ) as init_mrd,
+        mock.patch.object(bench_conftest, "_warm_rcu_files"),
+    ):
+        gen = bench_conftest._benchmark_io_fixture_helper(
+            _make_fs,
+            params,
+            "benchmark-prime",
+            create_files=True,
+            gcs_kwargs=bench_conftest.rcu_rapid_write_kwargs(bucket_type),
+        )
+        gcs, file_paths, yielded_params = next(gen)
+        try:
+            assert gcs._grpc_client is fake_grpc_client
+            grpc_client_cls.assert_called_once()
+            init_aaow.assert_not_awaited()
+            init_mrd.assert_awaited_once()
+            assert init_mrd.await_args is not None
+            warmed_client, warmed_bucket, warmed_object, _ = init_mrd.await_args.args
+            assert warmed_client is fake_grpc_client
+            assert warmed_bucket == "my-bucket"
+            assert warmed_object.endswith("/_client_warmup")
+            for p in file_paths:
+                assert not p.endswith(f"/{warmed_object}")
+            assert len(yielded_params.round_file_paths[0]) == 2
+        finally:
+            with pytest.raises(StopIteration):
+                next(gen)
+
+
 def test_benchmark_io_fixture_rcu_cold_stages_distinct_objects_per_round(
     extended_gcs_factory,
 ):

@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 from unittest import mock
 
 import pytest
@@ -211,6 +213,47 @@ def test_setup_environment_turns_on_rcu_rapid_write_for_rcu_z(
         os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
         run._setup_environment(args)
         assert os.environ.get("FSSPEC_GCS_RCU_RAPID_WRITE") == rcu_rapid_write
+
+
+@pytest.mark.parametrize(
+    "bucket_type, expected",
+    [
+        ("standard_rcu_z", True),
+        ("standard_rcu_cold", False),
+    ],
+)
+def test_setup_environment_propagates_rcu_rapid_write_to_spawned_child_process(
+    bucket_type, expected
+):
+    """Spawned child processes initialize GCSFileSystem().rcu_rapid_write from _setup_environment."""
+    args = run.parse_args(
+        [
+            "--group=dataloading/webdataset",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    with mock.patch.dict(os.environ):
+        os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
+        run._setup_environment(args)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import gcsfs; "
+                    "fs = gcsfs.GCSFileSystem(token='anon', skip_instance_cache=True); "
+                    "print(fs.rcu_rapid_write)"
+                ),
+            ],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    assert proc.stdout.strip() == str(expected)
 
 
 def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():

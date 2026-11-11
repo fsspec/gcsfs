@@ -3074,7 +3074,8 @@ def _convert_fixed_key_metadata(metadata, *, from_google=False):
 async def upload_chunk(fs, location, data, offset, size, content_type):
     """
     Uploads a chunk of data. This function has a conditional path to support
-    experimental features for Zonal and RCU buckets to append data using gRPC.
+    experimental features for Zonal buckets, and RCU buckets with ``rcu_rapid_write``,
+    to append data using gRPC.
     """
     from google.cloud.storage.asyncio.async_appendable_object_writer import (
         AsyncAppendableObjectWriter,

@@ -290,6 +290,31 @@ def test_open_append_on_rcu_by_default_overwrites_over_http(default_fs):
     http_upload.reset_mock()
 
 
+def test_open_http_gcs_file_does_not_leak_finalize_on_close_into_kwargs(default_fs):
+    """HTTP-backed GCSFile handles from _open must not carry finalize_on_close in kwargs."""
+    fs, _ = default_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+
+    with (
+        mock.patch.object(
+            fs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            return_value=({"Location": UPLOAD_URL}, b""),
+        ),
+        mock.patch.object(fs, "call", return_value=({}, '{"generation": "1"}')),
+    ):
+        with fs.open(PATH, "wb") as default_handle:
+            pass
+        with fs.open(PATH, "wb", finalize_on_close=False) as explicit_handle:
+            pass
+
+    assert type(default_handle) is core.GCSFile
+    assert type(explicit_handle) is core.GCSFile
+    assert "finalize_on_close" not in default_handle.kwargs
+    assert "finalize_on_close" not in explicit_handle.kwargs
+
+
 async def _fake_http_call(*args, **kwargs):
     """Start a resumable upload, or complete a multipart upload."""
     if kwargs.get("uploadType") == "resumable":
