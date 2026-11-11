@@ -1426,7 +1426,7 @@ def test_encode_features_worst_case_bounds():
 
 
 @pytest.mark.asyncio
-async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch, caplog):
+async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch):
     from gcsfs.tests import layouts
 
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
@@ -1487,7 +1487,16 @@ async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch, caplo
     caller_md = [(feat_key, "caller-val")]
     layout_name = "projects/_/buckets/b/storageLayout"
     op_name = "projects/_/buckets/b/operations/op1"
-    grpc_logger = "google.cloud.storage_control_v2.services.storage_control.transports.grpc_asyncio"
+    grpc_logger = logging.getLogger(
+        "google.cloud.storage_control_v2.services.storage_control.transports.grpc_asyncio"
+    )
+    log_records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record):
+            log_records.append(record)
+
+    log_handler = _ListHandler(logging.DEBUG)
 
     try:
         transport_cls = svc.StorageControlAsyncClient.get_transport_class(
@@ -1507,9 +1516,10 @@ async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch, caplo
         fs_cached = ExtendedGcsFileSystem(token="anon", endpoint_url=endpoint)
         client = await fs._get_control_plane_client()
         ops = client.transport.operations_client
-        monkeypatch.setattr(logging.getLogger("google"), "propagate", True)
-        caplog.clear()
-        with caplog.at_level(logging.DEBUG, logger=grpc_logger):
+        orig_level = grpc_logger.level
+        grpc_logger.setLevel(logging.DEBUG)
+        grpc_logger.addHandler(log_handler)
+        try:
             layout = await client.get_storage_layout(name=layout_name)
             op = await ops.get_operation(op_name)
             await client.get_storage_layout(name=layout_name, metadata=caller_md)
@@ -1523,9 +1533,12 @@ async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch, caplo
             calls_during_opt_out = len(counting.calls)
             monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
             await client.get_storage_layout(name=layout_name)
+        finally:
+            grpc_logger.removeHandler(log_handler)
+            grpc_logger.setLevel(orig_level)
         logged_features = [
             record.metadata.get(feat_key)
-            for record in caplog.records
+            for record in log_records
             if "Sending request" in record.getMessage()
             and isinstance(getattr(record, "metadata", None), dict)
         ]
