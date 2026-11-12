@@ -119,14 +119,16 @@ def test_feature_and_cache_variants():
     projected = cases[f"{stem}-proj286r1-reg"]
     assert projected.read_columns()[:2] == ["tokens", "label"]
     assert len(projected.read_columns()) == 2 + 286
-    assert projected.extra_columns()["read_projected_feature_count"] == 286
+    assert projected.extra_columns()["read_projected_feature_column_count"] == 286
+    assert projected.extra_columns()["read_projection_run_length_columns"] == 1
     assert projected.cache_type is None and projected.block_size is None
     every = cases[f"{stem}-reg"]
     assert len(every.read_columns()) == 2 + 1134
+    assert every.extra_columns()["read_projection_run_length_columns"] is None
     readahead = cases[f"{stem}-proj286r1-ctreadahead-bs5m-reg"]
     assert (readahead.cache_type, readahead.block_size) == ("readahead", 5242880)
-    assert readahead.extra_columns()["gcsfs_cache_type"] == "readahead"
-    assert readahead.extra_columns()["gcsfs_block_size_bytes"] == 5242880
+    assert readahead.extra_columns()["gcsfs_read_cache_type"] == "readahead"
+    assert readahead.extra_columns()["gcsfs_read_block_size_bytes"] == 5242880
 
 
 def test_baseline_has_no_features_or_gcsfs_settings():

@@ -29,8 +29,8 @@ class RayDataReadParameters(ReadParameters):
     # pretok_parquet feature columns: feature_column_count extra binary columns of
     # feature_value_bytes per value on average (0 keeps the plain tokens + label
     # corpus). The read selects tokens, label and projected_feature_count of them
-    # (0 = all), picked in runs of projection_run_length adjacent columns (1 =
-    # scattered). Batches then stay pyarrow tables: binary columns have no tensor form.
+    # (0 = all), picked in blocks of projection_run_length adjacent columns (1 =
+    # scattered). Blocks can merge or be cut. Batches then stay pyarrow tables: binary columns have no tensor form.
     feature_column_count: int = 0
     feature_value_bytes: int = 10
     projected_feature_count: int = 0
@@ -122,14 +122,16 @@ class RayDataReadParameters(ReadParameters):
             "parquet_row_group_size_rows": self.row_group_size,
             "sample_sequence_length_tokens": self.seq_len,
             "parquet_feature_column_count": self.feature_column_count or None,
-            "read_projected_feature_count": (
+            "read_projected_feature_column_count": (
                 (self.projected_feature_count or self.feature_column_count)
                 if features
                 else None
             ),
-            "read_projection_run_length": (
-                self.projection_run_length if features else None
+            "read_projection_run_length_columns": (
+                self.projection_run_length
+                if features and self.projected_feature_count
+                else None
             ),
-            "gcsfs_cache_type": self.cache_type,
-            "gcsfs_block_size_bytes": self.block_size,
+            "gcsfs_read_cache_type": self.cache_type,
+            "gcsfs_read_block_size_bytes": self.block_size,
         }

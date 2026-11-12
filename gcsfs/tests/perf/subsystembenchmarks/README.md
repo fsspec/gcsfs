@@ -37,11 +37,16 @@ columns). Such reads turn into hundreds of small range reads per file.
 | :-- | :-- |
 | `feature_column_count`, `feature_value_bytes` | Extra binary columns next to `tokens` and `label`, `feature_value_bytes` per value on average (default 10). 0 keeps the plain corpus. |
 | `projected_feature_count` | Feature columns the read selects besides `tokens` and `label` (`select_columns`, pushed down into the scan). 0 reads all of them. |
-| `projection_run_length` | Selected columns come in runs of this many adjacent columns: 1 (default) scatters them, larger values cluster them. This sets how many separate reads Arrow issues per row group. |
+| `projection_run_length` | Selected columns are picked in blocks of this many adjacent columns: 1 (default) scatters them, larger values cluster them. Blocks can merge or be cut. This sets how many separate reads Arrow issues per row group. |
 | `cache_type`, `block_size` | gcsfs `open()` options for every file Ray opens, for any `ray_data` case. pyarrow's `FSSpecHandler` passes none, so the driver applies them as filesystem defaults. Unset keeps gcsfs's defaults. |
 
 With feature columns, batches stay pyarrow tables (binary columns have no tensor
 form), so these cases do not copy batches to the GPU.
+
+With a projection, `dataset_read_throughput_mean_bytes_per_second` and
+`dataset_read_amplification_ratio` are still relative to the whole stored table.
+A read with no over-fetch scores an amplification of about the projected share of
+the bytes, not 1, so compare projected rows with each other.
 
 ## How a case runs
 
