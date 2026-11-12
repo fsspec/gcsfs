@@ -1,11 +1,10 @@
-import datetime
 import unittest.mock as mock
 from types import SimpleNamespace
 
-import google.oauth2.credentials
 import pytest
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.tests import layouts
 from gcsfs.tests.perf.microbenchmarks import conftest as bench_conftest
 from gcsfs.tests.perf.microbenchmarks.cat import test_cat as cat_bench
 from gcsfs.tests.perf.microbenchmarks.cat_ranges import (
@@ -75,25 +74,99 @@ def test_prepare_files_rcu_z_skips_gcloud_and_uses_extended_gcs(bucket_type):
 
 
 @pytest.mark.parametrize(
-    "bucket_type",
-    ["standard_rcu_warm", "standard_rcu_cold", "hns_rcu_warm", "hns_rcu_cold"],
+    "bucket_type, expected_rcu_rapid_write",
+    [
+        ("standard_rcu_z", True),
+        ("hns_rcu_z", True),
+        ("standard_rcu_warm", False),
+        ("hns_rcu_cold", False),
+        ("zonal", None),
+        ("regional", None),
+    ],
 )
-def test_prepare_files_rcu_warm_and_cold_use_base_http_gcs_on_emulator(
-    extended_gcs_factory, bucket_type
+@pytest.mark.parametrize("helper", ["io", "put", "listing"])
+def test_benchmark_fixtures_set_rcu_rapid_write_by_bucket_type(
+    helper, bucket_type, expected_rcu_rapid_write
 ):
-    """*_rcu_warm and *_rcu_cold must upload STANDARD objects via base HTTP GCSFileSystem."""
-    gcs = extended_gcs_factory()
+    """*_rcu_z enables rcu_rapid_write for RAPID writes; warm/cold force False for HTTP staging."""
+    created = []
+
+    def tracking_factory(**kwargs):
+        created.append(kwargs)
+        return mock.MagicMock(spec=ExtendedGcsFileSystem)
+
+    params = SimpleNamespace(
+        name=f"{helper}_{bucket_type}",
+        bucket_name=TEST_BUCKET,
+        bucket_type=bucket_type,
+        files=1,
+        folders=1,
+        depth=0,
+        file_size_bytes=0,
+        rounds=1,
+    )
+
+    with (
+        mock.patch.object(bench_conftest, "_prepare_files"),
+        mock.patch.object(bench_conftest, "_warm_rcu_files"),
+    ):
+        if helper == "io":
+            gen = bench_conftest._benchmark_io_fixture_helper(
+                tracking_factory, params, "benchmark-io", create_files=True
+            )
+        elif helper == "put":
+            gen = bench_conftest._benchmark_put_fixture_helper(
+                tracking_factory, params, "benchmark-put"
+            )
+        else:
+            gen = bench_conftest._benchmark_listing_fixture_helper(
+                tracking_factory, params, "benchmark-listing"
+            )
+        next(gen)
+        gen.close()
+
+    if expected_rcu_rapid_write is None:
+        assert "rcu_rapid_write" not in created[0]
+    else:
+        assert created[0]["rcu_rapid_write"] is expected_rcu_rapid_write
+
+
+@pytest.mark.parametrize(
+    "bucket_type, bucket_layout",
+    [
+        ("standard_rcu_warm", layouts.STANDARD_RCU),
+        ("standard_rcu_cold", layouts.STANDARD_RCU),
+        ("hns_rcu_warm", layouts.HIERARCHICAL_RCU),
+        ("hns_rcu_cold", layouts.HIERARCHICAL_RCU),
+    ],
+)
+def test_prepare_files_rcu_warm_and_cold_use_http_on_emulator(
+    extended_gcs_factory, bucket_type, bucket_layout
+):
+    """*_rcu_warm and *_rcu_cold stage STANDARD objects over HTTP through ExtendedGcsFileSystem."""
+    gcs = extended_gcs_factory(**bench_conftest.rcu_rapid_write_kwargs(bucket_type))
     paths = [f"{TEST_BUCKET}/rcu-http-{bucket_type}/file_{i}" for i in range(2)]
 
     try:
-        with mock.patch.object(
-            ExtendedGcsFileSystem,
-            "_pipe_file",
-            side_effect=AssertionError("ExtendedGcsFileSystem._pipe_file must not run"),
-        ):
-            bench_conftest._prepare_files(
-                gcs, paths, file_size=64, bucket_type=bucket_type
-            )
+        try:
+            with (
+                mock.patch.object(
+                    gcs,
+                    "_get_bucket_layout",
+                    new_callable=mock.AsyncMock,
+                    return_value=bucket_layout,
+                ),
+                mock.patch(
+                    "gcsfs.zb_hns_utils.init_aaow",
+                    new_callable=mock.AsyncMock,
+                    side_effect=AssertionError("gRPC appendable writer must not run"),
+                ),
+            ):
+                bench_conftest._prepare_files(
+                    gcs, paths, file_size=64, bucket_type=bucket_type
+                )
+        finally:
+            gcs.invalidate_storage_layout_cache(TEST_BUCKET)
 
         for path in paths:
             assert len(gcs.cat_file(path)) == 64
@@ -117,10 +190,10 @@ def test_benchmark_listing_fixture_rcu_cold_uses_http_upload(
         file_size_bytes=0,
         rounds=1,
     )
-    with mock.patch.object(
-        ExtendedGcsFileSystem,
-        "_pipe_file",
-        side_effect=AssertionError("ExtendedGcsFileSystem._pipe_file must not run"),
+    with mock.patch(
+        "gcsfs.zb_hns_utils.init_aaow",
+        new_callable=mock.AsyncMock,
+        side_effect=AssertionError("gRPC appendable writer must not run"),
     ):
         gen = bench_conftest._benchmark_listing_fixture_helper(
             extended_gcs_factory,
@@ -162,10 +235,10 @@ def test_benchmark_listing_fixture_rcu_warm_uploads_over_http_without_warmup(
     )
 
     with (
-        mock.patch.object(
-            ExtendedGcsFileSystem,
-            "_pipe_file",
-            side_effect=AssertionError("ExtendedGcsFileSystem._pipe_file must not run"),
+        mock.patch(
+            "gcsfs.zb_hns_utils.init_aaow",
+            new_callable=mock.AsyncMock,
+            side_effect=AssertionError("gRPC appendable writer must not run"),
         ),
         mock.patch(
             "gcsfs.tests.perf.microbenchmarks.conftest.time.sleep"
@@ -243,6 +316,169 @@ def test_benchmark_io_fixture_rcu_warm_reads_on_isolated_fs_closes_it_and_sleeps
                 next(gen)
 
 
+@pytest.mark.parametrize(
+    "bucket_type, file_size_bytes, primes",
+    [
+        ("standard_rcu_warm", 64, True),
+        ("hns_rcu_cold", bench_conftest.SMALL_FILE_UPLOAD_LIMIT, True),
+        ("standard_rcu_cold", 2 * bench_conftest.MB, False),
+        ("standard_rcu_z", 64, False),
+        ("zonal", 64, False),
+        ("regional", 64, False),
+    ],
+)
+def test_benchmark_io_fixture_primes_client_for_small_rcu_warm_and_cold_files(
+    bucket_type, file_size_bytes, primes
+):
+    """Small *_rcu_warm/*_rcu_cold runs read a sentinel via gcs to warm its gRPC client."""
+    gcs = mock.MagicMock(spec=bench_conftest.ExtendedGcsFileSystem)
+    params = SimpleNamespace(
+        name=f"cat_{bucket_type}",
+        bucket_name="my-bucket",
+        bucket_type=bucket_type,
+        files=2,
+        file_size_bytes=file_size_bytes,
+        rounds=1,
+    )
+
+    with (
+        mock.patch.object(bench_conftest, "_prepare_files"),
+        mock.patch.object(bench_conftest, "_warm_rcu_files"),
+    ):
+        gen = bench_conftest._benchmark_io_fixture_helper(
+            lambda **kwargs: gcs,
+            params,
+            "benchmark-prime",
+            create_files=True,
+        )
+        _, file_paths, yielded_params = next(gen)
+        try:
+            assert len(gcs.pipe_file.call_args_list) == (1 if primes else 0)
+            assert len(gcs.cat_file.call_args_list) == (1 if primes else 0)
+            if primes:
+                (pipe_path, payload), _ = gcs.pipe_file.call_args
+                (cat_path,), _ = gcs.cat_file.call_args
+                assert pipe_path.endswith("/_client_warmup")
+                assert pipe_path == cat_path
+                assert payload == b"\0"
+                assert pipe_path not in file_paths
+                all_round_paths = [
+                    p for rp in yielded_params.round_file_paths for p in rp
+                ]
+                assert pipe_path not in all_round_paths
+                op_names = [
+                    c[0] for c in gcs.mock_calls if c[0] in ("pipe_file", "cat_file")
+                ]
+                assert op_names == ["pipe_file", "cat_file"]
+        finally:
+            with pytest.raises(StopIteration):
+                next(gen)
+
+
+@pytest.mark.parametrize(
+    "bucket_type, bucket_layout",
+    [
+        ("standard_rcu_warm", layouts.STANDARD_RCU),
+        ("hns_rcu_cold", layouts.HIERARCHICAL_RCU),
+    ],
+)
+def test_benchmark_io_fixture_primes_grpc_client_on_extended_fs_for_small_rcu_warm_and_cold(
+    bucket_type, bucket_layout
+):
+    """Fixture setup stages over HTTP and warms gcs's gRPC client via MRD without reading target files."""
+    params = SimpleNamespace(
+        name=f"cat_{bucket_type}",
+        bucket_name="my-bucket",
+        bucket_type=bucket_type,
+        files=2,
+        file_size_bytes=64,
+        rounds=1,
+    )
+    fake_grpc_client = mock.MagicMock()
+    fake_grpc_client.grpc_client.transport.close = mock.AsyncMock()
+    fake_mrd = mock.MagicMock()
+    fake_mrd.persisted_size = 1
+    fake_mrd.is_stream_open = True
+    fake_mrd.object_name = "warmup"
+    fake_mrd.close = mock.AsyncMock()
+
+    async def _fake_download_ranges(ranges):
+        for _, length, buf in ranges:
+            buf.write(b"\0" * length)
+
+    fake_mrd.download_ranges = mock.AsyncMock(side_effect=_fake_download_ranges)
+
+    async def _fake_http_call(*args, **kwargs):
+        return {
+            "name": "obj",
+            "size": "1",
+            "generation": "1",
+            "timeFinalized": "2026-01-01T00:00:00Z",
+        }
+
+    def _make_fs(**kwargs):
+        return ExtendedGcsFileSystem(token="anon", skip_instance_cache=True, **kwargs)
+
+    with (
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=bucket_layout,
+        ),
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_call",
+            new_callable=mock.AsyncMock,
+            side_effect=_fake_http_call,
+        ),
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_rm",
+            new_callable=mock.AsyncMock,
+        ),
+        mock.patch(
+            "gcsfs.extended_gcsfs.AsyncGrpcClient",
+            return_value=fake_grpc_client,
+        ) as grpc_client_cls,
+        mock.patch(
+            "gcsfs.zb_hns_utils.init_aaow",
+            new_callable=mock.AsyncMock,
+            side_effect=AssertionError("gRPC write must not run"),
+        ) as init_aaow,
+        mock.patch(
+            "gcsfs.zb_hns_utils.init_mrd",
+            new_callable=mock.AsyncMock,
+            return_value=fake_mrd,
+        ) as init_mrd,
+        mock.patch.object(bench_conftest, "_warm_rcu_files"),
+    ):
+        gen = bench_conftest._benchmark_io_fixture_helper(
+            _make_fs,
+            params,
+            "benchmark-prime",
+            create_files=True,
+            gcs_kwargs=bench_conftest.rcu_rapid_write_kwargs(bucket_type),
+        )
+        gcs, file_paths, yielded_params = next(gen)
+        try:
+            assert gcs._grpc_client is fake_grpc_client
+            grpc_client_cls.assert_called_once()
+            init_aaow.assert_not_awaited()
+            init_mrd.assert_awaited_once()
+            assert init_mrd.await_args is not None
+            warmed_client, warmed_bucket, warmed_object, _ = init_mrd.await_args.args
+            assert warmed_client is fake_grpc_client
+            assert warmed_bucket == "my-bucket"
+            assert warmed_object.endswith("/_client_warmup")
+            for p in file_paths:
+                assert not p.endswith(f"/{warmed_object}")
+            assert len(yielded_params.round_file_paths[0]) == 2
+        finally:
+            with pytest.raises(StopIteration):
+                next(gen)
+
+
 def test_benchmark_io_fixture_rcu_cold_stages_distinct_objects_per_round(
     extended_gcs_factory,
 ):
@@ -280,49 +516,6 @@ def test_benchmark_io_fixture_rcu_cold_stages_distinct_objects_per_round(
 
     for p in all_paths:
         assert not gcs.exists(p)
-
-
-@pytest.mark.parametrize(
-    "bucket_type, file_size_bytes, primes",
-    [
-        ("standard_rcu_warm", 64, True),
-        ("hns_rcu_cold", bench_conftest.SMALL_FILE_UPLOAD_LIMIT, True),
-        ("standard_rcu_cold", 2 * bench_conftest.MB, False),
-        ("standard_rcu_z", 64, False),
-        ("zonal", 64, False),
-        ("regional", 64, False),
-    ],
-)
-def test_benchmark_io_fixture_primes_client_for_small_rcu_warm_and_cold_files(
-    bucket_type, file_size_bytes, primes
-):
-    """Small *_rcu_warm/*_rcu_cold files are staged on other clients, so the benchmarked one is primed."""
-    gcs = mock.MagicMock(spec=ExtendedGcsFileSystem)
-    params = SimpleNamespace(
-        name=f"cat_{bucket_type}",
-        bucket_name=TEST_BUCKET,
-        bucket_type=bucket_type,
-        files=2,
-        file_size_bytes=file_size_bytes,
-        rounds=1,
-    )
-
-    with (
-        mock.patch.object(bench_conftest, "_prepare_files"),
-        mock.patch.object(bench_conftest, "_warm_rcu_files"),
-    ):
-        gen = bench_conftest._benchmark_io_fixture_helper(
-            lambda **kwargs: gcs, params, "benchmark-prime", create_files=True
-        )
-        _, file_paths, _ = next(gen)
-        with pytest.raises(StopIteration):
-            next(gen)
-
-    prefix = file_paths[0].rsplit("/", 1)[0]
-    if primes:
-        gcs.pipe_file.assert_called_once_with(f"{prefix}/_client_warmup", b"\0")
-    else:
-        gcs.pipe_file.assert_not_called()
 
 
 def test_read_cat_and_cat_ranges_rotate_rcu_cold_files_each_round(extended_gcs_factory):
@@ -525,29 +718,3 @@ def test_read_cat_and_cat_ranges_rotate_rcu_cold_files_each_round(extended_gcs_f
     finally:
         with pytest.raises(StopIteration):
             next(gen_r)
-
-
-def test_http_gcs_from_reuses_authenticated_credentials_without_reconnecting(
-    extended_gcs_factory,
-):
-    """_http_gcs_from must reuse gcs.credentials.credentials rather than re-running connect(None)."""
-    gcs = extended_gcs_factory()
-    creds_obj = google.oauth2.credentials.Credentials(
-        "test-access-token", expiry=datetime.datetime(2099, 1, 1)
-    )
-    gcs.credentials.token = None
-    gcs.credentials.method = "cloud"
-    gcs.credentials.credentials = creds_obj
-    gcs.credentials.project = "project"
-
-    http_fs = None
-    try:
-        with mock.patch(
-            "google.auth.default",
-            side_effect=AssertionError("must not re-run google.auth.default"),
-        ):
-            http_fs = bench_conftest._http_gcs_from(gcs)
-        assert http_fs.credentials.credentials is creds_obj
-    finally:
-        if http_fs is not None:
-            bench_conftest._close_gcs(http_fs)

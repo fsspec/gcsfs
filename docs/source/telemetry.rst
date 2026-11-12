@@ -47,8 +47,8 @@ Each process caches the result: ``fork`` children keep a resolved value, and ``s
 
    Telemetry tokens are attached to JSON API (HTTP) requests only. gRPC requests use a ``User-Agent`` fixed
    when the gRPC client is created and do not yet carry telemetry tokens. This includes Rapid (zonal) reads
-   and writes, Rapid Cache Ultra reads and writes, and Storage Control API calls (bucket layout lookups and HNS
-   folder operations such as ``mkdir``, ``rmdir`` and ``mv``).
+   and writes, Rapid Cache Ultra reads (and writes when ``rcu_rapid_write=True``), and Storage Control API calls
+   (bucket layout lookups and HNS folder operations such as ``mkdir``, ``rmdir`` and ``mv``).
 
 Privacy & Security Guarantees
 -----------------------------
