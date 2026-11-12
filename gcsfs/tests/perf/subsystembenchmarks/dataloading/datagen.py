@@ -1,7 +1,12 @@
 """Per-case synthetic corpus dataset generator.
 
-Dispatches uncompressed corpus generation by format (`pretok_parquet`, `text_parquet`, `pretok_jsonl`).
-Shard writing is seeded deterministically and uploaded concurrently.
+Dispatches uncompressed corpus generation by format (`pretok_parquet`, `text_parquet`,
+`pretok_jsonl`). Shard writing is seeded deterministically and uploaded concurrently.
+
+`pretok_parquet` can also carry extra binary feature columns, which turn it into a wide
+table for column-projected reads. Feature names, sizes and the projection are pure
+functions of the case parameters, so the read side picks the same columns without
+reading data.
 """
 
 import io
@@ -13,6 +18,10 @@ from concurrent.futures import ProcessPoolExecutor
 VOCAB_SIZE = 32000
 _CHARS_PER_TOKEN = 6
 _MAX_INGEST_THREADS = 64
+# Feature columns: one seed for their sizes and projections (every shard shares one
+# schema), and a fixed log-normal spread of per-column value sizes.
+_FEATURE_SEED = 0
+_FEATURE_SIZE_SIGMA = 1.0
 
 
 def ingest_workers(file_count):
@@ -47,22 +56,47 @@ def _write_parquet_shard(fs, root, idx, rows, row_group_size, schema, make_chunk
     return path
 
 
-def _write_pretok_parquet(fs, root, idx, seq_len, rows, row_group_size):
+def _write_pretok_parquet(
+    fs,
+    root,
+    idx,
+    seq_len,
+    rows,
+    row_group_size,
+    *,
+    feature_column_count=0,
+    feature_value_bytes=0,
+):
+    """tokens + label, plus feature_column_count binary feature columns if set."""
     import numpy as np
     import pyarrow as pa
 
     rng = np.random.default_rng(idx)
-    schema = pa.schema([("tokens", pa.list_(pa.int64())), ("label", pa.int64())])
+    widths = (
+        feature_column_widths(feature_column_count, feature_value_bytes)
+        if feature_column_count
+        else []
+    )
+    schema = pa.schema(
+        [("tokens", pa.list_(pa.int64())), ("label", pa.int64())]
+        + [(name, pa.binary()) for name in feature_column_names(feature_column_count)]
+    )
 
     def make_chunk(n):
         tokens = rng.integers(0, VOCAB_SIZE, size=(n, seq_len), dtype=np.int64)
-        return pa.table(
-            {
-                "tokens": pa.array(list(tokens)),
-                "label": pa.array(rng.integers(0, 2, size=n, dtype=np.int64)),
-            },
-            schema=schema,
-        )
+        arrays = [
+            pa.array(list(tokens), type=pa.list_(pa.int64())),
+            pa.array(rng.integers(0, 2, size=n, dtype=np.int64)),
+        ]
+        for width in widths:
+            offsets = np.arange(0, (n + 1) * width, width, dtype=np.int32)
+            data = pa.py_buffer(rng.bytes(n * width))
+            arrays.append(
+                pa.Array.from_buffers(
+                    pa.binary(), n, [None, pa.py_buffer(offsets), data]
+                )
+            )
+        return pa.Table.from_arrays(arrays, schema=schema)
 
     return _write_parquet_shard(fs, root, idx, rows, row_group_size, schema, make_chunk)
 
@@ -115,6 +149,53 @@ def _write_pretok_jsonl(fs, root, idx, seq_len, rows, row_group_size):
     return path
 
 
+def feature_column_names(count):
+    """Feature column names, zero-padded so they sort in schema order."""
+    digits = len(str(max(count - 1, 0)))
+    return [f"f{i:0{digits}d}" for i in range(count)]
+
+
+def feature_column_widths(count, value_bytes):
+    """Bytes per value of each feature column: log-normal sizes with mean value_bytes."""
+    import numpy as np
+
+    if count < 1 or value_bytes < 1:
+        raise ValueError(
+            f"feature columns need feature_column_count >= 1 and feature_value_bytes "
+            f">= 1, got {count} and {value_bytes}"
+        )
+    rng = np.random.default_rng(_FEATURE_SEED)
+    sizes = rng.lognormal(0.0, _FEATURE_SIZE_SIGMA, count)
+    sizes *= value_bytes / sizes.mean()
+    return [max(1, int(round(s))) for s in sizes]
+
+
+def feature_projection(count, projected, run_length=1):
+    """Sorted indices of the feature columns a read selects.
+
+    Columns are picked in runs of ``run_length`` adjacent columns at random positions:
+    1 scatters them through the schema, larger values cluster them. Arrow merges
+    adjacent column chunks into one read, so this sets how many small reads a file
+    needs. ``projected`` of 0 (or >= count) selects every feature column.
+    """
+    import numpy as np
+
+    if projected < 0 or run_length < 1:
+        raise ValueError(
+            f"need projected_feature_count >= 0 and projection_run_length >= 1, got "
+            f"{projected} and {run_length}"
+        )
+    if projected == 0 or projected >= count:
+        return list(range(count))
+    run_length = min(run_length, count)
+    rng = np.random.default_rng(_FEATURE_SEED)
+    chosen = set()
+    while len(chosen) < projected:
+        start = int(rng.integers(0, count - run_length + 1))
+        chosen.update(range(start, start + run_length))
+    return sorted(chosen)[:projected]
+
+
 _WRITERS = {
     "pretok_parquet": _write_pretok_parquet,
     "text_parquet": _write_text_parquet,
@@ -126,10 +207,10 @@ FORMATS = tuple(_WRITERS)
 
 def _write_shard_task(args):
     """Writes one shard in a worker process, resolving its own filesystem handle."""
-    prefix, fmt, idx, seq_len, rows_per_file, row_group_size = args
+    prefix, fmt, idx, seq_len, rows_per_file, row_group_size, fmt_options = args
     fs, root = _fs_and_root(prefix)
     path = _WRITERS[fmt](
-        fs, root.rstrip("/"), idx, seq_len, rows_per_file, row_group_size
+        fs, root.rstrip("/"), idx, seq_len, rows_per_file, row_group_size, **fmt_options
     )
     return {
         "bytes": int(fs.info(path)["size"]),
@@ -137,14 +218,28 @@ def _write_shard_task(args):
     }
 
 
-def ingest_dataset(prefix, *, fmt, seq_len, file_count, rows_per_file, row_group_size):
-    """Write file_count shards of rows_per_file rows under prefix concurrently and return corpus manifest."""
+def ingest_dataset(
+    prefix,
+    *,
+    fmt,
+    seq_len,
+    file_count,
+    rows_per_file,
+    row_group_size,
+    fmt_options=None,
+):
+    """Write file_count shards of rows_per_file rows under prefix concurrently and return corpus manifest.
+
+    ``fmt_options`` holds format-specific writer keywords (pretok_parquet's
+    ``feature_column_count`` and ``feature_value_bytes``).
+    """
     if fmt not in _WRITERS:
         raise ValueError(f"unknown fmt {fmt!r}; expected one of {sorted(_WRITERS)}")
+    fmt_options = dict(fmt_options or {})
     fs, root = _fs_and_root(prefix)
     fs.makedirs(root.rstrip("/"), exist_ok=True)
     tasks = [
-        (prefix, fmt, idx, seq_len, rows_per_file, row_group_size)
+        (prefix, fmt, idx, seq_len, rows_per_file, row_group_size, fmt_options)
         for idx in range(file_count)
     ]
 

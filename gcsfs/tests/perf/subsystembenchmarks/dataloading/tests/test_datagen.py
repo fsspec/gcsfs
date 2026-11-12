@@ -183,3 +183,57 @@ def test_corpus_bytes_are_deterministic_across_runs(tmp_path):
     assert fs.cat(f"{tmp_path}/a/data/shard_00000.parquet") == fs.cat(
         f"{tmp_path}/b/data/shard_00000.parquet"
     )
+
+
+def test_pretok_parquet_feature_columns(tmp_path):
+    import pyarrow.parquet as pq
+
+    prefix = _prefix(tmp_path)
+    man = datagen.ingest_dataset(
+        prefix,
+        fmt="pretok_parquet",
+        seq_len=4,
+        file_count=2,
+        rows_per_file=100,
+        row_group_size=50,
+        fmt_options=dict(feature_column_count=40, feature_value_bytes=8),
+    )
+    assert man["sample_count"] == 200
+    fs, root = fsspec.core.url_to_fs(prefix)
+    f0 = sorted(p for p in fs.ls(root, detail=False) if p.endswith(".parquet"))[0]
+    with fs.open(f0, "rb") as fh:
+        md = pq.ParquetFile(fh).metadata
+    assert md.num_row_groups == 2
+    # Leaf paths: the tokens list column's leaf is "tokens.list.element".
+    names = [md.schema.column(i).path.split(".")[0] for i in range(md.num_columns)]
+    assert names[:2] == ["tokens", "label"]
+    assert names[2:] == datagen.feature_column_names(40)
+    for i, width in enumerate(datagen.feature_column_widths(40, 8)):
+        # Plain binary pages: 4-byte length + value per row, plus page headers.
+        assert md.row_group(0).column(i + 2).total_uncompressed_size >= 50 * (4 + width)
+
+
+def test_feature_column_widths_vary_around_the_mean():
+    widths = datagen.feature_column_widths(1000, 12)
+    assert min(widths) >= 1
+    assert abs(sum(widths) / 1000 - 12) < 0.5
+    assert len(set(widths)) > 10
+    with pytest.raises(ValueError, match="feature_column_count"):
+        datagen.feature_column_widths(0, 12)
+
+
+def test_feature_projection_run_length_clusters_columns():
+    def runs(indices):
+        return 1 + sum(1 for a, b in zip(indices, indices[1:]) if b != a + 1)
+
+    scattered = datagen.feature_projection(1134, 286, run_length=1)
+    clustered = datagen.feature_projection(1134, 286, run_length=16)
+    for cols in (scattered, clustered):
+        assert len(cols) == len(set(cols)) == 286
+        assert cols == sorted(cols)
+    assert runs(scattered) > 150
+    assert runs(clustered) <= 286 // 16 + 1
+    assert scattered == datagen.feature_projection(1134, 286, run_length=1)
+    # 0 or >= count selects every feature column.
+    assert datagen.feature_projection(20, 0) == list(range(20))
+    assert datagen.feature_projection(20, 25) == list(range(20))

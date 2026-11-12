@@ -8,6 +8,7 @@ import pyarrow.fs
 import ray
 import torch
 
+import gcsfs
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
@@ -16,6 +17,24 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     reduce_split,
     timestamp,
 )
+
+
+class _GCSFileSystemWithCacheType(gcsfs.GCSFileSystem):
+    """gcsfs whose reads default to ``cache_type``.
+
+    pyarrow's FSSpecHandler opens files with no cache_type, and gcsfs has no
+    filesystem-level default for it. Taking it as a constructor argument keeps it when
+    Ray pickles the filesystem to its workers.
+    """
+
+    def __init__(self, *args, cache_type, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.read_cache_type = cache_type
+
+    def _open(self, path, mode="rb", **kwargs):
+        if "r" in mode:
+            kwargs.setdefault("cache_type", self.read_cache_type)
+        return super()._open(path, mode, **kwargs)
 
 
 def ensure_ray_initialized():
@@ -38,14 +57,30 @@ def shutdown_ray():
         ray.shutdown()
 
 
-def resolve_parquet_source(prefix):
-    """Resolves Parquet file paths and wraps filesystem in PyArrow PyFileSystem."""
+def resolve_parquet_source(prefix, cache_type=None, block_size=None):
+    """Resolves Parquet file paths and wraps filesystem in PyArrow PyFileSystem.
+
+    ``cache_type`` and ``block_size`` set gcsfs's defaults for every file Ray opens;
+    None keeps gcsfs's own.
+    """
     fs, base_path = fsspec.core.url_to_fs(prefix)
     if str(prefix).startswith("gs://"):
         assert_fsspec_gcsfs(prefix)
     paths = sorted(fs.glob(f"{base_path.rstrip('/')}/*.parquet"))
     if not paths:
         raise FileNotFoundError(f"no Parquet files found under {prefix}")
+    if cache_type is not None or block_size is not None:
+        if not isinstance(fs, gcsfs.GCSFileSystem):
+            raise ValueError(
+                f"cache_type/block_size need gcsfs, got {type(fs).__name__}"
+            )
+        kwargs = dict(fs.storage_options)
+        if block_size is not None:
+            kwargs["block_size"] = block_size
+        if cache_type is not None:
+            fs = _GCSFileSystemWithCacheType(cache_type=cache_type, **kwargs)
+        else:
+            fs = gcsfs.GCSFileSystem(**kwargs)
     arrow_fs = pyarrow.fs.PyFileSystem(pyarrow.fs.FSSpecHandler(fs))
     if str(prefix).startswith("gs://"):
         assert_gcsfs_backed(arrow_fs)
@@ -58,9 +93,6 @@ def build_dataset(arrow_fs, paths, params):
     if params.access == "shuffled" and params.file_shuffle:
         file_shuffle = ray.data.FileShuffleConfig(seed=42, reseed_after_execution=True)
 
-    columns = (
-        ["tokens", "label"] if params.fmt == "pretok_parquet" else ["text", "label"]
-    )
     concurrency = (
         min(params.num_workers, len(paths)) if params.num_workers > 0 else None
     )
@@ -71,6 +103,9 @@ def build_dataset(arrow_fs, paths, params):
         shuffle=file_shuffle,
         concurrency=concurrency,
     )
+    # Ray pushes select_columns down into the Parquet scan (read_parquet's own
+    # columns= is deprecated), so only the selected column chunks are fetched.
+    columns = params.read_columns()
     if columns:
         ds = ds.select_columns(columns)
     return ds
@@ -87,6 +122,8 @@ class _TextParquetCollateFn(ray.data.collate_fn.NumpyBatchCollateFn):
 
 
 def _rows_in_batch(batch):
+    if hasattr(batch, "num_rows"):  # pyarrow batches (feature columns)
+        return int(batch.num_rows)
     v = batch.get("label")
     if v is None:
         v = next(iter(batch.values()))
@@ -116,7 +153,20 @@ def _iter_batches(source, params, shuffle_seed, collate_fn, device):
 
     ``feed`` adds the per-round sync and moves tensors Ray leaves on the host
     (text_parquet's custom collate); already-moved tensors are untouched.
+
+    With feature columns, batches stay pyarrow tables on the host: the case
+    measures the projected read, and binary columns have no tensor form.
     """
+    if params.has_features:
+        shuffled = params.access == "shuffled" and params.shuffle_buffer_size > 0
+        return source.iter_batches(
+            batch_size=params.batch_size,
+            batch_format="pyarrow",
+            prefetch_batches=params.prefetch_factor,
+            local_shuffle_buffer_size=params.shuffle_buffer_size if shuffled else None,
+            local_shuffle_seed=shuffle_seed,
+            drop_last=False,
+        )
     batches = source.iter_torch_batches(
         **_torch_batch_kwargs(params, shuffle_seed, collate_fn, device)
     )
@@ -218,7 +268,9 @@ class RayDataReadDriver:
         ensure_ray_initialized()
 
         build_start = time.perf_counter()
-        arrow_fs, paths = resolve_parquet_source(prefix)
+        arrow_fs, paths = resolve_parquet_source(
+            prefix, params.cache_type, params.block_size
+        )
         dataset = build_dataset(arrow_fs, paths, params)
         build_seconds = time.perf_counter() - build_start
 

@@ -16,16 +16,32 @@ A group is a `<subsystem>/<implementation>` directory with its own
 | Group | Framework path | What is timed |
 | :-- | :-- | :-- |
 | `dataloading/huggingface_datasets` | Hugging Face Datasets (streaming) → PyTorch `DataLoader` | Full reads of a synthetic Parquet or JSONL corpus |
-| `dataloading/ray_data` | Ray Data `read_parquet` → `iter_torch_batches` | Full reads of a synthetic Parquet corpus |
+| `dataloading/ray_data` | Ray Data `read_parquet` → `iter_torch_batches` (`iter_batches` with feature columns) | Full reads of a synthetic Parquet corpus, or column-projected reads of a wide table |
 | `dataloading/webdataset` | WebDataset → PyTorch `DataLoader`; `gs://` opened by a `gcsfs` opener | Reads of synthetic image tar shards |
 | `checkpointing/pytorch` | PyTorch `torch.distributed.checkpoint` (`FsspecReader`) | Sharded DCP checkpoint read of Llama-3.1-8B and OLMoE-1B-7B with AdamW state across FSDP2/HSDP/TP/PP/EP layouts |
 | `checkpointing/pytorch_lightning` | PyTorch Lightning | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 | `checkpointing/ray_pytorch` | Ray actors with PyTorch `torch.save` / DCP | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 
 Data-loading groups detect CUDA automatically. On a GPU host, each round
-includes copying batches to the GPU. The exception is WebDataset with
-`decode: false`, where there is nothing to copy. Checkpointing groups always
-run on CPU (`gloo`).
+includes copying batches to the GPU. The exceptions are WebDataset with
+`decode: false` and Ray Data cases with feature columns, where there is nothing to copy.
+Checkpointing groups always run on CPU (`gloo`).
+
+### Wide-table projected reads (`dataloading/ray_data`)
+
+`pretok_parquet` can carry extra binary feature columns, which models feature
+tables that jobs read with a column projection (for example 286 of 1,134
+columns). Such reads turn into hundreds of small range reads per file.
+
+| Parameter | Meaning |
+| :-- | :-- |
+| `feature_column_count`, `feature_value_bytes` | Extra binary columns next to `tokens` and `label`, `feature_value_bytes` per value on average (default 10). 0 keeps the plain corpus. |
+| `projected_feature_count` | Feature columns the read selects besides `tokens` and `label` (`select_columns`, pushed down into the scan). 0 reads all of them. |
+| `projection_run_length` | Selected columns come in runs of this many adjacent columns: 1 (default) scatters them, larger values cluster them. This sets how many separate reads Arrow issues per row group. |
+| `cache_type`, `block_size` | gcsfs `open()` options for every file Ray opens, for any `ray_data` case. pyarrow's `FSSpecHandler` passes none, so the driver applies them as filesystem defaults. Unset keeps gcsfs's defaults. |
+
+With feature columns, batches stay pyarrow tables (binary columns have no tensor
+form), so these cases do not copy batches to the GPU.
 
 ## How a case runs
 
@@ -201,7 +217,7 @@ subsystembenchmarks/
 │   ├── configurator.py # config loading for read groups
 │   ├── bucket.py       # per-case bucket (also used by checkpointing)
 │   ├── amplification.py
-│   ├── datagen.py      # synthetic Parquet/JSONL corpus
+│   ├── datagen.py      # synthetic Parquet/JSONL corpus, optional feature columns
 │   ├── device.py       # GPU batch delivery
 │   ├── huggingface_datasets/
 │   ├── ray_data/
