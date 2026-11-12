@@ -4,6 +4,10 @@ ignore:
 codecov:
   require_ci_to_pass: true
 
+# Post commit statuses in one request on PRs so 404 errors on PATCH
+# never leave runs stuck (codecov/codecov-action#1979).
+github_checks: false
+
 coverage:
   status:
     project:
