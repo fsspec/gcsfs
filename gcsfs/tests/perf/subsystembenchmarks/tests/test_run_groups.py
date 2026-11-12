@@ -1,4 +1,7 @@
 import os
+import subprocess
+import sys
+from unittest import mock
 
 import pytest
 
@@ -158,6 +161,101 @@ def test_parse_args_accepts_rapid_cache_with_zone(monkeypatch, bucket_type):
     assert os.environ["GCSFS_SUBSYSTEM_ZONE"] == "us-central1-a"
 
 
+_RCU_BUCKET_TYPES = [
+    "standard_rcu_z",
+    "standard_rcu_warm",
+    "standard_rcu_cold",
+    "hns_rcu_z",
+    "hns_rcu_warm",
+    "hns_rcu_cold",
+]
+
+
+@pytest.mark.parametrize("bucket_type", _RCU_BUCKET_TYPES)
+def test_parse_args_requires_zone_for_rcu_bucket_types(capsys, bucket_type):
+    argv = ["--group=dataloading/webdataset", f"--bucket-type={bucket_type}"]
+    with pytest.raises(SystemExit):
+        run.parse_args(argv + _REQUIRED)
+    assert "--zone is required" in capsys.readouterr().err
+    args = run.parse_args(argv + _REQUIRED + ["--zone=us-central1-c"])
+    assert args.zone == "us-central1-c"
+
+
+@pytest.mark.parametrize(
+    "bucket_type, rcu_rapid_write",
+    [
+        ("standard_rcu_z", "true"),
+        ("hns_rcu_z", "true"),
+        ("standard_rcu_warm", None),
+        ("hns_rcu_cold", None),
+        ("zonal", None),
+        ("regional", None),
+    ],
+)
+def test_setup_environment_turns_on_rcu_rapid_write_for_rcu_z(
+    bucket_type, rcu_rapid_write
+):
+    """*_rcu_z stages and saves RAPID objects, which gcsfs writes to RCU buckets
+    only with rcu_rapid_write, so every process of the run gets the env var."""
+    args = run.parse_args(
+        [
+            "--group=dataloading/webdataset",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    with mock.patch.dict(os.environ):
+        os.environ.pop("FSSPEC_GCS_RCU_RAPID_WRITE", None)
+        run._setup_environment(args)
+        assert os.environ.get("FSSPEC_GCS_RCU_RAPID_WRITE") == rcu_rapid_write
+
+        os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
+        run._setup_environment(args)
+        assert os.environ.get("FSSPEC_GCS_RCU_RAPID_WRITE") == rcu_rapid_write
+
+
+@pytest.mark.parametrize(
+    "bucket_type, expected",
+    [
+        ("standard_rcu_z", True),
+        ("standard_rcu_cold", False),
+    ],
+)
+def test_setup_environment_propagates_rcu_rapid_write_to_spawned_child_process(
+    bucket_type, expected
+):
+    """Spawned child processes initialize GCSFileSystem().rcu_rapid_write from _setup_environment."""
+    args = run.parse_args(
+        [
+            "--group=dataloading/webdataset",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    with mock.patch.dict(os.environ):
+        os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
+        run._setup_environment(args)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import gcsfs; "
+                    "fs = gcsfs.GCSFileSystem(token='anon', skip_instance_cache=True); "
+                    "print(fs.rcu_rapid_write)"
+                ),
+            ],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    assert proc.stdout.strip() == str(expected)
+
+
 def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
@@ -185,8 +283,9 @@ def test_cloudbuild_disables_leaked_rapid_caches_before_deleting_buckets():
     assert cb_yaml.count("gcloud storage buckets anywhere-caches list") >= 2
     assert "python3 -c" not in cb_yaml
     assert (
-        "^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}-"
-        in cb_yaml
+        "^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm"
+        "|standard_rcu_z|standard_rcu_warm|standard_rcu_cold|hns_rcu_z|hns_rcu_warm"
+        "|hns_rcu_cold)-[0-9a-f]{8}-" in cb_yaml
     )
 
 

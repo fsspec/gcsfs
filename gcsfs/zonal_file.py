@@ -61,6 +61,7 @@ class ZonalFile(GCSFile):
 
         For Zonal buckets, `finalize_on_close` defaults to `False` to optimize
         for write throughput and keep the file appendable. For RCU buckets,
+        which use ZonalFile for writes only with `rcu_rapid_write=True`,
         `finalize_on_close` defaults to `True`. When `finalize_on_close` is
         `False`, exiting a `with` block or closing the file will not
         automatically finalize it; to finalize the write, `.commit()` must be

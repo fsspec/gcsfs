@@ -450,8 +450,91 @@ def test_cloudbuild_reaps_leaked_ci_and_nightly_case_buckets_only():
     reaped = re.compile(pattern.replace("${_INFRA_PREFIX}", "gcsfs-ci-ssb")).match
     assert reaped("gcsfs-ci-ssb-ci-62b31d50-load-gpt2-ddp-ws2-zon-5782f6cc")
     assert reaped("gcsfs-ci-ssb-zonal-62b31d50-read-hf-txpq-a2bbe381")
+    assert reaped("gcsfs-ci-ssb-standard_rcu_z-62b31d50-read-hf-txpq-a2bbe381")
+    assert reaped("gcsfs-ci-ssb-hns_rcu_warm-62b31d50-load-gpt2-dcp-5782f6cc")
     assert not reaped("gcsfs-ci-ssb-run-results")
     assert not reaped("gcsfs-ci-ssb-models")
+
+
+def _run_step_with_fake_gcloud(tmp_path, step_id, build_vars, gcloud_body=""):
+    """Runs a cloud-sdk step against a fake gcloud (and a no-op sleep).
+
+    The step must succeed. Returns the gcloud calls in order.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "build_vars.env").write_text(
+        "".join(f"export {k}={v}\n" for k, v in build_vars.items())
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "gcloud_calls"
+    calls.touch()
+    (bin_dir / "gcloud").write_text(
+        f'#!/bin/bash\nGCLOUD_CALLS={calls}\necho "$*" >> "$GCLOUD_CALLS"\n'
+        f"{gcloud_body}\n"
+    )
+    (bin_dir / "gcloud").chmod(0o755)
+    (bin_dir / "sleep").write_text("#!/bin/sh\n")
+    (bin_dir / "sleep").chmod(0o755)
+    script = (
+        _cloudbuild_step_script(step_id)
+        .replace("$$", "$")
+        .replace("/workspace/", f"{workspace}/")
+    )
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        # Cloud Build substitutions, which bash sees as plain variables here.
+        "PROJECT_ID": "proj",
+        "_INFRA_PREFIX": "gcsfs-ci-ssb",
+    }
+    proc = subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (workspace / "FAILED").exists(), proc.stdout + proc.stderr
+    return calls.read_text().splitlines()
+
+
+_LEAKED_RCU_BUCKET = "gcsfs-ci-ssb-hns_rcu_cold-62b31d50-read-hf-x-a2bbe381"
+# A bucket listing line (as `gcloud storage ls` and `buckets list` print it) and a
+# running cache on it.
+_FAKE_RCU_GCLOUD = f"""
+case "$*" in
+  "storage ls"*) echo "gs://{_LEAKED_RCU_BUCKET}/";;
+  "storage buckets list"*) echo "gs://{_LEAKED_RCU_BUCKET}/ 2026-01-01T00:00:00+00:00";;
+  "alpha storage buckets rapid-caches list"*)
+    printf '{_LEAKED_RCU_BUCKET}/us-central1-b\\trunning\\n';;
+esac
+"""
+
+
+@pytest.mark.parametrize("step_id", ["delete-buckets", "cleanup-leaked-resources"])
+def test_cloudbuild_disables_rcu_caches_before_removing_their_bucket(tmp_path, step_id):
+    calls = _run_step_with_fake_gcloud(
+        tmp_path,
+        step_id,
+        {
+            "BUCKET_PREFIX": "gcsfs-ci-ssb-hns_rcu_cold-62b31d50",
+            "RESULTS_BUCKET": "gcsfs-ci-ssb-run-results",
+        },
+        _FAKE_RCU_GCLOUD,
+    )
+    disables = [
+        i
+        for i, c in enumerate(calls)
+        if c.startswith(
+            f"alpha storage buckets rapid-caches disable {_LEAKED_RCU_BUCKET}/us-central1-b"
+        )
+    ]
+    removals = [
+        i
+        for i, c in enumerate(calls)
+        if c.startswith(f"storage rm --recursive gs://{_LEAKED_RCU_BUCKET}")
+        or c.startswith(f"storage buckets delete gs://{_LEAKED_RCU_BUCKET}")
+    ]
+    assert len(disables) == 1, calls
+    assert removals and disables[0] < min(removals), calls
 
 
 @pytest.mark.parametrize(

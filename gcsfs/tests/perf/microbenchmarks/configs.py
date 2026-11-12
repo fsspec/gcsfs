@@ -4,7 +4,7 @@ import os
 import yaml
 
 from gcsfs.tests.conftest import BUCKET_NAME_MAP
-from gcsfs.tests.settings import BENCHMARK_FILTER
+from gcsfs.tests.settings import BENCHMARK_BUCKET_TYPES, BENCHMARK_FILTER
 
 
 class BaseBenchmarkConfigurator:
@@ -27,6 +27,15 @@ class BaseBenchmarkConfigurator:
         return common, scenarios
 
     def get_bucket_name(self, bucket_type):
+        if BENCHMARK_BUCKET_TYPES:
+            allowed_types = {
+                item.strip()
+                for part in BENCHMARK_BUCKET_TYPES.split(",")
+                for item in part.split()
+                if item.strip()
+            }
+            if bucket_type not in allowed_types:
+                return None
         return BUCKET_NAME_MAP.get(bucket_type)
 
     def generate_cases(self):
