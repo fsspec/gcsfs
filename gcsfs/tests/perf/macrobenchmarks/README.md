@@ -78,7 +78,9 @@ Cloud Build runs these steps:
    - clean up resources leaked by earlier builds,
    - create the per-run buckets and copy the dataset into one of them, and
    - create a GKE cluster.
-3. Optionally make a seed checkpoint (see below).
+3. Optionally make a seed checkpoint (see below). For the Rapid Cache Ultra
+   bucket types, the steps before and after it also put the dataset and the
+   seed in the state the type measures (see the Cloud Build README).
 4. Install the workload's Helm chart.
 5. Scrape the metrics.
 6. Clean up. Fail the build if an earlier step recorded a failure.

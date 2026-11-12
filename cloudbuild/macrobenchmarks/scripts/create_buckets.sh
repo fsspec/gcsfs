@@ -2,7 +2,8 @@
 # create-buckets: create the per-run checkpoint bucket (co-located with the
 # cluster's region) and ensure the shared results bucket exists in the
 # worker-pool LOCATION so BigQuery ingestion can read it.
-set -e
+# -E: also run the ERR trap for failures inside lib.sh functions.
+set -eE
 source "$(dirname "$0")/lib.sh"
 trap 'record_failure create-buckets' ERR
 skip_if_failed
@@ -14,22 +15,10 @@ create_typed_bucket "$CHECKPOINT_BUCKET"
 # read-amplification metric.
 create_typed_bucket "$DATASET_BUCKET"
 SRC_OBJECT_PATH=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
-if [ "${_BUCKET_TYPE}" = "zonal" ] || [ "${DATASET_SRC_IS_RAPID:-no}" = "yes" ]; then
-  # RAPID (zonal) objects lack the server-side rewrite rsync uses, so daisy-chain
-  # (download+reupload)
-  ulimit -n 65536
-  DEST_PARENT="${SRC_OBJECT_PATH%/*}"
-  [ "$DEST_PARENT" = "$SRC_OBJECT_PATH" ] && DEST_PARENT=""
-  # `cp --recursive` on a directory/bucket source without a trailing wildcard
-  # copies the source's own name into the destination (e.g. _DATASET_PATH
-  # "gs://bucket" would land at "gs://DATASET_BUCKET/bucket/..."); "/*" makes
-  # it copy the source's contents instead.
-  CLOUDSDK_STORAGE_PROCESS_COUNT=16 CLOUDSDK_STORAGE_THREAD_COUNT=16 \
-  CLOUDSDK_STORAGE_ATTEMPT_GRPC_DIRECT_PATH=False \
-    gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH%/}/*" "gs://${DATASET_BUCKET}${DEST_PARENT:+/$DEST_PARENT}"
-else
-  # Regional/HNS support server-side copy; rsync mirrors the source into the dest.
-  gcloud storage rsync --recursive "${_DATASET_PATH}" "gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}"
+# *_rcu_z needs RAPID objects, which gcloud cannot write on an RCU bucket; the
+# rcu-stage step copies the dataset with gcsfs instead.
+if [ "${RCU_STATE}" != "z" ]; then
+  copy_dataset_into_run_bucket
 fi
 echo "export RUN_DATASET_PATH=gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}" >> "${BUILD_VARS_FILE}"
 if gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
