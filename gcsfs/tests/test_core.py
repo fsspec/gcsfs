@@ -659,6 +659,43 @@ async def test_delete_files_with_exception(gcs):
         assert result == [True, True, exc]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency", [1, 5])
+async def test_delete_files_bounds_concurrency(gcs, concurrency):
+    # Arrange
+    files = [f"{TEST_BUCKET}/file_{i}" for i in range(50)]
+    in_flight = 0
+    max_in_flight = 0
+
+    async def mock_rm_files(batch):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return list(batch)
+
+    with (
+        mock.patch.object(
+            type(gcs),
+            "on_google",
+            new_callable=mock.PropertyMock(return_value=True),
+        ),
+        mock.patch.object(gcs, "rm_concurrency", concurrency),
+        mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
+    ):
+        # Act
+        result = await gcs._delete_files(files, batchsize=2)
+
+    # Assert
+    assert result == files
+    assert max_in_flight == concurrency
+
+
+def test_rm_concurrency_default():
+    assert GCSFileSystem.rm_concurrency == 5
+
+
 def test_rm_wildcards_in_directory(gcs):
     base_dir = f"{TEST_BUCKET}/test_rm_complex_{uuid.uuid4().hex}"
     files = [

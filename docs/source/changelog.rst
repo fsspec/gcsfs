@@ -14,6 +14,13 @@ Unreleased
   needs the ``roles/iam.serviceAccountTokenCreator`` role on itself.
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
+* **Recursive** ``rm()`` **now keeps at most 5 batch delete requests in flight**
+  (new ``GCSFileSystem.rm_concurrency`` attribute, default ``5``). Previously
+  up to ~100 batches of 100 objects could run at once. That is well above the
+  initial write rate of a new bucket, and the server throttled the deletes and
+  other writes to the same bucket. In-region, the new default deletes roughly
+  650 objects/s. Set ``rm_concurrency`` higher for buckets that have already
+  scaled up.
 
 2026.10.0
 ---------
