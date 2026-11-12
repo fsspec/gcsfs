@@ -660,7 +660,7 @@ async def test_delete_files_with_exception(gcs):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("concurrency", [1, 5])
+@pytest.mark.parametrize("concurrency", [None, 1, 8])
 async def test_delete_files_bounds_concurrency(gcs, concurrency):
     # Arrange
     files = [f"{TEST_BUCKET}/file_{i}" for i in range(50)]
@@ -675,25 +675,46 @@ async def test_delete_files_bounds_concurrency(gcs, concurrency):
         in_flight -= 1
         return list(batch)
 
+    kwargs = {} if concurrency is None else {"concurrency": concurrency}
     with (
         mock.patch.object(
             type(gcs),
             "on_google",
             new_callable=mock.PropertyMock(return_value=True),
         ),
-        mock.patch.object(gcs, "rm_concurrency", concurrency),
         mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
     ):
         # Act
-        result = await gcs._delete_files(files, batchsize=2)
+        result = await gcs._delete_files(files, batchsize=2, **kwargs)
 
     # Assert
     assert result == files
-    assert max_in_flight == concurrency
+    # 25 batches are available, so the cap is what limits in-flight requests;
+    # the default is 5.
+    assert max_in_flight == (concurrency or 5)
 
 
-def test_rm_concurrency_default():
-    assert GCSFileSystem.rm_concurrency == 5
+@pytest.mark.asyncio
+async def test_rm_passes_concurrency_to_delete_files(gcs):
+    # Arrange
+    path = f"{TEST_BUCKET}/test_rm_concurrency_{uuid.uuid4().hex}"
+    files = [f"{path}/file_{i}" for i in range(3)]
+
+    with (
+        mock.patch.object(gcs, "_expand_path", return_value=files),
+        mock.patch.object(
+            gcs, "_delete_files", new=mock.AsyncMock(return_value=files)
+        ) as mock_delete_files,
+    ):
+        # Act
+        await gcs._rm(path, recursive=True)
+        await gcs._rm(path, recursive=True, batchsize=10, concurrency=2)
+
+    # Assert
+    assert mock_delete_files.await_args_list == [
+        mock.call(files, 100, concurrency=5),
+        mock.call(files, 10, concurrency=2),
+    ]
 
 
 def test_rm_wildcards_in_directory(gcs):
