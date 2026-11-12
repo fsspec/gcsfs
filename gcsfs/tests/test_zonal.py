@@ -206,6 +206,18 @@ def test_readline_zb(extended_gcsfs, gcs_bucket_mocks):
             assert result == expected
 
 
+def test_flush_read_mode_is_noop_zb(extended_gcsfs, gcs_bucket_mocks):
+    """flush() on a read handle is a no-op, including the flush that
+    io.TextIOWrapper.close() makes at the end of a text-mode read."""
+    with gcs_bucket_mocks(json_data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
+        with extended_gcsfs.open(file_path, "rb") as f:
+            f.flush()
+            assert f.read() == json_data
+
+        with extended_gcsfs.open(file_path, "r") as f:
+            assert f.read() == json_data.decode()
+
+
 def test_readline_from_cache_zb(extended_gcsfs, gcs_bucket_mocks):
     data = text_files["zonal/test/a"]
     with gcs_bucket_mocks(data, bucket_type_val=layouts.ZONAL_HIERARCHICAL):
