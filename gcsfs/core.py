@@ -1795,10 +1795,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         # limit minimizes the number of round-trips when deleting many objects.
         #
         # ``concurrency`` is the maximum number of batch requests in flight.
-        # The default is kept low so that background deletes stay below the
-        # initial write rate of a standard (non-HNS) bucket, about 1000
-        # writes/s (https://cloud.google.com/storage/docs/request-rate), and
-        # do not get throttled or slow down other writes to the bucket.
+        # The default is kept low so that deletes stay below the initial
+        # write rate of a standard (non-HNS) bucket, about 1000 writes/s
+        # (https://cloud.google.com/storage/docs/request-rate), and do not
+        # get throttled or slow down other writes to the bucket.
         # Increase it for buckets that have scaled to higher rates.
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
