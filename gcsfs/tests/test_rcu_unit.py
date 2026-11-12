@@ -1073,7 +1073,7 @@ def test_gcs_factory_closes_created_instances_on_teardown(monkeypatch):
 def test_zonal_unfinalized_helpers_skip_live_rcu_and_mock_gcs(
     monkeypatch, on_google, layout
 ):
-    """Unfinalized MRD tests skip on mock GCS and live RCU, but run on live Zonal."""
+    """Unfinalized MRD tests skip on mock GCS, xfail on live RCU, and run on live Zonal."""
     from _pytest.outcomes import Skipped
 
     from gcsfs.tests import test_zonal
@@ -1082,12 +1082,22 @@ def test_zonal_unfinalized_helpers_skip_live_rcu_and_mock_gcs(
     monkeypatch.setattr(
         ExtendedGcsFileSystem, "on_google", property(lambda self: on_google)
     )
+    request = mock.Mock()
+    request.getfixturevalue.return_value = monkeypatch
     with mock.patch.object(fake_fs, "_sync_lookup_bucket_layout", return_value=layout):
-        if not on_google or layout.is_rcu:
+        if not on_google:
             with pytest.raises(Skipped):
-                test_zonal._require_live_non_rcu_zonal(fake_fs)
+                test_zonal._require_live_non_rcu_zonal(fake_fs, request)
         else:
-            _no_skip(test_zonal._require_live_non_rcu_zonal, fake_fs)
+            _no_skip(test_zonal._require_live_non_rcu_zonal, fake_fs, request)
+    live_rcu = on_google and layout.is_rcu
+    assert fake_fs.rcu_rapid_write is live_rcu
+    if live_rcu:
+        (marker,) = request.applymarker.call_args.args
+        assert marker.name == "xfail"
+        assert marker.kwargs["strict"] is False
+    else:
+        request.applymarker.assert_not_called()
 
 
 @pytest.mark.parametrize(

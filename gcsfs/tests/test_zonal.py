@@ -292,19 +292,26 @@ def test_pickle_read_handle_zb(extended_gcsfs, gcs_bucket_mocks):
                 assert f2.read() == json_data[10:]
 
 
-def _require_live_non_rcu_zonal(extended_gcsfs):
+def _require_live_non_rcu_zonal(extended_gcsfs, request):
     if not extended_gcsfs.on_google:
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
     if extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu:
-        pytest.skip(
-            "Unfinalized RCU MRD size fallback hits stale HTTP 0 size when redirected "
-            "read_handle omits persisted_size; default RCU writes finalize over HTTP."
+        # Default RCU writes go over HTTP and finalize, so write RAPID objects.
+        request.getfixturevalue("monkeypatch").setattr(
+            extended_gcsfs, "rcu_rapid_write", True
+        )
+        request.applymarker(
+            pytest.mark.xfail(
+                strict=False,
+                reason="RCU redirected MRD omits persisted_size, so unfinalized reads "
+                "fall back to HTTP size 0.",
+            )
         )
 
 
-def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
+def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path, request):
     "Tests that mrd can read from an unfinalized file successfully"
-    _require_live_non_rcu_zonal(extended_gcsfs)
+    _require_live_non_rcu_zonal(extended_gcsfs, request)
 
     with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
         f.write(b"Hello, ")
@@ -318,11 +325,11 @@ def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
         assert f.read() == b"o, world!"  # Check cache works as well
 
 
-def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
+def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path, request):
     """
     Tests that cat_file can read from an unfinalized file successfully
     """
-    _require_live_non_rcu_zonal(extended_gcsfs)
+    _require_live_non_rcu_zonal(extended_gcsfs, request)
 
     extended_gcsfs.pipe({file_path: b"Hello, world!"}, finalize_on_close=False)
     assert extended_gcsfs.info(file_path).get("timeFinalized") is None
