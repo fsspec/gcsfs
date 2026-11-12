@@ -438,6 +438,16 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     protocol = "gs", "gcs"
     async_impl = True
     MIN_CHUNK_SIZE_FOR_CONCURRENCY = 5 * 1024 * 1024
+    # Maximum number of batch delete requests that ``rm`` keeps in flight.
+    # GCS works through the operations inside a batch largely one at a
+    # time, so the resulting delete rate is roughly proportional to this
+    # value (about 130 deletes/s per in-flight batch when client and bucket
+    # are in the same region) and mostly independent of ``batchsize``. A
+    # value of 5 keeps recursive deletes at roughly 650 deletes/s, below the
+    # ~1000 writes/s that a new bucket initially supports, so background
+    # deletes do not trigger server-side throttling of foreground traffic.
+    # Increase it on buckets that have already scaled to a higher rate.
+    rm_concurrency = 5
 
     def __init__(
         self,
@@ -1761,7 +1771,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         )
 
     async def _delete_files(self, files, batchsize):
-        """Helper to delete files in batches."""
+        """Helper to delete files in batches.
+
+        At most ``self.rm_concurrency`` batch requests are in flight at once.
+        """
         if self.on_google:
             # emulators do not support batch
             chunk_results = await asyn._run_coros_in_chunks(
@@ -1770,6 +1783,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     for i in range(0, len(files), batchsize)
                 ],
                 return_exceptions=True,
+                batch_size=self.rm_concurrency,
             )
             out = []
             for r in chunk_results:
