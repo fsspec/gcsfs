@@ -55,6 +55,16 @@ def _writer():
     return writer
 
 
+def _no_skip(fn, *args):
+    """Call fn(*args) and fail (not skip) the test if it calls pytest.skip."""
+    from _pytest.outcomes import Skipped
+
+    try:
+        return fn(*args)
+    except Skipped as exc:
+        pytest.fail(f"unexpected skip: {exc}")
+
+
 @pytest.fixture(
     params=[
         (
@@ -935,7 +945,7 @@ def test_zonal_write_mocks_live_rcu_enables_rcu_rapid_write(
     )
 
     gen = conftest.zonal_write_mocks.__wrapped__(request)
-    assert next(gen) is None
+    assert _no_skip(next, gen) is None
     assert fake_extended.rcu_rapid_write is expected_rcu_rapid_write
     assert fake_async.rcu_rapid_write is expected_rcu_rapid_write
     with pytest.raises(StopIteration):
@@ -966,7 +976,7 @@ def test_zonal_write_mocks_live_gcs_matches_layout_or_grpc_data_path(
     # Unparametrized request: runs iff live_layout.uses_grpc_data_path.
     unparam_gen = conftest.zonal_write_mocks.__wrapped__(SimpleNamespace())
     if live_layout.uses_grpc_data_path:
-        assert next(unparam_gen) is None
+        assert _no_skip(next, unparam_gen) is None
     else:
         with pytest.raises(Skipped):
             next(unparam_gen)
@@ -977,7 +987,7 @@ def test_zonal_write_mocks_live_gcs_matches_layout_or_grpc_data_path(
             SimpleNamespace(param=target)
         )
         if live_layout == target:
-            assert next(param_gen) is None
+            assert _no_skip(next, param_gen) is None
         else:
             with pytest.raises(Skipped):
                 next(param_gen)
@@ -1011,7 +1021,7 @@ def test_rcu_fs_fixture_skips_non_rcu_buckets(
     fixture = getattr(test_rcu, fixture_name)
     gen = fixture.__wrapped__()
     if layout.is_rcu:
-        assert next(gen) is fake_fs
+        assert _no_skip(next, gen) is fake_fs
         with pytest.raises(StopIteration):
             next(gen)
     else:
@@ -1077,7 +1087,7 @@ def test_zonal_unfinalized_helpers_skip_live_rcu_and_mock_gcs(
             with pytest.raises(Skipped):
                 test_zonal._require_live_non_rcu_zonal(fake_fs)
         else:
-            test_zonal._require_live_non_rcu_zonal(fake_fs)
+            _no_skip(test_zonal._require_live_non_rcu_zonal, fake_fs)
 
 
 @pytest.mark.parametrize(

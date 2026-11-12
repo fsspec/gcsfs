@@ -85,8 +85,8 @@ raise_fd_limit() {
 }
 STATUS=0
 
-# Core test deselections shared by buckets whose writes go through the gRPC
-# appendable writer (Zonal and Rapid Cache Ultra).
+# Core test deselections for the zonal-core suite, whose Zonal bucket writes go
+# through the gRPC appendable writer.
 # 1. KMS & Metadata Support: gRPC appendable writes do not forward 'kmsKeyName',
 #    'contentType', or custom metadata.
 # 2. Copy/Merge: Server-side Rewrite/Compose are not supported on RAPID objects.
