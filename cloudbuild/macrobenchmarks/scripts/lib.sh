@@ -29,6 +29,12 @@ RCU_STATE=""
 if [[ "${_BUCKET_TYPE:-}" == *_rcu_* ]]; then
   RCU_STATE="${_BUCKET_TYPE##*_rcu_}"
 fi
+# By default, gcsfs writes STANDARD objects over HTTP to RCU buckets; *_rcu_z
+# opts in via FSSPEC_GCS_RCU_RAPID_WRITE="true" so writes stay RAPID.
+RCU_RAPID_WRITE=false
+if [[ "${RCU_STATE}" == "z" ]]; then
+  RCU_RAPID_WRITE=true
+fi
 
 # Record a step id in the failure ledger. The allowFailure provisioning steps
 # append here on error so the final check-failure step can fail the build with
@@ -215,6 +221,7 @@ EOF
 shared_workload_helm_args() {
   SHARED_HELM_ARGS=(
     --set gcsfs.datasetPath="${RUN_DATASET_PATH:-${_DATASET_PATH}}"
+    --set gcsfs.rcuRapidWrite="${RCU_RAPID_WRITE}"
     --set workload.modelId="${_MODEL_ID}"
     --set-string workload.image="${_IMAGE}"
     --set workload.hfToken="${_HF_TOKEN}"

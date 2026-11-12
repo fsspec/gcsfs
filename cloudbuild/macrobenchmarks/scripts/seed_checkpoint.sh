@@ -28,17 +28,15 @@ CHART="gcsfs/tests/perf/macrobenchmarks/workloads/${_WORKLOAD}/helm_chart"
 # checkpoint is full-size regardless of step count: the frozen ~16 GB model plus
 # eagerly-materialized AdamW state are serialized the same as in a long run.
 # simulatedStepComputeSeconds=0 makes the single step instant.
-# *_rcu_warm and *_rcu_cold measure reads of STANDARD objects, so their seed
-# release writes over HTTP; gcsfs would write RAPID objects on an RCU bucket.
-FORCE_HTTP=false
-case "${RCU_STATE}" in warm|cold) FORCE_HTTP=true ;; esac
+# RCU writes default to STANDARD over HTTP (wanted for *_rcu_warm and
+# *_rcu_cold); shared_workload_helm_args sets gcsfs.rcuRapidWrite=true for
+# *_rcu_z so the seed checkpoint is written as RAPID objects over gRPC.
 echo "Installing seed release $SEED_RUN_ID to write one checkpoint to $SEED_CKPT_DIR ..."
 shared_workload_helm_args
 helm install "$SEED_RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
   "${SHARED_HELM_ARGS[@]}" \
   --set gcsfs.ckptWritePath="$SEED_CKPT_DIR" \
   --set-string gcsfs.ckptLoadPath="" \
-  --set gcsfs.forceHttp="$FORCE_HTTP" \
   --set workload.steps="1" \
   --set workload.ckptWriterInterval="1" \
   --set workload.simulatedStepComputeSeconds="0"

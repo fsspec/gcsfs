@@ -1,8 +1,8 @@
 """Prepare the objects of a Rapid Cache Ultra (RCU) run from inside the cluster.
 
     stage-rapid SRC DST  Copy every object under SRC to the same relative path
-                         under DST. gcsfs writes RAPID objects on an RCU
-                         bucket; gcloud cannot.
+                         under DST as RAPID objects using rcu_rapid_write=True
+                         (gcloud cannot write RAPID on an RCU bucket).
     check PATH...        Fail unless gcsfs sees the bucket of every PATH as an
                          RCU bucket. A gcsfs without RCU support reads them
                          over HTTP.
@@ -88,13 +88,13 @@ def main(argv=None):
     commands.add_parser("warm").add_argument("paths", nargs="+")
     args = parser.parse_args(argv)
 
-    fs = gcsfs.GCSFileSystem()
     if args.command == "stage-rapid":
-        stage_rapid(fs, args.src, args.dst)
+        # RCU writes default to HTTP (STANDARD); opt in to RAPID over gRPC.
+        stage_rapid(gcsfs.GCSFileSystem(rcu_rapid_write=True), args.src, args.dst)
     elif args.command == "check":
-        check(fs, args.paths)
+        check(gcsfs.GCSFileSystem(), args.paths)
     else:
-        warm(fs, args.paths)
+        warm(gcsfs.GCSFileSystem(), args.paths)
 
 
 if __name__ == "__main__":

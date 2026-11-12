@@ -17,7 +17,10 @@ EFFECTIVE_LOAD_PATH="${_CHECKPOINT_LOAD_PATH}"
 if [ -z "$EFFECTIVE_LOAD_PATH" ] && [ "${_SEED_CHECKPOINT}" = "true" ]; then
   EFFECTIVE_LOAD_PATH="${SEEDED_CKPT_PATH:-}"
 fi
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /workspace/start_time.txt
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${WORKSPACE_DIR}/start_time.txt"
+# shared_workload_helm_args sets gcsfs.rcuRapidWrite=true for *_rcu_z so
+# checkpoint writes stay RAPID, while *_rcu_warm and *_rcu_cold write STANDARD
+# over HTTP by default.
 shared_workload_helm_args
 helm install "$RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
   "${SHARED_HELM_ARGS[@]}" \
@@ -32,4 +35,4 @@ helm install "$RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
 if ! wait_for_jobset "$RUN_ID" run-workload; then
   exit 1
 fi
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /workspace/end_time.txt
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${WORKSPACE_DIR}/end_time.txt"

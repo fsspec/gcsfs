@@ -191,13 +191,17 @@ measured run reads:
 
 | State | Dataset | Seed checkpoint | Before `run-workload` |
 | :-- | :-- | :-- | :-- |
-| `z` | Copied in by gcsfs as `RAPID` objects, in a Job on the workload node pool | Written by gcsfs (`RAPID`) | Nothing |
-| `warm` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`) | A Job reads the first MiB of every dataset and seed object from `_ZONE`, then the step waits `_RCU_WARMUP_SETTLE_SECONDS` |
-| `cold` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`) | Restore runs copy the dataset in again and the seed to a new prefix, because the seed run read them from `_ZONE` |
+| `z` | Copied in by gcsfs with `rcu_rapid_write=True` (`RAPID`), in a Job on the workload node pool | Written by gcsfs with `gcsfs.rcuRapidWrite=true` (`RAPID`) | Nothing |
+| `warm` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`, default) | A Job reads the first MiB of every dataset and seed object from `_ZONE`, then the step waits `_RCU_WARMUP_SETTLE_SECONDS` |
+| `cold` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`, default) | Restore runs copy the dataset in again and the seed to a new prefix, because the seed run read them from `_ZONE` |
 
 * The storage class of every staged object is checked by listing.
-* Checkpoint saves go through gcsfs and write `RAPID` objects in all three
-  states, so only `z` rows measure saves. Schedule fresh runs on `z` only.
+* Writes to RCU buckets default to HTTP (`STANDARD` objects). `*_rcu_z` sets
+  `gcsfs.rcuRapidWrite=true` (`FSSPEC_GCS_RCU_RAPID_WRITE="true"`) on both the
+  seed and workload releases so checkpoint saves write `RAPID` objects;
+  `*_rcu_warm` and `*_rcu_cold` leave it `false`, so their checkpoint saves
+  write `STANDARD` objects over HTTP (only `z` rows measure `RAPID` saves;
+  schedule fresh runs on `z` only).
 * Requirements: the project is allowlisted for Rapid Cache Ultra (flat buckets
   have their own allowlist), `_ZONE` supports it, the gcsfs in `_REQUIREMENTS`
   supports it (`rcu-stage` checks this), and `_CHECKPOINT_LOAD_PATH` is empty.

@@ -64,7 +64,7 @@ gcsfs:
   datasetPath: ""
   ckptWritePath: ""
   ckptLoadPath: ""
-  # Turn off gcsfs's zonal/HNS/RCU path (GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false),
-  # e.g. so the seed release of the *_rcu_warm/*_rcu_cold runs writes STANDARD
-  # objects to a Rapid Cache Ultra bucket.
-  forceHttp: false
+  # Write RAPID objects over gRPC to Rapid Cache Ultra buckets
+  # (FSSPEC_GCS_RCU_RAPID_WRITE="true"); by default RCU writes use HTTP
+  # (STANDARD objects). Used by *_rcu_z runs.
+  rcuRapidWrite: false

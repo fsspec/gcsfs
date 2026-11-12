@@ -71,7 +71,12 @@ class FakeGCS:
 def fake_gcs(monkeypatch):
     def install(objects, layouts=None):
         fs = FakeGCS(objects, layouts)
-        monkeypatch.setattr(prepare.gcsfs, "GCSFileSystem", lambda **kwargs: fs)
+
+        def make_fs(**kwargs):
+            fs.init_kwargs = kwargs
+            return fs
+
+        monkeypatch.setattr(prepare.gcsfs, "GCSFileSystem", make_fs)
         return fs
 
     return install
@@ -86,6 +91,7 @@ def test_stage_rapid_copies_a_bucket_root_dataset(fake_gcs):
 
     prepare.main(["stage-rapid", "gs://src", "gs://dst/"])
 
+    assert fs.init_kwargs == {"rcu_rapid_write": True}
     assert _under(fs, "dst") == {
         "dst/a.parquet": b"a" * 10,
         "dst/sub/b.parquet": b"b" * 20,
@@ -103,6 +109,7 @@ def test_stage_rapid_copies_only_the_dataset_prefix(fake_gcs):
 
     prepare.main(["stage-rapid", "gs://src/data", "gs://dst/data"])
 
+    assert fs.init_kwargs == {"rcu_rapid_write": True}
     assert _under(fs, "dst") == {
         "dst/data/a.parquet": b"a",
         "dst/data/sub/b.parquet": b"bb",
@@ -122,6 +129,7 @@ def test_warm_reads_at_most_one_mib_of_every_object(fake_gcs):
 
     prepare.main(["warm", "gs://data/", "gs://ckpt/seed/run/model.ckpt"])
 
+    assert fs.init_kwargs == {}
     assert sorted(fs.reads) == [
         ("ckpt/seed/run/model.ckpt", 0, MiB),
         ("data/a.parquet", 0, 10),
@@ -131,9 +139,11 @@ def test_warm_reads_at_most_one_mib_of_every_object(fake_gcs):
 
 def test_check_passes_when_every_bucket_is_rcu(fake_gcs):
     # The fake raises KeyError for any other bucket name.
-    fake_gcs({}, layouts={"data": RCU, "ckpt": RCU})
+    fs = fake_gcs({}, layouts={"data": RCU, "ckpt": RCU})
 
     prepare.main(["check", "gs://data/parquet/", "gs://ckpt"])
+
+    assert fs.init_kwargs == {}
 
 
 def test_check_fails_when_a_bucket_is_not_rcu(fake_gcs):

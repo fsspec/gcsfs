@@ -1,5 +1,6 @@
-"""gcsfs.forceHttp in the workload charts: the seed release of *_rcu_warm and
-*_rcu_cold sets it so gcsfs writes STANDARD objects over HTTP."""
+"""gcsfs.rcuRapidWrite in the workload charts: *_rcu_z runs (seed and
+measured) set it so gcsfs writes RAPID objects to RCU buckets over gRPC; by
+default writes go over HTTP (STANDARD)."""
 
 import shutil
 import subprocess
@@ -39,17 +40,19 @@ def _workload_env(chart, *sets):
 
 
 @pytest.mark.parametrize("chart", CHARTS)
-def test_force_http_turns_off_the_extended_filesystem(chart):
-    env = _workload_env(chart, "gcsfs.forceHttp=true")
+def test_rcu_rapid_write_sets_fsspec_env_var(chart):
+    env = _workload_env(chart, "gcsfs.rcuRapidWrite=true")
 
-    assert env["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] == "false"
+    assert env["FSSPEC_GCS_RCU_RAPID_WRITE"] == "true"
+    assert "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT" not in env
 
 
 @pytest.mark.parametrize("chart", CHARTS)
 @pytest.mark.parametrize(
-    "sets", [(), ("gcsfs.forceHttp=false",)], ids=["default", "false"]
+    "sets", [(), ("gcsfs.rcuRapidWrite=false",)], ids=["default", "false"]
 )
-def test_extended_filesystem_stays_on_without_force_http(chart, sets):
+def test_rcu_rapid_write_is_omitted_by_default_and_when_false(chart, sets):
     env = _workload_env(chart, *sets)
 
+    assert "FSSPEC_GCS_RCU_RAPID_WRITE" not in env
     assert "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT" not in env

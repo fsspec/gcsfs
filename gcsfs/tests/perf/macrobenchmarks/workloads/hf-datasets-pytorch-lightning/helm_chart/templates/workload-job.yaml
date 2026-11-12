@@ -111,9 +111,9 @@ spec:
                 value: "{{ $root.Values.gcsfs.ckptWritePath }}"
               - name: CKPT_LOAD_PATH
                 value: "{{ $root.Values.gcsfs.ckptLoadPath }}"
-              {{- if $root.Values.gcsfs.forceHttp }}
-              - name: GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT
-                value: "false"
+              {{- if $root.Values.gcsfs.rcuRapidWrite }}
+              - name: FSSPEC_GCS_RCU_RAPID_WRITE
+                value: "true"
               {{- end }}
               - name: CHECKPOINT_WRITE_INTERVAL
                 value: "{{ $root.Values.workload.ckptWriterInterval }}"

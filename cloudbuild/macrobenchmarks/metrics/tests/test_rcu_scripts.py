@@ -26,7 +26,14 @@ STEPS = {
         ).read_text()
     )["steps"]
 }
-PLUMBING = ("PATH", "STUB_LOG", "STUB_MANIFESTS", "FAILED_FILE", "BUILD_VARS_FILE")
+PLUMBING = (
+    "PATH",
+    "STUB_LOG",
+    "STUB_MANIFESTS",
+    "FAILED_FILE",
+    "BUILD_VARS_FILE",
+    "WORKSPACE_DIR",
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
@@ -114,6 +121,7 @@ def env(tmp_path):
         "STUB_MANIFESTS": str(tmp_path / "manifests.yaml"),
         "FAILED_FILE": str(tmp_path / "FAILED"),
         "BUILD_VARS_FILE": str(build_vars),
+        "WORKSPACE_DIR": str(tmp_path),
         "PROJECT_ID": "test-project",
         "LOCATION": "us-central1",
         "_INFRA_PREFIX": "pfx",
@@ -814,25 +822,31 @@ def test_prepare_reads_cold_records_failure_when_the_dataset_copy_fails(env):
     assert _build_var(env, "SEEDED_CKPT_PATH") == SEED
 
 
-# --- seed-checkpoint ------------------------------------------------------
+# --- seed-checkpoint / run-workload ---------------------------------------
 
 
+@pytest.mark.parametrize("step", ["seed-checkpoint", "run-workload"])
 @pytest.mark.parametrize(
-    ("bucket_type", "force_http"),
+    ("bucket_type", "rcu_rapid_write"),
     [
-        ("standard_rcu_warm", True),
-        ("hns_rcu_cold", True),
-        ("standard_rcu_z", False),
+        ("standard_rcu_z", True),
+        ("hns_rcu_z", True),
+        ("standard_rcu_warm", False),
+        ("hns_rcu_cold", False),
         ("regional", False),
+        ("zonal", False),
+        ("hns", False),
     ],
 )
-def test_seed_release_writes_over_http_only_for_warm_and_cold(
-    env, bucket_type, force_http
+def test_workload_releases_enable_rcu_rapid_write_only_for_rcu_z(
+    env, step, bucket_type, rcu_rapid_write
 ):
-    proc, calls = _run_step(
-        "seed-checkpoint", env, _BUCKET_TYPE=bucket_type, STUB_LS=SEED
-    )
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    proc, calls = _run_step(step, env, _BUCKET_TYPE=bucket_type, STUB_LS=SEED)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     (install,) = _calls(calls, "helm install")
-    assert ("gcsfs.forceHttp=true" in install) == force_http
+    expected_flag = f"--set gcsfs.rcuRapidWrite={str(rcu_rapid_write).lower()}"
+    assert re.search(rf"(?:^|\s){re.escape(expected_flag)}(?:\s|$)", install)
+    assert "forceHttp" not in install
