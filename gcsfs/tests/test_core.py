@@ -653,14 +653,14 @@ async def test_delete_files_with_exception(gcs):
         mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
     ):
         # Act
-        result = await gcs._delete_files(files, batchsize=2)
+        result = await gcs._delete_files(files, batchsize=2, concurrency=5)
 
         # Assert
         assert result == [True, True, exc]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("concurrency", [None, 1, 8])
+@pytest.mark.parametrize("concurrency", [1, 5, 8])
 async def test_delete_files_bounds_concurrency(gcs, concurrency):
     # Arrange
     files = [f"{TEST_BUCKET}/file_{i}" for i in range(50)]
@@ -675,7 +675,6 @@ async def test_delete_files_bounds_concurrency(gcs, concurrency):
         in_flight -= 1
         return list(batch)
 
-    kwargs = {} if concurrency is None else {"concurrency": concurrency}
     with (
         mock.patch.object(
             type(gcs),
@@ -685,13 +684,12 @@ async def test_delete_files_bounds_concurrency(gcs, concurrency):
         mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
     ):
         # Act
-        result = await gcs._delete_files(files, batchsize=2, **kwargs)
+        result = await gcs._delete_files(files, batchsize=2, concurrency=concurrency)
 
     # Assert
     assert result == files
-    # 25 batches are available, so the cap is what limits in-flight requests;
-    # the default is 5.
-    assert max_in_flight == (concurrency or 5)
+    # 25 batches are available, so the cap is what limits in-flight requests.
+    assert max_in_flight == concurrency
 
 
 @pytest.mark.asyncio
