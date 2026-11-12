@@ -765,13 +765,14 @@ async def async_gcs():
 
 @pytest.fixture
 def skip_if_zonal(gcs):
-    """Skips tests that validate HTTP REST mechanics specific to standard regional buckets."""
+    """Skips tests validating HTTP REST write mechanics when writes use gRPC."""
     if (
         hasattr(gcs, "_sync_lookup_bucket_layout")
-        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).uses_grpc_data_path
+        and hasattr(gcs, "_uses_grpc_write_path")
+        and gcs._uses_grpc_write_path(gcs._sync_lookup_bucket_layout(TEST_BUCKET))
     ):
         pytest.skip(
-            "Test validates HTTP REST mechanics specific to non-gRPC regional buckets"
+            "Test validates HTTP REST mechanics specific to non-gRPC regional writes"
         )
 
 

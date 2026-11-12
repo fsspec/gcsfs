@@ -1226,8 +1226,17 @@ class TestZonalFileRealGCS:
     `finalize_on_close` is set to `True` in these tests because the current
     implementation does not return the correct size for unfinalized objects,
     which would cause assertion failures in `cat()` when it checks the object's
-    size using HTTP call.
+    size using HTTP call. Live RCU runs opt into ``rcu_rapid_write=True`` so
+    these tests continue exercising AAOW/ZonalFile writes.
     """
+
+    @pytest.fixture(autouse=True)
+    def _enable_rcu_rapid_write(self, extended_gcsfs):
+        if extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu:
+            with mock.patch.object(extended_gcsfs, "rcu_rapid_write", True):
+                yield
+        else:
+            yield
 
     def test_put_file_to_zonal_bucket(self, extended_gcsfs, file_path):
         """Test putting a large file to a Zonal bucket."""

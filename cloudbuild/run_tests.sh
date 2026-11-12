@@ -204,7 +204,11 @@ case "$TEST_SUITE" in
     export GCSFS_RUN_RAPID_TESTS="true"
     export GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT='true'
 
-    run_pytest "${ARGS[@]}" "${RAPID_CORE_DESELECTS[@]}" \
+    # Default RCU writes use HTTP (STANDARD), so HTTP write/metadata/copy/merge
+    # tests run directly; skip_if_grpc_read still skips HTTP read-mechanics tests.
+    run_pytest "${ARGS[@]}" \
+      --deselect=gcsfs/tests/test_core.py::test_sign \
+      --deselect=gcsfs/tests/test_core.py::test_requester_pays_fails_without_user_project \
       gcsfs/tests/test_rcu.py \
       gcsfs/tests/test_zonal.py \
       gcsfs/tests/test_zonal_file.py \

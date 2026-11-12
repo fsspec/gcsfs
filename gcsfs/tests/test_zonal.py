@@ -280,10 +280,19 @@ def test_pickle_read_handle_zb(extended_gcsfs, gcs_bucket_mocks):
                 assert f2.read() == json_data[10:]
 
 
-def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
-    "Tests that mrd can read from an unfinalized file successfully"
+def _require_live_non_rcu_zonal(extended_gcsfs):
     if not extended_gcsfs.on_google:
         pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+    if extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu:
+        pytest.skip(
+            "Unfinalized RCU MRD size fallback hits stale HTTP 0 size when redirected "
+            "read_handle omits persisted_size; default RCU writes finalize over HTTP."
+        )
+
+
+def test_read_unfinalized_file_using_mrd(extended_gcsfs, file_path):
+    "Tests that mrd can read from an unfinalized file successfully"
+    _require_live_non_rcu_zonal(extended_gcsfs)
 
     with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
         f.write(b"Hello, ")
@@ -301,8 +310,7 @@ def test_cat_file_on_unfinalized_file(extended_gcsfs, file_path):
     """
     Tests that cat_file can read from an unfinalized file successfully
     """
-    if not extended_gcsfs.on_google:
-        pytest.skip("Cannot simulate unfinalized files on mock GCS.")
+    _require_live_non_rcu_zonal(extended_gcsfs)
 
     extended_gcsfs.pipe({file_path: b"Hello, world!"}, finalize_on_close=False)
     assert extended_gcsfs.info(file_path).get("timeFinalized") is None
