@@ -5,17 +5,23 @@ from __future__ import annotations
 import contextvars
 import os
 import re
-from enum import Enum
+from enum import StrEnum
 from typing import Dict, Optional, Union
 
 # Allowed characters in RFC 9110 product-version tokens: ASCII alphanumeric, '_', '.', '-'
 _TOKEN_SANITIZE_REGEX = re.compile(r"[^a-zA-Z0-9_.-]")
 
 
-class Dimension(str, Enum):
+class Dimension(StrEnum):
     """Standard telemetry dimension keys."""
 
     FRAMEWORK = "fw"
+    ENVIRONMENT = "env"
+    METHOD = "m"
+    METHOD_PARAMS = "mp"
+
+
+GRPC_METADATA_KEY = "x-goog-storage-gcsfs-features"
 
 
 def sanitize_token(token: Optional[str], max_len: int = 64) -> Optional[str]:
