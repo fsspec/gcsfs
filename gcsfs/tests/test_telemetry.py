@@ -402,6 +402,26 @@ def test_collect_tokens_map_caches_detector_exception():
     assert call_count == 1
 
 
+def test_warm_up_and_get_dimension_handle_failing_and_missing_detectors():
+    calls = 0
+
+    class FailingBackgroundDetector(BaseDetector):
+        name = Dimension.ENVIRONMENT
+        call_scoped = False
+
+        def detect(self):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("probe init failed")
+
+    tracker = UsageMetricsTracker(detectors=[FailingBackgroundDetector()])
+    tracker.warm_up()
+    assert calls == 1
+    assert tracker.get_dimension(Dimension.ENVIRONMENT) is None
+    assert calls == 2
+    assert tracker.get_dimension(Dimension.FRAMEWORK) is None
+
+
 def test_collect_tokens_map_records_empty_for_none_detection():
     """Verify that collect_tokens_map records empty string for None detection and avoids redundant checks."""
     call_count = 0
@@ -1839,6 +1859,15 @@ def test_non_google_bios_fast_skips_even_on_kubernetes(
     assert fake_host.opened_sessions == 0
 
 
+def test_non_linux_platform_skips_dmi_and_probe(fake_host, monkeypatch):
+    monkeypatch.setattr(environment_module.sys, "platform", "freebsd")
+    detector = EnvironmentDetector()
+
+    assert detector.detect() == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
 def test_concurrent_detect_launches_exactly_one_probe(fake_host, monkeypatch):
     fake_host.product_name = "Google Compute Engine"
     fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
@@ -1910,6 +1939,47 @@ def test_detect_slow_race_returns_none_for_scheduler_and_verdict_for_late_peer(
 
     monkeypatch.setattr(peer_detector, "_is_kubernetes", k8s_after_winner_resolves)
     assert peer_detector.detect() == "gke"
+
+
+def test_schedule_probe_recovers_after_loop_error_or_future_cancel(
+    fake_host, monkeypatch
+):
+    import concurrent.futures
+
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    detector = EnvironmentDetector()
+
+    def raise_loop_error():
+        raise RuntimeError("loop unavailable")
+
+    with monkeypatch.context() as m:
+        m.setattr(fsspec.asyn, "get_loop", raise_loop_error)
+        with pytest.raises(RuntimeError, match="loop unavailable"):
+            detector.detect()
+
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+    pending_future: concurrent.futures.Future = concurrent.futures.Future()
+
+    def capture_without_running(coro, _loop):
+        coro.close()
+        return pending_future
+
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "run_coroutine_threadsafe", capture_without_running)
+        assert detector.detect() is None
+
+    assert detector._probe_in_flight is True
+    assert detector._probe_future is pending_future
+    assert pending_future.cancel() is True
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+    assert detector.detect() is None
+    _wait_until_probe_settles(detector)
+    assert detector.detect() == "gce"
 
 
 def test_module_fork_hook_resets_live_detectors(fake_host):
