@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import io
 import os
@@ -1359,6 +1360,28 @@ def _connector_error():
     )
 
 
+def _fake_winreg(product_name):
+    """Fake winreg module for HKLM\\SYSTEM\\HardwareConfig\\Current."""
+
+    def open_key(root, sub_key):
+        assert root == "HKEY_LOCAL_MACHINE"
+        assert sub_key == r"SYSTEM\HardwareConfig\Current"
+        return contextlib.nullcontext((root, sub_key))
+
+    def query_value_ex(key, value_name):
+        assert key == ("HKEY_LOCAL_MACHINE", r"SYSTEM\HardwareConfig\Current")
+        assert value_name == "SystemProductName"
+        if isinstance(product_name, BaseException):
+            raise product_name
+        return product_name, 1
+
+    return types.SimpleNamespace(
+        HKEY_LOCAL_MACHINE="HKEY_LOCAL_MACHINE",
+        OpenKey=open_key,
+        QueryValueEx=query_value_ex,
+    )
+
+
 def _wait_until_probe_settles(detector: EnvironmentDetector, timeout: float = 5.0):
     deadline = time.monotonic() + timeout
     while detector._probe_in_flight:
@@ -2067,3 +2090,63 @@ def test_eager_task_factory_probe_does_not_deadlock(fake_host, monkeypatch):
         asyncio.run_coroutine_threadsafe(swap_factory(prev_factory), loop).result(
             timeout=5
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "product_name,mds_outcome,expected",
+    [
+        pytest.param("Google Compute Engine ", _mds_response(404), "gce", id="gce-vm"),
+        pytest.param(
+            "Google", _mds_response(200, body="win-cluster"), "gke", id="gke-node"
+        ),
+    ],
+)
+async def test_windows_gce_bios_probes_metadata_server(
+    fake_host, monkeypatch, product_name, mds_outcome, expected
+):
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(product_name))
+    fake_host.outcomes = [mds_outcome]
+    detector = EnvironmentDetector()
+
+    assert detector.detect() is None
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == expected
+    assert fake_host.dmi_reads == []
+    assert fake_host.requests == [
+        (_DEFAULT_CLUSTER_NAME_URL, {"Metadata-Flavor": "Google"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "registry_outcome",
+    [
+        pytest.param("Virtual Machine", id="non-google-product"),
+        pytest.param(123, id="non-string-value"),
+        pytest.param(FileNotFoundError("missing value"), id="missing-registry-value"),
+    ],
+)
+def test_non_gcp_windows_host_skips_probe(fake_host, monkeypatch, registry_outcome):
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(registry_outcome))
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == "oth"
+    assert detector._gcp_bios is False
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
+def test_non_linux_non_windows_platform_skips_probe(fake_host, monkeypatch):
+    monkeypatch.setattr(environment_module.sys, "platform", "darwin")
+    monkeypatch.delitem(sys.modules, "winreg", raising=False)
+    detector = EnvironmentDetector()
+
+    assert detector.detect() == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0

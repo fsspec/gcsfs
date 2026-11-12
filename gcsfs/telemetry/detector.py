@@ -23,6 +23,7 @@ _TRUTHY_VALUES = ("1", "true", "yes")
 _GCP_PRODUCT_NAMES = ("Google", "Google Compute Engine")
 # GKE Sandbox (gVisor) exposes this sysfs entry from the host, unlike sys_vendor.
 _DMI_PRODUCT_NAME_PATH = "/sys/class/dmi/id/product_name"
+_WINDOWS_HARDWARE_CONFIG_KEY = r"SYSTEM\HardwareConfig\Current"
 _K8S_SERVICE_ACCOUNT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
 _METADATA_HOST_ENV_VARS = ("GCE_METADATA_HOST", "GCE_METADATA_ROOT", "GCE_METADATA_IP")
 _DEFAULT_METADATA_HOST = "169.254.169.254"
@@ -51,6 +52,19 @@ def _read_linux_product_name() -> Optional[str]:
             return f.read()
     except OSError:
         return None
+
+
+def _read_windows_product_name() -> Optional[str]:
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, _WINDOWS_HARDWARE_CONFIG_KEY
+        ) as key:
+            product_name, _ = winreg.QueryValueEx(key, "SystemProductName")
+    except OSError:
+        return None
+    return product_name
 
 
 _backoff_sleep = asyncio.sleep
@@ -270,10 +284,15 @@ class EnvironmentDetector(BaseDetector):
 
     @staticmethod
     def _read_gcp_bios() -> bool:
-        if not sys.platform.startswith("linux"):
+        if sys.platform.startswith("linux"):
+            product_name = _read_linux_product_name()
+        elif sys.platform == "win32":
+            product_name = _read_windows_product_name()
+        else:
             return False
-        product_name = _read_linux_product_name()
-        return product_name is not None and product_name.strip() in _GCP_PRODUCT_NAMES
+        return (
+            isinstance(product_name, str) and product_name.strip() in _GCP_PRODUCT_NAMES
+        )
 
     def _local_fallback_verdict(self) -> str:
         if not self._is_gcp_bios():

@@ -39,9 +39,9 @@ The environment detector classifies the host into one of three values:
 - ``env/gke``: GKE pods.
 - ``env/oth``: Serverless runtimes (Cloud Run, Cloud Functions, App Engine) and hosts outside Google Cloud.
 
-Hosts outside Linux, serverless runtimes, and Linux hosts without a Google value in DMI resolve locally without network calls. When DMI contains a Google value or ``GCE_METADATA_HOST``, ``GCE_METADATA_ROOT``, or ``GCE_METADATA_IP`` is set, ``gcsfs`` queries the metadata server in the background at init. Storage calls never wait on the query, and requests before the query finishes omit the ``env/`` token.
+Hosts outside Linux and Windows, serverless runtimes, and Linux or Windows hosts without a Google value in DMI (Linux) or the ``SystemProductName`` registry value (Windows) resolve locally without network calls. When DMI or the Windows registry contains a Google value or ``GCE_METADATA_HOST``, ``GCE_METADATA_ROOT``, or ``GCE_METADATA_IP`` is set, ``gcsfs`` queries the metadata server in the background at init. Storage calls never wait on the query, and requests before the query finishes omit the ``env/`` token.
 
-Each process caches the result: ``fork`` children keep a resolved value, and ``spawn`` or ``forkserver`` workers each detect once. If the metadata query fails or ``NO_GCE_CHECK=true`` is set, ``gcsfs`` resolves ``gce``, ``gke``, or ``oth`` from DMI and Kubernetes signals.
+Each process caches the result: ``fork`` children keep a resolved value, and ``spawn`` or ``forkserver`` workers each detect once. If the metadata query fails or ``NO_GCE_CHECK=true`` is set, ``gcsfs`` resolves ``gce``, ``gke``, or ``oth`` from DMI or registry and Kubernetes signals.
 
 .. note::
 
