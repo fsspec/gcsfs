@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import shlex
@@ -578,8 +579,8 @@ def flat_bucket(flat_bucket_name, gcs_factory):
         _close_gcs(gcs)
 
 
-# Bucket layouts whose appendable writes use the gRPC writer; pass them to
-# ``zonal_write_mocks`` as indirect params.
+# Bucket layouts whose appendable writes use the gRPC writer (RCU layouts only
+# with ``rcu_rapid_write``); pass them to ``zonal_write_mocks`` as indirect params.
 RAPID_WRITE_LAYOUTS = [
     layouts.ZONAL_HIERARCHICAL,
     layouts.STANDARD_RCU,
@@ -604,6 +605,18 @@ def _get_live_zonal_bucket_layout() -> BucketLayout:
     return layout
 
 
+def _rapid_write_filesystems(request, layout):
+    """Return the test's filesystems that need rcu_rapid_write=True for RAPID writes."""
+    if not layout.is_rcu:
+        return []
+    fixturenames = getattr(request, "fixturenames", ())
+    return [
+        request.getfixturevalue(name)
+        for name in ("extended_gcsfs", "async_gcs")
+        if name in fixturenames
+    ]
+
+
 @pytest.fixture
 def zonal_write_mocks(request):
     """A fixture for mocking Zonal and RCU bucket write functionality.
@@ -611,6 +624,8 @@ def zonal_write_mocks(request):
     Accepts an optional indirect ``BucketLayout`` param (default ``ZONAL_HIERARCHICAL``).
     On real GCS it yields ``None`` when the live bucket matches the requested
     layout (or uses the gRPC data path when unparametrized) and skips otherwise.
+    For RCU layouts (live or mocked) it sets ``rcu_rapid_write`` on the test's
+    ``extended_gcsfs`` or ``async_gcs`` filesystem, so writes use the appendable writer.
     """
     has_param = hasattr(request, "param")
     layout = getattr(request, "param", layouts.ZONAL_HIERARCHICAL)
@@ -627,8 +642,13 @@ def zonal_write_mocks(request):
             pytest.skip(
                 f"Live write tests require a Zonal or RCU bucket, got {live_layout}"
             )
-        yield None
+        with contextlib.ExitStack() as stack:
+            for fs in _rapid_write_filesystems(request, live_layout):
+                stack.enter_context(mock.patch.object(fs, "rcu_rapid_write", True))
+            yield None
         return
+
+    rapid_write_filesystems = _rapid_write_filesystems(request, layout)
 
     patch_target_get_bucket_layout = (
         "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout"
@@ -673,7 +693,10 @@ def zonal_write_mocks(request):
         mock.patch(patch_target_get_bucket_layout, return_value=layout),
         mock.patch(patch_target_gcsfs_info, mock_gcsfs_info),
         mock.patch(patch_target_init_aaow, mock_init_aaow),
+        contextlib.ExitStack() as stack,
     ):
+        for fs in rapid_write_filesystems:
+            stack.enter_context(mock.patch.object(fs, "rcu_rapid_write", True))
         mocks = {
             "aaow": mock_aaow,
             "init_aaow": mock_init_aaow,

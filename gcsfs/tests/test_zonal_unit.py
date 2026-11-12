@@ -2036,9 +2036,12 @@ async def test_anywhere_cache_bucket_writes_stay_on_http(extended_gcsfs, async_g
 @pytest.mark.parametrize(
     "bucket_layout", [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU]
 )
-async def test_core_upload_helpers_route_rcu_to_extended(async_gcs, bucket_layout):
-    """core.simple_upload and core.initiate_upload hand RCU buckets to gRPC."""
+async def test_core_upload_helpers_route_rcu_to_extended_with_rcu_rapid_write(
+    async_gcs, bucket_layout
+):
+    """With rcu_rapid_write, core.simple_upload and core.initiate_upload hand RCU buckets to gRPC."""
     with (
+        mock.patch.object(async_gcs, "rcu_rapid_write", True),
         mock.patch.object(
             async_gcs,
             "_lookup_bucket_layout",

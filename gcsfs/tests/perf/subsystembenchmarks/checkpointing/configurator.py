@@ -144,8 +144,8 @@ class OneFactorCheckpointConfigurator(OneFactorConfigurator):
         )
 
     def build_cases(self, scenario, common_config, include_disabled=False):
-        # Warm and cold only change how a load's checkpoint is staged, and saves write
-        # RAPID objects on every RCU type, so saves run on *_rcu_z only.
+        # Warm and cold only change how a load's checkpoint is staged, so saves run
+        # on *_rcu_z only, where run.py turns on RAPID writes.
         bucket_type = os.environ.get("GCSFS_SUBSYSTEM_BUCKET_TYPE", "regional")
         if "write" in scenario["scenario"] and rcu_state(bucket_type) in (
             "warm",

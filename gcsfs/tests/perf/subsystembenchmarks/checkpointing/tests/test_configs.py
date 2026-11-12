@@ -111,8 +111,8 @@ def test_rapid_cache_bucket_types_produce_expected_id_tokens(
 @pytest.mark.parametrize(
     "bucket_type, scenarios",
     [
-        # Warm and cold only change how loads are staged, and a save writes RAPID
-        # objects on every RCU type, so saves run on *_rcu_z only.
+        # Warm and cold only change how loads are staged, so saves run on *_rcu_z
+        # only, where run.py turns on RAPID writes.
         ("standard_rcu_warm", {"checkpoint_read"}),
         ("hns_rcu_cold", {"checkpoint_read"}),
         ("standard_rcu_z", {"checkpoint_read", "checkpoint_write"}),

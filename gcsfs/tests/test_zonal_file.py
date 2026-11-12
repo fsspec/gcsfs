@@ -45,7 +45,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout
     ):
         """The zonal pipe_file path routes through the shared cache updater."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -88,7 +90,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout
     ):
         """The zonal put_file path routes through the shared cache updater."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -147,7 +151,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, payload, expected_chunks, expected_updates
     ):
         """_put_file sets the callback size and updates progress after each chunk."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -197,7 +203,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, finalize_on_close
     ):
         """A failed pipe_file closes the writer without finalizing the partial object and still updates the dircache."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -240,7 +248,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, finalize_on_close
     ):
         """A failed put_file closes the writer without finalizing the partial object and still updates the dircache."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -286,7 +296,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, tmp_path
     ):
         """A missing local file fails before the writer replaces the object."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
 
         with (
@@ -725,10 +737,11 @@ def test_zonal_file_open_append_mode_nonexistent_file(
     [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],
     indirect=True,
 )
-def test_open_write_modes_use_zonal_file_on_rcu(
+def test_open_write_modes_use_zonal_file_on_rcu_with_rcu_rapid_write(
     extended_gcsfs, zonal_write_mocks, file_path, mode
 ):
-    """Every write mode on an RCU bucket opens a ZonalFile that writes RAPID and finalizes on close by default."""
+    """With rcu_rapid_write (set by zonal_write_mocks), every write mode on an RCU
+    bucket opens a ZonalFile that writes RAPID and finalizes on close by default."""
     with extended_gcsfs.open(file_path, mode) as f:
         assert isinstance(f, ZonalFile)
         assert f.finalize_on_close is True
@@ -864,7 +877,7 @@ def test_zonal_file_finalize_on_close_default_false(
 def test_zonal_file_finalize_on_close_rcu_default_and_overrides(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
-    """On RCU buckets finalize_on_close defaults to True, but explicit False overrides it."""
+    """With rcu_rapid_write, finalize_on_close on RCU buckets defaults to True, but explicit False overrides it."""
     if not zonal_write_mocks:
         pytest.skip("Unit test for finalize_on_close resolution with mocks.")
 
@@ -933,7 +946,9 @@ async def test_simple_upload_finalize_on_close_defaults_by_bucket_layout(bucket_
     """simple_upload defaults finalize_on_close to True on RCU and False on Zonal, with override support."""
     from gcsfs.extended_gcsfs import simple_upload
 
-    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=True
+    )
     fs._grpc_client = mock.MagicMock()
     writer = mock.MagicMock()
     writer.append = mock.AsyncMock()
@@ -978,7 +993,9 @@ async def test_simple_upload_failure_closes_without_finalizing(
     """A failed simple_upload closes the writer without finalizing the partial object."""
     from gcsfs.extended_gcsfs import simple_upload
 
-    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=True
+    )
     fs._grpc_client = mock.MagicMock()
     writer = mock.MagicMock()
     writer.append = mock.AsyncMock(side_effect=ConnectionError("append failed"))
@@ -1026,7 +1043,9 @@ async def test_write_helpers_propagate_finalize_failure(
     """
     from gcsfs.extended_gcsfs import simple_upload
 
-    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=True
+    )
     fs._grpc_client = mock.MagicMock()
     path = f"{TEST_ZONAL_BUCKET}/k"
     writer = mock.MagicMock(bucket_name=TEST_ZONAL_BUCKET, object_name="k")
