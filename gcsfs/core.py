@@ -1760,7 +1760,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             or _MTLS_HOST in self._location.lower()
         )
 
-    async def _delete_files(self, files, batchsize, concurrency=5):
+    async def _delete_files(self, files, batchsize, concurrency):
         """Helper to delete files in batches.
 
         At most ``concurrency`` batch requests are in flight at once.

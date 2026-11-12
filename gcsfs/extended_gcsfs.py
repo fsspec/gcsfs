@@ -2046,7 +2046,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         recursive=False,
         maxdepth=None,
         batchsize=100,
-        concurrency=5,
+        *,
+        concurrency,
     ):
         """Helper method to handle the rm operation for paths within a single bucket."""
         if not await self._is_bucket_hns_enabled(bucket):
@@ -2103,7 +2104,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         )
 
     async def _perform_rm(
-        self, files, dirs, path, batchsize, concurrency=5, delete_placeholder=True
+        self, files, dirs, path, batchsize, *, concurrency, delete_placeholder=True
     ):
         """
         Helper method to perform the deletion of files and directories.
