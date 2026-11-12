@@ -217,10 +217,6 @@ class EnvironmentDetector(BaseDetector):
         return self._detect_slow()
 
     def _detect_slow(self) -> Optional[str]:
-        cached_env = self._cached_env
-        if cached_env is not None:
-            return cached_env
-
         if self._has_serverless_env() and not self._is_kubernetes():
             return self._cache_verdict(ENV_OTHER)
 
