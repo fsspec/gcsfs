@@ -13,12 +13,15 @@ What is Collected
 
 When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework and appends an anonymous brand identifier token to the HTTP ``User-Agent`` header of outgoing requests to Google Cloud Storage.
 
+Outgoing HTTP JSON requests also emit the encoded ``X-Goog-Storage-Gcsfs-Features`` header alongside ``User-Agent`` (matching ``x-goog-storage-gcsfs-features`` on gRPC), honoring caller-supplied overrides case-insensitively and omitting the header when no attribution dimensions are active.
+
 Example Header
 ~~~~~~~~~~~~~~
 
 .. code-block:: text
 
    User-Agent: python-gcsfs/2026.3.0 fw/pandas
+   X-Goog-Storage-Gcsfs-Features: EAE=
 
 Recognized Frameworks
 ~~~~~~~~~~~~~~~~~~~~~
@@ -30,12 +33,23 @@ The detector recognizes major ecosystem libraries, including:
 
 If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header.
 
+gRPC Metadata
+~~~~~~~~~~~~~
+
+Because gRPC channels use a ``User-Agent`` fixed when the client is created, ``gcsfs`` instead attaches the encoded ``x-goog-storage-gcsfs-features`` metadata header (a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload) when active attribution dimensions are present:
+
+- **Storage Control Unary RPCs:** Every unary call (including LRO operations, bucket layout lookups, and HNS folder operations such as ``mkdir``, ``rmdir``, and ``mv``) attaches ``x-goog-storage-gcsfs-features`` per RPC.
+- **Rapid (Zonal) and Rapid Cache Ultra Stream Opens:** Initial read (``MRD``) stream opens, and appendable write stream opens (Rapid zonal writes, and Rapid Cache Ultra writes when ``rcu_rapid_write=True``), attach ``x-goog-storage-gcsfs-features`` at open time.
+
+Caller-supplied ``x-goog-storage-gcsfs-features`` metadata is preserved verbatim (case-insensitively) without being overwritten, and the header is omitted when no recognized attribution dimensions are active.
+
+.. code-block:: text
+
+   x-goog-storage-gcsfs-features: EAE=
+
 .. note::
 
-   The framework token is attached to JSON API (HTTP) requests only. gRPC requests use a ``User-Agent`` fixed
-   when the gRPC client is created and do not yet carry the framework token. This includes Rapid (zonal) reads
-   and writes, Rapid Cache Ultra reads (and writes when ``rcu_rapid_write=True``), and Storage Control API calls
-   (bucket layout lookups and HNS folder operations such as ``mkdir``, ``rmdir`` and ``mv``).
+   Pooled ``MRD`` read streams retain stream-opener attribution across subsequent pooled reads, and internal mid-stream SDK reconnects omit initial open-time metadata.
 
 Privacy & Security Guarantees
 -----------------------------
@@ -87,4 +101,5 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- Outgoing requests contain only standard ``python-gcsfs/<version>`` headers.
+- Outgoing HTTP ``User-Agent`` framework tokens, HTTP ``X-Goog-Storage-Gcsfs-Features`` headers, and gRPC ``x-goog-storage-gcsfs-features`` metadata are suppressed (HTTP ``User-Agent`` headers contain only standard ``python-gcsfs/<version>`` headers).
+- Caller-supplied overrides (such as explicit HTTP ``X-Goog-Storage-Gcsfs-Features`` headers or gRPC ``x-goog-storage-gcsfs-features`` metadata) are preserved untouched.
