@@ -3,7 +3,7 @@ substitutions:
   _INFRA_PREFIX: ""
   _VM_SERVICE_ACCOUNT: ""
   _GROUP: "dataloading/huggingface_datasets"
-  _BUCKET_TYPE: "regional"  # regional | zonal | hns | rapid_cache_cold | rapid_cache_warm (one type per run, like macrobenchmarks)
+  _BUCKET_TYPE: "regional"  # regional | zonal | hns | rapid_cache_cold | rapid_cache_warm | {standard,hns}_rcu_{z,warm,cold} (one type per run, like macrobenchmarks)
   _MACHINE_TYPE: "c4-standard-192"  # CPU now; point at a GPU type later (auto-detect handles backend)
   _REQUIREMENTS: ""
   _SWEEP_AXES: ""
@@ -90,6 +90,7 @@ steps:
         else
           case "$${_BUCKET_TYPE}" in
             regional|zonal|hns|rapid_cache_cold|rapid_cache_warm) ;;
+            standard_rcu_z|standard_rcu_warm|standard_rcu_cold|hns_rcu_z|hns_rcu_warm|hns_rcu_cold) ;;
             *) echo "ERROR: unknown _BUCKET_TYPE '$${_BUCKET_TYPE}'"; exit 1;;
           esac
           BUCKET_KIND=$${_BUCKET_TYPE}
@@ -162,7 +163,7 @@ steps:
           CLEAN_NAME="$${name#gs://}"
           CLEAN_NAME="$${CLEAN_NAME%/}"
           if [ "$$CLEAN_NAME" = "$${RESULTS_BUCKET}" ] || [ "$$CLEAN_NAME" = "${_INFRA_PREFIX}-run-results" ]; then continue; fi
-          if [[ ! "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm)-[0-9a-f]{8}- ]]; then continue; fi
+          if [[ ! "$$CLEAN_NAME" =~ ^${_INFRA_PREFIX}-(ci|regional|zonal|hns|rapid_cache_cold|rapid_cache_warm|standard_rcu_z|standard_rcu_warm|standard_rcu_cold|hns_rcu_z|hns_rcu_warm|hns_rcu_cold)-[0-9a-f]{8}- ]]; then continue; fi
 
           CREATION_SECONDS=$$(date -d "$$creation_time" +%s 2>/dev/null) || continue
           AGE=$$(($$CURRENT_TIME - $$CREATION_SECONDS))
@@ -175,6 +176,12 @@ steps:
                 | awk 'toupper($$2) != "DISABLED" && toupper($$2) != "PAUSED" {print $$1}' || true); do
               echo "Disabling leaked anywhere-cache on gs://$$CLEAN_NAME in zone $$z"
               curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
+            done
+            # Rapid Cache Ultra caches (RCU runs): list ids (<bucket>/<zone><TAB>state).
+            for id in $$(gcloud alpha storage buckets rapid-caches list "gs://$$CLEAN_NAME" --project="${PROJECT_ID}" --format="value(id,state)" --quiet < /dev/null \
+                | awk 'toupper($$2) != "DISABLED" {print $$1}' || true); do
+              echo "Disabling leaked Rapid Cache Ultra cache $$id"
+              gcloud alpha storage buckets rapid-caches disable "$$id" --project="${PROJECT_ID}" --quiet < /dev/null || true
             done
             gcloud storage rm --recursive "gs://$$CLEAN_NAME" < /dev/null || true
             gcloud storage buckets delete "gs://$$CLEAN_NAME" --quiet < /dev/null || true
@@ -320,9 +327,9 @@ steps:
         gcloud compute instances delete "$$VM_NAME" --project="${PROJECT_ID}" --zone="$$ZONE" --quiet || true
     waitFor: ["run-subsystembenchmarks"]
 
-  # Safety net: each case deletes its own objects and (for non-Rapid-Cache buckets) its bucket.
-  # For Rapid Cache runs, empty buckets remain in a 1-hour DISABLED grace period and are reaped
-  # by cleanup-leaked-resources on subsequent builds.
+  # Safety net: each case deletes its own objects and (for buckets without a cache) its bucket.
+  # For Rapid Cache and RCU runs, GCS refuses to delete the emptied buckets for a while after
+  # the cache is disabled, so cleanup-leaked-resources reaps them on subsequent builds.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "delete-buckets"
     entrypoint: "bash"
@@ -342,6 +349,14 @@ steps:
           for z in $$(printf '%s\n' "$$CACHES" | awk 'NF && toupper($$2) != "DISABLED" && toupper($$2) != "PAUSED" {print $$1}'); do
             echo "Disabling active anywhere-cache on $$b in zone $$z"
             curl -s -X POST -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" -d "{}" "https://storage.googleapis.com/storage/v1/b/$$CLEAN_NAME/anywhereCaches/$$z/disable" < /dev/null >/dev/null || true
+          done
+          # RCU runs: disable any Rapid Cache Ultra cache a case left running (ids are
+          # <bucket>/<zone>). The bucket delete below still fails for a while after the
+          # disable; the reaper retries it.
+          for id in $$(gcloud alpha storage buckets rapid-caches list "gs://$$CLEAN_NAME" --project=${PROJECT_ID} --format="value(id,state)" --quiet < /dev/null \
+              | awk 'toupper($$2) != "DISABLED" {print $$1}' || true); do
+            echo "Disabling Rapid Cache Ultra cache $$id"
+            gcloud alpha storage buckets rapid-caches disable "$$id" --project=${PROJECT_ID} --quiet < /dev/null || true
           done
           gcloud storage rm --recursive "$$b/**" < /dev/null 2>/dev/null || true
           if [ -n "$$CACHES" ]; then

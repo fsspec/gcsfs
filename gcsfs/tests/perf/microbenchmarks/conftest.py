@@ -7,10 +7,13 @@ import subprocess
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List
 
 import pytest
 
+from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.tests.conftest import _close_gcs
 from gcsfs.tests.perf._common.resource_monitor import ResourceMonitor
 from gcsfs.tests.perf.microbenchmarks.request_counter import (
     DOWNLOAD,
@@ -18,6 +21,7 @@ from gcsfs.tests.perf.microbenchmarks.request_counter import (
     OBJECT_GET,
     OTHER,
 )
+from gcsfs.tests.settings import RCU_WARMUP_SETTLE_SECONDS
 
 MB = 1024 * 1024
 
@@ -25,6 +29,79 @@ MB = 1024 * 1024
 # Spinning up the process pool below to write a few bytes per file costs far
 # more than the upload itself.
 SMALL_FILE_UPLOAD_LIMIT = 1 * MB
+
+RCU_Z_BUCKET_TYPES = frozenset({"standard_rcu_z", "hns_rcu_z"})
+RCU_WARM_BUCKET_TYPES = frozenset({"standard_rcu_warm", "hns_rcu_warm"})
+RCU_COLD_BUCKET_TYPES = frozenset({"standard_rcu_cold", "hns_rcu_cold"})
+
+
+def _is_rcu_z(bucket_type: str | None) -> bool:
+    return bucket_type in RCU_Z_BUCKET_TYPES
+
+
+def _is_rcu_warm(bucket_type: str | None) -> bool:
+    return bucket_type in RCU_WARM_BUCKET_TYPES
+
+
+def _is_rcu_cold(bucket_type: str | None) -> bool:
+    return bucket_type in RCU_COLD_BUCKET_TYPES
+
+
+def rcu_rapid_write_kwargs(bucket_type: str | None) -> dict:
+    """Filesystem kwargs controlling RCU ``RAPID`` vs ``STANDARD`` writes.
+
+    ``*_rcu_z`` must stage and write ``RAPID`` objects, whereas ``*_rcu_warm``
+    and ``*_rcu_cold`` must stage ``STANDARD`` objects over HTTP even if
+    ``FSSPEC_GCS_RCU_RAPID_WRITE`` is set in the environment.
+    """
+    if _is_rcu_z(bucket_type):
+        return {"rcu_rapid_write": True}
+    if _is_rcu_warm(bucket_type) or _is_rcu_cold(bucket_type):
+        return {"rcu_rapid_write": False}
+    return {}
+
+
+def get_round_file_paths(params, default_file_paths, round_num: int):
+    """Return the file paths to read in ``round_num`` (rotates on ``*_rcu_cold``)."""
+    round_paths = getattr(params, "round_file_paths", None)
+    if round_paths:
+        return round_paths[round_num % len(round_paths)]
+    return default_file_paths
+
+
+def _warm_rcu_files(extended_gcs_factory, file_paths, file_size_bytes: int) -> None:
+    """Trigger RCU ingest-on-read on an isolated client, close it, and wait for settle.
+
+    Rapid Cache Ultra with ``admit-on-first-miss`` admits the full object on any
+    range read, so reading up to 1 MiB triggers whole-object ingestion without
+    buffering multi-GB benchmark files in memory.
+    """
+    if not file_paths:
+        return
+
+    warm_fs = extended_gcs_factory(skip_instance_cache=True)
+    read_end = min(file_size_bytes, 1 * MB)
+    try:
+
+        def _warm_one(path: str) -> None:
+            if read_end > 0:
+                warm_fs.cat_file(path, start=0, end=read_end)
+            else:
+                warm_fs.cat_file(path)
+
+        max_workers = min(32, len(file_paths))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for future in [executor.submit(_warm_one, p) for p in file_paths]:
+                future.result()
+    finally:
+        _close_gcs(warm_fs)
+
+    if RCU_WARMUP_SETTLE_SECONDS > 0:
+        logging.info(
+            "Sleeping %.1fs after warm-up reads for RCU cache ingestion.",
+            RCU_WARMUP_SETTLE_SECONDS,
+        )
+        time.sleep(RCU_WARMUP_SETTLE_SECONDS)
 
 
 def _format_mb(value):
@@ -146,16 +223,21 @@ def _prepare_files_gcloud(file_paths, file_size):
     return True
 
 
-def _prepare_files(gcs, file_paths, file_size=0):
+def _prepare_files(gcs, file_paths, file_size=0, bucket_type=None):
     if file_size <= SMALL_FILE_UPLOAD_LIMIT:
         content = os.urandom(file_size) if file_size else b""
+        pipe_kwargs = (
+            {"finalize_on_close": True}
+            if isinstance(gcs, ExtendedGcsFileSystem)
+            else {}
+        )
         try:
-            gcs.pipe({path: content for path in file_paths})
+            gcs.pipe({path: content for path in file_paths}, **pipe_kwargs)
             return
         except Exception as e:
             pytest.fail(f"Failed to pipe files: {e}")
 
-    if len(file_paths) * file_size >= 10240 * MB:
+    if not _is_rcu_z(bucket_type) and len(file_paths) * file_size >= 10240 * MB:
         if _prepare_files_gcloud(file_paths, file_size):
             return
 
@@ -186,11 +268,22 @@ def _write_local_file(path, file_size):
 def _benchmark_io_fixture_helper(
     extended_gcs_factory, params, prefix_tag, create_files=False, gcs_kwargs=None
 ):
-    gcs_kwargs = gcs_kwargs or {}
+    bucket_type = getattr(params, "bucket_type", None)
+    gcs_kwargs = {**(gcs_kwargs or {}), **rcu_rapid_write_kwargs(bucket_type)}
     gcs = extended_gcs_factory(**gcs_kwargs)
 
+    rounds = getattr(params, "rounds", 1)
     prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
-    file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
+    if create_files and _is_rcu_cold(bucket_type) and rounds > 1:
+        round_file_paths = [
+            [f"{prefix}/round_{r}/file_{i}" for i in range(params.files)]
+            for r in range(rounds)
+        ]
+        file_paths = round_file_paths[0]
+        params.round_file_paths = round_file_paths
+    else:
+        file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
+        params.round_file_paths = [file_paths]
 
     action = "creating" if create_files else "targeting"
     logging.info(
@@ -201,7 +294,31 @@ def _benchmark_io_fixture_helper(
     try:
         if create_files:
             start_time = time.perf_counter()
-            _prepare_files(gcs, file_paths, params.file_size_bytes)
+            _prepare_files(
+                gcs, file_paths, params.file_size_bytes, bucket_type=bucket_type
+            )
+            if _is_rcu_cold(bucket_type) and rounds > 1:
+                for round_idx in range(1, rounds):
+                    gcs.copy(
+                        round_file_paths[0],
+                        round_file_paths[round_idx],
+                        batch_size=32,
+                    )
+            elif _is_rcu_warm(bucket_type):
+                _warm_rcu_files(
+                    extended_gcs_factory, file_paths, params.file_size_bytes
+                )
+
+            if (
+                _is_rcu_warm(bucket_type) or _is_rcu_cold(bucket_type)
+            ) and params.file_size_bytes <= SMALL_FILE_UPLOAD_LIMIT:
+                # Other bucket types stage small files over gRPC/HTTP with gcs itself,
+                # and _warm_rcu_files uses a separate instance, so stage and read a
+                # sentinel object via gcs (not file_paths, keeping *_rcu_cold targets
+                # unread) to initialize its gRPC data client before round 0.
+                warmup_path = f"{prefix}/_client_warmup"
+                gcs.pipe_file(warmup_path, b"\0")
+                gcs.cat_file(warmup_path)
 
             duration_ms = (time.perf_counter() - start_time) * 1000
             logging.info(
@@ -312,7 +429,9 @@ def gcsfs_benchmark_cat_ranges(extended_gcs_factory, request):
 
 
 def _benchmark_put_fixture_helper(extended_gcs_factory, params, prefix_tag):
-    gcs = extended_gcs_factory()
+    gcs = extended_gcs_factory(
+        **rcu_rapid_write_kwargs(getattr(params, "bucket_type", None))
+    )
 
     prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
     file_paths = [f"{prefix}/file_{i}" for i in range(params.files)]
@@ -388,7 +507,9 @@ def _benchmark_listing_fixture_helper(
     create_folders=False,
     require_file_paths=False,
 ):
-    gcs = extended_gcs_factory()
+    gcs = extended_gcs_factory(
+        **rcu_rapid_write_kwargs(getattr(params, "bucket_type", None))
+    )
 
     prefix = f"{params.bucket_name}/{prefix_tag}-{uuid.uuid4()}"
 
@@ -463,8 +584,15 @@ def _benchmark_listing_fixture_helper(
             f"folders and with {files_per_folder} files per folder."
         )
 
+        bucket_type = getattr(params, "bucket_type", None)
+        file_size_bytes = getattr(params, "file_size_bytes", 0)
         start_time = time.perf_counter()
-        _prepare_files(gcs, file_paths, getattr(params, "file_size_bytes", 0))
+        _prepare_files(
+            gcs,
+            file_paths,
+            file_size_bytes,
+            bucket_type=bucket_type,
+        )
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         logging.info(

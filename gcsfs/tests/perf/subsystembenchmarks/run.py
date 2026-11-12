@@ -9,6 +9,10 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
     RAPID_CACHE_BUCKET_TYPES,
 )
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.rcu import (
+    RCU_BUCKET_TYPES,
+    rcu_state,
+)
 
 
 def discover_groups():
@@ -32,6 +36,12 @@ def _setup_environment(args):
         os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
+    if rcu_state(args.bucket_type) == "z":
+        # *_rcu_z stages and saves RAPID objects, which gcsfs writes to RCU buckets
+        # only with rcu_rapid_write. The suite's processes read it from the env.
+        os.environ["FSSPEC_GCS_RCU_RAPID_WRITE"] = "true"
+    else:
+        os.environ.pop("FSSPEC_GCS_RCU_RAPID_WRITE", None)
 
 
 def _build_parser():
@@ -68,7 +78,8 @@ def _build_parser():
     )
     parser.add_argument(
         "--zone",
-        help="placement zone; required when --bucket-type in (zonal, rapid_cache_cold, rapid_cache_warm)",
+        help="placement zone; required when --bucket-type is zonal, rapid_cache_* or "
+        "*_rcu_*",
     )
     parser.add_argument(
         "--model-id",
@@ -104,7 +115,8 @@ def _build_parser():
 def parse_args(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.bucket_type in ("zonal", *RAPID_CACHE_BUCKET_TYPES) and not args.zone:
+    zone_types = ("zonal", *RAPID_CACHE_BUCKET_TYPES, *RCU_BUCKET_TYPES)
+    if args.bucket_type in zone_types and not args.zone:
         parser.error(f"--zone is required when --bucket-type={args.bucket_type}")
     if args.amplification_wait < 0:
         parser.error("--amplification-wait must be >= 0")
