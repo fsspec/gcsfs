@@ -18,10 +18,10 @@ Unreleased
   by default (new ``concurrency`` argument, e.g.
   ``fs.rm(path, recursive=True, concurrency=10)``). Previously up to ~100
   batches of 100 objects could run at once. That is well above the initial
-  write rate of a new bucket, and the server throttled the deletes and other
-  writes to the same bucket. In-region, the new default deletes roughly 650
-  objects/s. Pass a higher ``concurrency`` for buckets that have already
-  scaled up.
+  write rate of a standard (non-HNS) bucket, about 1000 writes/s (see the
+  `request rate guidelines <https://cloud.google.com/storage/docs/request-rate>`_),
+  and the server throttled the deletes and other writes to the same bucket.
+  Pass a higher ``concurrency`` for buckets that have already scaled up.
 
 2026.10.0
 ---------
