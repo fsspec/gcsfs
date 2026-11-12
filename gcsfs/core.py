@@ -438,16 +438,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     protocol = "gs", "gcs"
     async_impl = True
     MIN_CHUNK_SIZE_FOR_CONCURRENCY = 5 * 1024 * 1024
-    # Maximum number of batch delete requests that ``rm`` keeps in flight.
-    # GCS works through the operations inside a batch largely one at a
-    # time, so the resulting delete rate is roughly proportional to this
-    # value (about 130 deletes/s per in-flight batch when client and bucket
-    # are in the same region) and mostly independent of ``batchsize``. A
-    # value of 5 keeps recursive deletes at roughly 650 deletes/s, below the
-    # ~1000 writes/s that a new bucket initially supports, so background
-    # deletes do not trigger server-side throttling of foreground traffic.
-    # Increase it on buckets that have already scaled to a higher rate.
-    rm_concurrency = 5
 
     def __init__(
         self,
@@ -1770,10 +1760,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             or _MTLS_HOST in self._location.lower()
         )
 
-    async def _delete_files(self, files, batchsize):
+    async def _delete_files(self, files, batchsize, concurrency=5):
         """Helper to delete files in batches.
 
-        At most ``self.rm_concurrency`` batch requests are in flight at once.
+        At most ``concurrency`` batch requests are in flight at once.
         """
         if self.on_google:
             # emulators do not support batch
@@ -1783,7 +1773,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     for i in range(0, len(files), batchsize)
                 ],
                 return_exceptions=True,
-                batch_size=self.rm_concurrency,
+                batch_size=concurrency,
             )
             out = []
             for r in chunk_results:
@@ -1797,14 +1787,26 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 [self._rm_file(f) for f in files], return_exceptions=True, batch_size=5
             )
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=100):
+    async def _rm(
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=5
+    ):
         # 100 is the maximum number of operations allowed in a single GCS batch
         # request (https://cloud.google.com/storage/docs/batch); using the full
         # limit minimizes the number of round-trips when deleting many objects.
+        #
+        # ``concurrency`` is the maximum number of batch requests in flight.
+        # GCS works through the operations inside a batch largely one at a
+        # time, so the delete rate is roughly proportional to ``concurrency``
+        # (about 130 deletes/s per in-flight batch when client and bucket are
+        # in the same region) and mostly independent of ``batchsize``. The
+        # default of 5 keeps recursive deletes at roughly 650 deletes/s, below
+        # the ~1000 writes/s a new bucket initially supports, so background
+        # deletes do not trigger server-side throttling of other traffic to
+        # the bucket. Increase it for buckets that have scaled to higher rates.
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
-        exs = await self._delete_files(files, batchsize)
+        exs = await self._delete_files(files, batchsize, concurrency=concurrency)
 
         # buckets
         exs.extend(
