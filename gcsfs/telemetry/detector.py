@@ -12,6 +12,7 @@ from typing import Dict, Optional
 
 import aiohttp
 import fsspec.asyn
+from google.auth.transport import DEFAULT_RETRYABLE_STATUS_CODES
 
 from gcsfs.telemetry.context import Dimension
 
@@ -39,6 +40,7 @@ _SERVERLESS_ENV_VAR_PAIRS = (
 )
 # Only errors time can fix; others hit _probe_coro's local fallback at once.
 _PROBE_RETRYABLE_ERRORS = (aiohttp.ClientConnectionError, asyncio.TimeoutError)
+_PROBE_RETRYABLE_STATUSES = frozenset(DEFAULT_RETRYABLE_STATUS_CODES)
 
 
 def _env_flag_enabled(name: str) -> bool:
@@ -346,23 +348,26 @@ class EnvironmentDetector(BaseDetector):
             await _backoff_sleep(delay)
         return await self._probe_metadata_server_once(url)
 
-    @staticmethod
-    async def _probe_metadata_server_once(url: str) -> Optional[str]:
+    async def _probe_metadata_server_once(self, url: str) -> Optional[str]:
         headers = {_METADATA_FLAVOR_HEADER: _METADATA_FLAVOR_VALUE}
         try:
             async with _new_probe_session() as session:
                 async with session.get(url, headers=headers) as response:
-                    from_google_server = (
+                    status = response.status
+                    if (
                         response.headers.get(_METADATA_FLAVOR_HEADER)
                         == _METADATA_FLAVOR_VALUE
-                    )
-                    if not from_google_server:
+                    ):
+                        if status == 200:
+                            cluster_name = await response.text()
+                            return ENV_GKE if cluster_name.strip() else ENV_GCE
+                        if status == 404:
+                            return ENV_GCE
+                    elif status == 403:
+                        # GKE sends unflavored 403 before pod credentials load.
                         return None
-                    if response.status == 200:
-                        cluster_name = await response.text()
-                        return ENV_GKE if cluster_name.strip() else ENV_GCE
-                    if response.status == 404:
-                        return ENV_GCE
-                    return None
+                    if status in _PROBE_RETRYABLE_STATUSES:
+                        return None
+                    return self._local_fallback_verdict()
         except _PROBE_RETRYABLE_ERRORS:
             return None
