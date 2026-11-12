@@ -39,9 +39,32 @@ The environment detector classifies the host into one of three values:
 - ``env/gke``: GKE pods.
 - ``env/oth``: Serverless runtimes (Cloud Run, Cloud Functions, App Engine) and hosts outside Google Cloud.
 
-Hosts outside Linux and Windows, serverless runtimes, and Linux or Windows hosts without a Google value in DMI (Linux) or the ``SystemProductName`` registry value (Windows) resolve locally without network calls. When DMI or the Windows registry contains a Google value or ``GCE_METADATA_HOST``, ``GCE_METADATA_ROOT``, or ``GCE_METADATA_IP`` is set, ``gcsfs`` queries the metadata server in the background at init. Storage calls never wait on the query, and requests before the query finishes omit the ``env/`` token.
+Detection runs once per process (and not at all when telemetry is disabled). On Google Cloud VMs, ``gcsfs`` makes a background request to the `metadata server <https://cloud.google.com/compute/docs/metadata/overview>`_ to tell GKE apart from Compute Engine; elsewhere it uses only local environment variables and the machine's hardware product name. Setting ``GCE_METADATA_HOST``, ``GCE_METADATA_ROOT``, or ``GCE_METADATA_IP`` points ``gcsfs`` at that metadata server outside Google Cloud VMs too (unless a serverless runtime matched first), and ``NO_GCE_CHECK=true`` skips the network request altogether. Storage operations never wait for this lookup, so requests sent before it finishes omit the ``env/`` token.
 
-Each process caches the result: ``fork`` children keep a resolved value, and ``spawn`` or ``forkserver`` workers each detect once. If the metadata query fails or ``NO_GCE_CHECK=true`` is set, ``gcsfs`` resolves ``gce``, ``gke``, or ``oth`` from DMI or registry and Kubernetes signals.
+How the environment is detected
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``gcsfs`` checks the host in order:
+
+- **Serverless runtimes** (Cloud Run, Cloud Functions, App Engine) are recognized from their
+  platform environment variables and resolve to ``oth`` without any network request, unless
+  the process runs inside Kubernetes.
+- **Hosts that are not Google Cloud VMs** resolve to ``oth`` without any network request,
+  unless ``GCE_METADATA_*`` is set. ``gcsfs`` reads the hardware product name from
+  ``/sys/class/dmi/id/product_name`` on Linux and ``SystemProductName`` under
+  ``HKLM\SYSTEM\HardwareConfig\Current`` on Windows, and treats ``Google`` or
+  ``Google Compute Engine`` as a Google Cloud VM; other operating systems resolve to ``oth``.
+- **Google Cloud VMs** (and hosts with ``GCE_METADATA_*`` set): when the filesystem is
+  created, ``gcsfs`` queries the metadata server in the background for the instance's
+  ``cluster-name`` attribute. If it is set, the host resolves to ``gke``, otherwise ``gce``
+  (the cluster name itself is never sent). If the metadata server is not ready yet, ``gcsfs``
+  retries a few times with backoff.
+
+Each process caches the result: ``fork`` children reuse a resolved value, and ``spawn`` or
+``forkserver`` workers each detect once. If ``NO_GCE_CHECK=true`` is set, or the metadata
+server cannot be reached or does not answer as a Google metadata server, ``gcsfs`` decides
+from local signals only (the hardware product name above and whether the process runs in a
+Kubernetes pod).
 
 .. note::
 
