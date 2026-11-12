@@ -1,9 +1,11 @@
 import dataclasses
+import logging
 import os
 
 from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
     OneFactorConfigurator,
 )
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.rcu import rcu_state
 
 _BUCKET = {
     "regional": "reg",
@@ -11,6 +13,12 @@ _BUCKET = {
     "hns": "hns",
     "rapid_cache_cold": "rccold",
     "rapid_cache_warm": "rcwarm",
+    "standard_rcu_z": "rcuz",
+    "standard_rcu_warm": "rcuwarm",
+    "standard_rcu_cold": "rcucold",
+    "hns_rcu_z": "hnsrcuz",
+    "hns_rcu_warm": "hnsrcuwarm",
+    "hns_rcu_cold": "hnsrcucold",
 }
 _STRATEGY = {
     # pytorch_lightning and ray_pytorch: fsdp_* is FSDP1 (FSDPStrategy),
@@ -134,6 +142,22 @@ class OneFactorCheckpointConfigurator(OneFactorConfigurator):
                 "GCSFS_SUBSYSTEM_MODEL_ID", common_config.get("model_id")
             ),
         )
+
+    def build_cases(self, scenario, common_config, include_disabled=False):
+        # Warm and cold only change how a load's checkpoint is staged, so saves run
+        # on *_rcu_z only, where run.py turns on RAPID writes.
+        bucket_type = os.environ.get("GCSFS_SUBSYSTEM_BUCKET_TYPE", "regional")
+        if "write" in scenario["scenario"] and rcu_state(bucket_type) in (
+            "warm",
+            "cold",
+        ):
+            logging.info(
+                "skipping %s scenarios on %s: saves run on *_rcu_z only",
+                scenario["scenario"],
+                bucket_type,
+            )
+            return []
+        return super().build_cases(scenario, common_config, include_disabled)
 
     def validate_case(self, p):
         if p.rounds < 1:
