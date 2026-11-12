@@ -101,7 +101,10 @@ def test_stage_rapid_copies_a_bucket_root_dataset(fake_gcs):
 def test_stage_rapid_copies_only_the_dataset_prefix(fake_gcs):
     fs = fake_gcs(
         {
+            # Folder placeholders (zero-byte, name ends in /) are not copied.
+            "src/data/": b"",
             "src/data/a.parquet": b"a",
+            "src/data/sub/": b"",
             "src/data/sub/b.parquet": b"bb",
             "src/data2/c.parquet": b"c",
         }
@@ -124,7 +127,8 @@ def test_warm_reads_at_most_one_mib_of_every_object(fake_gcs):
             "data/empty": b"",
             "ckpt/seed/run/model.ckpt": b"z" * (MiB + 1),
             "ckpt/other/unrelated": b"w" * 5,
-        }
+        },
+        layouts={"data": RCU, "ckpt": RCU},
     )
 
     prepare.main(["warm", "gs://data/", "gs://ckpt/seed/run/model.ckpt"])
@@ -135,6 +139,15 @@ def test_warm_reads_at_most_one_mib_of_every_object(fake_gcs):
         ("data/a.parquet", 0, 10),
         ("data/sub/b.parquet", 0, MiB),
     ]
+
+
+def test_warm_fails_before_reading_when_a_bucket_is_not_rcu(fake_gcs):
+    fs = fake_gcs({"data/a.parquet": b"x"}, layouts={"data": NOT_RCU})
+
+    with pytest.raises(SystemExit, match="data"):
+        prepare.main(["warm", "gs://data/"])
+
+    assert fs.reads == []
 
 
 def test_check_passes_when_every_bucket_is_rcu(fake_gcs):

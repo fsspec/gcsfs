@@ -144,7 +144,7 @@ Before creating the triggers, set up the following in your GCP project.
 | Substitution | Default | Description |
 | :----------- | :------ | :---------- |
 | `_WORKLOAD` | `hf-datasets-pytorch-lightning` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`: `hf-datasets-pytorch-lightning` or `ray-data-ray-train-pytorch`. The retained Cloud Build path is CPU-default for both. |
-| `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, `hns`, or a Rapid Cache Ultra type `{standard,hns}_rcu_{z,warm,cold}` (see below). Must match the dataset bucket. |
+| `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, `hns`, or a Rapid Cache Ultra type `{standard,hns}_rcu_{z,warm,cold}` (see below). `_DATASET_PATH` is copied into a fresh per-run bucket of this type, so its own type need not match. |
 | `_MACHINE_TYPE` | `c4-standard-192` | Node machine type for the workload pool. |
 | `_ENABLE_TIER1_NETWORKING` | `true` | Enable TIER_1 high-bandwidth egress (requires gVNIC / C-series). |
 | `_NODES` | `2` | Number of workload nodes. |
@@ -195,7 +195,7 @@ measured run reads:
 | `warm` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`, default) | A Job reads the first MiB of every dataset and seed object from `_ZONE`, then the step waits `_RCU_WARMUP_SETTLE_SECONDS` |
 | `cold` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`, default) | Restore runs copy the dataset in again and the seed to a new prefix, because the seed run read them from `_ZONE` |
 
-* The storage class of every staged object is checked by listing.
+* The storage class of every staged object is checked by listing, except the cold-restore re-copies, which gcloud writes as `STANDARD`.
 * Writes to RCU buckets default to HTTP (`STANDARD` objects). `*_rcu_z` sets
   `gcsfs.rcuRapidWrite=true` (`FSSPEC_GCS_RCU_RAPID_WRITE="true"`) on both the
   seed and workload releases so checkpoint saves write `RAPID` objects;

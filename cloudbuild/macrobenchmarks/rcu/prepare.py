@@ -27,7 +27,11 @@ THREADS = 32
 
 def _sizes(fs, path):
     """Size of every object at or under path, keyed by its bucket/key name."""
-    return {name: info["size"] for name, info in fs.find(path, detail=True).items()}
+    return {
+        name: info["size"]
+        for name, info in fs.find(path, detail=True).items()
+        if not name.endswith("/")
+    }
 
 
 def stage_rapid(fs, src, dst):
@@ -63,6 +67,7 @@ def check(fs, paths):
 
 
 def warm(fs, paths):
+    check(fs, paths)
     sizes = {}
     for path in paths:
         sizes.update(_sizes(fs, path))

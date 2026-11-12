@@ -850,3 +850,27 @@ def test_workload_releases_enable_rcu_rapid_write_only_for_rcu_z(
     expected_flag = f"--set gcsfs.rcuRapidWrite={str(rcu_rapid_write).lower()}"
     assert re.search(rf"(?:^|\s){re.escape(expected_flag)}(?:\s|$)", install)
     assert "forceHttp" not in install
+
+
+@pytest.mark.parametrize(
+    ("listing", "failures"),
+    [("model.ckpt\tRAPID", []), ("model.ckpt\tSTANDARD", ["run-workload"])],
+)
+def test_run_workload_checks_z_checkpoint_saves_are_rapid(env, listing, failures):
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/")
+
+    _, calls = _run_step(
+        "run-workload",
+        env,
+        _BUCKET_TYPE="standard_rcu_z",
+        _SEED_CHECKPOINT="false",
+        STUB_LIST=listing,
+    )
+
+    assert _failures(env) == failures
+    listings = _calls(calls, "gcloud storage objects list")
+    assert listings
+    assert all(
+        c.startswith("gcloud storage objects list gs://ckpt-bucket/checkpoints/** ")
+        for c in listings
+    )

@@ -2,7 +2,8 @@
 # run-workload: helm install the workload chart, then poll the JobSet until it
 # completes (recording start/end timestamps for the metric scrape) or fails /
 # times out.
-set -e
+# -E: also run the ERR trap for failures inside lib.sh functions.
+set -eE
 source "$(dirname "$0")/lib.sh"
 trap 'record_failure run-workload' ERR
 skip_if_failed
@@ -36,3 +37,7 @@ if ! wait_for_jobset "$RUN_ID" run-workload; then
   exit 1
 fi
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${WORKSPACE_DIR}/end_time.txt"
+# z rows measure RAPID saves; skip if no checkpoint was written (possible on short Ray runs).
+if [ "${RCU_STATE}" = "z" ] && gcloud storage objects list "gs://${CHECKPOINT_BUCKET}/checkpoints/**" --format="value(name)" 2>/dev/null | grep -q .; then
+  verify_storage_class "gs://${CHECKPOINT_BUCKET}/checkpoints/" RAPID
+fi
