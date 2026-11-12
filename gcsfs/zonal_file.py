@@ -375,6 +375,9 @@ class ZonalFile(GCSFile):
         """
         if self.closed:
             raise ValueError("Flush on closed file.")
+        if self.readable():
+            # no-op to flush on read-mode
+            return
         if self.forced:
             if force:
                 raise ValueError("Force flush cannot be called more than once.")
@@ -384,10 +387,6 @@ class ZonalFile(GCSFile):
             return
         if force:
             self.forced = True
-
-        if self.readable():
-            # no-op to flush on read-mode
-            return
 
         # Case 1: Intermediate flush (force=False)
         # If no data has been written (aaow is None), there is nothing to flush.
