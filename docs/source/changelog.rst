@@ -14,6 +14,15 @@ Unreleased
   needs the ``roles/iam.serviceAccountTokenCreator`` role on itself.
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
+* **Recursive** ``rm()`` **now keeps at most 5 batch delete requests in flight**
+  by default (new ``concurrency`` argument, e.g.
+  ``fs.rm(path, recursive=True, concurrency=10)``). This keeps deletes below
+  the initial write rate of a standard (non-HNS) bucket, about 1000 writes/s
+  (see the
+  `request rate guidelines <https://cloud.google.com/storage/docs/request-rate>`_),
+  so they are not throttled and do not slow down other writes to the same
+  bucket. Pass a higher ``concurrency`` for buckets that have already scaled
+  up.
 
 2026.10.0
 ---------

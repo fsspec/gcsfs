@@ -653,10 +653,69 @@ async def test_delete_files_with_exception(gcs):
         mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
     ):
         # Act
-        result = await gcs._delete_files(files, batchsize=2)
+        result = await gcs._delete_files(files, batchsize=2, concurrency=5)
 
         # Assert
         assert result == [True, True, exc]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency", [1, 5, 8])
+async def test_delete_files_bounds_concurrency(gcs, concurrency):
+    # Arrange
+    files = [f"{TEST_BUCKET}/file_{i}" for i in range(50)]
+    in_flight = 0
+    max_in_flight = 0
+
+    async def mock_rm_files(batch):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return list(batch)
+
+    with (
+        mock.patch.object(
+            type(gcs),
+            "on_google",
+            new_callable=mock.PropertyMock(return_value=True),
+        ),
+        mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
+    ):
+        # Act
+        result = await gcs._delete_files(files, batchsize=2, concurrency=concurrency)
+
+    # Assert
+    assert result == files
+    # 25 batches are available, so the cap is what limits in-flight requests.
+    assert max_in_flight == concurrency
+
+
+def test_rm_passes_concurrency_to_delete_files(gcs):
+    # Arrange
+    path = f"{TEST_BUCKET}/test_rm_concurrency_{uuid.uuid4().hex}"
+    files = [f"{path}/file_{i}" for i in range(3)]
+    # Call the flat-bucket implementation directly: on HNS/zonal test buckets
+    # ExtendedGcsFileSystem._rm would route to the HNS path instead. Run it on
+    # the filesystem's own loop, as the sync API does.
+    core_rm = gcsfs.core.GCSFileSystem._rm
+
+    with (
+        mock.patch.object(gcs, "_expand_path", new=mock.AsyncMock(return_value=files)),
+        mock.patch.object(
+            gcs, "_delete_files", new=mock.AsyncMock(return_value=files)
+        ) as mock_delete_files,
+    ):
+        # Act
+        sync(gcs.loop, core_rm, gcs, path, recursive=True)
+        sync(gcs.loop, core_rm, gcs, path, recursive=True, batchsize=10, concurrency=2)
+
+    # Assert
+    assert mock_delete_files.await_args_list == [
+        mock.call(files, 100, concurrency=5),
+        mock.call(files, 10, concurrency=2),
+    ]
 
 
 def test_rm_wildcards_in_directory(gcs):
