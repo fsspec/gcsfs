@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
+import pickle
 import sys
 import threading
 import types
@@ -14,8 +16,10 @@ import pytest
 
 import gcsfs.telemetry.manager as manager_mod
 from gcsfs.telemetry.context import (
+    USER_AGENT_DIMENSIONS,
     Dimension,
     get_telemetry_context,
+    has_telemetry_context,
     reset_telemetry_context,
     sanitize_token,
     set_telemetry_context,
@@ -23,9 +27,11 @@ from gcsfs.telemetry.context import (
 from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
 from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
+    _file_telemetry_context,
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
     mirror_gcs_methods,
+    with_telemetry_context,
     wrap_file_methods,
 )
 
@@ -450,28 +456,100 @@ def detector(monkeypatch):
     return counting
 
 
+class _CountingEnvDetector(BaseDetector):
+    """Environment detector that counts invocations and returns `value`."""
+
+    name = Dimension.ENVIRONMENT
+
+    def __init__(self, value="gke"):
+        self.value = value
+        self.calls = 0
+
+    def detect(self):
+        self.calls += 1
+        return self.value
+
+
+@contextlib.contextmanager
+def _scoped_ctx(tokens, value=None):
+    token = set_telemetry_context(tokens, value)
+    try:
+        yield
+    finally:
+        reset_telemetry_context(token)
+
+
+class _DummyFile(fsspec.spec.AbstractBufferedFile):
+    def _fetch_range(self, start, end):
+        return self.fs.cat_file(self.path, start=start, end=end)
+
+
+wrap_file_methods(_DummyFile)
+
+
 class _DummyFS(fsspec.asyn.AsyncFileSystem):
-    """Fake async filesystem whose leaf calls record (thread, User-Agent tokens)."""
+    """Fake async filesystem whose leaf calls record (thread, UA tokens, method)."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.seen = []
+        self.seen, self.seen_telemetry = [], []
+
+    def clear(self):
+        self.seen.clear()
+        self.seen_telemetry.clear()
 
     def _record(self):
-        tokens = tuple(manager_mod.default_usage_tracker.get_tokens())
-        self.seen.append((threading.get_ident(), tokens))
+        tracker = manager_mod.default_usage_tracker
+        self.seen.append(
+            (threading.get_ident(), tuple(tracker.get_tokens(USER_AGENT_DIMENSIONS)))
+        )
+        self.seen_telemetry.append(tracker.get_dimension(Dimension.METHOD))
 
-    async def _ls(self, path, detail=False, **kwargs):
+    async def _ls(self, path, detail=False, prefix="", **kwargs):
         self._record()
-        return [path]
+        return (
+            [{"name": f"{path}/a.txt", "size": 3, "type": "file"}] if detail else [path]
+        )
+
+    async def _info(self, path, **kwargs):
+        self._record()
+        return {"name": path, "size": 3, "type": "file"}
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         self._record()
         return b"abc"[start:end]
 
+    async def _rm_file(self, path, **kwargs):
+        self._record()
+
+    async def _cp_file(self, path1, path2, **kwargs):
+        self._record()
+
+    async def _list_objects(self, path, **kwargs):
+        self._record()
+        return [{"name": f"{path}/a.txt", "size": 3, "type": "file"}]
+
+    async def open_async(self, path, mode="rb", **kwargs):
+        self._record()
+        return b"async"
+
+    def created(self, path):
+        return self.info(path)["name"]
+
+    def modified(self, path):
+        return self.info(path)["name"]
+
+    def sign(self, path, expiration=100, **kwargs):
+        self._record()
+        return f"https://signed/{path}"
+
+    def _open(self, path, mode="rb", **kwargs):
+        self._record()
+        return _DummyFile(self, path, mode=mode, size=3, cache_type="none")
+
     async def _walk(self, path, maxdepth=None, **kwargs):
         for i in range(4):
-            await self._ls(f"{path}/dir_{i}")
+            await self._ls(f"{path}/dir_{i}", detail=True)
             yield (f"{path}/dir_{i}", [], [f"file_{i}.txt"])
 
 
@@ -545,7 +623,7 @@ def test_async_gen_wrapper_aclose_on_early_exit(detector):
     assert closed_with == []
     # Close the sync generator early (simulating break in for loop)
     gen_instance.close()
-    assert closed_with == [{"fw": "pandas"}]
+    assert closed_with == [{"fw": "pandas", "m": ""}]
 
 
 @pytest.mark.asyncio
@@ -556,41 +634,44 @@ async def test_async_gen_detects_framework_only_once(detector):
     # 1. Sync walk across 4 yielded directories -> detect() must run strictly ONCE
     assert len(list(fs.walk("bucket"))) == 4
     assert len(detector.calls) == 1
+    assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * 4
+    assert fs.seen_telemetry == ["walk"] * 4
 
     # 2. Native async _walk across 4 yielded directories -> detect() must run strictly ONCE
+    fs.clear()
     detector.calls.clear()
     assert len([item async for item in fs._walk("bucket")]) == 4
     assert len(detector.calls) == 1
 
-    # Every inner _ls call carried the framework, and nothing leaked afterwards
-    assert {tokens for _, tokens in fs.seen} == {("fw/pandas",)}
+    # Every inner _ls call carried the framework and top-level walk method, and nothing leaked afterwards
+    assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * 4
+    assert fs.seen_telemetry == ["walk"] * 4
     assert get_telemetry_context() == {}
 
 
 @pytest.mark.asyncio
 async def test_native_async_gen_scopes_context_per_step_and_closes(detector):
     """Verify native async gen wrapper scopes context to each step (no leak to consumer) and closes on early exit."""
-    closed = False
+    closed_with = []
     seen_inside = []
 
     async def sample_async_gen():
-        nonlocal closed
         try:
             for i in range(3):
-                seen_inside.append(get_telemetry_context().get("fw"))
+                seen_inside.append(get_telemetry_context())
                 yield i
         finally:
-            closed = True
+            closed_with.append(get_telemetry_context())
 
     agen = _gcs_async_wrapper(sample_async_gen)()
     assert await agen.__anext__() == 0
     # Context is active inside the generator step but never leaks to the consumer between yields
-    assert seen_inside == ["pandas"]
+    assert seen_inside == [{"fw": "pandas", "m": ""}]
     assert get_telemetry_context() == {}
 
-    # Early exit (like `break` in `async for`) closes the underlying generator
+    # Early exit (like `break` in `async for`) closes the underlying generator with context active
     await agen.aclose()
-    assert closed
+    assert closed_with == [{"fw": "pandas", "m": ""}]
 
 
 def test_file_inherited_methods_propagate_caller_framework_across_threads(detector):
@@ -616,15 +697,16 @@ def test_file_inherited_methods_propagate_caller_framework_across_threads(detect
 
     for file_cls in (LeafFile, ZonalLikeFile):
         fs = _DummyFS(skip_instance_cache=True)
-        f = file_cls(fs, "bucket/f.txt", mode="rb", size=3, cache_type="none")
-        # Differs from the detector's "pandas", so a re-detection would show up
-        f.caller_framework = "torch"
-        out = []
-        t = threading.Thread(target=lambda: out.append(f.read()))
-        t.start()
-        t.join()
+        with file_cls(fs, "bucket/f.txt", mode="rb", size=3, cache_type="none") as f:
+            # Differs from the detector's "pandas", so a re-detection would show up
+            f.caller_framework = "torch"
+            out = []
+            t = threading.Thread(target=lambda: out.append(f.read()))
+            t.start()
+            t.join()
         assert out == [b"abc"], file_cls.__name__
         assert [tokens for _, tokens in fs.seen] == [("fw/torch",)], file_cls.__name__
+        assert fs.seen_telemetry == ["open"], file_cls.__name__
     assert detector.calls == []
 
 
@@ -726,11 +808,401 @@ def test_sync_wrapper_propagates_context_to_background_loop_thread(detector):
 
     assert fs.ls("bucket") == ["bucket"]
     [(thread_id, tokens)] = fs.seen
-    # Ran on the background fsspecIO thread, with the caller thread's framework
+    # Ran on the background fsspecIO thread, with the caller thread's framework and method
     assert thread_id != caller_thread_id
     assert tokens == ("fw/pandas",)
+    assert fs.seen_telemetry == ["ls"]
     # Detection ran once, on the caller thread: the loop thread's stack has no framework frames
     assert detector.calls == [caller_thread_id]
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.parametrize(
+    "invoke, expected_method, expected_count",
+    [
+        pytest.param(
+            lambda fs: fs.cat(["bucket/f1.txt", "bucket/f2.txt", "bucket/f3.txt"]),
+            "cat",
+            3,
+            id="cat",
+        ),
+        pytest.param(
+            lambda fs: fs.move("bucket/a.txt", "bucket/b.txt"), "move", 4, id="move"
+        ),
+        pytest.param(
+            lambda fs: fs.mv("bucket/a.txt", "bucket/b.txt"), "mv", 4, id="mv"
+        ),
+        pytest.param(lambda fs: fs.created("bucket/a.txt"), "created", 1, id="created"),
+        pytest.param(
+            lambda fs: fs.modified("bucket/a.txt"), "modified", 1, id="modified"
+        ),
+        pytest.param(lambda fs: fs.sign("bucket/a.txt"), "sign", 1, id="sign"),
+        pytest.param(lambda fs: fs.head("bucket/a.txt", size=2), "head", 2, id="head"),
+        pytest.param(
+            lambda fs: fs.read_text("bucket/a.txt"), "read_text", 2, id="read_text"
+        ),
+        pytest.param(lambda fs: fs.listdir("bucket"), "ls", 1, id="listdir"),
+    ],
+)
+def test_method_detection_top_level_wins_and_public_entrypoints(
+    detector, invoke, expected_method, expected_count
+):
+    """Verify outermost public methods and aliases win cleanly over inner helpers."""
+    fs = _DummyFS(skip_instance_cache=True)
+
+    invoke(fs)
+
+    assert fs.seen_telemetry == [expected_method] * expected_count
+    assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * expected_count
+    assert len(detector.calls) == 1
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_native_async_entrypoints_and_unwrapped_private_helper(detector):
+    """Verify native async `_cat`, `open_async`, and unwrapped `_list_objects` behavior."""
+    fs = _DummyFS(skip_instance_cache=True)
+
+    await fs._cat(["bucket/f1.txt", "bucket/f2.txt", "bucket/f3.txt"])
+
+    assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * 3
+    assert fs.seen_telemetry == ["cat"] * 3
+    assert len(detector.calls) == 1
+
+    fs.clear()
+    await fs.open_async("bucket/a.txt")
+
+    assert fs.seen_telemetry == ["open_async"]
+
+    fs.clear()
+    await fs._list_objects("bucket")
+
+    assert fs.seen_telemetry == [None]
+
+    fs.clear()
+    with _scoped_ctx({Dimension.FRAMEWORK.value: "jax", Dimension.METHOD.value: "ls"}):
+        await fs._list_objects("bucket")
+
+    assert fs.seen_telemetry == ["ls"]
+    assert get_telemetry_context() == {}
+
+
+def test_fs_open_records_open_method_and_does_not_leak(detector):
+    """Verify `fs.open` attributes init and read calls to `open` without leaking context."""
+    fs = _DummyFS(skip_instance_cache=True)
+
+    with fs.open("bucket/a.txt", "rb") as f:
+        assert get_telemetry_context() == {}
+        assert f.read() == b"abc"
+
+    assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * 2
+    assert fs.seen_telemetry == ["open", "open"]
+
+
+def test_with_telemetry_context_tracks_open_and_preserves_outer_method(detector):
+    """Verify `@with_telemetry_context` tracks `_open`, skips `_helper`, and cleans up on error."""
+
+    class _DirectContextFS(_DummyFS):
+        @with_telemetry_context
+        def _open(self, path, mode="rb", **kwargs):
+            self._record()
+            if path == "bucket/fail":
+                raise RuntimeError("open failed")
+            return path
+
+        @with_telemetry_context
+        def _helper(self):
+            self._record()
+            return "ok"
+
+    direct_fs = _DirectContextFS(skip_instance_cache=True)
+
+    direct_fs._open("bucket/a.txt")
+    direct_fs._helper()
+    with _scoped_ctx(
+        {Dimension.FRAMEWORK.value: "jax", Dimension.METHOD.value: "find"}
+    ):
+        direct_fs._helper()
+
+    assert direct_fs.seen_telemetry == ["open", None, "find"]
+
+    with pytest.raises(RuntimeError, match="open failed"):
+        direct_fs._open("bucket/fail")
+
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_preset_framework_skips_detection_while_recording_method(detector):
+    """Verify partial preset framework reuses its token without stack walking while capturing method."""
+    fs = _DummyFS(skip_instance_cache=True)
+
+    with _scoped_ctx(Dimension.FRAMEWORK, "jax"):
+        await fs._cat(["bucket/f1.txt", "bucket/f2.txt"])
+        assert [tokens for _, tokens in fs.seen] == [("fw/jax",)] * 2
+        assert fs.seen_telemetry == ["cat", "cat"]
+
+        fs.clear()
+        assert fs.head("bucket/a.txt", size=2) == b"ab"
+        assert fs.seen_telemetry == ["head", "head"]
+
+        fs.clear()
+        assert fs.read_text("bucket/a.txt") == "abc"
+        assert fs.seen_telemetry == ["read_text", "read_text"]
+
+        fs.clear()
+        assert len(list(fs.walk("bucket"))) == 4
+        assert fs.seen_telemetry == ["walk"] * 4
+
+        assert detector.calls == []
+        assert get_telemetry_context() == {Dimension.FRAMEWORK.value: "jax"}
+
+    assert get_telemetry_context() == {}
+
+
+def test_has_telemetry_context_and_wrapper_exception_cleanup(detector):
+    """Verify `has_telemetry_context` states and ContextVar cleanup on wrapper/init exceptions."""
+    from gcsfs.core import GCSFile, GCSFileSystem
+
+    assert not has_telemetry_context()
+    assert not has_telemetry_context(Dimension.METHOD)
+
+    with _scoped_ctx(Dimension.FRAMEWORK, "pandas"):
+        assert has_telemetry_context()
+        assert has_telemetry_context(Dimension.FRAMEWORK)
+        assert not has_telemetry_context(Dimension.METHOD)
+
+    with _scoped_ctx(Dimension.METHOD, ""):
+        assert has_telemetry_context()
+        assert has_telemetry_context(Dimension.METHOD)
+
+    class _FailingFS(_DummyFS):
+        async def _cat_file(self, path, start=None, end=None, **kwargs):
+            raise RuntimeError("cat failed")
+
+    failing_fs = _FailingFS(skip_instance_cache=True)
+    with pytest.raises(RuntimeError, match="cat failed"):
+        failing_fs.cat_file("bucket/f.txt")
+    assert get_telemetry_context() == {}
+
+    real_fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    with pytest.raises(NotImplementedError):
+        GCSFile(real_fs, "bucket/f.txt", mode="invalid")
+    assert get_telemetry_context() == {}
+
+
+def test_user_agent_excludes_method_and_respects_opt_out(monkeypatch):
+    """Verify User-Agent filters to fw/ and env/, get_tokens() defaults to all, and opt-out holds."""
+    from gcsfs.core import _build_user_agent
+
+    tracker = UsageMetricsTracker()
+    with _scoped_ctx(
+        {
+            Dimension.FRAMEWORK.value: "pandas",
+            Dimension.ENVIRONMENT.value: "gke",
+            Dimension.METHOD.value: "find",
+        }
+    ):
+        assert has_telemetry_context(Dimension.METHOD)
+        assert tracker.get_tokens(USER_AGENT_DIMENSIONS) == ["fw/pandas", "env/gke"]
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke", "m/find"]
+        assert tracker.collect_tokens_map(USER_AGENT_DIMENSIONS) == {
+            "fw": "pandas",
+            "env": "gke",
+        }
+        assert tracker.get_dimension(Dimension.METHOD) == "find"
+        ua = _build_user_agent()
+        assert "fw/pandas" in ua
+        assert "env/gke" in ua
+        assert "m/find" not in ua
+
+        for env_var, env_val in (
+            ("DO_NOT_TRACK", "1"),
+            ("DO_NOT_TRACK", " TRUE "),
+            ("GCSFS_NO_TELEMETRY", "yes"),
+        ):
+            with monkeypatch.context() as mp:
+                mp.setenv(env_var, env_val)
+                assert tracker.get_tokens(USER_AGENT_DIMENSIONS) == []
+                assert tracker.get_tokens() == []
+                assert tracker.get_dimension(Dimension.METHOD) is None
+                assert tracker.collect_tokens_map() == {}
+
+
+def test_custom_detector_and_dimension_filtering(detector, monkeypatch):
+    """Verify custom detectors respect dimension filtering and file handles cache missing detectors."""
+
+    class _CustomAppDetector(BaseDetector):
+        name = "app"
+
+        def detect(self):
+            return "myapp"
+
+    custom_tracker = UsageMetricsTracker(detectors=[_CustomAppDetector()])
+    with _scoped_ctx({Dimension.FRAMEWORK: "jax", "region": "us"}):
+        assert custom_tracker.get_tokens(USER_AGENT_DIMENSIONS) == ["fw/jax"]
+        assert custom_tracker.get_tokens() == [
+            "fw/jax",
+            "region/us",
+            "app/myapp",
+        ]
+        assert custom_tracker.collect_tokens_map() == {
+            "fw": "jax",
+            "region": "us",
+            "app": "myapp",
+        }
+
+    # Dimension-filtered queries skip unrelated detectors.
+    env_det = _CountingEnvDetector(None)
+    multi_tracker = UsageMetricsTracker(detectors=[detector, env_det])
+    with monkeypatch.context() as mp:
+        mp.setattr(manager_mod, "default_usage_tracker", multi_tracker)
+        detector.calls.clear()
+        assert multi_tracker.get_dimension(Dimension.FRAMEWORK) == "pandas"
+        assert len(detector.calls) == 1
+        assert env_det.calls == 0
+
+        class _ChunkFile:
+            def __init__(self):
+                self.caller_framework = "pandas"
+                self.caller_method = "open"
+
+            def read_chunks(self):
+                return [
+                    multi_tracker.get_tokens(USER_AGENT_DIMENSIONS) for _ in range(5)
+                ]
+
+        wrap_file_methods(_ChunkFile)
+        detector.calls.clear()
+        assert _ChunkFile().read_chunks() == [["fw/pandas"]] * 5
+        assert detector.calls == []
+        assert env_det.calls == 1
+
+
+def test_opted_out_fs_and_file_reopen_suppress_telemetry(
+    detector, spied_gcs_harness, monkeypatch
+):
+    """Verify opted-out FS calls, open handles, and pickled reopens suppress active contexts."""
+    gke_env = _CountingEnvDetector()
+    fs = _DummyFS(skip_instance_cache=True)
+    core_fs = spied_gcs_harness.fs
+    detector.calls.clear()
+
+    with contextlib.ExitStack() as stack:
+        with monkeypatch.context() as mp:
+            mp.setenv("DO_NOT_TRACK", "TRUE")
+            assert fs.ls("bucket") == ["bucket"]
+            assert [tokens for _, tokens in fs.seen] == [()]
+            assert fs.seen_telemetry == [None]
+            assert detector.calls == []
+
+            spied_gcs_harness.clear()
+            opted_out_file = stack.enter_context(
+                core_fs.open(
+                    "test-bucket/file.txt", "rb", block_size=2, cache_type="blockcache"
+                )
+            )
+            assert opted_out_file._telemetry_disabled is True
+            assert opted_out_file.caller_framework == ""
+            assert opted_out_file.caller_method == ""
+            assert len(opted_out_file.read(2)) == 2
+            opted_out_payload = pickle.dumps(opted_out_file)
+            assert spied_gcs_harness.seen
+            assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
+            assert detector.calls == []
+
+        monkeypatch.setattr(
+            manager_mod,
+            "default_usage_tracker",
+            UsageMetricsTracker(detectors=[detector, gke_env]),
+        )
+        spied_gcs_harness.clear()
+        detector.calls.clear()
+        assert get_telemetry_context() == {}
+        assert len(opted_out_file.read(2)) == 2
+        assert spied_gcs_harness.seen == [((), None)]
+        assert detector.calls == []
+        assert gke_env.calls == 0
+
+        spied_gcs_harness.clear()
+        detector.calls.clear()
+        with _scoped_ctx(
+            {
+                Dimension.FRAMEWORK.value: "ray",
+                Dimension.METHOD.value: "find",
+                "region": "us",
+            }
+        ):
+            assert len(opted_out_file.read(2)) == 2
+            with _file_telemetry_context(opted_out_file):
+                assert manager_mod.default_usage_tracker.get_tokens() == []
+        assert spied_gcs_harness.seen == [((), None)]
+
+    spied_gcs_harness.clear()
+    with _scoped_ctx(
+        {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "find"}
+    ):
+        with pickle.loads(opted_out_payload) as reopened_opted_out:
+            assert reopened_opted_out._telemetry_disabled is True
+            assert len(reopened_opted_out.read(2)) == 2
+    assert spied_gcs_harness.seen
+    assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
+    assert detector.calls == []
+    assert gke_env.calls == 0
+    assert get_telemetry_context() == {}
+
+
+@pytest.mark.parametrize(
+    "outer_ctx",
+    [None, {Dimension.FRAMEWORK.value: "jax", Dimension.METHOD.value: "find"}],
+    ids=["no_outer_ctx", "with_outer_ctx"],
+)
+@pytest.mark.asyncio
+async def test_opted_out_generators_and_nested_calls_suppress_telemetry(
+    detector, monkeypatch, outer_ctx
+):
+    """Verify opted-out sync/async generators and nested calls negative-cache all detectors."""
+    gke_env = _CountingEnvDetector()
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[detector, gke_env]),
+    )
+    fs = _DummyFS(skip_instance_cache=True)
+
+    # Start sync and async walk generators while opted out (first step snapshots disabled
+    # tokens), then remove DO_NOT_TRACK before consuming the remaining yields and closing early.
+    scope_cm = (
+        _scoped_ctx(outer_ctx) if outer_ctx is not None else contextlib.nullcontext()
+    )
+    with scope_cm:
+        with monkeypatch.context() as mp:
+            mp.setenv("DO_NOT_TRACK", "1")
+            sync_gen = fs.walk("bucket")
+            sync_early = fs.walk("bucket")
+            async_gen = fs._walk("bucket")
+            async_early = fs._walk("bucket")
+
+            assert next(sync_gen)[0] == "bucket/dir_0"
+            assert next(sync_early)[0] == "bucket/dir_0"
+            assert (await async_gen.__anext__())[0] == "bucket/dir_0"
+            assert (await async_early.__anext__())[0] == "bucket/dir_0"
+            assert fs.cat("bucket/a.txt") == b"abc"
+            assert await fs._cat("bucket/b.txt") == b"abc"
+
+        assert len(list(sync_gen)) == 3
+        sync_early.close()
+        assert len([item async for item in async_gen]) == 3
+        await async_early.aclose()
+
+        expected_ctx = dict(outer_ctx) if outer_ctx is not None else {}
+        assert get_telemetry_context() == expected_ctx
+
+    assert fs.seen
+    assert all(tokens == () for _, tokens in fs.seen)
+    assert fs.seen_telemetry == [None] * len(fs.seen)
+    assert detector.calls == []
+    assert gke_env.calls == 0
     assert get_telemetry_context() == {}
 
 
@@ -786,61 +1258,78 @@ class _CallerThreadOnlyDetector(BaseDetector):
 
 
 _COMMON_FS_OPS = [
-    ("ls", lambda fs, tmp_path, monkeypatch: fs.ls("test-bucket")),
-    ("info", lambda fs, tmp_path, monkeypatch: fs.info("test-bucket/file.txt")),
-    ("exists", lambda fs, tmp_path, monkeypatch: fs.exists("test-bucket/file.txt")),
-    ("cat", lambda fs, tmp_path, monkeypatch: fs.cat("test-bucket/file.txt")),
+    ("ls", lambda fs, tmp_path, monkeypatch: fs.ls("test-bucket"), "ls"),
+    ("info", lambda fs, tmp_path, monkeypatch: fs.info("test-bucket/file.txt"), "info"),
+    (
+        "exists",
+        lambda fs, tmp_path, monkeypatch: fs.exists("test-bucket/file.txt"),
+        "exists",
+    ),
+    ("cat", lambda fs, tmp_path, monkeypatch: fs.cat("test-bucket/file.txt"), "cat"),
     (
         "cat_file",
         lambda fs, tmp_path, monkeypatch: fs.cat_file("test-bucket/file.txt"),
+        "cat_file",
     ),
     (
         "head",
         lambda fs, tmp_path, monkeypatch: fs.head("test-bucket/file.txt", size=5),
+        "head",
     ),
     (
         "tail",
         lambda fs, tmp_path, monkeypatch: fs.tail("test-bucket/file.txt", size=5),
+        "tail",
     ),
-    ("find", lambda fs, tmp_path, monkeypatch: fs.find("test-bucket")),
-    ("walk", lambda fs, tmp_path, monkeypatch: list(fs.walk("test-bucket"))),
-    ("glob", lambda fs, tmp_path, monkeypatch: fs.glob("test-bucket/*")),
-    ("du", lambda fs, tmp_path, monkeypatch: fs.du("test-bucket")),
-    ("size", lambda fs, tmp_path, monkeypatch: fs.size("test-bucket/file.txt")),
+    ("find", lambda fs, tmp_path, monkeypatch: fs.find("test-bucket"), "find"),
+    (
+        "walk",
+        lambda fs, tmp_path, monkeypatch: list(fs.walk("test-bucket")),
+        "walk",
+    ),
+    ("glob", lambda fs, tmp_path, monkeypatch: fs.glob("test-bucket/*"), "glob"),
+    ("du", lambda fs, tmp_path, monkeypatch: fs.du("test-bucket"), "du"),
+    ("size", lambda fs, tmp_path, monkeypatch: fs.size("test-bucket/file.txt"), "size"),
     (
         "read_bytes",
         lambda fs, tmp_path, monkeypatch: fs.read_bytes("test-bucket/file.txt"),
+        "cat_file",
     ),
     (
         "read_text",
         lambda fs, tmp_path, monkeypatch: fs.read_text("test-bucket/file.txt"),
+        "read_text",
     ),
     (
         "write_bytes",
         lambda fs, tmp_path, monkeypatch: fs.write_bytes(
             "test-bucket/file.txt", b"data"
         ),
+        "pipe_file",
     ),
     (
         "write_text",
         lambda fs, tmp_path, monkeypatch: fs.write_text("test-bucket/file.txt", "data"),
+        "write_text",
     ),
     (
         "pipe_file",
         lambda fs, tmp_path, monkeypatch: fs.pipe_file("test-bucket/file.txt", b"x"),
+        "pipe_file",
     ),
-    ("rm", lambda fs, tmp_path, monkeypatch: fs.rm("test-bucket/file.txt")),
-    ("rmdir", lambda fs, tmp_path, monkeypatch: fs.rmdir("test-bucket")),
+    ("rm", lambda fs, tmp_path, monkeypatch: fs.rm("test-bucket/file.txt"), "rm"),
+    ("rmdir", lambda fs, tmp_path, monkeypatch: fs.rmdir("test-bucket"), "rmdir"),
     (
         "merge",
         lambda fs, tmp_path, monkeypatch: fs.merge(
             "test-bucket/merged.txt", ["test-bucket/a.txt", "test-bucket/b.txt"]
         ),
+        "merge",
     ),
-    ("buckets", lambda fs, tmp_path, monkeypatch: fs.buckets),
-    ("open_read", _read_file_helper),
-    ("open_write", _write_file_helper),
-    ("get_file_concurrent", _get_file_concurrent_helper),
+    ("buckets", lambda fs, tmp_path, monkeypatch: fs.buckets, None),
+    ("open_read", _read_file_helper, "open"),
+    ("open_write", _write_file_helper, "open"),
+    ("get_file_concurrent", _get_file_concurrent_helper, "get_file"),
 ]
 
 
@@ -848,22 +1337,20 @@ _COMMON_FS_OPS = [
     "mock_gcs_harness", ["core", "extended"], indirect=True, ids=["core", "extended"]
 )
 @pytest.mark.parametrize(
-    "name,op", _COMMON_FS_OPS, ids=[name for name, _ in _COMMON_FS_OPS]
+    "name,op,expected_method",
+    _COMMON_FS_OPS,
+    ids=[name for name, _, _ in _COMMON_FS_OPS],
 )
 def test_all_parent_methods_telemetry_coverage(
-    mock_gcs_harness, tmp_path, monkeypatch, name, op
+    spied_gcs_harness, tmp_path, monkeypatch, name, op, expected_method
 ):
     """
     Verify that inherited and overridden FileSystem and File methods (on both
     GCSFileSystem and ExtendedGcsFileSystem) detect the caller framework on the
-    caller thread and propagate it to every outgoing User-Agent header.
-
-    No telemetry context is pre-set: the detector only reports a framework on the
-    caller thread, so a method missing its telemetry wrapper would send requests
-    without the token (detection would only happen on the fsspecIO loop thread).
+    caller thread and propagate framework and method telemetry to every outgoing call.
     """
-    fs = mock_gcs_harness.fs
-    captured = mock_gcs_harness.user_agents
+    fs = spied_gcs_harness.fs
+    captured = spied_gcs_harness.user_agents
     fs.dircache.clear()
 
     fw_name = f"test-{name}"
@@ -873,7 +1360,7 @@ def test_all_parent_methods_telemetry_coverage(
         "default_usage_tracker",
         UsageMetricsTracker(detectors=[detector]),
     )
-    captured.clear()
+    spied_gcs_harness.clear()
 
     op(fs, tmp_path, monkeypatch)
 
@@ -881,6 +1368,10 @@ def test_all_parent_methods_telemetry_coverage(
     assert all(
         f"fw/{fw_name}" in ua for ua in captured
     ), f"operation {name} had requests missing fw/{fw_name}: {captured}"
+    assert len(spied_gcs_harness.seen) > 0
+    assert all(
+        m == expected_method for _, m in spied_gcs_harness.seen
+    ), f"operation {name} recorded unexpected methods: {spied_gcs_harness.seen}"
     # Regression guard: stack-walking must never run on the fsspec loop thread,
     # where it can't find user frames and would add per-request overhead.
     loop_thread_name = fsspec.asyn.iothread[0].name
@@ -946,32 +1437,29 @@ def test_filesystem_methods_are_telemetry_wrapped(fs_cls_path):
     ), f"{cls_name} methods missing telemetry wrappers: {sorted(unwrapped)}"
 
 
-def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
-    """
-    Across a Rapid (zonal) file's whole life (open -> read -> seek -> read -> info ->
-    close), the caller framework is detected exactly once, on the caller thread, and
-    every operation runs with it.
-
-    Opening for read issues a JSON API `_info` request from `ZonalFile.__init__` (MRD
-    pool setup) before `GCSFile.__init__` caches `caller_framework`, so `_open` must scope
-    telemetry; afterwards the wrapped file methods reuse the cached value.
-    """
+@pytest.fixture
+def zonal_fs_harness(monkeypatch):
+    """Patch Zonal/Extended GCS hooks and record telemetry across HTTP and gRPC ops."""
     from gcsfs import zb_hns_utils
     from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
     from gcsfs.tests import layouts
 
-    fw = "test-zonal-lifecycle"
     data = b"0123456789"
-    detector = _CallerThreadOnlyDetector(fw)
-    monkeypatch.setattr(
-        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
-    )
-    user_agents = []
-    # (operation, framework in the active telemetry context) for gRPC-side operations
-    grpc_ops = []
+    user_agents, grpc_ops, captured = [], [], []
+
+    def _rec(op_name):
+        tracker = manager_mod.default_usage_tracker
+        captured.append(
+            (
+                op_name,
+                tuple(tracker.get_tokens(USER_AGENT_DIMENSIONS)),
+                tracker.get_dimension(Dimension.METHOD),
+            )
+        )
 
     async def fake_call(self, method, path, *args, **kwargs):
+        _rec("http_info")
         user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
         return {
             "kind": "storage#object",
@@ -982,58 +1470,137 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
             "timeFinalized": "2026-01-01T00:00:00.000Z",
         }
 
-    async def fake_lookup_bucket_layout(self, bucket):
+    async def fake_layout(self, bucket):
+        _rec("layout")
         return layouts.ZONAL_HIERARCHICAL
 
-    async def fake_mrd_pool_initialize(self):
-        return None
+    async def fake_mrd_init(self):
+        _rec("mrd_init")
 
-    async def fake_mrd_pool_close(self):
-        grpc_ops.append(("mrd_pool.close", get_telemetry_context().get("fw")))
+    async def fake_mrd_close(self):
+        _rec("mrd_close")
+        grpc_ops.append(("mrd_pool.close", get_telemetry_context().copy()))
 
     async def fake_cat_file(self, path, start=None, end=None, **kwargs):
-        # Zonal reads go through the gRPC MRD path; record the context they run with
-        grpc_ops.append(("_cat_file", get_telemetry_context().get("fw")))
+        _rec("cat_file")
+        grpc_ops.append(("_cat_file", get_telemetry_context().copy()))
         return data[start:end]
 
     monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
-    monkeypatch.setattr(
-        ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
-    )
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_layout)
     monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_init)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_close)
     monkeypatch.setattr(
         zb_hns_utils.MRDPool, "persisted_size", len(data), raising=False
     )
 
     fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-    f = fs.open("zonal-bucket/obj", "rb", cache_type="none")
-    try:
-        # Open: MRD pool `_info` request is tagged; GCSFile.__init__ reused the detection
-        assert f.caller_framework == fw
-        assert user_agents, "zonal open did not issue any JSON API requests"
-        assert detector.thread_names == [threading.current_thread().name]
+    return types.SimpleNamespace(
+        fs=fs,
+        data=data,
+        user_agents=user_agents,
+        grpc_ops=grpc_ops,
+        captured=captured,
+        clear=lambda: (user_agents.clear(), grpc_ops.clear(), captured.clear()),
+    )
 
+
+def test_zonal_file_lifecycle_detects_framework_once(monkeypatch, zonal_fs_harness):
+    """Verify Rapid (zonal) file lifecycle detects framework once and honors opt-out across reopen."""
+    fw = "test-zonal-lifecycle"
+    detector = _CallerThreadOnlyDetector(fw)
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
+    )
+    fs, data = zonal_fs_harness.fs, zonal_fs_harness.data
+
+    with fs.open("zonal-bucket/obj", "rb", cache_type="none") as f:
+        assert f.caller_framework == fw
+        assert f.caller_method == "open"
+        assert zonal_fs_harness.user_agents
+        assert detector.thread_names == [threading.current_thread().name]
         assert f.read(4) == data[:4]
         f.seek(0)
         assert f.read(2) == data[:2]
         assert f.info()["size"] == len(data)
-    finally:
-        f.close()
 
-    # Detected exactly once (at open, on the caller thread) for the file's whole life
-    assert detector.thread_names == [
-        threading.current_thread().name
-    ], f"framework detection ran more than once: {detector.thread_names}"
+    assert detector.thread_names == [threading.current_thread().name]
+    assert all(f"fw/{fw}" in ua for ua in zonal_fs_harness.user_agents)
+    assert [op for op, _ in zonal_fs_harness.grpc_ops].count("_cat_file") == 2
+    assert ("mrd_pool.close", fw) in [
+        (op, ctx.get("fw")) for op, ctx in zonal_fs_harness.grpc_ops
+    ]
     assert all(
-        f"fw/{fw}" in ua for ua in user_agents
-    ), f"zonal file sent HTTP requests without the framework token: {user_agents}"
-    assert [op for op, _ in grpc_ops].count("_cat_file") == 2
-    assert ("mrd_pool.close", fw) in grpc_ops
+        ctx.get("fw") == fw and ctx.get("m") == "open"
+        for _, ctx in zonal_fs_harness.grpc_ops
+    )
+    assert zonal_fs_harness.captured
+    assert all(m == "open" for _, _, m in zonal_fs_harness.captured)
+
+
+def test_zonal_file_pickle_reopen_preserves_and_opts_out_telemetry(
+    monkeypatch, zonal_fs_harness
+):
+    """Verify ZonalFile pickle reopen preserves enabled framework/method and enforces opt-out."""
+    fs, data = zonal_fs_harness.fs, zonal_fs_harness.data
+
+    class _GkeEnvDetector(BaseDetector):
+        name = Dimension.ENVIRONMENT
+
+        def __init__(self):
+            self.calls = 0
+
+        def detect(self):
+            self.calls += 1
+            return "gke"
+
+    detector = _CallerThreadOnlyDetector("pandas")
+    gke_env = _GkeEnvDetector()
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[detector, gke_env]),
+    )
+
+    with _scoped_ctx(Dimension.FRAMEWORK, "torch"):
+        with fs.open("zonal-bucket/obj", "rb", cache_type="none") as f:
+            enabled_payload = pickle.dumps(f)
+
+    detector.thread_names.clear()
+    gke_env.calls = 0
+    zonal_fs_harness.clear()
+    with _scoped_ctx({Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "cat"}):
+        with pickle.loads(enabled_payload) as reopened:
+            assert reopened.caller_framework == "torch"
+            assert reopened.caller_method == "open"
+            assert "_reopen_telemetry" not in reopened.kwargs
+            assert reopened.read(4) == data[:4]
+    assert detector.thread_names == []
+    assert zonal_fs_harness.captured
     assert all(
-        ctx_fw == fw for _, ctx_fw in grpc_ops
-    ), f"zonal operations ran without the framework context: {grpc_ops}"
+        ua == ("fw/torch", "env/gke") and m == "open"
+        for _, ua, m in zonal_fs_harness.captured
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("DO_NOT_TRACK", "1")
+        with fs.open("zonal-bucket/obj", "rb", cache_type="none") as opted_zonal:
+            opted_out_payload = pickle.dumps(opted_zonal)
+
+    detector.thread_names.clear()
+    gke_env.calls = 0
+    zonal_fs_harness.clear()
+    with _scoped_ctx(
+        {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "find"}
+    ):
+        with pickle.loads(opted_out_payload) as reopened_opted_out:
+            assert reopened_opted_out._telemetry_disabled is True
+            assert reopened_opted_out.read(4) == data[:4]
+    assert zonal_fs_harness.captured
+    assert all((ua, m) == ((), None) for _, ua, m in zonal_fs_harness.captured)
+    assert detector.thread_names == []
+    assert gke_env.calls == 0
     assert get_telemetry_context() == {}
 
 
@@ -1075,6 +1642,7 @@ async def test_zonal_file_async_fetch_range_propagates_caller_framework():
 
     assert await f._async_fetch_range(0, 10) == b"data"
     assert captured_context.get(Dimension.FRAMEWORK.value) == "jax"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
     assert get_telemetry_context() == {}
 
 
@@ -1105,6 +1673,7 @@ def test_zonal_file_write_propagates_caller_framework():
     finally:
         f.closed = True
     assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
     assert get_telemetry_context() == {}
 
 
@@ -1161,7 +1730,9 @@ async def test_async_fetch_range_propagates_caller_framework():
 
     f.caller_framework = "pandas"
     await f._async_fetch_range(0, 10)
+    f.closed = True
     assert captured_context.get(Dimension.FRAMEWORK.value) == "pandas"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
 
 
 def test_defer_close_propagates_caller_framework():
@@ -1193,22 +1764,63 @@ def test_defer_close_propagates_caller_framework():
 
     assert done.wait(timeout=5.0)
     assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+    assert captured_context.get(Dimension.METHOD.value) == "open"
+
+
+@pytest.fixture
+def spied_gcs_harness(mock_gcs_harness, monkeypatch):
+    """Wrap mock_gcs_harness to capture active UA tokens and method per call."""
+    from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+
+    orig_call = CoreGCSFileSystem._call
+    seen = []
+
+    async def spy_call(self, method, path, *args, **kwargs):
+        tracker = manager_mod.default_usage_tracker
+        seen.append(
+            (
+                tuple(tracker.get_tokens(USER_AGENT_DIMENSIONS)),
+                tracker.get_dimension(Dimension.METHOD),
+            )
+        )
+        res = await orig_call(self, method, path, *args, **kwargs)
+        if isinstance(res, dict) and "size" in res:
+            res.setdefault("metadata", {"k": "v"})
+        elif method == "GET" and "download" in str(path) and isinstance(res, tuple):
+            rng = (kwargs.get("headers") or {}).get("Range", "")
+            if rng.startswith("bytes="):
+                s_str, e_str = rng.removeprefix("bytes=").split("-")
+                return res[0], res[1][int(s_str) : int(e_str) + 1]
+        return res
+
+    monkeypatch.setattr(CoreGCSFileSystem, "_call", spy_call)
+
+    def _clear():
+        mock_gcs_harness.clear()
+        seen.clear()
+
+    return types.SimpleNamespace(
+        fs=mock_gcs_harness.fs,
+        user_agents=mock_gcs_harness.user_agents,
+        seen=seen,
+        clear=_clear,
+    )
 
 
 @pytest.mark.asyncio
-async def test_gcsfs_native_async_telemetry_propagation(mock_gcs_harness):
+async def test_gcsfs_native_async_telemetry_propagation(spied_gcs_harness):
     """Verify native async GCSFileSystem methods propagate telemetry context."""
-    fs = mock_gcs_harness.fs
-    mock_gcs_harness.clear()
+    fs = spied_gcs_harness.fs
+    spied_gcs_harness.clear()
 
-    token = set_telemetry_context(Dimension.FRAMEWORK, "jax")
-    try:
+    with _scoped_ctx(Dimension.FRAMEWORK, "jax"):
         res = await fs._cat(["test-bucket/f1.txt", "test-bucket/f2.txt"])
         assert len(res) == 2
-        assert len(mock_gcs_harness.user_agents) >= 2
-        assert all("fw/jax" in ua for ua in mock_gcs_harness.user_agents)
-    finally:
-        reset_telemetry_context(token)
+        assert len(spied_gcs_harness.user_agents) >= 2
+        assert all("fw/jax" in ua for ua in spied_gcs_harness.user_agents)
+        assert len(spied_gcs_harness.seen) >= 2
+        assert all(m == "cat" for _, m in spied_gcs_harness.seen)
+        assert get_telemetry_context() == {Dimension.FRAMEWORK.value: "jax"}
 
 
 @pytest.mark.asyncio
@@ -1231,3 +1843,112 @@ async def test_gcsfs_async_wrapper_super_resolution():
         out = await sub_fs._cat_ranges(["test-bucket/f1.txt"], [0], [5])
         assert out == [b"patched"]
         mock_super.assert_awaited_once()
+
+
+def test_spied_gcsfs_listdir_alias_records_ls(detector, spied_gcs_harness):
+    """Verify `GCSFileSystem.listdir` alias attributes its call to `ls`."""
+    fs = spied_gcs_harness.fs
+    spied_gcs_harness.clear()
+
+    assert len(fs.listdir("test-bucket")) == 1
+    assert spied_gcs_harness.seen == [(("fw/pandas",), "ls")]
+
+
+@pytest.mark.parametrize(
+    "invoke, check",
+    [
+        pytest.param(
+            lambda fs: fs.getxattr("test-bucket/file.txt", "k"),
+            lambda res: res == "v",
+            id="getxattr",
+        ),
+        pytest.param(
+            lambda fs: fs.checksum("test-bucket/file.txt"),
+            lambda res: isinstance(res, int),
+            id="checksum",
+        ),
+        pytest.param(
+            lambda fs: fs.ukey("test-bucket/file.txt"),
+            lambda res: len(res) == 64,
+            id="ukey",
+        ),
+        pytest.param(
+            lambda fs: fs.read_block("test-bucket/file.txt", 0, 2),
+            lambda res: res == b"MO",
+            id="read_block",
+        ),
+    ],
+)
+def test_composite_helpers_negative_cache_method(
+    detector, spied_gcs_harness, invoke, check
+):
+    """Verify untracked composite helpers negative-cache Dimension.METHOD individually."""
+    fs = spied_gcs_harness.fs
+    spied_gcs_harness.clear()
+    fs.invalidate_cache()
+
+    assert check(invoke(fs))
+
+    assert len(spied_gcs_harness.seen) >= 1
+    assert all(m is None for _, m in spied_gcs_harness.seen)
+
+
+def test_primed_walk_generator_retains_outer_context(detector):
+    """Verify a primed walk generator retains its outer context when resumed outside scope."""
+    dummy_fs = _DummyFS(skip_instance_cache=True)
+    with _scoped_ctx(
+        {Dimension.FRAMEWORK.value: "jax", Dimension.METHOD.value: "find"}
+    ):
+        primed_gen = dummy_fs.walk("test-bucket")
+        first_step = next(primed_gen)
+
+    detector.calls.clear()
+    dummy_fs.clear()
+    assert first_step == ("test-bucket/dir_0", [], ["file_0.txt"])
+    assert len(list(primed_gen)) == 3
+    assert [tokens for _, tokens in dummy_fs.seen] == [("fw/jax",)] * 3
+    assert dummy_fs.seen_telemetry == ["find"] * 3
+    assert detector.calls == []
+
+
+def test_gcsfile_pickle_reopen_preserves_telemetry(detector, spied_gcs_harness):
+    """Verify pickling and reopening GCSFile preserves telemetry with 0 stack walks."""
+    from gcsfs.core import GCSFile
+
+    fs = spied_gcs_harness.fs
+    with _scoped_ctx(Dimension.FRAMEWORK, "torch"):
+        with fs.open("test-bucket/file.txt", "rb", size=4, cache_type="none") as f:
+            assert len(f.read(1)) == 1
+            payload = pickle.dumps(f)
+
+    detector.calls.clear()
+    with _scoped_ctx({Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "cat"}):
+        with pickle.loads(payload) as reopened:
+            assert reopened.caller_framework == "torch"
+            assert reopened.caller_method == "open"
+            assert "_reopen_telemetry" not in reopened.kwargs
+            assert detector.calls == []
+
+            with GCSFile(
+                fs,
+                "test-bucket/file.txt",
+                "rb",
+                size=4,
+                cache_type="none",
+                _reopen_telemetry=("torch", "open", "cache_options"),
+            ) as compat_file:
+                assert compat_file.caller_framework == "torch"
+                assert compat_file.caller_method == "open"
+            with fs.open(
+                "test-bucket/file.txt",
+                "rb",
+                size=4,
+                cache_type="none",
+                _reopen_telemetry="bad",
+            ) as malformed_file:
+                assert malformed_file.caller_framework == "ray"
+                assert malformed_file.caller_method == "cat"
+
+            spied_gcs_harness.clear()
+            assert reopened.read() == b"OCK"
+            assert spied_gcs_harness.seen == [(("fw/torch",), "open")]
