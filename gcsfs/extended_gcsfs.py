@@ -2542,9 +2542,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 # cache even if the write fails.
                 try:
                     try:
-                        with memoryview(data) as data_view:
-                            for i in range(0, len(data_view), chunksize):
-                                await writer.append(data_view[i : i + chunksize])
+                        # data is bytes or a flat byte view, so slices count
+                        # bytes. A bytes slice copies only what io.BytesIO
+                        # would copy from a view slice, and a slice covering
+                        # all of bytes is the object itself, which io.BytesIO
+                        # shares.
+                        for i in range(0, len(data), chunksize):
+                            await writer.append(data[i : i + chunksize])
                     except BaseException:
                         # Leave a partially written object unfinalized.
                         await zb_hns_utils.close_aaow(writer, finalize_on_close=False)

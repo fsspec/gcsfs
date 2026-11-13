@@ -530,6 +530,29 @@ def test_zonal_file_write_passes_bytes_through(
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_pipe_file_passes_bytes_through(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """bytes that fit in one chunk reach the writer unwrapped, as in
+    ZonalFile.write; larger bytes are appended in chunksize slices."""
+    if not zonal_write_mocks:
+        pytest.skip("Inspects the arguments of the mocked writer.")
+    data = b"x" * 100
+    extended_gcsfs.pipe_file(file_path, data, chunksize=100, finalize_on_close=True)
+
+    (appended,) = [c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list]
+    assert appended is data
+
+    zonal_write_mocks["aaow"].append.reset_mock()
+    data = bytes(range(100))
+    extended_gcsfs.pipe_file(file_path, data, chunksize=40, finalize_on_close=True)
+
+    appended = [c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list]
+    assert appended == [data[:40], data[40:80], data[80:]]
+    assert all(type(chunk) is bytes for chunk in appended)
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_pipe_file_chunks_typed_buffer_by_bytes(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
