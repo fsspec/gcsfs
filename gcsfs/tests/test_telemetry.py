@@ -16,6 +16,7 @@ import aiohttp
 import fsspec.asyn
 import fsspec.spec
 import pytest
+from google.auth.transport import DEFAULT_RETRYABLE_STATUS_CODES
 
 import gcsfs.telemetry.detector as environment_module
 import gcsfs.telemetry.manager as manager_mod
@@ -1555,14 +1556,22 @@ async def test_google_flavored_empty_200_resolves_gce_without_retry(fake_host, b
     "status, flavor",
     [
         pytest.param(403, False, id="flavorless-403"),
-        pytest.param(404, False, id="flavorless-404"),
+        pytest.param(408, True, id="flavored-408"),
         pytest.param(429, True, id="flavored-429"),
-        pytest.param(499, False, id="flavorless-499"),
         pytest.param(500, False, id="flavorless-500"),
         pytest.param(503, True, id="flavored-503"),
+        pytest.param(
+            504,
+            False,
+            id="flavorless-504",
+            marks=pytest.mark.skipif(
+                504 not in DEFAULT_RETRYABLE_STATUS_CODES,
+                reason="google-auth < 2.40.3 omits 504",
+            ),
+        ),
     ],
 )
-async def test_untrusted_metadata_responses_retry_until_cluster_name(
+async def test_transient_metadata_responses_retry_until_cluster_name(
     fake_host, status, flavor
 ):
     fake_host.product_name = "Google Compute Engine"
@@ -1583,6 +1592,62 @@ async def test_untrusted_metadata_responses_retry_until_cluster_name(
     assert detected_during_retries == [None, None]
     assert fake_host.sleep_delays == [0.5, 1.0]
     assert resolved == "gke"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kubernetes", [False, True], ids=["gce-vm", "gcp-k8s"])
+@pytest.mark.parametrize(
+    "status, flavor",
+    [
+        pytest.param(200, False, id="flavorless-200"),
+        pytest.param(404, False, id="flavorless-404"),
+        pytest.param(403, True, id="flavored-403"),
+        pytest.param(400, True, id="flavored-400"),
+        pytest.param(401, False, id="flavorless-401"),
+        pytest.param(405, True, id="flavored-405"),
+        pytest.param(410, True, id="flavored-410"),
+        pytest.param(499, False, id="flavorless-499"),
+        pytest.param(501, True, id="flavored-501"),
+        pytest.param(502, False, id="flavorless-502"),
+    ],
+)
+async def test_definitive_metadata_responses_fall_back_without_retry(
+    fake_host, monkeypatch, kubernetes, status, flavor
+):
+    if kubernetes:
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(status, flavor=flavor, body="prod-cluster"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == ("gke" if kubernetes else "gce")
+    assert len(fake_host.requests) == 1
+    assert fake_host.sleep_delays == []
+
+
+@pytest.mark.asyncio
+async def test_definitive_response_after_transient_error_stops_retrying(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        asyncio.TimeoutError(),
+        _mds_response(400, flavor=False),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+
+    assert detector.detect() == "gce"
+    assert len(fake_host.requests) == 2
+    assert fake_host.sleep_delays == [0.5]
 
 
 @pytest.mark.asyncio
@@ -1683,16 +1748,16 @@ def test_detect_inside_repeated_asyncio_run_probes_once_on_fsspec_loop(
     release = threading.Event()
     real_probe_once = EnvironmentDetector._probe_metadata_server_once
 
-    async def gated_probe_once(url: str):
+    async def gated_probe_once(self, url: str):
         started.set()
         while not release.is_set():
             await asyncio.sleep(0.005)
-        return await real_probe_once(url)
+        return await real_probe_once(self, url)
 
     monkeypatch.setattr(
         EnvironmentDetector,
         "_probe_metadata_server_once",
-        staticmethod(gated_probe_once),
+        gated_probe_once,
     )
     fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
     detector = EnvironmentDetector()
@@ -2078,15 +2143,15 @@ def test_mid_operation_probe_resolution_updates_subsequent_requests(
     release_probe = threading.Event()
     real_probe_once = EnvironmentDetector._probe_metadata_server_once
 
-    async def gated_probe_once(url: str):
+    async def gated_probe_once(self, url: str):
         while not release_probe.is_set():
             await asyncio.sleep(0.005)
-        return await real_probe_once(url)
+        return await real_probe_once(self, url)
 
     monkeypatch.setattr(
         EnvironmentDetector,
         "_probe_metadata_server_once",
-        staticmethod(gated_probe_once),
+        gated_probe_once,
     )
 
     fw_detector = _CallerThreadOnlyDetector("pandas")
