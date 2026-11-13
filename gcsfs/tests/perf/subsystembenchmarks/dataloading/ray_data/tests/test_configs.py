@@ -112,6 +112,7 @@ def test_feature_and_cache_variants():
     assert set(cases) == {
         f"{stem}-proj286r1-reg",
         f"{stem}-proj286r16-reg",
+        f"{stem}-proj286r286-reg",
         f"{stem}-reg",
         f"{stem}-proj286r1-ctreadahead-bs5m-reg",
         f"{stem}-proj286r1-ctreadahead-bs8m-reg",
@@ -122,6 +123,9 @@ def test_feature_and_cache_variants():
     assert projected.extra_columns()["read_projected_feature_column_count"] == 286
     assert projected.extra_columns()["read_projection_run_length_columns"] == 1
     assert projected.cache_type is None and projected.block_size is None
+    contiguous = cases[f"{stem}-proj286r286-reg"]
+    assert len(contiguous.read_columns()) == 2 + 286
+    assert contiguous.extra_columns()["read_projection_run_length_columns"] == 286
     every = cases[f"{stem}-reg"]
     assert len(every.read_columns()) == 2 + 1134
     assert every.extra_columns()["read_projection_run_length_columns"] is None
