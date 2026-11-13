@@ -159,11 +159,6 @@ def feature_column_widths(count, value_bytes):
     """Bytes per value of each feature column: log-normal sizes with mean value_bytes."""
     import numpy as np
 
-    if count < 1 or value_bytes < 1:
-        raise ValueError(
-            f"feature columns need feature_column_count >= 1 and feature_value_bytes "
-            f">= 1, got {count} and {value_bytes}"
-        )
     rng = np.random.default_rng(_FEATURE_SEED)
     sizes = rng.lognormal(0.0, _FEATURE_SIZE_SIGMA, count)
     sizes *= value_bytes / sizes.mean()
@@ -173,29 +168,20 @@ def feature_column_widths(count, value_bytes):
 def feature_projection(count, projected, run_length=1):
     """Sorted indices of the feature columns a read selects.
 
-    Columns are picked in blocks of ``run_length`` adjacent columns at random positions:
-    1 scatters them through the schema, larger values cluster them. Blocks can merge,
-    and the last one is cut to reach ``projected``. Arrow merges
+    Columns are picked in non-overlapping blocks of ``run_length`` adjacent columns at
+    random block positions: 1 scatters them, larger values cluster them. Neighbouring
+    blocks can touch, and the last one is cut to reach ``projected``. Arrow merges
     adjacent column chunks into one read, so this sets how many small reads a file
     needs. ``projected`` of 0 (or >= count) selects every feature column.
     """
     import numpy as np
 
-    if projected < 0 or run_length < 1:
-        raise ValueError(
-            f"need projected_feature_count >= 0 and projection_run_length >= 1, got "
-            f"{projected} and {run_length}"
-        )
     if projected == 0 or projected >= count:
         return list(range(count))
-    run_length = min(run_length, count)
     rng = np.random.default_rng(_FEATURE_SEED)
-    chosen = {}  # insertion-ordered set
-    while len(chosen) < projected:
-        start = int(rng.integers(0, count - run_length + 1))
-        chosen.update(dict.fromkeys(range(start, start + run_length)))
-    # Trim the overshoot from the last run, not from the end of the schema.
-    return sorted(list(chosen)[:projected])
+    blocks = rng.choice(count // run_length, -(-projected // run_length), replace=False)
+    columns = [int(b) * run_length + i for b in blocks for i in range(run_length)]
+    return sorted(columns[:projected])
 
 
 _WRITERS = {

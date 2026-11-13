@@ -218,8 +218,6 @@ def test_feature_column_widths_vary_around_the_mean():
     assert min(widths) >= 1
     assert abs(sum(widths) / 1000 - 12) < 0.5
     assert len(set(widths)) > 10
-    with pytest.raises(ValueError, match="feature_column_count"):
-        datagen.feature_column_widths(0, 12)
 
 
 def test_feature_projection_run_length_clusters_columns():

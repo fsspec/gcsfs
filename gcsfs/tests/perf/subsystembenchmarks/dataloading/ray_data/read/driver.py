@@ -27,12 +27,12 @@ class _GCSFileSystemWithCacheType(gcsfs.GCSFileSystem):
     Ray pickles the filesystem to its workers.
     """
 
-    def __init__(self, *args, cache_type, **kwargs):
+    def __init__(self, *args, cache_type=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.read_cache_type = cache_type
 
     def _open(self, path, mode="rb", **kwargs):
-        if "r" in mode:
+        if "r" in mode and self.read_cache_type is not None:
             kwargs.setdefault("cache_type", self.read_cache_type)
         return super()._open(path, mode, **kwargs)
 
@@ -74,13 +74,8 @@ def resolve_parquet_source(prefix, cache_type=None, block_size=None):
             raise ValueError(
                 f"cache_type/block_size need gcsfs, got {type(fs).__name__}"
             )
-        kwargs = dict(fs.storage_options)
-        if block_size is not None:
-            kwargs["block_size"] = block_size
-        if cache_type is not None:
-            fs = _GCSFileSystemWithCacheType(cache_type=cache_type, **kwargs)
-        else:
-            fs = gcsfs.GCSFileSystem(**kwargs)
+        options = dict(fs.storage_options, cache_type=cache_type, block_size=block_size)
+        fs = _GCSFileSystemWithCacheType(**options)
     arrow_fs = pyarrow.fs.PyFileSystem(pyarrow.fs.FSSpecHandler(fs))
     if str(prefix).startswith("gs://"):
         assert_gcsfs_backed(arrow_fs)

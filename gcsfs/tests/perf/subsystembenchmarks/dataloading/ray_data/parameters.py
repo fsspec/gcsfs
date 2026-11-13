@@ -51,6 +51,14 @@ class RayDataReadParameters(ReadParameters):
     def has_features(self):
         return self.fmt == "pretok_parquet" and self.feature_column_count > 0
 
+    @property
+    def projects_subset(self):
+        """True when the read selects some, but not all, of the feature columns."""
+        return (
+            self.has_features
+            and 0 < self.projected_feature_count < self.feature_column_count
+        )
+
     def read_columns(self):
         """Columns the read selects."""
         if self.fmt == "text_parquet":
@@ -102,7 +110,7 @@ class RayDataReadParameters(ReadParameters):
                 tokens.append("nofshuf")
             if self.shuffle_buffer_size > 0:
                 tokens.append(f"buf{self.shuffle_buffer_size}")
-        if self.has_features and self.projected_feature_count:
+        if self.projects_subset:
             tokens.append(
                 f"proj{self.projected_feature_count}r{self.projection_run_length}"
             )
@@ -128,9 +136,7 @@ class RayDataReadParameters(ReadParameters):
                 else None
             ),
             "read_projection_run_length_columns": (
-                self.projection_run_length
-                if features and self.projected_feature_count
-                else None
+                self.projection_run_length if self.projects_subset else None
             ),
             "gcsfs_read_cache_type": self.cache_type,
             "gcsfs_read_block_size_bytes": self.block_size,

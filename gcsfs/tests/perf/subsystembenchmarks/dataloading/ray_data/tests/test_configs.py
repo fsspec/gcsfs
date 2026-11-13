@@ -149,6 +149,20 @@ def test_baseline_has_no_features_or_gcsfs_settings():
             "fmt: text_parquet, feature_column_count: 10",
             "only generated for pretok_parquet",
         ),
+        (
+            "feature_column_count: 10, projected_feature_count: 10",
+            "use 0 to read every feature column",
+        ),
+        (
+            "feature_column_count: 10, projection_run_length: 4",
+            "projection_run_length needs",
+        ),
+        ("projection_run_length: 4", "projection_run_length needs"),
+        (
+            "feature_column_count: 10, projected_feature_count: 3, "
+            "projection_run_length: 4",
+            "between 1 and projected_feature_count",
+        ),
     ],
 )
 def test_feature_validation(tmp_path, variant, match):
