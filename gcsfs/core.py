@@ -430,11 +430,16 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     version_aware: bool
         Whether to support object versioning. If enabled this will require the
         user to have the necessary permissions for dealing with versioned objects.
+    cache_type: str, optional
+        Default read caching policy used by ``open()`` when ``cache_type`` is
+        not passed per call (e.g., ``"adaptive"``, ``"readahead"``, ``"none"``).
+        Can be overridden in ``open()``.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
     retries = 6  # number of retries on http failure
     default_block_size = DEFAULT_BLOCK_SIZE
+    default_cache_type = None
     protocol = "gs", "gcs"
     async_impl = True
     MIN_CHUNK_SIZE_FOR_CONCURRENCY = 5 * 1024 * 1024
@@ -458,6 +463,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
+        cache_type=None,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -474,6 +480,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
+        if cache_type is not None:
+            self.default_cache_type = cache_type
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
@@ -2378,6 +2386,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         autocommit=True,
         fixed_key_metadata=None,
         generation=None,
+        cache_type=None,
         **kwargs,
     ):
         """
@@ -2385,15 +2394,20 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
         consistency: None or str
             If None, use default for this instance
+        cache_type: None or str
+            If None, use default for this instance
         """
         if block_size is None:
             block_size = self.default_block_size
+        if cache_type is None:
+            cache_type = self.default_cache_type
         const = consistency or self.consistency
         return GCSFile(
             self,
             path,
             mode,
             block_size,
+            cache_type=cache_type,
             cache_options=cache_options,
             consistency=const,
             metadata=metadata,

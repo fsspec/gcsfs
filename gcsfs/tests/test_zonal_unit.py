@@ -100,6 +100,27 @@ def test_open_uses_correct_blocksize_and_consistency_for_all_bucket_types(
             assert isinstance(f.checker, SizeChecker)
 
 
+@pytest.mark.parametrize("bucket_layout", layouts.ALL_BUCKET_LAYOUTS)
+def test_open_uses_default_cache_type_for_all_bucket_types(
+    extended_gcs_factory, gcs_bucket_mocks, bucket_layout
+):
+    csv_file = "2014-01-01.csv"
+    csv_file_path = f"{TEST_ZONAL_BUCKET}/{csv_file}"
+    csv_data = csv_files[csv_file]
+
+    extended_gcsfs = extended_gcs_factory(cache_type="readahead")
+    assert extended_gcsfs.default_cache_type == "readahead"
+
+    with gcs_bucket_mocks(csv_data, bucket_type_val=bucket_layout):
+        with extended_gcsfs.open(csv_file_path, "rb") as f:
+            assert f.cache_type == "readahead"
+            assert f.cache_source == "explicit"
+
+        with extended_gcsfs.open(csv_file_path, "rb", cache_type="none") as f:
+            assert f.cache_type == "none"
+            assert f.cache_source == "explicit"
+
+
 @pytest.mark.parametrize(
     "bucket_layout",
     [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],

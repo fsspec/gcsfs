@@ -522,6 +522,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         autocommit=True,
         fixed_key_metadata=None,
         generation=None,
+        cache_type=None,
         **kwargs,
     ):
         """
@@ -539,12 +540,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             kwargs["finalize_on_close"] = self._resolve_finalize_on_close(
                 bucket_layout, finalize_on_close
             )
+        if cache_type is None:
+            cache_type = self.default_cache_type
 
         return file_cls(
             self,
             path,
             mode,
             block_size=block_size or self.default_block_size,
+            cache_type=cache_type,
             cache_options=cache_options,
             consistency=consistency or self.consistency,
             metadata=metadata,

@@ -3557,6 +3557,59 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.read() == b"HelloWorld"
 
 
+def test_filesystem_default_cache_type(gcs):
+    """Verify cache_type set on GCSFileSystem applies as default on open() and survives pickling."""
+    import pickle
+
+    from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+
+    fn = f"{TEST_BUCKET}/fs_default_cache.txt"
+    gcs.pipe(fn, b"HelloWorld")
+    assert gcs.default_cache_type is None
+
+    base_opts = {
+        k: v for k, v in gcs.storage_options.items() if k != "skip_instance_cache"
+    }
+
+    for fs_cls in {type(gcs), CoreGCSFileSystem}:
+        fs_ra = fs_cls(**base_opts, cache_type="readahead")
+        fs_none = fs_cls(**base_opts, cache_type="none")
+        assert fs_ra is not fs_none
+        assert fs_ra.default_cache_type == "readahead"
+        assert fs_none.default_cache_type == "none"
+
+        # Default open() inherits filesystem cache_type as explicit
+        with fs_ra.open(fn, "rb") as f:
+            assert f.cache_type == "readahead"
+            assert f.cache_source == "explicit"
+            assert f.read() == b"HelloWorld"
+
+        # Per-call open(cache_type=...) overrides filesystem default
+        with fs_ra.open(fn, "rb", cache_type="none") as f:
+            assert f.cache_type == "none"
+            assert f.cache_source == "explicit"
+            assert f.read() == b"HelloWorld"
+
+        # Write mode still works when default_cache_type is set
+        fn_w = f"{TEST_BUCKET}/fs_default_cache_write_{fs_cls.__name__}.txt"
+        with fs_ra.open(fn_w, "wb") as f:
+            f.write(b"Written")
+        assert fs_ra.cat_file(fn_w) == b"Written"
+
+        # Pickling preserves default_cache_type on the filesystem
+        fs_unpickled = pickle.loads(pickle.dumps(fs_ra))
+        assert fs_unpickled.default_cache_type == "readahead"
+        with fs_unpickled.open(fn, "rb") as f:
+            assert f.cache_type == "readahead"
+            assert f.cache_source == "explicit"
+
+    # fsspec.open forwards storage_options to GCSFileSystem and opens with default_cache_type
+    with fsspec.open(f"gs://{fn}", "rb", **base_opts, cache_type="readahead") as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "explicit"
+        assert f.read() == b"HelloWorld"
+
+
 def test_cat_file_default_concurrency(gcs, skip_if_grpc_read):
     # Arrange
     fn = f"{TEST_BUCKET}/test_cat_default_concurrency.txt"
