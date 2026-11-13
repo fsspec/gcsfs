@@ -6,7 +6,11 @@ import os
 from typing import Dict, List, Optional
 
 from gcsfs.telemetry.context import Dimension, get_telemetry_context, sanitize_token
-from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
+from gcsfs.telemetry.detector import (
+    BaseDetector,
+    EnvironmentDetector,
+    FrameworkDetector,
+)
 
 
 class UsageMetricsTracker:
@@ -24,9 +28,27 @@ class UsageMetricsTracker:
             for env in ("DO_NOT_TRACK", "GCSFS_NO_TELEMETRY")
         )
 
-    def collect_tokens_map(self) -> Dict[str, str]:
+    def warm_up(self) -> None:
+        """Start non-call-scoped detectors (e.g. background environment probe)."""
+        if not self.is_enabled():
+            return
+        for detector in self.detectors:
+            if getattr(detector, "call_scoped", True):
+                continue
+            try:
+                detector.detect()
+            except Exception:
+                pass
+
+    def collect_tokens_map(self, *, call_scoped_only: bool = False) -> Dict[str, str]:
         """
-        Collect active telemetry tokens across all registered detectors.
+        Collect active telemetry tokens across registered detectors.
+
+        Parameters
+        ----------
+        call_scoped_only : bool, default False
+            When True, evaluate only detectors with ``call_scoped = True`` so
+            background process dimensions are not frozen in per-call context.
 
         Returns
         -------
@@ -40,6 +62,8 @@ class UsageMetricsTracker:
 
         # Run registered detectors for any dimensions not already set
         for detector in self.detectors:
+            if call_scoped_only and not getattr(detector, "call_scoped", True):
+                continue
             dim_key = (
                 detector.name.value
                 if isinstance(detector.name, Dimension)
@@ -74,13 +98,33 @@ class UsageMetricsTracker:
         """
         Resolve a specific dimension's sanitized bare token value (e.g. Dimension.FRAMEWORK -> 'pandas').
         """
-        token_map = self.collect_tokens_map()
-        return sanitize_token(token_map.get(dimension.value))
+        if not self.is_enabled():
+            return None
+
+        target_key = dimension.value
+        tokens = get_telemetry_context()
+        if target_key in tokens:
+            return sanitize_token(tokens[target_key])
+
+        for detector in self.detectors:
+            dim_key = (
+                detector.name.value
+                if isinstance(detector.name, Dimension)
+                else str(detector.name)
+            )
+            if dim_key == target_key:
+                try:
+                    return sanitize_token(detector.detect())
+                except Exception:
+                    return None
+
+        return None
 
 
-# Default singleton instance pre-configured with standard framework detector
+# Default singleton instance pre-configured with standard detectors
 default_usage_tracker = UsageMetricsTracker(
     detectors=[
         FrameworkDetector(),
+        EnvironmentDetector(),
     ]
 )

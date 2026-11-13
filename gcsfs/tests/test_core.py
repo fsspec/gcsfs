@@ -2217,6 +2217,7 @@ def test_attrs(gcs):
     assert gcs.getxattr(a, "something") == "not"
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project(gcs_factory):
     gcs = gcs_factory(requester_pays=True, project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
@@ -2234,6 +2235,7 @@ def test_request_user_project(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project_string(gcs_factory):
     gcs = gcs_factory(requester_pays=TEST_PROJECT)
     assert gcs.requester_pays == TEST_PROJECT
@@ -2252,6 +2254,7 @@ def test_request_user_project_string(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_header(gcs_factory):
     gcs = gcs_factory(requester_pays=True)
     # test directly against `_call` to inspect the result
@@ -2296,6 +2299,7 @@ def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_fa
         fs.ls(requester_pays_bucket)
 
 
+@pytest.mark.usefixtures("gcs")
 def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""

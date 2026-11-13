@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import inspect
+import io
 import os
 import sys
 import threading
+import time
 import types
 
+import aiohttp
 import fsspec.asyn
 import fsspec.spec
 import pytest
+from google.auth.transport import DEFAULT_RETRYABLE_STATUS_CODES
 
+import gcsfs.telemetry.detector as environment_module
 import gcsfs.telemetry.manager as manager_mod
 from gcsfs.telemetry.context import (
     Dimension,
@@ -20,7 +27,11 @@ from gcsfs.telemetry.context import (
     sanitize_token,
     set_telemetry_context,
 )
-from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
+from gcsfs.telemetry.detector import (
+    BaseDetector,
+    EnvironmentDetector,
+    FrameworkDetector,
+)
 from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
@@ -28,6 +39,9 @@ from gcsfs.telemetry.wrapper import (
     mirror_gcs_methods,
     wrap_file_methods,
 )
+
+# Captured at import time, before the conftest autouse fixture stubs detect().
+_REAL_ENVIRONMENT_DETECT = EnvironmentDetector.detect
 
 # ============================================================================
 # 1. Sanitizer Tests
@@ -388,6 +402,26 @@ def test_collect_tokens_map_caches_detector_exception():
         reset_telemetry_context(t)
     assert tokens2 == {Dimension.FRAMEWORK.value: ""}
     assert call_count == 1
+
+
+def test_warm_up_and_get_dimension_handle_failing_and_missing_detectors():
+    calls = 0
+
+    class FailingBackgroundDetector(BaseDetector):
+        name = Dimension.ENVIRONMENT
+        call_scoped = False
+
+        def detect(self):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("probe init failed")
+
+    tracker = UsageMetricsTracker(detectors=[FailingBackgroundDetector()])
+    tracker.warm_up()
+    assert calls == 1
+    assert tracker.get_dimension(Dimension.ENVIRONMENT) is None
+    assert calls == 2
+    assert tracker.get_dimension(Dimension.FRAMEWORK) is None
 
 
 def test_collect_tokens_map_records_empty_for_none_detection():
@@ -1231,3 +1265,1025 @@ async def test_gcsfs_async_wrapper_super_resolution():
         out = await sub_fs._cat_ranges(["test-bucket/f1.txt"], [0], [5])
         assert out == [b"patched"]
         mock_super.assert_awaited_once()
+
+
+# ============================================================================
+# 7. Environment Detector Tests
+# ============================================================================
+
+_PRODUCT_NAME_PATH = "/sys/class/dmi/id/product_name"
+_DEFAULT_CLUSTER_NAME_URL = (
+    "http://169.254.169.254/computeMetadata/v1/instance/attributes/cluster-name"
+)
+_ENVIRONMENT_ENV_VARS = (
+    "DO_NOT_TRACK",
+    "GCSFS_NO_TELEMETRY",
+    "NO_GCE_CHECK",
+    "GCE_METADATA_HOST",
+    "GCE_METADATA_ROOT",
+    "GCE_METADATA_IP",
+    "KUBERNETES_SERVICE_HOST",
+    "K_SERVICE",
+    "K_CONFIGURATION",
+    "K_REVISION",
+    "CLOUD_RUN_JOB",
+    "CLOUD_RUN_EXECUTION",
+    "CLOUD_RUN_WORKER_POOL",
+    "CLOUD_RUN_REVISION",
+    "FUNCTION_TARGET",
+    "FUNCTION_NAME",
+    "GAE_SERVICE",
+    "GAE_VERSION",
+    "GAE_INSTANCE",
+    "GAE_ENV",
+)
+
+
+class _FakeMetadataResponse:
+    def __init__(self, status: int, headers: dict, body: str):
+        self.status = status
+        self.headers = headers
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
+
+
+class _FakeRequestContext:
+    def __init__(self, outcome):
+        self._outcome = outcome
+
+    async def __aenter__(self):
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeClientSession:
+    def __init__(self, host: "_FakeHost"):
+        self._host = host
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self._host.closed_sessions += 1
+        return False
+
+    def get(self, url, headers=None):
+        self._host.requests.append((url, dict(headers or {})))
+        return _FakeRequestContext(self._host.next_outcome())
+
+
+class _FakeHost:
+    """Fake DMI file, metadata server, and backoff sleeps for EnvironmentDetector."""
+
+    def __init__(self):
+        self.product_name = None
+        self.dmi_reads = []
+        self.outcomes = []
+        self.requests = []
+        self.opened_sessions = 0
+        self.closed_sessions = 0
+        self.sleep_delays = []
+        self.on_sleep = None
+
+    def open(self, path, *args, **kwargs):
+        self.dmi_reads.append(path)
+        if isinstance(self.product_name, BaseException):
+            raise self.product_name
+        if self.product_name is None:
+            raise FileNotFoundError(path)
+        return io.StringIO(self.product_name)
+
+    def new_probe_session(self):
+        self.opened_sessions += 1
+        return _FakeClientSession(self)
+
+    def next_outcome(self):
+        if len(self.outcomes) > 1:
+            return self.outcomes.pop(0)
+        return self.outcomes[0]
+
+
+def _mds_response(status: int, flavor: bool = True, body: str = ""):
+    headers = {"Metadata-Flavor": "Google"} if flavor else {}
+    return _FakeMetadataResponse(status, headers, body)
+
+
+def _connector_error():
+    connection_key = types.SimpleNamespace(host="169.254.169.254", port=80, ssl=False)
+    return aiohttp.ClientConnectorError(
+        connection_key, ConnectionRefusedError(111, "Connection refused")
+    )
+
+
+def _fake_winreg(product_name):
+    """Fake winreg module for HKLM\\SYSTEM\\HardwareConfig\\Current."""
+
+    def open_key(root, sub_key):
+        assert root == "HKEY_LOCAL_MACHINE"
+        assert sub_key == r"SYSTEM\HardwareConfig\Current"
+        return contextlib.nullcontext((root, sub_key))
+
+    def query_value_ex(key, value_name):
+        assert key == ("HKEY_LOCAL_MACHINE", r"SYSTEM\HardwareConfig\Current")
+        assert value_name == "SystemProductName"
+        if isinstance(product_name, BaseException):
+            raise product_name
+        return product_name, 1
+
+    return types.SimpleNamespace(
+        HKEY_LOCAL_MACHINE="HKEY_LOCAL_MACHINE",
+        OpenKey=open_key,
+        QueryValueEx=query_value_ex,
+    )
+
+
+def _wait_until_probe_settles(detector: EnvironmentDetector, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while detector._probe_in_flight:
+        if time.monotonic() > deadline:
+            raise AssertionError("metadata probe did not settle")
+        time.sleep(0.01)
+
+
+async def _settle_probe(detector: EnvironmentDetector, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while detector._probe_in_flight:
+        if time.monotonic() > deadline:
+            raise AssertionError("metadata probe did not settle")
+        await asyncio.sleep(0.01)
+
+
+@pytest.fixture
+def fake_host(monkeypatch, tmp_path):
+    """Opt back into the real EnvironmentDetector.detect with a hermetic fake host."""
+    monkeypatch.setattr(EnvironmentDetector, "detect", _REAL_ENVIRONMENT_DETECT)
+    for name in _ENVIRONMENT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    host = _FakeHost()
+    monkeypatch.setattr(
+        environment_module,
+        "sys",
+        types.SimpleNamespace(platform="linux", _getframe=sys._getframe),
+    )
+    monkeypatch.setattr(environment_module, "open", host.open, raising=False)
+    monkeypatch.setattr(
+        environment_module,
+        "_K8S_SERVICE_ACCOUNT_PATH",
+        str(tmp_path / "missing-serviceaccount"),
+    )
+    monkeypatch.setattr(
+        environment_module, "_new_probe_session", host.new_probe_session
+    )
+
+    async def fake_backoff_sleep(delay):
+        host.sleep_delays.append(delay)
+        if host.on_sleep is not None:
+            result = host.on_sleep()
+            if inspect.isawaitable(result):
+                await result
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(environment_module, "_backoff_sleep", fake_backoff_sleep)
+    return host
+
+
+def test_default_usage_tracker_registers_environment_detector():
+    from gcsfs.telemetry.manager import default_usage_tracker
+
+    detector_types = [type(d) for d in default_usage_tracker.detectors]
+
+    assert detector_types == [FrameworkDetector, EnvironmentDetector]
+
+
+def test_usage_tracker_emits_environment_token(fake_host):
+    fake_host.product_name = "QEMU"
+    tracker = UsageMetricsTracker(detectors=[EnvironmentDetector()])
+
+    tokens = tracker.get_tokens()
+
+    assert tokens == ["env/oth"]
+    assert tracker.get_dimension(Dimension.ENVIRONMENT) == "oth"
+
+
+@pytest.mark.asyncio
+async def test_first_detect_schedules_probe_and_later_detect_returns_verdict(
+    fake_host, monkeypatch
+):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = "Google Compute Engine\n"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    first = detector.detect()
+    await _settle_probe(detector)
+    second = detector.detect()
+
+    assert first is None
+    assert second == "gke"
+    assert fake_host.requests == [
+        (_DEFAULT_CLUSTER_NAME_URL, {"Metadata-Flavor": "Google"})
+    ]
+
+
+def test_detect_from_sync_caller_probes_on_fsspec_loop(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    detector = EnvironmentDetector()
+
+    first = detector.detect()
+    _wait_until_probe_settles(detector)
+    second = detector.detect()
+
+    assert first is None
+    assert second == "gce"
+    assert detector._probe_future is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "product_name, env_vars",
+    [
+        pytest.param("Google Compute Engine", {}, id="linux-gce"),
+        pytest.param("Google", {}, id="linux-legacy-google"),
+        pytest.param(
+            "Google Compute Engine",
+            {"KUBERNETES_SERVICE_HOST": "10.0.0.1"},
+            id="self-managed-k8s-on-gce",
+        ),
+    ],
+)
+async def test_google_flavored_404_resolves_gce(
+    fake_host, monkeypatch, product_name, env_vars
+):
+    for name, value in env_vars.items():
+        monkeypatch.setenv(name, value)
+    fake_host.product_name = product_name
+    fake_host.outcomes = [_mds_response(404)]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gce"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["", "   \n"], ids=["empty", "whitespace"])
+async def test_google_flavored_empty_200_resolves_gce_without_retry(fake_host, body):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body=body)]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gce"
+    assert len(fake_host.requests) == 1
+    assert fake_host.sleep_delays == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, flavor",
+    [
+        pytest.param(403, False, id="flavorless-403"),
+        pytest.param(408, True, id="flavored-408"),
+        pytest.param(429, True, id="flavored-429"),
+        pytest.param(500, False, id="flavorless-500"),
+        pytest.param(503, True, id="flavored-503"),
+        pytest.param(
+            504,
+            False,
+            id="flavorless-504",
+            marks=pytest.mark.skipif(
+                504 not in DEFAULT_RETRYABLE_STATUS_CODES,
+                reason="google-auth < 2.40.3 omits 504",
+            ),
+        ),
+    ],
+)
+async def test_transient_metadata_responses_retry_until_cluster_name(
+    fake_host, status, flavor
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(status, flavor=flavor, body="Not Found\n"),
+        _mds_response(status, flavor=flavor, body="Not Found\n"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+    detected_during_retries = []
+    fake_host.on_sleep = lambda: detected_during_retries.append(detector.detect())
+
+    first = detector.detect()
+    await _settle_probe(detector)
+    resolved = detector.detect()
+
+    assert first is None
+    assert detected_during_retries == [None, None]
+    assert fake_host.sleep_delays == [0.5, 1.0]
+    assert fake_host.opened_sessions == 1
+    assert fake_host.closed_sessions == 1
+    assert resolved == "gke"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kubernetes", [False, True], ids=["gce-vm", "gcp-k8s"])
+@pytest.mark.parametrize(
+    "status, flavor",
+    [
+        pytest.param(200, False, id="flavorless-200"),
+        pytest.param(404, False, id="flavorless-404"),
+        pytest.param(403, True, id="flavored-403"),
+        pytest.param(400, True, id="flavored-400"),
+        pytest.param(401, False, id="flavorless-401"),
+        pytest.param(405, True, id="flavored-405"),
+        pytest.param(410, True, id="flavored-410"),
+        pytest.param(499, False, id="flavorless-499"),
+        pytest.param(501, True, id="flavored-501"),
+        pytest.param(502, False, id="flavorless-502"),
+    ],
+)
+async def test_definitive_metadata_responses_fall_back_without_retry(
+    fake_host, monkeypatch, kubernetes, status, flavor
+):
+    if kubernetes:
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(status, flavor=flavor, body="prod-cluster"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == ("gke" if kubernetes else "gce")
+    assert len(fake_host.requests) == 1
+    assert fake_host.sleep_delays == []
+
+
+@pytest.mark.asyncio
+async def test_definitive_response_after_transient_error_stops_retrying(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        asyncio.TimeoutError(),
+        _mds_response(400, flavor=False),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+
+    assert detector.detect() == "gce"
+    assert len(fake_host.requests) == 2
+    assert fake_host.sleep_delays == [0.5]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        pytest.param(_connector_error, id="connector-error"),
+        pytest.param(asyncio.TimeoutError, id="timeout"),
+    ],
+)
+@pytest.mark.parametrize(
+    "final_response, expected",
+    [
+        pytest.param(
+            _mds_response(200, body="prod-cluster"), "gke", id="cluster-name-gke"
+        ),
+        pytest.param(_mds_response(404), "gce", id="flavored-404-gce"),
+    ],
+)
+async def test_network_errors_retry_until_metadata_server_answers(
+    fake_host, error_factory, final_response, expected
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [error_factory(), error_factory(), final_response]
+    detector = EnvironmentDetector()
+    detected_during_retries = []
+    fake_host.on_sleep = lambda: detected_during_retries.append(detector.detect())
+
+    first = detector.detect()
+    await _settle_probe(detector)
+    resolved = detector.detect()
+
+    assert first is None
+    assert detected_during_retries == [None, None]
+    assert resolved == expected
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_on_gcp_bios_without_kubernetes_caches_gce(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [asyncio.TimeoutError()]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gce"
+    assert len(fake_host.requests) == 6
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_on_gcp_bios_kubernetes_caches_gke(fake_host, monkeypatch):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(403, flavor=False)]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert detector._cached_env == "gke"
+    assert detector._probe_future is None
+    assert len(fake_host.requests) == 6
+
+
+class _UndecodableMetadataResponse(_FakeMetadataResponse):
+    async def text(self) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+@pytest.mark.asyncio
+async def test_unexpected_probe_error_falls_back_without_rescheduling(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _UndecodableMetadataResponse(200, {"Metadata-Flavor": "Google"}, "")
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    first = detector.detect()
+    second = detector.detect()
+
+    assert first == "gce"
+    assert second == "gce"
+    assert detector._probe_future is None
+    assert len(fake_host.requests) == 1
+
+
+def test_detect_inside_repeated_asyncio_run_probes_once_on_fsspec_loop(
+    fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    started = threading.Event()
+    release = threading.Event()
+    real_probe_once = EnvironmentDetector._probe_metadata_server_once
+
+    async def gated_probe_once(self, session: aiohttp.ClientSession, url: str):
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.005)
+        return await real_probe_once(self, session, url)
+
+    monkeypatch.setattr(
+        EnvironmentDetector,
+        "_probe_metadata_server_once",
+        gated_probe_once,
+    )
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    async def call_once():
+        return detector.detect()
+
+    first = asyncio.run(call_once())
+    assert first is None
+    assert started.wait(timeout=5)
+    assert detector._probe_in_flight is True
+
+    release.set()
+    _wait_until_probe_settles(detector)
+    second = asyncio.run(call_once())
+
+    assert second == "gke"
+    assert len(fake_host.requests) == 1
+
+
+def test_post_fork_gc_of_stale_generation_probe_under_lock_does_not_deadlock(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(503, flavor=False)]
+    detector = EnvironmentDetector()
+    detector._probe_generation = 1
+    detector._probe_in_flight = True
+
+    class _SuspendOnce:
+        def __await__(self):
+            yield None
+
+    async def suspend():
+        await _SuspendOnce()
+
+    fake_host.on_sleep = suspend
+    coro = detector._probe_coro(1)
+    coro.send(None)
+
+    detector._reset_after_fork()
+    assert detector._probe_generation == 2
+
+    def close_while_holding_lock():
+        with detector._lock:
+            coro.close()
+
+    worker = threading.Thread(target=close_while_holding_lock, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert detector._probe_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_metadata_host_override_probes_that_host_even_off_gcp(
+    fake_host, monkeypatch
+):
+    monkeypatch.setenv("GCE_METADATA_HOST", "metadata.internal:8080")
+    fake_host.product_name = "QEMU"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert [url for url, _ in fake_host.requests] == [
+        "http://metadata.internal:8080/computeMetadata/v1/instance/attributes/"
+        "cluster-name"
+    ]
+
+
+@pytest.mark.parametrize(
+    "primary_var, secondary_var",
+    [
+        ("K_SERVICE", "K_REVISION"),
+        ("CLOUD_RUN_JOB", "CLOUD_RUN_EXECUTION"),
+        ("CLOUD_RUN_WORKER_POOL", "CLOUD_RUN_REVISION"),
+        ("GAE_SERVICE", "GAE_INSTANCE"),
+    ],
+)
+def test_serverless_env_without_kubernetes_is_oth_without_io(
+    fake_host, monkeypatch, primary_var, secondary_var
+):
+    monkeypatch.setenv(primary_var, "svc")
+    monkeypatch.setenv(secondary_var, "rev")
+    fake_host.product_name = "Google Compute Engine"
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
+@pytest.mark.parametrize(
+    "env_vars",
+    [
+        pytest.param({"K_SERVICE": "svc"}, id="k-service-only"),
+        pytest.param({"FUNCTION_TARGET": "fn"}, id="function-target-only"),
+        pytest.param({"FUNCTION_NAME": "fn"}, id="function-name-only"),
+        pytest.param({"GAE_ENV": "standard"}, id="gae-env-only"),
+        pytest.param({"CLOUD_RUN_JOB": "job"}, id="cloud-run-job-only"),
+        pytest.param(
+            {"CLOUD_RUN_WORKER_POOL": "pool"}, id="cloud-run-worker-pool-only"
+        ),
+        pytest.param({"GAE_SERVICE": "default"}, id="gae-service-only"),
+        pytest.param(
+            {"FUNCTION_TARGET": "fn", "K_SERVICE": "svc"},
+            id="function-target-without-k-revision",
+        ),
+        pytest.param(
+            {
+                "K_SERVICE": "svc",
+                "K_REVISION": "rev",
+                "KUBERNETES_SERVICE_HOST": "10.0.0.1",
+            },
+            id="serverless-pair-with-k8s",
+        ),
+    ],
+)
+def test_single_serverless_env_var_does_not_suppress_gcp_probe(
+    fake_host, monkeypatch, env_vars
+):
+    for name, value in env_vars.items():
+        monkeypatch.setenv(name, value)
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    _wait_until_probe_settles(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert len(fake_host.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "product_name, kubernetes_host, expected",
+    [
+        pytest.param("QEMU", None, "oth", id="off-gcp"),
+        pytest.param("Google Compute Engine", None, "gce", id="gce-vm"),
+        pytest.param("Google Compute Engine", "10.0.0.1", "gke", id="gcp-k8s"),
+    ],
+)
+def test_no_gce_check_resolves_from_local_signals_only(
+    fake_host,
+    monkeypatch,
+    product_name,
+    kubernetes_host,
+    expected,
+):
+    monkeypatch.setenv("NO_GCE_CHECK", "true")
+    if kubernetes_host is not None:
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", kubernetes_host)
+    fake_host.product_name = product_name
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == expected
+    assert fake_host.opened_sessions == 0
+
+
+@pytest.mark.parametrize(
+    "product_name",
+    [
+        pytest.param("Google Foo", id="google-prefix"),
+        pytest.param("Amazon EC2", id="aws"),
+        pytest.param(FileNotFoundError(_PRODUCT_NAME_PATH), id="missing-dmi"),
+    ],
+)
+def test_non_google_bios_fast_skips_even_on_kubernetes(
+    fake_host, monkeypatch, product_name
+):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = product_name
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == "oth"
+    assert fake_host.dmi_reads == ["/sys/class/dmi/id/product_name"]
+    assert fake_host.opened_sessions == 0
+
+
+def test_non_linux_platform_skips_dmi_and_probe(fake_host, monkeypatch):
+    monkeypatch.setattr(environment_module.sys, "platform", "freebsd")
+    detector = EnvironmentDetector()
+
+    assert detector.detect() == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
+def test_concurrent_detect_launches_exactly_one_probe(fake_host, monkeypatch):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    probe_generations = []
+    real_probe_coro = EnvironmentDetector._probe_coro
+
+    def counting_probe_coro(self, generation):
+        probe_generations.append(generation)
+        return real_probe_coro(self, generation)
+
+    monkeypatch.setattr(EnvironmentDetector, "_probe_coro", counting_probe_coro)
+    detector = EnvironmentDetector()
+    barrier = threading.Barrier(10)
+    results = []
+
+    def worker():
+        barrier.wait(timeout=5)
+        results.append(detector.detect())
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    _wait_until_probe_settles(detector)
+    resolved = detector.detect()
+
+    assert len(probe_generations) == 1
+    assert len(results) == 10
+    assert set(results) <= {None, "gke"}
+    assert resolved == "gke"
+    assert len(fake_host.requests) == 1
+
+
+def test_detect_slow_race_returns_none_for_scheduler_and_verdict_for_late_peer(
+    fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(200, body="prod-cluster"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+
+    real_run_coro = asyncio.run_coroutine_threadsafe
+
+    def preempting_run_coro(coro, loop):
+        fut = real_run_coro(coro, loop)
+        fut.result(timeout=5)
+        return fut
+
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "run_coroutine_threadsafe", preempting_run_coro)
+        scheduler_detector = EnvironmentDetector()
+        assert scheduler_detector.detect() is None
+        assert scheduler_detector.detect() == "gke"
+
+    peer_detector = EnvironmentDetector()
+    real_is_k8s = peer_detector._is_kubernetes
+    settled_by_winner = False
+
+    def k8s_after_winner_resolves():
+        nonlocal settled_by_winner
+        result = real_is_k8s()
+        if not settled_by_winner:
+            settled_by_winner = True
+            assert peer_detector._schedule_probe() is True
+            _wait_until_probe_settles(peer_detector)
+        return result
+
+    monkeypatch.setattr(peer_detector, "_is_kubernetes", k8s_after_winner_resolves)
+    assert peer_detector.detect() == "gke"
+
+
+def test_schedule_probe_recovers_after_loop_error_or_future_cancel(
+    fake_host, monkeypatch
+):
+    import concurrent.futures
+
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    detector = EnvironmentDetector()
+
+    def raise_loop_error():
+        raise RuntimeError("loop unavailable")
+
+    with monkeypatch.context() as m:
+        m.setattr(fsspec.asyn, "get_loop", raise_loop_error)
+        with pytest.raises(RuntimeError, match="loop unavailable"):
+            detector.detect()
+
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+    pending_future: concurrent.futures.Future = concurrent.futures.Future()
+
+    def capture_without_running(coro, _loop):
+        coro.close()
+        return pending_future
+
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "run_coroutine_threadsafe", capture_without_running)
+        assert detector.detect() is None
+
+    assert detector._probe_in_flight is True
+    assert detector._probe_future is pending_future
+    assert pending_future.cancel() is True
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+    assert detector.detect() is None
+    _wait_until_probe_settles(detector)
+    assert detector.detect() == "gce"
+
+
+def test_module_fork_hook_resets_live_detectors(fake_host):
+    detector = EnvironmentDetector()
+    detector._cached_env = "gce"
+    detector._probe_in_flight = True
+    detector._probe_future = object()
+
+    environment_module._reset_detectors_after_fork()
+
+    assert detector in environment_module._live_detectors
+    assert detector._cached_env == "gce"
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+
+def test_fs_init_warmup_and_opt_out(fake_host, monkeypatch):
+    from gcsfs.core import GCSFileSystem
+
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    fw_calls = []
+
+    class CountingFW(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            fw_calls.append(1)
+            return "pandas"
+
+    env_disabled = EnvironmentDetector()
+    disabled_tracker = UsageMetricsTracker(detectors=[CountingFW(), env_disabled])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", disabled_tracker)
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+    assert fw_calls == []
+    assert disabled_tracker.get_dimension(Dimension.FRAMEWORK) is None
+    assert disabled_tracker.get_dimension(Dimension.ENVIRONMENT) is None
+
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    env_enabled = EnvironmentDetector()
+    enabled_tracker = UsageMetricsTracker(detectors=[CountingFW(), env_enabled])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", enabled_tracker)
+    GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+
+    assert fw_calls == []
+    future = env_enabled._probe_future
+    if future is not None:
+        future.result(timeout=5)
+    assert env_enabled.detect() == "gce"
+    assert fake_host.opened_sessions == 1
+
+    assert enabled_tracker.get_dimension(Dimension.FRAMEWORK) == "pandas"
+    assert len(fw_calls) == 1
+    fresh_env = EnvironmentDetector()
+    enabled_tracker.detectors = [CountingFW(), fresh_env]
+    first_dim = enabled_tracker.get_dimension(Dimension.ENVIRONMENT)
+    if fresh_env._probe_future is not None:
+        fresh_env._probe_future.result(timeout=5)
+    assert first_dim in (None, "gce")
+    assert enabled_tracker.get_dimension(Dimension.ENVIRONMENT) == "gce"
+    assert len(fw_calls) == 1
+
+
+def test_mid_operation_probe_resolution_updates_subsequent_requests(
+    mock_gcs_harness, fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    release_probe = threading.Event()
+    real_probe_once = EnvironmentDetector._probe_metadata_server_once
+
+    async def gated_probe_once(self, session: aiohttp.ClientSession, url: str):
+        while not release_probe.is_set():
+            await asyncio.sleep(0.005)
+        return await real_probe_once(self, session, url)
+
+    monkeypatch.setattr(
+        EnvironmentDetector,
+        "_probe_metadata_server_once",
+        gated_probe_once,
+    )
+
+    fw_detector = _CallerThreadOnlyDetector("pandas")
+    env_detector = EnvironmentDetector()
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[fw_detector, env_detector]),
+    )
+    assert env_detector.detect() is None
+
+    fs = mock_gcs_harness.fs
+    mock_gcs_harness.clear()
+    orig_call = fs._call
+
+    async def call_then_settle(method, path, *args, **kwargs):
+        result = await orig_call(method, path, *args, **kwargs)
+        if len(mock_gcs_harness.user_agents) == 1:
+            release_probe.set()
+            await _settle_probe(env_detector)
+        return result
+
+    monkeypatch.setattr(fs, "_call", call_then_settle)
+
+    fs.cat(["test-bucket/f1.txt", "test-bucket/f2.txt"], batch_size=1)
+
+    assert len(mock_gcs_harness.user_agents) == 2
+    assert "fw/pandas" in mock_gcs_harness.user_agents[0]
+    assert "env/" not in mock_gcs_harness.user_agents[0]
+    assert "fw/pandas" in mock_gcs_harness.user_agents[1]
+    assert "env/gke" in mock_gcs_harness.user_agents[1]
+    assert len(fw_detector.thread_names) == 1
+
+
+@pytest.mark.skipif(not hasattr(asyncio, "eager_task_factory"), reason="Python 3.12+")
+def test_eager_task_factory_probe_does_not_deadlock(fake_host, monkeypatch):
+    fake_host.product_name = "Google Compute Engine"
+
+    def fail_session():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(environment_module, "_new_probe_session", fail_session)
+    loop = fsspec.asyn.get_loop()
+
+    async def swap_factory(new_factory):
+        prev = loop.get_task_factory()
+        loop.set_task_factory(new_factory)
+        return prev
+
+    prev_factory = asyncio.run_coroutine_threadsafe(
+        swap_factory(asyncio.eager_task_factory), loop
+    ).result(timeout=5)
+    try:
+        detector = EnvironmentDetector()
+        worker = threading.Thread(target=detector.detect, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        _wait_until_probe_settles(detector)
+        assert detector.detect() == "gce"
+
+        async def eager_caller():
+            asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+            detector_in_async = EnvironmentDetector()
+            detector_in_async.detect()
+            await _settle_probe(detector_in_async)
+            return detector_in_async.detect()
+
+        assert asyncio.run(eager_caller()) == "gce"
+    finally:
+        asyncio.run_coroutine_threadsafe(swap_factory(prev_factory), loop).result(
+            timeout=5
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "product_name,mds_outcome,expected",
+    [
+        pytest.param("Google Compute Engine ", _mds_response(404), "gce", id="gce-vm"),
+        pytest.param(
+            "Google", _mds_response(200, body="win-cluster"), "gke", id="gke-node"
+        ),
+    ],
+)
+async def test_windows_gce_bios_probes_metadata_server(
+    fake_host, monkeypatch, product_name, mds_outcome, expected
+):
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(product_name))
+    fake_host.outcomes = [mds_outcome]
+    detector = EnvironmentDetector()
+
+    assert detector.detect() is None
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == expected
+    assert fake_host.dmi_reads == []
+    assert fake_host.requests == [
+        (_DEFAULT_CLUSTER_NAME_URL, {"Metadata-Flavor": "Google"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "registry_outcome",
+    [
+        pytest.param("Virtual Machine", id="non-google-product"),
+        pytest.param(123, id="non-string-value"),
+        pytest.param(FileNotFoundError("missing value"), id="missing-registry-value"),
+    ],
+)
+def test_non_gcp_windows_host_skips_probe(fake_host, monkeypatch, registry_outcome):
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(registry_outcome))
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == "oth"
+    assert detector._gcp_bios is False
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
+def test_non_linux_non_windows_platform_skips_probe(fake_host, monkeypatch):
+    monkeypatch.setattr(environment_module.sys, "platform", "darwin")
+    monkeypatch.delitem(sys.modules, "winreg", raising=False)
+    detector = EnvironmentDetector()
+
+    assert detector.detect() == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
