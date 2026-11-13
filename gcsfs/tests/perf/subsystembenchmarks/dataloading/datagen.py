@@ -168,9 +168,10 @@ def feature_column_widths(count, value_bytes):
 def feature_projection(count, projected, run_length=1):
     """Sorted indices of the feature columns a read selects.
 
-    Columns are picked in non-overlapping blocks of ``run_length`` adjacent columns at
-    random block positions: 1 scatters them, larger values cluster them. Neighbouring
-    blocks can touch, and the last one is cut to reach ``projected``. Arrow merges
+    Columns are picked in non-overlapping blocks of ``run_length`` adjacent columns, in
+    random block order: 1 scatters them, larger values cluster them. The schema's last
+    block may be shorter, neighbouring blocks can touch, and the last block picked is
+    cut to reach ``projected``. Arrow merges
     adjacent column chunks into one read, so this sets how many small reads a file
     needs. ``projected`` of 0 (or >= count) selects every feature column.
     """
@@ -179,8 +180,10 @@ def feature_projection(count, projected, run_length=1):
     if projected == 0 or projected >= count:
         return list(range(count))
     rng = np.random.default_rng(_FEATURE_SEED)
-    blocks = rng.choice(count // run_length, -(-projected // run_length), replace=False)
-    columns = [int(b) * run_length + i for b in blocks for i in range(run_length)]
+    starts = rng.permutation(range(0, count, run_length))
+    columns = [
+        c for s in starts for c in range(int(s), min(int(s) + run_length, count))
+    ]
     return sorted(columns[:projected])
 
 

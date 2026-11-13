@@ -170,7 +170,7 @@ def _iter_batches(source, params, shuffle_seed, collate_fn, device):
 
 def run_single_rank(dataset, params):
     """Iterates dataset on single consumer rank across rounds."""
-    device = device_lib.rank_device(0)
+    device = None if params.has_features else device_lib.rank_device(0)
     per_epoch = []
     ttfb = None
     collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
@@ -198,7 +198,8 @@ def _consume_shard(shard, params, shuffle_seed, collate_fn):
     first_batch = None
     rows = 0
     # Ray sets CUDA_VISIBLE_DEVICES from num_gpus, so rank 0 is this task's GPU.
-    device = device_lib.rank_device(0)
+    # Feature-column batches stay on the host, so those cases take no GPU.
+    device = None if params.has_features else device_lib.rank_device(0)
     for batch in _iter_batches(shard, params, shuffle_seed, collate_fn, device):
         if first_batch is None:
             first_batch = timestamp()
@@ -211,7 +212,7 @@ def run_multi_rank(dataset, params):
     world_size = params.world_size
     epoch_records = []
     collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
-    num_gpus = device_lib.ray_task_num_gpus(world_size)
+    num_gpus = 0 if params.has_features else device_lib.ray_task_num_gpus(world_size)
     for epoch in range(params.rounds):
         splits = dataset.streaming_split(n=world_size, equal=False)
         shuffle_seed = (

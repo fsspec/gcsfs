@@ -232,6 +232,9 @@ def test_feature_projection_run_length_clusters_columns():
     assert runs(scattered) > 150
     assert runs(clustered) <= 286 // 16 + 1
     assert scattered == datagen.feature_projection(1134, 286, run_length=1)
+    # The schema's partial last block can be picked, and never overflows the sample.
+    assert len(datagen.feature_projection(10, 9, run_length=4)) == 9
+    assert max(clustered) >= 1120  # 1134 % 16 leaves a 14-column tail block
     # 0 or >= count selects every feature column.
     assert datagen.feature_projection(20, 0) == list(range(20))
     assert datagen.feature_projection(20, 25) == list(range(20))
