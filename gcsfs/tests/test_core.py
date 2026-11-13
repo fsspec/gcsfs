@@ -692,21 +692,24 @@ async def test_delete_files_bounds_concurrency(gcs, concurrency):
     assert max_in_flight == concurrency
 
 
-@pytest.mark.asyncio
-async def test_rm_passes_concurrency_to_delete_files(gcs):
+def test_rm_passes_concurrency_to_delete_files(gcs):
     # Arrange
     path = f"{TEST_BUCKET}/test_rm_concurrency_{uuid.uuid4().hex}"
     files = [f"{path}/file_{i}" for i in range(3)]
+    # Call the flat-bucket implementation directly: on HNS/zonal test buckets
+    # ExtendedGcsFileSystem._rm would route to the HNS path instead. Run it on
+    # the filesystem's own loop, as the sync API does.
+    core_rm = gcsfs.core.GCSFileSystem._rm
 
     with (
-        mock.patch.object(gcs, "_expand_path", return_value=files),
+        mock.patch.object(gcs, "_expand_path", new=mock.AsyncMock(return_value=files)),
         mock.patch.object(
             gcs, "_delete_files", new=mock.AsyncMock(return_value=files)
         ) as mock_delete_files,
     ):
         # Act
-        await gcs._rm(path, recursive=True)
-        await gcs._rm(path, recursive=True, batchsize=10, concurrency=2)
+        sync(gcs.loop, core_rm, gcs, path, recursive=True)
+        sync(gcs.loop, core_rm, gcs, path, recursive=True, batchsize=10, concurrency=2)
 
     # Assert
     assert mock_delete_files.await_args_list == [
