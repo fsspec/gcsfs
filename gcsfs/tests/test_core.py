@@ -1400,6 +1400,37 @@ def test_cat_file(gcs):
     assert data[:1] == gcs.cat_file(fn, end=1)
 
 
+@pytest.mark.parametrize(
+    "data,start,end",
+    [
+        (b"0123456789", 10, None),
+        (b"0123456789", 10, 20),
+        (b"0123456789", 15, None),
+        (b"0123456789", -5, -8),
+        (b"0123456789", -1, -1),
+        (b"0123456789", 3, -20),
+        (b"0123456789", -20, 4),
+        (b"", 0, 4),
+        (b"", None, 4),
+    ],
+)
+def test_cat_file_range_past_end(gcs, skip_if_grpc_read, caplog, data, start, end):
+    # GCS answers a range past the end with 416 and ignores a crossed range,
+    # where a slice of the object is empty
+    fn = f"{TEST_BUCKET}/range_past_end"
+    gcs.pipe(fn, data)
+    assert gcs.cat_file(fn, start=start, end=end) == data[start:end]
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_cat_ranges_with_zero_byte_object(gcs, skip_if_grpc_read):
+    full = f"{TEST_BUCKET}/has_data"
+    empty = f"{TEST_BUCKET}/zero_byte"
+    gcs.pipe(full, b"0123456789")
+    gcs.pipe(empty, b"")
+    assert gcs.cat_ranges([full, empty], 0, 4, on_error="raise") == [b"0123", b""]
+
+
 @pytest.mark.parametrize("consistency", [None, "size", "md5", "crc32c"])
 def test_get_put(consistency, gcs):
     if consistency == "crc32c" and gcsfs.checkers.crcmod is None:
