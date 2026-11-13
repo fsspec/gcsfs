@@ -439,7 +439,6 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     scopes = {"read_only", "read_write", "full_control"}
     retries = 6  # number of retries on http failure
     default_block_size = DEFAULT_BLOCK_SIZE
-    default_cache_type = None
     protocol = "gs", "gcs"
     async_impl = True
     MIN_CHUNK_SIZE_FOR_CONCURRENCY = 5 * 1024 * 1024
@@ -480,8 +479,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
-        if cache_type is not None:
-            self.default_cache_type = cache_type
+        self.default_cache_type = cache_type
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
@@ -2399,15 +2397,13 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         """
         if block_size is None:
             block_size = self.default_block_size
-        if cache_type is None:
-            cache_type = self.default_cache_type
         const = consistency or self.consistency
         return GCSFile(
             self,
             path,
             mode,
             block_size,
-            cache_type=cache_type,
+            cache_type=cache_type or self.default_cache_type,
             cache_options=cache_options,
             consistency=const,
             metadata=metadata,

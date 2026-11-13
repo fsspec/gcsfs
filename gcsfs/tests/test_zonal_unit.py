@@ -71,6 +71,7 @@ def test_open_uses_default_blocksize_and_consistency_from_fs(
             assert isinstance(f, GCSFile)
             assert isinstance(f, ZonalFile) is bucket_type_val.uses_grpc_data_path
             assert f.blocksize == extended_gcsfs.default_block_size
+            assert f.cache_type == "adaptive"
             assert type(f.checker) is ConsistencyChecker
 
 
@@ -84,41 +85,29 @@ def test_open_uses_correct_blocksize_and_consistency_for_all_bucket_types(
 
     custom_filesystem_block_size = 100 * 1024 * 1024
     extended_gcsfs = extended_gcs_factory(
-        block_size=custom_filesystem_block_size, consistency="md5"
+        block_size=custom_filesystem_block_size,
+        consistency="md5",
+        cache_type="readahead",
     )
 
     with gcs_bucket_mocks(csv_data, bucket_type_val=bucket_type_val):
         with extended_gcsfs.open(csv_file_path, "rb") as f:
             assert f.blocksize == custom_filesystem_block_size
+            assert f.cache_type == "readahead"
+            assert f.cache_source == "explicit"
             assert isinstance(f.checker, MD5Checker)
 
         file_block_size = 1024 * 1024
         with extended_gcsfs.open(
-            csv_file_path, "rb", block_size=file_block_size, consistency="size"
+            csv_file_path,
+            "rb",
+            block_size=file_block_size,
+            consistency="size",
+            cache_type="none",
         ) as f:
             assert f.blocksize == file_block_size
-            assert isinstance(f.checker, SizeChecker)
-
-
-@pytest.mark.parametrize("bucket_layout", layouts.ALL_BUCKET_LAYOUTS)
-def test_open_uses_default_cache_type_for_all_bucket_types(
-    extended_gcs_factory, gcs_bucket_mocks, bucket_layout
-):
-    csv_file = "2014-01-01.csv"
-    csv_file_path = f"{TEST_ZONAL_BUCKET}/{csv_file}"
-    csv_data = csv_files[csv_file]
-
-    extended_gcsfs = extended_gcs_factory(cache_type="readahead")
-    assert extended_gcsfs.default_cache_type == "readahead"
-
-    with gcs_bucket_mocks(csv_data, bucket_type_val=bucket_layout):
-        with extended_gcsfs.open(csv_file_path, "rb") as f:
-            assert f.cache_type == "readahead"
-            assert f.cache_source == "explicit"
-
-        with extended_gcsfs.open(csv_file_path, "rb", cache_type="none") as f:
             assert f.cache_type == "none"
-            assert f.cache_source == "explicit"
+            assert isinstance(f.checker, SizeChecker)
 
 
 @pytest.mark.parametrize(
