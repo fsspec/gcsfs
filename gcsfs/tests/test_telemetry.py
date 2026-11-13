@@ -1568,6 +1568,8 @@ async def test_transient_metadata_responses_retry_until_cluster_name(
     assert first is None
     assert detected_during_retries == [None, None]
     assert fake_host.sleep_delays == [0.5, 1.0]
+    assert fake_host.opened_sessions == 1
+    assert fake_host.closed_sessions == 1
     assert resolved == "gke"
 
 
@@ -1725,11 +1727,11 @@ def test_detect_inside_repeated_asyncio_run_probes_once_on_fsspec_loop(
     release = threading.Event()
     real_probe_once = EnvironmentDetector._probe_metadata_server_once
 
-    async def gated_probe_once(self, url: str):
+    async def gated_probe_once(self, session: aiohttp.ClientSession, url: str):
         started.set()
         while not release.is_set():
             await asyncio.sleep(0.005)
-        return await real_probe_once(self, url)
+        return await real_probe_once(self, session, url)
 
     monkeypatch.setattr(
         EnvironmentDetector,
@@ -2120,10 +2122,10 @@ def test_mid_operation_probe_resolution_updates_subsequent_requests(
     release_probe = threading.Event()
     real_probe_once = EnvironmentDetector._probe_metadata_server_once
 
-    async def gated_probe_once(self, url: str):
+    async def gated_probe_once(self, session: aiohttp.ClientSession, url: str):
         while not release_probe.is_set():
             await asyncio.sleep(0.005)
-        return await real_probe_once(self, url)
+        return await real_probe_once(self, session, url)
 
     monkeypatch.setattr(
         EnvironmentDetector,

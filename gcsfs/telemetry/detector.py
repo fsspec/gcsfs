@@ -341,33 +341,35 @@ class EnvironmentDetector(BaseDetector):
 
     async def _query_metadata_server(self) -> Optional[str]:
         url = f"http://{self._metadata_host()}{_CLUSTER_NAME_PATH}"
-        for delay in _PROBE_RETRY_DELAYS_SECONDS:
-            verdict = await self._probe_metadata_server_once(url)
-            if verdict is not None:
-                return verdict
-            await _backoff_sleep(delay)
-        return await self._probe_metadata_server_once(url)
+        async with _new_probe_session() as session:
+            for delay in _PROBE_RETRY_DELAYS_SECONDS:
+                verdict = await self._probe_metadata_server_once(session, url)
+                if verdict is not None:
+                    return verdict
+                await _backoff_sleep(delay)
+            return await self._probe_metadata_server_once(session, url)
 
-    async def _probe_metadata_server_once(self, url: str) -> Optional[str]:
+    async def _probe_metadata_server_once(
+        self, session: aiohttp.ClientSession, url: str
+    ) -> Optional[str]:
         headers = {_METADATA_FLAVOR_HEADER: _METADATA_FLAVOR_VALUE}
         try:
-            async with _new_probe_session() as session:
-                async with session.get(url, headers=headers) as response:
-                    status = response.status
-                    if (
-                        response.headers.get(_METADATA_FLAVOR_HEADER)
-                        == _METADATA_FLAVOR_VALUE
-                    ):
-                        if status == 200:
-                            cluster_name = await response.text()
-                            return ENV_GKE if cluster_name.strip() else ENV_GCE
-                        if status == 404:
-                            return ENV_GCE
-                    elif status == 403:
-                        # GKE sends unflavored 403 before pod credentials load.
-                        return None
-                    if status in _PROBE_RETRYABLE_STATUSES:
-                        return None
-                    return self._local_fallback_verdict()
+            async with session.get(url, headers=headers) as response:
+                status = response.status
+                if (
+                    response.headers.get(_METADATA_FLAVOR_HEADER)
+                    == _METADATA_FLAVOR_VALUE
+                ):
+                    if status == 200:
+                        cluster_name = await response.text()
+                        return ENV_GKE if cluster_name.strip() else ENV_GCE
+                    if status == 404:
+                        return ENV_GCE
+                elif status == 403:
+                    # GKE sends unflavored 403 before pod credentials load.
+                    return None
+                if status in _PROBE_RETRYABLE_STATUSES:
+                    return None
+                return self._local_fallback_verdict()
         except _PROBE_RETRYABLE_ERRORS:
             return None
