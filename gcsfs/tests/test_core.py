@@ -1,3 +1,4 @@
+import array
 import asyncio
 import base64
 import builtins
@@ -2299,10 +2300,10 @@ def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_fa
         fs.ls(requester_pays_bucket)
 
 
-@pytest.mark.usefixtures("gcs")
-def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
+def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""
+    # The gcs fixture creates TEST_BUCKET.
     fs = gcs_factory(requester_pays=True)
     file_path = f"{TEST_BUCKET}/test_req_pays_data_{uuid.uuid4().hex}"
     data = b"test data"
@@ -2356,6 +2357,38 @@ def test_pipe_small_cache_validity(gcs):
     ls_res = gcs.ls(f"gs://{folder}")
     assert len(ls_res) == 2
     assert f"{folder}/b" in ls_res
+
+
+def _numpy():
+    return pytest.importorskip("numpy")
+
+
+@pytest.mark.parametrize(
+    "make_data, kwargs",
+    [
+        # consistency="size" checks the uploaded size against the byte count:
+        # bytes + a typed buffer already sends every byte.
+        (lambda: array.array("d", [1.5, 2.5]), {"consistency": "size"}),
+        (lambda: _numpy().arange(5, dtype="int32"), {}),
+        (lambda: _numpy().arange(6, dtype="int32").reshape(2, 3), {}),
+        (lambda: _numpy().zeros((0, 3), dtype="int32"), {}),
+        # Large enough in bytes, and in elements, for a resumable upload.
+        (
+            lambda: array.array("d", bytes(4 * 2**20)),
+            {"chunksize": 2**18, "consistency": "size"},
+        ),
+    ],
+    ids=["typed_array", "numpy", "numpy_2d", "numpy_empty_2d", "typed_array_resumable"],
+)
+def test_pipe_file_accepts_any_bytes_like_object(gcs, make_data, kwargs):
+    """pipe_file uploads the bytes of any bytes-like object: len() of a typed
+    buffer counts elements, and a numpy array added to bytes broadcasts."""
+    data = make_data()
+    path = f"{TEST_BUCKET}/{uuid4()}"
+
+    gcs.pipe_file(path, data, **kwargs)
+
+    assert gcs.cat_file(path) == bytes(memoryview(data))
 
 
 def test_put_small_cache_validity(gcs):

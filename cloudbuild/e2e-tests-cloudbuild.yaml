@@ -15,6 +15,7 @@
 substitutions:
   _REGION: "us-central1"
   _ZONE: "us-central1-a"
+  _RCU_CROSS_ZONE: "us-central1-b"
   _SHORT_BUILD_ID: ${BUILD_ID:0:8}
   _SKIP_IF_FAILED: '[[ -f /workspace/FAILED ]] && echo "⚠️ Skipping: Previous failure" && exit 0'
   _TEST_ENV_VARS: "SHORT_BUILD_ID='${_SHORT_BUILD_ID}' PROJECT_ID='${PROJECT_ID}' REGION='${_REGION}' KEY_RING='${_GCSFS_KEY_RING_NAME}' KEY_NAME='${_GCSFS_KEY_NAME}'"
@@ -23,13 +24,15 @@ substitutions:
   _MACHINE_TYPE: "n2-standard-16"
   # Per-suite pytest-xdist worker counts. The heavy suites (standard, hns) run nearly
   # all of gcsfs/ and are the wall-clock long poles, so they get more workers; zonal
-  # suites are small. Each value drives BOTH the suite's `pytest -n` AND the number of
-  # per-worker bucket variants created/deleted for that suite's buckets, so they must
-  # stay in lockstep. Tune from each build's step timings.
+  # and RCU suites are smaller. Each value drives BOTH the suite's `pytest -n` AND the
+  # number of per-worker bucket variants created/deleted for that suite's buckets, so
+  # they must stay in lockstep. Tune from each build's step timings.
   _WORKERS_STANDARD: "4"
   _WORKERS_HNS: "8"
   _WORKERS_ZONAL: "2"
   _WORKERS_ZONAL_CORE: "2"
+  _WORKERS_RCU: "2"
+  _WORKERS_HNS_RCU: "2"
 
 steps:
   # Generate a persistent SSH key for this build run.
@@ -95,11 +98,14 @@ steps:
       - "PROJECT_ID=${PROJECT_ID}"
       - "REGION=${_REGION}"
       - "ZONE=${_ZONE}"
+      - "RCU_CROSS_ZONE=${_RCU_CROSS_ZONE}"
       - "SHORT_BUILD_ID=${_SHORT_BUILD_ID}"
       - "WORKERS_STANDARD=${_WORKERS_STANDARD}"
       - "WORKERS_HNS=${_WORKERS_HNS}"
       - "WORKERS_ZONAL=${_WORKERS_ZONAL}"
       - "WORKERS_ZONAL_CORE=${_WORKERS_ZONAL_CORE}"
+      - "WORKERS_RCU=${_WORKERS_RCU}"
+      - "WORKERS_HNS_RCU=${_WORKERS_HNS_RCU}"
     waitFor: ["-"]
     allowFailure: true
 
@@ -198,6 +204,38 @@ steps:
     waitFor: ["setup-vm", "create-buckets"]
     allowFailure: true
 
+  # Flat RCU Tests
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-rcu-tests"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="export TEST_SUITE='rcu' PYTEST_XDIST_WORKERS='${_WORKERS_RCU}' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-rcu-tests" >> /workspace/FAILED; exit 1; }
+    waitFor: ["setup-vm", "create-buckets"]
+    allowFailure: true
+
+  # HNS RCU Tests
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "run-hns-rcu-tests"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ${_SKIP_IF_FAILED}
+        gcloud compute ssh gcsfs-test-vm-${_SHORT_BUILD_ID} \
+          --zone=${_ZONE} \
+          --internal-ip \
+          --ssh-key-file=/workspace/.ssh/google_compute_engine \
+          --command="export TEST_SUITE='hns-rcu' PYTEST_XDIST_WORKERS='${_WORKERS_HNS_RCU}' ${_TEST_ENV_VARS} && bash cloudbuild/run_tests.sh" || { echo "run-hns-rcu-tests" >> /workspace/FAILED; exit 1; }
+    waitFor: ["setup-vm", "create-buckets"]
+    allowFailure: true
+
   # Test Report
   # GitHub shows only the first ~65k chars of the build log, so the test steps write their full output to
   # files on the VM. fetch-test-results copies them off the VM (gcloud image); test-report then prints a
@@ -224,6 +262,8 @@ steps:
         "run-zonal-tests",
         "run-hns-tests",
         "run-zonal-core-tests",
+        "run-rcu-tests",
+        "run-hns-rcu-tests",
       ]
     allowFailure: true
 
@@ -234,11 +274,11 @@ steps:
       - "-c"
       - |
         python3 cloudbuild/summarize_test_results.py /workspace/test-results \
-          --suites standard zonal zonal-core hns \
+          --suites standard zonal zonal-core hns rcu hns-rcu \
           --failed-steps /workspace/FAILED \
           --max-chars 30000 || echo "⚠️ Could not summarize test results"
 
-        for suite in standard zonal zonal-core hns; do
+        for suite in standard zonal zonal-core hns rcu hns-rcu; do
           if [[ -f /workspace/test-results/$${suite}.log ]]; then
             echo "===== FULL LOG: $${suite} ====="
             cat /workspace/test-results/$${suite}.log
@@ -259,11 +299,14 @@ steps:
     env:
       - "SHORT_BUILD_ID=${_SHORT_BUILD_ID}"
       - "ZONE=${_ZONE}"
+      - "RCU_CROSS_ZONE=${_RCU_CROSS_ZONE}"
       - "PROJECT_ID=${PROJECT_ID}"
       - "WORKERS_STANDARD=${_WORKERS_STANDARD}"
       - "WORKERS_HNS=${_WORKERS_HNS}"
       - "WORKERS_ZONAL=${_WORKERS_ZONAL}"
       - "WORKERS_ZONAL_CORE=${_WORKERS_ZONAL_CORE}"
+      - "WORKERS_RCU=${_WORKERS_RCU}"
+      - "WORKERS_HNS_RCU=${_WORKERS_HNS_RCU}"
     waitFor: ["test-report"]
 
   # Fail the build if any previous step failed

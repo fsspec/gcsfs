@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# cleanup-leaked-resources: reap clusters and checkpoint buckets left behind by
+# cleanup-leaked-resources: reap clusters and per-run buckets left behind by
 # builds that have already ended, without touching resources that might belong
 # to a build still in flight.
+source "$(dirname "$0")/lib.sh"
 
 CURRENT_TIME=$(date +%s)
 # Must be >= the build `timeout` (21600s). A concurrently-running build's
@@ -22,18 +23,19 @@ while read -r name location create_time; do
   fi
 done <<< "$CLUSTERS"
 
-# Clean up leaked checkpoint buckets. Scope the listing to this prefix's
-# ephemeral checkpoint buckets so the shared results bucket is never a
-# candidate; the in-loop anchored match is kept as a second guard.
-BUCKETS=$(gcloud storage buckets list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-macrobench-checkpoint-'" --format="value(name,creation_time)")
+# Clean up leaked per-run checkpoint and dataset buckets, with their Rapid
+# Cache Ultra caches. Scope the listing to this prefix's ephemeral buckets so
+# the shared results bucket is never a candidate; the in-loop anchored match is
+# kept as a second guard.
+BUCKETS=$(gcloud storage buckets list --project="${PROJECT_ID}" --filter="name~'${_INFRA_PREFIX}-macrobench-(checkpoint|dataset)-'" --format="value(name,creation_time)")
 while read -r name creation_time; do
   if [ -z "$name" ]; then continue; fi
-  if [[ "$name" =~ ^${_INFRA_PREFIX}-macrobench-checkpoint- ]]; then
+  if [[ "$name" =~ ^${_INFRA_PREFIX}-macrobench-(checkpoint|dataset)- ]]; then
     CREATED=$(date -d "$creation_time" +%s 2>/dev/null) || continue
     AGE=$((CURRENT_TIME - CREATED))
     if [ "$AGE" -gt "$THRESHOLD" ]; then
       echo "Deleting leaked bucket gs://$name"
-      gcloud storage rm --recursive "gs://$name" || true
+      delete_bucket_and_caches "$name"
     fi
   fi
 done <<< "$BUCKETS"

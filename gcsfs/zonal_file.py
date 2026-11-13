@@ -17,7 +17,7 @@ from gcsfs.core import (
 )
 from gcsfs.retry import HttpError
 from gcsfs.telemetry.wrapper import wrap_file_methods
-from gcsfs.utils import is_empty_range
+from gcsfs.utils import as_byte_buffer, is_empty_range
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS, sync_teardown
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
@@ -356,6 +356,12 @@ class ZonalFile(GCSFile):
         if self.forced:
             raise ValueError("This file has been force-flushed, can only close")
 
+        # Accept any bytes-like object, as a binary file does. The writer
+        # truth-tests and len()s its argument, which fails for a numpy array
+        # and counts elements, not bytes, for a typed buffer. bytes is passed
+        # through as is, so the writer's io.BytesIO shares it without a copy.
+        data = as_byte_buffer(data)
+
         # Lazily initialize the AsyncAppendableObjectWriter on the first write to avoid
         # unnecessary object creation for files that are opened but never written to.
         self._ensure_aaow()
@@ -375,6 +381,9 @@ class ZonalFile(GCSFile):
         """
         if self.closed:
             raise ValueError("Flush on closed file.")
+        if self.readable():
+            # no-op to flush on read-mode
+            return
         if self.forced:
             if force:
                 raise ValueError("Force flush cannot be called more than once.")
@@ -384,10 +393,6 @@ class ZonalFile(GCSFile):
             return
         if force:
             self.forced = True
-
-        if self.readable():
-            # no-op to flush on read-mode
-            return
 
         # Case 1: Intermediate flush (force=False)
         # If no data has been written (aaow is None), there is nothing to flush.

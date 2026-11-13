@@ -58,6 +58,9 @@ substitutions:
   _WORKLOAD_TIMEOUT_SECONDS: "14400"
   _JOBSET_VERSION: "v0.12.0"
   _SKIP_CLEANUP: "false"
+  # *_rcu_warm only: seconds to wait after the warm-up reads for the cache to
+  # ingest the objects. Empty => 120 + 1.5 per GiB of the warmed objects.
+  _RCU_WARMUP_SETTLE_SECONDS: ""
 
 # Each step's logic lives in scripts/<step>.sh; the step bodies below are just
 # the env wiring (Cloud Build substitutions reach the scripts as environment
@@ -100,6 +103,7 @@ steps:
       - "_DATALOADER_PREFETCH_FACTOR=${_DATALOADER_PREFETCH_FACTOR}"
       - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
       - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
+      - "_RCU_WARMUP_SETTLE_SECONDS=${_RCU_WARMUP_SETTLE_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/init_variables.sh"]
     waitFor: ["-"]
 
@@ -141,6 +145,22 @@ steps:
     args: ["cloudbuild/macrobenchmarks/scripts/create_cluster.sh"]
     waitFor: ["init-variables"]
 
+  # *_rcu_* only: stage the dataset in the state the bucket type measures.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "rcu-stage"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_DATASET_PATH=${_DATASET_PATH}"
+      - "_IMAGE=${_IMAGE}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
+    args: ["cloudbuild/macrobenchmarks/scripts/rcu_stage.sh"]
+    waitFor: ["create-cluster", "create-buckets"]
+
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "seed-checkpoint"
     entrypoint: "bash"
@@ -149,6 +169,7 @@ steps:
       - "PROJECT_ID=${PROJECT_ID}"
       - "_ZONE=${_ZONE}"
       - "_WORKLOAD=${_WORKLOAD}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_MODEL_ID=${_MODEL_ID}"
       - "_IMAGE=${_IMAGE}"
@@ -171,7 +192,26 @@ steps:
       - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
       - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/seed_checkpoint.sh"]
-    waitFor: ["create-cluster", "create-buckets"]
+    waitFor: ["rcu-stage"]
+
+  # *_rcu_* only: put the seed checkpoint and the dataset in the state the
+  # bucket type measures (warm-up reads, or fresh copies for cold) before
+  # run-workload starts the clock.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "rcu-prepare-reads"
+    entrypoint: "bash"
+    allowFailure: true
+    env:
+      - "PROJECT_ID=${PROJECT_ID}"
+      - "_ZONE=${_ZONE}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
+      - "_DATASET_PATH=${_DATASET_PATH}"
+      - "_IMAGE=${_IMAGE}"
+      - "_REQUIREMENTS=${_REQUIREMENTS}"
+      - "_MACHINE_TYPE=${_MACHINE_TYPE}"
+      - "_RCU_WARMUP_SETTLE_SECONDS=${_RCU_WARMUP_SETTLE_SECONDS}"
+    args: ["cloudbuild/macrobenchmarks/scripts/rcu_prepare_reads.sh"]
+    waitFor: ["seed-checkpoint"]
 
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "run-workload"
@@ -181,6 +221,7 @@ steps:
       - "PROJECT_ID=${PROJECT_ID}"
       - "_ZONE=${_ZONE}"
       - "_WORKLOAD=${_WORKLOAD}"
+      - "_BUCKET_TYPE=${_BUCKET_TYPE}"
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
       - "_MODEL_ID=${_MODEL_ID}"
@@ -208,7 +249,7 @@ steps:
       - "_TORCH_DISTRIBUTED_TIMEOUT_SECONDS=${_TORCH_DISTRIBUTED_TIMEOUT_SECONDS}"
       - "_WORKLOAD_TIMEOUT_SECONDS=${_WORKLOAD_TIMEOUT_SECONDS}"
     args: ["cloudbuild/macrobenchmarks/scripts/run_workload.sh"]
-    waitFor: ["seed-checkpoint"]
+    waitFor: ["rcu-prepare-reads"]
 
   # Runs our Python metrics code, so it uses a pinned Python image: the gcloud
   # image deliberately ships no system python3/pip3. It must not call gcloud;
