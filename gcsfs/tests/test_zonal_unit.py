@@ -1000,7 +1000,7 @@ async def test_cat_ranges_zonal_closes_all_buffers_when_close_raises(
     assert all(b.close.call_count == 1 for b in created)
 
 
-def test_resolve_cache_config():
+def test_resolve_cache_config(monkeypatch):
     """Tests _resolve_cache_config logic under various kwargs configurations."""
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
@@ -1026,6 +1026,19 @@ def test_resolve_cache_config():
     # 4. kwargs is None
     c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(None)
     assert c_type == "adaptive"
+    assert c_source == "default"
+
+    # 5. Disabled via kwarg
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(
+        {"use_experimental_adaptive_prefetching": False}
+    )
+    assert c_type == "readahead"
+    assert c_source == "default"
+
+    # 6. Disabled via env var
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config({})
+    assert c_type == "readahead"
     assert c_source == "default"
 
 
