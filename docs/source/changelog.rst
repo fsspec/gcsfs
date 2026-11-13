@@ -15,6 +15,15 @@ Unreleased
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
 
+* ``open()`` for reading now pins the object generation that is current at open
+  time, and every read through that file (including the prefetcher's concurrent
+  fetches) requests that generation, so a file that is overwritten while open
+  keeps returning the version that was opened (on a bucket without object
+  versioning, where the old generation is deleted, those reads fail instead of
+  mixing bytes from two versions). Reads from a file opened with an explicit
+  ``generation=`` or a ``#<generation>`` path also request that generation
+  instead of the latest version (#601).
+
 2026.10.0
 ---------
 
