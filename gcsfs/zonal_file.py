@@ -356,6 +356,12 @@ class ZonalFile(GCSFile):
         if self.forced:
             raise ValueError("This file has been force-flushed, can only close")
 
+        # Accept any bytes-like object, as a binary file does. The writer
+        # truth-tests and len()s its argument, which fails for a numpy array
+        # and counts elements, not bytes, for a typed buffer; a flat byte view
+        # gives it bytes semantics without a copy.
+        data = memoryview(data).cast("B")
+
         # Lazily initialize the AsyncAppendableObjectWriter on the first write to avoid
         # unnecessary object creation for files that are opened but never written to.
         self._ensure_aaow()

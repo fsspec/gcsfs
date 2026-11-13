@@ -6,6 +6,7 @@ behavior belongs in test_core.py; HNS-specific behavior belongs in
 test_hns_unit.py or test_hns.py.
 """
 
+import array
 import asyncio
 import logging
 import os
@@ -422,6 +423,38 @@ def test_zonal_file_write_success(extended_gcsfs, zonal_write_mocks, file_path):
         )
     else:
         assert extended_gcsfs.cat(file_path) == data1 + data2
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        bytearray(b"bytearray"),
+        memoryview(b"memoryview"),
+        array.array("i", [1, 2, 3]),
+        memoryview(array.array("d", [1.5, 2.5])),
+    ],
+    ids=["bytearray", "memoryview", "typed_array", "typed_memoryview"],
+)
+def test_zonal_file_write_accepts_any_bytes_like_object(
+    extended_gcsfs, zonal_write_mocks, file_path, data
+):
+    """write() takes any bytes-like object, as a binary file does, and counts
+    bytes: len() of a typed buffer counts its elements instead."""
+    payload = bytes(memoryview(data))
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+        assert f.write(data) == len(payload)
+        assert f.loc == len(payload)
+
+    if zonal_write_mocks:
+        # The writer truth-tests and len()s what it is given, so it must get
+        # the data as flat bytes.
+        (appended,) = [
+            c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list
+        ]
+        assert len(appended) == len(payload)
+        assert bytes(appended) == payload
+    else:
+        assert extended_gcsfs.cat(file_path) == payload
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
