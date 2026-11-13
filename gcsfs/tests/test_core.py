@@ -2218,6 +2218,7 @@ def test_attrs(gcs):
     assert gcs.getxattr(a, "something") == "not"
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project(gcs_factory):
     gcs = gcs_factory(requester_pays=True, project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
@@ -2235,6 +2236,7 @@ def test_request_user_project(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project_string(gcs_factory):
     gcs = gcs_factory(requester_pays=TEST_PROJECT)
     assert gcs.requester_pays == TEST_PROJECT
@@ -2253,6 +2255,7 @@ def test_request_user_project_string(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_header(gcs_factory):
     gcs = gcs_factory(requester_pays=True)
     # test directly against `_call` to inspect the result

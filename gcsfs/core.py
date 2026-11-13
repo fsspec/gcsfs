@@ -494,6 +494,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 DeprecationWarning,
             )
 
+        # Prime background environment probe concurrently before credential discovery.
+        telemetry_manager.default_usage_tracker.warm_up()
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
