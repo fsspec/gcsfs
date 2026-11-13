@@ -457,6 +457,24 @@ def test_zonal_file_write_accepts_any_bytes_like_object(
         assert extended_gcsfs.cat(file_path) == payload
 
 
+def test_zonal_pipe_file_chunks_typed_buffer_by_bytes(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """chunksize counts bytes even when the data is a typed buffer."""
+    data = array.array("d", range(8))
+    payload = bytes(memoryview(data))
+
+    extended_gcsfs.pipe_file(file_path, data, chunksize=16, finalize_on_close=True)
+
+    if zonal_write_mocks:
+        appended = [
+            bytes(c.args[0]) for c in zonal_write_mocks["aaow"].append.await_args_list
+        ]
+        assert appended == [payload[i : i + 16] for i in range(0, len(payload), 16)]
+    else:
+        assert extended_gcsfs.cat(file_path) == payload
+
+
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode(extended_gcsfs, zonal_write_mocks, file_path):
     """Test that opening a ZonalFile in write mode initializes the writer."""

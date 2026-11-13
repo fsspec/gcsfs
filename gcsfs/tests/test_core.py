@@ -1,3 +1,4 @@
+import array
 import asyncio
 import base64
 import builtins
@@ -2352,6 +2353,31 @@ def test_pipe_small_cache_validity(gcs):
     ls_res = gcs.ls(f"gs://{folder}")
     assert len(ls_res) == 2
     assert f"{folder}/b" in ls_res
+
+
+def _numpy_int32():
+    return pytest.importorskip("numpy").arange(5, dtype="int32")
+
+
+@pytest.mark.parametrize(
+    "make_data, kwargs",
+    [
+        (lambda: array.array("d", [1.5, 2.5]), {}),
+        (_numpy_int32, {}),
+        # Large enough in bytes, and in elements, for a resumable upload.
+        (lambda: array.array("d", bytes(4 * 2**20)), {"chunksize": 2**18}),
+    ],
+    ids=["typed_array", "numpy", "typed_array_resumable"],
+)
+def test_pipe_file_accepts_any_bytes_like_object(gcs, make_data, kwargs):
+    """pipe_file uploads the bytes of any bytes-like object: len() of a typed
+    buffer counts elements, and a numpy array added to bytes broadcasts."""
+    data = make_data()
+    path = f"{TEST_BUCKET}/{uuid4()}"
+
+    gcs.pipe_file(path, data, **kwargs)
+
+    assert gcs.cat_file(path) == bytes(memoryview(data))
 
 
 def test_put_small_cache_validity(gcs):

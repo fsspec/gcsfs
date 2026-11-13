@@ -1835,6 +1835,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
         if_generation_match = _resolve_generation_match(mode, if_generation_match)
+        # Accept any bytes-like object. len() of a typed buffer counts
+        # elements, not bytes, and a numpy array added to the request body
+        # broadcasts; a flat byte view behaves like bytes without a copy.
+        data = memoryview(data).cast("B")
         size = len(data)
         out = None
         if size < chunksize:

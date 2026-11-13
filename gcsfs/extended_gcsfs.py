@@ -2538,7 +2538,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 # cache even if the write fails.
                 try:
                     try:
-                        with memoryview(data) as data_view:
+                        # A flat byte view, so chunksize counts bytes even for
+                        # a typed buffer.
+                        with memoryview(data).cast("B") as data_view:
                             for i in range(0, len(data_view), chunksize):
                                 await writer.append(data_view[i : i + chunksize])
                     except BaseException:
