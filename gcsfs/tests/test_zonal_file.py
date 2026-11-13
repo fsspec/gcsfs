@@ -322,6 +322,41 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
 
         mock_init_aaow.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    @pytest.mark.parametrize(
+        "data",
+        ["text", memoryview(bytes(8))[::2]],
+        ids=["str", "non_contiguous"],
+    )
+    async def test_pipe_file_rejected_data_does_not_open_writer(
+        self, bucket_layout, data
+    ):
+        """Data that is not bytes-like fails before the writer replaces the
+        object."""
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
+        fs._grpc_client = mock.MagicMock()
+
+        with (
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=bucket_layout,
+            ),
+            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                new_callable=mock.AsyncMock,
+            ) as mock_init_aaow,
+        ):
+            with pytest.raises(TypeError):
+                await fs._pipe_file(f"{TEST_ZONAL_BUCKET}/dir/file.txt", data)
+
+        mock_init_aaow.assert_not_awaited()
+
 
 @pytest.fixture
 def mock_gcsfs():
@@ -425,21 +460,42 @@ def test_zonal_file_write_success(extended_gcsfs, zonal_write_mocks, file_path):
         assert extended_gcsfs.cat(file_path) == data1 + data2
 
 
+def _numpy():
+    return pytest.importorskip("numpy")
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 @pytest.mark.parametrize(
-    "data",
+    "make_data",
     [
-        bytearray(b"bytearray"),
-        memoryview(b"memoryview"),
-        array.array("i", [1, 2, 3]),
-        memoryview(array.array("d", [1.5, 2.5])),
+        lambda: bytearray(b"bytearray"),
+        lambda: memoryview(b"memoryview"),
+        lambda: array.array("i", [1, 2, 3]),
+        lambda: memoryview(array.array("d", [1.5, 2.5])),
+        lambda: _numpy().arange(5, dtype="int32"),
+        # bool() of this array is False, so a writer given it as is would
+        # silently drop its 4 bytes.
+        lambda: _numpy().zeros(1, dtype="int32"),
+        lambda: _numpy().arange(6, dtype="float32").reshape(2, 3),
+        lambda: _numpy().zeros((0, 3), dtype="float32"),
     ],
-    ids=["bytearray", "memoryview", "typed_array", "typed_memoryview"],
+    ids=[
+        "bytearray",
+        "memoryview",
+        "typed_array",
+        "typed_memoryview",
+        "numpy",
+        "numpy_single_zero",
+        "numpy_2d",
+        "numpy_empty_2d",
+    ],
 )
 def test_zonal_file_write_accepts_any_bytes_like_object(
-    extended_gcsfs, zonal_write_mocks, file_path, data
+    extended_gcsfs, zonal_write_mocks, file_path, make_data
 ):
     """write() takes any bytes-like object, as a binary file does, and counts
     bytes: len() of a typed buffer counts its elements instead."""
+    data = make_data()
     payload = bytes(memoryview(data))
     with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
         assert f.write(data) == len(payload)
@@ -451,12 +507,29 @@ def test_zonal_file_write_accepts_any_bytes_like_object(
         (appended,) = [
             c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list
         ]
+        assert bool(appended) is bool(payload)
         assert len(appended) == len(payload)
         assert bytes(appended) == payload
     else:
         assert extended_gcsfs.cat(file_path) == payload
 
 
+def test_zonal_file_write_passes_bytes_through(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """bytes reach the writer unwrapped: append() puts its argument in an
+    io.BytesIO, which shares bytes but copies any other buffer."""
+    if not zonal_write_mocks:
+        pytest.skip("Inspects the arguments of the mocked writer.")
+    data = b"x" * 100
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+        f.write(data)
+
+    (appended,) = [c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list]
+    assert appended is data
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_pipe_file_chunks_typed_buffer_by_bytes(
     extended_gcsfs, zonal_write_mocks, file_path
 ):

@@ -2355,19 +2355,26 @@ def test_pipe_small_cache_validity(gcs):
     assert f"{folder}/b" in ls_res
 
 
-def _numpy_int32():
-    return pytest.importorskip("numpy").arange(5, dtype="int32")
+def _numpy():
+    return pytest.importorskip("numpy")
 
 
 @pytest.mark.parametrize(
     "make_data, kwargs",
     [
-        (lambda: array.array("d", [1.5, 2.5]), {}),
-        (_numpy_int32, {}),
+        # consistency="size" checks the uploaded size against the byte count:
+        # bytes + a typed buffer already sends every byte.
+        (lambda: array.array("d", [1.5, 2.5]), {"consistency": "size"}),
+        (lambda: _numpy().arange(5, dtype="int32"), {}),
+        (lambda: _numpy().arange(6, dtype="int32").reshape(2, 3), {}),
+        (lambda: _numpy().zeros((0, 3), dtype="int32"), {}),
         # Large enough in bytes, and in elements, for a resumable upload.
-        (lambda: array.array("d", bytes(4 * 2**20)), {"chunksize": 2**18}),
+        (
+            lambda: array.array("d", bytes(4 * 2**20)),
+            {"chunksize": 2**18, "consistency": "size"},
+        ),
     ],
-    ids=["typed_array", "numpy", "typed_array_resumable"],
+    ids=["typed_array", "numpy", "numpy_2d", "numpy_empty_2d", "typed_array_resumable"],
 )
 def test_pipe_file_accepts_any_bytes_like_object(gcs, make_data, kwargs):
     """pipe_file uploads the bytes of any bytes-like object: len() of a typed

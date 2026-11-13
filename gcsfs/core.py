@@ -52,7 +52,7 @@ from .telemetry.wrapper import (
     mirror_gcs_methods,
     wrap_file_methods,
 )
-from .utils import is_empty_range
+from .utils import as_byte_buffer, is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
@@ -1835,10 +1835,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
         if_generation_match = _resolve_generation_match(mode, if_generation_match)
-        # Accept any bytes-like object. len() of a typed buffer counts
-        # elements, not bytes, and a numpy array added to the request body
-        # broadcasts; a flat byte view behaves like bytes without a copy.
-        data = memoryview(data).cast("B")
+        # Accept any bytes-like object: len() of a typed buffer counts
+        # elements, and a numpy array added to the request body broadcasts.
+        data = as_byte_buffer(data)
         size = len(data)
         out = None
         if size < chunksize:

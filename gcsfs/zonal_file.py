@@ -17,7 +17,7 @@ from gcsfs.core import (
 )
 from gcsfs.retry import HttpError
 from gcsfs.telemetry.wrapper import wrap_file_methods
-from gcsfs.utils import is_empty_range
+from gcsfs.utils import as_byte_buffer, is_empty_range
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS, sync_teardown
 
 from .caching import (  # noqa: F401 Unused import to register GCS-Specific caches, Please do not remove it.
@@ -358,9 +358,9 @@ class ZonalFile(GCSFile):
 
         # Accept any bytes-like object, as a binary file does. The writer
         # truth-tests and len()s its argument, which fails for a numpy array
-        # and counts elements, not bytes, for a typed buffer; a flat byte view
-        # gives it bytes semantics without a copy.
-        data = memoryview(data).cast("B")
+        # and counts elements, not bytes, for a typed buffer. bytes is passed
+        # through as is, so the writer's io.BytesIO shares it without a copy.
+        data = as_byte_buffer(data)
 
         # Lazily initialize the AsyncAppendableObjectWriter on the first write to avoid
         # unnecessary object creation for files that are opened but never written to.
