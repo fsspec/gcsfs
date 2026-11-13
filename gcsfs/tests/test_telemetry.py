@@ -2204,3 +2204,36 @@ def test_eager_task_factory_probe_does_not_deadlock(fake_host, monkeypatch):
         asyncio.run_coroutine_threadsafe(swap_factory(prev_factory), loop).result(
             timeout=5
         )
+
+
+def test_stub_environment_detection_skips_live_benchmark_runs(monkeypatch):
+    import gcsfs.tests.conftest as tests_conftest
+
+    def make_request(run_benchmarks):
+        return types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                getoption=lambda opt: (
+                    run_benchmarks if opt == "--run-benchmarks" else False
+                )
+            )
+        )
+
+    monkeypatch.setattr(EnvironmentDetector, "detect", _REAL_ENVIRONMENT_DETECT)
+
+    bench_gen = tests_conftest._stub_environment_detection.__wrapped__(
+        make_request(run_benchmarks=True)
+    )
+    next(bench_gen)
+    try:
+        assert EnvironmentDetector.detect is _REAL_ENVIRONMENT_DETECT
+    finally:
+        bench_gen.close()
+
+    unit_gen = tests_conftest._stub_environment_detection.__wrapped__(
+        make_request(run_benchmarks=False)
+    )
+    next(unit_gen)
+    try:
+        assert EnvironmentDetector().detect() is None
+    finally:
+        unit_gen.close()
