@@ -2297,9 +2297,10 @@ def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_fa
         fs.ls(requester_pays_bucket)
 
 
-def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
+def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""
+    # The gcs fixture creates TEST_BUCKET.
     fs = gcs_factory(requester_pays=True)
     file_path = f"{TEST_BUCKET}/test_req_pays_data_{uuid.uuid4().hex}"
     data = b"test data"
