@@ -1609,14 +1609,38 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
 
 
 @mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
+def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs, monkeypatch):
     """Tests dynamic cache_type resolution for ZonalFile."""
-    # 1. Default -> cache_type="adaptive"
+    # 1. Default -> cache_type="adaptive", cache_source="default"
     zf_default = ZonalFile(
         gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb"
     )
     assert zf_default.cache_type == "adaptive"
+    assert zf_default.cache_source == "default"
     zf_default.close()
+
+    # 1b. Opt-out via kwarg -> cache_type="readahead", cache_source="default"
+    zf_no_prefetch = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        use_experimental_adaptive_prefetching=False,
+    )
+    assert zf_no_prefetch.cache_type == "readahead"
+    assert zf_no_prefetch.cache_source == "default"
+    zf_no_prefetch.close()
+
+    # 1c. Opt-out via env var -> cache_type="readahead", cache_source="default"
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    zf_env_no_prefetch = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+    )
+    assert zf_env_no_prefetch.cache_type == "readahead"
+    assert zf_env_no_prefetch.cache_source == "default"
+    zf_env_no_prefetch.close()
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING")
 
     # 2. Explicit cache_type="readahead" -> cache_type="readahead"
     zf_readahead = ZonalFile(
@@ -1626,6 +1650,7 @@ def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
         cache_type="readahead",
     )
     assert zf_readahead.cache_type == "readahead"
+    assert zf_readahead.cache_source == "explicit"
     zf_readahead.close()
 
     # 3. Explicit cache_type="readahead_chunked" -> cache_type="readahead_chunked"

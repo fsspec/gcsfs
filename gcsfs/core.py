@@ -2530,18 +2530,32 @@ mirror_gcs_methods(GCSFileSystem)
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type=None):
+def _get_prefetcher_and_cache_config(cache_type=None, kwargs=None):
     """
     Resolves effective cache_type and cache_source ("explicit" vs "default").
 
     Rules:
     - If user explicitly sets cache_type (cache_type is not None),
       cache_type is used, and cache_source is "explicit".
-    - If cache_type is None, default to "adaptive" and cache_source is "default".
+    - If cache_type is None and adaptive prefetching is enabled (default),
+      cache_type is "adaptive" and cache_source is "default".
+    - If cache_type is None and adaptive prefetching is disabled via
+      use_experimental_adaptive_prefetching or USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING,
+      fallback to "readahead" and cache_source is "default".
     """
     if cache_type is not None:
         return cache_type, "explicit"
-    return "adaptive", "default"
+    adaptive_prefetching = (kwargs or {}).get("use_experimental_adaptive_prefetching")
+    if adaptive_prefetching is None:
+        adaptive_prefetching = os.environ.get(
+            "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
+        )
+    use_adaptive = (
+        adaptive_prefetching.strip().lower() in ("true", "1")
+        if isinstance(adaptive_prefetching, str)
+        else bool(adaptive_prefetching)
+    )
+    return ("adaptive" if use_adaptive else "readahead"), "default"
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2689,7 +2703,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
-            cache_type
+            cache_type, kwargs
         )
         cache_options = dict(cache_options or {})
         if self.cache_type == "adaptive":
