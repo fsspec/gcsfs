@@ -100,3 +100,94 @@ def test_scale_axis_present():
     for c in scale:
         assert c.file_count * c.rows_per_file == base_rows
         assert f"-fc{c.file_count}x{c.rows_per_file}-" in c.name
+
+
+def test_feature_and_cache_variants():
+    cases = {
+        c.name: c
+        for c in RayDataReadConfigurator(CONFIG).generate_cases(include_disabled=True)
+        if c.sweep_axis in ("features", "gcsfs_cache")
+    }
+    stem = "read-ray-ptpq-shuf-nw0-rg1800-fc64x10920-feat1134v10-splitws8div"
+    assert set(cases) == {
+        f"{stem}-proj286r1-reg",
+        f"{stem}-proj286r16-reg",
+        f"{stem}-proj286r286-reg",
+        f"{stem}-reg",
+        f"{stem}-proj286r1-ctreadahead-bs5m-reg",
+        f"{stem}-proj286r1-ctreadahead-bs8m-reg",
+    }
+    projected = cases[f"{stem}-proj286r1-reg"]
+    assert projected.read_columns()[:2] == ["tokens", "label"]
+    assert len(projected.read_columns()) == 2 + 286
+    assert projected.extra_columns()["read_projected_feature_column_count"] == 286
+    assert projected.extra_columns()["read_projection_run_length_columns"] == 1
+    assert projected.cache_type is None and projected.block_size is None
+    contiguous = cases[f"{stem}-proj286r286-reg"]
+    assert len(contiguous.read_columns()) == 2 + 286
+    assert contiguous.extra_columns()["read_projection_run_length_columns"] == 286
+    every = cases[f"{stem}-reg"]
+    assert len(every.read_columns()) == 2 + 1134
+    assert every.extra_columns()["read_projection_run_length_columns"] is None
+    readahead = cases[f"{stem}-proj286r1-ctreadahead-bs5m-reg"]
+    assert (readahead.cache_type, readahead.block_size) == ("readahead", 5242880)
+    assert readahead.extra_columns()["gcsfs_read_cache_type"] == "readahead"
+    assert readahead.extra_columns()["gcsfs_read_block_size_bytes"] == 5242880
+
+
+def test_baseline_has_no_features_or_gcsfs_settings():
+    baseline = next(c for c in _cases() if c.sweep_axis == "baseline")
+    assert baseline.read_columns() == ["tokens", "label"]
+    assert baseline.cache_type is None and baseline.block_size is None
+    assert baseline.extra_columns()["parquet_feature_column_count"] is None
+
+
+@pytest.mark.parametrize(
+    "variant, match",
+    [
+        (
+            "feature_column_count: 10, projected_feature_count: 11",
+            "projected_feature_count",
+        ),
+        (
+            "fmt: text_parquet, feature_column_count: 10",
+            "only generated for pretok_parquet",
+        ),
+        (
+            "feature_column_count: 10, projected_feature_count: 10",
+            "use 0 to read every feature column",
+        ),
+        (
+            "feature_column_count: 10, projection_run_length: 4",
+            "projection_run_length needs",
+        ),
+        ("projection_run_length: 4", "projection_run_length needs"),
+        (
+            "feature_column_count: 10, projected_feature_count: 3, "
+            "projection_run_length: 4",
+            "between 1 and projected_feature_count",
+        ),
+    ],
+)
+def test_feature_validation(tmp_path, variant, match):
+    yaml_text = _YAML_WITH_BASELINE_CLASH.replace("    rounds: 5\n", "").replace(
+        "variants: []", f"variants:\n      - {{ axis: bad, {variant} }}"
+    )
+    (tmp_path / "configs.yaml").write_text(yaml_text)
+    with pytest.raises(ValueError, match=match):
+        RayDataReadConfigurator(str(tmp_path / "configs.py")).generate_cases()
+
+
+def test_columns_in_schema():
+    import json
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[7]
+    schema_path = (
+        root / "cloudbuild/subsystembenchmarks/subsystembenchmarks_schema.json"
+    )
+    with open(schema_path) as f:
+        schema_fields = {f["name"] for f in json.load(f)["schema"]["fields"]}
+    for c in RayDataReadConfigurator(CONFIG).generate_cases(include_disabled=True):
+        for col in c.extra_columns():
+            assert col in schema_fields, f"param column {col} missing from schema"

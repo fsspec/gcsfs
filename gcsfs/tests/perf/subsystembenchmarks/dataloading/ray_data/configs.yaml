@@ -32,3 +32,18 @@ scenarios:
       - { axis: "prefetch", prefetch_factor: 4 }
 
       - { axis: "workers", world_size: 4 }
+
+      # Wide table: 1,134 extra binary feature columns, read with a projection of 286
+      # (scattered, in blocks of 16 adjacent columns, or all together). Every projected
+      # column chunk becomes its own small range read unless its neighbours are projected too. Read throughput and amplification for these
+      # rows are relative to the whole table, so compare them with each other.
+      - { axis: "features", feature_column_count: 1134, projected_feature_count: 286 }
+      - { axis: "features", feature_column_count: 1134, projected_feature_count: 286, projection_run_length: 16 }
+      # Recommended layout: the same table and projection, with the 286 projected columns
+      # stored next to each other, so each row group is read with one large contiguous range.
+      - { axis: "features", feature_column_count: 1134, projected_feature_count: 286, projection_run_length: 286 }
+      - { axis: "features", feature_column_count: 1134, enabled: false }
+
+      # gcsfs cache for the projected read; compare with the first features row.
+      - { axis: "gcsfs_cache", feature_column_count: 1134, projected_feature_count: 286, cache_type: "readahead", block_size: 5242880 }
+      - { axis: "gcsfs_cache", feature_column_count: 1134, projected_feature_count: 286, cache_type: "readahead", block_size: 8388608 }

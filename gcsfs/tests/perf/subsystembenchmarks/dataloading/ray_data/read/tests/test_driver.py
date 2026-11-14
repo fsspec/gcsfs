@@ -169,3 +169,71 @@ def test_rows_in_batch_with_list_of_tensors():
 def test_rows_in_batch_with_list_of_strings():
     batch = {"text": ["sample1", "sample2", "sample3"]}
     assert driver._rows_in_batch(batch) == 3
+
+
+def test_driver_reads_projected_feature_columns(ray_cluster, tmp_path):
+    params = RayDataReadParameters(
+        name="test-features",
+        bucket_name="test-bucket",
+        bucket_type="regional",
+        rounds=2,
+        scenario="read",
+        framework="ray_data",
+        fmt="pretok_parquet",
+        file_count=3,
+        rows_per_file=40,
+        row_group_size=20,
+        seq_len=4,
+        feature_column_count=30,
+        feature_value_bytes=6,
+        projected_feature_count=7,
+        access="sequential",
+        num_workers=2,
+        batch_size=16,
+        split_by_node=False,
+        world_size=1,
+    )
+    prefix = f"{tmp_path}/features/"
+    params.ingest(prefix)
+
+    result = driver.RayDataReadDriver().run_read(prefix, params, manifest=None)
+    assert result.rows_per_epoch == [120, 120]
+    arrow_fs, paths = driver.resolve_parquet_source(prefix)
+    assert driver.build_dataset(arrow_fs, paths, params).schema().names == (
+        params.read_columns()
+    )
+
+
+def test_rows_in_batch_with_pyarrow_table():
+    assert driver._rows_in_batch(pa.table({"f0": [b"a", b"b", b"c"]})) == 3
+
+
+def test_cache_type_and_block_size_reach_gcsfs_after_pickling(monkeypatch):
+    import pickle
+
+    import gcsfs
+
+    seen = {}
+
+    def fake_open(self, path, mode="rb", block_size=None, **kwargs):
+        seen.clear()
+        seen.update(block_size=block_size or self.default_block_size, **kwargs)
+
+    monkeypatch.setattr(gcsfs.GCSFileSystem, "_open", fake_open)
+    fs = driver._GCSFileSystemWithCacheType(
+        cache_type="readahead", block_size=5 * 2**20, token="anon"
+    )
+    # Ray pickles the filesystem to its workers.
+    fs = pickle.loads(pickle.dumps(fs))
+
+    fs._open("bucket/key", "rb")
+    assert seen == {"cache_type": "readahead", "block_size": 5 * 2**20}
+    fs._open("bucket/key", "rb", cache_type="none")
+    assert seen["cache_type"] == "none"  # explicit wins
+    fs._open("bucket/key", "wb")
+    assert "cache_type" not in seen  # writes are untouched
+
+
+def test_cache_type_needs_gcsfs(parquet_dataset):
+    with pytest.raises(ValueError, match="need gcsfs"):
+        driver.resolve_parquet_source(parquet_dataset, cache_type="readahead")
