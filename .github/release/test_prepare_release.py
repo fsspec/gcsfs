@@ -192,17 +192,16 @@ def test_main_leaves_pyproject_untouched(tmp_path, monkeypatch):
     pyproject.write_text(original, encoding="utf-8")
     github_env = tmp_path / "github_env"
 
-    real_open = open
     github_env_encodings = []
 
     def tracking_open(file, *args, **kwargs):
         if str(file) == str(github_env):
             github_env_encodings.append(kwargs.get("encoding"))
-        return real_open(file, *args, **kwargs)
+        return open(file, *args, **kwargs)
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_ENV", str(github_env))
-    monkeypatch.setattr("builtins.open", tracking_open)
+    monkeypatch.setattr(prepare_release, "open", tracking_open, raising=False)
     monkeypatch.setattr("prepare_release.get_latest_tag", lambda: "2026.10.1")
     monkeypatch.setattr(
         "prepare_release.calculate_next_version", lambda tag: "2026.11.0"
