@@ -70,11 +70,14 @@ Feature Configuration & Disabling
 
 Adaptive prefetching is enabled by default as the ``adaptive`` cache type when ``cache_type`` is not explicitly set by the user, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
 
-To use a different cache or disable prefetching, explicitly specify a ``cache_type`` when opening a file (e.g., ``cache_type="readahead"`` or ``cache_type="none"``):
+To use a different cache or disable prefetching, specify ``cache_type`` when opening a file or set it as the default on ``GCSFileSystem`` (e.g., ``cache_type="readahead"`` or ``cache_type="none"``):
 
 .. code-block:: python
 
     gcs.open("bucket/file.txt", "rb", cache_type="readahead")
+
+    gcs = gcsfs.GCSFileSystem(cache_type="readahead")
+    gcs.open("bucket/file.txt", "rb")
 
 Limiting Prefetch Memory
 ------------------------

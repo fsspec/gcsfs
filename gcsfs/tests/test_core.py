@@ -3571,7 +3571,9 @@ def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
 
 
 def test_gcsfile_prefetch_and_cache_type_rules(gcs):
-    """Verify that adaptive cache is default when cache_type is not set, and explicit cache_type is respected."""
+    """Verify default adaptive cache, filesystem-level default cache_type, and per-call overrides."""
+    import pickle
+
     fn = f"{TEST_BUCKET}/cache_rules.txt"
     gcs.pipe(fn, b"HelloWorld")
 
@@ -3592,6 +3594,20 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.cache_type == "none"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
+
+    # 4. Filesystem-level default cache_type (including pickle and fsspec.open) and per-call override
+    base_opts = {
+        k: v for k, v in gcs.storage_options.items() if k != "skip_instance_cache"
+    }
+    fs_ra = pickle.loads(pickle.dumps(type(gcs)(**base_opts, cache_type="readahead")))
+    with fs_ra.open(fn, "rb") as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "explicit"
+        assert f.read() == b"HelloWorld"
+    with fs_ra.open(fn, "rb", cache_type="none") as f:
+        assert f.cache_type == "none"
+    with fsspec.open(f"gs://{fn}", "rb", **base_opts, cache_type="readahead") as f:
+        assert f.cache_type == "readahead"
 
 
 def test_cat_file_default_concurrency(gcs, skip_if_grpc_read):

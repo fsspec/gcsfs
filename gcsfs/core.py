@@ -430,6 +430,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     version_aware: bool
         Whether to support object versioning. If enabled this will require the
         user to have the necessary permissions for dealing with versioned objects.
+    cache_type: str, optional
+        Default read caching policy used by ``open()`` when ``cache_type`` is
+        not passed per call (e.g., ``"adaptive"``, ``"readahead"``, ``"none"``).
+        Can be overridden in ``open()``.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -458,6 +462,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
+        cache_type=None,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -474,6 +479,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
+        self.default_cache_type = cache_type
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
@@ -2383,12 +2389,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         autocommit=True,
         fixed_key_metadata=None,
         generation=None,
+        cache_type=None,
         **kwargs,
     ):
         """
         See ``GCSFile``.
 
         consistency: None or str
+            If None, use default for this instance
+        cache_type: None or str
             If None, use default for this instance
         """
         if block_size is None:
@@ -2399,6 +2408,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             path,
             mode,
             block_size,
+            cache_type=cache_type or self.default_cache_type,
             cache_options=cache_options,
             consistency=const,
             metadata=metadata,
