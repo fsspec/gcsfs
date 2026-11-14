@@ -190,9 +190,19 @@ def test_main_leaves_pyproject_untouched(tmp_path, monkeypatch):
     pyproject = tmp_path / "pyproject.toml"
     original = '[project]\ndependencies = [\n    "fsspec>=2026.9.0",\n]\n'
     pyproject.write_text(original, encoding="utf-8")
+    github_env = tmp_path / "github_env"
+
+    real_open = open
+    github_env_encodings = []
+
+    def tracking_open(file, *args, **kwargs):
+        if str(file) == str(github_env):
+            github_env_encodings.append(kwargs.get("encoding"))
+        return real_open(file, *args, **kwargs)
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("GITHUB_ENV", raising=False)
+    monkeypatch.setenv("GITHUB_ENV", str(github_env))
+    monkeypatch.setattr("builtins.open", tracking_open)
     monkeypatch.setattr("prepare_release.get_latest_tag", lambda: "2026.10.1")
     monkeypatch.setattr(
         "prepare_release.calculate_next_version", lambda tag: "2026.11.0"
@@ -205,3 +215,20 @@ def test_main_leaves_pyproject_untouched(tmp_path, monkeypatch):
 
     assert pyproject.read_text(encoding="utf-8") == original
     assert "2026.11.0" in changelog.read_text(encoding="utf-8")
+    assert github_env.read_text(encoding="utf-8") == (
+        "VERSION=2026.11.0\nBRANCH_NAME=release-2026.11.0\n"
+    )
+    assert github_env_encodings == ["utf-8"]
+
+
+def test_main_exits_nonzero_on_error(monkeypatch, capsys):
+    def mock_get_latest_tag_fail():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("prepare_release.get_latest_tag", mock_get_latest_tag_fail)
+
+    with pytest.raises(SystemExit) as exc_info:
+        prepare_release.main()
+
+    assert exc_info.value.code == 1
+    assert "Error: boom" in capsys.readouterr().err

@@ -145,7 +145,7 @@ def main():
         # 5. Output the version to GITHUB_ENV for downstream workflow consumption
         print(f"NEXT_VERSION={next_version}")
         if "GITHUB_ENV" in os.environ:
-            with open(os.environ["GITHUB_ENV"], "a") as gh_env:
+            with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as gh_env:
                 gh_env.write(f"VERSION={next_version}\n")
                 gh_env.write(f"BRANCH_NAME=release-{next_version}\n")
 
