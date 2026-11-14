@@ -3,6 +3,8 @@ Release Process
 
 This project uses CalVer for versioning.
 Releases are generally kept in sync with the ``fsspec`` monthly release cycle.
+This refers to release cadence only: the minimum ``fsspec`` version is not
+raised on each release (see `fsspec Dependency Policy`_).
 
 Automated Release Workflow
 --------------------------
@@ -14,7 +16,6 @@ The monthly release process is automated via GitHub Actions:
 
    - Calculates the next CalVer version.
    - Updates ``docs/source/changelog.rst`` with commit history since the last release.
-   - Updates the minimum ``fsspec`` dependency in ``pyproject.toml``.
    - Creates a release branch and opens a Pull Request labeled ``autorelease`` (e.g., ``chore: release YYYY.M.PATCH``).
 
 2. **Review and Merge:**
@@ -37,13 +38,22 @@ Maintainers can also execute a release manually:
 
    - Verify that the CI pipeline is passing on the ``main`` branch.
    - Update ``docs/source/changelog.rst`` manually with the changes for the new version following the existing format.
-   - Update the minimum ``fsspec`` dependency in ``pyproject.toml`` if necessary.
+   - Do not change the ``fsspec`` dependency as part of a release; see `fsspec Dependency Policy`_.
    - Commit the updates and merge them to the ``main`` branch.
 
 2. **Execution:**
 
    - Create and push a git tag matching the CalVer version pattern (e.g., ``git tag 2026.6.0 && git push origin 2026.6.0``).
    - Pushing the tag directly triggers the **Release** workflow, which builds artifacts, runs end-to-end tests, creates a GitHub Release, and publishes to PyPI.
+
+fsspec Dependency Policy
+------------------------
+
+Raise the ``fsspec`` lower bound only when gcsfs code requires a feature or
+fix first released in that ``fsspec`` version, and name it in the PR (e.g.
+#993 needed the ``adaptive`` cache from ``2026.9.0``). Do not raise it just to
+match the latest ``fsspec`` or as part of a release PR. Do not add an upper
+bound.
 
 Verification
 ------------
