@@ -14,7 +14,6 @@ The monthly release process is automated via GitHub Actions:
 
    - Calculates the next CalVer version.
    - Updates ``docs/source/changelog.rst`` with commit history since the last release.
-   - Updates the minimum ``fsspec`` dependency in ``pyproject.toml``.
    - Creates a release branch and opens a Pull Request labeled ``autorelease`` (e.g., ``chore: release YYYY.M.PATCH``).
 
 2. **Review and Merge:**

@@ -180,42 +180,28 @@ def test_update_changelog_file_short_underline(tmp_path):
         )
 
 
-def test_update_fsspec_dependency(tmp_path):
+def test_main_leaves_pyproject_untouched(tmp_path, monkeypatch):
+    (tmp_path / "docs" / "source").mkdir(parents=True)
+    changelog = tmp_path / "docs" / "source" / "changelog.rst"
+    changelog.write_text(
+        "Changelog\n=========\n\n2026.10.1\n---------\n\n* Previous change\n",
+        encoding="utf-8",
+    )
     pyproject = tmp_path / "pyproject.toml"
-    initial_content = """[project]
-name = "gcsfs"
-dependencies = [
-    "aiohttp>=3.9.0",
-    "fsspec>=2026.3.0",
-    "google-auth>=1.2",
-]
-"""
-    pyproject.write_text(initial_content, encoding="utf-8")
+    original = '[project]\ndependencies = [\n    "fsspec>=2026.9.0",\n]\n'
+    pyproject.write_text(original, encoding="utf-8")
 
-    prepare_release.update_fsspec_dependency(str(pyproject), 2026, 6)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_ENV", raising=False)
+    monkeypatch.setattr("prepare_release.get_latest_tag", lambda: "2026.10.1")
+    monkeypatch.setattr(
+        "prepare_release.calculate_next_version", lambda tag: "2026.11.0"
+    )
+    monkeypatch.setattr(
+        "prepare_release.get_changelog_entries", lambda tag: ["* New feature"]
+    )
 
-    expected_content = """[project]
-name = "gcsfs"
-dependencies = [
-    "aiohttp>=3.9.0",
-    "fsspec>=2026.6.0",
-    "google-auth>=1.2",
-]
-"""
-    assert pyproject.read_text(encoding="utf-8") == expected_content
+    prepare_release.main()
 
-
-def test_update_fsspec_dependency_not_found(tmp_path):
-    pyproject = tmp_path / "pyproject.toml"
-    initial_content = """[project]
-name = "gcsfs"
-dependencies = [
-    "aiohttp>=3.9.0",
-]
-"""
-    pyproject.write_text(initial_content, encoding="utf-8")
-
-    with pytest.raises(
-        ValueError, match="Could not find fsspec dependency in pyproject.toml"
-    ):
-        prepare_release.update_fsspec_dependency(str(pyproject), 2026, 6)
+    assert pyproject.read_text(encoding="utf-8") == original
+    assert "2026.11.0" in changelog.read_text(encoding="utf-8")
