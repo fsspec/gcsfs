@@ -27,7 +27,7 @@ def _telemetry_context(tokens_map: Optional[Dict[str, str]] = None):
     token = set_telemetry_context(
         tokens_map
         if tokens_map is not None
-        else manager.default_usage_tracker.collect_tokens_map()
+        else manager.default_usage_tracker.collect_tokens_map(call_scoped_only=True)
     )
     try:
         yield
@@ -85,7 +85,9 @@ def _gcs_async_wrapper(func: Callable, super_cls: Optional[type] = None) -> Call
         async def gen_wrapper(*args, **kwargs):
             target, pass_args = _resolve(args)
             # Detect once per iteration; scope context to each step so it never leaks to the consumer
-            tokens_map = manager.default_usage_tracker.collect_tokens_map()
+            tokens_map = manager.default_usage_tracker.collect_tokens_map(
+                call_scoped_only=True
+            )
             gen = target(*pass_args, **kwargs)
             try:
                 while True:
@@ -138,7 +140,9 @@ def _gcs_sync_wrapper(func: Callable) -> Callable:
         def gen_wrapper(*args, **kwargs):
             self, actual_func, pass_args = _resolve_target_method(func, args)
             # Detect once on the caller thread and reuse it for every yielded step
-            tokens_map = manager.default_usage_tracker.collect_tokens_map()
+            tokens_map = manager.default_usage_tracker.collect_tokens_map(
+                call_scoped_only=True
+            )
             gen = actual_func(*pass_args, **kwargs)
             try:
                 while True:

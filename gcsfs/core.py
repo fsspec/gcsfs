@@ -52,7 +52,7 @@ from .telemetry.wrapper import (
     mirror_gcs_methods,
     wrap_file_methods,
 )
-from .utils import is_empty_range
+from .utils import as_byte_buffer, is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
@@ -430,6 +430,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     version_aware: bool
         Whether to support object versioning. If enabled this will require the
         user to have the necessary permissions for dealing with versioned objects.
+    cache_type: str, optional
+        Default read caching policy used by ``open()`` when ``cache_type`` is
+        not passed per call (e.g., ``"adaptive"``, ``"readahead"``, ``"none"``).
+        Can be overridden in ``open()``.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -458,6 +462,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
+        cache_type=None,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -474,6 +479,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
+        self.default_cache_type = cache_type
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
@@ -494,6 +500,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 DeprecationWarning,
             )
 
+        # Prime background environment probe concurrently before credential discovery.
+        telemetry_manager.default_usage_tracker.warm_up()
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
@@ -1835,6 +1843,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
         if_generation_match = _resolve_generation_match(mode, if_generation_match)
+        # Accept any bytes-like object: len() of a typed buffer counts
+        # elements, and a numpy array added to the request body broadcasts.
+        data = as_byte_buffer(data)
         size = len(data)
         out = None
         if size < chunksize:
@@ -2378,12 +2389,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         autocommit=True,
         fixed_key_metadata=None,
         generation=None,
+        cache_type=None,
         **kwargs,
     ):
         """
         See ``GCSFile``.
 
         consistency: None or str
+            If None, use default for this instance
+        cache_type: None or str
             If None, use default for this instance
         """
         if block_size is None:
@@ -2394,6 +2408,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             path,
             mode,
             block_size,
+            cache_type=cache_type or self.default_cache_type,
             cache_options=cache_options,
             consistency=const,
             metadata=metadata,

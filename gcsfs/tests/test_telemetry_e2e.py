@@ -19,6 +19,8 @@ recorded at the aiohttp layer, i.e. exactly what is sent over the wire.
 
 from __future__ import annotations
 
+import http.server
+import threading
 import uuid
 from urllib.parse import urlparse
 
@@ -26,7 +28,13 @@ import aiohttp
 import fsspec
 import pytest
 
+import gcsfs.telemetry.detector as detector_mod
+from gcsfs.telemetry.detector import EnvironmentDetector, FrameworkDetector
+from gcsfs.telemetry.manager import default_usage_tracker
 from gcsfs.tests.settings import TEST_BUCKET
+
+# Captured at import time, before session conftest stubs EnvironmentDetector.detect.
+_REAL_ENVIRONMENT_DETECT = EnvironmentDetector.detect
 
 
 class _WireRecorder:
@@ -148,3 +156,84 @@ def test_lightning_checkpoint_save_e2e(gcs, wire, tmp_path):
     trainer.save_checkpoint(f"gs://{path}")
     wire.assert_all_tagged("lightning")
     assert gcs.exists(path)
+
+
+def test_env_token_on_first_op_after_filesystem_init(
+    gcs, skip_if_grpc_read, wire, monkeypatch, tmp_path
+):
+    """Init warmup probes metadata and tags outgoing User-Agent headers with env/gce."""
+    path = f"{_unique_prefix()}/obj.bin"
+    gcs.pipe(path, b"hello world")
+
+    recorded_mds: list[tuple[str, str | None]] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            recorded_mds.append((self.path, self.headers.get("Metadata-Flavor")))
+            self.send_response(404)
+            self.send_header("Metadata-Flavor", "Google")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        for name in (
+            "NO_GCE_CHECK",
+            "DO_NOT_TRACK",
+            "GCSFS_NO_TELEMETRY",
+            "KUBERNETES_SERVICE_HOST",
+            "GCE_METADATA_HOST",
+            "GCE_METADATA_ROOT",
+            "GCE_METADATA_IP",
+            "K_SERVICE",
+            "K_REVISION",
+            "CLOUD_RUN_JOB",
+            "CLOUD_RUN_EXECUTION",
+            "CLOUD_RUN_WORKER_POOL",
+            "CLOUD_RUN_REVISION",
+            "GAE_SERVICE",
+            "GAE_INSTANCE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        monkeypatch.setattr(detector_mod, "_DEFAULT_METADATA_HOST", f"127.0.0.1:{port}")
+        monkeypatch.setattr(
+            detector_mod,
+            "_K8S_SERVICE_ACCOUNT_PATH",
+            str(tmp_path / "missing-sa"),
+        )
+        monkeypatch.setattr(EnvironmentDetector, "detect", _REAL_ENVIRONMENT_DETECT)
+        fresh_env = EnvironmentDetector()
+        fresh_env._gcp_bios = True
+        monkeypatch.setattr(
+            default_usage_tracker,
+            "detectors",
+            [FrameworkDetector(), fresh_env],
+        )
+
+        fs = type(gcs)(**gcs.storage_options, skip_instance_cache=True)
+        future = fresh_env._probe_future
+        if future is not None:
+            future.result(timeout=5)
+        assert fresh_env.detect() == "gce"
+
+        wire.clear()
+        assert fs.info(path)["name"] == path
+        with fs.open(path, "rb", cache_type="none") as f:
+            assert f.read() == b"hello world"
+
+        assert wire.user_agents
+        assert all("env/gce" in ua for ua in wire.user_agents)
+        assert recorded_mds == [
+            ("/computeMetadata/v1/instance/attributes/cluster-name", "Google")
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

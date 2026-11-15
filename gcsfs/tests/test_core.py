@@ -1,3 +1,4 @@
+import array
 import asyncio
 import base64
 import builtins
@@ -2217,6 +2218,7 @@ def test_attrs(gcs):
     assert gcs.getxattr(a, "something") == "not"
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project(gcs_factory):
     gcs = gcs_factory(requester_pays=True, project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
@@ -2234,6 +2236,7 @@ def test_request_user_project(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project_string(gcs_factory):
     gcs = gcs_factory(requester_pays=TEST_PROJECT)
     assert gcs.requester_pays == TEST_PROJECT
@@ -2252,6 +2255,7 @@ def test_request_user_project_string(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_header(gcs_factory):
     gcs = gcs_factory(requester_pays=True)
     # test directly against `_call` to inspect the result
@@ -2296,9 +2300,10 @@ def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_fa
         fs.ls(requester_pays_bucket)
 
 
-def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
+def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""
+    # The gcs fixture creates TEST_BUCKET.
     fs = gcs_factory(requester_pays=True)
     file_path = f"{TEST_BUCKET}/test_req_pays_data_{uuid.uuid4().hex}"
     data = b"test data"
@@ -2352,6 +2357,38 @@ def test_pipe_small_cache_validity(gcs):
     ls_res = gcs.ls(f"gs://{folder}")
     assert len(ls_res) == 2
     assert f"{folder}/b" in ls_res
+
+
+def _numpy():
+    return pytest.importorskip("numpy")
+
+
+@pytest.mark.parametrize(
+    "make_data, kwargs",
+    [
+        # consistency="size" checks the uploaded size against the byte count:
+        # bytes + a typed buffer already sends every byte.
+        (lambda: array.array("d", [1.5, 2.5]), {"consistency": "size"}),
+        (lambda: _numpy().arange(5, dtype="int32"), {}),
+        (lambda: _numpy().arange(6, dtype="int32").reshape(2, 3), {}),
+        (lambda: _numpy().zeros((0, 3), dtype="int32"), {}),
+        # Large enough in bytes, and in elements, for a resumable upload.
+        (
+            lambda: array.array("d", bytes(4 * 2**20)),
+            {"chunksize": 2**18, "consistency": "size"},
+        ),
+    ],
+    ids=["typed_array", "numpy", "numpy_2d", "numpy_empty_2d", "typed_array_resumable"],
+)
+def test_pipe_file_accepts_any_bytes_like_object(gcs, make_data, kwargs):
+    """pipe_file uploads the bytes of any bytes-like object: len() of a typed
+    buffer counts elements, and a numpy array added to bytes broadcasts."""
+    data = make_data()
+    path = f"{TEST_BUCKET}/{uuid4()}"
+
+    gcs.pipe_file(path, data, **kwargs)
+
+    assert gcs.cat_file(path) == bytes(memoryview(data))
 
 
 def test_put_small_cache_validity(gcs):
@@ -3534,7 +3571,7 @@ def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
 
 
 def test_gcsfile_prefetch_and_cache_type_rules(gcs, monkeypatch):
-    """Verify default adaptive cache, opt-out flags, and explicit cache_type precedence."""
+    """Verify default adaptive cache, opt-out flags, filesystem default, and explicit overrides."""
     import pickle
 
     fn = f"{TEST_BUCKET}/cache_rules.txt"
@@ -3582,6 +3619,20 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs, monkeypatch):
         assert f.cache_type == "none"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
+
+    # 7. Filesystem-level default cache_type (including pickle and fsspec.open) and per-call override
+    base_opts = {
+        k: v for k, v in gcs.storage_options.items() if k != "skip_instance_cache"
+    }
+    fs_ra = pickle.loads(pickle.dumps(type(gcs)(**base_opts, cache_type="readahead")))
+    with fs_ra.open(fn, "rb", use_experimental_adaptive_prefetching=True) as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "explicit"
+        assert f.read() == b"HelloWorld"
+    with fs_ra.open(fn, "rb", cache_type="none") as f:
+        assert f.cache_type == "none"
+    with fsspec.open(f"gs://{fn}", "rb", **base_opts, cache_type="readahead") as f:
+        assert f.cache_type == "readahead"
 
 
 def test_cat_file_default_concurrency(gcs, skip_if_grpc_read):

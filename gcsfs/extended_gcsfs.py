@@ -47,6 +47,7 @@ from gcsfs.telemetry.wrapper import (
     mirror_gcs_methods,
     with_telemetry_context,
 )
+from gcsfs.utils import as_byte_buffer
 from gcsfs.zb_hns_utils import MRD_MAX_RANGES, DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
 
@@ -522,6 +523,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         autocommit=True,
         fixed_key_metadata=None,
         generation=None,
+        cache_type=None,
         **kwargs,
     ):
         """
@@ -539,12 +541,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             kwargs["finalize_on_close"] = self._resolve_finalize_on_close(
                 bucket_layout, finalize_on_close
             )
-
         return file_cls(
             self,
             path,
             mode,
             block_size=block_size or self.default_block_size,
+            cache_type=cache_type or self.default_cache_type,
             cache_options=cache_options,
             consistency=consistency or self.consistency,
             metadata=metadata,
@@ -2493,7 +2495,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         ----------
         path: str
             Path to the file to be written.
-        data: bytes
+        data: bytes-like
             The content to write to the file.
         metadata: dict, optional
             Ignored by gRPC uploads.
@@ -2510,6 +2512,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if_generation_match: int, optional
             Only write if the object's current generation matches this value.
         """
+        # Before the writer opens and replaces the object, so that data that is
+        # not bytes-like fails first; chunksize then counts bytes.
+        data = as_byte_buffer(data)
         bucket, key, generation = self.split_path(path)
         layout = await self._lookup_bucket_layout(bucket)
         if self._uses_grpc_write_path(layout):
@@ -2540,9 +2545,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 # cache even if the write fails.
                 try:
                     try:
-                        with memoryview(data) as data_view:
-                            for i in range(0, len(data_view), chunksize):
-                                await writer.append(data_view[i : i + chunksize])
+                        # data is bytes or a flat byte view, so slices count
+                        # bytes. A bytes slice copies only what io.BytesIO
+                        # would copy from a view slice, and a slice covering
+                        # all of bytes is the object itself, which io.BytesIO
+                        # shares.
+                        for i in range(0, len(data), chunksize):
+                            await writer.append(data[i : i + chunksize])
                     except BaseException:
                         # Leave a partially written object unfinalized.
                         await zb_hns_utils.close_aaow(writer, finalize_on_close=False)
