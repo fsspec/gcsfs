@@ -1461,6 +1461,33 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
     zf2.close()
 
 
+@pytest.mark.parametrize(
+    "env_setting,extra_kwargs",
+    [("false", {}), (None, {"use_experimental_adaptive_prefetching": False})],
+)
+def test_zonal_file_opt_out_checks_out_readahead_pool(
+    mock_gcsfs, monkeypatch, env_setting, extra_kwargs
+):
+    if env_setting is None:
+        monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    else:
+        monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", env_setting)
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        **extra_kwargs,
+    )
+    try:
+        assert zf.cache_type == "readahead"
+        pool_kwargs = mock_gcsfs._mrd_pool_cache.get.await_args.kwargs
+        assert pool_kwargs["cache_type"] == "readahead"
+        assert pool_kwargs["cache_source"] == "default"
+    finally:
+        zf.close()
+
+
 @mock.patch("gcsfs.zonal_file.asyn.sync")
 def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs, monkeypatch):
     """Tests dynamic cache_type resolution for ZonalFile."""

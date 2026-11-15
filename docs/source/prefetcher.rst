@@ -4,7 +4,7 @@ GCSFS Adaptive Concurrent Prefetching: Architecture & Usage Guide
 
 **Note:** The adaptive prefetching engine, originally developed in ``gcsfs``, has been upstreamed directly into ``fsspec`` (starting in ``fsspec>=2026.9.0``) as ``fsspec.caching.AdaptiveReadaheadCache``. In ``gcsfs``, it is enabled by default via the ``"adaptive"`` cache type whenever ``cache_type`` is not explicitly set, using ``DEFAULT_GCSFS_CONCURRENCY=4``.
 
-To select an alternative cache or disable prefetching, pass the standard ``cache_type=`` argument (e.g., ``cache_type="readahead"``, ``cache_type="readahead_chunked"``, or ``cache_type="none"``). Standard caching options can be passed via ``cache_options`` (e.g., ``cache_options={"max_prefetch_size": 32 * 1024 * 1024}``).
+To select an alternative cache or disable prefetching, pass the standard ``cache_type=`` argument (e.g., ``cache_type="readahead"``, ``cache_type="readahead_chunked"``, or ``cache_type="none"``), or set ``use_experimental_adaptive_prefetching=False`` or ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING=false`` to fall back to ``readahead``. Standard caching options can be passed via ``cache_options`` (e.g., ``cache_options={"max_prefetch_size": 32 * 1024 * 1024}``).
 
 Additional caveats:
 - the concurrent fetching code in `_cat_file_concurrent` is expected to be eventually upstreamed to the
@@ -92,7 +92,7 @@ Lowering ``max_prefetch_size`` lowers the cap on read-ahead data held by each op
 Under the Hood Lifecycle
 ------------------------
 
-* During ``GCSFile.__init__``, if ``cache_type`` is unspecified or set to ``"adaptive"``, an ``AdaptiveReadaheadCache`` from ``fsspec`` is initialized.
+* During ``GCSFile.__init__``, if ``cache_type`` is ``"adaptive"``, or is unspecified and adaptive prefetching has not been turned off, an ``AdaptiveReadaheadCache`` from ``fsspec`` is initialized.
 * When ``file.read(size)`` is called, reads are served from the adaptive cache buffer while background tasks prefetch upcoming chunks concurrently.
 * Calling ``file.close()`` safely tears down any active prefetch tasks and releases buffer memory.
 

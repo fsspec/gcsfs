@@ -14,6 +14,10 @@ Unreleased
   needs the ``roles/iam.serviceAccountTokenCreator`` role on itself.
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
+* Restored the ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`` environment variable and the
+  ``use_experimental_adaptive_prefetching`` ``open()`` argument. Setting either to false
+  when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back
+  to ``readahead``, as in 2026.8.x (#1172).
 
 2026.10.0
 ---------

@@ -2710,6 +2710,11 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 )
             else:
                 kwargs.pop("max_prefetch_size", None)
+        elif self.cache_source == "default":
+            # Adaptive prefetching was turned off by flag or env var. The
+            # readahead fallback does not take the adaptive cache's options.
+            cache_options.pop("concurrency", None)
+            cache_options.pop("max_prefetch_size", None)
         # Kept so that a pickled read handle reopens with the same cache options.
         self._reopen_cache_options = dict(cache_options)
 
