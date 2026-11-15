@@ -3753,17 +3753,18 @@ def test_adaptive_opt_out_drops_adaptive_cache_options(
         monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
     else:
         monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", env_setting)
+    caller_options = {"max_prefetch_size": 2**20, "concurrency": 8}
     with GCSFile(
         fake_fs,
         "bucket/file.txt",
         mode="rb",
         size=100,
-        cache_options={"max_prefetch_size": 2**20, "concurrency": 8},
+        cache_options=caller_options,
         **extra_kwargs,
     ) as f:
         assert f.cache_type == "readahead"
         assert f.cache_source == "default"
-        assert "cache_options" not in f._reopen_kwargs()
+        assert f._reopen_kwargs()["cache_options"] == caller_options
 
     with pytest.raises(TypeError):
         GCSFile(
@@ -3776,16 +3777,34 @@ def test_adaptive_opt_out_drops_adaptive_cache_options(
         )
 
 
-def test_default_handle_reopens_in_opted_out_process(fake_fs, monkeypatch):
+def test_default_handle_reopens_across_opt_out_boundary(fake_fs, monkeypatch):
     monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
     with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
-        reopen_kwargs = f._reopen_kwargs()
-    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+        plain_reopen_kwargs = f._reopen_kwargs()
+        assert "cache_options" not in plain_reopen_kwargs
     with GCSFile(
-        fake_fs, "bucket/file.txt", mode="rb", size=100, **reopen_kwargs
-    ) as f2:
-        assert f2.cache_type == "readahead"
-        assert f2.cache_source == "default"
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_options={"max_prefetch_size": 2**20},
+    ) as f_tuned:
+        tuned_reopen_kwargs = f_tuned._reopen_kwargs()
+
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    for reopen_kwargs in (plain_reopen_kwargs, tuned_reopen_kwargs):
+        with GCSFile(
+            fake_fs, "bucket/file.txt", mode="rb", size=100, **reopen_kwargs
+        ) as f2:
+            assert f2.cache_type == "readahead"
+            assert f2.cache_source == "default"
+
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING")
+    with GCSFile(
+        fake_fs, "bucket/file.txt", mode="rb", size=100, **tuned_reopen_kwargs
+    ) as f3:
+        assert f3.cache_type == "adaptive"
+        assert f3.cache._prefetcher.max_prefetch_size == 2**20
 
 
 def test_prefetcher_config_options(fake_fs):
