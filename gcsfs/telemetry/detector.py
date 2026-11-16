@@ -87,9 +87,12 @@ class BaseDetector:
     call_scoped : bool, default True
         True if the value depends on the current call (e.g. the calling
         framework) and is captured once per call in the telemetry context.
-        False if the value is process-wide (e.g. the compute environment): it
-        is never stored in the per-call context, is read when each request's
-        tokens are built, and is started early by ``UsageMetricsTracker.warm_up``.
+        False if the value is process-wide (e.g. the compute environment):
+        ``detect()`` is not called when capturing the per-call snapshot, but a
+        value already present in the context is still returned.
+        Process-wide detectors are also started early by
+        ``UsageMetricsTracker.warm_up``. Detectors that do not define this
+        attribute are treated as call-scoped.
     """
 
     name: Dimension | str = ""

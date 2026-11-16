@@ -40,19 +40,17 @@ class UsageMetricsTracker:
             except Exception:
                 pass
 
-    def collect_tokens_map(self, *, call_scoped_only: bool = True) -> Dict[str, str]:
+    def collect_tokens_map(self, *, call_scoped_only: bool) -> Dict[str, str]:
         """
-        Collect active telemetry tokens across registered detectors.
+        Collect telemetry tokens. For each dimension, the value already in the
+        telemetry context is used if present; otherwise its detector is called.
 
         Parameters
         ----------
-        call_scoped_only : bool, default True
-            When True (the default), evaluate only detectors with
-            ``call_scoped = True``. Use this for maps stored in the per-call
-            telemetry context, so process-wide dimensions (e.g. ``env``) are
-            never frozen there before they resolve. Pass False only when
-            building outgoing request tokens, which read process-wide
-            dimensions fresh on every call.
+        call_scoped_only : bool
+            Required. True leaves out process-wide dimensions such as ``env``
+            (use it for the per-call snapshot); False includes them (use it for
+            request headers).
 
         Returns
         -------
