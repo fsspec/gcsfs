@@ -33,6 +33,7 @@ PLUMBING = (
     "FAILED_FILE",
     "BUILD_VARS_FILE",
     "WORKSPACE_DIR",
+    "TMPDIR",
 )
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
@@ -136,6 +137,7 @@ def env(tmp_path):
         "FAILED_FILE": str(tmp_path / "FAILED"),
         "BUILD_VARS_FILE": str(build_vars),
         "WORKSPACE_DIR": str(tmp_path),
+        "TMPDIR": str(tmp_path),
         "PROJECT_ID": "test-project",
         "LOCATION": "us-central1",
         "_INFRA_PREFIX": "pfx",

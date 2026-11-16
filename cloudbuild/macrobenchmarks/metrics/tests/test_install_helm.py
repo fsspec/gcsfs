@@ -77,8 +77,10 @@ def _helm_stub(bin_dir, version):
 
 
 def _run(script, bin_dir, tmp_path, tarball=None, **env):
+    (tmp_path / "tmpdir").mkdir(exist_ok=True)
     run_env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "TMPDIR": str(tmp_path / "tmpdir"),
         "WORKSPACE_DIR": str(tmp_path),
         "STUB_LOG": str(tmp_path / "calls.log"),
         "STUB_TARBALL": str(tarball) if tarball else "/nonexistent",
@@ -106,6 +108,18 @@ def test_install_helm_installs_the_pinned_release(bin_dir, tmp_path, tarball):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "installed-helm" in proc.stdout
     assert PINNED_URL in curl_log
+
+
+def test_install_helm_downloads_into_tmpdir(bin_dir, tmp_path, tarball):
+    # Honouring TMPDIR keeps test runs out of the host's /tmp.
+    path, sha = tarball
+
+    proc, _ = _run(
+        f"HELM_SHA256={sha}\ninstall_helm && command -v helm", bin_dir, tmp_path, path
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.strip().startswith(str(tmp_path / "tmpdir"))
 
 
 def test_install_helm_rejects_a_tarball_with_the_wrong_checksum(
@@ -205,14 +219,16 @@ def test_helm_steps_install_the_pinned_helm(env, step):  # noqa: F811
     assert not [c for c in calls if "raw.githubusercontent.com" in c]
 
 
-def test_run_workload_records_failure_when_helm_install_fails(env):  # noqa: F811
+@pytest.mark.parametrize("step", ["run-workload", "seed-checkpoint"])
+def test_helm_steps_record_failure_when_helm_install_fails(env, step):  # noqa: F811
     # Another helm version on PATH forces a download; the stub curl serves
-    # nothing, so the checksum check fails.
+    # nothing, so the checksum check fails. run-workload runs with set -eE,
+    # seed-checkpoint with set -e: both must record the step as failed.
     _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
 
-    _, calls = _run_step("run-workload", env, STUB_HELM_VERSION="v0.0.0")
+    _, calls = _run_step(step, env, STUB_HELM_VERSION="v0.0.0")
 
-    assert _failures(env) == ["run-workload"]
+    assert _failures(env) == [step]
     assert not _calls(calls, "helm install")
 
 
