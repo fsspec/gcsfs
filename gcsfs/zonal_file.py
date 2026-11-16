@@ -110,7 +110,7 @@ class ZonalFile(GCSFile):
         object_size = None
         if self.mode == "rb":
             resolved_cache_type, resolved_cache_source = (
-                _get_prefetcher_and_cache_config(cache_type)
+                _get_prefetcher_and_cache_config(cache_type, kwargs)
             )
             # Reject an unknown cache type before checking out a pool and stream.
             if resolved_cache_type not in caches:

@@ -3570,8 +3570,8 @@ def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
             )
 
 
-def test_gcsfile_prefetch_and_cache_type_rules(gcs):
-    """Verify default adaptive cache, filesystem-level default cache_type, and per-call overrides."""
+def test_gcsfile_prefetch_and_cache_type_rules(gcs, monkeypatch):
+    """Verify default adaptive cache, opt-out flags, filesystem default, and explicit overrides."""
     import pickle
 
     fn = f"{TEST_BUCKET}/cache_rules.txt"
@@ -3583,24 +3583,49 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.cache_source == "default"
         assert f.read() == b"HelloWorld"
 
-    # 2. User sets cache_type="readahead" -> cache_type is "readahead", cache_source is "explicit"
-    with gcs.open(fn, "rb", cache_type="readahead") as f:
+    # 2. Opt-out via open() kwarg -> fallback to "readahead", cache_source is "default"
+    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "default"
+        assert f.read() == b"HelloWorld"
+        with pickle.loads(pickle.dumps(f)) as f2:
+            assert f2.cache_type == "readahead"
+            assert f2.cache_source == "default"
+
+    # 3. Opt-out via env var -> fallback to "readahead", cache_source is "default"
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    with gcs.open(fn, "rb") as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "default"
+        assert f.read() == b"HelloWorld"
+
+    # 4. Explicit open() kwarg True overrides env var "false"
+    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=True) as f:
+        assert f.cache_type == "adaptive"
+        assert f.cache_source == "default"
+        assert f.read() == b"HelloWorld"
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING")
+
+    # 5. User sets cache_type="readahead" -> cache_type is "readahead", cache_source is "explicit"
+    with gcs.open(
+        fn, "rb", cache_type="readahead", use_experimental_adaptive_prefetching=True
+    ) as f:
         assert f.cache_type == "readahead"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
-    # 3. User explicitly sets cache_type="none" -> cache_source is "explicit"
+    # 6. User explicitly sets cache_type="none" -> cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="none") as f:
         assert f.cache_type == "none"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
-    # 4. Filesystem-level default cache_type (including pickle and fsspec.open) and per-call override
+    # 7. Filesystem-level default cache_type (including pickle and fsspec.open) and per-call override
     base_opts = {
         k: v for k, v in gcs.storage_options.items() if k != "skip_instance_cache"
     }
     fs_ra = pickle.loads(pickle.dumps(type(gcs)(**base_opts, cache_type="readahead")))
-    with fs_ra.open(fn, "rb") as f:
+    with fs_ra.open(fn, "rb", use_experimental_adaptive_prefetching=True) as f:
         assert f.cache_type == "readahead"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
@@ -3667,6 +3692,119 @@ def fake_fs():
     fs.info.return_value = {"size": 100}
     fs.loop = fsspec.asyn.get_loop()
     return fs
+
+
+@pytest.mark.parametrize(
+    "env_setting,open_kwarg,cache_type_arg,expected_cache,expected_source",
+    [
+        (None, None, None, "adaptive", "default"),
+        ("true", None, None, "adaptive", "default"),
+        ("1", None, None, "adaptive", "default"),
+        ("false", None, None, "readahead", "default"),
+        ("FALSE", None, None, "readahead", "default"),
+        ("0", None, None, "readahead", "default"),
+        (None, False, None, "readahead", "default"),
+        (None, "false", None, "readahead", "default"),
+        ("true", False, None, "readahead", "default"),
+        ("false", True, None, "adaptive", "default"),
+        ("false", "true", None, "adaptive", "default"),
+        ("false", None, "adaptive", "adaptive", "explicit"),
+        ("true", True, "none", "none", "explicit"),
+    ],
+)
+def test_adaptive_prefetching_flag_and_env(
+    fake_fs,
+    monkeypatch,
+    env_setting,
+    open_kwarg,
+    cache_type_arg,
+    expected_cache,
+    expected_source,
+):
+    if env_setting is None:
+        monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    else:
+        monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", env_setting)
+
+    extra_kwargs = {}
+    if open_kwarg is not None:
+        extra_kwargs["use_experimental_adaptive_prefetching"] = open_kwarg
+
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_type=cache_type_arg,
+        **extra_kwargs,
+    ) as f:
+        assert f.cache_type == expected_cache
+        assert f.cache_source == expected_source
+
+
+@pytest.mark.parametrize(
+    "env_setting,extra_kwargs",
+    [("false", {}), (None, {"use_experimental_adaptive_prefetching": False})],
+)
+def test_adaptive_opt_out_drops_adaptive_cache_options(
+    fake_fs, monkeypatch, env_setting, extra_kwargs
+):
+    if env_setting is None:
+        monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    else:
+        monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", env_setting)
+    caller_options = {"max_prefetch_size": 2**20, "concurrency": 8}
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_options=caller_options,
+        **extra_kwargs,
+    ) as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "default"
+        assert f._reopen_kwargs()["cache_options"] == caller_options
+
+    with pytest.raises(TypeError):
+        GCSFile(
+            fake_fs,
+            "bucket/file.txt",
+            mode="rb",
+            size=100,
+            cache_type="readahead",
+            cache_options={"max_prefetch_size": 2**20},
+        )
+
+
+def test_default_handle_reopens_across_opt_out_boundary(fake_fs, monkeypatch):
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
+        plain_reopen_kwargs = f._reopen_kwargs()
+        assert "cache_options" not in plain_reopen_kwargs
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_options={"max_prefetch_size": 2**20},
+    ) as f_tuned:
+        tuned_reopen_kwargs = f_tuned._reopen_kwargs()
+
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    for reopen_kwargs in (plain_reopen_kwargs, tuned_reopen_kwargs):
+        with GCSFile(
+            fake_fs, "bucket/file.txt", mode="rb", size=100, **reopen_kwargs
+        ) as f2:
+            assert f2.cache_type == "readahead"
+            assert f2.cache_source == "default"
+
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING")
+    with GCSFile(
+        fake_fs, "bucket/file.txt", mode="rb", size=100, **tuned_reopen_kwargs
+    ) as f3:
+        assert f3.cache_type == "adaptive"
+        assert f3.cache._prefetcher.max_prefetch_size == 2**20
 
 
 def test_prefetcher_config_options(fake_fs):
@@ -4565,6 +4703,19 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs, skip_if_grpc_rea
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:e" in ua for ua in user_agents)
+
+    # 5. Adaptive prefetcher disabled fallback -> User-Agent contains cache_type/readahead:d
+    with mock.patch.object(
+        gcs.session, "request", wraps=gcs.session.request
+    ) as mock_session_request:
+        with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+            _ = f.read(10)
+
+        user_agents = [
+            call.kwargs.get("headers", {}).get("User-Agent", "")
+            for call in mock_session_request.call_args_list
+        ]
+        assert any("cache_type/readahead:d" in ua for ua in user_agents)
 
 
 @pytest.mark.parametrize(

@@ -2540,18 +2540,32 @@ mirror_gcs_methods(GCSFileSystem)
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type=None):
+def _get_prefetcher_and_cache_config(cache_type=None, kwargs=None):
     """
     Resolves effective cache_type and cache_source ("explicit" vs "default").
 
     Rules:
     - If user explicitly sets cache_type (cache_type is not None),
       cache_type is used, and cache_source is "explicit".
-    - If cache_type is None, default to "adaptive" and cache_source is "default".
+    - If cache_type is None and adaptive prefetching is enabled (default),
+      cache_type is "adaptive" and cache_source is "default".
+    - If cache_type is None and adaptive prefetching is disabled via
+      use_experimental_adaptive_prefetching or USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING,
+      fallback to "readahead" and cache_source is "default".
     """
     if cache_type is not None:
         return cache_type, "explicit"
-    return "adaptive", "default"
+    adaptive_prefetching = (kwargs or {}).get("use_experimental_adaptive_prefetching")
+    if adaptive_prefetching is None:
+        adaptive_prefetching = os.environ.get(
+            "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
+        )
+    use_adaptive = (
+        adaptive_prefetching.strip().lower() in ("true", "1")
+        if isinstance(adaptive_prefetching, str)
+        else bool(adaptive_prefetching)
+    )
+    return ("adaptive" if use_adaptive else "readahead"), "default"
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2699,20 +2713,21 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
-            cache_type
+            cache_type, kwargs
         )
-        cache_options = dict(cache_options or {})
+        # Kept so that a pickled read handle reopens with the caller's cache options.
+        self._reopen_cache_options = dict(cache_options or {})
         if self.cache_type == "adaptive":
-            if "concurrency" not in cache_options:
-                cache_options["concurrency"] = self.concurrency
-            if "max_prefetch_size" not in cache_options:
-                cache_options["max_prefetch_size"] = kwargs.pop(
-                    "max_prefetch_size", MAX_PREFETCH_SIZE
-                )
-            else:
-                kwargs.pop("max_prefetch_size", None)
-        # Kept so that a pickled read handle reopens with the same cache options.
-        self._reopen_cache_options = dict(cache_options)
+            effective_cache_options = {
+                "concurrency": self.concurrency,
+                "max_prefetch_size": kwargs.get("max_prefetch_size", MAX_PREFETCH_SIZE),
+                **self._reopen_cache_options,
+            }
+        elif self.cache_source == "default":
+            # Adaptive prefetching was turned off. ReadAheadCache takes no options.
+            effective_cache_options = {}
+        else:
+            effective_cache_options = dict(self._reopen_cache_options)
 
         # _supports_append is an internal argument not meant to be used directly.
         # If True, allows opening file in append mode. This is generally not supported
@@ -2736,7 +2751,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             block_size,
             autocommit=autocommit,
             cache_type=self.cache_type,
-            cache_options=cache_options,
+            cache_options=effective_cache_options,
             **kwargs,
         )
         self.gcsfs = gcsfs
@@ -2772,8 +2787,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 prefetcher = BackgroundPrefetcher(
                     fetcher=self._async_fetch_range,
                     size=self.size,
-                    concurrency=cache_options.get("concurrency", self.concurrency),
-                    max_prefetch_size=cache_options.get("max_prefetch_size"),
+                    concurrency=effective_cache_options.get(
+                        "concurrency", self.concurrency
+                    ),
+                    max_prefetch_size=effective_cache_options.get("max_prefetch_size"),
                     loop=fs_loop,
                 )
                 cache._prefetcher = prefetcher
