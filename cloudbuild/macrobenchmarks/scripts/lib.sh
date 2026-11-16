@@ -53,6 +53,31 @@ skip_if_failed() {
   fi
 }
 
+# Helm release the helm steps install, pinned with its SHA-256 so the build
+# only ever runs this exact binary. To bump: set HELM_VERSION and copy the
+# digest from https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz.sha256sum
+# (cross-check it against the GitHub release notes).
+HELM_VERSION="v3.22.1"
+HELM_SHA256="896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea"
+
+# Put the pinned helm first on PATH. Downloads the release tarball, verifies it
+# against HELM_SHA256 and only then unpacks it; returns non-zero (with no new
+# helm on PATH) on any failure. A no-op when the pinned helm is already on PATH.
+install_helm() {
+  if [[ "$(helm version --template '{{.Version}}' 2>/dev/null)" == "${HELM_VERSION}" ]]; then
+    return 0
+  fi
+  local tarball="helm-${HELM_VERSION}-linux-amd64.tar.gz" dir
+  dir="$(mktemp -d)" || return 1
+  curl -fsSL --retry 3 -o "${dir}/${tarball}" "https://get.helm.sh/${tarball}" || return 1
+  if ! echo "${HELM_SHA256}  ${dir}/${tarball}" | sha256sum -c --quiet - >/dev/null 2>&1; then
+    echo "ERROR: ${tarball} does not match the pinned SHA-256 checksum" >&2
+    return 1
+  fi
+  tar -xzf "${dir}/${tarball}" -C "${dir}" linux-amd64/helm || return 1
+  export PATH="${dir}/linux-amd64:${PATH}"
+}
+
 # Create a per-run bucket per _BUCKET_TYPE (regional | zonal-RAPID | hns |
 # regional or HNS with a Rapid Cache Ultra cache).
 create_typed_bucket() {
