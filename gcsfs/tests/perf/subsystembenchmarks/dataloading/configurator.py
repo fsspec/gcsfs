@@ -17,6 +17,12 @@ _BUCKET = {
     "hns": "hns",
     "rapid_cache_cold": "rccold",
     "rapid_cache_warm": "rcwarm",
+    "standard_rcu_z": "rcuz",
+    "standard_rcu_warm": "rcuwarm",
+    "standard_rcu_cold": "rcucold",
+    "hns_rcu_z": "hnsrcuz",
+    "hns_rcu_warm": "hnsrcuwarm",
+    "hns_rcu_cold": "hnsrcucold",
 }
 
 # Traversal patterns published in the read_access_pattern column.

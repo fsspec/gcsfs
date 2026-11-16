@@ -116,10 +116,13 @@ Before creating the triggers, set up the following in your GCP project.
 | `init-variables` | Validates all substitutions and the operator-supplied buckets, derives the region and run identifiers. **Fails fast before anything is provisioned or billed.** |
 | `cleanup-leaked-resources` | Best-effort reap of orphaned infra from prior failed builds with the same `_INFRA_PREFIX`. |
 | `create-buckets` | Creates the per-run checkpoint bucket and per-run dataset bucket (copying `_DATASET_PATH` in), and ensures the shared results bucket exists. |
-| `create-cluster` | Creates the dedicated VPC/subnet, the GKE cluster + a `_MACHINE_TYPE` node pool (with TIER_1 networking when enabled), and installs the JobSet controller. |
+| `create-cluster` | Creates the dedicated VPC/subnet, the GKE cluster + a `_MACHINE_TYPE` node pool in `_ZONE` (with TIER_1 networking when enabled), and installs the JobSet controller. If the control plane can't be created in `_ZONE`, it retries in the region's other zones. |
+| `rcu-stage` | RCU bucket types only: stages the dataset in the state the type measures and checks its storage class (see [Rapid Cache Ultra bucket types](#rapid-cache-ultra-bucket-types)). |
 | `seed-checkpoint` | When `_SEED_CHECKPOINT=true` and no external checkpoint is given, generates a per-run checkpoint so the measured run exercises the **restore** path. |
+| `rcu-prepare-reads` | RCU bucket types only: checks the seed checkpoint's storage class, then warms the cache (warm) or replaces the objects the seed run read (cold). |
 | `run-workload` | `helm install`s the chart and polls the JobSet to completion, recording start/end timestamps for the scrape. |
-| `scrape-metrics` | Parses Cloud Logging into raw CSVs, aggregates them into one summary row (retrying for ingestion lag), folds in system metrics, and uploads the summary to the results bucket. |
+| `scrape-metrics` | Parses Cloud Logging into raw CSVs, aggregates them into one summary row (retrying for ingestion lag), and folds in system metrics. Runs on `python:3.12-slim` (the gcloud image ships no system `python3`). |
+| `upload-summary` | Uploads the summary CSV from `scrape-metrics` to the results bucket. |
 | `cleanup-helm` / `cleanup-cluster` / `delete-buckets` | Tear down the workload, cluster/network, and per-run buckets (skipped when `_SKIP_CLEANUP=true`). |
 | `check-failure` | Fails the build if any earlier step recorded a failure (steps run with `allowFailure` so cleanup always happens). |
 
@@ -130,7 +133,7 @@ Before creating the triggers, set up the following in your GCP project.
 | Substitution | Description |
 | :----------- | :---------- |
 | `_INFRA_PREFIX` | Prefix for all created resources (cluster, network, buckets, BigQuery dataset). Also selects the shared results bucket `gs://<_INFRA_PREFIX>-macrobench-results`. |
-| `_ZONE` | GCP zone for the cluster and zonal buckets (e.g. `us-central1-a`). The region is derived from it. |
+| `_ZONE` | GCP zone for the workload node pool and zonal buckets (e.g. `us-central1-a`), and the preferred zone for the cluster's control plane (which may fall back to another zone in the region). The region is derived from it. |
 | `_GKE_SERVICE_ACCOUNT` | Email of the node service account (see prerequisites). |
 | `_DATASET_PATH` | `gs://` directory of `*.parquet` shards (with a `text` column) to train on. Must match the run's region and bucket type. |
 | `_REQUIREMENTS` | Whitespace-separated immutable pip specs/URLs installed last. Every workload requires the gcsfs build under test; the Ray workload needs nothing else. |
@@ -141,7 +144,7 @@ Before creating the triggers, set up the following in your GCP project.
 | Substitution | Default | Description |
 | :----------- | :------ | :---------- |
 | `_WORKLOAD` | `hf-datasets-pytorch-lightning` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`: `hf-datasets-pytorch-lightning` or `ray-data-ray-train-pytorch`. The retained Cloud Build path is CPU-default for both. |
-| `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, or `hns`. Must match the dataset bucket. |
+| `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, `hns`, or a Rapid Cache Ultra type `{standard,hns}_rcu_{z,warm,cold}` (see below). `_DATASET_PATH` is copied into a fresh per-run bucket of this type, so its own type need not match. |
 | `_MACHINE_TYPE` | `c4-standard-192` | Node machine type for the workload pool. |
 | `_ENABLE_TIER1_NETWORKING` | `true` | Enable TIER_1 high-bandwidth egress (requires gVNIC / C-series). |
 | `_NODES` | `2` | Number of workload nodes. |
@@ -159,11 +162,12 @@ Before creating the triggers, set up the following in your GCP project.
 | `_PER_DEVICE_BATCH` | `8` | Per-rank micro-batch size. |
 | `_GRAD_ACCUM` | `1` | Gradient-accumulation steps. |
 | `_DATALOADER_WORKERS` | `16` | Dataloader worker processes per rank. |
-| `_IMAGE` | `nvcr.io/nvidia/pytorch:26.05-py3` | Container image for the pods. |
+| `_IMAGE` | `nvcr.io/nvidia/pytorch:26.10-py3` | Container image for the pods. |
 | `_TORCH_DISTRIBUTED_TIMEOUT_SECONDS` | `900` | Per-collective Torch distributed timeout in seconds. |
 | `_WORKLOAD_TIMEOUT_SECONDS` | `14400` | Workload/JobSet completion timeout in seconds (default 4 hours). |
 | `_JOBSET_VERSION` | `v0.12.0` | JobSet controller release to install. |
 | `_SKIP_CLEANUP` | `false` | Leave infra standing after the run (for debugging). |
+| `_RCU_WARMUP_SETTLE_SECONDS` | `""` | `*_rcu_warm` only: seconds to wait after the warm-up reads. Empty means 120 + 1.5 per GiB of the warmed objects. |
 
 ### Interaction notes
 
@@ -177,6 +181,36 @@ Before creating the triggers, set up the following in your GCP project.
 * **Region/type coupling**: `_BUCKET_TYPE`, `_ZONE`, and `_DATASET_PATH` must
   agree, and the results bucket must be co-located with the build `LOCATION` (the
   BigQuery dataset is created there and cannot read a cross-region bucket).
+
+### Rapid Cache Ultra bucket types
+
+`standard_rcu_{z,warm,cold}` (flat) and `hns_rcu_{z,warm,cold}` (HNS) give both
+per-run buckets an admit-on-first-miss Rapid Cache Ultra cache in `_ZONE`, the
+workload node pool's zone. The suffix sets the state of the objects the
+measured run reads:
+
+| State | Dataset | Seed checkpoint | Before `run-workload` |
+| :-- | :-- | :-- | :-- |
+| `z` | Copied in by gcsfs with `rcu_rapid_write=True` (`RAPID`), in a Job on the workload node pool | Written by gcsfs with `gcsfs.rcuRapidWrite=true` (`RAPID`) | Nothing |
+| `warm` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`, default) | A Job reads the first MiB of every dataset and seed object from `_ZONE`, then the step waits `_RCU_WARMUP_SETTLE_SECONDS` |
+| `cold` | Copied in by gcloud (`STANDARD`) | Written over HTTP (`STANDARD`, default) | Restore runs copy the dataset in again and the seed to a new prefix, because the seed run read them from `_ZONE` |
+
+* The storage class of every staged object is checked by listing, except the cold-restore re-copies, which gcloud writes as `STANDARD`.
+* Writes to RCU buckets default to HTTP (`STANDARD` objects). `*_rcu_z` sets
+  `gcsfs.rcuRapidWrite=true` (`FSSPEC_GCS_RCU_RAPID_WRITE="true"`) on both the
+  seed and workload releases so checkpoint saves write `RAPID` objects;
+  `*_rcu_warm` and `*_rcu_cold` leave it `false`, so their checkpoint saves
+  write `STANDARD` objects over HTTP (only `z` rows measure `RAPID` saves;
+  schedule fresh runs on `z` only).
+* Requirements: the project is allowlisted for Rapid Cache Ultra (flat buckets
+  have their own allowlist), `_ZONE` supports it, the gcsfs in `_REQUIREMENTS`
+  supports it (`rcu-stage` checks this), and `_CHECKPOINT_LOAD_PATH` is empty.
+* Warm rows are only meaningful where the zone ingests objects on read.
+* Bucket-level read metrics may not count bytes served by the cache. Compare
+  `standard_rcu_z` with a `zonal` run before trusting the read-bytes and
+  amplification columns of RCU rows.
+* `delete-buckets` disables the caches asynchronously, so deleting the buckets
+  can fail; `cleanup-leaked-resources` deletes them in a later build.
 
 ## Setting up the triggers
 

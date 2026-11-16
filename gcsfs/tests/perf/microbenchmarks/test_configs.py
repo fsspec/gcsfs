@@ -26,6 +26,7 @@ from gcsfs.tests.perf.microbenchmarks.listing.configs import (
     get_listing_benchmark_cases,
 )
 from gcsfs.tests.perf.microbenchmarks.open.configs import get_open_benchmark_cases
+from gcsfs.tests.perf.microbenchmarks.pipe.configs import get_pipe_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.put.configs import (
     PutConfigurator,
     get_put_benchmark_cases,
@@ -53,6 +54,9 @@ def mock_config_dependencies():
             {"regional": "test-bucket"},
         ),
         mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES", ""
+        ),
     ):
         yield
 
@@ -783,3 +787,188 @@ def test_benchmark_listing_fixture_helper_rejects_invalid_folders_and_files(
     )
     with pytest.raises(ValueError, match="require 0 < folders .* <= files"):
         next(gen)
+
+
+def test_bucket_name_map_maps_all_six_rcu_bucket_types():
+    """Verify flat and HNS RCU bucket_type variants map to their respective test buckets."""
+    from gcsfs.tests import settings
+    from gcsfs.tests.conftest import BUCKET_NAME_MAP
+
+    for b_type in ("standard_rcu_z", "standard_rcu_warm", "standard_rcu_cold"):
+        assert BUCKET_NAME_MAP[b_type] == settings.TEST_STANDARD_RCU_BUCKET
+
+    for b_type in ("hns_rcu_z", "hns_rcu_warm", "hns_rcu_cold"):
+        assert BUCKET_NAME_MAP[b_type] == settings.TEST_HNS_RCU_BUCKET
+
+
+@pytest.mark.parametrize(
+    "bucket_types_env,expected_resolved",
+    [
+        (
+            "",
+            {
+                "regional": "reg-bkt",
+                "standard_rcu_z": "std-rcu-bkt",
+                "standard_rcu_warm": "std-rcu-bkt",
+                "standard_rcu_cold": "std-rcu-bkt",
+                "hns_rcu_z": "hns-rcu-bkt",
+            },
+        ),
+        (
+            "standard_rcu_z, hns_rcu_z",
+            {
+                "regional": None,
+                "standard_rcu_z": "std-rcu-bkt",
+                "standard_rcu_warm": None,
+                "standard_rcu_cold": None,
+                "hns_rcu_z": "hns-rcu-bkt",
+            },
+        ),
+        (
+            "standard_rcu_warm standard_rcu_cold",
+            {
+                "regional": None,
+                "standard_rcu_z": None,
+                "standard_rcu_warm": "std-rcu-bkt",
+                "standard_rcu_cold": "std-rcu-bkt",
+                "hns_rcu_z": None,
+            },
+        ),
+    ],
+)
+def test_get_bucket_name_filters_by_benchmark_bucket_types(
+    bucket_types_env, expected_resolved
+):
+    """Verify BENCHMARK_BUCKET_TYPES selects specific variants on a shared RCU bucket."""
+    fake_map = {
+        "regional": "reg-bkt",
+        "standard_rcu_z": "std-rcu-bkt",
+        "standard_rcu_warm": "std-rcu-bkt",
+        "standard_rcu_cold": "std-rcu-bkt",
+        "hns_rcu_z": "hns-rcu-bkt",
+    }
+    with (
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BUCKET_NAME_MAP", fake_map
+        ),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES",
+            bucket_types_env,
+        ),
+    ):
+        configurator = configs.BaseBenchmarkConfigurator("dummy")
+        for b_type, expected_bucket in expected_resolved.items():
+            assert configurator.get_bucket_name(b_type) == expected_bucket
+
+
+def test_rcu_bucket_types_in_shipped_yaml_configs():
+    """Verify shipped YAML configs scope RCU to IO groups and deduplicate reopen."""
+    with (
+        mock.patch("gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER", ""),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES", ""
+        ),
+    ):
+        # Read IO groups: flat and HNS RCU (z, warm, cold)
+        read_cases = get_read_benchmark_cases()
+        assert {c.bucket_type for c in read_cases} == {
+            "regional",
+            "zonal",
+            "standard_rcu_z",
+            "standard_rcu_warm",
+            "standard_rcu_cold",
+            "hns_rcu_z",
+            "hns_rcu_warm",
+            "hns_rcu_cold",
+        }
+        assert {c.bucket_type for c in get_cat_benchmark_cases()} == {
+            "regional",
+            "zonal",
+            "standard_rcu_z",
+            "standard_rcu_warm",
+            "standard_rcu_cold",
+            "hns_rcu_z",
+            "hns_rcu_warm",
+            "hns_rcu_cold",
+        }
+        assert {c.bucket_type for c in get_cat_ranges_benchmark_cases()} == {
+            "regional",
+            "zonal",
+            "hns",
+            "standard_rcu_z",
+            "standard_rcu_warm",
+            "standard_rcu_cold",
+            "hns_rcu_z",
+            "hns_rcu_warm",
+            "hns_rcu_cold",
+        }
+
+        # read_reopen_fixed_duration: zonal keeps mrd_pool_sizes=[1, 4]; RCU keeps z/warm with mrd_pool_sizes=[1]
+        reopen_cases = [
+            c for c in read_cases if c.name.startswith("read_reopen_fixed_duration")
+        ]
+        assert len(reopen_cases) == 12
+        assert len({c.name for c in reopen_cases}) == 12
+        assert {
+            (c.bucket_type, c.mrd_pool_cache_size, c.mrd_pool_size)
+            for c in reopen_cases
+        } == {
+            ("zonal", 16, 1),
+            ("zonal", 16, 4),
+            ("zonal", 0, 1),
+            ("zonal", 0, 4),
+            ("standard_rcu_z", 16, 1),
+            ("standard_rcu_z", 0, 1),
+            ("standard_rcu_warm", 16, 1),
+            ("standard_rcu_warm", 0, 1),
+            ("hns_rcu_z", 16, 1),
+            ("hns_rcu_z", 0, 1),
+            ("hns_rcu_warm", 16, 1),
+            ("hns_rcu_warm", 0, 1),
+        }
+
+        # Write IO groups: only *_rcu_z among RCU types
+        for get_fn in (
+            get_write_benchmark_cases,
+            get_put_benchmark_cases,
+            get_pipe_benchmark_cases,
+        ):
+            assert {c.bucket_type for c in get_fn()} == {
+                "regional",
+                "zonal",
+                "standard_rcu_z",
+                "hns_rcu_z",
+            }
+
+        # Metadata, open, and comparison groups ship without RCU bucket types
+        for get_fn in (
+            get_listing_benchmark_cases,
+            get_delete_benchmark_cases,
+            get_rename_benchmark_cases,
+        ):
+            assert {c.bucket_type for c in get_fn()} == {"regional", "hns"}
+
+        for get_fn in (
+            get_glob_benchmark_cases,
+            get_info_benchmark_cases,
+            get_open_benchmark_cases,
+        ):
+            assert {c.bucket_type for c in get_fn()} == {"regional", "zonal", "hns"}
+
+        assert {c.bucket_type for c in get_comparison_benchmark_cases()} == {
+            "regional",
+            "zonal",
+        }
+
+    # --config read_reopen_fixed_duration must select both split scenario entries
+    with (
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_FILTER",
+            "read_reopen_fixed_duration",
+        ),
+        mock.patch(
+            "gcsfs.tests.perf.microbenchmarks.configs.BENCHMARK_BUCKET_TYPES", ""
+        ),
+    ):
+        filtered_reopen = get_read_benchmark_cases()
+        assert [c.name for c in filtered_reopen] == [c.name for c in reopen_cases]

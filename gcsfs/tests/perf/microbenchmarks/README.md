@@ -25,7 +25,7 @@ The benchmarks use a set of parameter classes to define the configuration for ea
 *   **Base Parameters**: Common to all benchmarks.
     *   `name`: Unique name for the benchmark case.
     *   `bucket_name`: The GCS bucket used.
-    *   `bucket_type`: Type of bucket (regional, zonal, hns).
+    *   `bucket_type`: Type of bucket (`regional`, `zonal`, `hns`, `standard_rcu_z`, `standard_rcu_warm`, `standard_rcu_cold`, `hns_rcu_z`, `hns_rcu_warm`, `hns_rcu_cold`).
     *   `threads`: Number of threads.
     *   `processes`: Number of processes.
     *   `files`: Number of files involved.
@@ -128,6 +128,9 @@ The `run.py` script is the central entry point for executing benchmarks. It hand
 | `--regional-bucket` | Name of the regional GCS bucket. | Yes* |
 | `--zonal-bucket` | Name of the zonal GCS bucket. | Yes* |
 | `--hns-bucket` | Name of the HNS GCS bucket. | Yes* |
+| `--standard-rcu-bucket` | Name of the flat (non-HNS) RCU-enabled GCS bucket. | Yes* |
+| `--hns-rcu-bucket` | Name of the HNS RCU-enabled GCS bucket. | Yes* |
+| `--bucket-types` | Optional subset of `bucket_type` values to run (for example, `standard_rcu_z standard_rcu_warm`). | No |
 | `--log` | Enable console logging (`true` or `false`). Default: `false`. | No |
 | `--log-level` | Logging level (e.g., `INFO`, `DEBUG`). Default: `DEBUG`. | No |
 

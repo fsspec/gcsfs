@@ -6,6 +6,7 @@ import pytest
 from gcsfs.tests.perf.microbenchmarks.cat_ranges.configs import (
     get_cat_ranges_benchmark_cases,
 )
+from gcsfs.tests.perf.microbenchmarks.conftest import get_round_file_paths
 from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
     run_single_threaded,
@@ -114,15 +115,24 @@ def test_cat_ranges_single_threaded(benchmark, gcsfs_benchmark_cat_ranges, monit
     gcs, file_paths, params = gcsfs_benchmark_cat_ranges
 
     chunk_sizes = params.chunk_sizes_bytes or params.chunk_size_bytes
-    paths, starts, ends = _generate_ranges(
-        file_paths,
-        params.file_size_bytes,
-        chunk_sizes,
-        params.num_ranges,
-        params.pattern,
-    )
-    total_bytes = sum(end - start for start, end in zip(starts, ends))
-    op_args = (gcs, paths, starts, ends, params.max_gap, params.batch_size)
+
+    def _build_round_args(round_paths):
+        r_paths, r_starts, r_ends = _generate_ranges(
+            round_paths,
+            params.file_size_bytes,
+            chunk_sizes,
+            params.num_ranges,
+            params.pattern,
+        )
+        return (gcs, r_paths, r_starts, r_ends, params.max_gap, params.batch_size)
+
+    op_args = _build_round_args(file_paths)
+    total_bytes = sum(end - start for start, end in zip(op_args[2], op_args[3]))
+    round_args_builder = None
+    if len(getattr(params, "round_file_paths", ())) > 1:
+        round_args_builder = lambda r: _build_round_args(
+            get_round_file_paths(params, file_paths, r)
+        )
 
     run_single_threaded(
         benchmark,
@@ -132,4 +142,5 @@ def test_cat_ranges_single_threaded(benchmark, gcsfs_benchmark_cat_ranges, monit
         op_args,
         BENCHMARK_GROUP,
         total_bytes=total_bytes,
+        round_args_builder=round_args_builder,
     )

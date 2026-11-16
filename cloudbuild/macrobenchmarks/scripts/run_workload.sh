@@ -2,13 +2,14 @@
 # run-workload: helm install the workload chart, then poll the JobSet until it
 # completes (recording start/end timestamps for the metric scrape) or fails /
 # times out.
-set -e
+# -E: also run the ERR trap for failures inside lib.sh functions.
+set -eE
 source "$(dirname "$0")/lib.sh"
 trap 'record_failure run-workload' ERR
 skip_if_failed
 source "${BUILD_VARS_FILE}"
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${_ZONE}" --project="${PROJECT_ID}"
+gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}"
 CHART="gcsfs/tests/perf/macrobenchmarks/workloads/${_WORKLOAD}/helm_chart"
 # Restore precedence: an external checkpoint wins; otherwise, when seeding is on,
 # restore the per-run seed produced by the seed-checkpoint step. Empty => fresh
@@ -17,7 +18,10 @@ EFFECTIVE_LOAD_PATH="${_CHECKPOINT_LOAD_PATH}"
 if [ -z "$EFFECTIVE_LOAD_PATH" ] && [ "${_SEED_CHECKPOINT}" = "true" ]; then
   EFFECTIVE_LOAD_PATH="${SEEDED_CKPT_PATH:-}"
 fi
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /workspace/start_time.txt
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${WORKSPACE_DIR}/start_time.txt"
+# shared_workload_helm_args sets gcsfs.rcuRapidWrite=true for *_rcu_z so
+# checkpoint writes stay RAPID, while *_rcu_warm and *_rcu_cold write STANDARD
+# over HTTP by default.
 shared_workload_helm_args
 helm install "$RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
   "${SHARED_HELM_ARGS[@]}" \
@@ -32,4 +36,8 @@ helm install "$RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
 if ! wait_for_jobset "$RUN_ID" run-workload; then
   exit 1
 fi
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /workspace/end_time.txt
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${WORKSPACE_DIR}/end_time.txt"
+# z rows measure RAPID saves; skip if no checkpoint was written (possible on short Ray runs).
+if [ "${RCU_STATE}" = "z" ] && gcloud storage objects list "gs://${CHECKPOINT_BUCKET}/checkpoints/**" --format="value(name)" 2>/dev/null | grep -q .; then
+  verify_storage_class "gs://${CHECKPOINT_BUCKET}/checkpoints/" RAPID
+fi

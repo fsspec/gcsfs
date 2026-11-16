@@ -1,0 +1,24 @@
+# Per-PR CI profile (selected by GCSFS_SUBSYSTEM_CONFIG=configs.ci.yaml in
+# cloudbuild/subsystembenchmarks/scripts/run-ci.sh). One small case that still crosses an
+# epoch boundary (rounds: 2) with persistent DataLoader workers (num_workers: 2) on 2 ranks.
+# Guarded by tests/test_ci_suite.py.
+common:
+  rounds: 2
+  seq_len: 2048
+  batch_size: 8
+  baseline:
+    fmt: "text_parquet"
+    file_count: 16
+    rows_per_file: 1800
+    row_group_size: 900
+    access: "shuffled"
+    num_workers: 2
+    prefetch_factor: 2
+    split_by_node: true
+    world_size: 2
+    shuffle_buffer_size: 1000
+    max_buffer_input_shards: 4
+
+scenarios:
+  - name: "read"
+    scenario: "read"

@@ -4,6 +4,7 @@ import time
 import fsspec
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointDriver
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import rcu
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
 
@@ -54,7 +55,9 @@ def run_checkpoint_case(
         if "read" in params.scenario:
             from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 
+            rcu.assert_storage_class(prefix, params.bucket_type)
             rapid_cache.warm_if_needed(prefix, params.bucket_type)
+            rcu.warm_if_needed(prefix, params.bucket_type)
 
         window_start = time.time()
         with monitor() as m:
@@ -62,6 +65,9 @@ def run_checkpoint_case(
         window_end = time.time()
         if getattr(result, "verify", None) is not None:
             result.verify()
+        if "write" in params.scenario:
+            # Saves run on *_rcu_z only, where run.py turns on RAPID writes.
+            rcu.assert_storage_class(prefix, params.bucket_type)
 
         # Measure actual GCS files
         physical_size_bytes = 0

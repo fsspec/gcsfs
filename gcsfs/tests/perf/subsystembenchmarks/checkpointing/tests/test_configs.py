@@ -90,6 +90,12 @@ def test_is_distributed_strategy():
     [
         ("rapid_cache_cold", "rccold"),
         ("rapid_cache_warm", "rcwarm"),
+        ("standard_rcu_z", "rcuz"),
+        ("standard_rcu_warm", "rcuwarm"),
+        ("standard_rcu_cold", "rcucold"),
+        ("hns_rcu_z", "hnsrcuz"),
+        ("hns_rcu_warm", "hnsrcuwarm"),
+        ("hns_rcu_cold", "hnsrcucold"),
     ],
 )
 def test_rapid_cache_bucket_types_produce_expected_id_tokens(
@@ -100,3 +106,21 @@ def test_rapid_cache_bucket_types_produce_expected_id_tokens(
     assert cases
     assert all(c.bucket_type == bucket_type for c in cases)
     assert all(c.name.endswith(f"-{expected_token}") for c in cases)
+
+
+@pytest.mark.parametrize(
+    "bucket_type, scenarios",
+    [
+        # Warm and cold only change how loads are staged, so saves run on *_rcu_z
+        # only, where run.py turns on RAPID writes.
+        ("standard_rcu_warm", {"checkpoint_read"}),
+        ("hns_rcu_cold", {"checkpoint_read"}),
+        ("standard_rcu_z", {"checkpoint_read", "checkpoint_write"}),
+        ("regional", {"checkpoint_read", "checkpoint_write"}),
+    ],
+)
+def test_rcu_warm_and_cold_runs_drop_checkpoint_saves(
+    monkeypatch, bucket_type, scenarios
+):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", bucket_type)
+    assert {c.scenario for c in _cases()} == scenarios

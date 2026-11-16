@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from gcsfs.tests.perf.microbenchmarks.conftest import get_round_file_paths
 from gcsfs.tests.perf.microbenchmarks.read.configs import get_read_benchmark_cases
 from gcsfs.tests.perf.microbenchmarks.runner import (
     filter_test_cases,
@@ -137,9 +138,20 @@ def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read
 
     op, op_args = _build_read_worker(params, gcs, file_paths)
+    round_args_builder = None
+    if len(getattr(params, "round_file_paths", ())) > 1:
+        round_args_builder = lambda r: _build_read_worker(
+            params, gcs, get_round_file_paths(params, file_paths, r)
+        )[1]
 
     run_single_threaded_fixed_duration(
-        benchmark, monitor, params, op, op_args, BENCHMARK_GROUP
+        benchmark,
+        monitor,
+        params,
+        op,
+        op_args,
+        BENCHMARK_GROUP,
+        round_args_builder=round_args_builder,
     )
 
 
@@ -152,17 +164,32 @@ def test_read_single_threaded(benchmark, gcsfs_benchmark_read, monitor):
 def test_read_multi_threaded(benchmark, gcsfs_benchmark_read, monitor):
     gcs, file_paths, params = gcsfs_benchmark_read
 
-    args_list = []
-    for _ in range(params.threads):
-        thread_file_paths = list(file_paths)
-        random.shuffle(thread_file_paths)
-        _, op_args = _build_read_worker(params, gcs, thread_file_paths)
-        args_list.append(op_args)
+    def _build_thread_args(paths):
+        built = []
+        for _ in range(params.threads):
+            thread_file_paths = list(paths)
+            random.shuffle(thread_file_paths)
+            _, op_args = _build_read_worker(params, gcs, thread_file_paths)
+            built.append(op_args)
+        return built
+
+    args_list = _build_thread_args(file_paths)
+    round_args_builder = None
+    if len(getattr(params, "round_file_paths", ())) > 1:
+        round_args_builder = lambda r: _build_thread_args(
+            get_round_file_paths(params, file_paths, r)
+        )
 
     op, _ = _build_read_worker(params, gcs, file_paths)
 
     run_multi_threaded_fixed_duration(
-        benchmark, monitor, params, op, args_list, BENCHMARK_GROUP
+        benchmark,
+        monitor,
+        params,
+        op,
+        args_list,
+        BENCHMARK_GROUP,
+        round_args_builder=round_args_builder,
     )
 
 
@@ -304,8 +331,8 @@ def test_read_multi_process(
 ):
     _, file_paths, params = gcsfs_benchmark_read
 
-    def args_builder(gcs_instance, i, shared_arr):
-        process_file_paths = list(file_paths)
+    def args_builder(gcs_instance, i, shared_arr, round_num=0):
+        process_file_paths = list(get_round_file_paths(params, file_paths, round_num))
         random.shuffle(process_file_paths)
         return (
             gcs_instance,

@@ -86,7 +86,16 @@ def test_extra_columns_and_id_hooks_default_empty(tmp_path):
 
 @pytest.mark.parametrize(
     ("bucket_type", "token"),
-    [("rapid_cache_cold", "rccold"), ("rapid_cache_warm", "rcwarm")],
+    [
+        ("rapid_cache_cold", "rccold"),
+        ("rapid_cache_warm", "rcwarm"),
+        ("standard_rcu_z", "rcuz"),
+        ("standard_rcu_warm", "rcuwarm"),
+        ("standard_rcu_cold", "rcucold"),
+        ("hns_rcu_z", "hnsrcuz"),
+        ("hns_rcu_warm", "hnsrcuwarm"),
+        ("hns_rcu_cold", "hnsrcucold"),
+    ],
 )
 def test_rapid_cache_bucket_types_produce_expected_id_tokens(
     tmp_path, monkeypatch, bucket_type, token

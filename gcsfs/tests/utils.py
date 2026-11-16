@@ -56,16 +56,16 @@ def is_real_gcs():
     return host.startswith("https://")
 
 
-def _patch_get_bucket_type_for_emulator():
-    """Patch bucket type detection in spawned workers when running against fake-gcs-server."""
+def _patch_get_bucket_layout_for_emulator():
+    """Patch bucket layout detection in spawned workers when running against fake-gcs-server."""
     if is_real_gcs():
         return None
 
     from unittest import mock
 
-    from gcsfs.extended_gcsfs import BucketType
+    from gcsfs.extended_gcsfs import BucketLayout
 
     return mock.patch(
-        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
-        return_value=BucketType.UNKNOWN,
+        "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout",
+        return_value=BucketLayout.UNKNOWN,
     )

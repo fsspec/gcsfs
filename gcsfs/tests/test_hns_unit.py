@@ -11,24 +11,38 @@ in test_dircache.py, and zonal-specific filesystem routing belongs in
 test_zonal.py or test_zonal_file.py.
 """
 
+import asyncio
 import contextlib
 import os
+import sys
 import uuid
 from unittest import mock
 
+import fsspec
 import pytest
+from fsspec.asyn import FSTimeoutError
 from google.api_core import exceptions as api_exceptions
 from google.cloud import storage_control_v2
+from google.rpc import code_pb2
 
-from gcsfs.extended_gcsfs import BucketType, ExtendedGcsFileSystem
+from gcsfs.extended_gcsfs import (
+    BucketLayout,
+    CachingTier,
+    ExtendedGcsFileSystem,
+    NamespaceLayout,
+    StorageClass,
+)
+from gcsfs.poller import _BACKGROUND_TASKS
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
+from gcsfs.tests import layouts
 from gcsfs.tests.conftest import requires_hns
+from gcsfs.tests.lro_fakes import operation_pb
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 from gcsfs.tests.utils import is_real_gcs
 
 pytestmark = [requires_hns]
 
-ORIGINAL_GET_BUCKET_TYPE = ExtendedGcsFileSystem._get_bucket_type
+ORIGINAL_GET_BUCKET_LAYOUT = ExtendedGcsFileSystem._get_bucket_layout
 
 FIXED_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 FIXED_REQUEST_ID = str(FIXED_UUID)
@@ -41,12 +55,12 @@ def get_mock_folder(folder_path):
     return mock_folder
 
 
-async def _mixed_bucket_type(bucket):
-    """Bucket-type lookup used by the mixed flat/HNS ``rm`` tests."""
+async def _mixed_bucket_layout(bucket):
+    """Bucket-layout lookup used by the mixed flat/HNS ``rm`` tests."""
     return {
-        "flat-bucket": BucketType.NON_HIERARCHICAL,
-        "hns-bucket": BucketType.HIERARCHICAL,
-    }.get(bucket, BucketType.UNKNOWN)
+        "flat-bucket": layouts.STANDARD,
+        "hns-bucket": layouts.STANDARD_HIERARCHICAL,
+    }.get(bucket, BucketLayout.UNKNOWN)
 
 
 class AsyncIter:
@@ -66,13 +80,13 @@ def gcs_hns_mocks():
 
     @contextlib.contextmanager
     def _gcs_hns_mocks_factory(bucket_type_val, gcsfs):
-        """Creates mocks for a given file content and bucket type."""
+        """Creates mocks for a given file content and bucket layout."""
 
-        patch_target_lookup_bucket_type = (
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_type"
+        patch_target_lookup_bucket_layout = (
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._lookup_bucket_layout"
         )
-        patch_target_sync_lookup_bucket_type = (
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_type"
+        patch_target_sync_lookup_bucket_layout = (
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._sync_lookup_bucket_layout"
         )
         patch_target_super_mv = "gcsfs.core.GCSFileSystem._mv"
         patch_target_super_mkdir = "gcsfs.core.GCSFileSystem._mkdir"
@@ -89,11 +103,11 @@ def gcs_hns_mocks():
 
         with (
             mock.patch(
-                patch_target_lookup_bucket_type, new_callable=mock.AsyncMock
-            ) as mock_async_lookup_bucket_type,
+                patch_target_lookup_bucket_layout, new_callable=mock.AsyncMock
+            ) as mock_async_lookup_bucket_layout,
             mock.patch(
-                patch_target_sync_lookup_bucket_type
-            ) as mock_sync_lookup_bucket_type,
+                patch_target_sync_lookup_bucket_layout
+            ) as mock_sync_lookup_bucket_layout,
             mock.patch(
                 "gcsfs.core.GCSFileSystem._info", new_callable=mock.AsyncMock
             ) as mock_info,
@@ -120,11 +134,11 @@ def gcs_hns_mocks():
             ) as mock_super_rm,
             mock.patch("gcsfs.extended_gcsfs.uuid.uuid4", return_value=FIXED_UUID),
         ):
-            mock_async_lookup_bucket_type.return_value = bucket_type_val
-            mock_sync_lookup_bucket_type.return_value = bucket_type_val
+            mock_async_lookup_bucket_layout.return_value = bucket_type_val
+            mock_sync_lookup_bucket_layout.return_value = bucket_type_val
             mocks = {
-                "async_lookup_bucket_type": mock_async_lookup_bucket_type,
-                "sync_lookup_bucket_type": mock_sync_lookup_bucket_type,
+                "async_lookup_bucket_layout": mock_async_lookup_bucket_layout,
+                "sync_lookup_bucket_layout": mock_sync_lookup_bucket_layout,
                 "info": mock_info,
                 "control_client": mock_control_client_instance,
                 "super_mv": mock_super_mv,
@@ -175,7 +189,7 @@ class TestExtendedGcsFileSystemMv:
         gcsfs.touch(file_in_root)
         gcsfs.touch(nested_file)
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # Configure mocks
             # 1. First _info call in _mv on path1 should succeed.
             # 2. _info call in exists(path1) after mv should fail.
@@ -200,7 +214,7 @@ class TestExtendedGcsFileSystemMv:
             assert gcsfs.exists(f"{path2}/file1.txt")
             assert gcsfs.exists(f"{path2}/sub_dir/file2.txt")
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             # Verify the sequence of _info calls for mv and exists checks.
             expected_info_calls = [
                 mock.call(path1),  # from mv
@@ -234,7 +248,7 @@ class TestExtendedGcsFileSystemMv:
         file_in_root = f"{path1}/file1.txt"
         gcsfs.touch(file_in_root)
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # The paths passed to info will be stripped of protocol
             mocks["info"].side_effect = [
                 {"type": "directory", "name": path1},
@@ -247,7 +261,7 @@ class TestExtendedGcsFileSystemMv:
             assert not gcsfs.exists(path1)
             assert gcsfs.exists(path2)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -274,7 +288,7 @@ class TestExtendedGcsFileSystemMv:
 
         gcsfs.mkdir(path1)
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # Configure mocks for the sequence of calls
             mocks["info"].side_effect = [
                 {"type": "directory", "name": path1},  # _mv check
@@ -287,7 +301,7 @@ class TestExtendedGcsFileSystemMv:
             assert not gcsfs.exists(path1)
             assert gcsfs.exists(path2)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_info_calls = [
                 mock.call(path1),  # from _mv
                 mock.call(path1),  # from exists(path1)
@@ -315,7 +329,7 @@ class TestExtendedGcsFileSystemMv:
         path2 = f"{TEST_HNS_BUCKET}/new_file.txt"
         gcsfs.touch(path1)
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(
                 gcsfs, "_mv_file", new_callable=mock.AsyncMock
             ) as mock_mv_file,
@@ -345,14 +359,14 @@ class TestExtendedGcsFileSystemMv:
         "bucket_type, info_return, path1, path2, reason",
         [
             (
-                BucketType.NON_HIERARCHICAL,
+                layouts.STANDARD,
                 {"type": "directory"},
                 "old_dir_non_hns",
                 "new_dir_non_hns",
                 "not an HNS bucket",
             ),
             pytest.param(
-                BucketType.HIERARCHICAL,
+                layouts.STANDARD_HIERARCHICAL,
                 {"type": "directory"},
                 "cross_bucket_dir",
                 "another-bucket/d",
@@ -384,10 +398,7 @@ class TestExtendedGcsFileSystemMv:
                 f"{TEST_HNS_BUCKET}/{path2}" if path2 != "" else f"{TEST_HNS_BUCKET}/"
             )
         with gcs_hns_mocks(bucket_type, gcsfs) as mocks:
-            if bucket_type in [
-                BucketType.HIERARCHICAL,
-                BucketType.ZONAL_HIERARCHICAL,
-            ]:
+            if bucket_type.is_hierarchical:
                 mocks["info"].side_effect = [
                     info_return,
                     FileNotFoundError(path1),
@@ -415,8 +426,8 @@ class TestExtendedGcsFileSystemMv:
                 mock.call(path2),  # from exists(path2)
             ]
             if bucket_type not in [
-                BucketType.HIERARCHICAL,
-                BucketType.ZONAL_HIERARCHICAL,
+                layouts.STANDARD_HIERARCHICAL,
+                layouts.ZONAL_HIERARCHICAL,
             ]:
                 expected_info_calls.pop(1)  # info is not called from mv for non-HNS
 
@@ -436,7 +447,7 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{parent}/{dir_name}"
         path2 = f"{TEST_HNS_BUCKET}{trailing_slash}"
         expected_dst = f"{TEST_HNS_BUCKET}/{dir_name}"
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = [
                 {"type": "directory", "name": path1},
                 FileNotFoundError(path1),
@@ -492,10 +503,10 @@ class TestExtendedGcsFileSystemMv:
         gcsfs = gcs_hns
         path = f"{TEST_HNS_BUCKET}/some_path"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             gcsfs.mv(path, path)
 
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["info"].assert_not_called()
             mocks["control_client"].rename_folder.assert_not_called()
             mocks["super_mv"].assert_not_called()
@@ -506,10 +517,10 @@ class TestExtendedGcsFileSystemMv:
         path1 = [f"{TEST_HNS_BUCKET}/file1.txt", f"{TEST_HNS_BUCKET}/file2.txt"]
         path2 = f"{TEST_HNS_BUCKET}/new_dir/"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             gcsfs.mv(path1, path2)
 
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["info"].assert_not_called()
             mocks["control_client"].rename_folder.assert_not_called()
             mocks["super_mv"].assert_called_once_with(path1, path2)
@@ -520,10 +531,10 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/*.txt"
         path2 = f"{TEST_HNS_BUCKET}/new_dir/"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             gcsfs.mv(path1, path2)
 
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["info"].assert_not_called()
             mocks["control_client"].rename_folder.assert_not_called()
             mocks["super_mv"].assert_called_once_with(path1, path2)
@@ -534,7 +545,7 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/dir_to_move"
         path2 = f"{TEST_HNS_BUCKET}/new_parent/new_name"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # Mocked environment assertions
             mocks["info"].return_value = {"type": "directory"}
             mocks["control_client"].rename_folder.side_effect = (
@@ -560,7 +571,7 @@ class TestExtendedGcsFileSystemMv:
         gcsfs = gcs_hns
         path1 = f"{TEST_HNS_BUCKET}/dne"
         path2 = f"{TEST_HNS_BUCKET}/new_dir"
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError(path1)
 
             with pytest.raises(FileNotFoundError):
@@ -578,7 +589,7 @@ class TestExtendedGcsFileSystemMv:
         path1 = f"{TEST_HNS_BUCKET}/dir_disappears"
         path2 = f"{TEST_HNS_BUCKET}/new_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # Simulate _info finding the directory
             mocks["info"].return_value = {"type": "directory"}
             # Simulate the directory being gone when rename_folder is called
@@ -607,7 +618,7 @@ class TestExtendedGcsFileSystemMv:
         gcsfs.touch(f"{path1}/file.txt")
         gcsfs.touch(f"{path2}/file.txt")
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].return_value = {"type": "directory"}
             mocks["control_client"].rename_folder.side_effect = api_exceptions.Conflict(
                 "HNS rename failed due to conflict for"
@@ -627,6 +638,540 @@ class TestExtendedGcsFileSystemMv:
             mocks["super_mv"].assert_not_called()
             mocks["control_client"].rename_folder.assert_called()
 
+    def test_hns_rename_polls_pending_operation_with_poll_lro(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """A sync mv drives the real poll_lro: one GetOperation per poll, each
+        without the GAPIC default retry, then the dircache is updated."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.succeeded(after=2)
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+
+            gcsfs.mv(path1, path2)
+
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [path2]
+            mocks["super_mv"].assert_not_called()
+
+        assert lro.get_operation.await_count == 2
+        for call in lro.get_operation.await_args_list:
+            assert call.kwargs["retry"] is None
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_waits_with_poll_lro_and_default_timeout(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """The rename waits with poll_lro, bounded by _HNS_RENAME_FOLDER_LRO_TIMEOUT,
+        instead of operation.result()."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch(
+                "gcsfs.extended_gcsfs.poll_lro", new_callable=mock.AsyncMock
+            ) as mock_poll_lro,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            gcsfs.mv(path1, path2)
+
+            operation = mocks["control_client"].rename_folder.return_value
+            mock_poll_lro.assert_awaited_once_with(operation, timeout=300.0)
+            operation.result.assert_not_called()
+            mocks["super_mv"].assert_not_called()
+
+    def test_hns_rename_poll_timeout_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """A poll_lro timeout raises TimeoutError with a hint, invalidates the
+        dircache and neither falls back nor cancels the server-side rename."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_timeout"
+        path2 = f"{TEST_HNS_BUCKET}/dst_timeout"
+        name = "projects/_/buckets/b/operations/op-timeout"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.05)
+        lro = fake_lro.pending(name=name)
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(TimeoutError) as exc_info:
+                gcsfs.mv(path1, path2, poll_timeout=0.2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        err = exc_info.value
+        if sys.version_info >= (3, 11):
+            # fsspec's sync() rewrites any asyncio.TimeoutError, which is the
+            # built-in TimeoutError from 3.11, to an empty FSTimeoutError.
+            assert type(err) is FSTimeoutError
+            assert str(err) == ""
+            err = err.__cause__
+        assert type(err) is TimeoutError
+        assert str(err) == (
+            f"HNS folder rename from '{path1}' to '{path2}' (op: {name}) did not "
+            "finish within 0.2s. The rename may still complete on the server; "
+            "check the destination before retrying."
+        )
+        assert isinstance(err.__cause__, asyncio.TimeoutError)
+        assert lro.get_operation.await_count >= 1
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_timeout_outside_polling_still_falls_back(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """Only a poll_lro timeout skips the fallback; a timeout raised by an
+        earlier step keeps the existing fallback to object-level mv."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].side_effect = asyncio.TimeoutError("info timed out")
+
+            gcsfs.mv(path1, path2)
+
+            mocks["control_client"].rename_folder.assert_not_called()
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+
+    @pytest.mark.parametrize("after", [0, 1], ids=["done_at_t0", "done_on_poll"])
+    @pytest.mark.parametrize(
+        "code, expected_exc, match",
+        [
+            (code_pb2.ALREADY_EXISTS, FileExistsError, "HNS rename failed due to"),
+            (code_pb2.NOT_FOUND, FileNotFoundError, "Source .* not found"),
+            (code_pb2.FAILED_PRECONDITION, OSError, "HNS rename failed: 400"),
+            (code_pb2.ABORTED, FileExistsError, "HNS rename failed due to"),
+        ],
+        ids=["already_exists", "not_found", "failed_precondition", "aborted"],
+    )
+    def test_hns_rename_typed_operation_error_is_mapped_without_fallback(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+        fake_lro,
+        monkeypatch,
+        after,
+        code,
+        expected_exc,
+        match,
+    ):
+        """poll_lro raises operation errors as typed exceptions, so the
+        existing NotFound, Conflict and FailedPrecondition mappings apply, and
+        the cached listings for both paths are dropped."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.failed(code, after=after)
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(expected_exc, match=match):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        assert lro.get_operation.await_count == after
+
+    @pytest.mark.parametrize("after", [0, 1], ids=["done_at_t0", "done_on_poll"])
+    @pytest.mark.parametrize(
+        "code",
+        [code_pb2.PERMISSION_DENIED, code_pb2.INTERNAL],
+        ids=["permission_denied", "internal"],
+    )
+    def test_hns_rename_unmapped_operation_error_falls_back(
+        self,
+        gcs_hns,
+        gcs_hns_mocks,
+        fake_lro,
+        monkeypatch,
+        after,
+        code,
+    ):
+        """An operation that finished with an unmapped error renamed nothing,
+        so mv drops the cached listings and falls back to object-level mv."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.failed(code, after=after)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+
+            gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+            mock_mv_file.assert_not_called()
+            assert path1 not in gcsfs.dircache
+
+        assert lro.get_operation.await_count == after
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_status_check_error_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """A non-transient GetOperation error while the rename is pending is
+        raised without falling back and without cancelling the rename."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        error = api_exceptions.PermissionDenied("no access to operation")
+        lro = fake_lro.sequence([error])
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+
+            with pytest.raises(api_exceptions.PermissionDenied) as exc_info:
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            mock_mv_file.assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        assert exc_info.value is error
+        assert lro.get_operation.await_count == 1
+        lro.cancel_operation.assert_not_awaited()
+
+    def test_hns_rename_dircache_update_error_raises_without_fallback(
+        self, gcs_hns, gcs_hns_mocks, fake_lro
+    ):
+        """If the dircache update fails after the rename finished, the error
+        is raised and the cached listings are dropped; falling back would try
+        to move a source that is gone."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        lro = fake_lro.succeeded()
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs,
+                "_update_dircache_after_rename",
+                side_effect=RuntimeError("cache update failed"),
+            ),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(RuntimeError, match="cache update failed"):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+    def test_hns_rename_request_error_still_falls_back(self, gcs_hns, gcs_hns_mocks):
+        """An unmapped error from the rename_folder call itself means no
+        rename was started, so the object-level fallback is still used."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.side_effect = (
+                api_exceptions.PermissionDenied("rename not allowed")
+            )
+
+            gcsfs.mv(path1, path2)
+
+            mocks["control_client"].rename_folder.assert_called_once()
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+
+    def test_hns_rename_transient_status_check_error_keeps_waiting(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, fake_clock, monkeypatch
+    ):
+        """A transient GetOperation error (ServiceUnavailable) moves on to the
+        next check instead of ending the wait and falling back."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", lambda elapsed: 0.0)
+        lro = fake_lro.sequence(
+            [
+                api_exceptions.ServiceUnavailable("transient"),
+                operation_pb(done=True),
+            ]
+        )
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_mv_file", new_callable=mock.AsyncMock
+            ) as mock_mv_file,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+
+            gcsfs.mv(path1, path2)
+
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [path2]
+            mocks["super_mv"].assert_not_called()
+            mock_mv_file.assert_not_called()
+
+        assert lro.get_operation.await_count == 2
+        # The second check waits for the first backoff step (0.5 s +-25%).
+        first, backoff = fake_clock.sleeps
+        assert first == 0.0
+        assert 0.375 <= backoff <= 0.625
+        lro.cancel_operation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_hns_rename_cancelled_while_polling_sends_cancel(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, monkeypatch
+    ):
+        """Cancelling mv during poll_lro sends CancelOperation once, drops the
+        cached listings and propagates CancelledError without falling back."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_cancel"
+        path2 = f"{TEST_HNS_BUCKET}/dst_cancel"
+        waiting_after_first_poll = asyncio.Event()
+
+        delay_calls = 0
+
+        def cadence(elapsed):
+            nonlocal delay_calls
+            delay_calls += 1
+            if delay_calls == 1:
+                return 0.0
+            # Cancel while _poll_until sleeps, after a status check has
+            # finished. test_poller covers a cancel that races a check.
+            waiting_after_first_poll.set()
+            return 5.0
+
+        monkeypatch.setattr("gcsfs.poller._calculate_poll_delay", cadence)
+        lro = fake_lro.pending()
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            task = asyncio.create_task(gcsfs._mv(path1, path2))
+            await asyncio.wait_for(waiting_after_first_poll.wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(
+                asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True),
+                timeout=5.0,
+            )
+            await asyncio.sleep(0)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+            assert TEST_HNS_BUCKET not in gcsfs.dircache
+
+        lro.cancel_operation.assert_awaited_once()
+        assert not _BACKGROUND_TASKS
+
+    def test_fast_lro_polling_is_on_by_default(self, gcs_hns):
+        assert gcs_hns.fast_lro_polling is True
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        assert fs.fast_lro_polling is True
+
+    def test_fast_lro_polling_env_var_false_turns_polling_off(self, monkeypatch):
+        """FSSPEC_GCS_FAST_LRO_POLLING=false reaches the constructor through
+        fsspec's config, which parses the value as JSON."""
+        conf = {}
+        fsspec.config.set_conf_env(conf, {"FSSPEC_GCS_FAST_LRO_POLLING": "false"})
+        monkeypatch.setattr(fsspec.config, "conf", conf)
+
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+
+        assert fs.fast_lro_polling is False
+
+    @pytest.mark.parametrize(
+        "poll_timeout, expected_timeout",
+        [(600, 600), (None, None)],
+        ids=["custom_limit", "none_means_no_limit"],
+    )
+    def test_hns_rename_passes_poll_timeout_to_poll_lro(
+        self, gcs_hns, gcs_hns_mocks, poll_timeout, expected_timeout
+    ):
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch(
+                "gcsfs.extended_gcsfs.poll_lro", new_callable=mock.AsyncMock
+            ) as mock_poll_lro,
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            gcsfs.mv(path1, path2, poll_timeout=poll_timeout)
+
+            operation = mocks["control_client"].rename_folder.return_value
+            mock_poll_lro.assert_awaited_once_with(operation, timeout=expected_timeout)
+
+    @pytest.mark.parametrize(
+        "bad_timeout",
+        [0, -1, float("inf"), float("nan"), True],
+        ids=["zero", "negative", "inf", "nan", "bool"],
+    )
+    def test_poll_timeout_rejects_non_finite_non_positive_or_bool(
+        self, gcs_hns, gcs_hns_mocks, bad_timeout
+    ):
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            with pytest.raises(ValueError, match="poll_timeout"):
+                gcsfs.mv(path1, path2, poll_timeout=bad_timeout)
+
+            mocks["control_client"].rename_folder.assert_not_called()
+            mocks["super_mv"].assert_not_called()
+
+    def test_poll_timeout_is_not_passed_to_object_level_mv(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """On a flat bucket mv falls back to object copies, which must not
+        receive the folder rename option."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
+            gcsfs.mv(path1, path2, poll_timeout=600)
+
+            mocks["super_mv"].assert_called_once_with(path1, path2)
+
+    def test_hns_rename_with_fast_lro_polling_off_uses_operation_result(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """With fast_lro_polling off, the rename waits with operation.result()
+        and never calls poll_lro."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch(
+                "gcsfs.extended_gcsfs.poll_lro", new_callable=mock.AsyncMock
+            ) as mock_poll_lro,
+            mock.patch.object(gcsfs, "fast_lro_polling", False),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            gcsfs.dircache[TEST_HNS_BUCKET] = [{"name": path1, "type": "directory"}]
+
+            gcsfs.mv(path1, path2)
+
+            operation = mocks["control_client"].rename_folder.return_value
+            operation.result.assert_awaited_once_with()
+            mock_poll_lro.assert_not_awaited()
+            mocks["super_mv"].assert_not_called()
+            assert [e["name"] for e in gcsfs.dircache[TEST_HNS_BUCKET]] == [path2]
+
+    @pytest.mark.parametrize(
+        "code, expected_exc",
+        [
+            (code_pb2.ALREADY_EXISTS, FileExistsError),
+            (code_pb2.NOT_FOUND, FileNotFoundError),
+        ],
+        ids=["already_exists", "not_found"],
+    )
+    def test_hns_rename_with_fast_lro_polling_off_maps_operation_errors(
+        self, gcs_hns, gcs_hns_mocks, fake_lro, code, expected_exc
+    ):
+        """With polling off, operation errors are still typed and mapped, so
+        they raise without falling back and drop the cached listings."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        lro = fake_lro.failed(code, after=1)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "fast_lro_polling", False),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+            gcsfs.dircache[path2] = [{"name": f"{path2}/g.txt", "type": "file"}]
+
+            with pytest.raises(expected_exc):
+                gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_not_called()
+            assert path1 not in gcsfs.dircache
+            assert path2 not in gcsfs.dircache
+
+    def test_hns_rename_with_fast_lro_polling_off_falls_back_on_unmapped_error(
+        self, gcs_hns, gcs_hns_mocks, fake_lro
+    ):
+        """With polling off, an operation that finished with an unmapped error
+        still falls back to object-level mv, as with polling on."""
+        gcsfs = gcs_hns
+        path1 = f"{TEST_HNS_BUCKET}/src_dir"
+        path2 = f"{TEST_HNS_BUCKET}/dst_dir"
+        lro = fake_lro.failed(code_pb2.INTERNAL, after=1)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "fast_lro_polling", False),
+        ):
+            mocks["info"].return_value = {"type": "directory", "name": path1}
+            mocks["control_client"].rename_folder.return_value = lro.op
+            gcsfs.dircache[path1] = [{"name": f"{path1}/f.txt", "type": "file"}]
+
+            gcsfs.mv(path1, path2)
+
+            mocks["super_mv"].assert_awaited_once_with(path1, path2)
+            assert path1 not in gcsfs.dircache
+
 
 class TestExtendedGcsFileSystemMvFile:
     """Unit tests for the _mv_file method in ExtendedGcsFileSystem."""
@@ -638,7 +1183,7 @@ class TestExtendedGcsFileSystemMvFile:
         path1 = f"{parent}/file1.txt"
         path2 = f"{parent}/file2.txt"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs):
             # Pre-populate cache
             gcsfs.dircache[parent] = [
                 {"name": path1, "type": "file"},
@@ -674,7 +1219,7 @@ class TestExtendedGcsFileSystemMvFile:
         path1 = f"{TEST_HNS_BUCKET}/file1.txt"
         path2 = "other-bucket/file2.txt"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs):
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs):
             with mock.patch(
                 "gcsfs.core.GCSFileSystem._mv_file_cache_update",
                 new_callable=mock.AsyncMock,
@@ -686,7 +1231,7 @@ class TestExtendedGcsFileSystemMvFile:
         path3 = f"{TEST_HNS_BUCKET}/file3.txt"
         path4 = f"{TEST_HNS_BUCKET}/file4.txt"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs):
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs):
             with mock.patch(
                 "gcsfs.core.GCSFileSystem._mv_file_cache_update",
                 new_callable=mock.AsyncMock,
@@ -1140,13 +1685,13 @@ class TestExtendedGcsFileSystemMkdir:
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/new_mkdir_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
             gcsfs.dircache[TEST_HNS_BUCKET] = []
 
             gcsfs.mkdir(f"{dir_path}{trailing_slash}")
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_create_folder_request(dir_path)
             mocks["control_client"].create_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -1160,7 +1705,7 @@ class TestExtendedGcsFileSystemMkdir:
         parent_dir = f"{TEST_HNS_BUCKET}/nested_parent"
         dir_path = f"{parent_dir}/new_nested_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
 
             def mock_info(path, *args, **kwargs):
                 if path == parent_dir:
@@ -1175,7 +1720,7 @@ class TestExtendedGcsFileSystemMkdir:
 
             gcsfs.mkdir(dir_path, create_parents=True)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_create_folder_request(dir_path, recursive=True)
             mocks["control_client"].create_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -1191,7 +1736,7 @@ class TestExtendedGcsFileSystemMkdir:
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/non_existent_parent/new_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
             mocks["control_client"].create_folder.side_effect = (
                 api_exceptions.FailedPrecondition("failed due to a precondition error")
@@ -1202,7 +1747,7 @@ class TestExtendedGcsFileSystemMkdir:
             ):
                 gcsfs.mkdir(dir_path, create_parents=False)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_create_folder_request(dir_path)
             mocks["control_client"].create_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -1218,9 +1763,9 @@ class TestExtendedGcsFileSystemMkdir:
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/some_dir"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
             gcsfs.mkdir(dir_path)
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             mocks["control_client"].create_folder.assert_not_called()
             mocks["super_mkdir"].assert_called_once_with(dir_path, create_parents=False)
 
@@ -1230,7 +1775,7 @@ class TestExtendedGcsFileSystemMkdir:
         bucket_name = f"gcsfs-non-existent-bucket-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some_dir"
 
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcsfs) as mocks:
             # Simulate the parent mkdir raising an error because the bucket doesn't exist
             mocks["super_mkdir"].side_effect = FileNotFoundError(
                 f"Bucket {bucket_name} does not exist."
@@ -1239,7 +1784,7 @@ class TestExtendedGcsFileSystemMkdir:
             with pytest.raises(FileNotFoundError, match=f"{bucket_name}"):
                 gcsfs.mkdir(dir_path, create_parents=False)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(bucket_name)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(bucket_name)
             mocks["super_mkdir"].assert_called_once_with(dir_path, create_parents=False)
             mocks["control_client"].create_folder.assert_not_called()
 
@@ -1251,13 +1796,13 @@ class TestExtendedGcsFileSystemMkdir:
         bucket_name = f"gcsfs-bucket-mkdir-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some_dir"
 
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcsfs) as mocks:
             # Simulate the bucket not existing initially.
             mocks["info"].side_effect = FileNotFoundError
 
             gcsfs.mkdir(dir_path, create_parents=True)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(bucket_name)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(bucket_name)
             # The call should fall back to the parent's mkdir to create the bucket.
             mocks["super_mkdir"].assert_called_once_with(dir_path, create_parents=True)
             mocks["control_client"].create_folder.assert_not_called()
@@ -1270,7 +1815,7 @@ class TestExtendedGcsFileSystemMkdir:
         bucket_name = f"gcsfs-hns-bucket-mkdir-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some_dir"
 
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcsfs) as mocks:
             # All paths do not exist initially
             mocks["info"].side_effect = FileNotFoundError
 
@@ -1293,14 +1838,14 @@ class TestExtendedGcsFileSystemMkdir:
             mocks["control_client"].create_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
             )
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
 
     def test_mkdir_create_non_hns_bucket(self, gcs_hns, gcs_hns_mocks):
         """Test creating a new non-HNS bucket by default."""
         gcsfs = gcs_hns
         bucket_path = f"new-non-hns-bucket-{uuid.uuid4()}"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
             mocks["info"].side_effect = [
                 FileNotFoundError,  # For the `exists` check before mkdir
                 {"type": "directory", "name": bucket_path},  # For `exists` after
@@ -1314,14 +1859,14 @@ class TestExtendedGcsFileSystemMkdir:
             mocks["super_mkdir"].assert_called_once_with(
                 bucket_path, create_parents=False
             )
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
 
     def test_mkdir_create_bucket_with_parent_params(self, gcs_hns, gcs_hns_mocks):
         """Test creating a bucket passes parent-level parameters like enable_versioning."""
         gcsfs = gcs_hns
         bucket_path = f"new-versioned-bucket-{uuid.uuid4()}"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = [
                 FileNotFoundError,  # For the `exists` check before mkdir
                 {"type": "directory", "name": bucket_path},  # For `exists` after
@@ -1339,7 +1884,7 @@ class TestExtendedGcsFileSystemMkdir:
                 enable_versioning=True,
                 enable_object_retention=True,
             )
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["control_client"].create_folder.assert_not_called()
 
     def test_mkdir_enable_hierarchical_namespace(self, gcs_hns, gcs_hns_mocks):
@@ -1347,7 +1892,7 @@ class TestExtendedGcsFileSystemMkdir:
         gcsfs = gcs_hns
         bucket_path = f"new-hns-bucket-{uuid.uuid4()}"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = [
                 FileNotFoundError,  # For the `exists` check before mkdir
                 {"type": "directory", "name": bucket_path},  # For `exists` after
@@ -1366,7 +1911,7 @@ class TestExtendedGcsFileSystemMkdir:
                 acl=None,
                 default_acl=None,
             )
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
 
     def test_mkdir_existing_hns_folder_is_noop(self, gcs_hns, gcs_hns_mocks):
         """Test that calling mkdir on an existing HNS folder is a no-op."""
@@ -1374,7 +1919,7 @@ class TestExtendedGcsFileSystemMkdir:
         dir_path = f"{TEST_HNS_BUCKET}/existing_dir"
         gcsfs.touch(f"{dir_path}/file.txt")
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].return_value = {"type": "directory", "name": dir_path}
 
             assert gcsfs.exists(dir_path)
@@ -1383,14 +1928,14 @@ class TestExtendedGcsFileSystemMkdir:
 
             mocks["control_client"].create_folder.assert_not_called()
             mocks["super_mkdir"].assert_not_called()
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
 
     def test_mkdir_existing_file_raises_error(self, gcs_hns, gcs_hns_mocks):
         """Test that calling mkdir on a path occupied by an existing file raises FileExistsError."""
         gcsfs = gcs_hns
         file_path = f"{TEST_HNS_BUCKET}/existing_file"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].return_value = {"type": "file", "name": file_path}
 
             with pytest.raises(FileExistsError, match="A file already exists"):
@@ -1405,7 +1950,7 @@ class TestExtendedGcsFileSystemMkdir:
         bucket_path = "new-zonal-bucket"
         placement = "us-central1-a"
 
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
 
             gcsfs.mkdir(bucket_path, placement=placement)
@@ -1429,7 +1974,7 @@ class TestExtendedGcsFileSystemMkdir:
         placement = "us-central1-a"
         location = "us-central1"
 
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcsfs) as mocks:
             # Simulate bucket not existing initially.
             mocks["info"].side_effect = FileNotFoundError
 
@@ -1475,7 +2020,7 @@ class TestExtendedGcsFileSystemMakedirs:
         parent_dir = f"{TEST_HNS_BUCKET}/new_dir"
         dir_path = f"{parent_dir}/nested_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             folder_exists = False
 
             def mock_info(path, *args, **kwargs):
@@ -1495,7 +2040,7 @@ class TestExtendedGcsFileSystemMakedirs:
             folder_exists = True
             assert gcsfs.exists(dir_path)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_create_folder_request(dir_path, recursive=True)
             mocks["control_client"].create_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -1509,7 +2054,7 @@ class TestExtendedGcsFileSystemMakedirs:
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/existing_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
 
             def mock_info(path, *args, **kwargs):
                 if path == TEST_HNS_BUCKET:
@@ -1522,7 +2067,7 @@ class TestExtendedGcsFileSystemMakedirs:
 
             gcsfs.makedirs(dir_path, exist_ok=True)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             mocks["control_client"].create_folder.assert_not_called()
             mocks["super_makedirs"].assert_not_called()
 
@@ -1531,7 +2076,7 @@ class TestExtendedGcsFileSystemMakedirs:
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/existing_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
 
             def mock_info(path, *args, **kwargs):
                 if path == TEST_HNS_BUCKET:
@@ -1545,7 +2090,7 @@ class TestExtendedGcsFileSystemMakedirs:
             with pytest.raises(FileExistsError, match="Directory already exists"):
                 gcsfs.makedirs(dir_path, exist_ok=False)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             mocks["control_client"].create_folder.assert_not_called()
             mocks["super_makedirs"].assert_not_called()
 
@@ -1554,7 +2099,7 @@ class TestExtendedGcsFileSystemMakedirs:
         gcsfs = gcs_hns
         file_path = f"{TEST_HNS_BUCKET}/existing_file"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
 
             def mock_info(path, *args, **kwargs):
                 if path == TEST_HNS_BUCKET:
@@ -1579,7 +2124,7 @@ class TestExtendedGcsFileSystemMakedirs:
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/some_dir/nested"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
 
             def mock_info(path, *args, **kwargs):
                 if path == TEST_HNS_BUCKET:
@@ -1589,7 +2134,7 @@ class TestExtendedGcsFileSystemMakedirs:
             mocks["info"].side_effect = mock_info
 
             gcsfs.makedirs(dir_path)
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             mocks["control_client"].create_folder.assert_not_called()
             mocks["super_makedirs"].assert_not_called()
 
@@ -1599,7 +2144,7 @@ class TestExtendedGcsFileSystemMakedirs:
         bucket_name = f"gcsfs-non-existent-bucket-{uuid.uuid4()}"
         dir_path = f"{bucket_name}/some_dir/nested"
 
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
 
             with pytest.raises(FileNotFoundError, match="Bucket does not exist"):
@@ -1618,13 +2163,13 @@ class TestExtendedGcsFileSystemMakedirs:
         bucket_path = f"new-bucket-{uuid.uuid4()}"
 
         # Case 1: Bucket does not exist
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcsfs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
             with pytest.raises(FileNotFoundError, match="Bucket does not exist"):
                 gcsfs.makedirs(bucket_path, exist_ok=exist_ok)
 
         # Case 2: Bucket exists
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].return_value = {"type": "directory", "name": bucket_path}
             if not exist_ok:
                 with pytest.raises(FileExistsError, match="Bucket already exists"):
@@ -1657,7 +2202,7 @@ class TestExtendedGcsFileSystemFind:
             get_mock_folder("find_test/empty"),
             get_mock_folder("find_test"),
         ]
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = mock_files
             mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
 
@@ -1706,7 +2251,7 @@ class TestExtendedGcsFileSystemFind:
             get_mock_folder("find_test/empty"),
             get_mock_folder("find_test"),
         ]
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = mock_files
             mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
             result = gcs_hns.find(base_path, withdirs=True, detail=True)
@@ -1754,7 +2299,7 @@ class TestExtendedGcsFileSystemFind:
             get_mock_folder("find_test/empty"),
             get_mock_folder("find_test"),
         ]
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = mock_files
             mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
             result = gcs_hns.find(base_path, withdirs=True, maxdepth=1)
@@ -1812,7 +2357,7 @@ class TestExtendedGcsFileSystemFind:
             get_mock_folder("find_test"),
         ]
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = mock_files
             mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
             result = gcs_hns.find(base_path, withdirs=True, versions=True)
@@ -1853,7 +2398,7 @@ class TestExtendedGcsFileSystemFind:
             get_mock_folder("find_test/other_folder"),
         ]
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs_hns) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcs_hns) as mocks:
             mocks["super_find"].return_value = {}  # No files
             mocks["control_client"].list_folders.return_value = AsyncIter(mock_folders)
 
@@ -1881,7 +2426,7 @@ class TestExtendedGcsFileSystemFind:
     def test_find_non_hns_falls_back(self, gcs_hns, gcs_hns_mocks):
         """Test that find falls back to parent implementation for non-HNS"""
         base_path = f"{TEST_HNS_BUCKET}/find_test"
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcs_hns) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcs_hns) as mocks:
             gcs_hns.find(base_path, withdirs=True)
             mocks["super_find"].assert_called_with(
                 base_path,
@@ -1899,7 +2444,7 @@ class TestExtendedGcsFileSystemFind:
         bucket = "test-bucket"
         path = f"{bucket}/does/not/exist"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcs) as mocks:
             # Mock the underlying find/list calls to return empty results
             mocks["super_find"].return_value = {}
             mocks["control_client"].list_folders.return_value = AsyncIter([])
@@ -1916,7 +2461,7 @@ class TestExtendedGcsFileSystemFind:
         bucket = "non-existent-bucket"
         path = f"{bucket}/some/path"
 
-        with gcs_hns_mocks(BucketType.UNKNOWN, gcs) as mocks:
+        with gcs_hns_mocks(BucketLayout.UNKNOWN, gcs) as mocks:
             # Mock the super `_find` to simulate the GCS API error.
             mocks["super_find"].side_effect = FileNotFoundError(bucket)
 
@@ -1932,7 +2477,7 @@ class TestExtendedGcsFileSystemFind:
         path = f"{TEST_HNS_BUCKET}/some/path"
         error_message = "API Internal Error"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcs) as mocks:
             # Simulate the list_folders call failing
             mocks["control_client"].list_folders.side_effect = (
                 api_exceptions.InternalServerError(error_message)
@@ -1950,41 +2495,57 @@ class TestExtendedGcsFileSystemInternal:
 
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_true_hierarchical(self):
-        """Verifies HNS is enabled when bucket type is HIERARCHICAL."""
+        """Verifies HNS is enabled when bucket layout is STANDARD_HIERARCHICAL."""
         fs = ExtendedGcsFileSystem(token="anon")
         with mock.patch.object(
-            fs, "_lookup_bucket_type", return_value=BucketType.HIERARCHICAL
+            fs, "_lookup_bucket_layout", return_value=layouts.STANDARD_HIERARCHICAL
         ):
             assert await fs._is_bucket_hns_enabled("my-bucket") is True
 
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_true_zonal_hierarchical(self):
-        """Verifies HNS is enabled when bucket type is ZONAL_HIERARCHICAL."""
+        """Verifies HNS is enabled when bucket layout is ZONAL_HIERARCHICAL."""
         fs = ExtendedGcsFileSystem(token="anon")
         with mock.patch.object(
-            fs, "_lookup_bucket_type", return_value=BucketType.ZONAL_HIERARCHICAL
+            fs, "_lookup_bucket_layout", return_value=layouts.ZONAL_HIERARCHICAL
         ):
             assert await fs._is_bucket_hns_enabled("my-bucket") is True
 
     @pytest.mark.asyncio
-    async def test_is_bucket_hns_enabled_false(self):
-        """Verifies HNS is disabled for STANDARD/non-hierarchical bucket types."""
+    async def test_is_bucket_hns_enabled_true_hns_rcu(self):
+        """Verifies HNS is enabled when bucket layout is HIERARCHICAL_RCU."""
         fs = ExtendedGcsFileSystem(token="anon")
-        # Mocking a non-hierarchical return value (e.g., standard bucket)
-        with mock.patch.object(fs, "_lookup_bucket_type", return_value="STANDARD"):
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", return_value=layouts.HIERARCHICAL_RCU
+        ):
+            assert await fs._is_bucket_hns_enabled("my-bucket") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bucket_layout",
+        [
+            layouts.STANDARD,
+            layouts.STANDARD_RCU,
+            BucketLayout.UNKNOWN,
+        ],
+    )
+    async def test_is_bucket_hns_enabled_false(self, bucket_layout):
+        """Verifies HNS is disabled for non-hierarchical bucket layouts."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        with mock.patch.object(fs, "_lookup_bucket_layout", return_value=bucket_layout):
             assert await fs._is_bucket_hns_enabled("my-bucket") is False
 
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_exception_handling(self):
         """
-        Verifies that if _lookup_bucket_type fails, we log a warning and return False
+        Verifies that if _lookup_bucket_layout fails, we log a warning and return False
         (fail-open to non-HNS behavior).
         """
         fs = ExtendedGcsFileSystem(token="anon")
 
         with (
             mock.patch.object(
-                fs, "_lookup_bucket_type", side_effect=Exception("API Error")
+                fs, "_lookup_bucket_layout", side_effect=Exception("API Error")
             ),
             mock.patch("gcsfs.extended_gcsfs.logger") as mock_logger,
         ):
@@ -1995,6 +2556,49 @@ class TestExtendedGcsFileSystemInternal:
             assert (
                 "Could not determine if bucket" in mock_logger.warning.call_args[0][0]
             )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bucket_layout, expected_zonal, expected_rcu, expected_grpc, expected_hns",
+        [
+            (layouts.ZONAL_HIERARCHICAL, True, False, True, True),
+            (layouts.STANDARD_HIERARCHICAL, False, False, False, True),
+            (layouts.STANDARD, False, False, False, False),
+            (layouts.STANDARD_RCU, False, True, True, False),
+            (layouts.HIERARCHICAL_RCU, False, True, True, True),
+            (layouts.STANDARD_RAPID_CACHE, False, False, False, False),
+            (layouts.HIERARCHICAL_RAPID_CACHE, False, False, False, True),
+            (BucketLayout.UNKNOWN, False, False, False, False),
+        ],
+    )
+    async def test_routing_helpers(
+        self, bucket_layout, expected_zonal, expected_rcu, expected_grpc, expected_hns
+    ):
+        """Verifies the routing helpers and the BucketLayout properties across all layouts."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        with mock.patch.object(fs, "_lookup_bucket_layout", return_value=bucket_layout):
+            assert await fs._is_zonal_bucket("my-bucket") is expected_zonal
+            assert await fs._is_rcu_bucket("my-bucket") is expected_rcu
+            assert await fs._uses_grpc_data_path("my-bucket") is expected_grpc
+            assert await fs._is_bucket_hns_enabled("my-bucket") is expected_hns
+        assert bucket_layout.is_zonal is expected_zonal
+        assert bucket_layout.is_rcu is expected_rcu
+        assert bucket_layout.uses_grpc_data_path is expected_grpc
+        assert bucket_layout.is_hierarchical is expected_hns
+
+    @pytest.mark.asyncio
+    async def test_uses_grpc_data_path_looks_up_layout_once(self):
+        """UNKNOWN layouts are not cached, so each extra lookup would be another RPC."""
+        fs = ExtendedGcsFileSystem(token="anon")
+        with mock.patch.object(
+            fs,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            return_value=BucketLayout.UNKNOWN,
+        ) as mock_get_layout:
+            assert await fs._uses_grpc_data_path("unknown-layout-bucket") is False
+
+        mock_get_layout.assert_awaited_once_with("unknown-layout-bucket")
 
     @pytest.mark.asyncio
     async def test_get_directory_info_hns_success(self):
@@ -2197,7 +2801,7 @@ class TestExtendedGcsFileSystemRmdir:
 
         gcsfs.mkdir(f"{dir_path}/placeholder", create_parents=True)
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # Configure mocks
             # 1. exists(dir_path) before rmdir should succeed.
             # 2. exists(dir_path) after rmdir should fail.
@@ -2210,7 +2814,7 @@ class TestExtendedGcsFileSystemRmdir:
             gcsfs.rmdir(dir_path)
 
             assert not gcsfs.exists(dir_path)
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_delete_folder_request(dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2227,10 +2831,10 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs = gcs_hns
         dir_path = f"{TEST_HNS_BUCKET}/some_dir"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
             gcsfs.rmdir(dir_path)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(dir_path)
 
@@ -2240,7 +2844,7 @@ class TestExtendedGcsFileSystemRmdir:
         dir_path = f"{TEST_HNS_BUCKET}/non_empty_dir"
         gcsfs.touch(f"{dir_path}/file.txt")
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["control_client"].delete_folder.side_effect = (
                 api_exceptions.FailedPrecondition("")
             )
@@ -2248,7 +2852,7 @@ class TestExtendedGcsFileSystemRmdir:
             with pytest.raises(OSError, match="Pre condition failed for rmdir"):
                 gcsfs.rmdir(dir_path)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_delete_folder_request(dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2261,7 +2865,7 @@ class TestExtendedGcsFileSystemRmdir:
         dir_name = "dne_dir"
         dir_path = f"{TEST_HNS_BUCKET}/{dir_name}"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["control_client"].delete_folder.side_effect = api_exceptions.NotFound(
                 ""
             )
@@ -2269,7 +2873,7 @@ class TestExtendedGcsFileSystemRmdir:
             with pytest.raises(FileNotFoundError, match="rmdir failed for path"):
                 gcsfs.rmdir(dir_path)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_delete_folder_request(dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2286,7 +2890,7 @@ class TestExtendedGcsFileSystemRmdir:
         file_path = f"{TEST_HNS_BUCKET}/{file_name}"
         gcsfs.touch(file_path)
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["control_client"].delete_folder.side_effect = api_exceptions.NotFound(
                 ""
             )
@@ -2294,7 +2898,7 @@ class TestExtendedGcsFileSystemRmdir:
             with pytest.raises(FileNotFoundError, match="rmdir failed for path"):
                 gcsfs.rmdir(file_path)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_delete_folder_request(file_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2313,7 +2917,7 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(f"{sub_dir}/placeholder")
         gcsfs.rm(f"{sub_dir}/placeholder")
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["control_client"].delete_folder.side_effect = (
                 api_exceptions.FailedPrecondition("Directory not empty")
             )
@@ -2321,7 +2925,7 @@ class TestExtendedGcsFileSystemRmdir:
             with pytest.raises(OSError, match="Pre condition failed for rmdir"):
                 gcsfs.rmdir(parent_dir)
 
-            mocks["async_lookup_bucket_type"].assert_called_once_with(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_called_once_with(TEST_HNS_BUCKET)
             expected_request = self._get_delete_folder_request(parent_dir)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2339,7 +2943,7 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(f"{grandchild_dir}/placeholder")
         gcsfs.rm(f"{grandchild_dir}/placeholder")
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = [
                 FileNotFoundError(grandchild_dir),
                 FileNotFoundError(child_dir),
@@ -2368,7 +2972,7 @@ class TestExtendedGcsFileSystemRmdir:
         bucket_path = f"{TEST_HNS_BUCKET}"
         gcsfs.touch(f"{bucket_path}/file.txt")
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["super_rmdir"].side_effect = HttpError(
                 {"code": 409, "message": "The bucket you tried to delete is not empty"}
             )
@@ -2378,7 +2982,7 @@ class TestExtendedGcsFileSystemRmdir:
             ):
                 gcsfs.rmdir(bucket_path)
 
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
@@ -2390,7 +2994,7 @@ class TestExtendedGcsFileSystemRmdir:
         dir_to_delete = f"{base_dir}/dir_to_delete"
         sibling_dir = f"{base_dir}/sibling_dir"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # --- Setup ---
             gcsfs.touch(f"{dir_to_delete}/file.txt")
             gcsfs.touch(f"{sibling_dir}/sibling_file.txt")
@@ -2458,7 +3062,7 @@ class TestExtendedGcsFileSystemRmdir:
         bucket_path = f"{TEST_HNS_BUCKET}"
         gcsfs.touch(f"{bucket_path}/file.txt")
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
             mocks["super_rmdir"].side_effect = HttpError(
                 {"code": 409, "message": "The bucket you tried to delete is not empty"}
             )
@@ -2468,7 +3072,7 @@ class TestExtendedGcsFileSystemRmdir:
             ):
                 gcsfs.rmdir(bucket_path)
 
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
@@ -2477,7 +3081,7 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs = gcs_hns
         bucket_path = f"{TEST_HNS_BUCKET}"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             # exists(dir_path) after rmdir should fail.
             mocks["info"].side_effect = [
                 FileNotFoundError(bucket_path),
@@ -2486,7 +3090,7 @@ class TestExtendedGcsFileSystemRmdir:
             gcsfs.rmdir(bucket_path)
 
             assert not gcsfs.exists(bucket_path)
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
@@ -2495,7 +3099,7 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs = gcs_hns
         bucket_path = f"{TEST_HNS_BUCKET}"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
             # exists(dir_path) after rmdir should fail.
             mocks["info"].side_effect = [
                 FileNotFoundError(bucket_path),
@@ -2504,7 +3108,7 @@ class TestExtendedGcsFileSystemRmdir:
             gcsfs.rmdir(bucket_path)
 
             assert not gcsfs.exists(bucket_path)
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
             mocks["control_client"].delete_folder.assert_not_called()
             mocks["super_rmdir"].assert_called_once_with(bucket_path)
 
@@ -2520,7 +3124,7 @@ class TestExtendedGcsFileSystemRmdir:
         gcsfs.touch(placeholder_path)
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_rm_file", wraps=gcsfs._rm_file) as mock_rm_file,
         ):
             mocks["info"].side_effect = [
@@ -2536,7 +3140,7 @@ class TestExtendedGcsFileSystemRmdir:
             # The bucket type is looked up both for the rmdir itself and for the
             # targeted cache update when the placeholder object is deleted via
             # _rm_file. The lookup is cached, so this is not an extra API call.
-            mocks["async_lookup_bucket_type"].assert_any_call(TEST_HNS_BUCKET)
+            mocks["async_lookup_bucket_layout"].assert_any_call(TEST_HNS_BUCKET)
             expected_request = self._get_delete_folder_request(folder_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2554,7 +3158,7 @@ class TestExtendedGcsFileSystemRmdir:
         mock_rm_file = mock.AsyncMock(side_effect=FileNotFoundError)
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_rm_file", new=mock_rm_file),
         ):
             await gcsfs._hns_rmdir(folder_path, delete_placeholder=delete_placeholder)
@@ -2592,7 +3196,7 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock()
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
@@ -2622,7 +3226,7 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock()
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
@@ -2645,7 +3249,13 @@ class TestExtendedGcsFileSystemRm:
                 [base_dir], recursive=True, maxdepth=None, detail=True
             )
             mocks["info"].assert_not_called()
-            files_to_delete = sorted([file_path, nested_file1, nested_file2])
+            # Only the target directory name is also deleted as an object;
+            # nested directories are not, since the recursive listing would
+            # have returned any coexisting object (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            files_to_delete = sorted(
+                [file_path, nested_file1, nested_file2] + [base_dir]
+            )
             mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
             assert sorted(mock_delete_files.await_args[0][0]) == files_to_delete
             expected_delete_folder_requests = [
@@ -2669,12 +3279,235 @@ class TestExtendedGcsFileSystemRm:
                 expected_delete_folder_requests
             )
 
+    @staticmethod
+    def _fake_object_listing(objects):
+        """
+        Emulates the object listing of core `GCSFileSystem._find` over the
+        object names in `objects`: it lists the prefix "path/" and only falls
+        back to the object "path" itself when that prefix has no objects.
+        """
+
+        async def fake_find(path, **kwargs):
+            path = path.rstrip("/")
+            names = [o for o in objects if o.startswith(f"{path}/")]
+            if not names:
+                names = [o for o in objects if o == path]
+            return {n: {"name": n, "type": "file", "size": 4} for n in names}
+
+        return fake_find
+
+    @pytest.mark.parametrize(
+        "objects, suffix, expected_files, expected_dirs",
+        [
+            # Folder 'a/' only contains the subfolder 'b/'.
+            pytest.param(
+                ["a"],
+                "",
+                ["a", ""],
+                ["a/b", "a", ""],
+                id="subfolder_only-parent_dir",
+            ),
+            pytest.param(["a"], "/*", ["a"], ["a/b", "a"], id="subfolder_only-glob"),
+            pytest.param(
+                ["a"], "/a", ["a"], ["a/b", "a"], id="subfolder_only-shared_name"
+            ),
+            # Folder 'a/' also contains the object 'a/x.txt', so the listing of
+            # the prefix 'a/' does not include the object 'a'.
+            pytest.param(
+                ["a", "a/x.txt"],
+                "",
+                ["a", "a/x.txt", ""],
+                ["a/b", "a", ""],
+                id="subfolder_and_object-parent_dir",
+            ),
+            pytest.param(
+                ["a", "a/x.txt"],
+                "/*",
+                ["a", "a/x.txt"],
+                ["a/b", "a"],
+                id="subfolder_and_object-glob",
+            ),
+            pytest.param(
+                ["a", "a/x.txt"],
+                "/a",
+                ["a", "a/x.txt"],
+                ["a/b", "a"],
+                id="subfolder_and_object-shared_name",
+            ),
+            # The object 'a/b' shares its name with the nested folder 'a/b/',
+            # whose parent 'a' is also removed, so only the recursive listing
+            # of 'a' (not a top-level blind delete) can find the object.
+            pytest.param(
+                ["a/b"],
+                "",
+                ["a/b", ""],
+                ["a/b", "a", ""],
+                id="nested_shared_name-parent_dir",
+            ),
+            pytest.param(
+                ["a/b"], "/*", ["a/b", "a"], ["a/b", "a"], id="nested_shared_name-glob"
+            ),
+            pytest.param(
+                ["a/b"],
+                "/a",
+                ["a/b", "a"],
+                ["a/b", "a"],
+                id="nested_shared_name-shared_name",
+            ),
+        ],
+    )
+    def test_rm_recursive_deletes_object_sharing_name_with_folder(
+        self, gcs_hns, gcs_hns_mocks, objects, suffix, expected_files, expected_dirs
+    ):
+        """
+        Test that recursive rm deletes an object that shares its name with a
+        folder (object 'a' and folder 'a/'), which can coexist in HNS buckets,
+        without deleting nested directory names as objects.
+
+        `_expand_path_with_details` is not mocked so that the real listings
+        in `_find`/`_glob` are exercised against an emulated bucket.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
+
+        def to_paths(names):
+            return [f"{base_dir}/{n}" if n else base_dir for n in names]
+
+        mock_delete_files = mock.AsyncMock(return_value=[])
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            mocks["super_find"].side_effect = self._fake_object_listing(
+                to_paths(objects)
+            )
+            mocks["control_client"].list_folders.side_effect = (
+                lambda *args, **kwargs: AsyncIter(
+                    [
+                        get_mock_folder("dir_to_rm"),
+                        get_mock_folder("dir_to_rm/a"),
+                        get_mock_folder("dir_to_rm/a/b"),
+                    ]
+                )
+            )
+
+            gcsfs.rm(f"{base_dir}{suffix}", recursive=True)
+
+            mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
+            # The coexisting object 'a' is deleted, but the nested folder name
+            # 'a/b' is never deleted as an object.
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
+                to_paths(expected_files)
+            )
+            expected_dir_paths = to_paths(expected_dirs)
+            expected_delete_folder_requests = [
+                mock.call(
+                    request=self._get_delete_folder_request(gcsfs, d),
+                    retry=mock.ANY,
+                    timeout=mock.ANY,
+                )
+                for d in expected_dir_paths
+            ]
+            mocks["control_client"].delete_folder.assert_has_calls(
+                expected_delete_folder_requests
+            )
+            assert mocks["control_client"].delete_folder.call_count == len(
+                expected_dir_paths
+            )
+
+    def test_rm_object_sharing_name_with_folder_keeps_dir_cache_on_failure(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """
+        Test that when the object sharing a directory's name is deleted and
+        the folder delete then fails, only the "file" entry is evicted from
+        the cached parent listing and the "directory" entry stays.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/dir_to_rm"
+        dir_path = f"{base_dir}/sub"
+        dir_entry = {"name": dir_path, "type": "directory", "size": 0}
+        file_entry = {"name": dir_path, "type": "file", "size": 4}
+        # A listing of `base_dir` caches both entries for the shared name.
+        gcsfs.dircache[base_dir] = [dir_entry, file_entry]
+
+        async def fake_delete_files(files, batchsize):
+            # Emulates a successful batch delete of the objects.
+            await gcsfs._rm_files_cache_update(files)
+            return list(files)
+
+        try:
+            with (
+                gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+                mock.patch.object(
+                    gcsfs, "_expand_path_with_details", new_callable=mock.AsyncMock
+                ) as mock_expand,
+                mock.patch.object(
+                    gcsfs, "_delete_files", side_effect=fake_delete_files
+                ) as mock_delete_files,
+            ):
+                mock_expand.return_value = [dir_entry]
+                mocks["control_client"].delete_folder.side_effect = (
+                    api_exceptions.FailedPrecondition("folder not empty")
+                )
+
+                with pytest.raises(OSError, match="Pre condition failed"):
+                    gcsfs.rm(dir_path, recursive=True)
+
+                mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+                assert gcsfs.dircache[base_dir] == [dir_entry]
+        finally:
+            gcsfs.invalidate_cache()
+
+    @pytest.mark.parametrize(
+        "maxdepth, expected_files",
+        [
+            # Unbounded: 'dir' is listed below the bucket root, so it is not
+            # also deleted as an object.
+            pytest.param(None, [], id="unbounded"),
+            # Bounded: every directory name except the bucket root is also
+            # deleted as an object.
+            pytest.param(1, [f"{TEST_HNS_BUCKET}/dir"], id="maxdepth"),
+        ],
+    )
+    def test_rm_recursive_bucket_root_not_deleted_as_object(
+        self, gcs_hns, gcs_hns_mocks, maxdepth, expected_files
+    ):
+        """Test that recursive rm never deletes the bucket name as an object."""
+        gcsfs = gcs_hns
+        dir_path = f"{TEST_HNS_BUCKET}/dir"
+
+        mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock()
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+            # With maxdepth set, _hns_rmdir also deletes the placeholder.
+            mock.patch.object(
+                gcsfs, "_rm_file", new_callable=mock.AsyncMock
+            ) as mock_rm_file,
+        ):
+            mock_expand.return_value = [
+                {"name": TEST_HNS_BUCKET, "type": "directory"},
+                {"name": dir_path, "type": "directory"},
+            ]
+            mock_delete_files.return_value = []
+            mock_rm_file.side_effect = FileNotFoundError
+
+            gcsfs.rm(TEST_HNS_BUCKET, recursive=True, maxdepth=maxdepth)
+
+            mock_delete_files.assert_awaited_once_with(expected_files, self.BATCH_SIZE)
+            mocks["super_rmdir"].assert_awaited_once_with(TEST_HNS_BUCKET)
+
     def test_rm_non_hns_fallback(self, gcs_hns, gcs_hns_mocks):
         """Test that sync rm falls back to the parent implementation for non-HNS buckets."""
         gcsfs = gcs_hns
         path = f"{TEST_HNS_BUCKET}/some_path"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
             gcsfs.rm(path, recursive=True)
 
             # Verify it called the parent's _rm and not the HNS-specific logic
@@ -2688,7 +3521,7 @@ class TestExtendedGcsFileSystemRm:
         path = f"{TEST_HNS_BUCKET}/dne"
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(
                 gcsfs, "_expand_path_with_details", new_callable=mock.AsyncMock
             ) as mock_expand,
@@ -2712,7 +3545,7 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock()
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
@@ -2724,7 +3557,9 @@ class TestExtendedGcsFileSystemRm:
             mock_expand.assert_awaited_once_with(
                 [dir_path], recursive=True, maxdepth=None, detail=True
             )
-            mock_delete_files.assert_awaited_once_with([], self.BATCH_SIZE)
+            # The directory name is also deleted as an object (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2736,10 +3571,12 @@ class TestExtendedGcsFileSystemRm:
         dir_path = f"{TEST_HNS_BUCKET}/non_empty_dir"
 
         mock_expand = mock.AsyncMock()
+        mock_delete_files = mock.AsyncMock(return_value=[])
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
             # Mock expand_path to return the directory itself
             mock_expand.return_value = [{"name": dir_path, "type": "directory"}]
@@ -2755,6 +3592,9 @@ class TestExtendedGcsFileSystemRm:
             mock_expand.assert_called_once_with(
                 [dir_path], recursive=False, maxdepth=None, detail=True
             )
+            # The directory name is also deleted as an object (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -2771,7 +3611,7 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock()
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
@@ -2793,7 +3633,9 @@ class TestExtendedGcsFileSystemRm:
             )
             mock_delete_files.assert_awaited_once()
             args, _ = mock_delete_files.await_args
-            assert sorted(args[0]) == sorted([file_path1, file_path2])
+            # Directory names are also deleted as objects (see
+            # test_rm_recursive_deletes_object_sharing_name_with_folder).
+            assert sorted(args[0]) == sorted([file_path1, file_path2, dir_path])
 
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
@@ -2818,11 +3660,11 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock(return_value=[])
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
-            mocks["async_lookup_bucket_type"].side_effect = _mixed_bucket_type
+            mocks["async_lookup_bucket_layout"].side_effect = _mixed_bucket_layout
 
             gcsfs.rm(paths, recursive=True)
 
@@ -2843,10 +3685,10 @@ class TestExtendedGcsFileSystemRm:
         """Test that rm([]) returns [] and doesn't do bucket lookup."""
         gcsfs = gcs_hns
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             assert gcsfs.rm([]) == []
 
-            mocks["async_lookup_bucket_type"].assert_not_called()
+            mocks["async_lookup_bucket_layout"].assert_not_called()
 
     def test_rm_same_bucket_hns_efficiency(self, gcs_hns, gcs_hns_mocks):
         """Test that rm on multiple HNS paths in the same bucket remains efficient."""
@@ -2858,7 +3700,7 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock()
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
@@ -2886,7 +3728,7 @@ class TestExtendedGcsFileSystemRm:
         flat_file1 = "flat-bucket/file1.txt"
         flat_file2 = "flat-bucket/file2.txt"
 
-        with gcs_hns_mocks(BucketType.NON_HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
             gcsfs.rm([flat_file1, flat_file2])
 
             # Calls super()._rm exactly once for the whole group
@@ -2903,8 +3745,8 @@ class TestExtendedGcsFileSystemRm:
         flat_file = "flat-bucket/file.txt"
         hns_file = "hns-bucket/file.txt"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
-            mocks["async_lookup_bucket_type"].side_effect = _mixed_bucket_type
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
+            mocks["async_lookup_bucket_layout"].side_effect = _mixed_bucket_layout
             mocks["super_rm"].side_effect = FileNotFoundError()
             mocks["info"].side_effect = FileNotFoundError()  # For HNS file check
 
@@ -2921,11 +3763,11 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock(return_value=[])
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
-            mocks["async_lookup_bucket_type"].side_effect = _mixed_bucket_type
+            mocks["async_lookup_bucket_layout"].side_effect = _mixed_bucket_layout
             # Flat fails, but HNS succeeds
             mocks["super_rm"].side_effect = FileNotFoundError()
 
@@ -2945,23 +3787,27 @@ class TestExtendedGcsFileSystemRm:
         mock_delete_files = mock.AsyncMock(return_value=[])
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
         ):
-            mocks["async_lookup_bucket_type"].side_effect = _mixed_bucket_type
+            mocks["async_lookup_bucket_layout"].side_effect = _mixed_bucket_layout
             # Flat group raises a non-FileNotFoundError; HNS group would succeed.
             mocks["super_rm"].side_effect = OSError("boom")
 
             with pytest.raises(OSError, match="boom"):
                 gcsfs.rm([flat_file, hns_file])
 
+    # Directory names that are not listed below another removed directory
+    # (all of them unless recursive=True and maxdepth=None) are also
+    # batch-deleted as objects (see
+    # test_rm_recursive_deletes_object_sharing_name_with_folder).
     @pytest.mark.parametrize(
         "recursive, maxdepth, expected_batch_files, expected_rm_files, expected_folder_deletes",
         [
-            (True, None, ["dir/sub/"], [], 2),
-            (True, 1, [], ["dir/sub/", "dir/"], 2),
-            (False, None, [], ["dir/"], 1),
+            (True, None, ["dir/sub/", "dir"], [], 2),
+            (True, 1, ["dir", "dir/sub"], ["dir/sub/", "dir/"], 2),
+            (False, None, ["dir"], ["dir/"], 1),
         ],
     )
     def test_rm_placeholder_delete_behavior(
@@ -2983,7 +3829,7 @@ class TestExtendedGcsFileSystemRm:
         mock_rm_file = mock.AsyncMock(side_effect=FileNotFoundError)
 
         with (
-            gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks,
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
             mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
             mock.patch.object(gcsfs, "_rm_file", new=mock_rm_file),
         ):
@@ -3001,9 +3847,9 @@ class TestExtendedGcsFileSystemRm:
 
             gcsfs.rm(dir_path, recursive=recursive, maxdepth=maxdepth)
 
-            assert mock_delete_files.await_args[0][0] == [
+            assert sorted(mock_delete_files.await_args[0][0]) == sorted(
                 f"{TEST_HNS_BUCKET}/{k}" for k in expected_batch_files
-            ]
+            )
             assert sorted(c.args[0] for c in mock_rm_file.await_args_list) == sorted(
                 f"{TEST_HNS_BUCKET}/{k}" for k in expected_rm_files
             )
@@ -3185,7 +4031,7 @@ class TestStorageControlRetryExecution:
         gcsfs = gcs_hns
         path = f"{TEST_HNS_BUCKET}/test_retry_config"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
             mock_create = mocks["control_client"].create_folder
             mock_create.return_value = mock.AsyncMock()
@@ -3211,7 +4057,7 @@ class TestStorageControlRetryExecution:
         gcsfs = gcs_hns
         path = f"{TEST_HNS_BUCKET}/test_per_attempt_timeout"
 
-        with gcs_hns_mocks(BucketType.HIERARCHICAL, gcsfs) as mocks:
+        with gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks:
             mocks["info"].side_effect = FileNotFoundError
             mock_create = mocks["control_client"].create_folder
             mock_create.return_value = mock.AsyncMock()
@@ -3225,15 +4071,15 @@ class TestStorageControlRetryExecution:
             assert kwargs["timeout"] == 30.0  # STORAGE_CONTROL_RPC_TIMEOUT
 
 
-class TestExtendedGcsFileSystemBucketType:
-    """Unit tests for ExtendedGcsFileSystem _get_bucket_type and grpc_client."""
+class TestExtendedGcsFileSystemBucketLayout:
+    """Unit tests for ExtendedGcsFileSystem _get_bucket_layout and grpc_client."""
 
     @pytest.fixture(autouse=True)
-    def _mock_get_bucket_type_on_emulator(self):
-        """Override the global session mock to allow testing the real _get_bucket_type."""
+    def _mock_get_bucket_layout_on_emulator(self):
+        """Override the global session mock to allow testing the real _get_bucket_layout."""
         with mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_type",
-            new=ORIGINAL_GET_BUCKET_TYPE,
+            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout",
+            new=ORIGINAL_GET_BUCKET_LAYOUT,
         ):
             yield
 
@@ -3244,40 +4090,95 @@ class TestExtendedGcsFileSystemBucketType:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "location_type, hns_enabled, expected_bucket_type",
+        "layout_fields, expected_bucket_layout",
         [
-            ("zone", None, BucketType.ZONAL_HIERARCHICAL),
-            ("region", True, BucketType.HIERARCHICAL),
-            ("region", False, BucketType.NON_HIERARCHICAL),
+            (
+                {"location_type": "zone", "hierarchical_namespace": {"enabled": True}},
+                layouts.ZONAL_HIERARCHICAL,
+            ),
+            # A zonal response without the HNS field is still hierarchical.
+            ({"location_type": "zone"}, layouts.ZONAL_HIERARCHICAL),
+            (
+                {
+                    "location_type": "multi-region",
+                    "hierarchical_namespace": {"enabled": True},
+                },
+                layouts.STANDARD_HIERARCHICAL,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "hierarchical_namespace": {"enabled": False},
+                },
+                layouts.STANDARD,
+            ),
+            ({"location_type": "region"}, layouts.STANDARD),
+            (
+                {"location_type": "region", "rapid_cache_info": {"cache_type": ""}},
+                layouts.STANDARD,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "rapid_cache_info": {"cache_type": "unknown-cache-type"},
+                },
+                layouts.STANDARD,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "rapid_cache_info": {"cache_type": "rapid-cache-ultra"},
+                },
+                layouts.STANDARD_RCU,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "hierarchical_namespace": {"enabled": True},
+                    "rapid_cache_info": {"cache_type": "rapid-cache-ultra"},
+                },
+                layouts.HIERARCHICAL_RCU,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "rapid_cache_info": {"cache_type": "rapid-cache"},
+                },
+                layouts.STANDARD_RAPID_CACHE,
+            ),
+            (
+                {
+                    "location_type": "region",
+                    "hierarchical_namespace": {"enabled": True},
+                    "rapid_cache_info": {"cache_type": "rapid-cache"},
+                },
+                layouts.HIERARCHICAL_RAPID_CACHE,
+            ),
         ],
     )
-    async def test_get_bucket_type_detection(
-        self, extended_gcsfs, location_type, hns_enabled, expected_bucket_type
+    async def test_get_bucket_layout_detection(
+        self, extended_gcsfs, layout_fields, expected_bucket_layout
     ):
         fs = extended_gcsfs
-        mock_response = mock.Mock()
-        mock_response.location_type = location_type
-        if hns_enabled is not None:
-            mock_response.hierarchical_namespace = mock.Mock(enabled=hns_enabled)
+        response = storage_control_v2.StorageLayout(**layout_fields)
 
         with mock.patch.object(
             fs, "_get_control_plane_client", new_callable=mock.AsyncMock
         ) as mock_client_getter:
             mock_client = mock_client_getter.return_value
-            mock_client.get_storage_layout = mock.AsyncMock(return_value=mock_response)
+            mock_client.get_storage_layout = mock.AsyncMock(return_value=response)
 
-            bucket_type = await fs._get_bucket_type("test-bucket")
-            assert bucket_type == expected_bucket_type
+            bucket_layout = await fs._get_bucket_layout("test-bucket")
+            assert bucket_layout == expected_bucket_layout
 
-            if location_type == "zone":
-                mock_client.get_storage_layout.assert_awaited_once_with(
-                    name="projects/_/buckets/test-bucket/storageLayout",
-                    retry=mock.ANY,
-                    timeout=mock.ANY,
-                )
+            mock_client.get_storage_layout.assert_awaited_once_with(
+                name="projects/_/buckets/test-bucket/storageLayout",
+                retry=mock.ANY,
+                timeout=mock.ANY,
+            )
 
     @pytest.mark.asyncio
-    async def test_get_bucket_type_not_found(self, extended_gcsfs, caplog):
+    async def test_get_bucket_layout_not_found(self, extended_gcsfs, caplog):
         import logging
 
         fs = extended_gcsfs
@@ -3291,12 +4192,12 @@ class TestExtendedGcsFileSystemBucketType:
             )
 
             with caplog.at_level(logging.WARNING, logger="gcsfs"):
-                bucket_type = await fs._get_bucket_type("missing-bucket")
-                assert bucket_type == BucketType.UNKNOWN
-                assert "not found or you lack permissions" in caplog.text
+                bucket_layout = await fs._get_bucket_layout("missing-bucket")
+                assert bucket_layout == BucketLayout.UNKNOWN
+                assert "detect bucket layout" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_get_bucket_type_general_exception(self, extended_gcsfs, caplog):
+    async def test_get_bucket_layout_general_exception(self, extended_gcsfs, caplog):
         import logging
 
         fs = extended_gcsfs
@@ -3310,6 +4211,93 @@ class TestExtendedGcsFileSystemBucketType:
             )
 
             with caplog.at_level(logging.WARNING, logger="gcsfs"):
-                bucket_type = await fs._get_bucket_type("error-bucket")
-                assert bucket_type == BucketType.UNKNOWN
-                assert "Could not determine bucket type" in caplog.text
+                bucket_layout = await fs._get_bucket_layout("error-bucket")
+                assert bucket_layout == BucketLayout.UNKNOWN
+                assert "Could not determine bucket layout" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_lookup_bucket_layout_caches_known_and_skips_unknown(
+        self, extended_gcsfs
+    ):
+        fs = extended_gcsfs
+        fs.invalidate_storage_layout_cache()
+
+        with mock.patch.object(
+            fs,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            side_effect=[
+                BucketLayout.UNKNOWN,
+                layouts.STANDARD_HIERARCHICAL,
+            ],
+        ) as mock_get_layout:
+            # First lookup returns UNKNOWN and should not cache
+            res1 = await fs._lookup_bucket_layout("transient-bucket")
+            assert res1 == BucketLayout.UNKNOWN
+            assert "transient-bucket" not in fs._storage_layout_cache
+            assert mock_get_layout.await_count == 1
+
+            # Second lookup retries _get_bucket_layout and caches the known layout
+            res2 = await fs._lookup_bucket_layout("transient-bucket")
+            assert res2 == layouts.STANDARD_HIERARCHICAL
+            assert (
+                fs._storage_layout_cache["transient-bucket"]
+                == layouts.STANDARD_HIERARCHICAL
+            )
+            assert mock_get_layout.await_count == 2
+
+            # Third lookup hits the cache without calling _get_bucket_layout again
+            res3 = await fs._lookup_bucket_layout("transient-bucket")
+            assert res3 == layouts.STANDARD_HIERARCHICAL
+            assert mock_get_layout.await_count == 2
+
+    def test_invalidate_storage_layout_cache_single_bucket(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache = {
+            "bucket-a": layouts.STANDARD_RCU,
+            "bucket-b": layouts.STANDARD_HIERARCHICAL,
+        }
+
+        fs.invalidate_storage_layout_cache("bucket-a")
+        assert fs._storage_layout_cache == {"bucket-b": layouts.STANDARD_HIERARCHICAL}
+
+        # A path inside the bucket drops that bucket's entry.
+        fs.invalidate_storage_layout_cache("gs://bucket-b/some/key")
+        assert fs._storage_layout_cache == {}
+
+        # Invalidating a bucket that is not cached is a no-op.
+        fs.invalidate_storage_layout_cache("missing-bucket")
+        assert fs._storage_layout_cache == {}
+
+    def test_invalidate_storage_layout_cache_all(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache = {
+            "bucket-a": layouts.STANDARD_RCU,
+            "bucket-b": layouts.STANDARD_HIERARCHICAL,
+        }
+
+        fs.invalidate_storage_layout_cache()
+
+        assert fs._storage_layout_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_lookup_after_invalidate_requeries(self, extended_gcsfs):
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs,
+            "_get_bucket_layout",
+            new_callable=mock.AsyncMock,
+            side_effect=[layouts.STANDARD_RCU, layouts.STANDARD],
+        ) as mock_get_layout:
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD_RCU
+
+            fs.invalidate_storage_layout_cache("bucket")
+
+            assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD
+            assert mock_get_layout.await_count == 2
+
+    def test_bucket_layout_presets(self):
+        assert BucketLayout.UNKNOWN == BucketLayout(
+            StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN
+        )

@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import io
 import os
 import sys
 import threading
+import time
 import types
 
+import aiohttp
 import fsspec.asyn
 import fsspec.spec
 import pytest
+from google.auth.transport import DEFAULT_RETRYABLE_STATUS_CODES
 
+import gcsfs.telemetry.detector as environment_module
 import gcsfs.telemetry.manager as manager_mod
 from gcsfs.telemetry.context import (
     Dimension,
@@ -19,14 +26,22 @@ from gcsfs.telemetry.context import (
     sanitize_token,
     set_telemetry_context,
 )
-from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
+from gcsfs.telemetry.detector import (
+    BaseDetector,
+    EnvironmentDetector,
+    FrameworkDetector,
+)
 from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
+    _telemetry_context,
     mirror_gcs_methods,
     wrap_file_methods,
 )
+
+# Captured at import time, before the conftest autouse fixture stubs detect().
+_REAL_ENVIRONMENT_DETECT = EnvironmentDetector.detect
 
 # ============================================================================
 # 1. Sanitizer Tests
@@ -158,7 +173,7 @@ def test_telemetry_tracker_opt_out(monkeypatch):
     # With GCSFS_NO_TELEMETRY=1
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "1")
     assert not tracker.is_enabled()
-    assert tracker.collect_tokens_map() == {}
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {}
     assert tracker.get_tokens() == []
 
     # With GCSFS_NO_TELEMETRY=true
@@ -169,7 +184,7 @@ def test_telemetry_tracker_opt_out(monkeypatch):
     # With DO_NOT_TRACK=1
     monkeypatch.setenv("DO_NOT_TRACK", "1")
     assert not tracker.is_enabled()
-    assert tracker.collect_tokens_map() == {}
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {}
     assert tracker.get_tokens() == []
 
     # With DO_NOT_TRACK=true
@@ -375,18 +390,38 @@ def test_collect_tokens_map_caches_detector_exception():
 
     tracker = UsageMetricsTracker(detectors=[FailingDetector()])
 
-    tokens1 = tracker.collect_tokens_map()
+    tokens1 = tracker.collect_tokens_map(call_scoped_only=False)
     assert tokens1 == {Dimension.FRAMEWORK.value: ""}
     assert call_count == 1
 
     # Second call
     t = set_telemetry_context(tokens1)
     try:
-        tokens2 = tracker.collect_tokens_map()
+        tokens2 = tracker.collect_tokens_map(call_scoped_only=False)
     finally:
         reset_telemetry_context(t)
     assert tokens2 == {Dimension.FRAMEWORK.value: ""}
     assert call_count == 1
+
+
+def test_warm_up_and_get_dimension_handle_failing_and_missing_detectors():
+    calls = 0
+
+    class FailingBackgroundDetector(BaseDetector):
+        name = Dimension.ENVIRONMENT
+        call_scoped = False
+
+        def detect(self):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("probe init failed")
+
+    tracker = UsageMetricsTracker(detectors=[FailingBackgroundDetector()])
+    tracker.warm_up()
+    assert calls == 1
+    assert tracker.get_dimension(Dimension.ENVIRONMENT) is None
+    assert calls == 2
+    assert tracker.get_dimension(Dimension.FRAMEWORK) is None
 
 
 def test_collect_tokens_map_records_empty_for_none_detection():
@@ -402,7 +437,7 @@ def test_collect_tokens_map_records_empty_for_none_detection():
             return None
 
     tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
-    tokens_map = tracker.collect_tokens_map()
+    tokens_map = tracker.collect_tokens_map(call_scoped_only=False)
     assert tokens_map == {"fw": ""}
     assert call_count == 1
 
@@ -413,11 +448,144 @@ def test_collect_tokens_map_records_empty_for_none_detection():
         # must now be O(1) without re-running detect()
         assert tracker.get_tokens() == []
         assert tracker.get_dimension(Dimension.FRAMEWORK) is None
-        tokens_map_2 = tracker.collect_tokens_map()
+        tokens_map_2 = tracker.collect_tokens_map(call_scoped_only=False)
         assert tokens_map_2 == {"fw": ""}
         assert call_count == 1  # Still 1, no additional detect() calls!
     finally:
         reset_telemetry_context(token)
+
+
+class _CallScopedFrameworkDetector(BaseDetector):
+    name = Dimension.FRAMEWORK
+
+    def detect(self):
+        return "pandas"
+
+
+class _ProcessScopedEnvDetector(BaseDetector):
+    """Process-wide detector whose value can change mid-call, like an in-flight probe."""
+
+    name = Dimension.ENVIRONMENT
+    call_scoped = False
+
+    def __init__(self, value="gke"):
+        self.value = value
+        self.calls = 0
+
+    def detect(self):
+        self.calls += 1
+        return self.value
+
+
+def _tracker_with(env_detector):
+    return UsageMetricsTracker(detectors=[_CallScopedFrameworkDetector(), env_detector])
+
+
+def test_collect_tokens_map_requires_call_scoped_only():
+    tracker = _tracker_with(_ProcessScopedEnvDetector())
+
+    with pytest.raises(TypeError):
+        tracker.collect_tokens_map()
+
+
+def test_collect_tokens_map_call_scoped_only_skips_process_scoped_detectors():
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    assert tracker.collect_tokens_map(call_scoped_only=True) == {"fw": "pandas"}
+    assert env_detector.calls == 0
+
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {
+        "fw": "pandas",
+        "env": "gke",
+    }
+    assert env_detector.calls == 1
+
+
+def test_get_tokens_reads_process_scoped_detectors_every_request():
+    """Request tokens include env and re-read it per call, even inside a per-call context."""
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+
+    token = set_telemetry_context(tracker.collect_tokens_map(call_scoped_only=True))
+    try:
+        assert get_telemetry_context() == {"fw": "pandas"}
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+    finally:
+        reset_telemetry_context(token)
+    assert env_detector.calls == 3
+
+
+def test_explicit_context_value_wins_over_process_scoped_detector():
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    token = set_telemetry_context({"env": "custom"})
+    try:
+        assert tracker.collect_tokens_map(call_scoped_only=True) == {
+            "env": "custom",
+            "fw": "pandas",
+        }
+        assert tracker.get_tokens() == ["env/custom", "fw/pandas"]
+    finally:
+        reset_telemetry_context(token)
+    assert env_detector.calls == 0
+
+
+def _check_env_resolves_mid_call(tracker, env_detector):
+    # The per-call snapshot holds only call-scoped dimensions while env is unresolved.
+    assert get_telemetry_context() == {"fw": "pandas"}
+    assert tracker.get_tokens() == ["fw/pandas"]
+    # The background probe resolves mid-call; later requests in the same call pick it up.
+    env_detector.value = "gke"
+    assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+
+
+def _run_in_telemetry_context(check):
+    with _telemetry_context():
+        check()
+
+
+def _run_in_native_async_gen(check):
+    async def steps():
+        check()
+        yield None
+
+    async def consume():
+        return [item async for item in _gcs_async_wrapper(steps)()]
+
+    asyncio.run(consume())
+
+
+def _run_in_sync_gen(check):
+    class GenFS(fsspec.asyn.AsyncFileSystem):
+        async def _steps(self):
+            check()
+            yield None
+
+        steps = _gcs_sync_wrapper(_steps)
+
+    list(GenFS(skip_instance_cache=True).steps())
+
+
+@pytest.mark.parametrize(
+    "run_call",
+    [_run_in_telemetry_context, _run_in_native_async_gen, _run_in_sync_gen],
+    ids=["telemetry_context", "native_async_gen", "sync_gen"],
+)
+def test_per_call_snapshot_never_freezes_unresolved_env(monkeypatch, run_call):
+    """Each wrapper snapshot site leaves env out, so an env that resolves mid-call is sent."""
+    env_detector = _ProcessScopedEnvDetector(value=None)
+    tracker = _tracker_with(env_detector)
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    run_call(lambda: _check_env_resolves_mid_call(tracker, env_detector))
+
+    assert env_detector.value == "gke"
+    assert get_telemetry_context() == {}
 
 
 # ============================================================================
@@ -731,3 +899,1475 @@ def test_sync_wrapper_propagates_context_to_background_loop_thread(detector):
     # Detection ran once, on the caller thread: the loop thread's stack has no framework frames
     assert detector.calls == [caller_thread_id]
     assert get_telemetry_context() == {}
+
+
+# ============================================================================
+# 6. GCSFileSystem & GCSFile Integration Tests
+# ============================================================================
+
+
+def _write_file_helper(fs, tmp_path, monkeypatch):
+    with fs.open("test-bucket/file.txt", "wb") as f:
+        f.write(b"data\n")
+        f.writelines([b"data2\n"])
+        f.flush()
+
+
+def _get_file_concurrent_helper(fs, tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
+
+    async def _zero_threshold(bucket):
+        return 0
+
+    monkeypatch.setattr(fs, "_get_threshold_for_disk_reads", _zero_threshold)
+    fs.get_file(
+        "test-bucket/file.txt",
+        str(tmp_path / "downloaded.bin"),
+        concurrency=2,
+        chunk_size=10,
+    )
+
+
+def _read_file_helper(fs, tmp_path, monkeypatch):
+    with fs.open("test-bucket/file.txt", "rb") as f:
+        return f.read(5)
+
+
+class _CallerThreadOnlyDetector(BaseDetector):
+    """
+    Framework detector that only "sees" a framework on the thread that created it,
+    mirroring real stack-walking: the fsspecIO loop thread never has user frames.
+    Records the thread name of every call so tests can assert detection never ran there.
+    """
+
+    name = Dimension.FRAMEWORK
+
+    def __init__(self, value):
+        self.value = value
+        self.caller_ident = threading.get_ident()
+        self.thread_names = []
+
+    def detect(self):
+        self.thread_names.append(threading.current_thread().name)
+        return self.value if threading.get_ident() == self.caller_ident else None
+
+
+_COMMON_FS_OPS = [
+    ("ls", lambda fs, tmp_path, monkeypatch: fs.ls("test-bucket")),
+    ("info", lambda fs, tmp_path, monkeypatch: fs.info("test-bucket/file.txt")),
+    ("exists", lambda fs, tmp_path, monkeypatch: fs.exists("test-bucket/file.txt")),
+    ("cat", lambda fs, tmp_path, monkeypatch: fs.cat("test-bucket/file.txt")),
+    (
+        "cat_file",
+        lambda fs, tmp_path, monkeypatch: fs.cat_file("test-bucket/file.txt"),
+    ),
+    (
+        "head",
+        lambda fs, tmp_path, monkeypatch: fs.head("test-bucket/file.txt", size=5),
+    ),
+    (
+        "tail",
+        lambda fs, tmp_path, monkeypatch: fs.tail("test-bucket/file.txt", size=5),
+    ),
+    ("find", lambda fs, tmp_path, monkeypatch: fs.find("test-bucket")),
+    ("walk", lambda fs, tmp_path, monkeypatch: list(fs.walk("test-bucket"))),
+    ("glob", lambda fs, tmp_path, monkeypatch: fs.glob("test-bucket/*")),
+    ("du", lambda fs, tmp_path, monkeypatch: fs.du("test-bucket")),
+    ("size", lambda fs, tmp_path, monkeypatch: fs.size("test-bucket/file.txt")),
+    (
+        "read_bytes",
+        lambda fs, tmp_path, monkeypatch: fs.read_bytes("test-bucket/file.txt"),
+    ),
+    (
+        "read_text",
+        lambda fs, tmp_path, monkeypatch: fs.read_text("test-bucket/file.txt"),
+    ),
+    (
+        "write_bytes",
+        lambda fs, tmp_path, monkeypatch: fs.write_bytes(
+            "test-bucket/file.txt", b"data"
+        ),
+    ),
+    (
+        "write_text",
+        lambda fs, tmp_path, monkeypatch: fs.write_text("test-bucket/file.txt", "data"),
+    ),
+    (
+        "pipe_file",
+        lambda fs, tmp_path, monkeypatch: fs.pipe_file("test-bucket/file.txt", b"x"),
+    ),
+    ("rm", lambda fs, tmp_path, monkeypatch: fs.rm("test-bucket/file.txt")),
+    ("rmdir", lambda fs, tmp_path, monkeypatch: fs.rmdir("test-bucket")),
+    (
+        "merge",
+        lambda fs, tmp_path, monkeypatch: fs.merge(
+            "test-bucket/merged.txt", ["test-bucket/a.txt", "test-bucket/b.txt"]
+        ),
+    ),
+    ("buckets", lambda fs, tmp_path, monkeypatch: fs.buckets),
+    ("open_read", _read_file_helper),
+    ("open_write", _write_file_helper),
+    ("get_file_concurrent", _get_file_concurrent_helper),
+]
+
+
+@pytest.mark.parametrize(
+    "mock_gcs_harness", ["core", "extended"], indirect=True, ids=["core", "extended"]
+)
+@pytest.mark.parametrize(
+    "name,op", _COMMON_FS_OPS, ids=[name for name, _ in _COMMON_FS_OPS]
+)
+def test_all_parent_methods_telemetry_coverage(
+    mock_gcs_harness, tmp_path, monkeypatch, name, op
+):
+    """
+    Verify that inherited and overridden FileSystem and File methods (on both
+    GCSFileSystem and ExtendedGcsFileSystem) detect the caller framework on the
+    caller thread and propagate it to every outgoing User-Agent header.
+
+    No telemetry context is pre-set: the detector only reports a framework on the
+    caller thread, so a method missing its telemetry wrapper would send requests
+    without the token (detection would only happen on the fsspecIO loop thread).
+    """
+    fs = mock_gcs_harness.fs
+    captured = mock_gcs_harness.user_agents
+    fs.dircache.clear()
+
+    fw_name = f"test-{name}"
+    detector = _CallerThreadOnlyDetector(fw_name)
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[detector]),
+    )
+    captured.clear()
+
+    op(fs, tmp_path, monkeypatch)
+
+    assert len(captured) > 0, f"operation {name} did not execute any network calls"
+    assert all(
+        f"fw/{fw_name}" in ua for ua in captured
+    ), f"operation {name} had requests missing fw/{fw_name}: {captured}"
+    # Regression guard: stack-walking must never run on the fsspec loop thread,
+    # where it can't find user frames and would add per-request overhead.
+    loop_thread_name = fsspec.asyn.iothread[0].name
+    assert (
+        loop_thread_name not in detector.thread_names
+    ), f"operation {name} ran framework detection on the loop thread: {detector.thread_names}"
+    assert get_telemetry_context() == {}
+
+
+def _is_async_fn(fn) -> bool:
+    return inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)
+
+
+@pytest.mark.parametrize(
+    "fs_cls_path",
+    ["gcsfs.core.GCSFileSystem", "gcsfs.extended_gcsfs.ExtendedGcsFileSystem"],
+    ids=["core", "extended"],
+)
+def test_filesystem_methods_are_telemetry_wrapped(fs_cls_path):
+    """
+    Verify, without a hardcoded method list, that every sync bridge and eligible native
+    async method defined on the filesystem class carries a telemetry wrapper.
+
+    - Any sync function defined on the class that wraps a coroutine (e.g. a leftover
+      `foo = asyn.sync_wrapper(_foo)`, detected via `functools.wraps`' `__wrapped__`)
+      must be a `_gcs_sync_wrapper`; otherwise it would skip caller-thread detection.
+    - Any native async method that `mirror_gcs_methods` targets (public sync counterpart
+      or AsyncFileSystem method) must be async-wrapped, and its public sync
+      counterpart (if any) must be sync-wrapped.
+    """
+    import importlib
+
+    module_name, cls_name = fs_cls_path.rsplit(".", 1)
+    fs_cls = getattr(importlib.import_module(module_name), cls_name)
+
+    unwrapped = set()
+    for name, attr in fs_cls.__dict__.items():
+        if name.startswith("__") or not inspect.isfunction(attr):
+            continue
+
+        # Sync bridges over coroutines (fsspec's sync_wrapper or ours)
+        if not _is_async_fn(attr) and _is_async_fn(inspect.unwrap(attr)):
+            if not getattr(attr, "_is_gcs_sync_wrapped", False):
+                unwrapped.add(name)
+            continue
+
+        # Native async methods targeted by mirror_gcs_methods
+        if name.startswith("_") and _is_async_fn(attr):
+            smethod = name[1:]
+            has_public_sync = hasattr(fsspec.spec.AbstractFileSystem, smethod) or (
+                hasattr(fs_cls, smethod)
+            )
+            if not (has_public_sync or hasattr(fsspec.asyn.AsyncFileSystem, name)):
+                continue
+            if not getattr(attr, "_is_gcs_async_wrapped", False):
+                unwrapped.add(name)
+            public = getattr(fs_cls, smethod, None)
+            if has_public_sync and not getattr(public, "_is_gcs_sync_wrapped", False):
+                unwrapped.add(smethod)
+
+    assert (
+        not unwrapped
+    ), f"{cls_name} methods missing telemetry wrappers: {sorted(unwrapped)}"
+
+
+def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
+    """
+    Across a Rapid (zonal) file's whole life (open -> read -> seek -> read -> info ->
+    close), the caller framework is detected exactly once, on the caller thread, and
+    every operation runs with it.
+
+    Opening for read issues a JSON API `_info` request from `ZonalFile.__init__` (MRD
+    pool setup) before `GCSFile.__init__` caches `caller_framework`, so `_open` must scope
+    telemetry; afterwards the wrapped file methods reuse the cached value.
+    """
+    from gcsfs import zb_hns_utils
+    from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+    from gcsfs.tests import layouts
+
+    fw = "test-zonal-lifecycle"
+    data = b"0123456789"
+    detector = _CallerThreadOnlyDetector(fw)
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[detector])
+    )
+    user_agents = []
+    # (operation, framework in the active telemetry context) for gRPC-side operations
+    grpc_ops = []
+
+    async def fake_call(self, method, path, *args, **kwargs):
+        user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
+        return {
+            "kind": "storage#object",
+            "name": "obj",
+            "bucket": "zonal-bucket",
+            "size": str(len(data)),
+            "generation": "1",
+            "timeFinalized": "2026-01-01T00:00:00.000Z",
+        }
+
+    async def fake_lookup_bucket_layout(self, bucket):
+        return layouts.ZONAL_HIERARCHICAL
+
+    async def fake_mrd_pool_initialize(self):
+        return None
+
+    async def fake_mrd_pool_close(self):
+        grpc_ops.append(("mrd_pool.close", get_telemetry_context().get("fw")))
+
+    async def fake_cat_file(self, path, start=None, end=None, **kwargs):
+        # Zonal reads go through the gRPC MRD path; record the context they run with
+        grpc_ops.append(("_cat_file", get_telemetry_context().get("fw")))
+        return data[start:end]
+
+    monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
+    monkeypatch.setattr(
+        ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
+    )
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
+    monkeypatch.setattr(
+        zb_hns_utils.MRDPool, "persisted_size", len(data), raising=False
+    )
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    f = fs.open("zonal-bucket/obj", "rb", cache_type="none")
+    try:
+        # Open: MRD pool `_info` request is tagged; GCSFile.__init__ reused the detection
+        assert f.caller_framework == fw
+        assert user_agents, "zonal open did not issue any JSON API requests"
+        assert detector.thread_names == [threading.current_thread().name]
+
+        assert f.read(4) == data[:4]
+        f.seek(0)
+        assert f.read(2) == data[:2]
+        assert f.info()["size"] == len(data)
+    finally:
+        f.close()
+
+    # Detected exactly once (at open, on the caller thread) for the file's whole life
+    assert detector.thread_names == [
+        threading.current_thread().name
+    ], f"framework detection ran more than once: {detector.thread_names}"
+    assert all(
+        f"fw/{fw}" in ua for ua in user_agents
+    ), f"zonal file sent HTTP requests without the framework token: {user_agents}"
+    assert [op for op, _ in grpc_ops].count("_cat_file") == 2
+    assert ("mrd_pool.close", fw) in grpc_ops
+    assert all(
+        ctx_fw == fw for _, ctx_fw in grpc_ops
+    ), f"zonal operations ran without the framework context: {grpc_ops}"
+    assert get_telemetry_context() == {}
+
+
+def test_zonal_file_methods_are_wrapped():
+    """Verify every ZonalFile override carries the file telemetry wrapper."""
+    from gcsfs.zonal_file import ZonalFile
+
+    for name, attr in ZonalFile.__dict__.items():
+        if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
+            continue
+        func = attr.fget if isinstance(attr, property) else attr
+        if callable(func):
+            assert getattr(
+                func, "_is_telemetry_wrapped", False
+            ), f"ZonalFile.{name} is not telemetry-wrapped"
+
+
+@pytest.mark.asyncio
+async def test_zonal_file_async_fetch_range_propagates_caller_framework():
+    """Verify ZonalFile's own background prefetch coroutine inherits the file's framework."""
+    import unittest.mock as mock
+
+    from gcsfs.zonal_file import ZonalFile
+
+    captured_context = {}
+
+    async def fake_concurrent_mrd_fetch(*args, **kwargs):
+        captured_context.update(get_telemetry_context())
+        return b"data"
+
+    f = ZonalFile.__new__(ZonalFile)
+    f.closed = True  # Skip finalizer cleanup for this partially-initialized file
+    f.caller_framework = "jax"
+    f.mrd_pool = None
+    f.gcsfs = mock.MagicMock()
+    f.gcsfs._concurrent_mrd_fetch = mock.AsyncMock(
+        side_effect=fake_concurrent_mrd_fetch
+    )
+
+    assert await f._async_fetch_range(0, 10) == b"data"
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "jax"
+    assert get_telemetry_context() == {}
+
+
+def test_zonal_file_write_propagates_caller_framework():
+    """Verify ZonalFile.write (gRPC append on the loop thread) runs with the file's framework."""
+    import unittest.mock as mock
+
+    from gcsfs.zonal_file import ZonalFile
+
+    captured_context = {}
+
+    async def fake_append(data):
+        captured_context.update(get_telemetry_context())
+
+    f = ZonalFile.__new__(ZonalFile)
+    f.closed = False
+    f.mode = "wb"
+    f.forced = False
+    f.loc = 0
+    f.caller_framework = "ray"
+    f.aaow = mock.MagicMock()
+    f.aaow.append = fake_append
+    f.gcsfs = mock.MagicMock()
+    f.gcsfs.loop = fsspec.asyn.get_loop()
+    f._ensure_aaow = lambda: None
+    try:
+        assert f.write(b"abc") == 3
+    finally:
+        f.closed = True
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+    assert get_telemetry_context() == {}
+
+
+def test_gcsfile_caller_framework_caches_empty_and_avoids_repeated_detect(monkeypatch):
+    """Verify GCSFile.caller_framework caches "" when undetected so file methods never re-detect."""
+    from gcsfs.core import GCSFile, GCSFileSystem
+
+    detect_count = 0
+
+    class DummyNoneDetector(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            nonlocal detect_count
+            detect_count += 1
+            return None
+
+    tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    f = GCSFile(fs, "bucket/test.txt", mode="wb")
+
+    # Detected once during GCSFile.__init__ and cached as the "" negative sentinel
+    assert detect_count == 1
+    assert f.caller_framework == ""
+
+    # Wrapped file methods reuse the cached value instead of re-running detection
+    f.write(b"data")
+    f.tell()
+    assert detect_count == 1
+    f.closed = True
+
+
+@pytest.mark.asyncio
+async def test_async_fetch_range_propagates_caller_framework():
+    """Verify that background prefetch coroutines inherit the framework context."""
+    import unittest.mock as mock
+
+    import gcsfs
+
+    captured_context = {}
+
+    async def mock_cat_file_concurrent(*args, **kwargs):
+        captured_context.update(get_telemetry_context())
+        return b"data"
+
+    fs = mock.MagicMock()
+    fs._cat_file_concurrent = mock.AsyncMock(side_effect=mock_cat_file_concurrent)
+    fs.split_path.return_value = ("bucket", "test.parquet", None)
+
+    with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
+        f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "rb", cache_type="none")
+
+    f.caller_framework = "pandas"
+    await f._async_fetch_range(0, 10)
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "pandas"
+
+
+def test_defer_close_propagates_caller_framework():
+    """Verify that background deferred close worker thread inherits the file's framework context."""
+    import unittest.mock as mock
+
+    import gcsfs
+    from gcsfs.core import _defer_close
+
+    done = threading.Event()
+    captured_context = {}
+
+    fs = mock.MagicMock()
+    fs.split_path.return_value = ("bucket", "test.parquet", None)
+    with mock.patch.object(gcsfs.core.GCSFile, "info", return_value={"size": 100}):
+        f = gcsfs.core.GCSFile(fs, "gs://bucket/test.parquet", "wb")
+
+    f.caller_framework = "ray"
+    f.buffer.write(b"x")
+
+    def mock_upload_chunk(final=False):
+        captured_context.update(get_telemetry_context())
+        done.set()
+        return True
+
+    f._initiate_upload = lambda: None
+    f._upload_chunk = mock_upload_chunk
+    _defer_close(f)
+
+    assert done.wait(timeout=5.0)
+    assert captured_context.get(Dimension.FRAMEWORK.value) == "ray"
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_native_async_telemetry_propagation(mock_gcs_harness):
+    """Verify native async GCSFileSystem methods propagate telemetry context."""
+    fs = mock_gcs_harness.fs
+    mock_gcs_harness.clear()
+
+    token = set_telemetry_context(Dimension.FRAMEWORK, "jax")
+    try:
+        res = await fs._cat(["test-bucket/f1.txt", "test-bucket/f2.txt"])
+        assert len(res) == 2
+        assert len(mock_gcs_harness.user_agents) >= 2
+        assert all("fw/jax" in ua for ua in mock_gcs_harness.user_agents)
+    finally:
+        reset_telemetry_context(token)
+
+
+@pytest.mark.asyncio
+async def test_gcsfs_async_wrapper_super_resolution():
+    """Verify super() resolution works on inherited AsyncFileSystem methods wrapped by telemetry."""
+    from unittest import mock
+
+    from gcsfs.core import GCSFileSystem
+
+    class SubGCSFS(GCSFileSystem):
+        async def _cat_ranges(self, paths, starts, ends, **kwargs):
+            return await super()._cat_ranges(paths, starts, ends, **kwargs)
+
+    sub_fs = SubGCSFS(token="anon", project="test-project", skip_instance_cache=True)
+    with mock.patch(
+        "fsspec.asyn.AsyncFileSystem._cat_ranges",
+        new_callable=mock.AsyncMock,
+        return_value=[b"patched"],
+    ) as mock_super:
+        out = await sub_fs._cat_ranges(["test-bucket/f1.txt"], [0], [5])
+        assert out == [b"patched"]
+        mock_super.assert_awaited_once()
+
+
+# ============================================================================
+# 7. Environment Detector Tests
+# ============================================================================
+
+_PRODUCT_NAME_PATH = "/sys/class/dmi/id/product_name"
+_DEFAULT_CLUSTER_NAME_URL = (
+    "http://169.254.169.254/computeMetadata/v1/instance/attributes/cluster-name"
+)
+_ENVIRONMENT_ENV_VARS = (
+    "DO_NOT_TRACK",
+    "GCSFS_NO_TELEMETRY",
+    "NO_GCE_CHECK",
+    "GCE_METADATA_HOST",
+    "GCE_METADATA_ROOT",
+    "GCE_METADATA_IP",
+    "KUBERNETES_SERVICE_HOST",
+    "K_SERVICE",
+    "K_CONFIGURATION",
+    "K_REVISION",
+    "CLOUD_RUN_JOB",
+    "CLOUD_RUN_EXECUTION",
+    "CLOUD_RUN_WORKER_POOL",
+    "CLOUD_RUN_REVISION",
+    "FUNCTION_TARGET",
+    "FUNCTION_NAME",
+    "GAE_SERVICE",
+    "GAE_VERSION",
+    "GAE_INSTANCE",
+    "GAE_ENV",
+)
+
+
+class _FakeMetadataResponse:
+    def __init__(self, status: int, headers: dict, body: str):
+        self.status = status
+        self.headers = headers
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
+
+
+class _FakeRequestContext:
+    def __init__(self, outcome):
+        self._outcome = outcome
+
+    async def __aenter__(self):
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeClientSession:
+    def __init__(self, host: "_FakeHost"):
+        self._host = host
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self._host.closed_sessions += 1
+        return False
+
+    def get(self, url, headers=None):
+        self._host.requests.append((url, dict(headers or {})))
+        return _FakeRequestContext(self._host.next_outcome())
+
+
+class _FakeHost:
+    """Fake DMI file, metadata server, and backoff sleeps for EnvironmentDetector."""
+
+    def __init__(self):
+        self.product_name = None
+        self.dmi_reads = []
+        self.outcomes = []
+        self.requests = []
+        self.opened_sessions = 0
+        self.closed_sessions = 0
+        self.sleep_delays = []
+        self.on_sleep = None
+
+    def open(self, path, *args, **kwargs):
+        self.dmi_reads.append(path)
+        if isinstance(self.product_name, BaseException):
+            raise self.product_name
+        if self.product_name is None:
+            raise FileNotFoundError(path)
+        return io.StringIO(self.product_name)
+
+    def new_probe_session(self):
+        self.opened_sessions += 1
+        return _FakeClientSession(self)
+
+    def next_outcome(self):
+        if len(self.outcomes) > 1:
+            return self.outcomes.pop(0)
+        return self.outcomes[0]
+
+
+def _mds_response(status: int, flavor: bool = True, body: str = ""):
+    headers = {"Metadata-Flavor": "Google"} if flavor else {}
+    return _FakeMetadataResponse(status, headers, body)
+
+
+def _connector_error():
+    connection_key = types.SimpleNamespace(host="169.254.169.254", port=80, ssl=False)
+    return aiohttp.ClientConnectorError(
+        connection_key, ConnectionRefusedError(111, "Connection refused")
+    )
+
+
+def _wait_until_probe_settles(detector: EnvironmentDetector, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while detector._probe_in_flight:
+        if time.monotonic() > deadline:
+            raise AssertionError("metadata probe did not settle")
+        time.sleep(0.01)
+
+
+async def _settle_probe(detector: EnvironmentDetector, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while detector._probe_in_flight:
+        if time.monotonic() > deadline:
+            raise AssertionError("metadata probe did not settle")
+        await asyncio.sleep(0.01)
+
+
+@pytest.fixture
+def fake_host(monkeypatch, tmp_path):
+    """Opt back into the real EnvironmentDetector.detect with a hermetic fake host."""
+    monkeypatch.setattr(EnvironmentDetector, "detect", _REAL_ENVIRONMENT_DETECT)
+    for name in _ENVIRONMENT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    host = _FakeHost()
+    monkeypatch.setattr(
+        environment_module,
+        "sys",
+        types.SimpleNamespace(platform="linux", _getframe=sys._getframe),
+    )
+    monkeypatch.setattr(environment_module, "open", host.open, raising=False)
+    monkeypatch.setattr(
+        environment_module,
+        "_K8S_SERVICE_ACCOUNT_PATH",
+        str(tmp_path / "missing-serviceaccount"),
+    )
+    monkeypatch.setattr(
+        environment_module, "_new_probe_session", host.new_probe_session
+    )
+
+    async def fake_backoff_sleep(delay):
+        host.sleep_delays.append(delay)
+        if host.on_sleep is not None:
+            result = host.on_sleep()
+            if inspect.isawaitable(result):
+                await result
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(environment_module, "_backoff_sleep", fake_backoff_sleep)
+    return host
+
+
+def test_default_usage_tracker_registers_environment_detector():
+    from gcsfs.telemetry.manager import default_usage_tracker
+
+    detector_types = [type(d) for d in default_usage_tracker.detectors]
+
+    assert detector_types == [FrameworkDetector, EnvironmentDetector]
+
+
+def test_usage_tracker_emits_environment_token(fake_host):
+    fake_host.product_name = "QEMU"
+    tracker = UsageMetricsTracker(detectors=[EnvironmentDetector()])
+
+    tokens = tracker.get_tokens()
+
+    assert tokens == ["env/oth"]
+    assert tracker.get_dimension(Dimension.ENVIRONMENT) == "oth"
+
+
+@pytest.mark.asyncio
+async def test_first_detect_schedules_probe_and_later_detect_returns_verdict(
+    fake_host, monkeypatch
+):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = "Google Compute Engine\n"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    first = detector.detect()
+    await _settle_probe(detector)
+    second = detector.detect()
+
+    assert first is None
+    assert second == "gke"
+    assert fake_host.requests == [
+        (_DEFAULT_CLUSTER_NAME_URL, {"Metadata-Flavor": "Google"})
+    ]
+
+
+def test_detect_from_sync_caller_probes_on_fsspec_loop(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    detector = EnvironmentDetector()
+
+    first = detector.detect()
+    _wait_until_probe_settles(detector)
+    second = detector.detect()
+
+    assert first is None
+    assert second == "gce"
+    assert detector._probe_future is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "product_name, env_vars",
+    [
+        pytest.param("Google Compute Engine", {}, id="linux-gce"),
+        pytest.param("Google", {}, id="linux-legacy-google"),
+        pytest.param(
+            "Google Compute Engine",
+            {"KUBERNETES_SERVICE_HOST": "10.0.0.1"},
+            id="self-managed-k8s-on-gce",
+        ),
+    ],
+)
+async def test_google_flavored_404_resolves_gce(
+    fake_host, monkeypatch, product_name, env_vars
+):
+    for name, value in env_vars.items():
+        monkeypatch.setenv(name, value)
+    fake_host.product_name = product_name
+    fake_host.outcomes = [_mds_response(404)]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gce"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["", "   \n"], ids=["empty", "whitespace"])
+async def test_google_flavored_empty_200_resolves_gce_without_retry(fake_host, body):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body=body)]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gce"
+    assert len(fake_host.requests) == 1
+    assert fake_host.sleep_delays == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, flavor",
+    [
+        pytest.param(403, False, id="flavorless-403"),
+        pytest.param(408, True, id="flavored-408"),
+        pytest.param(429, True, id="flavored-429"),
+        pytest.param(500, False, id="flavorless-500"),
+        pytest.param(503, True, id="flavored-503"),
+        pytest.param(
+            504,
+            False,
+            id="flavorless-504",
+            marks=pytest.mark.skipif(
+                504 not in DEFAULT_RETRYABLE_STATUS_CODES,
+                reason="google-auth < 2.40.3 omits 504",
+            ),
+        ),
+    ],
+)
+async def test_transient_metadata_responses_retry_until_cluster_name(
+    fake_host, status, flavor
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(status, flavor=flavor, body="Not Found\n"),
+        _mds_response(status, flavor=flavor, body="Not Found\n"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+    detected_during_retries = []
+    fake_host.on_sleep = lambda: detected_during_retries.append(detector.detect())
+
+    first = detector.detect()
+    await _settle_probe(detector)
+    resolved = detector.detect()
+
+    assert first is None
+    assert detected_during_retries == [None, None]
+    assert fake_host.sleep_delays == [0.5, 1.0]
+    assert fake_host.opened_sessions == 1
+    assert fake_host.closed_sessions == 1
+    assert resolved == "gke"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kubernetes", [False, True], ids=["gce-vm", "gcp-k8s"])
+@pytest.mark.parametrize(
+    "status, flavor",
+    [
+        pytest.param(200, False, id="flavorless-200"),
+        pytest.param(404, False, id="flavorless-404"),
+        pytest.param(403, True, id="flavored-403"),
+        pytest.param(400, True, id="flavored-400"),
+        pytest.param(401, False, id="flavorless-401"),
+        pytest.param(405, True, id="flavored-405"),
+        pytest.param(410, True, id="flavored-410"),
+        pytest.param(499, False, id="flavorless-499"),
+        pytest.param(501, True, id="flavored-501"),
+        pytest.param(502, False, id="flavorless-502"),
+    ],
+)
+async def test_definitive_metadata_responses_fall_back_without_retry(
+    fake_host, monkeypatch, kubernetes, status, flavor
+):
+    if kubernetes:
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(status, flavor=flavor, body="prod-cluster"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == ("gke" if kubernetes else "gce")
+    assert len(fake_host.requests) == 1
+    assert fake_host.sleep_delays == []
+
+
+@pytest.mark.asyncio
+async def test_definitive_response_after_transient_error_stops_retrying(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        asyncio.TimeoutError(),
+        _mds_response(400, flavor=False),
+        _mds_response(200, body="prod-cluster"),
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+
+    assert detector.detect() == "gce"
+    assert len(fake_host.requests) == 2
+    assert fake_host.sleep_delays == [0.5]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        pytest.param(_connector_error, id="connector-error"),
+        pytest.param(asyncio.TimeoutError, id="timeout"),
+    ],
+)
+@pytest.mark.parametrize(
+    "final_response, expected",
+    [
+        pytest.param(
+            _mds_response(200, body="prod-cluster"), "gke", id="cluster-name-gke"
+        ),
+        pytest.param(_mds_response(404), "gce", id="flavored-404-gce"),
+    ],
+)
+async def test_network_errors_retry_until_metadata_server_answers(
+    fake_host, error_factory, final_response, expected
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [error_factory(), error_factory(), final_response]
+    detector = EnvironmentDetector()
+    detected_during_retries = []
+    fake_host.on_sleep = lambda: detected_during_retries.append(detector.detect())
+
+    first = detector.detect()
+    await _settle_probe(detector)
+    resolved = detector.detect()
+
+    assert first is None
+    assert detected_during_retries == [None, None]
+    assert resolved == expected
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_on_gcp_bios_without_kubernetes_caches_gce(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [asyncio.TimeoutError()]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gce"
+    assert len(fake_host.requests) == 6
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_on_gcp_bios_kubernetes_caches_gke(fake_host, monkeypatch):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(403, flavor=False)]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert detector._cached_env == "gke"
+    assert detector._probe_future is None
+    assert len(fake_host.requests) == 6
+
+
+class _UndecodableMetadataResponse(_FakeMetadataResponse):
+    async def text(self) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+@pytest.mark.asyncio
+async def test_unexpected_probe_error_falls_back_without_rescheduling(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _UndecodableMetadataResponse(200, {"Metadata-Flavor": "Google"}, "")
+    ]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    first = detector.detect()
+    second = detector.detect()
+
+    assert first == "gce"
+    assert second == "gce"
+    assert detector._probe_future is None
+    assert len(fake_host.requests) == 1
+
+
+def test_detect_inside_repeated_asyncio_run_probes_once_on_fsspec_loop(
+    fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    started = threading.Event()
+    release = threading.Event()
+    real_probe_once = EnvironmentDetector._probe_metadata_server_once
+
+    async def gated_probe_once(self, session: aiohttp.ClientSession, url: str):
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.005)
+        return await real_probe_once(self, session, url)
+
+    monkeypatch.setattr(
+        EnvironmentDetector,
+        "_probe_metadata_server_once",
+        gated_probe_once,
+    )
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    async def call_once():
+        return detector.detect()
+
+    first = asyncio.run(call_once())
+    assert first is None
+    assert started.wait(timeout=5)
+    assert detector._probe_in_flight is True
+
+    release.set()
+    _wait_until_probe_settles(detector)
+    second = asyncio.run(call_once())
+
+    assert second == "gke"
+    assert len(fake_host.requests) == 1
+
+
+def test_post_fork_gc_of_stale_generation_probe_under_lock_does_not_deadlock(fake_host):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(503, flavor=False)]
+    detector = EnvironmentDetector()
+    detector._probe_generation = 1
+    detector._probe_in_flight = True
+
+    class _SuspendOnce:
+        def __await__(self):
+            yield None
+
+    async def suspend():
+        await _SuspendOnce()
+
+    fake_host.on_sleep = suspend
+    coro = detector._probe_coro(1)
+    coro.send(None)
+
+    detector._reset_after_fork()
+    assert detector._probe_generation == 2
+
+    def close_while_holding_lock():
+        with detector._lock:
+            coro.close()
+
+    worker = threading.Thread(target=close_while_holding_lock, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert detector._probe_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_metadata_host_override_probes_that_host_even_off_gcp(
+    fake_host, monkeypatch
+):
+    monkeypatch.setenv("GCE_METADATA_HOST", "metadata.internal:8080")
+    fake_host.product_name = "QEMU"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert [url for url, _ in fake_host.requests] == [
+        "http://metadata.internal:8080/computeMetadata/v1/instance/attributes/"
+        "cluster-name"
+    ]
+
+
+@pytest.mark.parametrize(
+    "primary_var, secondary_var",
+    [
+        ("K_SERVICE", "K_REVISION"),
+        ("CLOUD_RUN_JOB", "CLOUD_RUN_EXECUTION"),
+        ("CLOUD_RUN_WORKER_POOL", "CLOUD_RUN_REVISION"),
+        ("GAE_SERVICE", "GAE_INSTANCE"),
+    ],
+)
+def test_serverless_env_without_kubernetes_is_oth_without_io(
+    fake_host, monkeypatch, primary_var, secondary_var
+):
+    monkeypatch.setenv(primary_var, "svc")
+    monkeypatch.setenv(secondary_var, "rev")
+    fake_host.product_name = "Google Compute Engine"
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
+@pytest.mark.parametrize(
+    "env_vars",
+    [
+        pytest.param({"K_SERVICE": "svc"}, id="k-service-only"),
+        pytest.param({"FUNCTION_TARGET": "fn"}, id="function-target-only"),
+        pytest.param({"FUNCTION_NAME": "fn"}, id="function-name-only"),
+        pytest.param({"GAE_ENV": "standard"}, id="gae-env-only"),
+        pytest.param({"CLOUD_RUN_JOB": "job"}, id="cloud-run-job-only"),
+        pytest.param(
+            {"CLOUD_RUN_WORKER_POOL": "pool"}, id="cloud-run-worker-pool-only"
+        ),
+        pytest.param({"GAE_SERVICE": "default"}, id="gae-service-only"),
+        pytest.param(
+            {"FUNCTION_TARGET": "fn", "K_SERVICE": "svc"},
+            id="function-target-without-k-revision",
+        ),
+        pytest.param(
+            {
+                "K_SERVICE": "svc",
+                "K_REVISION": "rev",
+                "KUBERNETES_SERVICE_HOST": "10.0.0.1",
+            },
+            id="serverless-pair-with-k8s",
+        ),
+    ],
+)
+def test_single_serverless_env_var_does_not_suppress_gcp_probe(
+    fake_host, monkeypatch, env_vars
+):
+    for name, value in env_vars.items():
+        monkeypatch.setenv(name, value)
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    detector = EnvironmentDetector()
+
+    detector.detect()
+    _wait_until_probe_settles(detector)
+    detected = detector.detect()
+
+    assert detected == "gke"
+    assert len(fake_host.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "product_name, kubernetes_host, expected",
+    [
+        pytest.param("QEMU", None, "oth", id="off-gcp"),
+        pytest.param("Google Compute Engine", None, "gce", id="gce-vm"),
+        pytest.param("Google Compute Engine", "10.0.0.1", "gke", id="gcp-k8s"),
+    ],
+)
+def test_no_gce_check_resolves_from_local_signals_only(
+    fake_host,
+    monkeypatch,
+    product_name,
+    kubernetes_host,
+    expected,
+):
+    monkeypatch.setenv("NO_GCE_CHECK", "true")
+    if kubernetes_host is not None:
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", kubernetes_host)
+    fake_host.product_name = product_name
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == expected
+    assert fake_host.opened_sessions == 0
+
+
+@pytest.mark.parametrize(
+    "product_name",
+    [
+        pytest.param("Google Foo", id="google-prefix"),
+        pytest.param("Amazon EC2", id="aws"),
+        pytest.param(FileNotFoundError(_PRODUCT_NAME_PATH), id="missing-dmi"),
+    ],
+)
+def test_non_google_bios_fast_skips_even_on_kubernetes(
+    fake_host, monkeypatch, product_name
+):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    fake_host.product_name = product_name
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == "oth"
+    assert fake_host.dmi_reads == ["/sys/class/dmi/id/product_name"]
+    assert fake_host.opened_sessions == 0
+
+
+def test_non_linux_platform_skips_dmi_and_probe(fake_host, monkeypatch):
+    monkeypatch.setattr(environment_module.sys, "platform", "freebsd")
+    detector = EnvironmentDetector()
+
+    assert detector.detect() == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
+def test_concurrent_detect_launches_exactly_one_probe(fake_host, monkeypatch):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    probe_generations = []
+    real_probe_coro = EnvironmentDetector._probe_coro
+
+    def counting_probe_coro(self, generation):
+        probe_generations.append(generation)
+        return real_probe_coro(self, generation)
+
+    monkeypatch.setattr(EnvironmentDetector, "_probe_coro", counting_probe_coro)
+    detector = EnvironmentDetector()
+    barrier = threading.Barrier(10)
+    results = []
+
+    def worker():
+        barrier.wait(timeout=5)
+        results.append(detector.detect())
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    _wait_until_probe_settles(detector)
+    resolved = detector.detect()
+
+    assert len(probe_generations) == 1
+    assert len(results) == 10
+    assert set(results) <= {None, "gke"}
+    assert resolved == "gke"
+    assert len(fake_host.requests) == 1
+
+
+def test_detect_slow_race_returns_none_for_scheduler_and_verdict_for_late_peer(
+    fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [
+        _mds_response(200, body="prod-cluster"),
+        _mds_response(200, body="prod-cluster"),
+    ]
+
+    real_run_coro = asyncio.run_coroutine_threadsafe
+
+    def preempting_run_coro(coro, loop):
+        fut = real_run_coro(coro, loop)
+        fut.result(timeout=5)
+        return fut
+
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "run_coroutine_threadsafe", preempting_run_coro)
+        scheduler_detector = EnvironmentDetector()
+        assert scheduler_detector.detect() is None
+        assert scheduler_detector.detect() == "gke"
+
+    peer_detector = EnvironmentDetector()
+    real_is_k8s = peer_detector._is_kubernetes
+    settled_by_winner = False
+
+    def k8s_after_winner_resolves():
+        nonlocal settled_by_winner
+        result = real_is_k8s()
+        if not settled_by_winner:
+            settled_by_winner = True
+            assert peer_detector._schedule_probe() is True
+            _wait_until_probe_settles(peer_detector)
+        return result
+
+    monkeypatch.setattr(peer_detector, "_is_kubernetes", k8s_after_winner_resolves)
+    assert peer_detector.detect() == "gke"
+
+
+def test_schedule_probe_recovers_after_loop_error_or_future_cancel(
+    fake_host, monkeypatch
+):
+    import concurrent.futures
+
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    detector = EnvironmentDetector()
+
+    def raise_loop_error():
+        raise RuntimeError("loop unavailable")
+
+    with monkeypatch.context() as m:
+        m.setattr(fsspec.asyn, "get_loop", raise_loop_error)
+        with pytest.raises(RuntimeError, match="loop unavailable"):
+            detector.detect()
+
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+    pending_future: concurrent.futures.Future = concurrent.futures.Future()
+
+    def capture_without_running(coro, _loop):
+        coro.close()
+        return pending_future
+
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "run_coroutine_threadsafe", capture_without_running)
+        assert detector.detect() is None
+
+    assert detector._probe_in_flight is True
+    assert detector._probe_future is pending_future
+    assert pending_future.cancel() is True
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+    assert detector.detect() is None
+    _wait_until_probe_settles(detector)
+    assert detector.detect() == "gce"
+
+
+def test_module_fork_hook_resets_live_detectors(fake_host):
+    detector = EnvironmentDetector()
+    detector._cached_env = "gce"
+    detector._probe_in_flight = True
+    detector._probe_future = object()
+
+    environment_module._reset_detectors_after_fork()
+
+    assert detector in environment_module._live_detectors
+    assert detector._cached_env == "gce"
+    assert detector._probe_in_flight is False
+    assert detector._probe_future is None
+
+
+def test_fs_init_warmup_and_opt_out(fake_host, monkeypatch):
+    from gcsfs.core import GCSFileSystem
+
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(404)]
+    fw_calls = []
+
+    class CountingFW(BaseDetector):
+        name = Dimension.FRAMEWORK
+
+        def detect(self):
+            fw_calls.append(1)
+            return "pandas"
+
+    env_disabled = EnvironmentDetector()
+    disabled_tracker = UsageMetricsTracker(detectors=[CountingFW(), env_disabled])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", disabled_tracker)
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+    assert fw_calls == []
+    assert disabled_tracker.get_dimension(Dimension.FRAMEWORK) is None
+    assert disabled_tracker.get_dimension(Dimension.ENVIRONMENT) is None
+
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    env_enabled = EnvironmentDetector()
+    enabled_tracker = UsageMetricsTracker(detectors=[CountingFW(), env_enabled])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", enabled_tracker)
+    GCSFileSystem(token="anon", project="test-project", skip_instance_cache=True)
+
+    assert fw_calls == []
+    future = env_enabled._probe_future
+    if future is not None:
+        future.result(timeout=5)
+    assert env_enabled.detect() == "gce"
+    assert fake_host.opened_sessions == 1
+
+    assert enabled_tracker.get_dimension(Dimension.FRAMEWORK) == "pandas"
+    assert len(fw_calls) == 1
+    fresh_env = EnvironmentDetector()
+    enabled_tracker.detectors = [CountingFW(), fresh_env]
+    first_dim = enabled_tracker.get_dimension(Dimension.ENVIRONMENT)
+    if fresh_env._probe_future is not None:
+        fresh_env._probe_future.result(timeout=5)
+    assert first_dim in (None, "gce")
+    assert enabled_tracker.get_dimension(Dimension.ENVIRONMENT) == "gce"
+    assert len(fw_calls) == 1
+
+
+def test_mid_operation_probe_resolution_updates_subsequent_requests(
+    mock_gcs_harness, fake_host, monkeypatch
+):
+    fake_host.product_name = "Google Compute Engine"
+    fake_host.outcomes = [_mds_response(200, body="prod-cluster")]
+    release_probe = threading.Event()
+    real_probe_once = EnvironmentDetector._probe_metadata_server_once
+
+    async def gated_probe_once(self, session: aiohttp.ClientSession, url: str):
+        while not release_probe.is_set():
+            await asyncio.sleep(0.005)
+        return await real_probe_once(self, session, url)
+
+    monkeypatch.setattr(
+        EnvironmentDetector,
+        "_probe_metadata_server_once",
+        gated_probe_once,
+    )
+
+    fw_detector = _CallerThreadOnlyDetector("pandas")
+    env_detector = EnvironmentDetector()
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[fw_detector, env_detector]),
+    )
+    assert env_detector.detect() is None
+
+    fs = mock_gcs_harness.fs
+    mock_gcs_harness.clear()
+    orig_call = fs._call
+
+    async def call_then_settle(method, path, *args, **kwargs):
+        result = await orig_call(method, path, *args, **kwargs)
+        if len(mock_gcs_harness.user_agents) == 1:
+            release_probe.set()
+            await _settle_probe(env_detector)
+        return result
+
+    monkeypatch.setattr(fs, "_call", call_then_settle)
+
+    fs.cat(["test-bucket/f1.txt", "test-bucket/f2.txt"], batch_size=1)
+
+    assert len(mock_gcs_harness.user_agents) == 2
+    assert "fw/pandas" in mock_gcs_harness.user_agents[0]
+    assert "env/" not in mock_gcs_harness.user_agents[0]
+    assert "fw/pandas" in mock_gcs_harness.user_agents[1]
+    assert "env/gke" in mock_gcs_harness.user_agents[1]
+    assert len(fw_detector.thread_names) == 1
+
+
+@pytest.mark.skipif(not hasattr(asyncio, "eager_task_factory"), reason="Python 3.12+")
+def test_eager_task_factory_probe_does_not_deadlock(fake_host, monkeypatch):
+    fake_host.product_name = "Google Compute Engine"
+
+    def fail_session():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(environment_module, "_new_probe_session", fail_session)
+    loop = fsspec.asyn.get_loop()
+
+    async def swap_factory(new_factory):
+        prev = loop.get_task_factory()
+        loop.set_task_factory(new_factory)
+        return prev
+
+    prev_factory = asyncio.run_coroutine_threadsafe(
+        swap_factory(asyncio.eager_task_factory), loop
+    ).result(timeout=5)
+    try:
+        detector = EnvironmentDetector()
+        worker = threading.Thread(target=detector.detect, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        _wait_until_probe_settles(detector)
+        assert detector.detect() == "gce"
+
+        async def eager_caller():
+            asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+            detector_in_async = EnvironmentDetector()
+            detector_in_async.detect()
+            await _settle_probe(detector_in_async)
+            return detector_in_async.detect()
+
+        assert asyncio.run(eager_caller()) == "gce"
+    finally:
+        asyncio.run_coroutine_threadsafe(swap_factory(prev_factory), loop).result(
+            timeout=5
+        )
+
+
+def test_stub_environment_detection_skips_live_benchmark_runs(monkeypatch):
+    import gcsfs.tests.conftest as tests_conftest
+
+    def make_request(run_benchmarks):
+        return types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                getoption=lambda opt: (
+                    run_benchmarks if opt == "--run-benchmarks" else False
+                )
+            )
+        )
+
+    monkeypatch.setattr(EnvironmentDetector, "detect", _REAL_ENVIRONMENT_DETECT)
+
+    bench_gen = tests_conftest._stub_environment_detection.__wrapped__(
+        make_request(run_benchmarks=True)
+    )
+    next(bench_gen)
+    try:
+        assert EnvironmentDetector.detect is _REAL_ENVIRONMENT_DETECT
+    finally:
+        bench_gen.close()
+
+    unit_gen = tests_conftest._stub_environment_detection.__wrapped__(
+        make_request(run_benchmarks=False)
+    )
+    next(unit_gen)
+    try:
+        assert EnvironmentDetector().detect() is None
+    finally:
+        unit_gen.close()

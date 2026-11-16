@@ -7,5 +7,5 @@ if [[ "${_SKIP_CLEANUP}" == "true" ]]; then
 fi
 source "$(dirname "$0")/lib.sh"
 source "${BUILD_VARS_FILE}"
-gcloud storage rm --recursive --project="${PROJECT_ID}" gs://$CHECKPOINT_BUCKET || true
-gcloud storage rm --recursive --project="${PROJECT_ID}" gs://$DATASET_BUCKET || true
+delete_bucket_and_caches "$CHECKPOINT_BUCKET"
+delete_bucket_and_caches "$DATASET_BUCKET"

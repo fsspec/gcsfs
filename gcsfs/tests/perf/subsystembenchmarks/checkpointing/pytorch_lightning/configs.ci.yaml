@@ -1,0 +1,17 @@
+# Per-PR CI profile (selected by GCSFS_SUBSYSTEM_CONFIG=configs.ci.yaml in
+# cloudbuild/subsystembenchmarks/scripts/run-ci.sh). One save and one load on 2 spawned
+# ranks, each repeated (rounds: 2) on the same filesystem. ddp because the FSDP/TP
+# strategies wrap Llama's .model.layers, which gpt2 does not have. Guarded by
+# tests/test_ci_suite.py.
+common:
+  rounds: 2
+  model_id: "gs://huggingface-model-weights/gpt2"
+  baseline:
+    strategy: "ddp"
+    world_size: 2
+
+scenarios:
+  - name: "checkpoint_write"
+    scenario: "checkpoint_write"
+  - name: "checkpoint_read"
+    scenario: "checkpoint_read"

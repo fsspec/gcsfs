@@ -260,3 +260,53 @@ def test_run_read_case_forces_single_round_for_rapid_cache_cold(tmp_path, monkey
     assert seen_rounds == [("rapid_cache_cold", 1), ("rapid_cache_warm", 3)]
     assert cold_bench.extra_info["measurement_round_count"] == 1
     assert warm_bench.extra_info["measurement_round_count"] == 3
+
+
+@pytest.mark.parametrize(
+    "bucket_type",
+    ["standard_rcu_warm", "standard_rcu_cold", "hns_rcu_z"],
+)
+def test_run_read_case_stages_checks_and_warms_rcu_corpora_before_timing(
+    tmp_path, monkeypatch, bucket_type
+):
+    monkeypatch.setattr(read_case, "assert_fsspec_gcsfs", lambda prefix: None)
+    events = []
+    monkeypatch.setattr(
+        read_case.rcu,
+        "assert_storage_class",
+        lambda prefix, bt: events.append(("check", prefix, bt)),
+    )
+    monkeypatch.setattr(
+        read_case.rcu,
+        "warm_if_needed",
+        lambda prefix, bt: events.append(("warm", prefix, bt)),
+    )
+
+    def ingest(prefix):
+        events.append(("ingest", prefix))
+        return _DEFAULT_MANIFEST
+
+    params = _params(bucket_type=bucket_type, rounds=3)
+    params.ingest = ingest
+
+    class _RoundDriver(_FakeDriver):
+        def run_read(self, prefix, params, manifest):
+            events.append(("run_read", params.rounds))
+            return super().run_read(prefix, params, manifest)
+
+    read_case.run_read_case(
+        _Bench(),
+        _Monitor(),
+        params,
+        _RoundDriver(rows=10),
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+
+    prefix = f"{tmp_path}/c/data/"
+    # Unlike rapid_cache_cold, rcu_cold keeps every configured round.
+    assert events == [
+        ("ingest", prefix),
+        ("check", prefix, bucket_type),
+        ("warm", prefix, bucket_type),
+        ("run_read", 3),
+    ]

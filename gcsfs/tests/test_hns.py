@@ -20,7 +20,7 @@ import uuid
 
 import pytest
 
-from gcsfs.extended_gcsfs import BucketType
+from gcsfs.tests import layouts
 from gcsfs.tests.conftest import requires_hns, requires_real_gcs
 from gcsfs.tests.settings import TEST_HNS_BUCKET
 
@@ -389,7 +389,10 @@ class TestExtendedGcsFileSystemMkdir:
         assert gcsfs.exists(bucket_name)
         assert gcsfs.exists(dir_path)
 
-        assert gcsfs._sync_lookup_bucket_type(bucket_name) is BucketType.HIERARCHICAL
+        assert (
+            gcsfs._sync_lookup_bucket_layout(bucket_name)
+            == layouts.STANDARD_HIERARCHICAL
+        )
 
     def test_mkdir_for_zonal_bucket(self, gcs_hns, buckets_to_delete):
         """Test creating a Zonal bucket using the placement parameter (string)."""
@@ -409,7 +412,7 @@ class TestExtendedGcsFileSystemMkdir:
         assert gcsfs.exists(bucket_name)
         assert gcsfs.exists(dir_path)
         assert (
-            gcsfs._sync_lookup_bucket_type(bucket_name) == BucketType.ZONAL_HIERARCHICAL
+            gcsfs._sync_lookup_bucket_layout(bucket_name) == layouts.ZONAL_HIERARCHICAL
         )
 
         info = gcsfs.info(bucket_name)
@@ -424,9 +427,7 @@ class TestExtendedGcsFileSystemMkdir:
         assert not gcsfs.exists(bucket_path)
         gcsfs.mkdir(bucket_path)
         assert gcsfs.exists(bucket_path)
-        assert (
-            gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.NON_HIERARCHICAL
-        )
+        assert gcsfs._sync_lookup_bucket_layout(bucket_path) == layouts.STANDARD
 
     def test_mkdir_create_bucket_with_parent_params(self, gcs_hns, buckets_to_delete):
         """Test creating a bucket passes parent-level parameters like enable_versioning."""
@@ -447,7 +448,10 @@ class TestExtendedGcsFileSystemMkdir:
         assert not gcsfs.exists(bucket_path)
         gcsfs.mkdir(bucket_path, enable_hierarchical_namespace=True)
         assert gcsfs.exists(bucket_path)
-        assert gcsfs._sync_lookup_bucket_type(bucket_path) is BucketType.HIERARCHICAL
+        assert (
+            gcsfs._sync_lookup_bucket_layout(bucket_path)
+            == layouts.STANDARD_HIERARCHICAL
+        )
 
     def test_hns_mkdir_existing_file_error(self, gcs_hns):
         """Test mkdir raises FileExistsError if a file exists at the path."""
@@ -821,6 +825,60 @@ class TestExtendedGcsFileSystemRm:
         assert not gcsfs.exists(file1)
         assert not gcsfs.exists(nested_dir)
         assert not gcsfs.exists(nested_file)
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            pytest.param("", id="parent_dir"),
+            pytest.param("/*", id="glob"),
+            pytest.param("/a", id="shared_name"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "with_nested_object",
+        [
+            pytest.param(False, id="subfolder_only"),
+            pytest.param(True, id="subfolder_and_object"),
+        ],
+    )
+    def test_rm_recursive_object_and_folder_sharing_name(
+        self, gcs_hns, suffix, with_nested_object
+    ):
+        """
+        Test that recursive rm deletes an object that shares its name with a
+        folder (object 'a' and folder 'a/'), which can coexist in HNS buckets.
+
+        With `with_nested_object`, folder 'a/' also contains the object
+        'a/x.txt', so listing the prefix 'a/' does not return the object 'a'.
+        """
+        gcsfs = gcs_hns
+        base_dir = f"{TEST_HNS_BUCKET}/rm_shared_name"
+        shared = f"{base_dir}/a"
+        gcsfs.pipe(shared, b"file")  # object 'a'
+        gcsfs.makedirs(f"{shared}/b")  # folders 'a/' and 'a/b/'
+        if with_nested_object:
+            gcsfs.pipe(f"{shared}/x.txt", b"nested")  # object 'a/x.txt'
+        gcsfs.invalidate_cache()
+        # Populate the cached parent listing, which holds entries for 'a'.
+        assert shared in gcsfs.ls(base_dir)
+
+        gcsfs.rm(f"{base_dir}{suffix}", recursive=True)
+
+        def assert_removed():
+            # exists() is True while either the object 'a' or the folder 'a/'
+            # exists.
+            assert not gcsfs.exists(shared)
+            if suffix:
+                assert gcsfs.ls(base_dir) == []
+            else:
+                # Only removing the parent directory itself deletes it.
+                assert not gcsfs.exists(base_dir)
+
+        # Check the cached state first, so that a stale cache entry left
+        # behind by rm is caught, then the actual bucket state.
+        assert_removed()
+        gcsfs.invalidate_cache()
+        assert_removed()
 
     def test_rm_folder_with_placeholder(self, gcs_hns):
         """
@@ -1926,7 +1984,7 @@ class TestExtendedGcsFileSystemHnsRequesterPays:
         fs = gcs_factory(requester_pays=True)
 
         # Clear cache to force lookup
-        fs._storage_layout_cache.clear()
+        fs.invalidate_storage_layout_cache()
 
-        bucket_type = fs._sync_lookup_bucket_type(hns_requester_pays_bucket)
-        assert bucket_type == BucketType.HIERARCHICAL
+        bucket_layout = fs._sync_lookup_bucket_layout(hns_requester_pays_bucket)
+        assert bucket_layout == layouts.STANDARD_HIERARCHICAL

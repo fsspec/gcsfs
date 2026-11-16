@@ -1,0 +1,34 @@
+# Per-PR CI profile (selected by GCSFS_SUBSYSTEM_CONFIG=configs.ci.yaml in
+# cloudbuild/subsystembenchmarks/scripts/run-ci.sh). One small case that still crosses an
+# epoch boundary (rounds: 2) with persistent DataLoader workers (num_workers: 2) on 2 ranks.
+# Guarded by tests/test_ci_suite.py.
+common:
+  rounds: 2
+  batch_size: 8
+  baseline:
+    fmt: "image_tar"
+    # file_count * rows_per_file = image count.
+    file_count: 16
+    rows_per_file: 50
+    # Qwen2-VL default max_pixels (28 * 28 * 1280).
+    pixel_budget: 1003520
+    image_encoding: "jpeg"
+    jpeg_quality: 75
+    sample_shape: "pairs"
+    access: "shuffled"
+    shard_shuffle: true
+    shuffle_buffer_size: 100
+    num_workers: 2
+    prefetch_factor: 2
+    split_by_node: true
+    world_size: 2
+    resampled: false
+    decode: false
+    cache_dir_enabled: false
+    gcs_read_mode: "default"
+    gcs_read_concurrency: 4
+    read_buffer_bytes: 0
+
+scenarios:
+  - name: "read"
+    scenario: "read"

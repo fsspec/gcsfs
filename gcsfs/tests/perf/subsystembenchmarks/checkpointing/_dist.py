@@ -4,9 +4,38 @@ import socket
 # Cap on spawned ranks to prevent OOM on test-c4-highmem.
 MAX_RANKS = 16
 
+# Concurrent benchmark processes on one VM (cloudbuild/subsystembenchmarks/scripts/run-ci.sh)
+# each get a disjoint block of ports via GCSFS_SUBSYSTEM_PORT_BASE. Without it, an
+# OS-assigned free port is probed and only bound later by the TCPStore, so two processes
+# can pick the same port and one fails with EADDRINUSE.
+PORT_BLOCK_SIZE = 16
+
+
+def _port_is_free(port: int) -> bool:
+    # A TCPStore listens dual-stack on [::]:port, which also makes this IPv4 bind fail;
+    # binding without SO_REUSEADDR also rejects a port that holds a server-side TIME_WAIT.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+    return True
+
 
 def find_free_port() -> int:
     """Finds an available TCP port for the Gloo distributed backend."""
+    base = os.environ.get("GCSFS_SUBSYSTEM_PORT_BASE")
+    if base:
+        # The first free port in the block. A checkpoint read case's setup (in its own
+        # spawned process) and run (in the parent) may both get the same port; that is safe
+        # because setup's process group is gone before run probes the block.
+        for port in range(int(base), int(base) + PORT_BLOCK_SIZE):
+            if _port_is_free(port):
+                return port
+        raise RuntimeError(
+            f"no free port in [{base}, {int(base) + PORT_BLOCK_SIZE}) "
+            "(GCSFS_SUBSYSTEM_PORT_BASE)"
+        )
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]

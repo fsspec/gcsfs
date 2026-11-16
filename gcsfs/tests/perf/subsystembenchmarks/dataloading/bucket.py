@@ -11,9 +11,15 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache, rcu
 
-BUCKET_TYPES = ("regional", "zonal", "hns", *rapid_cache.RAPID_CACHE_BUCKET_TYPES)
+BUCKET_TYPES = (
+    "regional",
+    "zonal",
+    "hns",
+    *rapid_cache.RAPID_CACHE_BUCKET_TYPES,
+    *rcu.RCU_BUCKET_TYPES,
+)
 _MAX_BUCKET_NAME = 63
 _SUFFIX_LEN = 8
 
@@ -67,7 +73,8 @@ class BucketSpec:
                 f"unknown bucket_type {self.bucket_type!r}; expected one of {BUCKET_TYPES}"
             )
         if (
-            self.bucket_type in ("zonal", *rapid_cache.RAPID_CACHE_BUCKET_TYPES)
+            self.bucket_type
+            in ("zonal", *rapid_cache.RAPID_CACHE_BUCKET_TYPES, *rcu.RCU_BUCKET_TYPES)
             and not self.zone
         ):
             raise ValueError(
@@ -85,11 +92,10 @@ def bucket_kwargs(spec):
     """buckets.insert body for this bucket type (gcsfs.mkdir forwards these verbatim)."""
     if spec.bucket_type in ("regional", *rapid_cache.RAPID_CACHE_BUCKET_TYPES):
         return {}
-    body = {
-        # HNS requires uniform bucket-level access.
-        "iam_configuration": {"uniformBucketLevelAccess": {"enabled": True}},
-        "hierarchicalNamespace": {"enabled": True},
-    }
+    # HNS requires uniform bucket-level access; RCU buckets use it as well.
+    body = {"iam_configuration": {"uniformBucketLevelAccess": {"enabled": True}}}
+    if not spec.bucket_type.startswith("standard_rcu_"):
+        body["hierarchicalNamespace"] = {"enabled": True}
     if spec.bucket_type == "zonal":
         body["storageClass"] = "RAPID"
         body["customPlacementConfig"] = {"dataLocations": [spec.zone]}
@@ -108,15 +114,17 @@ def _delete(fs, name, spec=None):
     """Best-effort teardown; cloudbuild sweeps the prefix at the end as the safety net."""
     if spec is not None and rapid_cache.is_rapid_cache_bucket_type(spec.bucket_type):
         rapid_cache.disable(fs, name, spec.zone)
+    elif spec is not None and spec.bucket_type in rcu.RCU_BUCKET_TYPES:
+        rcu.disable(fs, name, spec.zone)
     try:
         fs.rm(f"{name}/", recursive=True)
     except FileNotFoundError:
         pass
     except Exception as exc:
         logging.warning("could not empty benchmark bucket %s: %s", name, exc)
-    # GCS enforces a 1-hour grace period after disabling an Anywhere Cache during which
-    # buckets.delete returns HTTP 400; objects are already removed above, and Cloud Build's
-    # cleanup-leaked-resources sweeps the empty bucket once the grace period elapses.
+    # GCS refuses buckets.delete for a while after a cache is disabled (an hour for an
+    # Anywhere Cache, longer for an RCU cache); objects are already removed above, and
+    # Cloud Build's cleanup-leaked-resources sweeps the empty bucket later.
     with contextlib.suppress(Exception):
         fs.rmdir(name)
 
@@ -140,6 +148,9 @@ def case_bucket(spec, case_id, *, fs=None):
                 ingest_on_write=rapid_cache.ingest_on_write_for(spec.bucket_type),
             )
             rapid_cache.wait_running(fs, name, spec.zone)
+        elif spec.bucket_type in rcu.RCU_BUCKET_TYPES:
+            rcu.create(fs, name, spec.zone)
+            rcu.wait_for_rcu_layout(name, spec.bucket_type, spec.project)
         yield f"gs://{name}/data/"
     finally:
         _delete(fs, name, spec=spec)
