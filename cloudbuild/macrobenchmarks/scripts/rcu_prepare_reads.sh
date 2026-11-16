@@ -48,7 +48,7 @@ case "${RCU_STATE}" in
       gcloud storage rm "${RUN_DATASET_PATH%/}/**"
       copy_dataset_into_run_bucket
       gcloud storage cp --recursive "$SEED" "gs://${CHECKPOINT_BUCKET}/seed-cold/"
-      echo "export SEEDED_CKPT_PATH=gs://${CHECKPOINT_BUCKET}/seed-cold/${SEED##*/}" >> "${BUILD_VARS_FILE}"
+      printf 'export SEEDED_CKPT_PATH=%q\n' "gs://${CHECKPOINT_BUCKET}/seed-cold/${SEED##*/}" >> "${BUILD_VARS_FILE}"
     fi
     ;;
 esac
