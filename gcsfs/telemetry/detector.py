@@ -77,7 +77,20 @@ if hasattr(os, "register_at_fork"):
 
 
 class BaseDetector:
-    """Base interface for extracting telemetry tokens."""
+    """
+    Base interface for extracting telemetry tokens.
+
+    Attributes
+    ----------
+    name : Dimension or str
+        Dimension key the detector fills (e.g. ``Dimension.FRAMEWORK``).
+    call_scoped : bool, default True
+        True if the value depends on the current call (e.g. the calling
+        framework) and is captured once per call in the telemetry context.
+        False if the value is process-wide (e.g. the compute environment): it
+        is never stored in the per-call context, is read when each request's
+        tokens are built, and is started early by ``UsageMetricsTracker.warm_up``.
+    """
 
     name: Dimension | str = ""
     call_scoped: bool = True

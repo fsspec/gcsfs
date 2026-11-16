@@ -35,6 +35,7 @@ from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
+    _telemetry_context,
     mirror_gcs_methods,
     wrap_file_methods,
 )
@@ -452,6 +453,76 @@ def test_collect_tokens_map_records_empty_for_none_detection():
         assert call_count == 1  # Still 1, no additional detect() calls!
     finally:
         reset_telemetry_context(token)
+
+
+class _CallScopedFrameworkDetector(BaseDetector):
+    name = Dimension.FRAMEWORK
+
+    def detect(self):
+        return "pandas"
+
+
+class _ProcessScopedEnvDetector(BaseDetector):
+    name = Dimension.ENVIRONMENT
+    call_scoped = False
+
+    def __init__(self):
+        self.calls = 0
+
+    def detect(self):
+        self.calls += 1
+        return "gke"
+
+
+def test_collect_tokens_map_skips_process_scoped_detectors_by_default():
+    """By default, per-call maps exclude process-wide dimensions such as env."""
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = UsageMetricsTracker(
+        detectors=[_CallScopedFrameworkDetector(), env_detector]
+    )
+
+    assert tracker.collect_tokens_map() == {"fw": "pandas"}
+    assert env_detector.calls == 0
+
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {
+        "fw": "pandas",
+        "env": "gke",
+    }
+    assert env_detector.calls == 1
+
+
+def test_get_tokens_reads_process_scoped_detectors_every_request():
+    """Request tokens include env and re-read it per call, even inside a per-call context."""
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = UsageMetricsTracker(
+        detectors=[_CallScopedFrameworkDetector(), env_detector]
+    )
+
+    assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+
+    token = set_telemetry_context(tracker.collect_tokens_map())
+    try:
+        assert get_telemetry_context() == {"fw": "pandas"}
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+    finally:
+        reset_telemetry_context(token)
+    assert env_detector.calls == 3
+
+
+def test_telemetry_context_snapshot_excludes_process_scoped_detectors(monkeypatch):
+    """The wrapper's per-call snapshot never freezes env, so a later value is still sent."""
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = UsageMetricsTracker(
+        detectors=[_CallScopedFrameworkDetector(), env_detector]
+    )
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    with _telemetry_context():
+        assert get_telemetry_context() == {"fw": "pandas"}
+        assert env_detector.calls == 0
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+    assert get_telemetry_context() == {}
 
 
 # ============================================================================
