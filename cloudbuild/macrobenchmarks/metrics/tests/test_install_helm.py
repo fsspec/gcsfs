@@ -7,7 +7,6 @@ for real; no network is used.
 
 import hashlib
 import io
-import os
 import re
 import shutil
 import subprocess
@@ -15,7 +14,15 @@ import tarfile
 
 import pytest
 
-from .test_rcu_scripts import REPO
+from .test_rcu_scripts import (  # noqa: F401  (env is a fixture)
+    REPO,
+    SEED,
+    _add_build_vars,
+    _calls,
+    _failures,
+    _run_step,
+    env,
+)
 
 LIB = "cloudbuild/macrobenchmarks/scripts/lib.sh"
 PINNED_URL = "https://get.helm.sh/helm-v3.22.1-linux-amd64.tar.gz"
@@ -167,3 +174,50 @@ def test_pinned_helm_version_and_checksum_are_well_formed(bin_dir, tmp_path):
     version, sha = proc.stdout.split()
     assert re.fullmatch(r"v3\.\d+\.\d+", version)
     assert re.fullmatch(r"[0-9a-f]{64}", sha)
+
+
+# --- The helm steps (run like Cloud Build via the test_rcu_scripts harness) ---
+
+PIPE_TO_SHELL = re.compile(r"\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b")
+
+
+def test_no_cloudbuild_script_pipes_a_download_into_a_shell():
+    offenders = [
+        f"{path.relative_to(REPO)}:{n}"
+        for path in sorted((REPO / "cloudbuild").rglob("*"))
+        if path.suffix in (".sh", ".yaml", ".yml")
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if PIPE_TO_SHELL.search(line)
+    ]
+    assert offenders == []
+
+
+@pytest.mark.parametrize("step", ["run-workload", "seed-checkpoint", "cleanup-helm"])
+def test_helm_steps_install_the_pinned_helm(env, step):  # noqa: F811
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    proc, calls = _run_step(step, env, STUB_LS=SEED)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _failures(env) == []
+    helm_calls = _calls(calls, "helm ")
+    assert helm_calls and helm_calls[0].startswith("helm version")
+    assert not [c for c in calls if "raw.githubusercontent.com" in c]
+
+
+def test_run_workload_records_failure_when_helm_install_fails(env):  # noqa: F811
+    # Another helm version on PATH forces a download; the stub curl serves
+    # nothing, so the checksum check fails.
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    _, calls = _run_step("run-workload", env, STUB_HELM_VERSION="v0.0.0")
+
+    assert _failures(env) == ["run-workload"]
+    assert not _calls(calls, "helm install")
+
+
+def test_cleanup_helm_still_uninstalls_when_helm_install_fails(env):  # noqa: F811
+    proc, calls = _run_step("cleanup-helm", env, STUB_HELM_VERSION="v0.0.0")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "helm uninstall buildid-test" in calls

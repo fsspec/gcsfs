@@ -19,7 +19,7 @@ fi
 
 SEED_RUN_ID="${RUN_ID}-seed"
 SEED_CKPT_DIR="gs://$CHECKPOINT_BUCKET/seed"
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+install_helm
 gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}"
 CHART="gcsfs/tests/perf/macrobenchmarks/workloads/${_WORKLOAD}/helm_chart"
 
