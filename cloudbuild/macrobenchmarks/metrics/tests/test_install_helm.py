@@ -98,6 +98,10 @@ def _run(script, bin_dir, tmp_path, tarball=None, **env):
     return proc, log.read_text() if log.exists() else ""
 
 
+def _tmpdir_files(tmp_path):
+    return sorted(p for p in (tmp_path / "tmpdir").rglob("*") if p.is_file())
+
+
 def test_install_helm_installs_the_pinned_release(bin_dir, tmp_path, tarball):
     path, sha = tarball
     _helm_stub(bin_dir, "v0.0.0")  # some other helm already on PATH
@@ -121,6 +125,8 @@ def test_install_helm_downloads_into_tmpdir(bin_dir, tmp_path, tarball):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stdout.strip().startswith(str(tmp_path / "tmpdir"))
+    # Only the helm binary is kept; the downloaded tarball is deleted.
+    assert [p.name for p in _tmpdir_files(tmp_path)] == ["helm"]
 
 
 def test_install_helm_rejects_a_tarball_with_the_wrong_checksum(
@@ -134,6 +140,8 @@ def test_install_helm_rejects_a_tarball_with_the_wrong_checksum(
     assert re.search(r"rc=[1-9]", proc.stdout), proc.stdout + proc.stderr
     assert "checksum" in proc.stderr.lower()
     assert "installed-helm" not in proc.stdout
+    # The unverified download is not left behind.
+    assert list((tmp_path / "tmpdir").iterdir()) == []
 
 
 def test_install_helm_fails_when_the_download_fails(bin_dir, tmp_path, tarball):
@@ -150,6 +158,7 @@ def test_install_helm_fails_when_the_download_fails(bin_dir, tmp_path, tarball):
     assert PINNED_URL in curl_log
     assert re.search(r"rc=[1-9]", proc.stdout), proc.stdout + proc.stderr
     assert "installed-helm" not in proc.stdout
+    assert list((tmp_path / "tmpdir").iterdir()) == []
 
 
 def test_install_helm_skips_the_download_when_the_pinned_version_is_on_path(
@@ -200,8 +209,8 @@ def test_no_cloudbuild_script_pipes_a_download_into_a_shell():
     offenders = [
         f"{path.relative_to(REPO)}:{n}"
         for path in sorted((REPO / "cloudbuild").rglob("*"))
-        if path.suffix in (".sh", ".yaml", ".yml")
-        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if path.is_file() and path.suffix in (".sh", ".yaml", ".yml")
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if PIPE_TO_SHELL.search(line)
     ]
     assert offenders == []

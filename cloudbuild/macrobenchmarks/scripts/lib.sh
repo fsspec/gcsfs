@@ -62,19 +62,28 @@ HELM_SHA256="d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983"
 
 # Put the pinned helm first on PATH. Downloads the release tarball, verifies it
 # against HELM_SHA256 and only then unpacks it; returns non-zero (with no new
-# helm on PATH) on any failure. A no-op when the pinned helm is already on PATH.
+# helm on PATH and the temp dir removed) on any failure. A no-op when the pinned
+# helm is already on PATH.
 install_helm() {
   if [[ "$(helm version --template '{{.Version}}' 2>/dev/null)" == "${HELM_VERSION}" ]]; then
     return 0
   fi
   local tarball="helm-${HELM_VERSION}-linux-amd64.tar.gz" dir
   dir="$(mktemp -d)" || return 1
-  curl -fsSL --retry 3 -o "${dir}/${tarball}" "https://get.helm.sh/${tarball}" || return 1
-  if ! echo "${HELM_SHA256}  ${dir}/${tarball}" | sha256sum -c --quiet - >/dev/null 2>&1; then
-    echo "ERROR: ${tarball} does not match the pinned SHA-256 checksum" >&2
+  if ! curl -fsSL --retry 3 -o "${dir}/${tarball}" "https://get.helm.sh/${tarball}"; then
+    rm -rf "${dir}"
     return 1
   fi
-  tar -xzf "${dir}/${tarball}" -C "${dir}" linux-amd64/helm || return 1
+  if ! echo "${HELM_SHA256}  ${dir}/${tarball}" | sha256sum -c --quiet - >/dev/null 2>&1; then
+    echo "ERROR: ${tarball} does not match the pinned SHA-256 checksum" >&2
+    rm -rf "${dir}"
+    return 1
+  fi
+  if ! tar -xzf "${dir}/${tarball}" -C "${dir}" linux-amd64/helm; then
+    rm -rf "${dir}"
+    return 1
+  fi
+  rm -f "${dir}/${tarball}"
   export PATH="${dir}/linux-amd64:${PATH}"
 }
 
