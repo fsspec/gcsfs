@@ -40,15 +40,17 @@ class UsageMetricsTracker:
             except Exception:
                 pass
 
-    def collect_tokens_map(self, *, call_scoped_only: bool = False) -> Dict[str, str]:
+    def collect_tokens_map(self, *, call_scoped_only: bool) -> Dict[str, str]:
         """
-        Collect active telemetry tokens across registered detectors.
+        Collect telemetry tokens. For each dimension, the value already in the
+        telemetry context is used if present; otherwise its detector is called.
 
         Parameters
         ----------
-        call_scoped_only : bool, default False
-            When True, evaluate only detectors with ``call_scoped = True`` so
-            background process dimensions are not frozen in per-call context.
+        call_scoped_only : bool
+            Required. True leaves out process-wide dimensions such as ``env``
+            unless they are already set in the context (use it for the per-call
+            snapshot); False includes them (use it for request headers).
 
         Returns
         -------
@@ -86,7 +88,8 @@ class UsageMetricsTracker:
         -------
         List[str]: List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
-        token_map = self.collect_tokens_map()
+        # Include process-wide dimensions (e.g. env), read fresh per request.
+        token_map = self.collect_tokens_map(call_scoped_only=False)
         out = []
         for dim_key, val in token_map.items():
             clean_val = sanitize_token(val)
