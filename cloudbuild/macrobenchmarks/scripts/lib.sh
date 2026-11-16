@@ -53,38 +53,61 @@ skip_if_failed() {
   fi
 }
 
-# Helm release the helm steps install, pinned with its SHA-256 so the build
-# only ever runs this exact binary. To bump: set HELM_VERSION and copy the
-# digest from https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz.sha256sum
-# (cross-check it against the GitHub release notes).
-HELM_VERSION="v4.3.2"
-HELM_SHA256="d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983"
+# The helm steps install the latest Helm ${HELM_MAJOR} release on every build, so
+# security fixes arrive without version bumps. A release is used only if its
+# detached signature verifies against Helm's release-signing keys committed in
+# helm-release-keys.asc (Helm's KEYS file from helm/helm@5638c35399464b6432ba81b92a341218991efa5c).
+# If Helm adds or rotates a signing key, builds fail closed until that file is
+# refreshed from https://github.com/helm/helm/blob/main/KEYS. Moving to a new
+# major version is a deliberate change of HELM_MAJOR.
+HELM_MAJOR=4
+HELM_RELEASE_KEYS="$(dirname "${BASH_SOURCE[0]}")/helm-release-keys.asc"
 
-# Put the pinned helm first on PATH. Downloads the release tarball, verifies it
-# against HELM_SHA256 and only then unpacks it; returns non-zero (with no new
-# helm on PATH and the temp dir removed) on any failure. A no-op when the pinned
-# helm is already on PATH.
+# Download helm $2 into dir $1 and verify its signature; unpacks only
+# linux-amd64/helm and deletes everything else on success.
+_fetch_verified_helm() {
+  local dir="$1" version="$2"
+  local tarball="helm-${version}-linux-amd64.tar.gz"
+  curl -fsSL --retry 3 -o "${dir}/${tarball}" "https://get.helm.sh/${tarball}" || return 1
+  curl -fsSL --retry 3 -o "${dir}/${tarball}.asc" \
+    "https://github.com/helm/helm/releases/download/${version}/${tarball}.asc" || return 1
+  mkdir -m 700 "${dir}/gnupg" || return 1
+  local verified=1
+  if GNUPGHOME="${dir}/gnupg" gpg --batch --quiet --import "${HELM_RELEASE_KEYS}" 2>/dev/null &&
+     GNUPGHOME="${dir}/gnupg" gpg --batch --status-fd 1 --verify \
+       "${dir}/${tarball}.asc" "${dir}/${tarball}" 2>/dev/null | grep -q '^\[GNUPG:\] GOODSIG '; then
+    verified=0
+  fi
+  GNUPGHOME="${dir}/gnupg" gpgconf --kill all >/dev/null 2>&1
+  if [[ "${verified}" != 0 ]]; then
+    echo "ERROR: ${tarball} signature does not verify against ${HELM_RELEASE_KEYS}" >&2
+    return 1
+  fi
+  tar -xzf "${dir}/${tarball}" -C "${dir}" linux-amd64/helm || return 1
+  rm -rf "${dir:?}/${tarball}" "${dir:?}/${tarball}.asc" "${dir:?}/gnupg"
+}
+
+# Put the latest signature-verified Helm ${HELM_MAJOR} first on PATH. Returns
+# non-zero (with no new helm on PATH and the temp dir removed) on any failure.
+# A no-op when that version is already on PATH.
 install_helm() {
-  if [[ "$(helm version --template '{{.Version}}' 2>/dev/null)" == "${HELM_VERSION}" ]]; then
+  local version dir
+  version="$(curl -fsSL --retry 3 "https://get.helm.sh/helm${HELM_MAJOR}-latest-version")" || return 1
+  if ! [[ "${version}" =~ ^v${HELM_MAJOR}\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: unexpected latest helm ${HELM_MAJOR} version '${version}'" >&2
+    return 1
+  fi
+  if [[ "$(helm version --template '{{.Version}}' 2>/dev/null)" == "${version}" ]]; then
+    echo "helm ${version} already installed"
     return 0
   fi
-  local tarball="helm-${HELM_VERSION}-linux-amd64.tar.gz" dir
   dir="$(mktemp -d)" || return 1
-  if ! curl -fsSL --retry 3 -o "${dir}/${tarball}" "https://get.helm.sh/${tarball}"; then
+  if ! _fetch_verified_helm "${dir}" "${version}"; then
     rm -rf "${dir}"
     return 1
   fi
-  if ! echo "${HELM_SHA256}  ${dir}/${tarball}" | sha256sum -c --quiet - >/dev/null 2>&1; then
-    echo "ERROR: ${tarball} does not match the pinned SHA-256 checksum" >&2
-    rm -rf "${dir}"
-    return 1
-  fi
-  if ! tar -xzf "${dir}/${tarball}" -C "${dir}" linux-amd64/helm; then
-    rm -rf "${dir}"
-    return 1
-  fi
-  rm -f "${dir}/${tarball}"
   export PATH="${dir}/linux-amd64:${PATH}"
+  echo "Installed helm ${version} (signature verified)"
 }
 
 # Create a per-run bucket per _BUCKET_TYPE (regional | zonal-RAPID | hns |
