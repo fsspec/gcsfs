@@ -7,20 +7,10 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
-* Preserve URL-like object names and literal ``#``/``?`` characters when
-  parsing version-aware paths. A numeric suffix after the last ``#`` selects
-  a generation; a valid ``?generation=...`` can follow a literal ``#`` in a
-  name. The first ``?`` still starts query parameters, and a valid fragment
-  takes precedence. Other text remains part of the object name. This also
-  allows fsspec to enable version awareness automatically for these paths.
-  ``version_aware=False`` keeps the entire name literal (#1129).
-* Reject writes to a specific generation in standard and zonal ``pipe_file``,
-  write-mode ``open``, and ``merge``, consistently with ``put_file`` and copy
-  operations. ``pipe_file``, standard write-mode ``open``, and ``merge``
-  previously ignored the generation and could overwrite the live object.
-  ``merge`` also rejects versioned sources rather than composing their live
-  versions. Zonal append to an explicit generation and conditional writes using
-  ``if_generation_match`` remain supported (#1129).
+* Fix generation parsing for object names containing literal ``#``, ``?``,
+  or URL-like text (#1129).
+* Reject generation-qualified overwrites and ``merge`` sources instead of
+  silently using live objects. Zonal append is unchanged (#1129).
 
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials

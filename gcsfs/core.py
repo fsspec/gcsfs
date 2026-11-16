@@ -2438,14 +2438,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             Input path, like `gcs://mybucket/path/to/file`.
             Everything after the bucket delimiter is an object key, not a URL.
 
-        With version awareness enabled, a valid integer after the last ``#``
-        selects an object generation and takes precedence over the first
-        ``generation`` query value. Query parameters begin at the first ``?``;
-        A valid ``?generation=`` is still a selector even with ``#generation``.
-        Other literal ``?`` characters can use the ``#generation`` form.
-        Invalid generation values remain part of the key. A valid query also
-        accepts an empty trailing ``#``. With version awareness disabled, the
-        entire key is returned literally.
+        With version awareness enabled, ``#123`` or ``?generation=123`` selects
+        a generation. A valid numeric suffix after the last ``#`` takes
+        precedence. Invalid selectors remain part of the key. With version
+        awareness disabled, the entire key is literal.
 
         Returns
         -------
@@ -2467,8 +2463,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 else:
                     key, generation = fragment_key, fragment
 
-            # A valid fragment is already stripped. An empty trailing fragment
-            # is also ignored when a query supplies the generation.
+            # Keep supporting query selectors with an empty trailing fragment.
             query_path = key if generation is not None else keypart.removesuffix("#")
             query_key, _, query = query_path.partition("?")
             values = parse_qs(query).get("generation", []) if "#" not in query else []
