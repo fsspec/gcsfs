@@ -3,8 +3,9 @@ name: Bump Helm Pin
 # Weekly: if Helm published a newer release in the pinned major version, update
 # HELM_VERSION/HELM_SHA256 in cloudbuild/macrobenchmarks/scripts/lib.sh and open
 # a PR. The pin is only rewritten after get.helm.sh, the GitHub release notes
-# and the downloaded tarball all agree on the SHA-256. Major upgrades are left
-# to a human.
+# and the downloaded tarball all agree on the linux-amd64 SHA-256, and the PR is
+# only opened once the rewritten lib.sh installs that release. Major upgrades
+# are left to a human.
 on:
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC
@@ -49,8 +50,9 @@ jobs:
             exit 1
           fi
           notes="$(gh release view "$latest" --repo helm/helm --json body --jq .body)"
-          if ! grep -Fq "$sha" <<<"$notes"; then
-            echo "ERROR: ${latest} SHA-256 ${sha} not found in GitHub release notes" >&2
+          # The notes list a digest per platform; require it on the linux-amd64 line.
+          if ! grep -Fq "${tarball}.sha256sum) / ${sha}" <<<"$notes"; then
+            echo "ERROR: ${latest} SHA-256 ${sha} for ${tarball} not found in GitHub release notes" >&2
             exit 1
           fi
           dir="$(mktemp -d)"
@@ -61,6 +63,14 @@ jobs:
             -e "s/^HELM_VERSION=\".*\"/HELM_VERSION=\"${latest}\"/" \
             -e "s/^HELM_SHA256=\".*\"/HELM_SHA256=\"${sha}\"/" \
             "$lib"
+          # PRs opened with GITHUB_TOKEN do not trigger CI, so prove here that
+          # the rewritten lib.sh pins the new release and installs it.
+          if ! (source "$lib" \
+                && [[ "$HELM_VERSION" == "$latest" && "$HELM_SHA256" == "$sha" ]] \
+                && install_helm); then
+            echo "ERROR: rewritten ${lib} does not install helm ${latest}" >&2
+            exit 1
+          fi
           if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
             echo "version=${latest}" >> "$GITHUB_OUTPUT"
           fi
@@ -71,9 +81,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
+          set -euo pipefail
           branch="automation/bump-helm-${VERSION}"
-          if gh pr list --head "$branch" --state all --json number --jq '.[0].number' | grep -q .; then
-            echo "A PR for helm ${VERSION} already exists; nothing to do."
+          # Outside an `if` so a failed lookup stops the step instead of
+          # force-pushing over an existing PR's branch.
+          existing="$(gh pr list --head "$branch" --state all --json number --jq '.[0].number')"
+          if [[ -n "$existing" ]]; then
+            echo "PR #${existing} for helm ${VERSION} already exists; nothing to do."
             exit 0
           fi
           git config --global user.name "github-actions[bot]"

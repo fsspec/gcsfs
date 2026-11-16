@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+from pathlib import Path
 
 import pytest
 import yaml
@@ -242,7 +243,7 @@ def test_no_cloudbuild_script_pipes_a_download_into_a_shell():
 
 
 @pytest.mark.parametrize("step", ["run-workload", "seed-checkpoint", "cleanup-helm"])
-def test_helm_steps_install_the_pinned_helm(env, step):  # noqa: F811
+def test_helm_steps_reuse_the_pinned_helm_already_on_path(env, step):  # noqa: F811
     _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
 
     proc, calls = _run_step(step, env, STUB_LS=SEED)
@@ -251,7 +252,42 @@ def test_helm_steps_install_the_pinned_helm(env, step):  # noqa: F811
     assert _failures(env) == []
     helm_calls = _calls(calls, "helm ")
     assert helm_calls and helm_calls[0].startswith("helm version")
+    assert _calls(calls, "curl ") == []
     assert not [c for c in calls if "raw.githubusercontent.com" in c]
+
+
+@pytest.mark.parametrize(
+    ("step", "helm_command"),
+    [
+        ("run-workload", "installed-helm install buildid-test "),
+        ("seed-checkpoint", "installed-helm install buildid-test-seed "),
+        ("cleanup-helm", "installed-helm uninstall buildid-test"),
+    ],
+)
+def test_helm_steps_download_and_use_the_pinned_helm(
+    env, tarball, step, helm_command  # noqa: F811
+):
+    # An older helm on PATH forces the download; the fixture tarball's helm
+    # (pinned via HELM_SHA256 in build_vars.env, which the steps source after
+    # lib.sh) must then run the step's helm commands.
+    path, sha = tarball
+    _write_exe(Path(env["PATH"].split(":", 1)[0]) / "curl", CURL_STUB)
+    _add_build_vars(
+        env,
+        RUN_DATASET_PATH="gs://dataset-bucket/",
+        SEEDED_CKPT_PATH=SEED,
+        HELM_SHA256=sha,
+    )
+
+    proc, calls = _run_step(
+        step, env, STUB_LS=SEED, STUB_HELM_VERSION="v0.0.0", STUB_TARBALL=str(path)
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _failures(env) == []
+    assert [c for c in _calls(calls, "curl ") if PINNED_URL in c]
+    assert helm_command in proc.stdout
+    assert not _calls(calls, "helm install") and not _calls(calls, "helm uninstall")
 
 
 @pytest.mark.parametrize("step", ["run-workload", "seed-checkpoint"])
@@ -274,13 +310,35 @@ def test_cleanup_helm_still_uninstalls_when_helm_install_fails(env):  # noqa: F8
     assert "helm uninstall buildid-test" in calls
 
 
+# --- .github/workflows/bump-helm.yml ---------------------------------------
+
+
+def _workflow_script(step_name):
+    workflow = yaml.safe_load(BUMP_WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["bump"]["steps"]
+    return next(s["run"] for s in steps if s.get("name") == step_name)
+
+
+def _release_notes(version, amd64_sha, arm64_sha="1" * 64):
+    """Release notes in Helm's format: one checksum line per platform."""
+
+    def line(label, platform, digest):
+        tarball = f"https://get.helm.sh/helm-{version}-{platform}.tar.gz"
+        return f"- [{label}]({tarball}) ([checksum]({tarball}.sha256sum) / {digest})\r"
+
+    return "\n".join(
+        [
+            line("Linux amd64", "linux-amd64", amd64_sha),
+            line("Linux arm64", "linux-arm64", arm64_sha),
+        ]
+    )
+
+
 def test_bump_helm_workflow_script_verifies_three_way_sha256_and_bumps_lib_sh(
     tmp_path, tarball
 ):
     path, sha = tarball
-    workflow = yaml.safe_load(BUMP_WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["bump"]["steps"]
-    script = next(s["run"] for s in steps if s.get("name") == "Update the pin")
+    script = _workflow_script("Update the pin")
 
     stub_bin = tmp_path / "bump_bin"
     stub_bin.mkdir()
@@ -294,8 +352,8 @@ def test_bump_helm_workflow_script_verifies_three_way_sha256_and_bumps_lib_sh(
     gh_output = tmp_path / "github_output"
     (tmp_path / "tmpdir").mkdir(exist_ok=True)
 
-    def run_bump(latest, sha256sum, notes):
-        work_lib.write_text(original_lib, encoding="utf-8")
+    def run_bump(latest, sha256sum, notes, lib=original_lib):
+        work_lib.write_text(lib, encoding="utf-8")
         gh_output.write_text("", encoding="utf-8")
         return subprocess.run(
             ["bash", "-e", "-c", script],
@@ -313,32 +371,100 @@ def test_bump_helm_workflow_script_verifies_three_way_sha256_and_bumps_lib_sh(
             text=True,
         )
 
-    # (a) Already at latest -> no change, empty version output.
-    proc = run_bump(PINNED_HELM_VERSION, sha, f"checksum / {sha}")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert work_lib.read_text(encoding="utf-8") == original_lib
-    assert gh_output.read_text(encoding="utf-8") == ""
+    # (a) Latest is the pinned release, or older than it -> no change.
+    for latest in (PINNED_HELM_VERSION, "v4.0.0"):
+        proc = run_bump(latest, sha, _release_notes(latest, sha))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "already up to date" in proc.stdout
+        assert work_lib.read_text(encoding="utf-8") == original_lib
+        assert gh_output.read_text(encoding="utf-8") == ""
 
-    # (b) Valid newer v4.9.9 where .sha256sum, tarball, and release body agree.
-    notes = (
-        "- [Linux amd64](https://get.helm.sh/helm-v4.9.9-linux-amd64.tar.gz) "
-        f"([checksum](https://get.helm.sh/helm-v4.9.9-linux-amd64.tar.gz.sha256sum) / {sha})"
-    )
-    proc = run_bump("v4.9.9", sha, notes)
+    # (b) Valid newer v4.9.9 where .sha256sum, tarball, and release body agree,
+    # and the rewritten lib.sh installs it.
+    proc = run_bump("v4.9.9", sha, _release_notes("v4.9.9", sha))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     updated = work_lib.read_text(encoding="utf-8")
     assert 'HELM_VERSION="v4.9.9"' in updated
     assert f'HELM_SHA256="{sha}"' in updated
     assert gh_output.read_text(encoding="utf-8").strip() == "version=v4.9.9"
 
-    # (c) Mismatch between .sha256sum and GitHub release notes or tarball, or non-v4 version.
+    # (c) Any disagreement, or a non-v4 version -> fail without changing lib.sh.
     wrong_sha = "0" * 64
-    for bad_latest, bad_sha, bad_notes in [
-        ("v4.9.9", sha, f"checksum / {wrong_sha}"),
-        ("v4.9.9", wrong_sha, f"checksum / {wrong_sha}"),
-        ("v5.0.0", sha, notes),
+    for bad_latest, bad_sha, bad_notes, error in [
+        ("v4.9.9", sha, _release_notes("v4.9.9", wrong_sha), "release notes"),
+        # The digest is in the notes, but only for another platform.
+        (
+            "v4.9.9",
+            sha,
+            _release_notes("v4.9.9", wrong_sha, arm64_sha=sha),
+            "release notes",
+        ),
+        ("v4.9.9", wrong_sha, _release_notes("v4.9.9", wrong_sha), "FAILED"),
+        ("v5.0.0", sha, _release_notes("v5.0.0", sha), "unexpected latest helm"),
     ]:
         proc = run_bump(bad_latest, bad_sha, bad_notes)
         assert proc.returncode != 0
+        assert error in proc.stdout + proc.stderr, proc.stdout + proc.stderr
         assert work_lib.read_text(encoding="utf-8") == original_lib
         assert gh_output.read_text(encoding="utf-8") == ""
+
+    # (d) The sed leaves HELM_SHA256 untouched (its line no longer matches), so
+    # the rewritten lib.sh would pin the new version with the old digest: no PR.
+    unmatched_lib = original_lib.replace("\nHELM_SHA256=", "\nreadonly HELM_SHA256=", 1)
+    assert unmatched_lib != original_lib
+    proc = run_bump("v4.9.9", sha, _release_notes("v4.9.9", sha), lib=unmatched_lib)
+    assert proc.returncode != 0
+    assert "does not install helm v4.9.9" in proc.stderr
+    assert gh_output.read_text(encoding="utf-8") == ""
+
+
+OPEN_PR_GH_STUB = r"""#!/usr/bin/env bash
+echo "gh $*" >> "$STUB_LOG"
+if [[ "$1 $2" == "pr list" ]]; then
+  [[ -n "$STUB_GH_LIST_FAIL" ]] && exit 1
+  printf '%s\n' "$STUB_EXISTING_PR"
+fi
+exit 0
+"""
+
+
+@pytest.mark.parametrize(
+    ("stub_env", "returncode", "pushed"),
+    [
+        ({"STUB_EXISTING_PR": "42"}, 0, False),
+        ({"STUB_GH_LIST_FAIL": "1"}, 1, False),
+        ({}, 0, True),
+    ],
+    ids=["pr-exists", "lookup-fails", "new-pr"],
+)
+def test_bump_helm_workflow_opens_a_pr_only_when_none_exists(
+    tmp_path, stub_env, returncode, pushed
+):
+    script = _workflow_script("Open a pull request")
+    stub_bin = tmp_path / "pr_bin"
+    stub_bin.mkdir()
+    _write_exe(stub_bin / "gh", OPEN_PR_GH_STUB)
+    _write_exe(stub_bin / "git", '#!/usr/bin/env bash\necho "git $*" >> "$STUB_LOG"\n')
+    log = tmp_path / "calls.log"
+
+    # GitHub Actions runs `run:` blocks with `bash -e`.
+    proc = subprocess.run(
+        ["bash", "-e", "-c", script],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{stub_bin}:/usr/bin:/bin",
+            "STUB_LOG": str(log),
+            "VERSION": "v4.9.9",
+            "STUB_EXISTING_PR": "",
+            **stub_env,
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    calls = log.read_text().splitlines()
+    assert proc.returncode == returncode, proc.stdout + proc.stderr
+    assert calls[0].startswith("gh pr list --head automation/bump-helm-v4.9.9 ")
+    push = "git push --force origin automation/bump-helm-v4.9.9"
+    assert (push in calls) == pushed
+    assert bool(_calls(calls, "gh pr create")) == pushed
