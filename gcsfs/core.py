@@ -3308,6 +3308,9 @@ async def simple_upload(
     experimental features for Zonal buckets, and RCU buckets with ``rcu_rapid_write``, to
     upload data using gRPC.
     """
+    if content_type is not None and ("\r" in content_type or "\n" in content_type):
+        raise ValueError("content_type must not contain CR or LF characters")
+
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
@@ -3342,13 +3345,22 @@ async def simple_upload(
         kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
     metadata = json.dumps(metadata)
+    datain = as_byte_buffer(datain)
+    boundary = uuid.uuid4().hex
+    # `in` on a memoryview compares integer elements, so search views with re.
+    while (
+        boundary.encode("ascii") in datain
+        if isinstance(datain, bytes)
+        else re.search(boundary.encode("ascii"), datain)
+    ) or boundary in metadata:
+        boundary = uuid.uuid4().hex
     template = (
-        "--==0=="
+        f"--{boundary}"
         "\nContent-Type: application/json; charset=UTF-8"
-        "\n\n" + metadata + "\n--==0==" + f"\nContent-Type: {content_type}" + "\n\n"
+        f"\n\n{metadata}\n--{boundary}\nContent-Type: {content_type}\n\n"
     )
 
-    data = template.encode() + datain + b"\n--==0==--"
+    data = b"".join((template.encode(), datain, f"\n--{boundary}--".encode("ascii")))
     # aiohttp handles bytes and memoryview natively and zero-copy;
     # no need to wrap in UnclosableBytesIO.
     payload = (
@@ -3361,7 +3373,7 @@ async def simple_upload(
             "POST",
             path,
             uploadType="multipart",
-            headers={"Content-Type": 'multipart/related; boundary="==0=="'},
+            headers={"Content-Type": f'multipart/related; boundary="{boundary}"'},
             data=payload,
             json_out=True,
             **kw,
