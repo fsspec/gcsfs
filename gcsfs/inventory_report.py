@@ -199,7 +199,7 @@ class InventoryReport:
         InventoryReport._validate_path_segment(project, "project")
         InventoryReport._validate_path_segment(location, "location")
         InventoryReport._validate_path_segment(id, "id")
-        url = f"{InventoryReport.BASE_URL}" "/projects/{}/locations/{}/reportConfigs/{}"
+        url = InventoryReport.BASE_URL + "/projects/{}/locations/{}/reportConfigs/{}"
         try:
             raw_inventory_report_config = await gcs_file_system._call(
                 "GET", url, project, location, id, json_out=True
