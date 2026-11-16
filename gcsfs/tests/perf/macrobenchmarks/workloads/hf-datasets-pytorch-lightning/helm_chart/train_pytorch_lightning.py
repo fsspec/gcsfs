@@ -321,8 +321,8 @@ def build_train_dataset(
             logging.warning(
                 "dataset_num_shards=%d is not a multiple of world_size=%d; "
                 "every rank will read the entire dataset (%dx read "
-                "amplification). Adjust max_buffer_input_shards or the "
-                "dataset's shard count.",
+                "amplification). Make the dataset's Parquet file count a "
+                "multiple of world_size.",
                 ds.num_shards,
                 world_size,
                 world_size,
