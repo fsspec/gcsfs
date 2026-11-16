@@ -3345,13 +3345,14 @@ async def simple_upload(
         kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
     metadata = json.dumps(metadata)
-    datain = (
-        datain
-        if isinstance(datain, (bytes, bytearray))
-        else bytes(as_byte_buffer(datain))
-    )
+    datain = as_byte_buffer(datain)
     boundary = uuid.uuid4().hex
-    while boundary.encode("ascii") in datain or boundary in metadata:
+    # `in` on a memoryview compares integer elements, so search views with re.
+    while (
+        boundary.encode("ascii") in datain
+        if isinstance(datain, bytes)
+        else re.search(boundary.encode("ascii"), datain)
+    ) or boundary in metadata:
         boundary = uuid.uuid4().hex
     template = (
         f"--{boundary}"
@@ -3359,7 +3360,7 @@ async def simple_upload(
         f"\n\n{metadata}\n--{boundary}\nContent-Type: {content_type}\n\n"
     )
 
-    data = template.encode() + datain + f"\n--{boundary}--".encode("ascii")
+    data = b"".join((template.encode(), datain, f"\n--{boundary}--".encode("ascii")))
     # aiohttp handles bytes and memoryview natively and zero-copy;
     # no need to wrap in UnclosableBytesIO.
     payload = (
