@@ -33,7 +33,6 @@ PLUMBING = (
     "FAILED_FILE",
     "BUILD_VARS_FILE",
     "WORKSPACE_DIR",
-    "TMPDIR",
 )
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
@@ -88,8 +87,7 @@ def _stub(body):
     return f"#!/usr/bin/env bash\n{body}\n"
 
 
-# lib.sh's install_helm skips the download when helm reports the pinned
-# version; STUB_HELM_VERSION overrides it to force a (failing) download.
+# Reports the pinned version, so lib.sh's install_helm skips the download.
 PINNED_HELM_VERSION = re.search(
     r'^HELM_VERSION="([^"]+)"',
     (REPO / "cloudbuild/macrobenchmarks/scripts/lib.sh").read_text(),
@@ -97,7 +95,7 @@ PINNED_HELM_VERSION = re.search(
 ).group(1)
 HELM_STUB = _stub(
     'echo "helm $*" >> "$STUB_LOG"\n'
-    f'[[ "$1" == version ]] && echo "${{STUB_HELM_VERSION-{PINNED_HELM_VERSION}}}"\n'
+    f'[[ "$1" == version ]] && echo "{PINNED_HELM_VERSION}"\n'
     "exit 0"
 )
 
@@ -137,7 +135,6 @@ def env(tmp_path):
         "FAILED_FILE": str(tmp_path / "FAILED"),
         "BUILD_VARS_FILE": str(build_vars),
         "WORKSPACE_DIR": str(tmp_path),
-        "TMPDIR": str(tmp_path),
         "PROJECT_ID": "test-project",
         "LOCATION": "us-central1",
         "_INFRA_PREFIX": "pfx",
