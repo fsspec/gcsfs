@@ -142,6 +142,11 @@ class InventoryReport:
         # Return the final snapshot.
         return snapshot
 
+    @staticmethod
+    def _validate_path_segment(value, name):
+        if not isinstance(value, str) or not value or value in {".", ".."}:
+            raise ValueError(f"Invalid inventory report {name}: {value!r}.")
+
     def _validate_inventory_report_info(inventory_report_info):
         """
         Validates the inventory report information dictionary that user
@@ -157,7 +162,8 @@ class InventoryReport:
 
         Raises:
             ValueError: If any required key (use_snapshot_listing, location, id)
-            is missing from the inventory_report_info dictionary.
+            is missing from the inventory_report_info dictionary, or if location
+            or id is not a valid path segment.
         """
         if "use_snapshot_listing" not in inventory_report_info:
             raise ValueError("Use snapshot listing is not configured.")
@@ -165,6 +171,10 @@ class InventoryReport:
             raise ValueError("Inventory report location is not configured.")
         if "id" not in inventory_report_info:
             raise ValueError("Inventory report id is not configured.")
+        InventoryReport._validate_path_segment(
+            inventory_report_info["location"], "location"
+        )
+        InventoryReport._validate_path_segment(inventory_report_info["id"], "id")
 
     async def _fetch_raw_inventory_report_config(gcs_file_system, location, id):
         """
@@ -182,15 +192,17 @@ class InventoryReport:
             configuration retrieved from GCS.
 
         Raises:
-            Exception: If there is an error while fetching the inventory
-            report configuration.
+            ValueError: If project, location, or id is invalid, or if there is
+            an error while fetching the inventory report configuration.
         """
         project = gcs_file_system.project
-        url = "{}/projects/{}/locations/{}/reportConfigs/{}"
-        url = url.format(InventoryReport.BASE_URL, project, location, id)
+        InventoryReport._validate_path_segment(project, "project")
+        InventoryReport._validate_path_segment(location, "location")
+        InventoryReport._validate_path_segment(id, "id")
+        url = f"{InventoryReport.BASE_URL}" "/projects/{}/locations/{}/reportConfigs/{}"
         try:
             raw_inventory_report_config = await gcs_file_system._call(
-                "GET", url, json_out=True
+                "GET", url, project, location, id, json_out=True
             )
             return raw_inventory_report_config
         except Exception as e:
