@@ -80,6 +80,7 @@ jobs:
         run: |
           pip install -r cloudbuild/macrobenchmarks/metrics/requirements.txt
           PYTHONPATH=cloudbuild/macrobenchmarks pytest cloudbuild/macrobenchmarks/metrics/tests
+          pytest gcsfs/tests/perf/macrobenchmarks --run-benchmarks-infra
       - name: Run Release Automation Tests
         run: |
           pytest -vv .github/release/
@@ -122,6 +123,7 @@ jobs:
             gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt
+            gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements.txt
       - name: Install subsystem benchmark dependencies
         # Resolve dependencies together to catch version conflicts.
         run: |
@@ -129,7 +131,8 @@ jobs:
           python -m pip install \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt \
-            -r gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt
+            -r gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt \
+            -r gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements.txt
       - name: Run subsystem benchmark unit tests
         run: pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
 

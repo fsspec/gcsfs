@@ -256,7 +256,7 @@ fetch_model_from_hf() {
   if [[ -n "${HF_TOKEN:-}" ]]; then
     hf_args+=(--token "$HF_TOKEN")
   fi
-  huggingface-cli download "$MODEL_ID" --local-dir "$1/$model_name" "${hf_args[@]}" || return 1
+  hf download "$MODEL_ID" --local-dir "$1/$model_name" "${hf_args[@]}" || return 1
 }
 if [[ "${MODEL_ID:-}" == gs://* ]]; then
   stage_once "$LOCAL_MODEL_PATH" fetch_model_from_gcs
