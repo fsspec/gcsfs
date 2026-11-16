@@ -72,19 +72,23 @@ _fetch_verified_helm() {
   curl -fsSL --retry 3 -o "${dir}/${tarball}.asc" \
     "https://github.com/helm/helm/releases/download/${version}/${tarball}.asc" || return 1
   mkdir -m 700 "${dir}/gnupg" || return 1
-  local verified=1
-  if GNUPGHOME="${dir}/gnupg" gpg --batch --quiet --import "${HELM_RELEASE_KEYS}" 2>/dev/null &&
-     GNUPGHOME="${dir}/gnupg" gpg --batch --status-fd 1 --verify \
-       "${dir}/${tarball}.asc" "${dir}/${tarball}" 2>/dev/null | grep -q '^\[GNUPG:\] GOODSIG '; then
-    verified=0
-  fi
-  GNUPGHOME="${dir}/gnupg" gpgconf --kill all >/dev/null 2>&1
-  if [[ "${verified}" != 0 ]]; then
+  # Import and verify need no gpg-agent; --no-autostart keeps gpg from spawning
+  # one (its socket path can exceed the 108-byte limit for long TMPDIRs).
+  # Require gpg to succeed AND report GOODSIG with no bad/expired/revoked
+  # signature alongside it.
+  local status err="${dir}/gpg.err"
+  if ! GNUPGHOME="${dir}/gnupg" gpg --batch --no-autostart --quiet \
+         --import -- "${HELM_RELEASE_KEYS}" 2>"${err}" ||
+     ! status="$(GNUPGHOME="${dir}/gnupg" gpg --batch --no-autostart --status-fd 1 \
+         --verify -- "${dir}/${tarball}.asc" "${dir}/${tarball}" 2>>"${err}")" ||
+     ! grep -q '^\[GNUPG:\] GOODSIG ' <<<"${status}" ||
+     grep -qE '^\[GNUPG:\] (BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG) ' <<<"${status}"; then
     echo "ERROR: ${tarball} signature does not verify against ${HELM_RELEASE_KEYS}" >&2
+    cat "${err}" >&2
     return 1
   fi
   tar -xzf "${dir}/${tarball}" -C "${dir}" linux-amd64/helm || return 1
-  rm -rf "${dir:?}/${tarball}" "${dir:?}/${tarball}.asc" "${dir:?}/gnupg"
+  rm -rf "${dir:?}/${tarball}" "${dir:?}/${tarball}.asc" "${dir:?}/gnupg" "${err}"
 }
 
 # Put the latest signature-verified Helm ${HELM_MAJOR} first on PATH. Returns

@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 
 import pytest
 
@@ -137,6 +138,20 @@ def _release(tmp_path, keys, signer="trusted", tamper=False):
     return tarball, signature
 
 
+@pytest.fixture(autouse=True)
+def short_tmpdir(tmp_path):
+    """TMPDIR for install_helm: tmp_path/"tmpdir", linked to a short /tmp dir.
+
+    gpg probes for an agent socket under its home dir even with --no-autostart;
+    pytest's long tmp_path can exceed the 108-byte socket path limit on hosts
+    without /run/user (containers, some CI runners).
+    """
+    short = tempfile.mkdtemp(prefix="ih.", dir="/tmp")
+    (tmp_path / "tmpdir").symlink_to(short)
+    yield
+    shutil.rmtree(short, ignore_errors=True)
+
+
 @pytest.fixture
 def bin_dir(tmp_path):
     d = tmp_path / "bin"
@@ -154,11 +169,10 @@ def _helm_stub(bin_dir, version):
 
 
 def _run(script, bin_dir, tmp_path, keys, release=None, **env):
-    (tmp_path / "tmpdir").mkdir(exist_ok=True)
     tarball, signature = release or ("/nonexistent", "/nonexistent")
     run_env = {
         "PATH": f"{bin_dir}:{os.path.dirname(shutil.which('gpg'))}:/usr/bin:/bin",
-        "TMPDIR": str(tmp_path / "tmpdir"),
+        "TMPDIR": str((tmp_path / "tmpdir").resolve()),
         "WORKSPACE_DIR": str(tmp_path),
         "STUB_LOG": str(tmp_path / "calls.log"),
         "STUB_LATEST": LATEST,
@@ -210,7 +224,7 @@ def test_install_helm_downloads_into_tmpdir(bin_dir, tmp_path, keys):
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip().startswith(str(tmp_path / "tmpdir"))
+    assert proc.stdout.strip().startswith(str((tmp_path / "tmpdir").resolve()))
     # Only the helm binary is kept: tarball, signature and keyring are deleted.
     assert [p.name for p in _tmpdir_files(tmp_path)] == ["helm"]
 
@@ -228,6 +242,44 @@ def test_install_helm_rejects_a_signature_from_an_unknown_key(bin_dir, tmp_path,
     assert re.search(r"rc=[1-9]", proc.stdout), proc.stdout + proc.stderr
     assert "signature" in proc.stderr.lower()
     assert "installed-helm" not in proc.stdout
+    assert list((tmp_path / "tmpdir").iterdir()) == []
+
+
+def test_install_helm_rejects_a_bundle_mixing_good_and_bad_signatures(
+    bin_dir, tmp_path, keys
+):
+    # A good signature must not carry an extra bad/unverifiable one with it.
+    tarball, signature = _release(tmp_path, keys)
+    stranger = tmp_path / "stranger.asc"
+    _gpg(
+        keys["home"],
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase",
+        "",
+        "--local-user",
+        keys["stranger"],
+        "--detach-sign",
+        "--output",
+        str(stranger),
+        str(tarball),
+    )
+    good = tmp_path / "good.sig"
+    _gpg(keys["home"], "--dearmor", "--output", str(good), str(signature))
+    bundle = tmp_path / "bundle.sig"
+    bundle.write_bytes(good.read_bytes() + stranger.read_bytes())
+
+    proc, _ = _run(
+        "install_helm; echo rc=$?; helm",
+        bin_dir,
+        tmp_path,
+        keys,
+        (tarball, bundle),
+    )
+
+    assert re.search(r"rc=[1-9]", proc.stdout), proc.stdout + proc.stderr
+    assert "installed-helm" not in proc.stdout
+    assert "gpg:" in proc.stderr  # gpg's own diagnostics are surfaced
     assert list((tmp_path / "tmpdir").iterdir()) == []
 
 
