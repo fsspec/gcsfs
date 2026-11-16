@@ -162,7 +162,7 @@ Before creating the triggers, set up the following in your GCP project.
 | `_PER_DEVICE_BATCH` | `8` | Per-rank micro-batch size. |
 | `_GRAD_ACCUM` | `1` | Gradient-accumulation steps. |
 | `_DATALOADER_WORKERS` | `16` | Dataloader worker processes per rank. |
-| `_IMAGE` | `nvcr.io/nvidia/pytorch:26.05-py3` | Container image for the pods. |
+| `_IMAGE` | `nvcr.io/nvidia/pytorch:26.10-py3` | Container image for the pods. |
 | `_TORCH_DISTRIBUTED_TIMEOUT_SECONDS` | `900` | Per-collective Torch distributed timeout in seconds. |
 | `_WORKLOAD_TIMEOUT_SECONDS` | `14400` | Workload/JobSet completion timeout in seconds (default 4 hours). |
 | `_JOBSET_VERSION` | `v0.12.0` | JobSet controller release to install. |
