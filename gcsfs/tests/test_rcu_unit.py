@@ -408,6 +408,105 @@ async def test_rcu_http_writes_keep_upload_params_by_default(default_fs, caplog)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("layout", [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU])
+async def test_rcu_default_http_initiate_open_pipe_and_put_forward_kms_key_name(
+    default_fs, layout, tmp_path
+):
+    """Without rcu_rapid_write, initiate_upload, open('wb'), _pipe_file, and _put_file
+    all forward kmsKeyName over HTTP."""
+    fs, init_aaow = default_fs
+    fs._storage_layout_cache[BUCKET] = layout
+    lpath = tmp_path / "data"
+    lpath.write_bytes(b"data")
+
+    with (
+        mock.patch.object(
+            fs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            side_effect=_fake_http_call,
+        ) as http_call,
+        mock.patch.object(fs, "call", return_value=({}, '{"generation": "1"}')),
+    ):
+        await initiate_upload(fs, BUCKET, "key", kms_key_name="kms-key")
+        assert http_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        http_call.reset_mock()
+        with fs.open(PATH, "wb", kms_key_name="kms-key") as f:
+            f.write(b"data")
+        assert type(f) is core.GCSFile
+        assert http_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        http_call.reset_mock()
+        await fs._pipe_file(PATH, b"data", kms_key_name="kms-key")
+        assert http_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        http_call.reset_mock()
+        await fs._put_file(str(lpath), PATH, kms_key_name="kms-key")
+        assert http_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+    init_aaow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "preconditions", [None, object()], ids=["no_preconditions", "with_preconditions"]
+)
+@pytest.mark.parametrize("layout", [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU])
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        "open_wb",
+        "open_ab",
+        "open_xb",
+        "initiate_upload",
+        "simple_upload",
+        "core.initiate_upload",
+        "core.simple_upload",
+        "pipe_file",
+        "put_file",
+        "direct_init_aaow",
+    ],
+)
+async def test_rcu_rapid_write_rejects_kms_key_name_before_init_aaow(
+    rcu_fs, preconditions, layout, entry_point, tmp_path
+):
+    """With rcu_rapid_write=True, kms_key_name raises NotImplementedError before opening
+    AAOW regardless of whether Preconditions is available."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layout
+    lpath = tmp_path / "data"
+    lpath.write_bytes(b"data")
+
+    with (
+        mock.patch("gcsfs.zb_hns_utils.Preconditions", preconditions),
+        pytest.raises(
+            NotImplementedError,
+            match="not supported for gRPC RAPID uploads to RCU buckets",
+        ),
+    ):
+        if entry_point.startswith("open_"):
+            mode = entry_point.removeprefix("open_")
+            fs.open(PATH, mode, kms_key_name="kms-key")
+        elif entry_point == "initiate_upload":
+            await initiate_upload(fs, BUCKET, "key", kms_key_name="kms-key")
+        elif entry_point == "simple_upload":
+            await simple_upload(fs, BUCKET, "key", b"data", kms_key_name="kms-key")
+        elif entry_point == "core.initiate_upload":
+            await core.initiate_upload(fs, BUCKET, "key", kms_key_name="kms-key")
+        elif entry_point == "core.simple_upload":
+            await core.simple_upload(fs, BUCKET, "key", b"data", kms_key_name="kms-key")
+        elif entry_point == "pipe_file":
+            await fs._pipe_file(PATH, b"data", kms_key_name="kms-key")
+        elif entry_point == "put_file":
+            await fs._put_file(str(lpath), PATH, kms_key_name="kms-key")
+        else:
+            await fs._init_aaow(BUCKET, "key", kms_key_name="kms-key")
+
+    init_aaow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "cached, fresh",
     [

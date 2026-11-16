@@ -1058,7 +1058,6 @@ def test_resolve_cache_config(monkeypatch):
     [
         {"metadatain": {"key": "value"}},
         {"fixed_key_metadata": {"key": "value"}},
-        {"kms_key_name": "key_name"},
         {"consistency": "md5"},
         {"content_type": "text/plain"},
     ],
@@ -1082,6 +1081,7 @@ async def test_simple_upload_zonal_unsupported_params(
         "will be ignored" in r.message and r.levelname == "WARNING"
         for r in caplog.records
     )
+    assert not any("kms_key_name" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1090,7 +1090,6 @@ async def test_simple_upload_zonal_unsupported_params(
     [
         {"metadata": {"key": "value"}},
         {"fixed_key_metadata": {"key": "value"}},
-        {"kms_key_name": "key_name"},
         {"content_type": "text/plain"},
     ],
 )
@@ -1110,6 +1109,152 @@ async def test_initiate_upload_zonal_unsupported_params(
         "will be ignored" in r.message and r.levelname == "WARNING"
         for r in caplog.records
     )
+    assert not any("kms_key_name" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upload_fn",
+    [simple_upload, gcsfs.core.simple_upload],
+    ids=["extended_simple_upload", "core_simple_upload"],
+)
+async def test_simple_upload_zonal_kms_key_name_raises_without_preconditions(
+    async_gcs, zonal_write_mocks, file_path, upload_fn
+):
+    """simple_upload on Zonal buckets rejects kms_key_name before AAOW when Preconditions is None."""
+    bucket, object_name, _ = async_gcs.split_path(file_path)
+    with mock.patch("gcsfs.zb_hns_utils.Preconditions", None):
+        with pytest.raises(
+            NotImplementedError,
+            match="AsyncAppendableObjectWriter.from_blob accepts Preconditions",
+        ):
+            await upload_fn(
+                async_gcs,
+                bucket=bucket,
+                key=object_name,
+                datain=b"secret",
+                kms_key_name="key_name",
+            )
+
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "initiate_fn",
+    [initiate_upload, gcsfs.core.initiate_upload],
+    ids=["extended_initiate_upload", "core_initiate_upload"],
+)
+async def test_initiate_upload_zonal_kms_key_name_raises_without_preconditions(
+    async_gcs, zonal_write_mocks, file_path, initiate_fn
+):
+    """initiate_upload on Zonal buckets rejects kms_key_name before AAOW when Preconditions is None."""
+    bucket, object_name, _ = async_gcs.split_path(file_path)
+    with mock.patch("gcsfs.zb_hns_utils.Preconditions", None):
+        with pytest.raises(
+            NotImplementedError,
+            match="AsyncAppendableObjectWriter.from_blob accepts Preconditions",
+        ):
+            await initiate_fn(
+                fs=async_gcs,
+                bucket=bucket,
+                key=object_name,
+                kms_key_name="key_name",
+            )
+
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["pipe_file", "put_file"])
+async def test_pipe_and_put_file_zonal_kms_key_name_raises_without_preconditions(
+    async_gcs, zonal_write_mocks, file_path, method, tmp_path
+):
+    """_pipe_file and _put_file on Zonal buckets reject kms_key_name before AAOW when Preconditions is None."""
+    lpath = tmp_path / "payload.bin"
+    lpath.write_bytes(b"secret")
+    with mock.patch("gcsfs.zb_hns_utils.Preconditions", None):
+        with pytest.raises(
+            NotImplementedError,
+            match="AsyncAppendableObjectWriter.from_blob accepts Preconditions",
+        ):
+            if method == "pipe_file":
+                await async_gcs._pipe_file(
+                    file_path, b"secret", kms_key_name="key_name"
+                )
+            else:
+                await async_gcs._put_file(
+                    str(lpath), file_path, kms_key_name="key_name"
+                )
+
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        "simple_upload",
+        "core_simple_upload",
+        "initiate_upload",
+        "core_initiate_upload",
+        "pipe_file",
+        "put_file",
+    ],
+)
+async def test_zonal_uploads_forward_kms_key_name_when_preconditions_available(
+    async_gcs, zonal_write_mocks, file_path, caplog, entry_point, tmp_path
+):
+    """When Preconditions is available on Zonal buckets, simple_upload, initiate_upload,
+    _pipe_file, and _put_file forward kms_key_name to init_aaow without warning."""
+    bucket, object_name, _ = async_gcs.split_path(file_path)
+    lpath = tmp_path / "payload.bin"
+    lpath.write_bytes(b"secret")
+
+    with (
+        mock.patch("gcsfs.zb_hns_utils.Preconditions", object()),
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+    ):
+        if entry_point == "simple_upload":
+            await simple_upload(
+                async_gcs,
+                bucket=bucket,
+                key=object_name,
+                datain=b"secret",
+                kms_key_name="key_name",
+            )
+        elif entry_point == "core_simple_upload":
+            await gcsfs.core.simple_upload(
+                async_gcs,
+                bucket=bucket,
+                key=object_name,
+                datain=b"secret",
+                kms_key_name="key_name",
+            )
+        elif entry_point == "initiate_upload":
+            await initiate_upload(
+                fs=async_gcs,
+                bucket=bucket,
+                key=object_name,
+                kms_key_name="key_name",
+            )
+        elif entry_point == "core_initiate_upload":
+            await gcsfs.core.initiate_upload(
+                fs=async_gcs,
+                bucket=bucket,
+                key=object_name,
+                kms_key_name="key_name",
+            )
+        elif entry_point == "pipe_file":
+            await async_gcs._pipe_file(file_path, b"secret", kms_key_name="key_name")
+        else:
+            await async_gcs._put_file(str(lpath), file_path, kms_key_name="key_name")
+
+    zonal_write_mocks["init_aaow"].assert_awaited_once()
+    assert (
+        zonal_write_mocks["init_aaow"].await_args.kwargs["kms_key_name"] == "key_name"
+    )
+    assert not any("will be ignored" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
