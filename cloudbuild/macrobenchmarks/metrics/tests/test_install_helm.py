@@ -15,6 +15,7 @@ import tarfile
 import pytest
 
 from .test_rcu_scripts import (  # noqa: F401  (env is a fixture)
+    PINNED_HELM_VERSION,
     REPO,
     SEED,
     _add_build_vars,
@@ -25,7 +26,7 @@ from .test_rcu_scripts import (  # noqa: F401  (env is a fixture)
 )
 
 LIB = "cloudbuild/macrobenchmarks/scripts/lib.sh"
-PINNED_URL = "https://get.helm.sh/helm-v3.22.1-linux-amd64.tar.gz"
+PINNED_URL = f"https://get.helm.sh/helm-{PINNED_HELM_VERSION}-linux-amd64.tar.gz"
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
@@ -154,7 +155,7 @@ def test_install_helm_fails_when_the_download_fails(bin_dir, tmp_path, tarball):
 def test_install_helm_skips_the_download_when_the_pinned_version_is_on_path(
     bin_dir, tmp_path
 ):
-    _helm_stub(bin_dir, "v3.22.1")
+    _helm_stub(bin_dir, PINNED_HELM_VERSION)
 
     proc, curl_log = _run("install_helm", bin_dir, tmp_path)
 
@@ -186,7 +187,7 @@ def test_pinned_helm_version_and_checksum_are_well_formed(bin_dir, tmp_path):
     proc, _ = _run('echo "$HELM_VERSION $HELM_SHA256"', bin_dir, tmp_path)
 
     version, sha = proc.stdout.split()
-    assert re.fullmatch(r"v3\.\d+\.\d+", version)
+    assert re.fullmatch(r"v\d+\.\d+\.\d+", version)
     assert re.fullmatch(r"[0-9a-f]{64}", sha)
 
 

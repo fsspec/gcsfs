@@ -90,14 +90,14 @@ def _stub(body):
 
 # lib.sh's install_helm skips the download when helm reports the pinned
 # version; STUB_HELM_VERSION overrides it to force a (failing) download.
-_PINNED_HELM = re.search(
+PINNED_HELM_VERSION = re.search(
     r'^HELM_VERSION="([^"]+)"',
     (REPO / "cloudbuild/macrobenchmarks/scripts/lib.sh").read_text(),
     re.M,
 ).group(1)
 HELM_STUB = _stub(
     'echo "helm $*" >> "$STUB_LOG"\n'
-    f'[[ "$1" == version ]] && echo "${{STUB_HELM_VERSION-{_PINNED_HELM}}}"\n'
+    f'[[ "$1" == version ]] && echo "${{STUB_HELM_VERSION-{PINNED_HELM_VERSION}}}"\n'
     "exit 0"
 )
 

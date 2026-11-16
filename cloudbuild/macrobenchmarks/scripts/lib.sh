@@ -57,8 +57,8 @@ skip_if_failed() {
 # only ever runs this exact binary. To bump: set HELM_VERSION and copy the
 # digest from https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz.sha256sum
 # (cross-check it against the GitHub release notes).
-HELM_VERSION="v3.22.1"
-HELM_SHA256="896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea"
+HELM_VERSION="v4.3.2"
+HELM_SHA256="d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983"
 
 # Put the pinned helm first on PATH. Downloads the release tarball, verifies it
 # against HELM_SHA256 and only then unpacks it; returns non-zero (with no new
