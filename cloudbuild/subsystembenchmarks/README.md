@@ -228,6 +228,36 @@ picks its own bucket type), and artifacts go to
 ingestion never reads. Still give the CI trigger its own `_INFRA_PREFIX` (for
 example `gcsfs-ci-ssb`) so its VMs and buckets stay separate from nightly runs.
 
+### Securing the pull request trigger
+
+A pull request trigger builds from the pull request's branch, so the pull
+request supplies this YAML and the scripts the VM runs. Checks inside the
+repository cannot limit what that code does; only the trigger and IAM can:
+
+- **Gate external pull requests.** Set the trigger's comment control to
+  `COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY`, so a maintainer must comment
+  `/gcbrun` before a contributor outside the repository can run code on the VM.
+- **Give the VM a dedicated, prefix-scoped service account.** Do not reuse a VM
+  service account that other pipelines rely on, and do not grant it
+  project-wide `roles/storage.admin`. Limit storage to the CI trigger's
+  `_INFRA_PREFIX` with an IAM condition, and keep `_CI_MODEL_ID` under that
+  prefix too (for example `gs://gcsfs-ci-ssb-models/gpt2`):
+
+  ```bash
+  gcloud iam service-accounts create ssb-ci-vm --project=<PROJECT_ID>
+  gcloud projects add-iam-policy-binding <PROJECT_ID> \
+    --member=serviceAccount:ssb-ci-vm@<PROJECT_ID>.iam.gserviceaccount.com \
+    --role=roles/storage.admin \
+    --condition='expression=resource.name.startsWith("projects/_/buckets/gcsfs-ci-ssb-"),title=only-gcsfs-ci-ssb-buckets'
+  gcloud projects add-iam-policy-binding <PROJECT_ID> \
+    --member=serviceAccount:ssb-ci-vm@<PROJECT_ID>.iam.gserviceaccount.com \
+    --role=roles/serviceusage.serviceUsageConsumer --condition=None
+  ```
+
+  Pass that account as the trigger's `_VM_SERVICE_ACCOUNT`. The VM never lists
+  the project's buckets, which a bucket-name condition cannot allow; the
+  leaked-bucket sweeps run as the Cloud Build service account.
+
 ## BigQuery ingestion
 
 The ingestion pipeline requires both substitutions:
