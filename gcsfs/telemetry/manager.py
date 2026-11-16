@@ -49,8 +49,8 @@ class UsageMetricsTracker:
         ----------
         call_scoped_only : bool
             Required. True leaves out process-wide dimensions such as ``env``
-            (use it for the per-call snapshot); False includes them (use it for
-            request headers).
+            unless they are already set in the context (use it for the per-call
+            snapshot); False includes them (use it for request headers).
 
         Returns
         -------
