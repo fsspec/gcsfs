@@ -1,0 +1,89 @@
+name: Bump Helm Pin
+
+# Weekly: if Helm published a newer release in the pinned major version, update
+# HELM_VERSION/HELM_SHA256 in cloudbuild/macrobenchmarks/scripts/lib.sh and open
+# a PR. The pin is only rewritten after get.helm.sh, the GitHub release notes
+# and the downloaded tarball all agree on the SHA-256. Major upgrades are left
+# to a human.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  bump:
+    if: github.repository == 'fsspec/gcsfs'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Update the pin
+        id: bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          lib="cloudbuild/macrobenchmarks/scripts/lib.sh"
+          current="$(sed -n 's/^HELM_VERSION="\([^"]*\)"/\1/p' "$lib")"
+          major="${current#v}"
+          major="${major%%.*}"
+          latest="$(curl -fsSL --retry 3 "https://get.helm.sh/helm${major}-latest-version")"
+          if ! [[ "$latest" =~ ^v${major}\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: unexpected latest helm ${major} version '${latest}'" >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" == "$current" ]]; then
+            echo "Helm ${current} is already up to date (latest: ${latest})"
+            exit 0
+          fi
+          tarball="helm-${latest}-linux-amd64.tar.gz"
+          sha="$(curl -fsSL --retry 3 "https://get.helm.sh/${tarball}.sha256sum" | awk '{print $1}')"
+          if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: malformed SHA-256 '${sha}' from get.helm.sh" >&2
+            exit 1
+          fi
+          notes="$(gh release view "$latest" --repo helm/helm --json body --jq .body)"
+          if ! grep -Fq "$sha" <<<"$notes"; then
+            echo "ERROR: ${latest} SHA-256 ${sha} not found in GitHub release notes" >&2
+            exit 1
+          fi
+          dir="$(mktemp -d)"
+          trap 'rm -rf "$dir"' EXIT
+          curl -fsSL --retry 3 -o "${dir}/${tarball}" "https://get.helm.sh/${tarball}"
+          echo "${sha}  ${dir}/${tarball}" | sha256sum -c --quiet -
+          sed -i \
+            -e "s/^HELM_VERSION=\".*\"/HELM_VERSION=\"${latest}\"/" \
+            -e "s/^HELM_SHA256=\".*\"/HELM_SHA256=\"${sha}\"/" \
+            "$lib"
+          if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+            echo "version=${latest}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a pull request
+        if: steps.bump.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          branch="automation/bump-helm-${VERSION}"
+          if gh pr list --head "$branch" --state all --json number --jq '.[0].number' | grep -q .; then
+            echo "A PR for helm ${VERSION} already exists; nothing to do."
+            exit 0
+          fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add cloudbuild/macrobenchmarks/scripts/lib.sh
+          git commit -m "build(macrobenchmarks): bump helm to ${VERSION}"
+          git push --force origin "$branch"
+          gh pr create \
+            --title "build(macrobenchmarks): bump helm to ${VERSION}" \
+            --body "Automated weekly bump of the pinned Helm used by the macrobenchmark Cloud Build steps. The SHA-256 matched in get.helm.sh, the GitHub release notes (https://github.com/helm/helm/releases/tag/${VERSION}) and the downloaded tarball. Check the release notes for behaviour changes before merging." \
+            --head "$branch" \
+            --base main

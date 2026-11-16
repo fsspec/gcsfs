@@ -88,18 +88,16 @@ def _stub(body):
     return f"#!/usr/bin/env bash\n{body}\n"
 
 
-# lib.sh's install_helm resolves the latest helm from get.helm.sh and skips the
-# download when helm already reports it; STUB_HELM_VERSION overrides the stub's
-# version to force a (failing) download.
-STUB_HELM_LATEST = "v4.9.9"
+# lib.sh's install_helm skips the download when helm reports the pinned
+# version; STUB_HELM_VERSION overrides it to force a (failing) download.
+PINNED_HELM_VERSION = re.search(
+    r'^HELM_VERSION="([^"]+)"',
+    (REPO / "cloudbuild/macrobenchmarks/scripts/lib.sh").read_text(),
+    re.M,
+).group(1)
 HELM_STUB = _stub(
     'echo "helm $*" >> "$STUB_LOG"\n'
-    f'[[ "$1" == version ]] && echo "${{STUB_HELM_VERSION-{STUB_HELM_LATEST}}}"\n'
-    "exit 0"
-)
-CURL_STUB = _stub(
-    'echo "curl $*" >> "$STUB_LOG"\n'
-    f'[[ "${{@: -1}}" == *-latest-version ]] && printf %s "{STUB_HELM_LATEST}"\n'
+    f'[[ "$1" == version ]] && echo "${{STUB_HELM_VERSION-{PINNED_HELM_VERSION}}}"\n'
     "exit 0"
 )
 
@@ -113,7 +111,7 @@ def env(tmp_path):
         "gcloud": GCLOUD_STUB,
         "kubectl": KUBECTL_STUB,
         "helm": HELM_STUB,
-        "curl": CURL_STUB,
+        "curl": _stub('echo "curl $*" >> "$STUB_LOG"'),
         "sleep": _stub('echo "sleep $*" >> "$STUB_LOG"'),
         "python3": _stub('echo "python3 is not in the gcloud image" >&2; exit 1'),
         "pip3": _stub('echo "pip3 is not in the gcloud image" >&2; exit 1'),
