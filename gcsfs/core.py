@@ -2441,7 +2441,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         With version awareness enabled, a valid integer after the last ``#``
         selects an object generation and takes precedence over the first
         ``generation`` query value. Query parameters begin at the first ``?``;
-        keys containing a literal ``?`` can use the ``#generation`` form.
+        A valid ``?generation=`` is still a selector even with ``#generation``.
+        Other literal ``?`` characters can use the ``#generation`` form.
         Invalid generation values remain part of the key. A valid query also
         accepts an empty trailing ``#``. With version awareness disabled, the
         entire key is returned literally.
@@ -2470,7 +2471,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             # is also ignored when a query supplies the generation.
             query_path = key if generation is not None else keypart.removesuffix("#")
             query_key, _, query = query_path.partition("?")
-            values = parse_qs(query).get("generation", [])
+            values = parse_qs(query).get("generation", []) if "#" not in query else []
             if values:
                 try:
                     int(values[0])
@@ -2727,7 +2728,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             or ""
         )
         self.generation = _coalesce_generation(generation, path_generation)
-        if self.generation is not None and mode in {"wb", "xb", "ab"}:
+        if self.generation is not None and (
+            mode in {"wb", "xb"}
+            or (mode == "ab" and not kwargs.get("_supports_append", False))
+        ):
             raise ValueError("Cannot write to specific object generation")
         self.if_generation_match = _resolve_open_generation_match(
             mode, if_generation_match

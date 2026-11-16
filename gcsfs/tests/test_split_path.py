@@ -53,6 +53,21 @@ from gcsfs.core import GCSFileSystem
         ("dir/file#123", "dir/file", "123"),
         ("dir/file?generation=123#", "dir/file", "123"),
         ("dir/file?generation=123#invalid", "dir/file?generation=123#invalid", None),
+        (
+            "dir/file?generation=123&other=1#invalid",
+            "dir/file?generation=123&other=1#invalid",
+            None,
+        ),
+        (
+            "dir/file?other=1&generation=123#invalid",
+            "dir/file?other=1&generation=123#invalid",
+            None,
+        ),
+        (
+            "dir/file?generation=123&other=1#variant#456",
+            "dir/file?generation=123&other=1#variant",
+            "456",
+        ),
     ],
 )
 def test_split_path_preserves_object_key(protocol, key, expected_key, generation):

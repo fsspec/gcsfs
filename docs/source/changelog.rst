@@ -19,8 +19,7 @@ Unreleased
   operations. ``pipe_file``, standard write-mode ``open``, and ``merge``
   previously ignored the generation and could overwrite the live object.
   ``merge`` also rejects versioned sources rather than composing their live
-  versions. Zonal append with an explicit generation is also rejected; omit
-  the generation to append to the live object. Conditional writes using
+  versions. Zonal append to an explicit generation and conditional writes using
   ``if_generation_match`` remain supported (#1129).
 
 * ``sign()`` now works with credentials that have no private key, such as

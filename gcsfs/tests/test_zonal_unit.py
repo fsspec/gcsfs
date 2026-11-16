@@ -2102,3 +2102,24 @@ async def test_pipe_zonal_rejects_specific_generation(
                 f"{TEST_ZONAL_BUCKET}/file{suffix}", b"replacement"
             )
     zonal_write_mocks["init_aaow"].assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "suffix,generation", [("", "123"), ("#123", None), ("?generation=123", None)]
+)
+def test_zonal_append_preserves_generation(
+    extended_gcsfs, zonal_write_mocks, suffix, generation
+):
+    extended_gcsfs.version_aware = True
+    with extended_gcsfs.open(
+        f"{file_path}{suffix}", "ab", generation=generation
+    ) as handle:
+        handle.write(b"new data")
+    assert zonal_write_mocks["init_aaow"].await_args.args[3] == "123"
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb"])
+def test_zonal_overwrite_rejects_generation(extended_gcsfs, zonal_write_mocks, mode):
+    with pytest.raises(ValueError, match="Cannot write to specific object generation"):
+        extended_gcsfs.open(file_path, mode, generation="123")
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
