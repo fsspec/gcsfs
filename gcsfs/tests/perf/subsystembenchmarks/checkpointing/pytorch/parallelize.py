@@ -1,6 +1,7 @@
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import Shard
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
@@ -39,17 +40,40 @@ def split_stage(model: nn.Module, stage: int, num_stages: int) -> None:
         model.lm_head = None
 
 
-def keep_local_experts(model: nn.Module, rank: int, num_ranks: int) -> None:
-    """Keeps this rank's contiguous expert slice per layer (assumes per-expert
-    nn.ModuleList, i.e. transformers<5). State-dict layout only: breaks HF forward."""
-    for layer in model.model.layers.children():
-        experts = layer.mlp.experts
-        if len(experts) % num_ranks:
+def _experts_modules(model: nn.Module) -> list[nn.Module]:
+    """Each MoE layer's experts module (transformers>=5 OlmoeExperts and the like),
+    which holds every expert of the layer in 3-D [num_experts, ...] weights."""
+    return [
+        layer.mlp.experts
+        for layer in model.model.layers.children()
+        if hasattr(getattr(layer, "mlp", None), "experts")
+    ]
+
+
+def check_experts_split(model: nn.Module, num_ranks: int) -> None:
+    """EP gives each rank a contiguous run of whole experts, so the expert count
+    must divide evenly across the ranks."""
+    for experts in _experts_modules(model):
+        if experts.num_experts % num_ranks:
             raise ValueError(
-                f"{len(experts)} experts do not split into {num_ranks} ranks"
+                f"{experts.num_experts} experts do not split into {num_ranks} ranks"
             )
-        per_rank = len(experts) // num_ranks
-        layer.mlp.experts = _keep(experts, rank * per_rank, per_rank)
+
+
+def _expert_placement_fn(model: nn.Module, strategy: str):
+    """FSDP placement for the fused expert weights; None keeps FSDP's Shard(0).
+
+    Dim 0 of a fused expert weight indexes the experts. EP keeps Shard(0), so each
+    rank owns whole experts; every other strategy shards dim 1 instead, slicing
+    each expert across the dp ranks as FSDP did with transformers<5's per-expert
+    2-D weights.
+    """
+    if strategy == "ep":
+        return None
+    expert_params = {p for m in _experts_modules(model) for p in m.parameters()}
+    if not expert_params:
+        return None
+    return lambda p: Shard(1) if p in expert_params else None
 
 
 def parallelize(model: nn.Module, mesh: DeviceMesh, params) -> nn.Module:
@@ -61,17 +85,14 @@ def parallelize(model: nn.Module, mesh: DeviceMesh, params) -> nn.Module:
     if "tp" in dims:
         apply_llama_tp(model, mesh["tp"])
     if params.strategy == "ep":
-        # EP reuses the dp_shard ranks; local experts stay whole plain tensors.
-        dp_shard = mesh["dp_shard"]
-        keep_local_experts(model, dp_shard.get_local_rank(), dp_shard.size())
+        # EP reuses the dp_shard ranks.
+        check_experts_split(model, mesh["dp_shard"].size())
 
     dp_dims = tuple(d for d in dims if d.startswith("dp_"))
     if dp_dims:
         dp_mesh = mesh[dp_dims]
+        placement_fn = _expert_placement_fn(model, params.strategy)
         for layer in model.model.layers.children():
-            ignored = set()
-            if params.strategy == "ep":
-                ignored = set(layer.mlp.experts.parameters())
-            fully_shard(layer, mesh=dp_mesh, ignored_params=ignored)
+            fully_shard(layer, mesh=dp_mesh, shard_placement_fn=placement_fn)
         fully_shard(model, mesh=dp_mesh)
     return model

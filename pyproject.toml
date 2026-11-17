@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "aiohttp!=4.0.0a0,!=4.0.0a1,>=3.9.0",
     "decorator>4.1.2",
+    # Raise only when gcsfs needs a newer fsspec feature/fix; see docs/source/release.rst.
     "fsspec>=2026.9.0",
     "google-auth>=1.2",
     "google-auth-oauthlib",
@@ -79,4 +80,4 @@ markers = [
 [tool.isort]
 profile = "black"
 known_first_party = ["prepare_release", "summarize_test_results"]
-known_third_party = ["aiohttp", "click", "datasets", "decorator", "fsspec", "fuse", "google", "google_auth_oauthlib", "google_crc32c", "grpc", "lightning", "metric_logging", "metrics", "numpy", "prettytable", "proto", "psutil", "pyarrow", "pytest", "pytest_asyncio", "ray", "requests", "torch", "torchdata", "torchtitan", "torchtitan_recipes", "torchtitan_train", "transformers", "yaml"]
+known_third_party = ["aiohttp", "click", "datasets", "decorator", "fsspec", "fuse", "google", "google_auth_oauthlib", "google_crc32c", "grpc", "lightning", "metric_logging", "metrics", "numpy", "prettytable", "proto", "psutil", "pyarrow", "pytest", "pytest_asyncio", "ray", "rcu", "requests", "torch", "torchdata", "torchtitan", "torchtitan_recipes", "torchtitan_train", "transformers", "yaml", "yarl"]

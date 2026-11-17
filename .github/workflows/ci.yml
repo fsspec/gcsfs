@@ -11,6 +11,12 @@ on:
       CODECOV_TOKEN:
         required: false
 
+# Read-only by default. When a release workflow calls this one with
+# `contents: write`, jobs without their own permissions block would
+# otherwise inherit that write token.
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: bash -l -eo pipefail {0}
@@ -29,12 +35,13 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Setup conda
-        uses: conda-incubator/setup-miniconda@v3
+        uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb # v4.1.0
         with:
           environment-file: environment_gcsfs.yaml
           python-version: ${{ matrix.python-version }}
@@ -73,6 +80,7 @@ jobs:
         run: |
           pip install -r cloudbuild/macrobenchmarks/metrics/requirements.txt
           PYTHONPATH=cloudbuild/macrobenchmarks pytest cloudbuild/macrobenchmarks/metrics/tests
+          pytest gcsfs/tests/perf/macrobenchmarks --run-benchmarks-infra
       - name: Run Release Automation Tests
         run: |
           pytest -vv .github/release/
@@ -89,7 +97,7 @@ jobs:
             -n auto \
             gcsfs/
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
@@ -103,9 +111,11 @@ jobs:
       STORAGE_EMULATOR_HOST: http://localhost:4443
     steps:
       - name: Checkout source
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
           cache: pip
@@ -113,6 +123,7 @@ jobs:
             gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt
+            gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements.txt
       - name: Install subsystem benchmark dependencies
         # Resolve dependencies together to catch version conflicts.
         run: |
@@ -120,7 +131,8 @@ jobs:
           python -m pip install \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt \
-            -r gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt
+            -r gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt \
+            -r gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements.txt
       - name: Run subsystem benchmark unit tests
         run: pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
 
@@ -128,10 +140,11 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      - uses: pre-commit/action@v3.0.1
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1

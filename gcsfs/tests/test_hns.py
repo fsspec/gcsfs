@@ -356,7 +356,7 @@ class TestExtendedGcsFileSystemMkdir:
     def test_mkdir_in_non_existent_bucket_fails(self, gcs_hns):
         """Test that mkdir fails when the target bucket does not exist."""
         gcsfs = gcs_hns
-        bucket_name = f"gcsfs-non-existent-bucket-{uuid.uuid4()}"
+        bucket_name = f"gcsfs-test-non-existent-bucket-{uuid.uuid4().hex[:12]}"
         dir_path = f"{bucket_name}/some_dir"
 
         with pytest.raises(FileNotFoundError, match=f"{bucket_name}"):
@@ -367,7 +367,7 @@ class TestExtendedGcsFileSystemMkdir:
     ):
         """Test that mkdir with create_parents=True creates the bucket."""
         gcsfs = gcs_hns
-        bucket_name = f"gcsfs-bucket-mkdir-{uuid.uuid4()}"
+        bucket_name = f"gcsfs-test-bucket-mkdir-{uuid.uuid4().hex[:12]}"
         dir_path = f"{bucket_name}/some_dir"
         buckets_to_delete.add(bucket_name)
 
@@ -380,7 +380,7 @@ class TestExtendedGcsFileSystemMkdir:
     ):
         """Test mkdir with create_parents and enable_hierarchical_namespace creates an HNS bucket."""
         gcsfs = gcs_hns
-        bucket_name = f"gcsfs-hns-bucket-mkdir-{uuid.uuid4()}"
+        bucket_name = f"gcsfs-test-hns-bucket-mkdir-{uuid.uuid4().hex[:12]}"
         dir_path = f"{bucket_name}/some_dir"
         buckets_to_delete.add(bucket_name)
 
@@ -397,7 +397,7 @@ class TestExtendedGcsFileSystemMkdir:
     def test_mkdir_for_zonal_bucket(self, gcs_hns, buckets_to_delete):
         """Test creating a Zonal bucket using the placement parameter (string)."""
         gcsfs = gcs_hns
-        bucket_name = f"gcsfs-zonal-bucket-{uuid.uuid4()}"
+        bucket_name = f"gcsfs-test-zonal-bucket-{uuid.uuid4().hex[:12]}"
         dir_path = f"{bucket_name}/some_dir"
         buckets_to_delete.add(bucket_name)
 
@@ -421,7 +421,7 @@ class TestExtendedGcsFileSystemMkdir:
     def test_mkdir_create_non_hns_bucket(self, gcs_hns, buckets_to_delete):
         """Test creating a new non-HNS bucket by default."""
         gcsfs = gcs_hns
-        bucket_path = f"new-non-hns-bucket-{uuid.uuid4()}"
+        bucket_path = f"gcsfs-test-non-hns-bucket-{uuid.uuid4().hex[:12]}"
         buckets_to_delete.add(bucket_path)
 
         assert not gcsfs.exists(bucket_path)
@@ -432,7 +432,7 @@ class TestExtendedGcsFileSystemMkdir:
     def test_mkdir_create_bucket_with_parent_params(self, gcs_hns, buckets_to_delete):
         """Test creating a bucket passes parent-level parameters like enable_versioning."""
         gcsfs = gcs_hns
-        bucket_path = f"new-versioned-bucket-{uuid.uuid4()}"
+        bucket_path = f"gcsfs-test-versioned-bucket-{uuid.uuid4().hex[:12]}"
         buckets_to_delete.add(bucket_path)
 
         assert not gcsfs.exists(bucket_path)
@@ -442,7 +442,7 @@ class TestExtendedGcsFileSystemMkdir:
     def test_mkdir_enable_hierarchical_namespace(self, gcs_hns, buckets_to_delete):
         """Test creating a new HNS-enabled bucket."""
         gcsfs = gcs_hns
-        bucket_path = f"new-hns-bucket-{uuid.uuid4()}"
+        bucket_path = f"gcsfs-test-hns-bucket-{uuid.uuid4().hex[:12]}"
         buckets_to_delete.add(bucket_path)
 
         assert not gcsfs.exists(bucket_path)
@@ -514,7 +514,7 @@ class TestExtendedGcsFileSystemMakedirs:
     def test_makedirs_in_non_existent_bucket_fails(self, gcs_hns):
         """Test that makedirs raises FileNotFoundError if the target bucket does not exist."""
         gcsfs = gcs_hns
-        bucket_name = f"gcsfs-non-existent-{uuid.uuid4().hex[:12]}"
+        bucket_name = f"gcsfs-test-non-existent-{uuid.uuid4().hex[:12]}"
         dir_path = f"{bucket_name}/some/nested/dir"
 
         assert not gcsfs.exists(bucket_name)
@@ -525,7 +525,7 @@ class TestExtendedGcsFileSystemMakedirs:
         """Test makedirs on bucket-only paths raises FileNotFoundError if
         bucket doesn't exist, and FileExistsError if exists and not exist_ok."""
         gcsfs = gcs_hns
-        non_existent_bucket = f"gcsfs-non-existent-{uuid.uuid4().hex[:12]}"
+        non_existent_bucket = f"gcsfs-test-non-existent-{uuid.uuid4().hex[:12]}"
 
         # Case 1: Bucket does not exist
         with pytest.raises(FileNotFoundError, match="Bucket does not exist"):

@@ -12,7 +12,11 @@ from gcsfs.telemetry.context import (
     get_telemetry_context,
     sanitize_token,
 )
-from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
+from gcsfs.telemetry.detector import (
+    BaseDetector,
+    EnvironmentDetector,
+    FrameworkDetector,
+)
 
 
 class UsageMetricsTracker:
@@ -30,9 +34,29 @@ class UsageMetricsTracker:
             for env in ("DO_NOT_TRACK", "GCSFS_NO_TELEMETRY")
         )
 
-    def collect_tokens_map(self) -> Dict[str, str]:
+    def warm_up(self) -> None:
+        """Start non-call-scoped detectors (e.g. background environment probe)."""
+        if not self.is_enabled():
+            return
+        for detector in self.detectors:
+            if getattr(detector, "call_scoped", True):
+                continue
+            try:
+                detector.detect()
+            except Exception:
+                pass
+
+    def collect_tokens_map(self, *, call_scoped_only: bool) -> Dict[str, str]:
         """
-        Collect active telemetry tokens across all registered detectors.
+        Collect telemetry tokens. For each dimension, the value already in the
+        telemetry context is used if present; otherwise its detector is called.
+
+        Parameters
+        ----------
+        call_scoped_only : bool
+            Required. True leaves out process-wide dimensions such as ``env``
+            unless they are already set in the context (use it for the per-call
+            snapshot); False includes them (use it for request headers).
 
         Returns
         -------
@@ -46,6 +70,8 @@ class UsageMetricsTracker:
 
         # Run registered detectors for any dimensions not already set
         for detector in self.detectors:
+            if call_scoped_only and not getattr(detector, "call_scoped", True):
+                continue
             dim_key = (
                 detector.name.value
                 if isinstance(detector.name, Dimension)
@@ -84,7 +110,8 @@ class UsageMetricsTracker:
             return []
 
         if tokens_map is None:
-            tokens_map = self.collect_tokens_map()
+            # Include process-wide dimensions (e.g. env), read fresh per request.
+            tokens_map = self.collect_tokens_map(call_scoped_only=False)
 
         include_custom = dimensions == ALL_DIMENSIONS
         out = []
@@ -101,13 +128,32 @@ class UsageMetricsTracker:
         """
         Resolve a specific dimension's sanitized bare token value (e.g. Dimension.FRAMEWORK -> 'pandas').
         """
-        token_map = self.collect_tokens_map()
-        return sanitize_token(token_map.get(dimension.value))
+        if not self.is_enabled():
+            return None
+
+        target_key = dimension.value
+        tokens = get_telemetry_context()
+        if target_key in tokens:
+            return sanitize_token(tokens[target_key])
+
+        for detector in self.detectors:
+            dim_key = (
+                detector.name.value
+                if isinstance(detector.name, Dimension)
+                else str(detector.name)
+            )
+            if dim_key == target_key:
+                try:
+                    return sanitize_token(detector.detect())
+                except Exception:
+                    return None
+
+        return None
 
     def encode_features(self) -> Optional[str]:
         """Return web-safe base64 encoded GcsfsFeatures for active telemetry state."""
-        tokens_map = self.collect_tokens_map()
-        if not tokens_map:
+        tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        if not any(tokens_map.values()):
             return None
 
         from gcsfs.telemetry import schema as telemetry_schema
@@ -115,9 +161,10 @@ class UsageMetricsTracker:
         return telemetry_schema.encode_features(tokens_map)
 
 
-# Default singleton instance pre-configured with standard framework detector
+# Default singleton instance pre-configured with standard detectors
 default_usage_tracker = UsageMetricsTracker(
     detectors=[
         FrameworkDetector(),
+        EnvironmentDetector(),
     ]
 )

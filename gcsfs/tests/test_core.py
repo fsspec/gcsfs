@@ -1,3 +1,4 @@
+import array
 import asyncio
 import base64
 import builtins
@@ -97,7 +98,7 @@ def test_exists(gcs):
     assert gcs.exists(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.exists(nb)
 
 
@@ -123,7 +124,7 @@ def test_isdir(gcs):
     assert gcs.isdir(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.isdir(nb)
 
 
@@ -152,7 +153,7 @@ def test_isfile(gcs):
     assert not gcs.isfile(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.isfile(nb)
 
     # Generation
@@ -220,6 +221,103 @@ def test_simple_upload(gcs):
     with gcs.open(fn, "wb") as f:
         f.write(b"zz")
     assert gcs.cat(fn) == b"zz"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"before\r\n--==0==--\r\nafter",
+        b"before\n--==0==--\nafter",
+    ],
+    ids=["crlf_boundary", "lf_boundary"],
+)
+def test_simple_upload_payload_with_multipart_boundary(gcs, payload):
+    fn = f"{TEST_BUCKET}/multipart_boundary_payload"
+    assert gcs.consistency == "none"
+    gcs.pipe_file(fn, payload)
+    assert gcs.cat_file(fn) == payload
+
+
+@pytest.mark.parametrize(
+    "make_data",
+    [bytes, bytearray, memoryview],
+    ids=["bytes", "bytearray", "memoryview"],
+)
+def test_simple_upload_boundary_collision_retry(gcs, skip_if_zonal, make_data):
+    first = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    second = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    raw = b"before\r\n--" + first.hex.encode("ascii") + b"--\r\nafter"
+    key = "boundary_collision"
+    fn = f"{TEST_BUCKET}/{key}"
+
+    with (
+        mock.patch("gcsfs.core.uuid.uuid4", side_effect=[first, second]) as mock_uuid,
+        mock.patch.object(gcs, "_call", wraps=gcs._call) as spy_call,
+    ):
+        sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key, make_data(raw))
+
+    assert mock_uuid.call_count == 2
+    call_kwargs = spy_call.call_args.kwargs
+    expected_boundary = second.hex
+    assert (
+        call_kwargs["headers"]["Content-Type"]
+        == f'multipart/related; boundary="{expected_boundary}"'
+    )
+    body = bytes(call_kwargs["data"])
+    assert body.startswith(f"--{expected_boundary}\n".encode("ascii"))
+    assert f"\n--{expected_boundary}\n".encode("ascii") in body
+    assert body.endswith(f"\n--{expected_boundary}--".encode("ascii"))
+    assert gcs.cat_file(fn) == raw
+
+
+def test_simple_upload_memoryview(gcs):
+    fn1 = f"{TEST_BUCKET}/simple_upload_mv_pipe"
+    mv1 = memoryview(b"hello --==0==-- world")
+    gcs.pipe_file(fn1, mv1)
+    assert gcs.cat_file(fn1) == bytes(mv1)
+
+    key2 = "simple_upload_mv_direct"
+    fn2 = f"{TEST_BUCKET}/{key2}"
+    mv2 = memoryview(b"hello\r\n--==0==--\r\nworld")
+    sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key2, mv2)
+    assert gcs.cat_file(fn2) == bytes(mv2)
+
+    key3 = "simple_upload_mv_typed"
+    fn3 = f"{TEST_BUCKET}/{key3}"
+    mv3 = memoryview(array.array("H", [1, 2, 3]))
+    sync(
+        gcs.loop,
+        gcsfs.core.simple_upload,
+        gcs,
+        TEST_BUCKET,
+        key3,
+        mv3,
+        consistency="size",
+    )
+    assert gcs.cat_file(fn3) == bytes(mv3)
+
+
+@pytest.mark.parametrize(
+    "bad_content_type",
+    [
+        "text/plain\r\nX-Injected: 1",
+        "text/plain\n\nmalicious-body",
+        "text/plain\rX-Injected: 1",
+    ],
+    ids=["crlf_header", "lf_body", "cr_header"],
+)
+def test_simple_upload_rejects_crlf_in_content_type(
+    gcs, skip_if_zonal, bad_content_type
+):
+    fn = f"{TEST_BUCKET}/bad_content_type"
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        with pytest.raises(ValueError, match="content_type"):
+            gcs.pipe_file(fn, b"hello", content_type=bad_content_type)
+        mock_call.assert_not_called()
+
+        mock_call.return_value = {"size": "5", "md5Hash": "", "crc32c": ""}
+        gcs.pipe_file(fn, b"hello", content_type=None, consistency="none")
+        mock_call.assert_called_once()
 
 
 def test_simple_upload_with_kms(gcs):
@@ -2217,6 +2315,7 @@ def test_attrs(gcs):
     assert gcs.getxattr(a, "something") == "not"
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project(gcs_factory):
     gcs = gcs_factory(requester_pays=True, project=TEST_PROJECT)
     # test directly against `_call` to inspect the result
@@ -2234,6 +2333,7 @@ def test_request_user_project(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_user_project_string(gcs_factory):
     gcs = gcs_factory(requester_pays=TEST_PROJECT)
     assert gcs.requester_pays == TEST_PROJECT
@@ -2252,6 +2352,7 @@ def test_request_user_project_string(gcs_factory):
     assert result["userProject"] == [TEST_PROJECT]
 
 
+@pytest.mark.usefixtures("gcs")
 def test_request_header(gcs_factory):
     gcs = gcs_factory(requester_pays=True)
     # test directly against `_call` to inspect the result
@@ -2296,9 +2397,10 @@ def test_requester_pays_fails_without_user_project(requester_pays_bucket, gcs_fa
         fs.ls(requester_pays_bucket)
 
 
-def test_fs_requester_pays_on_bucket_without_requester_pays(gcs_factory):
+def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
     """Test that metadata and data operations work when fs has requester_pays=True
     but the bucket does not have requester-pays enabled."""
+    # The gcs fixture creates TEST_BUCKET.
     fs = gcs_factory(requester_pays=True)
     file_path = f"{TEST_BUCKET}/test_req_pays_data_{uuid.uuid4().hex}"
     data = b"test data"
@@ -2352,6 +2454,38 @@ def test_pipe_small_cache_validity(gcs):
     ls_res = gcs.ls(f"gs://{folder}")
     assert len(ls_res) == 2
     assert f"{folder}/b" in ls_res
+
+
+def _numpy():
+    return pytest.importorskip("numpy")
+
+
+@pytest.mark.parametrize(
+    "make_data, kwargs",
+    [
+        # consistency="size" checks the uploaded size against the byte count:
+        # bytes + a typed buffer already sends every byte.
+        (lambda: array.array("d", [1.5, 2.5]), {"consistency": "size"}),
+        (lambda: _numpy().arange(5, dtype="int32"), {}),
+        (lambda: _numpy().arange(6, dtype="int32").reshape(2, 3), {}),
+        (lambda: _numpy().zeros((0, 3), dtype="int32"), {}),
+        # Large enough in bytes, and in elements, for a resumable upload.
+        (
+            lambda: array.array("d", bytes(4 * 2**20)),
+            {"chunksize": 2**18, "consistency": "size"},
+        ),
+    ],
+    ids=["typed_array", "numpy", "numpy_2d", "numpy_empty_2d", "typed_array_resumable"],
+)
+def test_pipe_file_accepts_any_bytes_like_object(gcs, make_data, kwargs):
+    """pipe_file uploads the bytes of any bytes-like object: len() of a typed
+    buffer counts elements, and a numpy array added to bytes broadcasts."""
+    data = make_data()
+    path = f"{TEST_BUCKET}/{uuid4()}"
+
+    gcs.pipe_file(path, data, **kwargs)
+
+    assert gcs.cat_file(path) == bytes(memoryview(data))
 
 
 def test_put_small_cache_validity(gcs):
@@ -2503,7 +2637,7 @@ def test_bucket_location(gcs_factory, location):
     gcs = gcs_factory(default_location=location)
     if not gcs.on_google:
         pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
-    bucket_name = str(uuid4())
+    bucket_name = f"gcsfs-test-{uuid4()}"
     try:
         gcs.mkdir(bucket_name)
         bucket = [
@@ -2520,7 +2654,7 @@ def test_bucket_default_location_overwrite(gcs_factory):
     gcs = gcs_factory(default_location="US")
     if not gcs.on_google:
         pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
-    bucket_name = str(uuid4())
+    bucket_name = f"gcsfs-test-{uuid4()}"
     try:
         gcs.mkdir(bucket_name, location="EUROPE-WEST3")
         bucket = [
@@ -3533,8 +3667,10 @@ def test_cat_file_concurrent_exception_cancellation(gcs, skip_if_zonal):
             )
 
 
-def test_gcsfile_prefetch_and_cache_type_rules(gcs):
-    """Verify that adaptive cache is default when cache_type is not set, and explicit cache_type is respected."""
+def test_gcsfile_prefetch_and_cache_type_rules(gcs, monkeypatch):
+    """Verify default adaptive cache, opt-out flags, filesystem default, and explicit overrides."""
+    import pickle
+
     fn = f"{TEST_BUCKET}/cache_rules.txt"
     gcs.pipe(fn, b"HelloWorld")
 
@@ -3544,17 +3680,56 @@ def test_gcsfile_prefetch_and_cache_type_rules(gcs):
         assert f.cache_source == "default"
         assert f.read() == b"HelloWorld"
 
-    # 2. User sets cache_type="readahead" -> cache_type is "readahead", cache_source is "explicit"
-    with gcs.open(fn, "rb", cache_type="readahead") as f:
+    # 2. Opt-out via open() kwarg -> fallback to "readahead", cache_source is "default"
+    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "default"
+        assert f.read() == b"HelloWorld"
+        with pickle.loads(pickle.dumps(f)) as f2:
+            assert f2.cache_type == "readahead"
+            assert f2.cache_source == "default"
+
+    # 3. Opt-out via env var -> fallback to "readahead", cache_source is "default"
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    with gcs.open(fn, "rb") as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "default"
+        assert f.read() == b"HelloWorld"
+
+    # 4. Explicit open() kwarg True overrides env var "false"
+    with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=True) as f:
+        assert f.cache_type == "adaptive"
+        assert f.cache_source == "default"
+        assert f.read() == b"HelloWorld"
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING")
+
+    # 5. User sets cache_type="readahead" -> cache_type is "readahead", cache_source is "explicit"
+    with gcs.open(
+        fn, "rb", cache_type="readahead", use_experimental_adaptive_prefetching=True
+    ) as f:
         assert f.cache_type == "readahead"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
 
-    # 3. User explicitly sets cache_type="none" -> cache_source is "explicit"
+    # 6. User explicitly sets cache_type="none" -> cache_source is "explicit"
     with gcs.open(fn, "rb", cache_type="none") as f:
         assert f.cache_type == "none"
         assert f.cache_source == "explicit"
         assert f.read() == b"HelloWorld"
+
+    # 7. Filesystem-level default cache_type (including pickle and fsspec.open) and per-call override
+    base_opts = {
+        k: v for k, v in gcs.storage_options.items() if k != "skip_instance_cache"
+    }
+    fs_ra = pickle.loads(pickle.dumps(type(gcs)(**base_opts, cache_type="readahead")))
+    with fs_ra.open(fn, "rb", use_experimental_adaptive_prefetching=True) as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "explicit"
+        assert f.read() == b"HelloWorld"
+    with fs_ra.open(fn, "rb", cache_type="none") as f:
+        assert f.cache_type == "none"
+    with fsspec.open(f"gs://{fn}", "rb", **base_opts, cache_type="readahead") as f:
+        assert f.cache_type == "readahead"
 
 
 def test_cat_file_default_concurrency(gcs, skip_if_grpc_read):
@@ -3614,6 +3789,119 @@ def fake_fs():
     fs.info.return_value = {"size": 100}
     fs.loop = fsspec.asyn.get_loop()
     return fs
+
+
+@pytest.mark.parametrize(
+    "env_setting,open_kwarg,cache_type_arg,expected_cache,expected_source",
+    [
+        (None, None, None, "adaptive", "default"),
+        ("true", None, None, "adaptive", "default"),
+        ("1", None, None, "adaptive", "default"),
+        ("false", None, None, "readahead", "default"),
+        ("FALSE", None, None, "readahead", "default"),
+        ("0", None, None, "readahead", "default"),
+        (None, False, None, "readahead", "default"),
+        (None, "false", None, "readahead", "default"),
+        ("true", False, None, "readahead", "default"),
+        ("false", True, None, "adaptive", "default"),
+        ("false", "true", None, "adaptive", "default"),
+        ("false", None, "adaptive", "adaptive", "explicit"),
+        ("true", True, "none", "none", "explicit"),
+    ],
+)
+def test_adaptive_prefetching_flag_and_env(
+    fake_fs,
+    monkeypatch,
+    env_setting,
+    open_kwarg,
+    cache_type_arg,
+    expected_cache,
+    expected_source,
+):
+    if env_setting is None:
+        monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    else:
+        monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", env_setting)
+
+    extra_kwargs = {}
+    if open_kwarg is not None:
+        extra_kwargs["use_experimental_adaptive_prefetching"] = open_kwarg
+
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_type=cache_type_arg,
+        **extra_kwargs,
+    ) as f:
+        assert f.cache_type == expected_cache
+        assert f.cache_source == expected_source
+
+
+@pytest.mark.parametrize(
+    "env_setting,extra_kwargs",
+    [("false", {}), (None, {"use_experimental_adaptive_prefetching": False})],
+)
+def test_adaptive_opt_out_drops_adaptive_cache_options(
+    fake_fs, monkeypatch, env_setting, extra_kwargs
+):
+    if env_setting is None:
+        monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    else:
+        monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", env_setting)
+    caller_options = {"max_prefetch_size": 2**20, "concurrency": 8}
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_options=caller_options,
+        **extra_kwargs,
+    ) as f:
+        assert f.cache_type == "readahead"
+        assert f.cache_source == "default"
+        assert f._reopen_kwargs()["cache_options"] == caller_options
+
+    with pytest.raises(TypeError):
+        GCSFile(
+            fake_fs,
+            "bucket/file.txt",
+            mode="rb",
+            size=100,
+            cache_type="readahead",
+            cache_options={"max_prefetch_size": 2**20},
+        )
+
+
+def test_default_handle_reopens_across_opt_out_boundary(fake_fs, monkeypatch):
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    with GCSFile(fake_fs, "bucket/file.txt", mode="rb", size=100) as f:
+        plain_reopen_kwargs = f._reopen_kwargs()
+        assert "cache_options" not in plain_reopen_kwargs
+    with GCSFile(
+        fake_fs,
+        "bucket/file.txt",
+        mode="rb",
+        size=100,
+        cache_options={"max_prefetch_size": 2**20},
+    ) as f_tuned:
+        tuned_reopen_kwargs = f_tuned._reopen_kwargs()
+
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    for reopen_kwargs in (plain_reopen_kwargs, tuned_reopen_kwargs):
+        with GCSFile(
+            fake_fs, "bucket/file.txt", mode="rb", size=100, **reopen_kwargs
+        ) as f2:
+            assert f2.cache_type == "readahead"
+            assert f2.cache_source == "default"
+
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING")
+    with GCSFile(
+        fake_fs, "bucket/file.txt", mode="rb", size=100, **tuned_reopen_kwargs
+    ) as f3:
+        assert f3.cache_type == "adaptive"
+        assert f3.cache._prefetcher.max_prefetch_size == 2**20
 
 
 def test_prefetcher_config_options(fake_fs):
@@ -4512,6 +4800,19 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs, skip_if_grpc_rea
             for call in mock_session_request.call_args_list
         ]
         assert any("cache_type/readahead:e" in ua for ua in user_agents)
+
+    # 5. Adaptive prefetcher disabled fallback -> User-Agent contains cache_type/readahead:d
+    with mock.patch.object(
+        gcs.session, "request", wraps=gcs.session.request
+    ) as mock_session_request:
+        with gcs.open(fn, "rb", use_experimental_adaptive_prefetching=False) as f:
+            _ = f.read(10)
+
+        user_agents = [
+            call.kwargs.get("headers", {}).get("User-Agent", "")
+            for call in mock_session_request.call_args_list
+        ]
+        assert any("cache_type/readahead:d" in ua for ua in user_agents)
 
 
 @pytest.mark.parametrize(
