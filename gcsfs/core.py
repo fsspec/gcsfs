@@ -52,7 +52,7 @@ from .telemetry.wrapper import (
     mirror_gcs_methods,
     wrap_file_methods,
 )
-from .utils import is_empty_range
+from .utils import as_byte_buffer, is_empty_range
 from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
 
 logger = logging.getLogger("gcsfs")
@@ -430,6 +430,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     version_aware: bool
         Whether to support object versioning. If enabled this will require the
         user to have the necessary permissions for dealing with versioned objects.
+    cache_type: str, optional
+        Default read caching policy used by ``open()`` when ``cache_type`` is
+        not passed per call (e.g., ``"adaptive"``, ``"readahead"``, ``"none"``).
+        Can be overridden in ``open()``.
     """
 
     scopes = {"read_only", "read_write", "full_control"}
@@ -458,6 +462,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         endpoint_url=None,
         default_location=None,
         version_aware=False,
+        cache_type=None,
         **kwargs,
     ):
         if cache_timeout is not None:
@@ -474,6 +479,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             warnings.warn("GCS project not set - cannot list or create buckets")
         if block_size is not None:
             self.default_block_size = block_size
+        self.default_cache_type = cache_type
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
@@ -494,6 +500,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 DeprecationWarning,
             )
 
+        # Prime background environment probe concurrently before credential discovery.
+        telemetry_manager.default_usage_tracker.warm_up()
         self.credentials = GoogleCredentials(
             project, access, token, on_google=self.on_google
         )
@@ -1848,6 +1856,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
         if_generation_match = _resolve_generation_match(mode, if_generation_match)
+        # Accept any bytes-like object: len() of a typed buffer counts
+        # elements, and a numpy array added to the request body broadcasts.
+        data = as_byte_buffer(data)
         size = len(data)
         out = None
         if size < chunksize:
@@ -2391,12 +2402,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         autocommit=True,
         fixed_key_metadata=None,
         generation=None,
+        cache_type=None,
         **kwargs,
     ):
         """
         See ``GCSFile``.
 
         consistency: None or str
+            If None, use default for this instance
+        cache_type: None or str
             If None, use default for this instance
         """
         if block_size is None:
@@ -2407,6 +2421,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             path,
             mode,
             block_size,
+            cache_type=cache_type or self.default_cache_type,
             cache_options=cache_options,
             consistency=const,
             metadata=metadata,
@@ -2538,18 +2553,32 @@ mirror_gcs_methods(GCSFileSystem)
 GoogleCredentials.load_tokens()
 
 
-def _get_prefetcher_and_cache_config(cache_type=None):
+def _get_prefetcher_and_cache_config(cache_type=None, kwargs=None):
     """
     Resolves effective cache_type and cache_source ("explicit" vs "default").
 
     Rules:
     - If user explicitly sets cache_type (cache_type is not None),
       cache_type is used, and cache_source is "explicit".
-    - If cache_type is None, default to "adaptive" and cache_source is "default".
+    - If cache_type is None and adaptive prefetching is enabled (default),
+      cache_type is "adaptive" and cache_source is "default".
+    - If cache_type is None and adaptive prefetching is disabled via
+      use_experimental_adaptive_prefetching or USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING,
+      fallback to "readahead" and cache_source is "default".
     """
     if cache_type is not None:
         return cache_type, "explicit"
-    return "adaptive", "default"
+    adaptive_prefetching = (kwargs or {}).get("use_experimental_adaptive_prefetching")
+    if adaptive_prefetching is None:
+        adaptive_prefetching = os.environ.get(
+            "USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true"
+        )
+    use_adaptive = (
+        adaptive_prefetching.strip().lower() in ("true", "1")
+        if isinstance(adaptive_prefetching, str)
+        else bool(adaptive_prefetching)
+    )
+    return ("adaptive" if use_adaptive else "readahead"), "default"
 
 
 _DEFERRED_CLOSE_THREAD_NAME = "gcsfs-deferred-close"
@@ -2697,20 +2726,21 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         )
         self.concurrency = kwargs.get("concurrency", DEFAULT_CONCURRENCY)
         self.cache_type, self.cache_source = _get_prefetcher_and_cache_config(
-            cache_type
+            cache_type, kwargs
         )
-        cache_options = dict(cache_options or {})
+        # Kept so that a pickled read handle reopens with the caller's cache options.
+        self._reopen_cache_options = dict(cache_options or {})
         if self.cache_type == "adaptive":
-            if "concurrency" not in cache_options:
-                cache_options["concurrency"] = self.concurrency
-            if "max_prefetch_size" not in cache_options:
-                cache_options["max_prefetch_size"] = kwargs.pop(
-                    "max_prefetch_size", MAX_PREFETCH_SIZE
-                )
-            else:
-                kwargs.pop("max_prefetch_size", None)
-        # Kept so that a pickled read handle reopens with the same cache options.
-        self._reopen_cache_options = dict(cache_options)
+            effective_cache_options = {
+                "concurrency": self.concurrency,
+                "max_prefetch_size": kwargs.get("max_prefetch_size", MAX_PREFETCH_SIZE),
+                **self._reopen_cache_options,
+            }
+        elif self.cache_source == "default":
+            # Adaptive prefetching was turned off. ReadAheadCache takes no options.
+            effective_cache_options = {}
+        else:
+            effective_cache_options = dict(self._reopen_cache_options)
 
         # _supports_append is an internal argument not meant to be used directly.
         # If True, allows opening file in append mode. This is generally not supported
@@ -2734,7 +2764,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             block_size,
             autocommit=autocommit,
             cache_type=self.cache_type,
-            cache_options=cache_options,
+            cache_options=effective_cache_options,
             **kwargs,
         )
         self.gcsfs = gcsfs
@@ -2770,8 +2800,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 prefetcher = BackgroundPrefetcher(
                     fetcher=self._async_fetch_range,
                     size=self.size,
-                    concurrency=cache_options.get("concurrency", self.concurrency),
-                    max_prefetch_size=cache_options.get("max_prefetch_size"),
+                    concurrency=effective_cache_options.get(
+                        "concurrency", self.concurrency
+                    ),
+                    max_prefetch_size=effective_cache_options.get("max_prefetch_size"),
                     loop=fs_loop,
                 )
                 cache._prefetcher = prefetcher
@@ -3289,6 +3321,9 @@ async def simple_upload(
     experimental features for Zonal buckets, and RCU buckets with ``rcu_rapid_write``, to
     upload data using gRPC.
     """
+    if content_type is not None and ("\r" in content_type or "\n" in content_type):
+        raise ValueError("content_type must not contain CR or LF characters")
+
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
@@ -3323,13 +3358,22 @@ async def simple_upload(
         kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
     metadata = json.dumps(metadata)
+    datain = as_byte_buffer(datain)
+    boundary = uuid.uuid4().hex
+    # `in` on a memoryview compares integer elements, so search views with re.
+    while (
+        boundary.encode("ascii") in datain
+        if isinstance(datain, bytes)
+        else re.search(boundary.encode("ascii"), datain)
+    ) or boundary in metadata:
+        boundary = uuid.uuid4().hex
     template = (
-        "--==0=="
+        f"--{boundary}"
         "\nContent-Type: application/json; charset=UTF-8"
-        "\n\n" + metadata + "\n--==0==" + f"\nContent-Type: {content_type}" + "\n\n"
+        f"\n\n{metadata}\n--{boundary}\nContent-Type: {content_type}\n\n"
     )
 
-    data = template.encode() + datain + b"\n--==0==--"
+    data = b"".join((template.encode(), datain, f"\n--{boundary}--".encode("ascii")))
     # aiohttp handles bytes and memoryview natively and zero-copy;
     # no need to wrap in UnclosableBytesIO.
     payload = (
@@ -3342,7 +3386,7 @@ async def simple_upload(
             "POST",
             path,
             uploadType="multipart",
-            headers={"Content-Type": 'multipart/related; boundary="==0=="'},
+            headers={"Content-Type": f'multipart/related; boundary="{boundary}"'},
             data=payload,
             json_out=True,
             **kw,

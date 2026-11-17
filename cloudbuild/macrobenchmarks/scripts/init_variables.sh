@@ -24,10 +24,17 @@ esac
 # silently skips checkpoint-bucket creation, and a non-positive _CHECKPOINT_INTERVAL
 # divides-by-zero in scrape-metrics. Fail fast here so misconfig never reaches
 # (and bills) GKE.
-case "${_BUCKET_TYPE}" in
-  regional|zonal|hns) ;;
-  *) echo "ERROR: _BUCKET_TYPE must be regional|zonal|hns (got '${_BUCKET_TYPE}')."; exit 1 ;;
-esac
+if ! [[ "${_BUCKET_TYPE}" =~ ^(regional|zonal|hns|(standard|hns)_rcu_(z|warm|cold))$ ]]; then
+  echo "ERROR: _BUCKET_TYPE must be regional|zonal|hns or {standard,hns}_rcu_{z,warm,cold} (got '${_BUCKET_TYPE}')."; exit 1
+fi
+# The RCU types control the storage state of every object the run reads, which
+# an external checkpoint would bypass.
+if [ -n "${RCU_STATE}" ] && [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then
+  echo "ERROR: _CHECKPOINT_LOAD_PATH is not supported with _BUCKET_TYPE=${_BUCKET_TYPE}; use _SEED_CHECKPOINT=true."; exit 1
+fi
+if ! [[ "${_RCU_WARMUP_SETTLE_SECONDS:-}" =~ ^[0-9]*$ ]]; then
+  echo "ERROR: _RCU_WARMUP_SETTLE_SECONDS must be empty or a non-negative integer (got '${_RCU_WARMUP_SETTLE_SECONDS}')."; exit 1
+fi
 # Reject an unknown parallel strategy before provisioning anything.
 case "${_TRAINING_STRATEGY:-ddp}" in
   ddp|fsdp_sharded|fsdp_full) ;;

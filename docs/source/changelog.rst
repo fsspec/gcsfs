@@ -23,6 +23,10 @@ Unreleased
   so they are not throttled and do not slow down other writes to the same
   bucket. Pass a higher ``concurrency`` for buckets that have already scaled
   up.
+* Restored the ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`` environment variable and the
+  ``use_experimental_adaptive_prefetching`` ``open()`` argument. Setting either to false
+  when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back
+  to ``readahead``, as in 2026.8.x (#1172).
 
 2026.10.0
 ---------

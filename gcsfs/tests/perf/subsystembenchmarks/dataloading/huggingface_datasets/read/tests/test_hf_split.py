@@ -50,11 +50,15 @@ def test_indivisible_every_rank_reads_some(tmp_path):
     assert all(x > 0 for x in per)
 
 
-def test_shuffle_collapses_num_shards_by_default(tmp_path):
-    """Verify streaming shuffle collapses num_shards to 1 by default."""
+def test_shuffle_preserves_num_shards_by_default(tmp_path):
+    """Verify streaming shuffle keeps every input shard available for splitting.
+
+    Since datasets 5.1, shuffle interleaves input shards within each node and
+    worker instead of merging them, so num_shards is unchanged.
+    """
     prefix, _ = _ingest(tmp_path, files=8)
     ds = _hf_read._build_dataset(prefix, "pretok_parquet", access="shuffled", seed=0)
-    assert ds.num_shards == 1
+    assert ds.num_shards == 8
 
 
 def test_max_buffer_input_shards_one_preserves_num_shards(tmp_path):
