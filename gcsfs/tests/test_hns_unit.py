@@ -3215,6 +3215,39 @@ class TestExtendedGcsFileSystemRm:
                 [file_path], self.BATCH_SIZE, concurrency=self.CONCURRENCY
             )
 
+    def test_rm_hns_concurrency_override(self, gcs_hns, gcs_hns_mocks):
+        """Test that an explicit concurrency passed to rm() reaches _delete_files."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/file_to_rm.txt"
+
+        mock_expand = mock.AsyncMock(return_value=[{"name": file_path, "type": "file"}])
+        mock_delete_files = mock.AsyncMock(return_value=[])
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            gcsfs.rm(file_path, batchsize=10, concurrency=2)
+
+            mock_delete_files.assert_awaited_once_with([file_path], 10, concurrency=2)
+
+    def test_rm_flat_concurrency_override(self, gcs_hns, gcs_hns_mocks):
+        """Test that an explicit concurrency passed to rm() reaches the flat path."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
+            gcsfs.rm(flat_file, batchsize=10, concurrency=2)
+
+            mocks["super_rm"].assert_awaited_once_with(
+                [flat_file],
+                recursive=False,
+                maxdepth=None,
+                batchsize=10,
+                concurrency=2,
+            )
+
     def test_rm_recursive_hns(self, gcs_hns, gcs_hns_mocks):
         """Test sync recursive rm on a directory in an HNS bucket."""
         gcsfs = gcs_hns

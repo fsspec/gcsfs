@@ -769,7 +769,7 @@ async def test_delete_files_bounds_concurrency(gcs, concurrency):
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         in_flight -= 1
         return list(batch)
 
