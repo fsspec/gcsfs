@@ -40,7 +40,7 @@ class DummyModel(L.LightningModule):
 
         self.llama = transformers.AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             local_files_only=use_local_files_only,
             use_cache=False,
         )

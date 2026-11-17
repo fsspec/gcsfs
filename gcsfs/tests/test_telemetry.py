@@ -36,6 +36,7 @@ from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
+    _telemetry_context,
     mirror_gcs_methods,
     wrap_file_methods,
 )
@@ -173,7 +174,7 @@ def test_telemetry_tracker_opt_out(monkeypatch):
     # With GCSFS_NO_TELEMETRY=1
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "1")
     assert not tracker.is_enabled()
-    assert tracker.collect_tokens_map() == {}
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {}
     assert tracker.get_tokens() == []
 
     # With GCSFS_NO_TELEMETRY=true
@@ -184,7 +185,7 @@ def test_telemetry_tracker_opt_out(monkeypatch):
     # With DO_NOT_TRACK=1
     monkeypatch.setenv("DO_NOT_TRACK", "1")
     assert not tracker.is_enabled()
-    assert tracker.collect_tokens_map() == {}
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {}
     assert tracker.get_tokens() == []
 
     # With DO_NOT_TRACK=true
@@ -390,14 +391,14 @@ def test_collect_tokens_map_caches_detector_exception():
 
     tracker = UsageMetricsTracker(detectors=[FailingDetector()])
 
-    tokens1 = tracker.collect_tokens_map()
+    tokens1 = tracker.collect_tokens_map(call_scoped_only=False)
     assert tokens1 == {Dimension.FRAMEWORK.value: ""}
     assert call_count == 1
 
     # Second call
     t = set_telemetry_context(tokens1)
     try:
-        tokens2 = tracker.collect_tokens_map()
+        tokens2 = tracker.collect_tokens_map(call_scoped_only=False)
     finally:
         reset_telemetry_context(t)
     assert tokens2 == {Dimension.FRAMEWORK.value: ""}
@@ -437,7 +438,7 @@ def test_collect_tokens_map_records_empty_for_none_detection():
             return None
 
     tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
-    tokens_map = tracker.collect_tokens_map()
+    tokens_map = tracker.collect_tokens_map(call_scoped_only=False)
     assert tokens_map == {"fw": ""}
     assert call_count == 1
 
@@ -448,11 +449,144 @@ def test_collect_tokens_map_records_empty_for_none_detection():
         # must now be O(1) without re-running detect()
         assert tracker.get_tokens() == []
         assert tracker.get_dimension(Dimension.FRAMEWORK) is None
-        tokens_map_2 = tracker.collect_tokens_map()
+        tokens_map_2 = tracker.collect_tokens_map(call_scoped_only=False)
         assert tokens_map_2 == {"fw": ""}
         assert call_count == 1  # Still 1, no additional detect() calls!
     finally:
         reset_telemetry_context(token)
+
+
+class _CallScopedFrameworkDetector(BaseDetector):
+    name = Dimension.FRAMEWORK
+
+    def detect(self):
+        return "pandas"
+
+
+class _ProcessScopedEnvDetector(BaseDetector):
+    """Process-wide detector whose value can change mid-call, like an in-flight probe."""
+
+    name = Dimension.ENVIRONMENT
+    call_scoped = False
+
+    def __init__(self, value="gke"):
+        self.value = value
+        self.calls = 0
+
+    def detect(self):
+        self.calls += 1
+        return self.value
+
+
+def _tracker_with(env_detector):
+    return UsageMetricsTracker(detectors=[_CallScopedFrameworkDetector(), env_detector])
+
+
+def test_collect_tokens_map_requires_call_scoped_only():
+    tracker = _tracker_with(_ProcessScopedEnvDetector())
+
+    with pytest.raises(TypeError):
+        tracker.collect_tokens_map()
+
+
+def test_collect_tokens_map_call_scoped_only_skips_process_scoped_detectors():
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    assert tracker.collect_tokens_map(call_scoped_only=True) == {"fw": "pandas"}
+    assert env_detector.calls == 0
+
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {
+        "fw": "pandas",
+        "env": "gke",
+    }
+    assert env_detector.calls == 1
+
+
+def test_get_tokens_reads_process_scoped_detectors_every_request():
+    """Request tokens include env and re-read it per call, even inside a per-call context."""
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+
+    token = set_telemetry_context(tracker.collect_tokens_map(call_scoped_only=True))
+    try:
+        assert get_telemetry_context() == {"fw": "pandas"}
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+    finally:
+        reset_telemetry_context(token)
+    assert env_detector.calls == 3
+
+
+def test_explicit_context_value_wins_over_process_scoped_detector():
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    token = set_telemetry_context({"env": "custom"})
+    try:
+        assert tracker.collect_tokens_map(call_scoped_only=True) == {
+            "env": "custom",
+            "fw": "pandas",
+        }
+        assert tracker.get_tokens() == ["env/custom", "fw/pandas"]
+    finally:
+        reset_telemetry_context(token)
+    assert env_detector.calls == 0
+
+
+def _check_env_resolves_mid_call(tracker, env_detector):
+    # The per-call snapshot holds only call-scoped dimensions while env is unresolved.
+    assert get_telemetry_context() == {"fw": "pandas"}
+    assert tracker.get_tokens() == ["fw/pandas"]
+    # The background probe resolves mid-call; later requests in the same call pick it up.
+    env_detector.value = "gke"
+    assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+
+
+def _run_in_telemetry_context(check):
+    with _telemetry_context():
+        check()
+
+
+def _run_in_native_async_gen(check):
+    async def steps():
+        check()
+        yield None
+
+    async def consume():
+        return [item async for item in _gcs_async_wrapper(steps)()]
+
+    asyncio.run(consume())
+
+
+def _run_in_sync_gen(check):
+    class GenFS(fsspec.asyn.AsyncFileSystem):
+        async def _steps(self):
+            check()
+            yield None
+
+        steps = _gcs_sync_wrapper(_steps)
+
+    list(GenFS(skip_instance_cache=True).steps())
+
+
+@pytest.mark.parametrize(
+    "run_call",
+    [_run_in_telemetry_context, _run_in_native_async_gen, _run_in_sync_gen],
+    ids=["telemetry_context", "native_async_gen", "sync_gen"],
+)
+def test_per_call_snapshot_never_freezes_unresolved_env(monkeypatch, run_call):
+    """Each wrapper snapshot site leaves env out, so an env that resolves mid-call is sent."""
+    env_detector = _ProcessScopedEnvDetector(value=None)
+    tracker = _tracker_with(env_detector)
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    run_call(lambda: _check_env_resolves_mid_call(tracker, env_detector))
+
+    assert env_detector.value == "gke"
+    assert get_telemetry_context() == {}
 
 
 # ============================================================================
