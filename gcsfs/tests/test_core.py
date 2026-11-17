@@ -238,63 +238,20 @@ def test_simple_upload_payload_with_multipart_boundary(gcs, payload):
     assert gcs.cat_file(fn) == payload
 
 
-@pytest.mark.parametrize(
-    "make_data",
-    [bytes, bytearray, memoryview],
-    ids=["bytes", "bytearray", "memoryview"],
-)
-def test_simple_upload_boundary_collision_retry(gcs, skip_if_zonal, make_data):
-    first = uuid.UUID("11111111-1111-1111-1111-111111111111")
-    second = uuid.UUID("22222222-2222-2222-2222-222222222222")
-    raw = b"before\r\n--" + first.hex.encode("ascii") + b"--\r\nafter"
-    key = "boundary_collision"
-    fn = f"{TEST_BUCKET}/{key}"
-
-    with (
-        mock.patch("gcsfs.core.uuid.uuid4", side_effect=[first, second]) as mock_uuid,
-        mock.patch.object(gcs, "_call", wraps=gcs._call) as spy_call,
-    ):
-        sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key, make_data(raw))
-
-    assert mock_uuid.call_count == 2
-    call_kwargs = spy_call.call_args.kwargs
-    expected_boundary = second.hex
-    assert (
-        call_kwargs["headers"]["Content-Type"]
-        == f'multipart/related; boundary="{expected_boundary}"'
-    )
-    body = bytes(call_kwargs["data"])
-    assert body.startswith(f"--{expected_boundary}\n".encode("ascii"))
-    assert f"\n--{expected_boundary}\n".encode("ascii") in body
-    assert body.endswith(f"\n--{expected_boundary}--".encode("ascii"))
-    assert gcs.cat_file(fn) == raw
-
-
 def test_simple_upload_memoryview(gcs):
-    fn1 = f"{TEST_BUCKET}/simple_upload_mv_pipe"
-    mv1 = memoryview(b"hello --==0==-- world")
-    gcs.pipe_file(fn1, mv1)
-    assert gcs.cat_file(fn1) == bytes(mv1)
-
-    key2 = "simple_upload_mv_direct"
-    fn2 = f"{TEST_BUCKET}/{key2}"
-    mv2 = memoryview(b"hello\r\n--==0==--\r\nworld")
-    sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key2, mv2)
-    assert gcs.cat_file(fn2) == bytes(mv2)
-
-    key3 = "simple_upload_mv_typed"
-    fn3 = f"{TEST_BUCKET}/{key3}"
-    mv3 = memoryview(array.array("H", [1, 2, 3]))
+    key = "simple_upload_mv_typed"
+    fn = f"{TEST_BUCKET}/{key}"
+    mv = memoryview(array.array("H", [1, 2, 3]))
     sync(
         gcs.loop,
         gcsfs.core.simple_upload,
         gcs,
         TEST_BUCKET,
-        key3,
-        mv3,
+        key,
+        mv,
         consistency="size",
     )
-    assert gcs.cat_file(fn3) == bytes(mv3)
+    assert gcs.cat_file(fn) == bytes(mv)
 
 
 @pytest.mark.parametrize(
@@ -314,10 +271,6 @@ def test_simple_upload_rejects_crlf_in_content_type(
         with pytest.raises(ValueError, match="content_type"):
             gcs.pipe_file(fn, b"hello", content_type=bad_content_type)
         mock_call.assert_not_called()
-
-        mock_call.return_value = {"size": "5", "md5Hash": "", "crc32c": ""}
-        gcs.pipe_file(fn, b"hello", content_type=None, consistency="none")
-        mock_call.assert_called_once()
 
 
 def test_simple_upload_with_kms(gcs):

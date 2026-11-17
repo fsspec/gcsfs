@@ -3347,13 +3347,6 @@ async def simple_upload(
     metadata = json.dumps(metadata)
     datain = as_byte_buffer(datain)
     boundary = uuid.uuid4().hex
-    # `in` on a memoryview compares integer elements, so search views with re.
-    while (
-        boundary.encode("ascii") in datain
-        if isinstance(datain, bytes)
-        else re.search(boundary.encode("ascii"), datain)
-    ) or boundary in metadata:
-        boundary = uuid.uuid4().hex
     template = (
         f"--{boundary}"
         "\nContent-Type: application/json; charset=UTF-8"
@@ -3361,20 +3354,13 @@ async def simple_upload(
     )
 
     data = b"".join((template.encode(), datain, f"\n--{boundary}--".encode("ascii")))
-    # aiohttp handles bytes and memoryview natively and zero-copy;
-    # no need to wrap in UnclosableBytesIO.
-    payload = (
-        data
-        if isinstance(data, (bytes, bytearray, memoryview))
-        else UnclosableBytesIO(data)
-    )
     with _translate_generation_mismatch(f"{bucket}/{key}", if_generation_match):
         j = await fs._call(
             "POST",
             path,
             uploadType="multipart",
             headers={"Content-Type": f'multipart/related; boundary="{boundary}"'},
-            data=payload,
+            data=data,
             json_out=True,
             **kw,
         )
