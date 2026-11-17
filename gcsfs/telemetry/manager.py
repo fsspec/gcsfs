@@ -11,7 +11,11 @@ from gcsfs.telemetry.context import (
     get_telemetry_context,
     sanitize_token,
 )
-from gcsfs.telemetry.detector import BaseDetector, FrameworkDetector
+from gcsfs.telemetry.detector import (
+    BaseDetector,
+    EnvironmentDetector,
+    FrameworkDetector,
+)
 
 
 class UsageMetricsTracker:
@@ -29,20 +33,38 @@ class UsageMetricsTracker:
             for env in ("DO_NOT_TRACK", "GCSFS_NO_TELEMETRY")
         )
 
+    def warm_up(self) -> None:
+        """Start non-call-scoped detectors (e.g. background environment probe)."""
+        if not self.is_enabled():
+            return
+        for detector in self.detectors:
+            if getattr(detector, "call_scoped", True):
+                continue
+            try:
+                detector.detect()
+            except Exception:
+                pass
+
     def collect_tokens_map(
         self,
         dimensions: frozenset[Dimension] = ALL_DIMENSIONS,
         *,
+        call_scoped_only: bool,
         method: str | None = None,
         method_params: str = "",
     ) -> dict[str, str]:
         """
-        Collect active telemetry tokens across registered detectors.
+        Collect telemetry tokens. For each dimension, the value already in the
+        telemetry context is used if present; otherwise its detector is called.
 
         Parameters
         ----------
         dimensions : frozenset[Dimension], optional
             Dimensions to collect and return. Defaults to ALL_DIMENSIONS.
+        call_scoped_only : bool
+            Required. True leaves out process-wide dimensions such as ``env``
+            unless they are already set in the context (use it for the per-call
+            snapshot); False includes them (use it for request headers).
         method : str | None, optional
             Top-level public method name to attach under Dimension.METHOD
             (or "" as a negative-cache sentinel for untracked entry points).
@@ -73,6 +95,8 @@ class UsageMetricsTracker:
 
         # Run registered detectors for any requested dimensions not already set
         for detector in self.detectors:
+            if call_scoped_only and not getattr(detector, "call_scoped", True):
+                continue
             dim_key = (
                 detector.name.value
                 if isinstance(detector.name, Dimension)
@@ -113,7 +137,10 @@ class UsageMetricsTracker:
         list[str]
             List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
-        token_map = self.collect_tokens_map(dimensions=dimensions)
+        # Include process-wide dimensions (e.g. env), read fresh per request.
+        token_map = self.collect_tokens_map(
+            dimensions=dimensions, call_scoped_only=False
+        )
         out = []
         for dim_key, val in token_map.items():
             clean_val = sanitize_token(val)
@@ -125,7 +152,9 @@ class UsageMetricsTracker:
         """
         Resolve a specific dimension's sanitized bare token value (e.g. Dimension.FRAMEWORK -> 'pandas').
         """
-        token_map = self.collect_tokens_map(dimensions=frozenset({dimension}))
+        token_map = self.collect_tokens_map(
+            dimensions=frozenset({dimension}), call_scoped_only=False
+        )
         return sanitize_token(token_map.get(dimension.value))
 
     def get_method_params(self) -> frozenset[str]:
@@ -139,9 +168,10 @@ class UsageMetricsTracker:
         return frozenset(canon.split(".")) if canon else frozenset()
 
 
-# Default singleton instance pre-configured with standard framework detector
+# Default singleton instance pre-configured with standard detectors
 default_usage_tracker = UsageMetricsTracker(
     detectors=[
         FrameworkDetector(),
+        EnvironmentDetector(),
     ]
 )

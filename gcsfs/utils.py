@@ -25,3 +25,24 @@ def is_empty_range(start: int | None, end: int | None, size: int | None = None) 
         return False
 
     return start >= end
+
+
+def as_byte_buffer(data) -> bytes | memoryview:
+    """Return a bytes-like ``data`` with bytes semantics, without copying.
+
+    A binary file accepts any C-contiguous bytes-like object, but code that
+    truth-tests, ``len()``s or slices it needs bytes semantics: a numpy array
+    has no single truth value, and ``len()`` of a typed buffer counts its
+    elements. ``bytes`` is returned unchanged, so ``io.BytesIO`` can share it
+    rather than copy it; anything else becomes a flat byte memoryview.
+
+    Raises TypeError, as ``memoryview`` does, if ``data`` is not a
+    C-contiguous bytes-like object.
+    """
+    if isinstance(data, bytes):
+        return data
+    view = memoryview(data)
+    if not view.nbytes and view.c_contiguous:
+        # cast() rejects a zero in the shape, as in np.empty((0, 3)).
+        return b""
+    return view.cast("B")

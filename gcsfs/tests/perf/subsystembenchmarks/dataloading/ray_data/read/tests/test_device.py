@@ -188,3 +188,33 @@ def test_multi_rank_tasks_request_their_gpu_share(ray_cluster, tmp_path, monkeyp
     assert rows == [20, 20]
     # One task per rank per round.
     assert requested == [{"num_gpus": 0.375}] * (params.world_size * params.rounds)
+
+
+def test_feature_columns_skip_the_gpu(ray_cluster, tmp_path, monkeypatch, sync_calls):
+    ranks, shares = [], []
+    monkeypatch.setattr(
+        driver.device_lib, "rank_device", lambda rank: ranks.append(rank) or FAKE_GPU
+    )
+    monkeypatch.setattr(
+        driver.device_lib, "ray_task_num_gpus", lambda ws: shares.append(ws) or 0.5
+    )
+    params = _params(seq_len=2, feature_column_count=6, projected_feature_count=3)
+    prefix = f"{tmp_path}/features/"
+    params.ingest(prefix)
+    arrow_fs, paths = driver.resolve_parquet_source(prefix)
+    dataset = driver.build_dataset(arrow_fs, paths, params)
+
+    _, rows, _ = driver.run_single_rank(dataset, params)
+    (split,) = dataset.streaming_split(n=1, equal=False)
+    _, _, shard_rows = driver._consume_shard._function(split, params, None, None)
+    multi = _params(
+        seq_len=2,
+        feature_column_count=6,
+        projected_feature_count=3,
+        split_by_node=True,
+        world_size=2,
+    )
+    _, multi_rows, _ = driver.run_multi_rank(dataset, multi)
+
+    assert rows == [20, 20] and shard_rows == 20 and multi_rows == [20, 20]
+    assert ranks == [] and shares == [] and sync_calls == []

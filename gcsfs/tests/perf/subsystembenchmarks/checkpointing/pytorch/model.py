@@ -31,7 +31,7 @@ def _resolve_model_config(model_id: str) -> AutoConfig:
 def build_model(params) -> nn.Module:
     cfg = _resolve_model_config(params.model_id)
     with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16)
     return model
 
 

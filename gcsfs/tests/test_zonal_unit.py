@@ -71,6 +71,7 @@ def test_open_uses_default_blocksize_and_consistency_from_fs(
             assert isinstance(f, GCSFile)
             assert isinstance(f, ZonalFile) is bucket_type_val.uses_grpc_data_path
             assert f.blocksize == extended_gcsfs.default_block_size
+            assert f.cache_type == "adaptive"
             assert type(f.checker) is ConsistencyChecker
 
 
@@ -84,19 +85,28 @@ def test_open_uses_correct_blocksize_and_consistency_for_all_bucket_types(
 
     custom_filesystem_block_size = 100 * 1024 * 1024
     extended_gcsfs = extended_gcs_factory(
-        block_size=custom_filesystem_block_size, consistency="md5"
+        block_size=custom_filesystem_block_size,
+        consistency="md5",
+        cache_type="readahead",
     )
 
     with gcs_bucket_mocks(csv_data, bucket_type_val=bucket_type_val):
         with extended_gcsfs.open(csv_file_path, "rb") as f:
             assert f.blocksize == custom_filesystem_block_size
+            assert f.cache_type == "readahead"
+            assert f.cache_source == "explicit"
             assert isinstance(f.checker, MD5Checker)
 
         file_block_size = 1024 * 1024
         with extended_gcsfs.open(
-            csv_file_path, "rb", block_size=file_block_size, consistency="size"
+            csv_file_path,
+            "rb",
+            block_size=file_block_size,
+            consistency="size",
+            cache_type="none",
         ) as f:
             assert f.blocksize == file_block_size
+            assert f.cache_type == "none"
             assert isinstance(f.checker, SizeChecker)
 
 
@@ -1000,7 +1010,7 @@ async def test_cat_ranges_zonal_closes_all_buffers_when_close_raises(
     assert all(b.close.call_count == 1 for b in created)
 
 
-def test_resolve_cache_config():
+def test_resolve_cache_config(monkeypatch):
     """Tests _resolve_cache_config logic under various kwargs configurations."""
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
@@ -1026,6 +1036,19 @@ def test_resolve_cache_config():
     # 4. kwargs is None
     c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(None)
     assert c_type == "adaptive"
+    assert c_source == "default"
+
+    # 5. Disabled via kwarg
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config(
+        {"use_experimental_adaptive_prefetching": False}
+    )
+    assert c_type == "readahead"
+    assert c_source == "default"
+
+    # 6. Disabled via env var
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    c_type, c_source = ExtendedGcsFileSystem._resolve_cache_config({})
+    assert c_type == "readahead"
     assert c_source == "default"
 
 
@@ -2036,9 +2059,12 @@ async def test_anywhere_cache_bucket_writes_stay_on_http(extended_gcsfs, async_g
 @pytest.mark.parametrize(
     "bucket_layout", [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU]
 )
-async def test_core_upload_helpers_route_rcu_to_extended(async_gcs, bucket_layout):
-    """core.simple_upload and core.initiate_upload hand RCU buckets to gRPC."""
+async def test_core_upload_helpers_route_rcu_to_extended_with_rcu_rapid_write(
+    async_gcs, bucket_layout
+):
+    """With rcu_rapid_write, core.simple_upload and core.initiate_upload hand RCU buckets to gRPC."""
     with (
+        mock.patch.object(async_gcs, "rcu_rapid_write", True),
         mock.patch.object(
             async_gcs,
             "_lookup_bucket_layout",

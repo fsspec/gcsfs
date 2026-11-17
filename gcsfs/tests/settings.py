@@ -19,6 +19,7 @@ TEST_STANDARD_RCU_BUCKET = _get_bucket_name(
 TEST_HNS_RCU_BUCKET = _get_bucket_name(
     "GCSFS_HNS_RCU_TEST_BUCKET", "gcsfs_hns_rcu_test"
 )
+TEST_CROSS_ZONE_RCU_BUCKET = os.getenv("GCSFS_CROSS_ZONE_RCU_TEST_BUCKET", "")
 TEST_PROJECT = os.getenv("GCSFS_TEST_PROJECT", "project")
 TEST_REGION = os.getenv("GCSFS_TEST_REGION", "us-central1")
 TEST_REQUESTER_PAYS_BUCKET = _get_bucket_name(

@@ -271,9 +271,14 @@ def test_driver_local_fs_olmoe_ep_vs_fsdp(tmp_path):
     config_dir = _create_tiny_olmoe_config_dir(tmp_path)
     model = build_model(_params(config_dir, "fsdp", dp=4, world_size=4))
     n_params = len(list(model.parameters()))
-    n_expert_params = sum(".experts." in n for n, _ in model.named_parameters())
-    n_dense_params = n_params - n_expert_params
+    # transformers>=5 fuses each layer's experts into gate_up_proj [E, 2I, H]
+    # and down_proj [E, H, I].
+    experts = {
+        n: tuple(p.shape) for n, p in model.named_parameters() if ".mlp.experts." in n
+    }
+    assert len(experts) == 2 * 2
     items = {}
+    chunk_offsets = {}
     for strategy, ep in (("fsdp", 1), ("ep", 4)):
         params = _params(config_dir, strategy, dp=4, ep=ep, world_size=4)
         prefix = (tmp_path / strategy).as_uri()
@@ -282,11 +287,25 @@ def test_driver_local_fs_olmoe_ep_vs_fsdp(tmp_path):
         result = driver.run(prefix, params)
         result.verify()
         items[strategy] = result.extra_columns["dcp_read_items_per_rank_max"]
+        metadata = FsspecReader(prefix).read_metadata().state_dict_metadata
+        chunk_offsets[strategy] = {
+            fqn: sorted(tuple(c.offsets) for c in metadata[f"model.{fqn}"].chunks)
+            for fqn in experts
+        }
 
     n_bytes_entries = _n_bytes_entries((tmp_path / "ep").as_uri())
     assert n_bytes_entries == _n_bytes_entries((tmp_path / "fsdp").as_uri())
+    # Both strategies split every parameter four ways, so each rank reads one
+    # chunk of each; they differ in which bytes those chunks hold.
     items_per_param = 4 + n_bytes_entries // n_params
-    assert items["fsdp"] == items_per_param * n_params
-    n_ep_local = n_dense_params + n_expert_params // 4
-    assert items["ep"] == items_per_param * n_ep_local
-    assert items["ep"] < items["fsdp"]
+    assert items["fsdp"] == items["ep"] == items_per_param * n_params
+    for fqn, (n_experts, dim1, *rest) in experts.items():
+        zeros = (0,) * len(rest)
+        # EP: rank r saves whole experts 4r..4r+3.
+        assert chunk_offsets["ep"][fqn] == [
+            (r * n_experts // 4, 0, *zeros) for r in range(4)
+        ], fqn
+        # FSDP: rank r saves a quarter of every expert.
+        assert chunk_offsets["fsdp"][fqn] == [
+            (0, r * dim1 // 4, *zeros) for r in range(4)
+        ], fqn
