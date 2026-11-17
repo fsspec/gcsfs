@@ -170,6 +170,27 @@ async def download_ranges(ranges, mrd):
     return results
 
 
+def _normalize_kms_generation(generation):
+    """Validate and normalize ``generation`` to ``int`` when ``kms_key_name`` is set."""
+    if generation is None:
+        return None
+    if isinstance(generation, bool) or not isinstance(generation, (int, str)):
+        raise ValueError(
+            f"generation must be a non-negative integer, got {generation!r}"
+        )
+    try:
+        gen_int = int(generation)
+    except ValueError as e:
+        raise ValueError(
+            f"generation must be a non-negative integer, got {generation!r}"
+        ) from e
+    if gen_int < 0:
+        raise ValueError(
+            f"generation must be a non-negative integer, got {generation!r}"
+        )
+    return gen_int
+
+
 async def init_aaow(
     grpc_client,
     bucket_name,
@@ -215,10 +236,13 @@ async def init_aaow(
         raise ValueError(
             "if_generation_match cannot be combined with an explicit generation"
         )
-    if kms_key_name and generation is not None and int(generation) > 0:
-        raise ValueError(
-            "kms_key_name cannot be set when appending to an existing object generation"
-        )
+    if kms_key_name and generation is not None:
+        gen_int = _normalize_kms_generation(generation)
+        if gen_int > 0:
+            raise ValueError(
+                "kms_key_name cannot be set for an existing object generation"
+            )
+        generation = gen_int
     if if_generation_match == 0:
         # Every SDK release maps generation=0 to WriteObjectSpec(if_generation_match=0).
         generation = 0

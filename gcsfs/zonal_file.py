@@ -115,10 +115,12 @@ class ZonalFile(GCSFile):
                 raise NotImplementedError(
                     "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets."
                 )
-            if "a" not in mode and generation is not None and int(generation) > 0:
-                raise ValueError(
-                    "kms_key_name cannot be set when appending to an existing object generation"
-                )
+            if generation is not None:
+                gen_int = zb_hns_utils._normalize_kms_generation(generation)
+                if "a" not in mode and gen_int > 0:
+                    raise ValueError(
+                        "kms_key_name cannot be set for an existing object generation"
+                    )
             if zb_hns_utils.Preconditions is None:
                 raise NotImplementedError(
                     "kms_key_name on Zonal buckets requires a google-cloud-storage "
@@ -275,10 +277,22 @@ class ZonalFile(GCSFile):
                 except FileNotFoundError:
                     # if file doesn't exist, we don't need generation
                     pass
-            elif kms_key_name and int(generation) > 0:
-                info = await self.gcsfs._info(
-                    f"{bucket_name}/{object_name}", generation=generation
-                )
+            elif kms_key_name:
+                gen_int = zb_hns_utils._normalize_kms_generation(generation)
+                if gen_int > 0:
+                    # Query the exact generation directly: GCSFileSystem._info
+                    # drops a kwarg-only generation on uncached GETs and returns
+                    # a synthetic directory entry when parent dircache misses it.
+                    info = await self.gcsfs._call(
+                        "GET",
+                        "b/{}/o/{}",
+                        bucket_name,
+                        object_name,
+                        json_out=True,
+                        generation=str(gen_int),
+                    )
+                else:
+                    generation = 0
             if kms_key_name and info is not None:
                 existing_kms_key = info.get("kmsKeyName")
                 if not _kms_key_matches(existing_kms_key, kms_key_name):
@@ -287,6 +301,12 @@ class ZonalFile(GCSFile):
                         f"object {bucket_name}/{object_name} uses {existing_kms_key!r}"
                     )
                 kms_key_name = None
+        elif (
+            kms_key_name
+            and generation is not None
+            and zb_hns_utils._normalize_kms_generation(generation) == 0
+        ):
+            generation = 0
         init_kwargs = {"if_generation_match": self.if_generation_match}
         if kms_key_name:
             init_kwargs["kms_key_name"] = kms_key_name

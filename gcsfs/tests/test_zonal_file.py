@@ -8,6 +8,7 @@ test_hns_unit.py or test_hns.py.
 
 import array
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -25,7 +26,10 @@ from google.cloud.storage.asyncio.async_appendable_object_writer import (
 )
 
 from gcsfs import zb_hns_utils
+from gcsfs.core import GCSFileSystem
 from gcsfs.extended_gcsfs import CachingTier, ExtendedGcsFileSystem
+
+_REAL_GCSFS_INFO = GCSFileSystem._info
 from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests import layouts
 from gcsfs.tests.conftest import RAPID_WRITE_LAYOUTS, requires_rapid
@@ -1043,7 +1047,9 @@ def test_zonal_file_append_nonexistent_creates_with_kms_key_name(
     ids=["exact_unversioned", "versioned_child"],
 )
 @pytest.mark.parametrize(
-    "explicit_gen", [None, "12345"], ids=["lookup_gen", "explicit_gen"]
+    "explicit_gen",
+    [None, "12345", 12345],
+    ids=["lookup_gen", "explicit_str_gen", "explicit_int_gen"],
 )
 @pytest.mark.parametrize(
     "zonal_write_mocks", [layouts.ZONAL_HIERARCHICAL], indirect=True
@@ -1052,29 +1058,59 @@ def test_zonal_file_append_existing_matching_kms_key_resumes_without_kms_kwarg(
     extended_gcsfs, zonal_write_mocks, file_path, existing_kms_key, explicit_gen
 ):
     """Appending to an existing Zonal object whose kmsKeyName matches resumes via
-    AppendObjectSpec(generation=...) with kms_key_name omitted."""
+    AppendObjectSpec(generation=...) with kms_key_name omitted, including when
+    parent dircache holds another generation and explicit_gen is str or int."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
     kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
-    zonal_write_mocks["_gcsfs_info"].return_value = {
+    info_dict = {
         "generation": "12345",
         "type": "file",
         "name": file_path,
         "kmsKeyName": existing_kms_key,
     }
+    parent = extended_gcsfs._parent(file_path)
+    extended_gcsfs.dircache[parent] = [
+        {"name": file_path, "type": "file", "size": 10, "generation": "9999"}
+    ]
 
     open_kwargs = {"finalize_on_close": True, "kms_key_name": kms_key}
-    if explicit_gen is not None:
+    if explicit_gen is None:
+        zonal_write_mocks["_gcsfs_info"].return_value = info_dict
+        call_ctx = contextlib.nullcontext()
+    else:
         open_kwargs["generation"] = explicit_gen
+        zonal_write_mocks["_gcsfs_info"].side_effect = (
+            lambda *a, **kw: _REAL_GCSFS_INFO(extended_gcsfs, *a, **kw)
+        )
+        call_ctx = mock.patch.object(
+            extended_gcsfs, "_call", new_callable=mock.AsyncMock, return_value=info_dict
+        )
 
-    with mock.patch.object(zb_hns_utils, "Preconditions", object()):
-        with extended_gcsfs.open(file_path, "ab", **open_kwargs) as f:
-            f.write(test_data)
+    try:
+        with (
+            mock.patch.object(zb_hns_utils, "Preconditions", object()),
+            call_ctx as m_call,
+        ):
+            with extended_gcsfs.open(file_path, "ab", **open_kwargs) as f:
+                f.write(test_data)
+    finally:
+        extended_gcsfs.dircache.pop(parent, None)
 
+    if explicit_gen is not None:
+        m_call.assert_awaited_once_with(
+            "GET",
+            "b/{}/o/{}",
+            bucket,
+            key,
+            json_out=True,
+            generation="12345",
+        )
+    expected_gen = "12345" if explicit_gen is None else explicit_gen
     zonal_write_mocks["init_aaow"].assert_awaited_once_with(
         extended_gcsfs.grpc_client,
         bucket,
         key,
-        "12345",
+        expected_gen,
         _DEFAULT_FLUSH_INTERVAL_BYTES,
         if_generation_match=None,
         storage_class=None,
@@ -1092,7 +1128,9 @@ def test_zonal_file_append_existing_matching_kms_key_resumes_without_kms_kwarg(
     ids=["unencrypted", "different_key", "key_name_prefix_mismatch"],
 )
 @pytest.mark.parametrize(
-    "explicit_gen", [None, "12345"], ids=["lookup_gen", "explicit_gen"]
+    "explicit_gen",
+    [None, "12345", 12345],
+    ids=["lookup_gen", "explicit_str_gen", "explicit_int_gen"],
 )
 @pytest.mark.parametrize(
     "zonal_write_mocks", [layouts.ZONAL_HIERARCHICAL], indirect=True
@@ -1102,23 +1140,80 @@ def test_zonal_file_append_existing_mismatched_kms_key_raises_before_init_aaow(
 ):
     """Appending with kms_key_name to an unencrypted or differently-encrypted object
     raises ValueError without opening AAOW or retrying on close."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
     kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
     info_dict = {"generation": "12345", "type": "file", "name": file_path}
     if existing_kms_key is not None:
         info_dict["kmsKeyName"] = existing_kms_key
-    zonal_write_mocks["_gcsfs_info"].return_value = info_dict
 
     open_kwargs = {"finalize_on_close": True, "kms_key_name": kms_key}
-    if explicit_gen is not None:
+    if explicit_gen is None:
+        zonal_write_mocks["_gcsfs_info"].return_value = info_dict
+        call_ctx = contextlib.nullcontext()
+    else:
         open_kwargs["generation"] = explicit_gen
+        zonal_write_mocks["_gcsfs_info"].side_effect = (
+            lambda *a, **kw: _REAL_GCSFS_INFO(extended_gcsfs, *a, **kw)
+        )
+        call_ctx = mock.patch.object(
+            extended_gcsfs, "_call", new_callable=mock.AsyncMock, return_value=info_dict
+        )
 
-    with mock.patch.object(zb_hns_utils, "Preconditions", object()):
+    with mock.patch.object(zb_hns_utils, "Preconditions", object()), call_ctx as m_call:
         with pytest.raises(ValueError, match="Cannot append with kms_key_name"):
             with extended_gcsfs.open(file_path, "ab", **open_kwargs) as f:
                 f.write(test_data)
 
+    if explicit_gen is not None:
+        m_call.assert_awaited_once_with(
+            "GET",
+            "b/{}/o/{}",
+            bucket,
+            key,
+            json_out=True,
+            generation="12345",
+        )
     zonal_write_mocks["init_aaow"].assert_not_awaited()
     assert f.closed
+
+
+@pytest.mark.skipif(is_real_gcs(), reason="Unit test using mocked Preconditions.")
+@pytest.mark.parametrize("mode", ["wb", "ab"])
+@pytest.mark.parametrize(
+    "zero_source", [0, "0", "#0"], ids=["int_0", "str_0", "frag_0"]
+)
+@pytest.mark.parametrize(
+    "zonal_write_mocks", [layouts.ZONAL_HIERARCHICAL], indirect=True
+)
+def test_zonal_file_kms_key_name_normalizes_zero_generation(
+    extended_gcsfs, zonal_write_mocks, file_path, mode, zero_source
+):
+    """generation=0, generation='0', and '#0' paths normalize to integer 0 and forward kms_key_name."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    open_path = f"gs://{file_path}#0" if zero_source == "#0" else file_path
+    open_kwargs = {"finalize_on_close": True, "kms_key_name": kms_key}
+    if zero_source != "#0":
+        open_kwargs["generation"] = zero_source
+
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", object()),
+        mock.patch.object(extended_gcsfs, "version_aware", zero_source == "#0"),
+    ):
+        with extended_gcsfs.open(open_path, mode, **open_kwargs) as f:
+            f.write(test_data)
+
+    zonal_write_mocks["init_aaow"].assert_awaited_once_with(
+        extended_gcsfs.grpc_client,
+        bucket,
+        key,
+        0,
+        _DEFAULT_FLUSH_INTERVAL_BYTES,
+        if_generation_match=None,
+        storage_class=None,
+        kms_key_name=kms_key,
+    )
+    assert type(zonal_write_mocks["init_aaow"].await_args.args[3]) is int
 
 
 def test_zonal_file_flush(extended_gcsfs, zonal_write_mocks, file_path):
@@ -2381,12 +2476,36 @@ def test_zonal_file_write_mode_rejects_kms_key_name_with_explicit_generation(
     with mock.patch.object(zb_hns_utils, "Preconditions", object()):
         with pytest.raises(
             ValueError,
-            match="kms_key_name cannot be set when appending to an existing object generation",
+            match="kms_key_name cannot be set for an existing object generation",
         ):
             zf.__init__(
                 gcsfs=mock_gcsfs,
                 path="gs://test-bucket/test-key#123",
                 mode="wb",
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+
+    assert "_closed" not in zf.__dict__
+
+
+@pytest.mark.parametrize("mode", ["wb", "ab"])
+@pytest.mark.parametrize("bad_gen", [-1, "-5", True, False, 1.5, "not-an-int"])
+def test_zonal_file_write_modes_reject_invalid_kms_generation_before_super_init(
+    mock_gcsfs, mode, bad_gen
+):
+    """Negative, boolean, float, or non-numeric generations with kms_key_name raise
+    ValueError before super().__init__."""
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    mock_gcsfs.split_path.return_value = ("test-bucket", "test-key", None)
+    zf = ZonalFile.__new__(ZonalFile)
+
+    with mock.patch.object(zb_hns_utils, "Preconditions", object()):
+        with pytest.raises(ValueError, match="generation"):
+            zf.__init__(
+                gcsfs=mock_gcsfs,
+                path="gs://test-bucket/test-key",
+                mode=mode,
+                generation=bad_gen,
                 kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
             )
 
