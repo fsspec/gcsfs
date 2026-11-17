@@ -294,8 +294,9 @@ def build_train_dataset(
 
     - Projection is pushed to GCS via columns=["text"].
     - Shuffling permutes shard list before split_dataset_by_node.
-    - max_buffer_input_shards improves shuffle quality but divides num_shards.
-      Unless the result is a multiple of world_size, split_dataset_by_node
+    - max_buffer_input_shards improves shuffle quality; since datasets 5.1 it
+      interleaves shards within each node/worker and keeps num_shards.
+      Unless num_shards is a multiple of world_size, split_dataset_by_node
       falls back to per-sample round-robin and every rank reads the whole
       dataset (world_size x read amplification); warned about below.
     """
@@ -320,8 +321,8 @@ def build_train_dataset(
             logging.warning(
                 "dataset_num_shards=%d is not a multiple of world_size=%d; "
                 "every rank will read the entire dataset (%dx read "
-                "amplification). Adjust max_buffer_input_shards or the "
-                "dataset's shard count.",
+                "amplification). Make the dataset's Parquet file count a "
+                "multiple of world_size.",
                 ds.num_shards,
                 world_size,
                 world_size,
@@ -919,7 +920,7 @@ if __name__ == "__main__":
     # GPU memory; harmless on CPU, where the model never forwards.
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         local_files_only=use_local_files_only,
         use_cache=False,
     )

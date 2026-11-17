@@ -22,6 +22,20 @@ if [[ "${_WORKLOAD}" == "hf-pytorch-lightning-cpu" ]]; then
   _WORKLOAD="hf-datasets-pytorch-lightning"
 fi
 
+# Object state the Rapid Cache Ultra (RCU) bucket types measure reads from:
+# z (written RAPID), warm (STANDARD, ingested into the cache before the run) or
+# cold (STANDARD, never read in the cache zone). Empty for the other types.
+RCU_STATE=""
+if [[ "${_BUCKET_TYPE:-}" == *_rcu_* ]]; then
+  RCU_STATE="${_BUCKET_TYPE##*_rcu_}"
+fi
+# By default, gcsfs writes STANDARD objects over HTTP to RCU buckets; *_rcu_z
+# opts in via FSSPEC_GCS_RCU_RAPID_WRITE="true" so writes stay RAPID.
+RCU_RAPID_WRITE=false
+if [[ "${RCU_STATE}" == "z" ]]; then
+  RCU_RAPID_WRITE=true
+fi
+
 # Record a step id in the failure ledger. The allowFailure provisioning steps
 # append here on error so the final check-failure step can fail the build with
 # the list of culprits.
@@ -39,7 +53,8 @@ skip_if_failed() {
   fi
 }
 
-# Create a per-run bucket per _BUCKET_TYPE (regional | zonal-RAPID | hns).
+# Create a per-run bucket per _BUCKET_TYPE (regional | zonal-RAPID | hns |
+# regional or HNS with a Rapid Cache Ultra cache).
 create_typed_bucket() {
   local bucket="$1"
   case "${_BUCKET_TYPE}" in
@@ -49,15 +64,164 @@ create_typed_bucket() {
       gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --placement="${_ZONE}" --default-storage-class=RAPID --enable-hierarchical-namespace --uniform-bucket-level-access ;;
     hns)
       gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --enable-hierarchical-namespace --uniform-bucket-level-access ;;
+    standard_rcu_*)
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --uniform-bucket-level-access
+      create_rapid_cache "$bucket" ;;
+    hns_rcu_*)
+      gcloud storage buckets create "gs://$bucket" --project="${PROJECT_ID}" --location="$REGION" --enable-hierarchical-namespace --uniform-bucket-level-access
+      create_rapid_cache "$bucket" ;;
     *)
-      echo "ERROR: unknown _BUCKET_TYPE='${_BUCKET_TYPE}' (expected regional|zonal|hns)" >&2
+      echo "ERROR: unknown _BUCKET_TYPE='${_BUCKET_TYPE}' (expected regional|zonal|hns|{standard,hns}_rcu_{z,warm,cold})" >&2
       return 1 ;;
   esac
+}
+
+# Add an admit-on-first-miss Rapid Cache Ultra cache in ${_ZONE}, the zone of
+# the workload node pool, and wait until it is running: gcsfs only uses the RCU
+# data path while it is. Creation is tried up to 3 times.
+create_rapid_cache() {
+  local bucket="$1" attempt=0 output state="" i
+  until output=$(gcloud alpha storage buckets rapid-caches create "gs://$bucket" "${_ZONE}" --project="${PROJECT_ID}" \
+      --cache-type=rapid-cache-ultra --admission-policy=admit-on-first-miss --no-async --quiet 2>&1); do
+    echo "$output" >&2
+    # An earlier attempt may have created the cache before it failed.
+    if (( attempt > 0 )) && grep -qi "already exists" <<< "$output"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    if (( attempt >= 3 )); then
+      echo "ERROR: could not create a rapid cache for gs://$bucket in ${_ZONE} after $attempt attempts." >&2
+      return 1
+    fi
+    echo "Rapid cache create failed for gs://$bucket in ${_ZONE} (attempt $attempt/3), retrying..." >&2
+    sleep $((RANDOM % 8 + 3))
+  done
+  echo "$output"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    # A failed describe counts as not running yet.
+    state=$(gcloud alpha storage buckets rapid-caches describe "$bucket/${_ZONE}" --project="${PROJECT_ID}" --format="value(state)" || true)
+    [ "${state,,}" = running ] && return 0
+    sleep 30
+  done
+  echo "ERROR: rapid cache $bucket/${_ZONE} is '$state', not running." >&2
+  return 1
+}
+
+# Best-effort delete of a per-run bucket of any type: its objects first, then
+# its Rapid Cache Ultra caches (disable runs async), then the bucket. The bucket
+# delete fails while a disable is still running; cleanup-leaked-resources
+# retries it in a later build.
+delete_bucket_and_caches() {
+  local bucket="$1" cache_id
+  # An empty name would make the commands below act on every bucket (gs://).
+  [ -n "$bucket" ] || return 1
+  gcloud storage rm --recursive --project="${PROJECT_ID}" "gs://$bucket" || true
+  while read -r cache_id _; do
+    [ -n "$cache_id" ] || continue
+    gcloud alpha storage buckets rapid-caches disable "$cache_id" --project="${PROJECT_ID}" --quiet || true
+  done <<< "$(gcloud alpha storage buckets rapid-caches list "gs://$bucket" --project="${PROJECT_ID}" --format="value(id,state)" || true)"
+  gcloud storage buckets delete "gs://$bucket" --project="${PROJECT_ID}" --quiet || true
+}
+
+# Copy _DATASET_PATH into the per-run dataset bucket with gcloud, which writes
+# STANDARD objects (RAPID on a zonal bucket).
+copy_dataset_into_run_bucket() {
+  local src_object_path dest_parent
+  src_object_path=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
+  if [ "${_BUCKET_TYPE}" = "zonal" ] || [ "${DATASET_SRC_IS_RAPID:-no}" = "yes" ]; then
+    # RAPID (zonal) objects lack the server-side rewrite rsync uses, so daisy-chain
+    # (download+reupload)
+    ulimit -n 65536
+    dest_parent="${src_object_path%/*}"
+    [ "$dest_parent" = "$src_object_path" ] && dest_parent=""
+    # `cp --recursive` on a directory/bucket source without a trailing wildcard
+    # copies the source's own name into the destination (e.g. _DATASET_PATH
+    # "gs://bucket" would land at "gs://DATASET_BUCKET/bucket/..."); "/*" makes
+    # it copy the source's contents instead.
+    CLOUDSDK_STORAGE_PROCESS_COUNT=16 CLOUDSDK_STORAGE_THREAD_COUNT=16 \
+    CLOUDSDK_STORAGE_ATTEMPT_GRPC_DIRECT_PATH=False \
+      gcloud storage cp --recursive --daisy-chain "${_DATASET_PATH%/}/*" "gs://${DATASET_BUCKET}${dest_parent:+/$dest_parent}"
+  else
+    # Regional/HNS support server-side copy; rsync mirrors the source into the dest.
+    gcloud storage rsync --recursive "${_DATASET_PATH}" "gs://${DATASET_BUCKET}/${src_object_path}"
+  fi
+}
+
+# Fail unless every object at PATH (an object or a prefix) has storage class
+# CLASS. Lists the objects instead of describing each one: a GET from the cache
+# zone could start ingesting the object.
+verify_storage_class() {
+  local path="$1" want="$2" listing
+  listing=$(gcloud storage objects list "${path}**" --format="value(name,storage_class)")
+  if [ -z "$listing" ]; then
+    echo "ERROR: no objects at $path." >&2
+    return 1
+  fi
+  if awk -F'\t' -v want="$want" '$2 != want' <<< "$listing" | grep .; then
+    echo "ERROR: the objects above at $path are not $want." >&2
+    return 1
+  fi
+  echo "All $(wc -l <<< "$listing") objects at $path are $want."
+}
+
+# Run ../rcu/prepare.py with the given arguments in a Job on the workload node
+# pool, which is in ${_ZONE} (the RCU cache zone), and wait for it.
+# Usage: run_rcu_job <name> <prepare.py args...>
+run_rcu_job() {
+  local job="${RUN_ID}-rcu-$1" status="" i
+  shift
+  gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}"
+  kubectl create configmap "$job" --from-file=prepare.py="$(dirname "${BASH_SOURCE[0]}")/../rcu/prepare.py"
+  kubectl apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $job
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: default
+      nodeSelector:
+        cloud.google.com/gke-nodepool: "${_MACHINE_TYPE}"
+      containers:
+        - name: prepare
+          image: "${_IMAGE}"
+          command:
+            - bash
+            - -c
+            - 'pip3 install --no-cache-dir \$REQUIREMENTS && python3 /rcu/prepare.py "\$@"'
+            - prepare
+          args:
+$(printf '            - "%s"\n' "$@")
+          env:
+            - name: REQUIREMENTS
+              value: "${_REQUIREMENTS}"
+          volumeMounts:
+            - name: rcu
+              mountPath: /rcu
+      volumes:
+        - name: rcu
+          configMap:
+            name: $job
+EOF
+  for ((i = 0; i < 360; i++)); do
+    status=$(kubectl get job "$job" -o jsonpath='{.status.succeeded}/{.status.failed}' || true)
+    [[ "$status" == 1/* || "$status" == */1 ]] && break
+    sleep 10
+  done
+  kubectl logs "job/$job" || true
+  if [[ "$status" != 1/* ]]; then
+    echo "ERROR: Job $job did not succeed (succeeded/failed: '$status')." >&2
+    return 1
+  fi
 }
 
 shared_workload_helm_args() {
   SHARED_HELM_ARGS=(
     --set gcsfs.datasetPath="${RUN_DATASET_PATH:-${_DATASET_PATH}}"
+    --set gcsfs.rcuRapidWrite="${RCU_RAPID_WRITE}"
     --set workload.modelId="${_MODEL_ID}"
     --set-string workload.image="${_IMAGE}"
     --set workload.hfToken="${_HF_TOKEN}"

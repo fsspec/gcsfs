@@ -20,7 +20,7 @@ workload_launcher: launcher.sh
 workload:
   configFile: train_pytorch_lightning.py
   configPath: /workload/configs/
-  image: nvcr.io/nvidia/pytorch:26.05-py3
+  image: nvcr.io/nvidia/pytorch:26.10-py3
   nodes: 2
   ranksPerNode: 4
   singlePodPerNode: true
@@ -38,8 +38,9 @@ workload:
   dataloaderWorkers: 16
   # HF streaming shuffle buffer size (0 to disable). Seed is fixed at 42.
   shuffleBufferSize: 10000
-  # Shards the shuffle buffer interleaves. Higher = better mixing, but it divides
-  # the shard count; keep the result a multiple of nodes x ranksPerNode or every
+  # Shards the shuffle buffer interleaves per node/worker. Higher = better
+  # mixing; it no longer changes the shard count (datasets >= 5.1), so keep the
+  # dataset's Parquet file count a multiple of nodes x ranksPerNode or every
   # rank re-reads the whole dataset.
   shuffleMaxBufferInputShards: 10
   # Batches to prefetch per dataloader worker.
@@ -73,10 +74,12 @@ workload:
     - name: GCSFS_LOG_LEVEL
       value: INFO
 
-# gcsfs-only storage configuration (gs:// via gcsfs/fsspec). The experimental
-# zonal-bucket/HNS path is on by default in gcsfs (GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT
-# defaults to "true"), so it is intentionally not set here.
+# gcsfs-only storage configuration (gs:// via gcsfs/fsspec). Writes to Rapid
+# Cache Ultra buckets default to HTTP (STANDARD objects); rcuRapidWrite sets
+# FSSPEC_GCS_RCU_RAPID_WRITE="true" so writes go over gRPC as RAPID objects
+# (used by *_rcu_z runs).
 gcsfs:
   datasetPath: ""
   ckptWritePath: ""
   ckptLoadPath: ""
+  rcuRapidWrite: false
