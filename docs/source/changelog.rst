@@ -27,6 +27,9 @@ Unreleased
   ``use_experimental_adaptive_prefetching`` ``open()`` argument. Setting either to false
   when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back
   to ``readahead``, as in 2026.8.x (#1172).
+* Framework telemetry now recognizes the Agent Development Kit (``google.adk``) and
+  sends ``fw/adk`` in the ``User-Agent`` header. Other ``google`` packages, such as
+  ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
 
 2026.10.0
 ---------
