@@ -49,7 +49,7 @@ Overview of the 6 Execution Flows
    this wraps a plain `def` function that stays on the caller thread and orchestrates
    multiple downstream steps or raw `fsspec.asyn.sync()` calls:
    [Caller Thread]
-     fs.open() -> _open() (@with_telemetry_context)
+     fs.open() -> ExtendedGcsFileSystem._open() (@with_telemetry_context)
        -> _telemetry_context(): captures call-scoped tokens ONCE on the caller thread
        -> all inner steps (wrapped sync calls, raw `asyn.sync()` calls, and
           `GCSFile.__init__`) reuse that active ContextVar in O(1)
@@ -66,11 +66,13 @@ Overview of the 6 Execution Flows
 Choosing a Wrapper (Maintainer Guide)
 -------------------------------------
 - `mirror_gcs_methods(cls)` + `bind_gcs_sync_methods(self)`: Auto-wraps `_foo` coroutines
-  and async generators on `AsyncFileSystem` subclasses and binds their `foo` sync mirrors.
+  and async generators matching `AbstractFileSystem`/`AsyncFileSystem` (or an existing
+  `cls.foo` attribute, skipping internal helpers like `_request`) and binds `foo` sync
+  mirrors for the public methods.
 - `_gcs_sync_wrapper(fn)`: Explicitly wraps async helpers whose sync bridge name does not
   follow the `_foo` -> `foo` convention (e.g. `_sync_lookup_bucket_layout`).
 - `@with_telemetry_context`: Decorates plain synchronous entry points not backed by a
-  single coroutine (e.g. `_open`).
+  single coroutine (e.g. `ExtendedGcsFileSystem._open`).
 - `wrap_file_methods(cls)`: Wraps non-dunder instance methods and properties defined
   directly in `cls.__dict__` on file classes (`GCSFile`, `ZonalFile`).
 """
@@ -112,7 +114,8 @@ def _telemetry_context(tokens_map: Optional[Dict[str, str]] = None):
 
 def with_telemetry_context(func: Callable) -> Callable:
     """
-    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap (e.g. `_open`).
+    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap
+    (e.g. `ExtendedGcsFileSystem._open`).
 
     Captures call-scoped telemetry once on the caller thread and scopes it for the whole call, so
     any requests issued underneath (including via `asyn.sync` to the loop thread) carry it.
