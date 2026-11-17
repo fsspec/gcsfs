@@ -48,17 +48,25 @@ def _get_creds_from_raw_token(token):
     should_fetch_expiry = env_val not in ("false", "0", "off", "no")
 
     if should_fetch_expiry:
-        response = requests.get(
-            "https://oauth2.googleapis.com/tokeninfo",
-            params={"access_token": token},
-            timeout=TOKEN_INFO_TIMEOUT_SECONDS,
-        )
+        try:
+            response = requests.post(
+                "https://oauth2.googleapis.com/tokeninfo",
+                data={"access_token": token},
+                timeout=TOKEN_INFO_TIMEOUT_SECONDS,
+            )
 
-        if response.status_code == 400:
-            # Token is likely expired or invalid format
-            raise ValueError("Provided token is either not valid, or expired.")
+            if response.status_code == 400:
+                # Token is likely expired or invalid format
+                raise ValueError("Provided token is either not valid, or expired.")
 
-        response.raise_for_status()
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else "unknown"
+            raise ValueError(
+                f"Failed to fetch token expiry (HTTP {status})."
+            ) from None
+        except requests.exceptions.RequestException:
+            raise ValueError("Network error while validating token expiry.") from None
         expiry = datetime.utcfromtimestamp(float(response.json()["exp"]))
 
         time_remaining = max(

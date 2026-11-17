@@ -1,8 +1,9 @@
 import datetime
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import requests
 
 from gcsfs import GCSFileSystem
 from gcsfs.credentials import GoogleCredentials
@@ -126,14 +127,14 @@ def test_raw_token_credentials_init_with_raw_token_fetches_expiry(
     mock_token_info_api_response.json.return_value = {"exp": str(future_time)}
 
     with patch(
-        "gcsfs.credentials.requests.get", return_value=mock_token_info_api_response
-    ) as mock_get:
+        "gcsfs.credentials.requests.post", return_value=mock_token_info_api_response
+    ) as mock_post:
         creds = GoogleCredentials(
             project="my-project", token=MOCK_TOKEN_STR, access="read_only"
         )
-        mock_get.assert_called_once_with(
+        mock_post.assert_called_once_with(
             "https://oauth2.googleapis.com/tokeninfo",
-            params={"access_token": MOCK_TOKEN_STR},
+            data={"access_token": MOCK_TOKEN_STR},
             timeout=10,
         )
 
@@ -150,12 +151,12 @@ def test_raw_token_credentials_init_env_var_disables_fetch(
     """Test that the FETCH_RAW_TOKEN_EXPIRY environment variable stops the network call."""
     with patch.dict(os.environ, {"FETCH_RAW_TOKEN_EXPIRY": "false"}):
         with patch(
-            "gcsfs.credentials.requests.get", return_value=mock_token_info_api_response
-        ) as mock_get:
+            "gcsfs.credentials.requests.post", return_value=mock_token_info_api_response
+        ) as mock_post:
             creds = GoogleCredentials(
                 project="my-project", token=MOCK_TOKEN_STR, access="read_only"
             )
-            mock_get.assert_not_called()
+            mock_post.assert_not_called()
             assert creds.credentials.token == MOCK_TOKEN_STR
             assert creds.credentials.expiry is None
 
@@ -168,7 +169,7 @@ def test_raw_token_credentials_init_raises_on_invalid_token(
     mock_token_info_api_response.json.return_value = {"error": "invalid_token"}
 
     with patch(
-        "gcsfs.credentials.requests.get", return_value=mock_token_info_api_response
+        "gcsfs.credentials.requests.post", return_value=mock_token_info_api_response
     ):
         with pytest.raises(ValueError, match="Provided token is either not valid"):
             GoogleCredentials(
@@ -188,7 +189,7 @@ def test_raw_token_credentials_refresh_throws_error_after_expiry(
     }
 
     with patch(
-        "gcsfs.credentials.requests.get", return_value=mock_token_info_api_response
+        "gcsfs.credentials.requests.post", return_value=mock_token_info_api_response
     ) as _:
         creds = GoogleCredentials(
             project="my-project", token="my_token", access="read_only"
@@ -225,9 +226,46 @@ def test_raw_token_credentials_init_raises_on_short_lived_token(
     }
 
     with patch(
-        "gcsfs.credentials.requests.get", return_value=mock_token_info_api_response
+        "gcsfs.credentials.requests.post", return_value=mock_token_info_api_response
     ):
         with pytest.raises(ValueError, match="less than the safety buffer"):
             GoogleCredentials(
                 project="my-project", token="short_lived_token", access="read_only"
             )
+
+
+def test_raw_token_credentials_http_error_masks_token_and_url():
+    """Test that HTTPError does not leak raw token or URL in exception message."""
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    sensitive_token = "secret-token-xyz-123"
+    mock_response.url = f"https://oauth2.googleapis.com/tokeninfo?secret={sensitive_token}"
+    error = requests.exceptions.HTTPError("500 Server Error", response=mock_response)
+    mock_response.raise_for_status.side_effect = error
+
+    with patch("gcsfs.credentials.requests.post", return_value=mock_response):
+        with pytest.raises(ValueError) as exc_info:
+            GoogleCredentials(
+                project="my-project", token=sensitive_token, access="read_only"
+            )
+        error_msg = str(exc_info.value)
+        assert "500" in error_msg
+        assert sensitive_token not in error_msg
+        assert "oauth2.googleapis.com" not in error_msg
+
+
+def test_raw_token_credentials_network_error_masks_token():
+    """Test that network exceptions do not leak raw token in exception message."""
+    sensitive_token = "secret-token-abc-999"
+    with patch(
+        "gcsfs.credentials.requests.post",
+        side_effect=requests.exceptions.ConnectionError("Connection failed"),
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            GoogleCredentials(
+                project="my-project", token=sensitive_token, access="read_only"
+            )
+        error_msg = str(exc_info.value)
+        assert "Network error" in error_msg
+        assert sensitive_token not in error_msg
+
