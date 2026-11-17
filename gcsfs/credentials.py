@@ -67,9 +67,7 @@ def _get_creds_from_raw_token(token):
                 raise ValueError("Invalid tokeninfo response format.") from None
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else "unknown"
-            raise ValueError(
-                f"Failed to fetch token expiry (HTTP {status})."
-            ) from None
+            raise ValueError(f"Failed to fetch token expiry (HTTP {status}).") from None
         except requests.exceptions.RequestException:
             raise ValueError("Network error while validating token expiry.") from None
 

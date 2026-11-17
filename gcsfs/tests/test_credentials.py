@@ -239,7 +239,9 @@ def test_raw_token_credentials_http_error_masks_token_and_url():
     mock_response = MagicMock()
     mock_response.status_code = 500
     sensitive_token = "secret-token-xyz-123"
-    mock_response.url = f"https://oauth2.googleapis.com/tokeninfo?secret={sensitive_token}"
+    mock_response.url = (
+        f"https://oauth2.googleapis.com/tokeninfo?secret={sensitive_token}"
+    )
     error = requests.exceptions.HTTPError("500 Server Error", response=mock_response)
     mock_response.raise_for_status.side_effect = error
 
@@ -274,7 +276,9 @@ def test_raw_token_credentials_malformed_json_masks_token():
     """Test that malformed JSON from captive portal / proxy raises clean ValueError without leaking token."""
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+    mock_response.json.side_effect = ValueError(
+        "Expecting value: line 1 column 1 (char 0)"
+    )
     sensitive_token = "secret-token-malformed-json"
 
     with patch("gcsfs.credentials.requests.post", return_value=mock_response):
@@ -302,5 +306,3 @@ def test_raw_token_credentials_missing_exp_masks_token():
         error_msg = str(exc_info.value)
         assert error_msg == "Invalid tokeninfo response format."
         assert sensitive_token not in error_msg
-
-
