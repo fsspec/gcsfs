@@ -98,7 +98,7 @@ def test_exists(gcs):
     assert gcs.exists(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.exists(nb)
 
 
@@ -124,7 +124,7 @@ def test_isdir(gcs):
     assert gcs.isdir(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.isdir(nb)
 
 
@@ -153,7 +153,7 @@ def test_isfile(gcs):
     assert not gcs.isfile(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.isfile(nb)
 
     # Generation
@@ -2637,7 +2637,7 @@ def test_bucket_location(gcs_factory, location):
     gcs = gcs_factory(default_location=location)
     if not gcs.on_google:
         pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
-    bucket_name = str(uuid4())
+    bucket_name = f"gcsfs-test-{uuid4()}"
     try:
         gcs.mkdir(bucket_name)
         bucket = [
@@ -2654,7 +2654,7 @@ def test_bucket_default_location_overwrite(gcs_factory):
     gcs = gcs_factory(default_location="US")
     if not gcs.on_google:
         pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
-    bucket_name = str(uuid4())
+    bucket_name = f"gcsfs-test-{uuid4()}"
     try:
         gcs.mkdir(bucket_name, location="EUROPE-WEST3")
         bucket = [

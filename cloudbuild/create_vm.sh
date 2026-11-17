@@ -11,7 +11,7 @@ set -e
 MACHINE_TYPE="${MACHINE_TYPE:-n2-standard-4}"
 
 # The VM is created in the same zone as the zonal bucket to test rapid storage features.
-# It's given the 'cloud-platform' scope to allow it to access GCS and other services.
+# Scope is restricted to Cloud Storage (CMEK keys are accessed via the GCS service agent).
 echo "--- Creating GCE VM ---"
 gcloud compute instances create "gcsfs-test-vm-${SHORT_BUILD_ID}" \
     --project="${PROJECT_ID}" \
@@ -20,5 +20,5 @@ gcloud compute instances create "gcsfs-test-vm-${SHORT_BUILD_ID}" \
     --image-family=debian-13 \
     --image-project=debian-cloud \
     --service-account="${ZONAL_VM_SERVICE_ACCOUNT}" \
-    --scopes=https://www.googleapis.com/auth/cloud-platform \
+    --scopes=https://www.googleapis.com/auth/devstorage.full_control \
     --metadata=enable-oslogin=TRUE
