@@ -24,7 +24,11 @@ _TRUTHY_VALUES = ("1", "true", "yes")
 _GCP_PRODUCT_NAMES = ("Google", "Google Compute Engine")
 # GKE Sandbox (gVisor) exposes this sysfs entry from the host, unlike sys_vendor.
 _DMI_PRODUCT_NAME_PATH = "/sys/class/dmi/id/product_name"
-_WINDOWS_HARDWARE_CONFIG_KEY = r"SYSTEM\HardwareConfig\Current"
+# Container silos omit HardwareConfig\Current, so the second path reads the SMBIOS hive.
+_WINDOWS_PRODUCT_NAME_KEYS = (
+    r"SYSTEM\HardwareConfig\Current",
+    r"HARDWARE\DESCRIPTION\System\BIOS",
+)
 _K8S_SERVICE_ACCOUNT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
 _METADATA_HOST_ENV_VARS = ("GCE_METADATA_HOST", "GCE_METADATA_ROOT", "GCE_METADATA_IP")
 _DEFAULT_METADATA_HOST = "169.254.169.254"
@@ -57,16 +61,19 @@ def _read_linux_product_name() -> Optional[str]:
 
 
 def _read_windows_product_name() -> Optional[str]:
-    import winreg
-
     try:
-        with winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE, _WINDOWS_HARDWARE_CONFIG_KEY
-        ) as key:
-            product_name, _ = winreg.QueryValueEx(key, "SystemProductName")
-    except OSError:
+        import winreg
+    except ImportError:
         return None
-    return product_name
+
+    for sub_key in _WINDOWS_PRODUCT_NAME_KEYS:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub_key) as key:
+                product_name, _ = winreg.QueryValueEx(key, "SystemProductName")
+            return product_name
+        except OSError:
+            continue
+    return None
 
 
 _backoff_sleep = asyncio.sleep

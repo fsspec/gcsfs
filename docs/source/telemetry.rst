@@ -52,7 +52,9 @@ How the environment is detected
 - **Hosts that are not Google Cloud VMs** resolve to ``oth`` without any network request,
   unless ``GCE_METADATA_*`` is set. ``gcsfs`` reads the hardware product name from
   ``/sys/class/dmi/id/product_name`` on Linux and ``SystemProductName`` under
-  ``HKLM\SYSTEM\HardwareConfig\Current`` on Windows, and treats ``Google`` or
+  ``HKLM\SYSTEM\HardwareConfig\Current`` (or ``HKLM\HARDWARE\DESCRIPTION\System\BIOS`` in
+  Windows containers where ``HardwareConfig\Current`` is absent) on Windows, and treats
+  ``Google`` or
   ``Google Compute Engine`` as a Google Cloud VM; other operating systems resolve to ``oth``.
 - **Google Cloud VMs** (and hosts with ``GCE_METADATA_*`` set): when the filesystem is
   created, ``gcsfs`` queries the metadata server in the background for the instance's

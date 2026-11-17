@@ -1381,25 +1381,35 @@ def _connector_error():
     )
 
 
-def _fake_winreg(product_name):
-    """Fake winreg module for HKLM\\SYSTEM\\HardwareConfig\\Current."""
+def _fake_winreg(entries=None, *, open_error=None):
+    """Fake winreg module for Windows registry lookups."""
+    if not isinstance(entries, dict):
+        entries = {r"SYSTEM\HardwareConfig\Current": entries}
+    opened_keys = []
 
     def open_key(root, sub_key):
         assert root == "HKEY_LOCAL_MACHINE"
-        assert sub_key == r"SYSTEM\HardwareConfig\Current"
+        opened_keys.append(sub_key)
+        if open_error is not None:
+            raise open_error
+        if sub_key not in entries:
+            raise FileNotFoundError(2, "missing key", sub_key)
         return contextlib.nullcontext((root, sub_key))
 
     def query_value_ex(key, value_name):
-        assert key == ("HKEY_LOCAL_MACHINE", r"SYSTEM\HardwareConfig\Current")
+        root, sub_key = key
+        assert root == "HKEY_LOCAL_MACHINE"
         assert value_name == "SystemProductName"
-        if isinstance(product_name, BaseException):
-            raise product_name
-        return product_name, 1
+        outcome = entries[sub_key]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome, 1
 
     return types.SimpleNamespace(
         HKEY_LOCAL_MACHINE="HKEY_LOCAL_MACHINE",
         OpenKey=open_key,
         QueryValueEx=query_value_ex,
+        opened_keys=opened_keys,
     )
 
 
@@ -2264,19 +2274,37 @@ def test_stub_environment_detection_skips_live_benchmark_runs(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "product_name,mds_outcome,expected",
+    "entries,mds_outcome,expected,expected_keys",
     [
-        pytest.param("Google Compute Engine ", _mds_response(404), "gce", id="gce-vm"),
         pytest.param(
-            "Google", _mds_response(200, body="win-cluster"), "gke", id="gke-node"
+            "Google Compute Engine ",
+            _mds_response(404),
+            "gce",
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="gce-vm",
+        ),
+        pytest.param(
+            {r"HARDWARE\DESCRIPTION\System\BIOS": "Google Compute Engine"},
+            _mds_response(200, body="win-cluster"),
+            "gke",
+            [r"SYSTEM\HardwareConfig\Current", r"HARDWARE\DESCRIPTION\System\BIOS"],
+            id="gke-pod-bios-fallback",
+        ),
+        pytest.param(
+            "Google",
+            _mds_response(200, body="win-cluster"),
+            "gke",
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="gke-node",
         ),
     ],
 )
 async def test_windows_gce_bios_probes_metadata_server(
-    fake_host, monkeypatch, product_name, mds_outcome, expected
+    fake_host, monkeypatch, entries, mds_outcome, expected, expected_keys
 ):
+    winreg = _fake_winreg(entries)
     monkeypatch.setattr(environment_module.sys, "platform", "win32")
-    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(product_name))
+    monkeypatch.setitem(sys.modules, "winreg", winreg)
     fake_host.outcomes = [mds_outcome]
     detector = EnvironmentDetector()
 
@@ -2285,29 +2313,109 @@ async def test_windows_gce_bios_probes_metadata_server(
     detected = detector.detect()
 
     assert detected == expected
+    assert winreg.opened_keys == expected_keys
     assert fake_host.dmi_reads == []
     assert fake_host.requests == [
         (_DEFAULT_CLUSTER_NAME_URL, {"Metadata-Flavor": "Google"})
     ]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "registry_outcome",
+    "entries,no_gce_check,mds_outcomes,expected_requests",
     [
-        pytest.param("Virtual Machine", id="non-google-product"),
-        pytest.param(123, id="non-string-value"),
-        pytest.param(FileNotFoundError("missing value"), id="missing-registry-value"),
+        pytest.param(
+            {r"HARDWARE\DESCRIPTION\System\BIOS": "Google"},
+            "true",
+            [],
+            0,
+            id="no-gce-check",
+        ),
+        pytest.param(
+            "Google",
+            None,
+            [_mds_response(404, flavor=False)],
+            1,
+            id="metadata-failure",
+        ),
     ],
 )
-def test_non_gcp_windows_host_skips_probe(fake_host, monkeypatch, registry_outcome):
+async def test_windows_gce_bios_falls_back_to_gke_on_kubernetes(
+    fake_host, monkeypatch, entries, no_gce_check, mds_outcomes, expected_requests
+):
     monkeypatch.setattr(environment_module.sys, "platform", "win32")
-    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(registry_outcome))
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(entries))
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    if no_gce_check is not None:
+        monkeypatch.setenv("NO_GCE_CHECK", no_gce_check)
+    else:
+        monkeypatch.delenv("NO_GCE_CHECK", raising=False)
+    fake_host.outcomes = mds_outcomes
+    detector = EnvironmentDetector()
+
+    first = detector.detect()
+    if no_gce_check is not None:
+        assert first == "gke"
+    else:
+        assert first is None
+        await _settle_probe(detector)
+        assert detector.detect() == "gke"
+
+    assert len(fake_host.requests) == expected_requests
+    assert fake_host.opened_sessions == expected_requests
+
+
+@pytest.mark.parametrize(
+    "entries,open_error,expected_keys",
+    [
+        pytest.param(
+            "Virtual Machine",
+            None,
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="non-google-product",
+        ),
+        pytest.param(
+            123,
+            None,
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="non-string-value",
+        ),
+        pytest.param(
+            None,
+            PermissionError("access denied"),
+            list(environment_module._WINDOWS_PRODUCT_NAME_KEYS),
+            id="open-key-error",
+        ),
+        pytest.param(
+            {
+                key: FileNotFoundError("missing value")
+                for key in environment_module._WINDOWS_PRODUCT_NAME_KEYS
+            },
+            None,
+            list(environment_module._WINDOWS_PRODUCT_NAME_KEYS),
+            id="missing-registry-value",
+        ),
+        pytest.param(None, None, None, id="winreg-import-error"),
+    ],
+)
+def test_non_gcp_windows_host_skips_probe(
+    fake_host, monkeypatch, entries, open_error, expected_keys
+):
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    if expected_keys is None:
+        monkeypatch.setitem(sys.modules, "winreg", None)
+        winreg = None
+    else:
+        winreg = _fake_winreg(entries, open_error=open_error)
+        monkeypatch.setitem(sys.modules, "winreg", winreg)
     detector = EnvironmentDetector()
 
     detected = detector.detect()
 
     assert detected == "oth"
     assert detector._gcp_bios is False
+    if winreg is not None:
+        assert winreg.opened_keys == expected_keys
     assert fake_host.dmi_reads == []
     assert fake_host.opened_sessions == 0
 
