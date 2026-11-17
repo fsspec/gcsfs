@@ -2828,6 +2828,12 @@ def test_get_headers_single_lookup_and_caller_precedence(monkeypatch):
         results.append((caller, snapshot, headers, delta))
 
     assert HTTP_HEADER_KEY == "X-Goog-Storage-Gcsfs-Features"
+    calls_before_empty = collect_spy.call_count
+    assert tracker.get_http_telemetry(include_tokens=False, include_features=False) == (
+        [],
+        None,
+    )
+    assert collect_spy.call_count == calls_before_empty
     for caller, snapshot, headers, delta in results:
         ua_keys = [k for k in (caller or {}) if k.lower() == "user-agent"]
         feat_keys = [k for k in (caller or {}) if k.lower() == feat_hdr]
@@ -2865,9 +2871,14 @@ def test_http_user_agent_excludes_method_and_method_params(monkeypatch):
         ALL_DIMENSIONS,
         {Dimension.FRAMEWORK: "pandas", Dimension.METHOD: "cat", "app": "myapp"},
     )
+    import gcsfs.core as core_mod
+
     token = set_telemetry_context(ctx)
     try:
         headers = fs._get_headers(None)
+        direct_ua = core_mod._build_user_agent(
+            cache_type="none", cache_source="explicit"
+        )
     finally:
         reset_telemetry_context(token)
 
@@ -2878,6 +2889,8 @@ def test_http_user_agent_excludes_method_and_method_params(monkeypatch):
     assert all_key_tokens == ["fw/pandas", "m/cat", "app/myapp"]
     assert "fw/pandas" in ua and "env/gke" in ua
     assert "m/" not in ua and "mp/" not in ua
+    assert "fw/pandas" in direct_ua and "env/gke" in direct_ua
+    assert "m/" not in direct_ua and "mp/" not in direct_ua
     assert (decoded.method, decoded.framework, decoded.environment) == (
         GcsfsMethod.GCSFS_METHOD_CAT,
         GcsfsFramework.GCSFS_FRAMEWORK_PANDAS,

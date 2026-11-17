@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from gcsfs.telemetry.context import (
     ALL_DIMENSIONS,
+    USER_AGENT_DIMENSIONS,
     Dimension,
     get_telemetry_context,
     sanitize_token,
@@ -150,15 +151,42 @@ class UsageMetricsTracker:
 
         return None
 
-    def encode_features(self) -> Optional[str]:
+    def encode_features(
+        self, tokens_map: Optional[Mapping[str, str]] = None
+    ) -> Optional[str]:
         """Return web-safe base64 encoded GcsfsFeatures for active telemetry state."""
-        tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        if not self.is_enabled():
+            return None
+
+        if tokens_map is None:
+            tokens_map = self.collect_tokens_map(call_scoped_only=False)
         if not any(tokens_map.values()):
             return None
 
         from gcsfs.telemetry import schema as telemetry_schema
 
         return telemetry_schema.encode_features(tokens_map)
+
+    def get_http_telemetry(
+        self,
+        *,
+        include_tokens: bool = True,
+        include_features: bool = True,
+    ) -> tuple[List[str], Optional[str]]:
+        """Collect HTTP User-Agent tokens and encoded GcsfsFeatures in one lookup."""
+        if not (include_tokens or include_features) or not self.is_enabled():
+            return [], None
+
+        tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        ua_tokens = (
+            self.get_tokens(dimensions=USER_AGENT_DIMENSIONS, tokens_map=tokens_map)
+            if include_tokens
+            else []
+        )
+        encoded = (
+            self.encode_features(tokens_map=tokens_map) if include_features else None
+        )
+        return ua_tokens, encoded
 
 
 # Default singleton instance pre-configured with standard detectors

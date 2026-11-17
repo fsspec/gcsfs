@@ -286,7 +286,7 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
-def _build_user_agent(cache_type=None, cache_source=None, tokens_map=None):
+def _build_user_agent(cache_type=None, cache_source=None, telemetry_tokens=None):
     """Build the standard User-Agent header string for HTTP requests."""
     tokens = [f"python-gcsfs/{version}"]
 
@@ -294,10 +294,10 @@ def _build_user_agent(cache_type=None, cache_source=None, tokens_map=None):
     if cache_val:
         tokens.append(cache_val)
 
-    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens(
-        dimensions=USER_AGENT_DIMENSIONS,
-        tokens_map=tokens_map,
-    )
+    if telemetry_tokens is None:
+        telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens(
+            dimensions=USER_AGENT_DIMENSIONS
+        )
     if telemetry_tokens:
         tokens.extend(telemetry_tokens)
 
@@ -644,24 +644,22 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         out = dict(headers) if headers is not None else {}
         need_ua = not any(k.lower() == "user-agent" for k in out)
         features_key_lower = HTTP_HEADER_KEY.lower()
-        has_caller_features = any(k.lower() == features_key_lower for k in out)
-        if need_ua or not has_caller_features:
-            tokens_map = telemetry_manager.default_usage_tracker.collect_tokens_map(
-                call_scoped_only=False
+        need_features = not any(k.lower() == features_key_lower for k in out)
+        if need_ua or need_features:
+            ua_tokens, encoded = (
+                telemetry_manager.default_usage_tracker.get_http_telemetry(
+                    include_tokens=need_ua,
+                    include_features=need_features,
+                )
             )
             if need_ua:
                 out["User-Agent"] = _build_user_agent(
                     cache_type=cache_type,
                     cache_source=cache_source,
-                    tokens_map=tokens_map,
+                    telemetry_tokens=ua_tokens,
                 )
-            if not has_caller_features and any(tokens_map.values()):
-                # Lazy import avoids top-level proto descriptor registration issues on module reload.
-                from .telemetry import schema as telemetry_schema
-
-                encoded = telemetry_schema.encode_features(tokens_map)
-                if encoded:
-                    out[HTTP_HEADER_KEY] = encoded
+            if encoded:
+                out[HTTP_HEADER_KEY] = encoded
         self.credentials.apply(out)
         return out
 
