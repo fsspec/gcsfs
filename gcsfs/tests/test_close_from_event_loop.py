@@ -40,9 +40,10 @@ def fake_fs(io_loop):
     return fs
 
 
-def make_read_file(fake_fs, pool_close):
-    pool = mock.Mock(persisted_size=1000, details=None, close=pool_close)
-    fake_fs._mrd_pool_cache.get = mock.AsyncMock(return_value=pool)
+def make_read_file(fake_fs, mrd_close):
+    mrd = mock.Mock(persisted_size=1000, details=None, close=mrd_close)
+    fake_fs._mrd_cache = mock.Mock(get=mock.AsyncMock(return_value=mrd))
+    fake_fs._mrd_pool_cache = fake_fs._mrd_cache
     return ZonalFile(gcsfs=fake_fs, path="gs://b/test-key", mode="rb")
 
 
@@ -121,10 +122,12 @@ def test_deferred_closes_share_a_bounded_thread_pool(fake_fs, io_loop):
 
     files = []
     for _ in range(n_files):
-        pool = mock.Mock(persisted_size=1000, details=None, close=pool_close)
-        fake_fs._mrd_pool_cache.get = mock.AsyncMock(return_value=pool)
+        mrd = mock.Mock(persisted_size=1000, details=None, close=pool_close)
+        fake_fs._mrd_cache = mock.Mock(get=mock.AsyncMock(return_value=mrd))
+        fake_fs._mrd_pool_cache = fake_fs._mrd_cache
         zf = RecordingZonalFile(gcsfs=fake_fs, path="gs://b/test-key", mode="rb")
-        zf.mrd_pool = pool
+        zf.mrd = mrd
+        zf.mrd_pool = mrd
         files.append(zf)
 
     async def close_all():
