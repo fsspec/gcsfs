@@ -256,18 +256,15 @@ def _chunks(lst, n):
 
 def _coalesce_generation(*args):
     """Helper to coalesce a list of object generations down to one."""
-    generations = set(args)
-    if None in generations:
-        generations.remove(None)
-    if len(generations) > 1:
+    defined = [g for g in args if g is not None]
+    if not defined:
+        return None
+    if len({str(g) for g in defined}) > 1:
         raise ValueError(
             "Cannot coalesce generations where more than one are defined,"
-            f" {generations}"
+            f" {set(defined)}"
         )
-    elif len(generations) == 0:
-        return None
-    else:
-        return generations.pop()
+    return defined[0]
 
 
 def _is_directory_marker(entry):
@@ -749,23 +746,21 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     make_bucket_requester_pays = asyn.sync_wrapper(_make_bucket_requester_pays)
 
-    async def _get_object(self, path):
+    async def _get_object(self, path, generation=None):
         """Return object information at the given path."""
-        bucket, key, generation = self.split_path(path)
+        bucket, key, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
 
         # Check if parent dir is in listing cache
-        listing = self._ls_from_cache(path)
-        if listing:
-            name = "/".join((bucket, key))
-            for file_details in listing:
-                if (
-                    file_details["type"] == "file"
-                    and file_details["name"] == name
-                    and (not generation or file_details.get("generation") == generation)
-                ):
-                    return file_details
-            else:
-                raise FileNotFoundError(path)
+        if generation is None:
+            listing = self._ls_from_cache(path)
+            if listing:
+                name = "/".join((bucket, key))
+                for file_details in listing:
+                    if file_details["type"] == "file" and file_details["name"] == name:
+                        return file_details
+                else:
+                    raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -793,7 +788,11 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             )
             for item in resp.get("items", []):
                 if item["name"] == key and (
-                    not generation or item.get("generation") == generation
+                    not generation
+                    or (
+                        item.get("generation") is not None
+                        and str(item.get("generation")) == str(generation)
+                    )
                 ):
                     res = item
                     break
@@ -1255,18 +1254,29 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 else:
                     raise FileNotFoundError(path)
             return out
-        # Check directory cache for parent dir
-        parent_path = self._parent(path)
-        parent_cache = self._ls_from_cache(parent_path)
         bucket, key, path_generation = self.split_path(path)
         generation = _coalesce_generation(generation, path_generation)
+        # Check directory cache for parent dir
+        parent_path = self._parent(path)
+        try:
+            parent_cache = self._ls_from_cache(parent_path)
+        except FileNotFoundError:
+            if generation is None:
+                raise
+            parent_cache = None
         if parent_cache:
             name = "/".join((bucket, key))
             for o in parent_cache:
                 if o["name"].rstrip("/") == name and (
-                    not generation or o.get("generation") == generation
+                    generation is None
+                    or (
+                        o.get("generation") is not None
+                        and str(o.get("generation")) == str(generation)
+                    )
                 ):
                     return o
+        if generation is not None:
+            return await self._get_object(path, generation=generation)
         if self._ls_from_cache(path):
             # this is a directory
             return {
@@ -1395,7 +1405,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if start is None:
             start = 0
         if end is None:
-            end = (await self._info(path))["size"]
+            info_kwargs = (
+                {"generation": kwargs["generation"]}
+                if kwargs.get("generation") is not None
+                else {}
+            )
+            end = (await self._info(path, **info_kwargs))["size"]
         if start >= end:
             return b""
 

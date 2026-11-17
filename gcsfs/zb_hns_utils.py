@@ -695,7 +695,8 @@ class MRDPool:
         # operations (_create_mrd) will emit this initial cache_source telemetry,
         # even if triggered by a request with a different cache_source.
         self.cache_source = cache_source
-        self._key = (bucket_name, object_name, generation, cache_type)
+        cache_gen = str(generation) if generation is not None else None
+        self._key = (bucket_name, object_name, cache_gen, cache_type)
         self.pool_size = pool_size
         self._free_mrds = asyncio.Queue(maxsize=pool_size)
         self._active_count = 0
@@ -1073,7 +1074,8 @@ class MRDPoolCache:
         info = await fs._info(f"{bucket_name}/{object_name}", generation=generation)
         if generation is None:
             generation = info.get("generation")
-        key = (bucket_name, object_name, generation, cache_type)
+        cache_gen = str(generation) if generation is not None else None
+        key = (bucket_name, object_name, cache_gen, cache_type)
         finalized = info.get("timeFinalized") is not None
 
         self._incref(key)

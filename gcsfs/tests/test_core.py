@@ -5056,3 +5056,101 @@ def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
     assert f"{bucket}/a/b/c" in dirs
     # Cache should remain empty because update_cache=False and prefix is used
     assert len(gcs.dircache) == 0
+
+
+def test_coalesce_generation_variants():
+    from gcsfs.core import _coalesce_generation
+
+    assert _coalesce_generation(None, None) is None
+    assert _coalesce_generation("123", None) == "123"
+    assert _coalesce_generation(None, "123") == "123"
+    assert _coalesce_generation(0, None) == 0
+    assert isinstance(_coalesce_generation(0, None), int)
+    assert _coalesce_generation("123", "123") == "123"
+    assert _coalesce_generation(123, "123") == 123
+    with pytest.raises(ValueError, match="Cannot coalesce generations"):
+        _coalesce_generation("123", "456")
+    with pytest.raises(ValueError, match="Cannot coalesce generations"):
+        _coalesce_generation(123, "456")
+
+
+@pytest.mark.asyncio
+async def test_info_with_generation_handles_cache_and_404_cleanly():
+    fs = GCSFileSystem(token="anon", version_aware=True, skip_instance_cache=True)
+    path = "bucket/dir/file.txt"
+
+    # 1. Cache hit when cached generation matches (str or int).
+    fs.dircache["bucket/dir"] = [
+        {"name": path, "size": 5, "generation": "111", "type": "file"}
+    ]
+    with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        assert (await fs._info(path, generation="111"))["generation"] == "111"
+        assert (await fs._info(path, generation=111))["generation"] == "111"
+        mock_call.assert_not_awaited()
+
+    # 2. Stale dircache holding newer generation 222 does not hijack generation="111"
+    #    or misclassify the file as a directory.
+    fs.dircache["bucket/dir"] = [
+        {"name": path, "size": 20, "generation": "222", "type": "file"}
+    ]
+    with mock.patch.object(
+        fs,
+        "_call",
+        new=mock.AsyncMock(
+            return_value={"name": "dir/file.txt", "size": "5", "generation": "111"}
+        ),
+    ) as mock_call:
+        info = await fs._info(path, generation="111")
+        assert info["type"] == "file"
+        assert info["size"] == 5
+        assert info["generation"] == "111"
+        mock_call.assert_awaited_once_with(
+            "GET",
+            "b/{}/o/{}",
+            "bucket",
+            "dir/file.txt",
+            json_out=True,
+            generation="111",
+        )
+
+    # 3. Missing pinned generation raises FileNotFoundError without falling back
+    #    to _get_directory_info (which on flat buckets would return the live object).
+    fs.dircache.clear()
+    with (
+        mock.patch.object(
+            fs, "_call", new=mock.AsyncMock(side_effect=FileNotFoundError(path))
+        ),
+        mock.patch.object(
+            fs, "_get_directory_info", new_callable=mock.AsyncMock
+        ) as mock_dir_info,
+    ):
+        with pytest.raises(FileNotFoundError):
+            await fs._info(path, generation="111")
+        mock_dir_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cat_file_concurrent_forwards_generation_to_info():
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 4
+    path = "bucket/file.bin"
+
+    with (
+        mock.patch.object(
+            fs, "_info", new=mock.AsyncMock(return_value={"size": 10})
+        ) as mock_info,
+        mock.patch.object(
+            fs,
+            "_cat_file_sequential",
+            new=mock.AsyncMock(side_effect=[b"01234", b"56789"]),
+        ) as mock_seq,
+    ):
+        out = await fs._cat_file_concurrent(
+            path, start=0, end=None, concurrency=2, generation="111"
+        )
+        assert out == b"0123456789"
+        mock_info.assert_awaited_once_with(path, generation="111")
+        assert [c.kwargs["generation"] for c in mock_seq.await_args_list] == [
+            "111",
+            "111",
+        ]

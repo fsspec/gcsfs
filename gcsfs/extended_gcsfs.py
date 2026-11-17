@@ -36,6 +36,7 @@ from gcsfs.concurrency import split_range
 from gcsfs.core import (
     GCSFile,
     GCSFileSystem,
+    _coalesce_generation,
     _get_prefetcher_and_cache_config,
     _location,
     _resolve_generation_match,
@@ -559,7 +560,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     # Replacement method for _process_limits to support new params (offset and length) for MRD.
     async def _process_limits_to_offset_and_length(
-        self, path, start, end, file_size=None
+        self, path, start, end, file_size=None, generation=None
     ):
         """
         Calculates the read offset and length from start and end parameters.
@@ -569,6 +570,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             start (int | None): The starting byte position.
             end (int | None): The ending byte position.
             file_size (int | None): The total size of the file. If None, it will be fetched via _info().
+            generation (int | str | None): Optional object generation for size lookup fallback.
 
         Returns:
             tuple: A tuple containing (offset, length).
@@ -578,7 +580,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         async def _get_size():
             nonlocal size
             if size is None:
-                size = (await self._info(path))["size"]
+                info_kwargs = (
+                    {"generation": generation} if generation is not None else {}
+                )
+                size = (await self._info(path, **info_kwargs))["size"]
             return size
 
         if start is None:
@@ -740,20 +745,34 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         Delegates concurrent fetching of individual chunks directly to `_cat_file`.
         """
-        file_size = size or await _get_mrd_size(mrd)
+        bucket, object_name, path_generation = self.split_path(path)
+        generation = _coalesce_generation(kwargs.get("generation"), path_generation)
+
+        file_size = size if size is not None else await _get_mrd_size(mrd)
         if file_size is None:
             logger.warning(
                 f"AsyncMultiRangeDownloader (MRD) for {path} has no 'persisted_size'. "
                 "Falling back to _info() to get the file size."
             )
-            file_size = (await self._info(path))["size"]
+            effective_gen = (
+                generation
+                if generation is not None
+                else (
+                    getattr(mrd, "generation", None)
+                    if isinstance(mrd, MRDPool)
+                    else None
+                )
+            )
+            info_kwargs = (
+                {"generation": effective_gen} if effective_gen is not None else {}
+            )
+            file_size = (await self._info(path, **info_kwargs))["size"]
 
         start_offset = start if start is not None else 0
         if start_offset >= file_size or start_offset + sum(chunk_lengths) > file_size:
             raise RuntimeError("Request not satisfiable.")
 
         pool_created_here = False
-        bucket, object_name, generation = self.split_path(path)
 
         # Only resolve if the config wasn't already passed down (e.g., from ZonalFile)
         cache_type, cache_source = self._resolve_cache_config(kwargs)
@@ -906,19 +925,21 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         concurrency = kwargs.pop("concurrency", 1)
         pool_created_here = False
 
+        bucket, object_name, path_generation = self.split_path(path)
+        if mrd is None and not await self._uses_grpc_data_path(bucket):
+            # Fall back to default implementation if not a Zonal or RCU bucket
+            return await super()._cat_file(
+                path, start=start, end=end, concurrency=concurrency, **kwargs
+            )
+
+        generation = _coalesce_generation(kwargs.get("generation"), path_generation)
+
         # A new MRDPool is required when read is done directly by the
         # GCSFilesystem class without creating a GCSFile object first.
         # Only resolve if the config wasn't already passed down (e.g., from ZonalFile)
         cache_type, cache_source = self._resolve_cache_config(kwargs)
 
         if mrd is None:
-            bucket, object_name, generation = self.split_path(path)
-            if not await self._uses_grpc_data_path(bucket):
-                # Fall back to default implementation if not a Zonal or RCU bucket
-                return await super()._cat_file(
-                    path, start=start, end=end, concurrency=concurrency, **kwargs
-                )
-
             # Instantiate an MRDPool locally for this call
             mrd = await self._mrd_pool_cache.get(
                 bucket,
@@ -931,6 +952,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             pool_created_here = True
 
         try:
+            effective_gen = (
+                generation
+                if generation is not None
+                else (
+                    getattr(mrd, "generation", None)
+                    if isinstance(mrd, MRDPool)
+                    else None
+                )
+            )
+            gen_kwargs = (
+                {"generation": effective_gen} if effective_gen is not None else {}
+            )
             file_size = await _get_mrd_size(mrd)
             if file_size is None:
                 logger.warning(
@@ -938,10 +971,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     "Falling back to _info() to get the file size. "
                     "This may result in incorrect behavior for unfinalized objects."
                 )
-                file_size = (await self._info(path))["size"]
+                file_size = (await self._info(path, **gen_kwargs))["size"]
 
             offset, length = await self._process_limits_to_offset_and_length(
-                path, start, end, file_size
+                path, start, end, file_size, **gen_kwargs
             )
 
             if length == 0:
@@ -1076,7 +1109,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         coroutine writes its assigned ranges into ``results``.
         """
         cache_type, cache_source = self._resolve_cache_config(kwargs)
-        bucket, object_name, generation = self.split_path(path)
+        bucket, object_name, path_generation = self.split_path(path)
         init_lock = asyncio.Lock()
         initialized = False
         pool = None
@@ -1091,6 +1124,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if initialized:
                     return
                 try:
+                    generation = _coalesce_generation(
+                        kwargs.get("generation"), path_generation
+                    )
+                    gen_kwargs = (
+                        {"generation": generation} if generation is not None else {}
+                    )
                     pool = await self._mrd_pool_cache.get(
                         bucket,
                         object_name,
@@ -1106,14 +1145,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                             f"AsyncMultiRangeDownloader (MRD) for {path} has no "
                             "'persisted_size'. Falling back to _info() to get the file size."
                         )
-                        file_size = (await self._info(path))["size"]
+                        file_size = (await self._info(path, **gen_kwargs))["size"]
 
                     # Empty ranges keep b"" and are not sent to the server.
                     requests = []
                     for i in idxs:
                         offset, length = (
                             await self._process_limits_to_offset_and_length(
-                                path, starts[i], ends[i], file_size
+                                path, starts[i], ends[i], file_size, **gen_kwargs
                             )
                         )
                         if length > 0:
@@ -2628,7 +2667,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return
 
         # Coalesce generation: URL parsed vs kwargs
-        generation = path_generation or kwargs.get("generation")
+        generation = _coalesce_generation(kwargs.get("generation"), path_generation)
         callback = callback or NoOpCallback()
 
         cache_type, cache_source = self._resolve_cache_config(kwargs)
@@ -2715,7 +2754,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 **kwargs,
             )
 
-        generation = path_generation or kwargs.get("generation")
+        generation = _coalesce_generation(kwargs.get("generation"), path_generation)
 
         cache_type, cache_source = self._resolve_cache_config(kwargs)
 
