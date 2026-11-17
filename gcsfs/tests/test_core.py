@@ -769,6 +769,10 @@ async def test_delete_files_bounds_concurrency(gcs, concurrency):
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
+        # Yield to the event loop so the other scheduled batch requests start
+        # before this one finishes. Without an await, each mock would complete
+        # immediately and at most one would ever be in flight. sleep(0) yields
+        # without adding wall-clock delay.
         await asyncio.sleep(0)
         in_flight -= 1
         return list(batch)
