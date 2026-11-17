@@ -1553,7 +1553,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     async def _merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
         bucket, key, generation = self.split_path(path)
-        source = [{"name": self.split_path(p)[1]} for p in paths]
+        if generation:
+            raise ValueError("Cannot write to specific object generation")
+        source = []
+        for p in paths:
+            _, src_key, src_generation = self.split_path(p)
+            entry = {"name": src_key}
+            if src_generation:
+                entry["generation"] = int(src_generation)
+            source.append(entry)
         await self._call(
             "POST",
             "b/{}/o/{}/compose",

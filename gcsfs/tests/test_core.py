@@ -2272,6 +2272,44 @@ def test_merge(gcs):
     assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
 
 
+def test_merge_destination_generation_raises(gcs):
+    gcs_versioned = GCSFileSystem(
+        project=gcs.project, session=gcs.session, version_aware=True
+    )
+    with pytest.raises(ValueError, match="Cannot write to specific object generation"):
+        gcs_versioned.merge(TEST_BUCKET + "/joined#12345", [a, b])
+
+
+def test_merge_source_generations_forwarded(gcs):
+    gcs_versioned = GCSFileSystem(
+        project=gcs.project, session=gcs.session, version_aware=True
+    )
+    calls = []
+
+    async def fake_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {}
+
+    with mock.patch.object(gcs_versioned, "_call", side_effect=fake_call):
+        gcs_versioned.merge(
+            TEST_BUCKET + "/joined",
+            [
+                f"{TEST_BUCKET}/src1#111",
+                f"{TEST_BUCKET}/src2?generation=222",
+                f"{TEST_BUCKET}/src3",
+            ],
+        )
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("POST", "b/{}/o/{}/compose", TEST_BUCKET, "joined")
+    assert kwargs["json"]["sourceObjects"] == [
+        {"name": "src1", "generation": 111},
+        {"name": "src2", "generation": 222},
+        {"name": "src3"},
+    ]
+
+
 def test_bigger_than_block_read(gcs):
     with gcs.open(TEST_BUCKET + "/2014-01-01.csv", "rb", block_size=3) as f:
         out = []
