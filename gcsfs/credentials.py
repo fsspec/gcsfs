@@ -60,6 +60,11 @@ def _get_creds_from_raw_token(token):
                 raise ValueError("Provided token is either not valid, or expired.")
 
             response.raise_for_status()
+            try:
+                data = response.json()
+                expiry = datetime.utcfromtimestamp(float(data["exp"]))
+            except Exception:
+                raise ValueError("Invalid tokeninfo response format.") from None
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else "unknown"
             raise ValueError(
@@ -67,7 +72,6 @@ def _get_creds_from_raw_token(token):
             ) from None
         except requests.exceptions.RequestException:
             raise ValueError("Network error while validating token expiry.") from None
-        expiry = datetime.utcfromtimestamp(float(response.json()["exp"]))
 
         time_remaining = max(
             0,

@@ -269,3 +269,38 @@ def test_raw_token_credentials_network_error_masks_token():
         assert "Network error" in error_msg
         assert sensitive_token not in error_msg
 
+
+def test_raw_token_credentials_malformed_json_masks_token():
+    """Test that malformed JSON from captive portal / proxy raises clean ValueError without leaking token."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+    sensitive_token = "secret-token-malformed-json"
+
+    with patch("gcsfs.credentials.requests.post", return_value=mock_response):
+        with pytest.raises(ValueError) as exc_info:
+            GoogleCredentials(
+                project="my-project", token=sensitive_token, access="read_only"
+            )
+        error_msg = str(exc_info.value)
+        assert error_msg == "Invalid tokeninfo response format."
+        assert sensitive_token not in error_msg
+
+
+def test_raw_token_credentials_missing_exp_masks_token():
+    """Test that valid JSON missing 'exp' field raises clean ValueError without leaking token."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"error": "unrecognized_response"}
+    sensitive_token = "secret-token-missing-exp"
+
+    with patch("gcsfs.credentials.requests.post", return_value=mock_response):
+        with pytest.raises(ValueError) as exc_info:
+            GoogleCredentials(
+                project="my-project", token=sensitive_token, access="read_only"
+            )
+        error_msg = str(exc_info.value)
+        assert error_msg == "Invalid tokeninfo response format."
+        assert sensitive_token not in error_msg
+
+
