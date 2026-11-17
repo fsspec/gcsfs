@@ -1,4 +1,81 @@
-"""Method wrappers and cross-thread context propagation helpers for telemetry."""
+"""
+Method wrappers and cross-thread context propagation helpers for telemetry.
+
+These wrappers capture and propagate call-scoped telemetry tokens across sync/async
+and thread boundaries via Python `contextvars` (`collect_tokens_map(call_scoped_only=True)`).
+Process-wide detectors (`call_scoped = False`) are skipped when capturing per-call `ContextVar`
+snapshots (so background probes are never frozen mid-flight) and are read per request via
+`get_tokens()` (`call_scoped_only=False`) unless a value is already set in the context.
+
+Overview of the 6 Execution Flows
+---------------------------------
+1. Synchronous FileSystem Coroutine Call (e.g. `fs.ls()`, `fs.cat_file()`):
+   [Caller Thread]
+     fs.ls() -> _gcs_sync_wrapper
+       -> _run_sync() -> _telemetry_context(): captures call-scoped tokens ONCE & sets ContextVar
+       -> fsspec.asyn.sync(): copies ContextVar to the loop thread (fsspecIO by default)
+   [Event Loop Thread]
+     fs._ls() -> _gcs_async_wrapper (sees ContextVar already set -> fast-path O(1))
+       -> _get_headers(): reads active telemetry tokens for outgoing request headers
+
+2. Synchronous FileSystem Generator (e.g. `for x in fs.walk(...)`):
+   [Caller Thread]
+     fs.walk() -> _gcs_sync_wrapper (gen_wrapper)
+       -> collect_tokens_map(call_scoped_only=True): captures call-scoped tokens ONCE
+          when iteration starts
+       -> per yielded step: _run_sync() advances the async generator on the loop thread
+          with those captured tokens, resetting ContextVar before yielding so it never
+          leaks into the caller's `for` loop body
+       -> finally: _run_sync() closes the async generator (`aclose`) with the same tokens
+
+3. Native Asynchronous FileSystem Coroutine Call (e.g. `await fs._cat(...)`):
+   [Event Loop Thread]
+     await fs._cat() -> _gcs_async_wrapper
+       -> _telemetry_context(): captures call-scoped tokens ONCE & sets ContextVar
+       -> inner `await fs._cat_file()` sees ContextVar already set -> fast-path O(1)
+       -> _get_headers(): reads active telemetry tokens for outgoing request headers
+
+4. Native Asynchronous FileSystem Generator (e.g. `async for x in fs._walk(...)`):
+   [Event Loop Thread]
+     async for x in fs._walk() -> _gcs_async_wrapper (gen_wrapper)
+       -> collect_tokens_map(call_scoped_only=True): captures call-scoped tokens ONCE
+          when iteration starts
+       -> per yielded step: scopes `_telemetry_context()` around each step (`__anext__`)
+          and resets before `yield` so ContextVar never leaks into the caller's `async for` body
+       -> finally: closes the underlying async generator (`aclose`)
+
+5. Plain Synchronous Entry Points (e.g. `ExtendedGcsFileSystem._open`):
+   Unlike Flow #1 (which bridges a single `async def` coroutine via `fsspec.asyn.sync()`),
+   this wraps a plain `def` function that stays on the caller thread and orchestrates
+   multiple downstream steps or raw `fsspec.asyn.sync()` calls:
+   [Caller Thread]
+     fs.open() -> ExtendedGcsFileSystem._open() (@with_telemetry_context)
+       -> _telemetry_context(): captures call-scoped tokens ONCE on the caller thread
+       -> all inner steps (wrapped sync calls, raw `asyn.sync()` calls, and
+          `GCSFile.__init__`) reuse that active ContextVar in O(1)
+
+6. File Object Lifecycle (e.g. `with fs.open(...) as f: f.read()`):
+   - Open (`GCSFile.__init__`): caches the caller's attribution ONCE on the file instance
+     (storing `""` when undetected so negative lookups never re-run detectors).
+   - File Operations (`_file_telemetry_wrapper` via `wrap_file_methods`):
+     restores the cached attribution into ContextVar across wrapped file methods and
+     properties (chunk fetches, upload hooks, `details`, background prefetcher
+     `_async_fetch_range`, and `_close_impl` on the `_defer_close` worker thread),
+     even when the original caller context is no longer present.
+
+Choosing a Wrapper (Maintainer Guide)
+-------------------------------------
+- `mirror_gcs_methods(cls)` + `bind_gcs_sync_methods(self)`: Auto-wraps `_foo` coroutines
+  and async generators matching `AbstractFileSystem`/`AsyncFileSystem` (or an existing
+  `cls.foo` attribute, skipping internal helpers like `_request`) and binds `foo` sync
+  mirrors for the public methods.
+- `_gcs_sync_wrapper(fn)`: Explicitly wraps async helpers whose sync bridge name does not
+  follow the `_foo` -> `foo` convention (e.g. `_sync_lookup_bucket_layout`).
+- `@with_telemetry_context`: Decorates plain synchronous entry points not backed by a
+  single coroutine (e.g. `ExtendedGcsFileSystem._open`).
+- `wrap_file_methods(cls)`: Wraps non-dunder instance methods and properties defined
+  directly in `cls.__dict__` on file classes (`GCSFile`, `ZonalFile`).
+"""
 
 from __future__ import annotations
 
@@ -37,9 +114,10 @@ def _telemetry_context(tokens_map: Optional[Dict[str, str]] = None):
 
 def with_telemetry_context(func: Callable) -> Callable:
     """
-    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap (e.g. `_open`).
+    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap
+    (e.g. `ExtendedGcsFileSystem._open`).
 
-    Detects the caller framework once on the caller thread and scopes it for the whole call, so
+    Captures call-scoped telemetry once on the caller thread and scopes it for the whole call, so
     any requests issued underneath (including via `asyn.sync` to the loop thread) carry it.
     """
 
@@ -315,7 +393,7 @@ def _file_telemetry_wrapper(func: Callable) -> Callable:
 
 
 def wrap_file_methods(cls: Any) -> None:
-    """Wrap all callable methods and properties on a File class (e.g. `GCSFile` or `ZonalFile`)."""
+    """Wrap non-dunder instance methods and properties defined directly on a File class."""
     for name, attr in list(cls.__dict__.items()):
         if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
             continue
