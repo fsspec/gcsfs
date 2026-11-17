@@ -47,9 +47,7 @@ def run_checkpoint_case(
 
         ctx = mp.get_context("spawn")
         p = ctx.Process(target=driver.setup, args=(prefix, params))
-        # The setup process (and its ranks and actors) picks its filesystem from the env.
-        with rcu.http_staging_env(params.bucket_type):
-            p.start()
+        p.start()
         p.join()
         if p.exitcode != 0:
             raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
@@ -68,7 +66,7 @@ def run_checkpoint_case(
         if getattr(result, "verify", None) is not None:
             result.verify()
         if "write" in params.scenario:
-            # RCU saves always write RAPID objects (only *_rcu_z runs them).
+            # Saves run on *_rcu_z only, where run.py turns on RAPID writes.
             rcu.assert_storage_class(prefix, params.bucket_type)
 
         # Measure actual GCS files

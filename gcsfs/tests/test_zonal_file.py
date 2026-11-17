@@ -6,6 +6,7 @@ behavior belongs in test_core.py; HNS-specific behavior belongs in
 test_hns_unit.py or test_hns.py.
 """
 
+import array
 import asyncio
 import logging
 import os
@@ -45,7 +46,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout
     ):
         """The zonal pipe_file path routes through the shared cache updater."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -88,7 +91,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout
     ):
         """The zonal put_file path routes through the shared cache updater."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -147,7 +152,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, payload, expected_chunks, expected_updates
     ):
         """_put_file sets the callback size and updates progress after each chunk."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -197,7 +204,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, finalize_on_close
     ):
         """A failed pipe_file closes the writer without finalizing the partial object and still updates the dircache."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         path = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -240,7 +249,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, finalize_on_close
     ):
         """A failed put_file closes the writer without finalizing the partial object and still updates the dircache."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
         rpath = f"{TEST_ZONAL_BUCKET}/dir/file.txt"
 
@@ -286,7 +297,9 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
         self, bucket_layout, tmp_path
     ):
         """A missing local file fails before the writer replaces the object."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
         fs._grpc_client = mock.MagicMock()
 
         with (
@@ -306,6 +319,41 @@ class TestZonalGcsFileSystemWriteFileCacheUpdate:
                 await fs._put_file(
                     str(tmp_path / "missing"), f"{TEST_ZONAL_BUCKET}/dir/file.txt"
                 )
+
+        mock_init_aaow.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bucket_layout", RAPID_WRITE_LAYOUTS)
+    @pytest.mark.parametrize(
+        "data",
+        ["text", memoryview(bytes(8))[::2]],
+        ids=["str", "non_contiguous"],
+    )
+    async def test_pipe_file_rejected_data_does_not_open_writer(
+        self, bucket_layout, data
+    ):
+        """Data that is not bytes-like fails before the writer replaces the
+        object."""
+        fs = ExtendedGcsFileSystem(
+            token="anon", skip_instance_cache=True, rcu_rapid_write=True
+        )
+        fs._grpc_client = mock.MagicMock()
+
+        with (
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=bucket_layout,
+            ),
+            mock.patch.object(fs, "_get_grpc_client", new_callable=mock.AsyncMock),
+            mock.patch(
+                "gcsfs.extended_gcsfs.zb_hns_utils.init_aaow",
+                new_callable=mock.AsyncMock,
+            ) as mock_init_aaow,
+        ):
+            with pytest.raises(TypeError):
+                await fs._pipe_file(f"{TEST_ZONAL_BUCKET}/dir/file.txt", data)
 
         mock_init_aaow.assert_not_awaited()
 
@@ -410,6 +458,117 @@ def test_zonal_file_write_success(extended_gcsfs, zonal_write_mocks, file_path):
         )
     else:
         assert extended_gcsfs.cat(file_path) == data1 + data2
+
+
+def _numpy():
+    return pytest.importorskip("numpy")
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+@pytest.mark.parametrize(
+    "make_data",
+    [
+        lambda: bytearray(b"bytearray"),
+        lambda: memoryview(b"memoryview"),
+        lambda: array.array("i", [1, 2, 3]),
+        lambda: memoryview(array.array("d", [1.5, 2.5])),
+        lambda: _numpy().arange(5, dtype="int32"),
+        # bool() of this array is False, so a writer given it as is would
+        # silently drop its 4 bytes.
+        lambda: _numpy().zeros(1, dtype="int32"),
+        lambda: _numpy().arange(6, dtype="float32").reshape(2, 3),
+        lambda: _numpy().zeros((0, 3), dtype="float32"),
+    ],
+    ids=[
+        "bytearray",
+        "memoryview",
+        "typed_array",
+        "typed_memoryview",
+        "numpy",
+        "numpy_single_zero",
+        "numpy_2d",
+        "numpy_empty_2d",
+    ],
+)
+def test_zonal_file_write_accepts_any_bytes_like_object(
+    extended_gcsfs, zonal_write_mocks, file_path, make_data
+):
+    """write() takes any bytes-like object, as a binary file does, and counts
+    bytes: len() of a typed buffer counts its elements instead."""
+    data = make_data()
+    payload = bytes(memoryview(data))
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+        assert f.write(data) == len(payload)
+        assert f.loc == len(payload)
+
+    if zonal_write_mocks:
+        # The writer truth-tests and len()s what it is given, so it must get
+        # the data as flat bytes.
+        (appended,) = [
+            c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list
+        ]
+        assert bool(appended) is bool(payload)
+        assert len(appended) == len(payload)
+        assert bytes(appended) == payload
+    else:
+        assert extended_gcsfs.cat(file_path) == payload
+
+
+def test_zonal_file_write_passes_bytes_through(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """bytes reach the writer unwrapped: append() puts its argument in an
+    io.BytesIO, which shares bytes but copies any other buffer."""
+    if not zonal_write_mocks:
+        pytest.skip("Inspects the arguments of the mocked writer.")
+    data = b"x" * 100
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+        f.write(data)
+
+    (appended,) = [c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list]
+    assert appended is data
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_pipe_file_passes_bytes_through(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """bytes that fit in one chunk reach the writer unwrapped, as in
+    ZonalFile.write; larger bytes are appended in chunksize slices."""
+    if not zonal_write_mocks:
+        pytest.skip("Inspects the arguments of the mocked writer.")
+    data = b"x" * 100
+    extended_gcsfs.pipe_file(file_path, data, chunksize=100, finalize_on_close=True)
+
+    (appended,) = [c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list]
+    assert appended is data
+
+    zonal_write_mocks["aaow"].append.reset_mock()
+    data = bytes(range(100))
+    extended_gcsfs.pipe_file(file_path, data, chunksize=40, finalize_on_close=True)
+
+    appended = [c.args[0] for c in zonal_write_mocks["aaow"].append.await_args_list]
+    assert appended == [data[:40], data[40:80], data[80:]]
+    assert all(type(chunk) is bytes for chunk in appended)
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_pipe_file_chunks_typed_buffer_by_bytes(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """chunksize counts bytes even when the data is a typed buffer."""
+    data = array.array("d", range(8))
+    payload = bytes(memoryview(data))
+
+    extended_gcsfs.pipe_file(file_path, data, chunksize=16, finalize_on_close=True)
+
+    if zonal_write_mocks:
+        appended = [
+            bytes(c.args[0]) for c in zonal_write_mocks["aaow"].append.await_args_list
+        ]
+        assert appended == [payload[i : i + 16] for i in range(0, len(payload), 16)]
+    else:
+        assert extended_gcsfs.cat(file_path) == payload
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
@@ -725,17 +884,26 @@ def test_zonal_file_open_append_mode_nonexistent_file(
     [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],
     indirect=True,
 )
-def test_open_write_modes_use_zonal_file_on_rcu(
+def test_open_write_modes_use_zonal_file_on_rcu_with_rcu_rapid_write(
     extended_gcsfs, zonal_write_mocks, file_path, mode
 ):
-    """Every write mode on an RCU bucket opens a ZonalFile that writes RAPID and finalizes on close by default."""
+    """With rcu_rapid_write (set by zonal_write_mocks), every write mode on an RCU
+    bucket opens a ZonalFile that writes RAPID and finalizes on close by default."""
     with extended_gcsfs.open(file_path, mode) as f:
         assert isinstance(f, ZonalFile)
         assert f.finalize_on_close is True
         f.write(test_data)
 
-    assert zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"] == "RAPID"
-    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
+    if zonal_write_mocks:
+        assert (
+            zonal_write_mocks["init_aaow"].await_args.kwargs["storage_class"] == "RAPID"
+        )
+        zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
+    else:
+        info = extended_gcsfs.info(file_path)
+        assert info.get("storageClass") == "RAPID"
+        assert info.get("timeFinalized") is not None
+        assert extended_gcsfs.cat(file_path) == test_data
 
 
 @pytest.mark.parametrize(
@@ -836,9 +1004,14 @@ def test_zonal_file_finalize_on_close_true(
 def test_zonal_file_finalize_on_close_default_false(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
-    """Test that finalize_on_close is False by default for Zonal buckets."""
+    """Test default finalize_on_close (False for Zonal, True for RCU)."""
+    expected = (
+        False
+        if zonal_write_mocks
+        else extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu
+    )
     with extended_gcsfs.open(file_path, "wb") as f:
-        assert f.finalize_on_close is False
+        assert f.finalize_on_close is expected
     if zonal_write_mocks:
         zonal_write_mocks["aaow"].close.assert_awaited_with(finalize_on_close=False)
 
@@ -851,7 +1024,7 @@ def test_zonal_file_finalize_on_close_default_false(
 def test_zonal_file_finalize_on_close_rcu_default_and_overrides(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
-    """On RCU buckets finalize_on_close defaults to True, but explicit False overrides it."""
+    """With rcu_rapid_write, finalize_on_close on RCU buckets defaults to True, but explicit False overrides it."""
     if not zonal_write_mocks:
         pytest.skip("Unit test for finalize_on_close resolution with mocks.")
 
@@ -920,7 +1093,9 @@ async def test_simple_upload_finalize_on_close_defaults_by_bucket_layout(bucket_
     """simple_upload defaults finalize_on_close to True on RCU and False on Zonal, with override support."""
     from gcsfs.extended_gcsfs import simple_upload
 
-    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=True
+    )
     fs._grpc_client = mock.MagicMock()
     writer = mock.MagicMock()
     writer.append = mock.AsyncMock()
@@ -965,7 +1140,9 @@ async def test_simple_upload_failure_closes_without_finalizing(
     """A failed simple_upload closes the writer without finalizing the partial object."""
     from gcsfs.extended_gcsfs import simple_upload
 
-    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=True
+    )
     fs._grpc_client = mock.MagicMock()
     writer = mock.MagicMock()
     writer.append = mock.AsyncMock(side_effect=ConnectionError("append failed"))
@@ -1013,7 +1190,9 @@ async def test_write_helpers_propagate_finalize_failure(
     """
     from gcsfs.extended_gcsfs import simple_upload
 
-    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    fs = ExtendedGcsFileSystem(
+        token="anon", skip_instance_cache=True, rcu_rapid_write=True
+    )
     fs._grpc_client = mock.MagicMock()
     path = f"{TEST_ZONAL_BUCKET}/k"
     writer = mock.MagicMock(bucket_name=TEST_ZONAL_BUCKET, object_name="k")
@@ -1154,7 +1333,7 @@ def test_zonal_file_append_multiple(extended_gcsfs, zonal_write_mocks, file_path
     data2 = b"appended data."
     data3 = b"more appended data."
 
-    with extended_gcsfs.open(file_path, "wb") as f:
+    with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
         f.write(data1)
 
     with extended_gcsfs.open(file_path, "ab", finalize_on_close=True) as f:
@@ -1173,7 +1352,7 @@ def test_zonal_file_append_to_empty(extended_gcsfs, zonal_write_mocks, file_path
         pass
 
     if not zonal_write_mocks:
-        with extended_gcsfs.open(file_path, "wb") as f:
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as f:
             f.write(b"")
 
     with extended_gcsfs.open(file_path, "ab", finalize_on_close=True) as f:
@@ -1194,8 +1373,17 @@ class TestZonalFileRealGCS:
     `finalize_on_close` is set to `True` in these tests because the current
     implementation does not return the correct size for unfinalized objects,
     which would cause assertion failures in `cat()` when it checks the object's
-    size using HTTP call.
+    size using HTTP call. Live RCU runs opt into ``rcu_rapid_write=True`` so
+    these tests continue exercising AAOW/ZonalFile writes.
     """
+
+    @pytest.fixture(autouse=True)
+    def _enable_rcu_rapid_write(self, extended_gcsfs):
+        if extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu:
+            with mock.patch.object(extended_gcsfs, "rcu_rapid_write", True):
+                yield
+        else:
+            yield
 
     def test_put_file_to_zonal_bucket(self, extended_gcsfs, file_path):
         """Test putting a large file to a Zonal bucket."""
@@ -1420,15 +1608,66 @@ def test_zonal_file_pool_size_initialization(mock_sync, mock_gcsfs):
     zf2.close()
 
 
+@pytest.mark.parametrize(
+    "env_setting,extra_kwargs",
+    [("false", {}), (None, {"use_experimental_adaptive_prefetching": False})],
+)
+def test_zonal_file_opt_out_checks_out_readahead_pool(
+    mock_gcsfs, monkeypatch, env_setting, extra_kwargs
+):
+    if env_setting is None:
+        monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", raising=False)
+    else:
+        monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", env_setting)
+    mock_gcsfs.loop = fsspec.asyn.get_loop()
+    zf = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        **extra_kwargs,
+    )
+    try:
+        assert zf.cache_type == "readahead"
+        pool_kwargs = mock_gcsfs._mrd_pool_cache.get.await_args.kwargs
+        assert pool_kwargs["cache_type"] == "readahead"
+        assert pool_kwargs["cache_source"] == "default"
+    finally:
+        zf.close()
+
+
 @mock.patch("gcsfs.zonal_file.asyn.sync")
-def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
+def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs, monkeypatch):
     """Tests dynamic cache_type resolution for ZonalFile."""
-    # 1. Default -> cache_type="adaptive"
+    # 1. Default -> cache_type="adaptive", cache_source="default"
     zf_default = ZonalFile(
         gcsfs=mock_gcsfs, path="gs://test-bucket/test-key", mode="rb"
     )
     assert zf_default.cache_type == "adaptive"
+    assert zf_default.cache_source == "default"
     zf_default.close()
+
+    # 1b. Opt-out via kwarg -> cache_type="readahead", cache_source="default"
+    zf_no_prefetch = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+        use_experimental_adaptive_prefetching=False,
+    )
+    assert zf_no_prefetch.cache_type == "readahead"
+    assert zf_no_prefetch.cache_source == "default"
+    zf_no_prefetch.close()
+
+    # 1c. Opt-out via env var -> cache_type="readahead", cache_source="default"
+    monkeypatch.setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+    zf_env_no_prefetch = ZonalFile(
+        gcsfs=mock_gcsfs,
+        path="gs://test-bucket/test-key",
+        mode="rb",
+    )
+    assert zf_env_no_prefetch.cache_type == "readahead"
+    assert zf_env_no_prefetch.cache_source == "default"
+    zf_env_no_prefetch.close()
+    monkeypatch.delenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING")
 
     # 2. Explicit cache_type="readahead" -> cache_type="readahead"
     zf_readahead = ZonalFile(
@@ -1438,6 +1677,7 @@ def test_zonal_file_cache_type_default_resolution(mock_sync, mock_gcsfs):
         cache_type="readahead",
     )
     assert zf_readahead.cache_type == "readahead"
+    assert zf_readahead.cache_source == "explicit"
     zf_readahead.close()
 
     # 3. Explicit cache_type="readahead_chunked" -> cache_type="readahead_chunked"

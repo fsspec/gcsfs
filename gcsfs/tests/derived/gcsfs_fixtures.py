@@ -4,15 +4,15 @@ import pytest
 from fsspec.tests.abstract import AbstractFixtures
 
 from gcsfs.core import GCSFileSystem
-from gcsfs.tests.conftest import _cleanup_gcs, allfiles
+from gcsfs.tests.conftest import _cleanup_gcs, _close_gcs, allfiles
 from gcsfs.tests.settings import TEST_BUCKET
 
 
 class GcsfsFixtures(AbstractFixtures):
     @pytest.fixture(scope="class")
-    def fs(self, gcs_factory, buckets_to_delete):
+    def fs(self, _session_gcs_factory, buckets_to_delete):
         GCSFileSystem.clear_instance_cache()
-        gcs = gcs_factory()
+        gcs = _session_gcs_factory()
         try:  # ensure we're empty.
             # Create the bucket if it doesn't exist, otherwise clean it.
             if not gcs.exists(TEST_BUCKET):
@@ -29,6 +29,7 @@ class GcsfsFixtures(AbstractFixtures):
             yield gcs
         finally:
             _cleanup_gcs(gcs)
+            _close_gcs(gcs)
 
     @pytest.fixture
     def fs_path(self):

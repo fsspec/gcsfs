@@ -67,9 +67,7 @@ def run_read_case(benchmark, monitor, params, driver, *, bucket_ctx=None):
     with bucket_ctx(params.name) as prefix:
         params.bucket_name = bucket_name_of(prefix)
         assert_fsspec_gcsfs(prefix)
-        # Ingest writes from spawned processes, which pick their filesystem from the env.
-        with rcu.http_staging_env(params.bucket_type):
-            manifest = params.ingest(prefix)
+        manifest = params.ingest(prefix)
         rcu.assert_storage_class(prefix, params.bucket_type)
         rapid_cache.warm_if_needed(prefix, params.bucket_type)
         rcu.warm_if_needed(prefix, params.bucket_type)

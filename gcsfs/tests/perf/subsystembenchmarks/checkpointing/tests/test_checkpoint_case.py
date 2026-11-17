@@ -484,36 +484,3 @@ def test_rcu_z_checkpoint_saves_are_checked_after_the_window(rcu_case):
         "monitor_exit",
         ("check", _RCU_PREFIX, "standard_rcu_z"),
     ]
-
-
-class _FlagRecordingDriver(_FakeReadDriver):
-    """setup() runs in a spawned process and records the flag that process got."""
-
-    def __init__(self, flag_file):
-        super().__init__(durations=[1.0])
-        self.flag_file = flag_file
-
-    def setup(self, prefix, params):
-        with open(self.flag_file, "w") as f:
-            f.write(os.environ.get("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "unset"))
-
-
-@pytest.mark.parametrize(
-    "bucket_type, staging_flag",
-    [("standard_rcu_cold", "false"), ("standard_rcu_z", "true")],
-)
-def test_checkpoint_setup_stages_rcu_cold_and_warm_with_the_http_only_filesystem(
-    rcu_case, monkeypatch, tmp_path, bucket_type, staging_flag
-):
-    monkeypatch.setenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true")
-    flag_file = tmp_path / "flag"
-
-    checkpoint_case.run_checkpoint_case(
-        _Bench(),
-        _Monitor(),
-        _params(scenario="checkpoint_read", bucket_type=bucket_type),
-        _FlagRecordingDriver(str(flag_file)),
-        bucket_ctx=_rcu_case_ctx,
-    )
-
-    assert flag_file.read_text() == staging_flag

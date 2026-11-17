@@ -58,6 +58,10 @@ re-triggered by adding a ``/gcbrun`` comment or by using re-run option from Gith
 The logs from the test run are available in the "details" section of the Checks
 tab in the pull request.
 
+Any new test that creates temporary buckets against real GCS must prefix their
+names with ``gcsfs-test-``, because the Cloud Build worker and E2E test VM
+service accounts are IAM-scoped to ``gcsfs-test-*`` buckets.
+
 Release Process
 ---------------
 

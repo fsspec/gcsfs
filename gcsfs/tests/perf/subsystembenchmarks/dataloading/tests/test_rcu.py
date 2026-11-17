@@ -1,6 +1,4 @@
 import logging
-import multiprocessing
-import os
 
 import fsspec
 import pytest
@@ -179,79 +177,6 @@ def test_wait_for_rcu_layout_rejects_a_bucket_with_the_wrong_namespace(
         )
 
     assert clock.sleeps == []
-
-
-_FLAG = "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"
-
-
-def _set_flag(monkeypatch, value):
-    if value is None:
-        monkeypatch.delenv(_FLAG, raising=False)
-    else:
-        monkeypatch.setenv(_FLAG, value)
-
-
-@pytest.mark.parametrize("before", ["true", None])
-@pytest.mark.parametrize(
-    "bucket_type, http",
-    [
-        ("standard_rcu_warm", True),
-        ("hns_rcu_cold", True),
-        ("standard_rcu_z", False),
-        ("regional", False),
-    ],
-)
-def test_http_staging_env_turns_the_flag_off_for_warm_and_cold_only(
-    monkeypatch, bucket_type, http, before
-):
-    _set_flag(monkeypatch, before)
-
-    with rcu.http_staging_env(bucket_type):
-        inside = os.environ.get(_FLAG)
-
-    assert inside == ("false" if http else before)
-    assert os.environ.get(_FLAG) == before
-
-
-@pytest.mark.parametrize("before", ["true", None])
-def test_http_staging_env_restores_the_flag_when_staging_fails(monkeypatch, before):
-    _set_flag(monkeypatch, before)
-
-    with pytest.raises(RuntimeError, match="staging failed"):
-        with rcu.http_staging_env("standard_rcu_cold"):
-            raise RuntimeError("staging failed")
-
-    assert os.environ.get(_FLAG) == before
-
-
-def _put_gcsfs_class(queue):
-    import gcsfs
-
-    queue.put(f"{gcsfs.GCSFileSystem.__module__}.{gcsfs.GCSFileSystem.__name__}")
-
-
-def _gcsfs_class_in_a_spawned_process():
-    ctx = multiprocessing.get_context("spawn")
-    queue = ctx.Queue()
-    process = ctx.Process(target=_put_gcsfs_class, args=(queue,))
-    process.start()
-    try:
-        return queue.get(timeout=120)
-    finally:
-        process.join()
-
-
-def test_processes_spawned_in_http_staging_env_use_the_http_only_filesystem(
-    monkeypatch,
-):
-    monkeypatch.setenv(_FLAG, "true")
-
-    with rcu.http_staging_env("standard_rcu_warm"):
-        inside = _gcsfs_class_in_a_spawned_process()
-    outside = _gcsfs_class_in_a_spawned_process()
-
-    assert inside == "gcsfs.core.GCSFileSystem"
-    assert outside == "gcsfs.extended_gcsfs.ExtendedGcsFileSystem"
 
 
 class _FakeGCS:

@@ -12,6 +12,7 @@ from gcsfs.tests.perf.microbenchmarks.conftest import (
     publish_multi_process_benchmark_extra_info,
     publish_request_metrics,
     publish_resource_metrics,
+    rcu_rapid_write_kwargs,
 )
 from gcsfs.tests.perf.microbenchmarks.request_counter import RequestCounter
 from gcsfs.tests.settings import BENCHMARK_CPU_AFFINITY
@@ -285,7 +286,10 @@ def run_multi_process(
     process_data_shared = ctx.Array("d", params.processes)
 
     # Create GCS instances for workers
-    gcs_kwargs = gcs_kwargs or {}
+    gcs_kwargs = {
+        **(gcs_kwargs or {}),
+        **rcu_rapid_write_kwargs(getattr(params, "bucket_type", None)),
+    }
     worker_gcs_instances = [
         extended_gcs_factory(**gcs_kwargs) for _ in range(params.processes)
     ]

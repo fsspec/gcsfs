@@ -1,4 +1,81 @@
-"""Method wrappers and cross-thread context propagation helpers for telemetry."""
+"""
+Method wrappers and cross-thread context propagation helpers for telemetry.
+
+These wrappers capture and propagate call-scoped telemetry tokens across sync/async
+and thread boundaries via Python `contextvars` (`collect_tokens_map(call_scoped_only=True)`).
+Process-wide detectors (`call_scoped = False`) are skipped when capturing per-call `ContextVar`
+snapshots (so background probes are never frozen mid-flight) and are read per request via
+`get_tokens()` (`call_scoped_only=False`) unless a value is already set in the context.
+
+Overview of the 6 Execution Flows
+---------------------------------
+1. Synchronous FileSystem Coroutine Call (e.g. `fs.ls()`, `fs.cat_file()`):
+   [Caller Thread]
+     fs.ls() -> _gcs_sync_wrapper
+       -> _run_sync() -> _telemetry_context(): captures call-scoped tokens ONCE & sets ContextVar
+       -> fsspec.asyn.sync(): copies ContextVar to the loop thread (fsspecIO by default)
+   [Event Loop Thread]
+     fs._ls() -> _gcs_async_wrapper (sees ContextVar already set -> fast-path O(1))
+       -> _get_headers(): reads active telemetry tokens for outgoing request headers
+
+2. Synchronous FileSystem Generator (e.g. `for x in fs.walk(...)`):
+   [Caller Thread]
+     fs.walk() -> _gcs_sync_wrapper (gen_wrapper)
+       -> collect_tokens_map(call_scoped_only=True): captures call-scoped tokens ONCE
+          when iteration starts
+       -> per yielded step: _run_sync() advances the async generator on the loop thread
+          with those captured tokens, resetting ContextVar before yielding so it never
+          leaks into the caller's `for` loop body
+       -> finally: _run_sync() closes the async generator (`aclose`) with the same tokens
+
+3. Native Asynchronous FileSystem Coroutine Call (e.g. `await fs._cat(...)`):
+   [Event Loop Thread]
+     await fs._cat() -> _gcs_async_wrapper
+       -> _telemetry_context(): captures call-scoped tokens ONCE & sets ContextVar
+       -> inner `await fs._cat_file()` sees ContextVar already set -> fast-path O(1)
+       -> _get_headers(): reads active telemetry tokens for outgoing request headers
+
+4. Native Asynchronous FileSystem Generator (e.g. `async for x in fs._walk(...)`):
+   [Event Loop Thread]
+     async for x in fs._walk() -> _gcs_async_wrapper (gen_wrapper)
+       -> collect_tokens_map(call_scoped_only=True): captures call-scoped tokens ONCE
+          when iteration starts
+       -> per yielded step: scopes `_telemetry_context()` around each step (`__anext__`)
+          and resets before `yield` so ContextVar never leaks into the caller's `async for` body
+       -> finally: closes the underlying async generator (`aclose`)
+
+5. Plain Synchronous Entry Points (e.g. `ExtendedGcsFileSystem._open`):
+   Unlike Flow #1 (which bridges a single `async def` coroutine via `fsspec.asyn.sync()`),
+   this wraps a plain `def` function that stays on the caller thread and orchestrates
+   multiple downstream steps or raw `fsspec.asyn.sync()` calls:
+   [Caller Thread]
+     fs.open() -> ExtendedGcsFileSystem._open() (@with_telemetry_context)
+       -> _telemetry_context(): captures call-scoped tokens ONCE on the caller thread
+       -> all inner steps (wrapped sync calls, raw `asyn.sync()` calls, and
+          `GCSFile.__init__`) reuse that active ContextVar in O(1)
+
+6. File Object Lifecycle (e.g. `with fs.open(...) as f: f.read()`):
+   - Open (`GCSFile.__init__`): caches the caller's attribution ONCE on the file instance
+     (storing `""` when undetected so negative lookups never re-run detectors).
+   - File Operations (`_file_telemetry_wrapper` via `wrap_file_methods`):
+     restores the cached attribution into ContextVar across wrapped file methods and
+     properties (chunk fetches, upload hooks, `details`, background prefetcher
+     `_async_fetch_range`, and `_close_impl` on the `_defer_close` worker thread),
+     even when the original caller context is no longer present.
+
+Choosing a Wrapper (Maintainer Guide)
+-------------------------------------
+- `mirror_gcs_methods(cls)` + `bind_gcs_sync_methods(self)`: Auto-wraps `_foo` coroutines
+  and async generators matching `AbstractFileSystem`/`AsyncFileSystem` (or an existing
+  `cls.foo` attribute, skipping internal helpers like `_request`) and binds `foo` sync
+  mirrors for the public methods.
+- `_gcs_sync_wrapper(fn)`: Explicitly wraps async helpers whose sync bridge name does not
+  follow the `_foo` -> `foo` convention (e.g. `_sync_lookup_bucket_layout`).
+- `@with_telemetry_context`: Decorates plain synchronous entry points not backed by a
+  single coroutine (e.g. `ExtendedGcsFileSystem._open`).
+- `wrap_file_methods(cls)`: Wraps `__init__` and non-dunder instance methods and properties
+  defined directly in `cls.__dict__` on file classes (`GCSFile`, `ZonalFile`).
+"""
 
 from __future__ import annotations
 
@@ -105,11 +182,17 @@ def _resolve_super_method(
 
 
 @contextlib.contextmanager
-def _telemetry_context(tokens_map: dict[str, str] | None):
-    """Scope `tokens_map` as the active telemetry context for the current execution."""
+def _telemetry_context(tokens_map: dict[str, str] | None = None):
+    """Scope `tokens_map` (or call-scoped tokens when `None`) for the current execution."""
     if tokens_map is None:
-        yield
-        return
+        if has_telemetry_context():
+            yield
+            return
+        tokens_map = (
+            manager.default_usage_tracker.collect_tokens_map(call_scoped_only=True)
+            if manager.default_usage_tracker.is_enabled()
+            else _disabled_tokens_map()
+        )
     effective = tokens_map if tokens_map else _disabled_tokens_map()
     token = set_telemetry_context(effective)
     try:
@@ -145,15 +228,17 @@ def _resolve_reopen_tokens(reopen_tel: Any) -> dict[str, str]:
     with _telemetry_context(
         {Dimension.FRAMEWORK.value: fw, Dimension.METHOD.value: method}
     ):
-        return manager.default_usage_tracker.collect_tokens_map()
+        return manager.default_usage_tracker.collect_tokens_map(call_scoped_only=True)
 
 
 def with_telemetry_context(func: Callable) -> Callable:
     """
-    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap (e.g. `_open`).
+    Decorator for plain sync entry points that `mirror_gcs_methods` doesn't wrap
+    (e.g. `ExtendedGcsFileSystem._open`).
 
-    Detects the caller framework and records `Dimension.METHOD` once on the caller thread
-    when no method context is active, so nested requests carry them across thread boundaries.
+    Captures call-scoped telemetry (including `Dimension.METHOD`) once on the caller thread
+    when no method context is active, so any requests issued underneath (including via
+    `asyn.sync` to the loop thread) carry it.
     """
     method_name = _tracked_method_name(func)
 
@@ -162,7 +247,7 @@ def with_telemetry_context(func: Callable) -> Callable:
         if has_telemetry_context(Dimension.METHOD):
             return func(*args, **kwargs)
         tokens_map = manager.default_usage_tracker.collect_tokens_map(
-            method=method_name or ""
+            call_scoped_only=True, method=method_name or ""
         )
         with _telemetry_context(tokens_map):
             return func(*args, **kwargs)
@@ -185,7 +270,7 @@ def _run_sync(
             return fsspec.asyn.sync(loop, func, *args, **kwargs)
         resolved_method = _tracked_method_name(func)
         tokens_map = manager.default_usage_tracker.collect_tokens_map(
-            method=resolved_method or ""
+            call_scoped_only=True, method=resolved_method or ""
         )
     with _telemetry_context(tokens_map):
         return fsspec.asyn.sync(loop, func, *args, **kwargs)
@@ -219,7 +304,7 @@ def _gcs_async_wrapper(
                 tokens_map = get_telemetry_context()
             else:
                 tokens_map = manager.default_usage_tracker.collect_tokens_map(
-                    method=method_name or ""
+                    call_scoped_only=True, method=method_name or ""
                 )
             gen = target(*pass_args, **kwargs)
             try:
@@ -244,7 +329,7 @@ def _gcs_async_wrapper(
         if has_telemetry_context(Dimension.METHOD):
             return await target(*pass_args, **kwargs)
         tokens_map = manager.default_usage_tracker.collect_tokens_map(
-            method=method_name or ""
+            call_scoped_only=True, method=method_name or ""
         )
         with _telemetry_context(tokens_map):
             return await target(*pass_args, **kwargs)
@@ -290,7 +375,7 @@ def _gcs_sync_wrapper(
                 tokens_map = get_telemetry_context()
             else:
                 tokens_map = manager.default_usage_tracker.collect_tokens_map(
-                    method=method_name or ""
+                    call_scoped_only=True, method=method_name or ""
                 )
             gen = actual_func(*pass_args, **kwargs)
             try:
@@ -316,7 +401,7 @@ def _gcs_sync_wrapper(
                 None
                 if has_telemetry_context(Dimension.METHOD)
                 else manager.default_usage_tracker.collect_tokens_map(
-                    method=method_name or ""
+                    call_scoped_only=True, method=method_name or ""
                 )
             )
             return _run_sync(
@@ -342,7 +427,7 @@ def _gcs_sync_wrapper(
         if has_telemetry_context(Dimension.METHOD):
             return target(*pass_args, **kwargs)
         tokens_map = manager.default_usage_tracker.collect_tokens_map(
-            method=method_name or ""
+            call_scoped_only=True, method=method_name or ""
         )
         with _telemetry_context(tokens_map):
             return target(*pass_args, **kwargs)
@@ -547,13 +632,16 @@ def _setup_file_telemetry(file_obj) -> contextvars.Token | None:
     token = set_telemetry_context(current)
 
     missing_detector = any(
-        (det.name.value if isinstance(det.name, Dimension) else str(det.name))
+        getattr(det, "call_scoped", True)
+        and (det.name.value if isinstance(det.name, Dimension) else str(det.name))
         not in current
         for det in manager.default_usage_tracker.detectors
     )
     if missing_detector:
         try:
-            filled = manager.default_usage_tracker.collect_tokens_map()
+            filled = manager.default_usage_tracker.collect_tokens_map(
+                call_scoped_only=True
+            )
             if filled != current:
                 # Initial token holds pre-call state; a single reset unwinds both sets.
                 set_telemetry_context(filled)
@@ -641,12 +729,12 @@ def _resolve_file_init_tokens(
     if reopen_tel is not _UNSET:
         return _resolve_reopen_tokens(reopen_tel)
     return manager.default_usage_tracker.collect_tokens_map(
-        method=file_obj.caller_method
+        call_scoped_only=True, method=file_obj.caller_method
     )
 
 
 def wrap_file_methods(cls: type) -> None:
-    """Wrap all callable methods and properties on a File class (e.g. `GCSFile` or `ZonalFile`)."""
+    """Wrap `__init__` and non-dunder instance methods and properties defined directly on a File class."""
     from gcsfs.core import GCSFile
 
     is_gcs_file = issubclass(cls, GCSFile)
@@ -681,7 +769,6 @@ def wrap_file_methods(cls: type) -> None:
 
         init_wrapper._is_telemetry_init_wrapped = True
         setattr(cls, "__init__", init_wrapper)
-
     for name, attr in list(cls.__dict__.items()):
         if name.startswith("__") or isinstance(attr, (classmethod, staticmethod)):
             continue
