@@ -1557,7 +1557,11 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             raise ValueError("Cannot write to specific object generation")
         source = []
         for p in paths:
-            _, src_key, src_generation = self.split_path(p)
+            src_bucket, src_key, src_generation = self.split_path(p)
+            if src_bucket != bucket:
+                raise ValueError(
+                    f"Source bucket '{src_bucket}' does not match destination bucket '{bucket}'"
+                )
             entry = {"name": src_key}
             if src_generation:
                 entry["generation"] = int(src_generation)

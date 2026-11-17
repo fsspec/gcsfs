@@ -2280,6 +2280,14 @@ def test_merge_destination_generation_raises(gcs):
         gcs_versioned.merge(TEST_BUCKET + "/joined#12345", [a, b])
 
 
+def test_merge_bucket_mismatch_raises(gcs):
+    with pytest.raises(
+        ValueError,
+        match="Source bucket 'other_bucket' does not match destination bucket",
+    ):
+        gcs.merge(TEST_BUCKET + "/joined", ["other_bucket/file1", a])
+
+
 def test_merge_source_generations_forwarded(gcs):
     gcs_versioned = GCSFileSystem(
         project=gcs.project, session=gcs.session, version_aware=True
