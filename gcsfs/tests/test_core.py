@@ -18,6 +18,7 @@ import aiohttp
 import fsspec.asyn
 import fsspec.core
 import google.auth.compute_engine
+import google.auth.credentials
 import pytest
 import requests
 from fsspec.asyn import sync
@@ -3129,6 +3130,48 @@ def test_sign_without_private_key_calls_signblob_api(monkeypatch):
     params = parse_qs(urlparse(url).query)
     assert params["GoogleAccessId"] == [IAM_SIGN_EMAIL]
     assert params["Signature"] == [signature]
+
+
+@pytest.mark.parametrize(
+    "token, sign_kwargs",
+    [
+        pytest.param("anon", {}, id="anon-token"),
+        pytest.param(
+            google.auth.credentials.AnonymousCredentials(),
+            {},
+            id="anonymous-credentials",
+        ),
+        pytest.param("anon", {"credentials": None}, id="explicit-none"),
+        pytest.param(
+            "anon",
+            {"credentials": google.auth.credentials.AnonymousCredentials()},
+            id="explicit-anonymous-credentials",
+        ),
+    ],
+)
+def test_sign_rejects_anonymous_credentials(monkeypatch, token, sign_kwargs):
+    client_cls = mock.Mock()
+    monkeypatch.setattr("google.cloud.storage.Client", client_cls)
+    fs = GCSFileSystem(token=token, skip_instance_cache=True)
+
+    with pytest.raises(ValueError, match="Cannot sign URL without signing credentials"):
+        fs.sign("bucket/key", **sign_kwargs)
+
+    client_cls.assert_not_called()
+
+
+def test_sign_anon_with_explicit_credentials(monkeypatch):
+    from google.cloud import storage
+
+    blob = _fake_storage_client(monkeypatch)
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+
+    assert fs.sign("bucket/key", expiration=300, credentials=SIGNER) == (
+        "https://signed.example/key"
+    )
+    client_creds = storage.Client.call_args.kwargs["credentials"]
+    assert isinstance(client_creds, google.auth.credentials.AnonymousCredentials)
+    assert blob.generate_signed_url.call_args.kwargs["credentials"] is SIGNER
 
 
 def test_write_x_mpu(gcs):

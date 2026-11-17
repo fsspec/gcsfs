@@ -231,3 +231,44 @@ def test_raw_token_credentials_init_raises_on_short_lived_token(
             GoogleCredentials(
                 project="my-project", token="short_lived_token", access="read_only"
             )
+
+
+def test_connect_cache_raises_on_empty_or_miss(monkeypatch):
+    monkeypatch.setattr(GoogleCredentials, "tokens", {})
+    with pytest.raises(ValueError, match="No cached tokens"):
+        GoogleCredentials(project="p1", access="read_only", token="cache")
+
+    cached_cred = Mock()
+    monkeypatch.setattr(
+        GoogleCredentials, "tokens", {("other-project", "read_only"): cached_cred}
+    )
+    with pytest.raises(ValueError, match="No cached token"):
+        GoogleCredentials(project="p1", access="read_only", token="cache")
+
+    creds = GoogleCredentials(
+        project="other-project", access="read_only", token="cache"
+    )
+    assert creds.credentials is cached_cred
+    assert creds.method == "cache"
+
+
+def test_connect_auto_cache_miss_falls_through_to_anon(monkeypatch):
+    monkeypatch.setattr(
+        GoogleCredentials, "tokens", {("other-project", "read_only"): Mock()}
+    )
+    with (
+        patch.object(
+            GoogleCredentials,
+            "_connect_google_default",
+            side_effect=ValueError("no default"),
+        ),
+        patch.object(
+            GoogleCredentials,
+            "_connect_cloud",
+            side_effect=ValueError("no cloud"),
+        ),
+    ):
+        creds = GoogleCredentials(project="p1", access="read_only", token=None)
+
+    assert creds.method == "anon"
+    assert creds.credentials is None
