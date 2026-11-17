@@ -178,10 +178,10 @@ class FrameworkDetector(BaseDetector):
                 mod_name = f_globals.get("__name__", "")
                 if mod_name:
                     top_pkg = mod_name.partition(".")[0]
-                    two_level_pkg = ".".join(mod_name.split(".", 2)[:2])
-                    framework = self.KNOWN_FRAMEWORKS.get(
-                        top_pkg
-                    ) or self.KNOWN_FRAMEWORKS.get(two_level_pkg)
+                    framework = self.KNOWN_FRAMEWORKS.get(top_pkg)
+                    if not framework and "." in mod_name:
+                        two_level_pkg = ".".join(mod_name.split(".", 2)[:2])
+                        framework = self.KNOWN_FRAMEWORKS.get(two_level_pkg)
                     if framework:
                         detected_framework = framework
                 frame = frame.f_back
