@@ -138,6 +138,41 @@ def test_framework_detector_ignores_internal_and_test_prefixes(monkeypatch):
     assert detector.detect() is None
 
 
+@pytest.mark.parametrize(
+    "module_names, expected",
+    [
+        # FsspecArtifactService I/O runs in a worker thread via `asyncio.to_thread`.
+        (
+            (
+                "threading",
+                "concurrent.futures.thread",
+                "google.adk.integrations.fsspec._fsspec_artifact_service",
+                "fsspec.spec",
+                "gcsfs.core",
+                "google.auth.transport.requests",
+            ),
+            "adk",
+        ),
+        # Outermost framework wins in both directions.
+        (("google.adk.runners", "pandas.io.parquet", "gcsfs.core"), "adk"),
+        (("ray.serve", "google.adk.runners", "gcsfs.core"), "ray"),
+        # Other `google` packages and lookalikes are not frameworks.
+        (("google", "gcsfs.core"), None),
+        (("google.auth.transport.requests", "gcsfs.core"), None),
+        (("google.cloud.storage.client", "gcsfs.core"), None),
+        (("google.adkx.tools", "gcsfs.core"), None),
+        (("google_adk", "gcsfs.core"), None),
+    ],
+)
+def test_framework_detector_google_adk(monkeypatch, module_names, expected):
+    frame = None
+    for module_name in module_names:
+        frame = _create_mock_frame(module_name, frame)
+
+    monkeypatch.setattr(sys, "_getframe", lambda: frame)
+    assert FrameworkDetector().detect() == expected
+
+
 def test_framework_detector_handles_empty_and_invalid_frames(monkeypatch):
     detector = FrameworkDetector()
 

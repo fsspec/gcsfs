@@ -143,6 +143,10 @@ class FrameworkDetector(BaseDetector):
         "tensorstore": "tensorstore",
         "tensorflow": "tensorflow",
         "jax": "jax",
+        # Agents. Keyed by two-level package because the `google` namespace also holds
+        # google-auth, google-cloud-storage and google-api-core, which run on gcsfs's
+        # own stack.
+        "google.adk": "adk",
     }
 
     def __init__(self, max_depth: int = 64):
@@ -174,8 +178,12 @@ class FrameworkDetector(BaseDetector):
                 mod_name = f_globals.get("__name__", "")
                 if mod_name:
                     top_pkg = mod_name.partition(".")[0]
-                    if top_pkg in self.KNOWN_FRAMEWORKS:
-                        detected_framework = self.KNOWN_FRAMEWORKS[top_pkg]
+                    framework = self.KNOWN_FRAMEWORKS.get(top_pkg)
+                    if not framework and "." in mod_name:
+                        two_level_pkg = ".".join(mod_name.split(".", 2)[:2])
+                        framework = self.KNOWN_FRAMEWORKS.get(two_level_pkg)
+                    if framework:
+                        detected_framework = framework
                 frame = frame.f_back
                 depth += 1
         finally:
