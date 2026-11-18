@@ -231,27 +231,60 @@ example `gcsfs-ci-ssb`) so its VMs and buckets stay separate from nightly runs.
 ### Securing the pull request trigger
 
 A pull request trigger builds from the pull request's branch, so the pull
-request supplies this YAML and the scripts the VM runs. Checks inside the
+request supplies the scripts the VM runs and, when the trigger reads its build
+config from the repository (`--build-config`), this YAML too. The scripts run as
+`_VM_SERVICE_ACCOUNT`; the YAML's steps run as the Cloud Build service account,
+which holds the broader roles listed under
+[Service accounts and IAM](#service-accounts-and-iam). Checks inside the
 repository cannot limit what that code does; only the trigger and IAM can:
 
 - **Gate external pull requests.** Set the trigger's comment control to
   `COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY`, so a maintainer must comment
-  `/gcbrun` before a contributor outside the repository can run code on the VM.
-- **Give the VM a dedicated, prefix-scoped service account.** Do not reuse a VM
-  service account that other pipelines rely on, and do not grant it
-  project-wide `roles/storage.admin`. Limit storage to the CI trigger's
-  `_INFRA_PREFIX` with an IAM condition, and keep `_CI_MODEL_ID` under that
-  prefix too (for example `gs://gcsfs-ci-ssb-models/gpt2`):
+  `/gcbrun` before a contributor outside the repository can run the build.
+  Before commenting, review the pull request's changes to
+  `subsystembenchmarks-cloudbuild.yaml` as well as to the scripts.
+- **Bound the Cloud Build service account.** Scoping the VM's account does not
+  limit a pull request that changes the YAML. Run pull request triggers in a
+  dedicated CI project that holds nothing a build must not reach, such as
+  nightly results, or create the trigger with `--inline-config` so that the
+  trigger, not the pull request, supplies the build steps (update the trigger
+  whenever this YAML changes). Grant the Cloud Build service account
+  `roles/iam.serviceAccountUser` on the VM service account only, never
+  project-wide, so a build cannot attach any other account to a VM.
+- **Give the VM a dedicated, narrowly scoped service account.** Do not reuse a
+  VM service account that other pipelines rely on, and do not grant it
+  project-wide `roles/storage.admin`. The VM needs that role only on the
+  per-case buckets, which in `_MODE=ci` are always named
+  `<_INFRA_PREFIX>-ci-...`, so limit it to that prefix with an IAM condition.
+  On the two shared buckets, grant bucket-level object roles instead: read on
+  the `_CI_MODEL_ID` bucket and read/write on the results bucket. Create the
+  results bucket first; the build otherwise creates it only on its first run.
+  With `_INFRA_PREFIX=gcsfs-ci-ssb` and
+  `_CI_MODEL_ID=gs://gcsfs-ci-ssb-models/gpt2`:
 
   ```bash
   gcloud iam service-accounts create ssb-ci-vm --project=<PROJECT_ID>
+  gcloud iam service-accounts add-iam-policy-binding \
+    ssb-ci-vm@<PROJECT_ID>.iam.gserviceaccount.com \
+    --project=<PROJECT_ID> \
+    --member=serviceAccount:<CLOUD_BUILD_SA_EMAIL> \
+    --role=roles/iam.serviceAccountUser
   gcloud projects add-iam-policy-binding <PROJECT_ID> \
     --member=serviceAccount:ssb-ci-vm@<PROJECT_ID>.iam.gserviceaccount.com \
     --role=roles/storage.admin \
-    --condition='expression=resource.name.startsWith("projects/_/buckets/gcsfs-ci-ssb-"),title=only-gcsfs-ci-ssb-buckets'
+    --condition='expression=resource.name.startsWith("projects/_/buckets/gcsfs-ci-ssb-ci-"),title=only-gcsfs-ci-ssb-ci-buckets'
   gcloud projects add-iam-policy-binding <PROJECT_ID> \
     --member=serviceAccount:ssb-ci-vm@<PROJECT_ID>.iam.gserviceaccount.com \
     --role=roles/serviceusage.serviceUsageConsumer --condition=None
+  gcloud storage buckets add-iam-policy-binding gs://gcsfs-ci-ssb-models \
+    --member=serviceAccount:ssb-ci-vm@<PROJECT_ID>.iam.gserviceaccount.com \
+    --role=roles/storage.objectViewer
+  gcloud storage buckets create gs://gcsfs-ci-ssb-run-results \
+    --project=<PROJECT_ID> --location=<REGION> \
+    --enable-hierarchical-namespace --uniform-bucket-level-access
+  gcloud storage buckets add-iam-policy-binding gs://gcsfs-ci-ssb-run-results \
+    --member=serviceAccount:ssb-ci-vm@<PROJECT_ID>.iam.gserviceaccount.com \
+    --role=roles/storage.objectUser
   ```
 
   Pass that account as the trigger's `_VM_SERVICE_ACCOUNT`. The VM never lists
