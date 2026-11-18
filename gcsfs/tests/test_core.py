@@ -2272,25 +2272,40 @@ def test_merge(gcs):
     assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
 
 
-def test_merge_destination_generation_raises(gcs):
+def test_merge_destination_generation_raises():
     gcs_versioned = GCSFileSystem(
-        project=gcs.project, session=gcs.session, version_aware=True
+        token="anon", version_aware=True, skip_instance_cache=True
     )
     with pytest.raises(ValueError, match="Cannot write to specific object generation"):
         gcs_versioned.merge(TEST_BUCKET + "/joined#12345", [a, b])
 
 
-def test_merge_bucket_mismatch_raises(gcs):
+def test_merge_empty_key_raises():
+    gcs_versioned = GCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    with pytest.raises(
+        ValueError, match="Cannot merge into bucket root without an object key"
+    ):
+        gcs_versioned.merge(TEST_BUCKET, [a, b])
+    with pytest.raises(ValueError, match="Source path must specify an object key"):
+        gcs_versioned.merge(TEST_BUCKET + "/joined", [TEST_BUCKET, b])
+
+
+def test_merge_bucket_mismatch_raises():
+    gcs_versioned = GCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
     with pytest.raises(
         ValueError,
         match="Source bucket 'other_bucket' does not match destination bucket",
     ):
-        gcs.merge(TEST_BUCKET + "/joined", ["other_bucket/file1", a])
+        gcs_versioned.merge(TEST_BUCKET + "/joined", ["other_bucket/file1", a])
 
 
-def test_merge_source_generations_forwarded(gcs):
+def test_merge_source_generations_forwarded():
     gcs_versioned = GCSFileSystem(
-        project=gcs.project, session=gcs.session, version_aware=True
+        token="anon", version_aware=True, skip_instance_cache=True
     )
     calls = []
 
@@ -2298,7 +2313,12 @@ def test_merge_source_generations_forwarded(gcs):
         calls.append((args, kwargs))
         return {}
 
-    with mock.patch.object(gcs_versioned, "_call", side_effect=fake_call):
+    with (
+        mock.patch.object(gcs_versioned, "_call", side_effect=fake_call),
+        mock.patch.object(
+            gcs_versioned, "_write_file_cache_update", new_callable=mock.AsyncMock
+        ) as mock_cache_update,
+    ):
         gcs_versioned.merge(
             TEST_BUCKET + "/joined",
             [
@@ -2316,6 +2336,7 @@ def test_merge_source_generations_forwarded(gcs):
         {"name": "src2", "generation": 222},
         {"name": "src3"},
     ]
+    mock_cache_update.assert_awaited_once_with(TEST_BUCKET + "/joined")
 
 
 def test_bigger_than_block_read(gcs):

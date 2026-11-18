@@ -1553,17 +1553,21 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     async def _merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
         bucket, key, generation = self.split_path(path)
-        if generation:
+        if not key:
+            raise ValueError("Cannot merge into bucket root without an object key")
+        if generation is not None:
             raise ValueError("Cannot write to specific object generation")
         source = []
         for p in paths:
             src_bucket, src_key, src_generation = self.split_path(p)
+            if not src_key:
+                raise ValueError("Source path must specify an object key")
             if src_bucket != bucket:
                 raise ValueError(
                     f"Source bucket '{src_bucket}' does not match destination bucket '{bucket}'"
                 )
             entry = {"name": src_key}
-            if src_generation:
+            if src_generation is not None:
                 entry["generation"] = int(src_generation)
             source.append(entry)
         await self._call(
@@ -1579,6 +1583,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 "destination": {"name": key, "bucket": bucket},
             },
         )
+        await self._write_file_cache_update(path)
 
     merge = asyn.sync_wrapper(_merge)
 

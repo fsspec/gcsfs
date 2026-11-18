@@ -3,7 +3,6 @@
 import logging
 import os
 import posixpath
-from unittest import mock
 
 import pytest
 from google.cloud import storage
@@ -140,6 +139,7 @@ def test_write_captures_generation_multipart(gcs_versioned):
     assert wo.generation == gcs_versioned.info(b)["generation"]
 
 
+# fake-gcs-server ignores sourceObjects[].generation during compose and uses the live object.
 @requires_real_gcs
 def test_merge_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
@@ -160,26 +160,3 @@ def test_merge_versioned(gcs_versioned):
     gcs_versioned.merge(merged, [f"{a}#{a_v1}", f"{b}#{b_v1}"])
 
     assert gcs_versioned.cat(merged) == b"a_v1b_v1"
-
-
-def test_merge_versioned_mocked(gcs_versioned):
-    calls = []
-
-    async def fake_call(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {}
-
-    merged = TEST_VERSIONED_BUCKET + "/tmp/test/merged"
-    with mock.patch.object(gcs_versioned, "_call", side_effect=fake_call):
-        gcs_versioned.merge(merged, [f"{a}#100", f"{b}#200"])
-
-    assert len(calls) == 1
-    args, kwargs = calls[0]
-    _, dest_key, _ = gcs_versioned.split_path(merged)
-    assert args == ("POST", "b/{}/o/{}/compose", TEST_VERSIONED_BUCKET, dest_key)
-    _, src_key_a, _ = gcs_versioned.split_path(a)
-    _, src_key_b, _ = gcs_versioned.split_path(b)
-    assert kwargs["json"]["sourceObjects"] == [
-        {"name": src_key_a, "generation": 100},
-        {"name": src_key_b, "generation": 200},
-    ]
