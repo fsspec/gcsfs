@@ -20,6 +20,7 @@ import fsspec.spec
 import grpc
 import grpc.aio
 import pytest
+import pytest_asyncio
 from google.auth.transport import DEFAULT_RETRYABLE_STATUS_CODES
 from google.cloud import storage_control_v2
 from google.longrunning import operations_pb2, operations_pb2_grpc
@@ -2453,6 +2454,7 @@ def test_encode_features_wire_parity(monkeypatch):
     reordered = telemetry_schema.encode_features({**full_tokens, "mp": reversed_mp})
     single_mp = telemetry_schema.encode_features({"mp": "cache_options"})
     unknown_mp = telemetry_schema.encode_features({"fw": "pandas", "mp": ",.unknown.,"})
+    empty_map = telemetry_schema.encode_features({})
     empty_mp = telemetry_schema.encode_features({"mp": ""})
     non_str = telemetry_schema.encode_features({"fw": 123, "mp": ["recursive"]})
     token = set_telemetry_context({"fw": "pandas", "mp": ""})
@@ -2471,6 +2473,7 @@ def test_encode_features_wire_parity(monkeypatch):
     assert reordered == full_enc
     assert unknown_mp == "EAE="
     assert tracker_encoded == "EAE="
+    assert empty_map is None
     assert empty_mp is None
     assert non_str is None
     assert "method_params" not in _decode_features(unknown_mp)
@@ -2559,15 +2562,66 @@ def test_encode_features_worst_case_bounds():
     ) * 5
 
 
+def test_tracker_encode_features_includes_process_scoped_env():
+    tracker = _tracker_with(_ProcessScopedEnvDetector("gke"))
+
+    token = set_telemetry_context(tracker.collect_tokens_map(call_scoped_only=True))
+    try:
+        snapshot = get_telemetry_context()
+        encoded = tracker.encode_features()
+    finally:
+        reset_telemetry_context(token)
+
+    assert snapshot == {"fw": "pandas"}
+    assert encoded == "EAEYAg=="
+
+
+def test_detector_tokens_map_to_schema_enums():
+    framework_tokens = sorted(set(FrameworkDetector.KNOWN_FRAMEWORKS.values()))
+    env_tokens = sorted(
+        {
+            value
+            for name, value in vars(environment_module).items()
+            if name.startswith("ENV_") and isinstance(value, str)
+        }
+    )
+
+    encoded_frameworks = {
+        token: telemetry_schema.encode_features({Dimension.FRAMEWORK.value: token})
+        for token in framework_tokens
+    }
+    encoded_envs = {
+        token: telemetry_schema.encode_features({Dimension.ENVIRONMENT.value: token})
+        for token in env_tokens
+    }
+
+    assert set(env_tokens) >= {
+        environment_module.ENV_GCE,
+        environment_module.ENV_GKE,
+        environment_module.ENV_OTHER,
+    }
+    for token, encoded in encoded_frameworks.items():
+        assert encoded is not None, f"Unmapped framework token: {token}"
+        decoded = _decode_features(encoded)
+        assert "framework" in decoded
+        assert decoded.framework != GcsfsFramework.GCSFS_FRAMEWORK_UNSPECIFIED
+    for token, encoded in encoded_envs.items():
+        assert encoded is not None, f"Unmapped environment token: {token}"
+        decoded = _decode_features(encoded)
+        assert "environment" in decoded
+        assert decoded.environment != GcsfsEnvironment.GCSFS_ENVIRONMENT_UNSPECIFIED
+
+
 # ============================================================================
 # 9. gRPC Control Plane Telemetry Interceptor Tests
 # ============================================================================
 
+_CONTROL_LAYOUT_NAME = "projects/_/buckets/b/storageLayout"
+_CONTROL_OP_NAME = "projects/_/buckets/b/operations/op1"
 
-@pytest.mark.asyncio
-async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch):
-    from gcsfs.tests import layouts
 
+@pytest_asyncio.fixture
+async def control_plane_loopback(monkeypatch):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
     counting = _CountingDetector("pandas")
@@ -2620,22 +2674,7 @@ async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch):
     operations_pb2_grpc.add_OperationsServicer_to_server(OperationsServicer(), server)
     port = server.add_insecure_port("127.0.0.1:0")
     await server.start()
-    fs = None
-    fs_sync = None
-    feat_key = "x-goog-storage-gcsfs-features"
-    caller_md = [(feat_key, "caller-val")]
-    layout_name = "projects/_/buckets/b/storageLayout"
-    op_name = "projects/_/buckets/b/operations/op1"
-    grpc_logger = logging.getLogger(
-        "google.cloud.storage_control_v2.services.storage_control.transports.grpc_asyncio"
-    )
-    log_records: list[logging.LogRecord] = []
-
-    class _ListHandler(logging.Handler):
-        def emit(self, record):
-            log_records.append(record)
-
-    log_handler = _ListHandler(logging.DEBUG)
+    instances = []
 
     try:
         transport_cls = svc.StorageControlAsyncClient.get_transport_class(
@@ -2651,74 +2690,163 @@ async def test_control_plane_interceptor_loopback_and_opt_out(monkeypatch):
         )
         ExtendedGcsFileSystem.clear_instance_cache()
         endpoint = f"http://127.0.0.1:{port}"
-        fs = ExtendedGcsFileSystem(token="anon", endpoint_url=endpoint)
-        fs_cached = ExtendedGcsFileSystem(token="anon", endpoint_url=endpoint)
-        client = await fs._get_control_plane_client()
-        ops = client.transport.operations_client
-        orig_level = grpc_logger.level
-        grpc_logger.setLevel(logging.DEBUG)
-        grpc_logger.addHandler(log_handler)
-        try:
-            layout = await client.get_storage_layout(name=layout_name)
-            op = await ops.get_operation(op_name)
-            await client.get_storage_layout(name=layout_name, metadata=caller_md)
-            calls_before_opt_out = len(counting.calls)
-            monkeypatch.setenv("DO_NOT_TRACK", "1")
-            await client.get_storage_layout(name=layout_name)
-            await client.get_storage_layout(name=layout_name, metadata=caller_md)
-            monkeypatch.delenv("DO_NOT_TRACK", raising=False)
-            monkeypatch.setenv("GCSFS_NO_TELEMETRY", "true")
-            await ops.get_operation(op_name)
-            calls_during_opt_out = len(counting.calls)
-            monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
-            await client.get_storage_layout(name=layout_name)
-        finally:
-            grpc_logger.removeHandler(log_handler)
-            grpc_logger.setLevel(orig_level)
-        logged_features = [
-            record.metadata.get(feat_key)
-            for record in log_records
-            if "Sending request" in record.getMessage()
-            and isinstance(getattr(record, "metadata", None), dict)
-        ]
 
-        fs_sync = ExtendedGcsFileSystem(
-            token="anon", endpoint_url=endpoint, skip_instance_cache=True
+        def make_fs(**kwargs):
+            inst = ExtendedGcsFileSystem(token="anon", endpoint_url=endpoint, **kwargs)
+            instances.append(inst)
+            return inst
+
+        fs = make_fs()
+        client = await fs._get_control_plane_client()
+
+        def metadata_values(metadata, key=GRPC_METADATA_KEY):
+            return [v for k, v in metadata if k == key]
+
+        yield types.SimpleNamespace(
+            endpoint=endpoint,
+            fs=fs,
+            make_fs=make_fs,
+            client=client,
+            ops=client.transport.operations_client,
+            counting=counting,
+            recorded_calls=recorded_calls,
+            metadata_values=metadata_values,
         )
-        fs_sync._storage_layout_cache["b"] = layouts.STANDARD_HIERARCHICAL
-        monkeypatch.setattr(
-            fs_sync, "_info", mock.AsyncMock(side_effect=FileNotFoundError)
-        )
-        await asyncio.to_thread(fs_sync.mkdir, "b/sub")
     finally:
-        for instance in (fs, fs_sync):
-            if instance is not None:
-                await instance._close_resources()
+        for instance in {id(i): i for i in instances}.values():
+            await instance._close_resources()
         ExtendedGcsFileSystem.clear_instance_cache()
         await server.stop(0)
 
-    def _md_values(call_idx, key):
-        return [v for k, v in recorded_calls[call_idx][1] if k == key]
 
-    expected_log = ["EAE=", "EAE=", "caller-val", None, "caller-val", None, "EAE="]
-    expected_wire = [[v] if v else [] for v in expected_log] + [["EAE="]]
-    assert fs_cached is fs
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_attaches_metadata_on_unary_and_lro(
+    control_plane_loopback,
+):
+    fs_cached = control_plane_loopback.make_fs()
+
+    layout = await control_plane_loopback.client.get_storage_layout(
+        name=_CONTROL_LAYOUT_NAME
+    )
+    op = await control_plane_loopback.ops.get_operation(_CONTROL_OP_NAME)
+
+    assert fs_cached is control_plane_loopback.fs
     assert layout.location_type == "zone"
-    assert op.name == op_name and op.done is True
-    assert [name for name, _ in recorded_calls] == [
+    assert op.name == _CONTROL_OP_NAME and op.done is True
+    assert [name for name, _ in control_plane_loopback.recorded_calls] == [
         "GetStorageLayout",
         "GetOperation",
-        *["GetStorageLayout"] * 3,
-        "GetOperation",
-        "GetStorageLayout",
-        "CreateFolder",
     ]
-    assert [_md_values(i, feat_key) for i in range(8)] == expected_wire
-    assert logged_features == expected_log
-    assert all(_md_values(i, "x-goog-request-params") for i in range(7))
-    assert calls_during_opt_out == calls_before_opt_out
-    assert _decode_features(_md_values(0, feat_key)[0]).framework == (
+    for _, md in control_plane_loopback.recorded_calls:
+        assert control_plane_loopback.metadata_values(md) == ["EAE="]
+        assert control_plane_loopback.metadata_values(md, "x-goog-request-params")
+    first_val = control_plane_loopback.metadata_values(
+        control_plane_loopback.recorded_calls[0][1]
+    )[0]
+    assert _decode_features(first_val).framework == (
         GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_caller_override_and_debug_logging(
+    control_plane_loopback,
+):
+    caller_md = [(GRPC_METADATA_KEY, "caller-val")]
+    grpc_logger = logging.getLogger(
+        "google.cloud.storage_control_v2.services.storage_control.transports.grpc_asyncio"
+    )
+    log_records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record):
+            log_records.append(record)
+
+    log_handler = _ListHandler(logging.DEBUG)
+    orig_level = grpc_logger.level
+
+    grpc_logger.setLevel(logging.DEBUG)
+    grpc_logger.addHandler(log_handler)
+    try:
+        await control_plane_loopback.client.get_storage_layout(
+            name=_CONTROL_LAYOUT_NAME
+        )
+        await control_plane_loopback.client.get_storage_layout(
+            name=_CONTROL_LAYOUT_NAME, metadata=caller_md
+        )
+    finally:
+        grpc_logger.removeHandler(log_handler)
+        grpc_logger.setLevel(orig_level)
+
+    logged_features = [
+        record.metadata.get(GRPC_METADATA_KEY)
+        for record in log_records
+        if "Sending request" in record.getMessage()
+        and isinstance(getattr(record, "metadata", None), dict)
+    ]
+    wire_features = [
+        control_plane_loopback.metadata_values(md)
+        for _, md in control_plane_loopback.recorded_calls
+    ]
+    assert wire_features == [["EAE="], ["caller-val"]]
+    assert logged_features == ["EAE=", "caller-val"]
+    assert all(
+        control_plane_loopback.metadata_values(md, "x-goog-request-params")
+        for _, md in control_plane_loopback.recorded_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_loopback_and_opt_out(
+    control_plane_loopback, monkeypatch
+):
+    caller_md = [(GRPC_METADATA_KEY, "caller-val")]
+    client = control_plane_loopback.client
+    ops = control_plane_loopback.ops
+
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME)
+    calls_before_opt_out = len(control_plane_loopback.counting.calls)
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME)
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME, metadata=caller_md)
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.setenv("GCSFS_NO_TELEMETRY", "true")
+    await ops.get_operation(_CONTROL_OP_NAME)
+    calls_during_opt_out = len(control_plane_loopback.counting.calls)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME)
+
+    wire_features = [
+        control_plane_loopback.metadata_values(md)
+        for _, md in control_plane_loopback.recorded_calls
+    ]
+    assert wire_features == [["EAE="], [], ["caller-val"], [], ["EAE="]]
+    assert all(
+        control_plane_loopback.metadata_values(md, "x-goog-request-params")
+        for _, md in control_plane_loopback.recorded_calls
+    )
+    assert calls_during_opt_out == calls_before_opt_out
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_attaches_metadata_on_sync_mkdir(
+    control_plane_loopback, monkeypatch
+):
+    from gcsfs.tests import layouts
+
+    fs_sync = control_plane_loopback.make_fs(skip_instance_cache=True)
+    fs_sync._storage_layout_cache["b"] = layouts.STANDARD_HIERARCHICAL
+    monkeypatch.setattr(fs_sync, "_info", mock.AsyncMock(side_effect=FileNotFoundError))
+
+    await asyncio.to_thread(fs_sync.mkdir, "b/sub")
+
+    assert [
+        (name, control_plane_loopback.metadata_values(md))
+        for name, md in control_plane_loopback.recorded_calls
+    ] == [("CreateFolder", ["EAE="])]
+    assert all(
+        control_plane_loopback.metadata_values(md, "x-goog-request-params")
+        for _, md in control_plane_loopback.recorded_calls
     )
 
 

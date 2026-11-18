@@ -1,4 +1,5 @@
-# Generated file - DO NOT EDIT.
+"""Protobuf message and enum definitions for gcsfs usage telemetry."""
+
 from __future__ import annotations
 
 import proto
