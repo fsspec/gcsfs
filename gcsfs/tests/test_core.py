@@ -2268,7 +2268,14 @@ def test_merge(gcs):
 
     with gcs.open(b, "wb") as f:
         f.write(b"a" * 10)
+
+    # Populate dircache before merge to verify cache invalidation.
+    gcs.ls(TEST_BUCKET)
+    assert TEST_BUCKET in gcs.dircache
+
     gcs.merge(TEST_BUCKET + "/joined", [a, b])
+    assert TEST_BUCKET not in gcs.dircache
+    assert TEST_BUCKET + "/joined" in gcs.ls(TEST_BUCKET)
     assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
 
 
