@@ -81,6 +81,70 @@ def test_cat_versioned(gcs_versioned):
     assert gcs_versioned.cat(f"{b}#{v1}") == b"v1"
 
 
+def test_open_pins_generation(gcs_versioned):
+    with gcs_versioned.open(b, "wb") as wo:
+        wo.write(b"v1")
+    v1 = gcs_versioned.info(b)["generation"]
+
+    with gcs_versioned.open(b, "rb") as ro:
+        assert ro.generation == v1
+        with gcs_versioned.open(b, "wb") as wo:
+            wo.write(b"v2")
+        assert ro.read() == b"v1"
+    assert gcs_versioned.cat(b) == b"v2"
+
+
+def test_open_older_generation(gcs_versioned):
+    old = b"older-version-is-longer"
+    gcs_versioned.pipe_file(b, old)
+    v1 = gcs_versioned.info(b)["generation"]
+    gcs_versioned.pipe_file(b, b"new")
+
+    assert gcs_versioned.info(b, generation=v1)["size"] == len(old)
+    with gcs_versioned.open(b, "rb", generation=v1, cache_type="none") as f:
+        assert f.size == len(old)
+        assert f.read() == old
+
+
+def test_open_older_generation_warm_listing(gcs_versioned):
+    old = b"older-version-is-longer"
+    gcs_versioned.pipe_file(b, old)
+    v1 = gcs_versioned.info(b)["generation"]
+    gcs_versioned.pipe_file(b, b"new")
+    # The cached listing only holds the current version.
+    gcs_versioned.ls(posixpath.dirname(b), refresh=True)
+
+    details = gcs_versioned.info(b, generation=v1)
+    assert details["generation"] == v1
+    assert details["size"] == len(old)
+    with gcs_versioned.open(b, "rb", generation=v1, cache_type="none") as f:
+        assert f.read() == old
+
+
+def test_missing_generation_not_found(gcs_versioned):
+    gcs_versioned.pipe_file(b, b"data")
+    missing = str(int(gcs_versioned.info(b)["generation"]) - 1)
+    for refresh in (False, True):
+        if refresh:
+            gcs_versioned.ls(posixpath.dirname(b), refresh=True)
+        with pytest.raises(FileNotFoundError):
+            gcs_versioned.info(b, generation=missing)
+        with pytest.raises(FileNotFoundError):
+            gcs_versioned.info(f"{b}#{missing}")
+        with pytest.raises(FileNotFoundError):
+            gcs_versioned.open(b, "rb", generation=missing)
+
+
+def test_cat_file_concurrent_older_generation(gcs_versioned):
+    old = b"0123456789abcdefghij"
+    gcs_versioned.pipe_file(b, old)
+    v1 = gcs_versioned.info(b)["generation"]
+    gcs_versioned.pipe_file(b, b"new")
+    gcs_versioned.invalidate_cache()
+
+    assert gcs_versioned.cat_file(b, generation=v1, concurrency=4) == old
+
+
 def test_cp_versioned(gcs_versioned):
     with gcs_versioned.open(a, "wb") as wo:
         wo.write(b"v1")
