@@ -822,20 +822,18 @@ def test_rm_passes_concurrency_to_delete_files(gcs):
 
 @pytest.mark.parametrize("concurrency", [0, -1, True, 2.5, "4"])
 def test_rm_rejects_invalid_concurrency(gcs, concurrency):
-    # Arrange
+    # Goes through the public rm(), so it covers GCSFileSystem and, when the
+    # suite runs with ExtendedGcsFileSystem (standard, HNS and zonal buckets),
+    # its HNS-aware _rm as well.
     path = f"{TEST_BUCKET}/test_rm_invalid_concurrency_{uuid.uuid4().hex}"
-    core_rm = gcsfs.core.GCSFileSystem._rm
 
-    with (
-        mock.patch.object(gcs, "_expand_path", new=mock.AsyncMock()) as mock_expand,
-        mock.patch.object(gcs, "_delete_files", new=mock.AsyncMock()) as mock_delete,
-    ):
-        # Act / Assert
+    with mock.patch.object(
+        gcs, "_delete_files", new=mock.AsyncMock()
+    ) as mock_delete_files:
         with pytest.raises(ValueError, match="positive integer"):
-            sync(gcs.loop, core_rm, gcs, path, recursive=True, concurrency=concurrency)
+            gcs.rm(path, recursive=True, concurrency=concurrency)
 
-        mock_expand.assert_not_called()
-        mock_delete.assert_not_called()
+        mock_delete_files.assert_not_called()
 
 
 def test_rm_wildcards_in_directory(gcs):

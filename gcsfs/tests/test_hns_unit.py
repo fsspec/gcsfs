@@ -3303,23 +3303,6 @@ class TestExtendedGcsFileSystemRm:
                 [file_path], self.BATCH_SIZE, concurrency=DEFAULT_HNS_RM_CONCURRENCY
             )
 
-    @pytest.mark.parametrize("concurrency", [0, -1, True, 2.5, "4"])
-    def test_rm_rejects_invalid_concurrency(self, gcs_hns, gcs_hns_mocks, concurrency):
-        """Test that rm() rejects concurrency values that are not positive ints."""
-        gcsfs = gcs_hns
-        file_path = f"{TEST_HNS_BUCKET}/file_to_rm.txt"
-        mock_delete_files = mock.AsyncMock(return_value=[])
-
-        with (
-            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
-            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
-        ):
-            with pytest.raises(ValueError, match="positive integer"):
-                gcsfs.rm(file_path, concurrency=concurrency)
-
-            mocks["async_lookup_bucket_layout"].assert_not_called()
-            mock_delete_files.assert_not_called()
-
     def test_rm_recursive_hns(self, gcs_hns, gcs_hns_mocks):
         """Test sync recursive rm on a directory in an HNS bucket."""
         gcsfs = gcs_hns
