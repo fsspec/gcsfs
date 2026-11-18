@@ -730,6 +730,10 @@ class DirectMemmoveBuffer:
                     self._error = e
             raise
         finally:
+            if isinstance(data, memoryview):
+                # PartialView.write's private byte view: stop exporting the
+                # source before the write future completes.
+                data.release()
             self._decrement_pending()
 
     def get_value(self):
