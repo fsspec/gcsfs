@@ -1968,7 +1968,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return out
 
     async def _rm(
-        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=5
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=4
     ):
         """
         Deletes files and directories.
@@ -1990,7 +1990,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
             concurrency (int): The maximum number of batch delete requests in
-                flight at once. Defaults to 5; see ``GCSFileSystem._rm``.
+                flight at once. Defaults to 4; see ``GCSFileSystem._rm``.
         """
         # Normalize to a list so single-path and multi-path inputs share a
         # single code path.

@@ -14,15 +14,15 @@ Unreleased
   needs the ``roles/iam.serviceAccountTokenCreator`` role on itself.
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
-* **Recursive** ``rm()`` **now keeps at most 5 batch delete requests in flight**
+* **Recursive** ``rm()`` **now keeps at most 4 batch delete requests in flight**
   by default (new ``concurrency`` argument, e.g.
-  ``fs.rm(path, recursive=True, concurrency=10)``). This keeps deletes below
-  the initial write rate of a standard (non-HNS) bucket, about 1000 writes/s
-  (see the
+  ``fs.rm(path, recursive=True, concurrency=10)``). Deletes count as writes,
+  so this keeps them well below the initial write rate of a standard
+  (non-HNS) bucket, about 1000 writes/s (see the
   `request rate guidelines <https://cloud.google.com/storage/docs/request-rate>`_),
-  so they are not throttled and do not slow down other writes to the same
-  bucket. Pass a higher ``concurrency`` for buckets that have already scaled
-  up.
+  leaving headroom for other writes to the same bucket so that neither gets
+  throttled. Pass a higher ``concurrency`` for buckets that have already
+  scaled up.
 * Restored the ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`` environment variable and the
   ``use_experimental_adaptive_prefetching`` ``open()`` argument. Setting either to false
   when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back

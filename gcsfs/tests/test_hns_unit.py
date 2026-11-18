@@ -3178,7 +3178,7 @@ class TestExtendedGcsFileSystemRm:
     """Unit tests for the rm method in ExtendedGcsFileSystem."""
 
     BATCH_SIZE = 100
-    CONCURRENCY = 5
+    CONCURRENCY = 4
 
     def _get_delete_folder_request(self, gcsfs, dir_path):
         """Constructs a DeleteFolderRequest for testing."""
@@ -3472,7 +3472,7 @@ class TestExtendedGcsFileSystemRm:
         # A listing of `base_dir` caches both entries for the shared name.
         gcsfs.dircache[base_dir] = [dir_entry, file_entry]
 
-        async def fake_delete_files(files, batchsize, concurrency=5):
+        async def fake_delete_files(files, batchsize, concurrency=4):
             # Emulates a successful batch delete of the objects.
             await gcsfs._rm_files_cache_update(files)
             return list(files)

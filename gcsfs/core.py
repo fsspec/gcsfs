@@ -1796,17 +1796,19 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             )
 
     async def _rm(
-        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=5
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=4
     ):
         # 100 is the maximum number of operations allowed in a single GCS batch
         # request (https://cloud.google.com/storage/docs/batch); using the full
         # limit minimizes the number of round-trips when deleting many objects.
         #
         # ``concurrency`` is the maximum number of batch requests in flight.
-        # The default is kept low so that deletes stay below the initial
-        # write rate of a standard (non-HNS) bucket, about 1000 writes/s
-        # (https://cloud.google.com/storage/docs/request-rate), and do not
-        # get throttled or slow down other writes to the bucket.
+        # The default of 4 respects the initial write rate of a standard
+        # (non-HNS) bucket, about 1000 writes/s
+        # (https://cloud.google.com/storage/docs/request-rate): deletes count
+        # as writes, so they are kept well below that limit to leave headroom
+        # for other writes (e.g. foreground checkpoint writes) to the same
+        # bucket, and neither the deletes nor those writes get throttled.
         # Increase it for buckets that have scaled to higher rates.
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]

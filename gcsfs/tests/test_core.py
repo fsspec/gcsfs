@@ -815,7 +815,7 @@ def test_rm_passes_concurrency_to_delete_files(gcs):
 
     # Assert
     assert mock_delete_files.await_args_list == [
-        mock.call(files, 100, concurrency=5),
+        mock.call(files, 100, concurrency=4),
         mock.call(files, 10, concurrency=2),
     ]
 
