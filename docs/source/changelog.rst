@@ -7,6 +7,9 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* Continue credential discovery when cached tokens belong to a different project
+  or access level; explicit ``token="cache"`` now reports a missing match.
+
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API

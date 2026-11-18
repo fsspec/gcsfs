@@ -7,6 +7,7 @@ import pytest
 from gcsfs import GCSFileSystem
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.retry import HttpError, NonRetryableError
+from gcsfs.tests.settings import TEST_BUCKET
 
 MOCK_TOKEN_STR = "ya29.valid_raw_token_string"
 MOCK_EXP_TIMESTAMP = 1764620492  # 2025-12-01 20:21:32 UTC
@@ -231,3 +232,80 @@ def test_raw_token_credentials_init_raises_on_short_lived_token(
             GoogleCredentials(
                 project="my-project", token="short_lived_token", access="read_only"
             )
+
+
+@pytest.mark.parametrize(
+    "cache_key", [("other-project", "read_only"), ("my-project", "read_write")]
+)
+def test_cache_credentials_require_matching_project_and_access(monkeypatch, cache_key):
+    from google.oauth2.credentials import Credentials
+
+    cached = Credentials("cached-fixture-token")
+    monkeypatch.setattr(GoogleCredentials, "tokens", {cache_key: cached})
+    with pytest.raises(
+        ValueError, match="^No cached tokens for this project and access level$"
+    ):
+        GoogleCredentials(
+            project="my-project", access="read_only", token="cache", on_google=False
+        )
+
+
+@pytest.mark.parametrize(
+    "cache_key", [("other-project", "read_only"), ("my-project", "read_write")]
+)
+def test_unmatched_cache_continues_to_anonymous(monkeypatch, tmp_path, cache_key):
+    from google.oauth2.credentials import Credentials
+
+    cached = Credentials("cached-fixture-token")
+    monkeypatch.setattr(GoogleCredentials, "tokens", {cache_key: cached})
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing.json"))
+    credentials = GoogleCredentials(
+        project="my-project", access="read_only", token=None, on_google=False
+    )
+    assert credentials.method == "anon"
+    assert credentials.credentials is None
+    assert GoogleCredentials.tokens == {cache_key: cached}
+
+
+def test_cache_credentials_preserve_matching_entry(monkeypatch):
+    from google.oauth2.credentials import Credentials
+
+    cached = Credentials("cached-fixture-token")
+    monkeypatch.setattr(
+        GoogleCredentials, "tokens", {("my-project", "read_only"): cached}
+    )
+    credentials = GoogleCredentials(
+        project="my-project", access="read_only", token="cache", on_google=False
+    )
+    headers = {}
+    credentials.apply(headers)
+    assert credentials.method == "cache"
+    assert credentials.credentials is cached
+    assert headers["authorization"] == "Bearer cached-fixture-token"
+
+
+@pytest.mark.parametrize(
+    "cache_key", [("other-project", "read_only"), ("my-project", "read_write")]
+)
+def test_unmatched_cache_filesystem_reads_anonymously(
+    monkeypatch, tmp_path, gcs, cache_key
+):
+    from google.oauth2.credentials import Credentials
+
+    if gcs.on_google:
+        pytest.skip("Anonymous fallback read uses the local emulator")
+    path = TEST_BUCKET + "/cache_fallback"
+    gcs.pipe(path, b"public emulator content")
+    monkeypatch.setattr(
+        GoogleCredentials, "tokens", {cache_key: Credentials("cached-fixture-token")}
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing.json"))
+    fs = GCSFileSystem(
+        project="my-project",
+        access="read_only",
+        token=None,
+        endpoint_url=gcs._endpoint,
+        skip_instance_cache=True,
+    )
+    assert fs.credentials.method == "anon"
+    assert fs.cat_file(path) == b"public emulator content"

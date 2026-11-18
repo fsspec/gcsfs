@@ -154,9 +154,9 @@ class GoogleCredentials:
             raise ValueError("No cached tokens")
 
         project, access = self.project, self.access
-        if (project, access) in self.tokens:
-            credentials = self.tokens[(project, access)]
-            self.credentials = credentials
+        if (project, access) not in self.tokens:
+            raise ValueError("No cached tokens for this project and access level")
+        self.credentials = self.tokens[(project, access)]
 
     def _dict_to_credentials(self, token):
         """
