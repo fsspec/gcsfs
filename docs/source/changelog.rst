@@ -31,6 +31,12 @@ Unreleased
   sends ``fw/adk`` in the ``User-Agent`` header. Other ``google`` packages, such as
   ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
 
+* Creating a ``GCSFileSystem`` with the default ``token=None`` off GCE no
+  longer waits ~15s for the "cloud" (metadata server) method to fail. One ping
+  of the metadata server with a 1s timeout now decides whether that method is
+  tried; on a GCE VM it is always tried, as before. An explicit
+  ``token="cloud"`` is unchanged (fsspec/filesystem_spec#1768).
+
 2026.10.0
 ---------
 
