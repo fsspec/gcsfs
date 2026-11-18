@@ -39,6 +39,7 @@ from gcsfs.core import (
     _get_prefetcher_and_cache_config,
     _location,
     _resolve_generation_match,
+    _validate_rm_concurrency,
 )
 from gcsfs.poller import poll_lro, unwrap_operation_result
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
@@ -58,11 +59,12 @@ STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
 
 # Default maximum number of batch delete requests that a recursive ``rm`` keeps
-# in flight on HNS buckets. HNS buckets support a higher initial request rate
-# than standard buckets (https://cloud.google.com/storage/docs/hns-overview),
-# so they get a higher default than DEFAULT_RM_CONCURRENCY while still keeping
-# deletes well below that limit, leaving headroom for other writes to the same
-# bucket. Callers can override it with ``concurrency``.
+# in flight on HNS buckets (including zonal buckets, which are hierarchical).
+# HNS buckets support a higher initial request rate than standard buckets
+# (https://cloud.google.com/storage/docs/hns-overview), so they get a higher
+# default than DEFAULT_RM_CONCURRENCY while still keeping deletes well below
+# that higher rate, leaving headroom for other writes to the same bucket.
+# Callers can override it with ``concurrency``.
 DEFAULT_HNS_RM_CONCURRENCY = 15
 
 
@@ -1998,10 +2000,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
             concurrency (int, optional): The maximum number of batch delete
-                requests in flight at once. None (default) uses
-                ``DEFAULT_HNS_RM_CONCURRENCY`` for HNS buckets and
-                ``DEFAULT_RM_CONCURRENCY`` for standard buckets.
+                requests in flight at once (a positive integer). None (default)
+                uses ``DEFAULT_HNS_RM_CONCURRENCY`` for HNS (including zonal)
+                buckets and ``DEFAULT_RM_CONCURRENCY`` for standard buckets.
         """
+        _validate_rm_concurrency(concurrency)
         # Normalize to a list so single-path and multi-path inputs share a
         # single code path.
         if isinstance(path, str):

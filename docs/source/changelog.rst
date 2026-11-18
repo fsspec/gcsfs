@@ -15,14 +15,14 @@ Unreleased
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
 * **Recursive** ``rm()`` **now limits how many batch delete requests are in
-  flight**: at most 4 by default on standard buckets and 15 on HNS buckets
-  (new ``concurrency`` argument, e.g.
+  flight**: at most 4 by default on standard buckets and 15 on HNS (including
+  zonal) buckets (new ``concurrency`` argument, e.g.
   ``fs.rm(path, recursive=True, concurrency=10)``). Deletes count as writes,
-  so this keeps them well below the initial write rate of a standard
-  (non-HNS) bucket, about 1000 writes/s (see the
-  `request rate guidelines <https://cloud.google.com/storage/docs/request-rate>`_),
-  and below the higher initial rate of HNS buckets, leaving headroom for other
-  writes to the same bucket so that neither gets throttled. Pass a higher
+  so these defaults stay well below the initial write rate of each bucket type
+  (see the
+  `request rate guidelines <https://cloud.google.com/storage/docs/request-rate>`_
+  and the `HNS overview <https://cloud.google.com/storage/docs/hns-overview>`_),
+  leaving headroom for other writes to the same bucket. Pass a higher
   ``concurrency`` for buckets that have already scaled up.
 * Restored the ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`` environment variable and the
   ``use_experimental_adaptive_prefetching`` ``open()`` argument. Setting either to false

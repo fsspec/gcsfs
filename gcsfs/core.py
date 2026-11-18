@@ -89,10 +89,25 @@ DEFAULT_BLOCK_SIZE = 5 * 2**20
 # standard bucket initially supports about 1000 writes/s
 # (https://cloud.google.com/storage/docs/request-rate). The default of 4 keeps
 # deletes well below that limit to leave headroom for other writes (e.g.
-# foreground checkpoint writes) to the same bucket, so that neither the deletes
-# nor those writes get throttled. Callers can pass a higher ``concurrency`` for
+# application writes) to the same bucket, so that neither the deletes nor
+# those writes get throttled. Callers can pass a higher ``concurrency`` for
 # buckets that have scaled to higher rates.
 DEFAULT_RM_CONCURRENCY = 4
+
+
+def _validate_rm_concurrency(concurrency):
+    """Check the ``concurrency`` argument of ``rm``: None or a positive int."""
+    if concurrency is None:
+        return
+    if (
+        isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or concurrency < 1
+    ):
+        raise ValueError(
+            f"concurrency must be a positive integer or None, got {concurrency!r}"
+        )
+
 
 SUPPORTED_FIXED_KEY_METADATA = {
     "content_encoding": "contentEncoding",
@@ -1814,6 +1829,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         #
         # ``concurrency`` is the maximum number of batch requests in flight;
         # None uses DEFAULT_RM_CONCURRENCY (see its comment for the rationale).
+        _validate_rm_concurrency(concurrency)
         if concurrency is None:
             concurrency = DEFAULT_RM_CONCURRENCY
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)

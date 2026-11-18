@@ -25,7 +25,9 @@ from google.api_core import exceptions as api_exceptions
 from google.cloud import storage_control_v2
 from google.rpc import code_pb2
 
+from gcsfs import core as gcsfs_core
 from gcsfs.extended_gcsfs import (
+    DEFAULT_HNS_RM_CONCURRENCY,
     BucketLayout,
     CachingTier,
     ExtendedGcsFileSystem,
@@ -3249,6 +3251,75 @@ class TestExtendedGcsFileSystemRm:
                 concurrency=2,
             )
 
+    def test_rm_default_concurrency_constants(self):
+        """Pin the default concurrencies used by rm() for each bucket type."""
+        assert gcsfs_core.DEFAULT_RM_CONCURRENCY == 4
+        assert DEFAULT_HNS_RM_CONCURRENCY == 15
+        assert self.CONCURRENCY == DEFAULT_HNS_RM_CONCURRENCY
+
+    def test_rm_flat_default_concurrency_reaches_delete_files(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """Test that rm() on a flat bucket uses the standard default of 4."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+        real_core_rm = gcsfs_core.GCSFileSystem._rm
+        mock_delete_files = mock.AsyncMock(return_value=[flat_file])
+
+        async def call_real_core_rm(*args, **kwargs):
+            return await real_core_rm(gcsfs, *args, **kwargs)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_expand_path", new=mock.AsyncMock(return_value=[flat_file])
+            ),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            # Run the real flat-bucket implementation instead of the mock.
+            mocks["super_rm"].side_effect = call_real_core_rm
+
+            gcsfs.rm(flat_file)
+
+            mock_delete_files.assert_awaited_once_with(
+                [flat_file], self.BATCH_SIZE, concurrency=4
+            )
+
+    def test_rm_zonal_default_concurrency(self, gcs_hns, gcs_hns_mocks):
+        """Test that zonal buckets, which are hierarchical, use the HNS default."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/file_to_rm.txt"
+        mock_expand = mock.AsyncMock(return_value=[{"name": file_path, "type": "file"}])
+        mock_delete_files = mock.AsyncMock(return_value=[])
+
+        with (
+            gcs_hns_mocks(layouts.ZONAL_HIERARCHICAL, gcsfs),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            gcsfs.rm(file_path)
+
+            mock_delete_files.assert_awaited_once_with(
+                [file_path], self.BATCH_SIZE, concurrency=DEFAULT_HNS_RM_CONCURRENCY
+            )
+
+    @pytest.mark.parametrize("concurrency", [0, -1, True, 2.5, "4"])
+    def test_rm_rejects_invalid_concurrency(self, gcs_hns, gcs_hns_mocks, concurrency):
+        """Test that rm() rejects concurrency values that are not positive ints."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/file_to_rm.txt"
+        mock_delete_files = mock.AsyncMock(return_value=[])
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs) as mocks,
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            with pytest.raises(ValueError, match="positive integer"):
+                gcsfs.rm(file_path, concurrency=concurrency)
+
+            mocks["async_lookup_bucket_layout"].assert_not_called()
+            mock_delete_files.assert_not_called()
+
     def test_rm_recursive_hns(self, gcs_hns, gcs_hns_mocks):
         """Test sync recursive rm on a directory in an HNS bucket."""
         gcsfs = gcs_hns
@@ -3473,7 +3544,7 @@ class TestExtendedGcsFileSystemRm:
         # A listing of `base_dir` caches both entries for the shared name.
         gcsfs.dircache[base_dir] = [dir_entry, file_entry]
 
-        async def fake_delete_files(files, batchsize, concurrency=15):
+        async def fake_delete_files(files, batchsize, concurrency=None):
             # Emulates a successful batch delete of the objects.
             await gcsfs._rm_files_cache_update(files)
             return list(files)
