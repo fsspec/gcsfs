@@ -3178,7 +3178,8 @@ class TestExtendedGcsFileSystemRm:
     """Unit tests for the rm method in ExtendedGcsFileSystem."""
 
     BATCH_SIZE = 100
-    CONCURRENCY = 4
+    # Default for HNS buckets; flat buckets are delegated with concurrency=None.
+    CONCURRENCY = 15
 
     def _get_delete_folder_request(self, gcsfs, dir_path):
         """Constructs a DeleteFolderRequest for testing."""
@@ -3472,7 +3473,7 @@ class TestExtendedGcsFileSystemRm:
         # A listing of `base_dir` caches both entries for the shared name.
         gcsfs.dircache[base_dir] = [dir_entry, file_entry]
 
-        async def fake_delete_files(files, batchsize, concurrency=4):
+        async def fake_delete_files(files, batchsize, concurrency=15):
             # Emulates a successful batch delete of the objects.
             await gcsfs._rm_files_cache_update(files)
             return list(files)
@@ -3560,7 +3561,7 @@ class TestExtendedGcsFileSystemRm:
                 recursive=True,
                 maxdepth=None,
                 batchsize=self.BATCH_SIZE,
-                concurrency=self.CONCURRENCY,
+                concurrency=None,
             )
 
     def test_rm_non_existent_path_hns(self, gcs_hns, gcs_hns_mocks):
@@ -3726,7 +3727,7 @@ class TestExtendedGcsFileSystemRm:
                 recursive=True,
                 maxdepth=None,
                 batchsize=self.BATCH_SIZE,
-                concurrency=self.CONCURRENCY,
+                concurrency=None,
             )
             # HNS bucket routes to HNS-specific deletion with ONLY the HNS path.
             mock_expand.assert_awaited_once_with(
@@ -3795,7 +3796,7 @@ class TestExtendedGcsFileSystemRm:
                 recursive=False,
                 maxdepth=None,
                 batchsize=self.BATCH_SIZE,
-                concurrency=self.CONCURRENCY,
+                concurrency=None,
             )
 
     def test_rm_mixed_buckets_all_dne_raises_error(self, gcs_hns, gcs_hns_mocks):
