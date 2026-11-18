@@ -49,27 +49,29 @@ def _get_creds_from_raw_token(token):
 
     if should_fetch_expiry:
         try:
-            response = requests.post(
-                "https://oauth2.googleapis.com/tokeninfo",
-                data={"access_token": token},
-                timeout=TOKEN_INFO_TIMEOUT_SECONDS,
-            )
+            with requests.Session() as session:
+                with session.post(
+                    "https://oauth2.googleapis.com/tokeninfo",
+                    data={"access_token": token},
+                    timeout=TOKEN_INFO_TIMEOUT_SECONDS,
+                ) as response:
+                    if response.status_code == 400:
+                        # Token is likely expired or invalid format
+                        raise ValueError(
+                            "Provided token is either not valid, or expired."
+                        )
 
-            if response.status_code == 400:
-                # Token is likely expired or invalid format
-                raise ValueError("Provided token is either not valid, or expired.")
-
-            response.raise_for_status()
-            try:
-                data = response.json()
-                expiry = datetime.utcfromtimestamp(float(data["exp"]))
-            except Exception:
-                raise ValueError("Invalid tokeninfo response format.") from None
+                    response.raise_for_status()
+                    try:
+                        data = response.json()
+                        expiry = datetime.utcfromtimestamp(float(data["exp"]))
+                    except (ValueError, KeyError, TypeError, OverflowError):
+                        raise ValueError("Invalid tokeninfo response format.") from None
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else "unknown"
-            raise ValueError(f"Failed to fetch token expiry (HTTP {status}).") from None
+            raise OSError(f"Failed to fetch token expiry (HTTP {status}).") from None
         except requests.exceptions.RequestException:
-            raise ValueError("Network error while validating token expiry.") from None
+            raise OSError("Network error while validating token expiry.") from None
 
         time_remaining = max(
             0,
