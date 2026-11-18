@@ -1521,8 +1521,13 @@ def _fake_winreg(entries=None, *, open_error=None):
         entries = {r"SYSTEM\HardwareConfig\Current": entries}
     opened_keys = []
 
-    def open_key(root, sub_key):
+    key_read = 0x20019
+    key_query_value = 0x0001
+
+    def open_key(root, sub_key, reserved=0, access=key_read):
         assert root == "HKEY_LOCAL_MACHINE"
+        assert reserved == 0
+        assert access == key_query_value
         opened_keys.append(sub_key)
         if open_error is not None:
             raise open_error
@@ -1541,6 +1546,7 @@ def _fake_winreg(entries=None, *, open_error=None):
 
     return types.SimpleNamespace(
         HKEY_LOCAL_MACHINE="HKEY_LOCAL_MACHINE",
+        KEY_QUERY_VALUE=key_query_value,
         OpenKey=open_key,
         QueryValueEx=query_value_ex,
         opened_keys=opened_keys,
@@ -2456,13 +2462,14 @@ async def test_windows_gce_bios_probes_metadata_server(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "entries,no_gce_check,mds_outcomes,expected_requests",
+    "entries,no_gce_check,mds_outcomes,expected_requests,expected_keys",
     [
         pytest.param(
             {r"HARDWARE\DESCRIPTION\System\BIOS": "Google"},
             "true",
             [],
             0,
+            [r"SYSTEM\HardwareConfig\Current", r"HARDWARE\DESCRIPTION\System\BIOS"],
             id="no-gce-check",
         ),
         pytest.param(
@@ -2470,15 +2477,23 @@ async def test_windows_gce_bios_probes_metadata_server(
             None,
             [_mds_response(404, flavor=False)],
             1,
+            [r"SYSTEM\HardwareConfig\Current"],
             id="metadata-failure",
         ),
     ],
 )
 async def test_windows_gce_bios_falls_back_to_gke_on_kubernetes(
-    fake_host, monkeypatch, entries, no_gce_check, mds_outcomes, expected_requests
+    fake_host,
+    monkeypatch,
+    entries,
+    no_gce_check,
+    mds_outcomes,
+    expected_requests,
+    expected_keys,
 ):
+    winreg = _fake_winreg(entries)
     monkeypatch.setattr(environment_module.sys, "platform", "win32")
-    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(entries))
+    monkeypatch.setitem(sys.modules, "winreg", winreg)
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     if no_gce_check is not None:
         monkeypatch.setenv("NO_GCE_CHECK", no_gce_check)
@@ -2495,6 +2510,7 @@ async def test_windows_gce_bios_falls_back_to_gke_on_kubernetes(
         await _settle_probe(detector)
         assert detector.detect() == "gke"
 
+    assert winreg.opened_keys == expected_keys
     assert len(fake_host.requests) == expected_requests
     assert fake_host.opened_sessions == expected_requests
 

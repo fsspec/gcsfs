@@ -54,8 +54,8 @@ How the environment is detected
   ``/sys/class/dmi/id/product_name`` on Linux and ``SystemProductName`` under
   ``HKLM\SYSTEM\HardwareConfig\Current`` (or ``HKLM\HARDWARE\DESCRIPTION\System\BIOS`` in
   Windows containers where ``HardwareConfig\Current`` is absent) on Windows, and treats
-  ``Google`` or
-  ``Google Compute Engine`` as a Google Cloud VM; other operating systems resolve to ``oth``.
+  ``Google`` or ``Google Compute Engine`` as a Google Cloud VM; other operating systems
+  resolve to ``oth``.
 - **Google Cloud VMs** (and hosts with ``GCE_METADATA_*`` set): when the filesystem is
   created, ``gcsfs`` queries the metadata server in the background for the instance's
   ``cluster-name`` attribute. If it is set, the host resolves to ``gke``, otherwise ``gce``

@@ -68,8 +68,11 @@ def _read_windows_product_name() -> Optional[str]:
 
     for sub_key in _WINDOWS_PRODUCT_NAME_KEYS:
         try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub_key) as key:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, sub_key, access=winreg.KEY_QUERY_VALUE
+            ) as key:
                 product_name, _ = winreg.QueryValueEx(key, "SystemProductName")
+            # Trust HardwareConfig\Current even if non-Google, like the Go and C++ SDKs.
             return product_name
         except OSError:
             continue
