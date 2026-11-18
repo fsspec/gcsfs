@@ -7,6 +7,8 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* Normalize negative ``cat_file`` bounds before splitting concurrent reads (#1114).
+
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
