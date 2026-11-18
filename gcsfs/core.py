@@ -2511,10 +2511,22 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         URL : str
             The signed URL
         """
-        from google.auth.credentials import Signing
+        from google.auth.credentials import AnonymousCredentials, Signing
         from google.cloud import storage
 
         credentials = self.credentials.credentials
+        signing_credentials = (
+            kwargs["credentials"] if "credentials" in kwargs else credentials
+        )
+        if signing_credentials is None or isinstance(
+            signing_credentials, AnonymousCredentials
+        ):
+            raise ValueError(
+                "Cannot sign URL without signing credentials; "
+                "initialize GCSFileSystem with credentials or pass explicit "
+                "`credentials=`."
+            )
+
         if (
             credentials is not None
             and not isinstance(credentials, Signing)
@@ -2533,7 +2545,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 kwargs["service_account_email"] = email
                 kwargs["access_token"] = credentials.token
 
-        client = storage.Client(credentials=credentials, project=self.project)
+        client_credentials = (
+            credentials if credentials is not None else AnonymousCredentials()
+        )
+        client = storage.Client(credentials=client_credentials, project=self.project)
 
         bucket, key, generation = self.split_path(path)
         bucket = client.bucket(bucket)
