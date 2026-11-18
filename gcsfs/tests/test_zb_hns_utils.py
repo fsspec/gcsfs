@@ -8,6 +8,7 @@ import importlib
 import logging
 import os
 import sys
+import threading
 from typing import Optional
 from unittest import mock
 
@@ -1139,6 +1140,67 @@ def test_partial_view_write_error_does_not_pin_buffer():
         closed_src.clear()
     finally:
         executor.shutdown()
+
+
+@pytest.mark.parametrize("copy_fails", [False, True], ids=["copied", "copy_fails"])
+def test_direct_memmove_buffer_releases_source_before_future_completes(copy_fails):
+    # A scheduled copy works on PartialView.write's own byte view of the chunk.
+    # The worker's arguments, or the stored error of a failed copy, would keep
+    # that view alive past the write future, so the source could not be resized
+    # by a caller reacting to the future.
+    size = DirectMemmoveBuffer.THRESHOLD_BYTES_FOR_SCHEDULING + 1
+    source = bytearray(b"a" * size)
+    resize_errors = []
+
+    def resize_source(_future):
+        try:
+            source.append(0)
+            resize_errors.append(None)
+        except BufferError as e:
+            resize_errors.append(e)
+
+    failing_memmove = (
+        mock.patch.object(zb_hns_utils.ctypes, "memmove", side_effect=OSError("boom"))
+        if copy_fails
+        else contextlib.nullcontext()
+    )
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    gate = threading.Event()
+    executor.submit(gate.wait)  # hold the worker until the callback is attached
+    buf = DirectMemmoveBuffer(size, executor)
+    with failing_memmove:
+        future = buf.get_view(0, size).write(source)
+        future.add_done_callback(resize_source)
+        gate.set()
+        error = future.exception()
+        executor.shutdown()
+
+    assert isinstance(error, OSError) == copy_fails
+    assert resize_errors == [None]
+
+
+@pytest.mark.parametrize(
+    "size",
+    [1024, DirectMemmoveBuffer.THRESHOLD_BYTES_FOR_SCHEDULING + 1],
+    ids=["inline", "scheduled"],
+)
+def test_direct_memmove_buffer_leaves_callers_memoryview_usable(size):
+    # google-cloud-storage reads a chunk again after write() returns (the
+    # rolling CRC32C of whole-object reads), so the sink may release its own
+    # view of the chunk but never the caller's.
+    data = bytes(range(256)) * (size // 256 + 1)
+    chunk = memoryview(data)[:size]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor)
+    view = buf.get_view(0, size)
+
+    view.write(chunk).result()
+    assert chunk.tobytes() == data[:size]
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data[:size]
+    executor.shutdown()
 
 
 @pytest.mark.asyncio
