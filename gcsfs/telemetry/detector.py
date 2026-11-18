@@ -24,6 +24,11 @@ _TRUTHY_VALUES = ("1", "true", "yes")
 _GCP_PRODUCT_NAMES = ("Google", "Google Compute Engine")
 # GKE Sandbox (gVisor) exposes this sysfs entry from the host, unlike sys_vendor.
 _DMI_PRODUCT_NAME_PATH = "/sys/class/dmi/id/product_name"
+# Container silos omit HardwareConfig\Current, so the second path reads the SMBIOS hive.
+_WINDOWS_PRODUCT_NAME_KEYS = (
+    r"SYSTEM\HardwareConfig\Current",
+    r"HARDWARE\DESCRIPTION\System\BIOS",
+)
 _K8S_SERVICE_ACCOUNT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
 _METADATA_HOST_ENV_VARS = ("GCE_METADATA_HOST", "GCE_METADATA_ROOT", "GCE_METADATA_IP")
 _DEFAULT_METADATA_HOST = "169.254.169.254"
@@ -53,6 +58,25 @@ def _read_linux_product_name() -> Optional[str]:
             return f.read()
     except OSError:
         return None
+
+
+def _read_windows_product_name() -> Optional[str]:
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    for sub_key in _WINDOWS_PRODUCT_NAME_KEYS:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, sub_key, access=winreg.KEY_QUERY_VALUE
+            ) as key:
+                product_name, _ = winreg.QueryValueEx(key, "SystemProductName")
+            # Trust HardwareConfig\Current even if non-Google, like the Go and C++ SDKs.
+            return product_name
+        except OSError:
+            continue
+    return None
 
 
 _backoff_sleep = asyncio.sleep
@@ -143,6 +167,10 @@ class FrameworkDetector(BaseDetector):
         "tensorstore": "tensorstore",
         "tensorflow": "tensorflow",
         "jax": "jax",
+        # Agents. Keyed by two-level package because the `google` namespace also holds
+        # google-auth, google-cloud-storage and google-api-core, which run on gcsfs's
+        # own stack.
+        "google.adk": "adk",
     }
 
     def __init__(self, max_depth: int = 64):
@@ -174,8 +202,12 @@ class FrameworkDetector(BaseDetector):
                 mod_name = f_globals.get("__name__", "")
                 if mod_name:
                     top_pkg = mod_name.partition(".")[0]
-                    if top_pkg in self.KNOWN_FRAMEWORKS:
-                        detected_framework = self.KNOWN_FRAMEWORKS[top_pkg]
+                    framework = self.KNOWN_FRAMEWORKS.get(top_pkg)
+                    if not framework and "." in mod_name:
+                        two_level_pkg = ".".join(mod_name.split(".", 2)[:2])
+                        framework = self.KNOWN_FRAMEWORKS.get(two_level_pkg)
+                    if framework:
+                        detected_framework = framework
                 frame = frame.f_back
                 depth += 1
         finally:
@@ -284,10 +316,15 @@ class EnvironmentDetector(BaseDetector):
 
     @staticmethod
     def _read_gcp_bios() -> bool:
-        if not sys.platform.startswith("linux"):
+        if sys.platform.startswith("linux"):
+            product_name = _read_linux_product_name()
+        elif sys.platform == "win32":
+            product_name = _read_windows_product_name()
+        else:
             return False
-        product_name = _read_linux_product_name()
-        return product_name is not None and product_name.strip() in _GCP_PRODUCT_NAMES
+        return (
+            isinstance(product_name, str) and product_name.strip() in _GCP_PRODUCT_NAMES
+        )
 
     def _local_fallback_verdict(self) -> str:
         if not self._is_gcp_bios():

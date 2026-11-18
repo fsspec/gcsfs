@@ -84,6 +84,7 @@ class GcsfsFramework(proto.Enum):
     GCSFS_FRAMEWORK_TENSORSTORE = 16
     GCSFS_FRAMEWORK_TENSORFLOW = 17
     GCSFS_FRAMEWORK_JAX = 18
+    GCSFS_FRAMEWORK_ADK = 19
 
 
 class GcsfsEnvironment(proto.Enum):

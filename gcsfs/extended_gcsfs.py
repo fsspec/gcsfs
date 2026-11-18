@@ -1970,7 +1970,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             raise FileNotFoundError(path)
         return out
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=100):
+    async def _rm(
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=5
+    ):
         """
         Deletes files and directories.
 
@@ -1990,6 +1992,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             recursive (bool): If True, deletes directories and their contents.
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
+            concurrency (int): The maximum number of batch delete requests in
+                flight at once. Defaults to 5; see ``GCSFileSystem._rm``.
         """
         # Normalize to a list so single-path and multi-path inputs share a
         # single code path.
@@ -2017,6 +2021,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     recursive=recursive,
                     maxdepth=maxdepth,
                     batchsize=batchsize,
+                    concurrency=concurrency,
                 )
                 for bucket, bucket_paths in grouped.items()
             ],
@@ -2042,12 +2047,23 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return results
 
     async def _rm_bucket_paths(
-        self, bucket, path, recursive=False, maxdepth=None, batchsize=100
+        self,
+        bucket,
+        path,
+        recursive=False,
+        maxdepth=None,
+        batchsize=100,
+        *,
+        concurrency,
     ):
         """Helper method to handle the rm operation for paths within a single bucket."""
         if not await self._is_bucket_hns_enabled(bucket):
             return await super()._rm(
-                path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
+                path,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                batchsize=batchsize,
+                concurrency=concurrency,
             )
 
         paths = await self._expand_path_with_details(
@@ -2090,10 +2106,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             dirs,
             path,
             batchsize=batchsize,
+            concurrency=concurrency,
             delete_placeholder=not (recursive and maxdepth is None),
         )
 
-    async def _perform_rm(self, files, dirs, path, batchsize, delete_placeholder=True):
+    async def _perform_rm(
+        self, files, dirs, path, batchsize, *, concurrency, delete_placeholder=True
+    ):
         """
         Helper method to perform the deletion of files and directories.
 
@@ -2103,6 +2122,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                               deepest to shallowest.
             path (str): The original path for the rm operation, for error reporting.
             batchsize (int): The number of files to delete in a single batch request.
+            concurrency (int): The maximum number of batch delete requests for
+                files in flight at once.
             delete_placeholder (bool): Whether `_hns_rmdir` should attempt to delete
                 each directory's placeholder object before deleting the folder.
 
@@ -2113,7 +2134,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if not files and not dirs:
             raise FileNotFoundError(path)
 
-        exs = await self._delete_files(files, batchsize)
+        exs = await self._delete_files(files, batchsize, concurrency=concurrency)
         # For directories, we must delete them from deepest to shallowest
         # to avoid race conditions where a parent is deleted before its child.
         # We group directories by depth and delete them level by level.
