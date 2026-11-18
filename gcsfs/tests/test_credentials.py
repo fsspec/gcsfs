@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import os
 from unittest.mock import Mock, patch
@@ -231,3 +232,50 @@ def test_raw_token_credentials_init_raises_on_short_lived_token(
             GoogleCredentials(
                 project="my-project", token="short_lived_token", access="read_only"
             )
+
+
+@pytest.mark.parametrize("token", ["anon", None])
+def test_extended_gcsfs_anonymous_credentials_for_grpc_clients(token, monkeypatch):
+    """
+    When the HTTP requests are anonymous, either with token="anon" or with
+    token=None after every other method failed, the gRPC and storage control
+    clients must get AnonymousCredentials instead of looking for credentials
+    again (#1109).
+    """
+    from google.auth.credentials import AnonymousCredentials
+
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    monkeypatch.setenv("NO_GCE_CHECK", "true")
+    with (
+        patch.object(
+            GoogleCredentials,
+            "_connect_google_default",
+            side_effect=ValueError("no default"),
+        ),
+        patch.object(
+            GoogleCredentials, "_connect_cache", side_effect=ValueError("no cache")
+        ),
+    ):
+        fs = ExtendedGcsFileSystem(token=token, skip_instance_cache=True)
+
+    assert fs.credentials.method == "anon"
+    assert isinstance(fs.credential, AnonymousCredentials)
+
+    with patch("gcsfs.extended_gcsfs.AsyncGrpcClient") as mock_grpc_client:
+        fs._grpc_client = None
+        asyncio.run(fs._get_grpc_client())
+    assert isinstance(
+        mock_grpc_client.call_args.kwargs["credentials"], AnonymousCredentials
+    )
+
+
+def test_extended_gcsfs_keeps_found_credentials_for_grpc_clients():
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    found = Mock()
+    with patch("gcsfs.credentials.gauth.default", return_value=(found, "my-project")):
+        fs = ExtendedGcsFileSystem(token=None, skip_instance_cache=True)
+
+    assert fs.credentials.method == "google_default"
+    assert fs.credential is found
