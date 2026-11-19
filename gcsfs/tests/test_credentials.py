@@ -3,6 +3,7 @@ import os
 from unittest.mock import Mock, patch
 
 import pytest
+from google.auth.exceptions import DefaultCredentialsError
 
 from gcsfs import GCSFileSystem
 from gcsfs.credentials import GoogleCredentials
@@ -13,9 +14,19 @@ MOCK_EXP_TIMESTAMP = 1764620492  # 2025-12-01 20:21:32 UTC
 
 
 def test_googlecredentials_none():
-    credentials = GoogleCredentials(project="myproject", token=None, access="read_only")
+    """With token=None and no credentials to be found, requests are anonymous."""
+    with patch.dict(os.environ, {"NO_GCE_CHECK": "true"}):
+        with patch(
+            "gcsfs.credentials.gauth.default",
+            side_effect=DefaultCredentialsError("no default credentials"),
+        ):
+            credentials = GoogleCredentials(
+                project="myproject", token=None, access="read_only"
+            )
+    assert credentials.credentials is None
     headers = {}
     credentials.apply(headers)
+    assert headers == {}
 
 
 def test_no_gce_check_skips_cloud():
@@ -43,6 +54,48 @@ def test_connect_google_default_uses_request():
         from google.auth.transport.requests import Request
 
         assert isinstance(kwargs["request"], Request)
+
+
+@pytest.mark.parametrize(
+    "project, default_project, expected",
+    [
+        ("my-project", "default-project", "my-project"),
+        ("my-project", "my-project", "my-project"),
+        ("my-project", None, "my-project"),
+        (None, "default-project", "default-project"),
+        ("", "default-project", "default-project"),
+        (None, None, None),
+    ],
+)
+def test_connect_google_default_project(project, default_project, expected):
+    """A project given by the user is kept; the default one only fills a gap."""
+    with patch("gcsfs.credentials.gauth.default") as mock_default:
+        mock_creds = Mock()
+        mock_default.return_value = (mock_creds, default_project)
+        cred = GoogleCredentials(
+            project=project, token="google_default", access="read_only"
+        )
+
+    assert cred.project == expected
+    assert cred.credentials is mock_creds
+    assert cred.method == "google_default"
+
+
+def test_default_credentials_used_when_project_differs():
+    """With token=None, a project other than the default one must not make
+    the default credentials be skipped in favour of the next method."""
+    with patch("gcsfs.credentials.gauth.default") as mock_default:
+        mock_creds = Mock()
+        mock_default.return_value = (mock_creds, "default-project")
+        with patch.object(GoogleCredentials, "_connect_cloud") as mock_cloud:
+            cred = GoogleCredentials(
+                project="my-project", token=None, access="read_only"
+            )
+
+    assert cred.method == "google_default"
+    assert cred.credentials is mock_creds
+    assert cred.project == "my-project"
+    mock_cloud.assert_not_called()
 
 
 def test_connect_cloud_success():

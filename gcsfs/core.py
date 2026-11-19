@@ -417,8 +417,9 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         This is required in order
         to list all the buckets you have access to within a project and to
         create/delete buckets, or update their access policies.
-        If ``token='google_default'``, the value is overridden by the default,
-        if ``token='anon'``, the value is ignored.
+        If not given, the default project found with the google default
+        credentials is used, if there is one.
+        If ``token='anon'``, the value is ignored.
     access : one of {'read_only', 'read_write', 'full_control'}
         Full control implies read/write as well as modifying metadata,
         e.g., access control.
