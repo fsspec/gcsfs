@@ -4,6 +4,7 @@ import base64
 import builtins
 import io
 import json
+import logging
 import os
 import ssl
 import uuid
@@ -21,6 +22,7 @@ import google.auth.compute_engine
 import pytest
 import requests
 from fsspec.asyn import sync
+from fsspec.prefetcher import BackgroundPrefetcher
 from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
@@ -4012,6 +4014,66 @@ def test_gcsfile_prefetcher_producer_fetcher_integration(fake_fs):
         prefetcher = getattr(f.cache, "_prefetcher", None)
         assert prefetcher is not None
         assert prefetcher.producer.fetcher == f._async_fetch_range
+
+
+def test_gcsfile_failed_read_init_closes_file_and_prefetcher(gcs):
+    """If GCSFile.__init__ fails after the cache is built, the file and its prefetcher are closed."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundPrefetcher.close
+
+    with mock.patch.object(
+        BackgroundPrefetcher, "close", autospec=True, side_effect=real_close
+    ) as prefetcher_close:
+        # An invalid fixed_key_metadata fails after AbstractBufferedFile.__init__ built the cache.
+        with pytest.raises(TypeError):
+            f.__init__(gcs, f"{TEST_BUCKET}/nested/file1", "rb", fixed_key_metadata=123)
+
+    assert f.closed is True
+    prefetcher_close.assert_called_once()
+    assert f.cache._prefetcher is None
+
+
+def test_gcsfile_failed_read_init_preserves_exception_when_prefetcher_close_fails(
+    gcs, caplog
+):
+    """If prefetcher teardown fails during failed __init__, log a warning and propagate the init error."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundPrefetcher.close
+
+    def failing_close(self):
+        real_close(self)
+        raise RuntimeError("prefetcher close boom")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+        mock.patch.object(
+            BackgroundPrefetcher, "close", autospec=True, side_effect=failing_close
+        ) as prefetcher_close,
+        pytest.raises(TypeError),
+    ):
+        f.__init__(gcs, f"{TEST_BUCKET}/nested/file1", "rb", fixed_key_metadata=123)
+
+    assert f.closed is True
+    prefetcher_close.assert_called_once()
+    assert f.cache._prefetcher is None
+    assert any(
+        r.levelno == logging.WARNING and "prefetcher close boom" in r.message
+        for r in caplog.records
+    )
+
+
+def test_gcsfile_failed_write_init_is_marked_closed(gcs):
+    """A failed write-mode open is marked closed, so close() and __del__ never flush it."""
+    f = GCSFile.__new__(GCSFile)
+
+    with pytest.raises(TypeError):
+        f.__init__(gcs, f"{TEST_BUCKET}/failed_open", "wb", fixed_key_metadata=123)
+
+    # AbstractBufferedFile.__init__ already set _closed = False, so this is not the default.
+    assert f.closed is True
+    with mock.patch.object(GCSFile, "flush") as flush:
+        f.close()
+    flush.assert_not_called()
 
 
 def test_gcsfile_prefetch_sequential_integrity(gcs):
