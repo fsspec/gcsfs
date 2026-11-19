@@ -1439,6 +1439,32 @@ async def test_get_file_exception_cleanup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_get_file_last_chunk_requests_only_remaining_bytes(
+    async_gcs, gcs_bucket_mocks, caplog, tmp_path, file_path, bucket_layout
+):
+    """
+    Tests that _get_file asks only for the remaining bytes in the last chunk, so
+    a size that is not a multiple of the chunk size does not log a short read.
+    """
+    data = bytes(range(133))
+
+    with gcs_bucket_mocks(data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(data)
+        lpath = tmp_path / "output.txt"
+        with caplog.at_level(logging.WARNING, logger="gcsfs"):
+            await async_gcs._get_file(file_path, str(lpath), chunksize=50)
+
+        requested = [
+            call.args[0][0][:2]
+            for call in mocks["downloader"].download_ranges.await_args_list
+        ]
+        assert requested == [(0, 50), (50, 50), (100, 33)]
+        assert "Short read" not in caplog.text
+        assert lpath.read_bytes() == data
+
+
+@pytest.mark.asyncio
 async def test_merge_zonal_not_supported(async_gcs, zonal_write_mocks):
     """Test _merge for Zonal buckets raises NotImplementedError."""
     path = f"{TEST_ZONAL_BUCKET}/merged_file"

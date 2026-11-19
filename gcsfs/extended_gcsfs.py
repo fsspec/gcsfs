@@ -2666,7 +2666,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                             break
 
                         data = await zb_hns_utils.download_range(
-                            offset=offset, length=chunksize, mrd=mrd
+                            offset=offset,
+                            length=min(chunksize, size - offset),
+                            mrd=mrd,
                         )
                         if not data:
                             break
