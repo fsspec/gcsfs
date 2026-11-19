@@ -2494,14 +2494,19 @@ def test_fs_requester_pays_on_bucket_without_requester_pays(gcs, gcs_factory):
 
 
 @mock.patch("gcsfs.credentials.gauth")
-def test_raise_on_project_mismatch(mock_auth):
-    mock_auth.default.return_value = (requests.Session(), "my_other_project")
-    match = "'my_project' does not match the google default project 'my_other_project'"
-    with pytest.raises(ValueError, match=match):
-        GCSFileSystem(project="my_project", token="google_default")
+def test_user_project_overrides_google_default(mock_auth):
+    credentials = requests.Session()
+    mock_auth.default.return_value = (credentials, "my_other_project")
 
-    result = GCSFileSystem(project="my_other_project", token="google_default")
-    assert result.project == "my_other_project"
+    fs = GCSFileSystem(
+        project="my_project", token="google_default", requester_pays=True
+    )
+    assert fs.project == "my_project"
+    assert fs.credentials.credentials is credentials
+    assert fs._get_params({}) == {"userProject": "my_project"}
+
+    fs = GCSFileSystem(project="my_other_project", token="google_default")
+    assert fs.project == "my_other_project"
 
 
 def test_ls_prefix_cache(gcs):

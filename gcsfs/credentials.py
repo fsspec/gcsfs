@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import pickle
-import textwrap
 import threading
 import warnings
 from datetime import datetime, timezone
@@ -124,18 +123,9 @@ class GoogleCredentials:
             req = Request(session)
             credentials, project = gauth.default(scopes=[self.scope], request=req)
 
-        msg = textwrap.dedent(
-            """\
-        User-provided project '{}' does not match the google default project '{}'. Either
-
-          1. Accept the google-default project by not passing a `project` to GCSFileSystem
-          2. Configure the default project to match the user-provided project (gcloud config set project)
-          3. Use an authorization method other than 'google_default' by providing 'token=...'
-        """
-        )
-        if self.project and self.project != project:
-            raise ValueError(msg.format(self.project, project))
-        self.project = project
+        # The default credentials are not tied to the default project, so a
+        # project given by the user takes precedence over it.
+        self.project = self.project or project
         self.credentials = credentials
 
     def _connect_cloud(self):

@@ -31,6 +31,11 @@ Unreleased
 * Framework telemetry now recognizes the Agent Development Kit (``google.adk``) and
   sends ``fw/adk`` in the ``User-Agent`` header. Other ``google`` packages, such as
   ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
+* A ``project`` passed to ``GCSFileSystem`` is now kept when the google default
+  credentials are used and their default project is a different one, instead of
+  raising ``ValueError`` with ``token="google_default"`` or skipping the default
+  credentials with ``token=None``. The default project is still used when no
+  ``project`` is given (#483).
 
 2026.10.0
 ---------

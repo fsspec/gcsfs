@@ -45,6 +45,48 @@ def test_connect_google_default_uses_request():
         assert isinstance(kwargs["request"], Request)
 
 
+@pytest.mark.parametrize(
+    "project, default_project, expected",
+    [
+        ("my-project", "default-project", "my-project"),
+        ("my-project", "my-project", "my-project"),
+        ("my-project", None, "my-project"),
+        (None, "default-project", "default-project"),
+        ("", "default-project", "default-project"),
+        (None, None, None),
+    ],
+)
+def test_connect_google_default_project(project, default_project, expected):
+    """A project given by the user is kept; the default one only fills a gap."""
+    with patch("gcsfs.credentials.gauth.default") as mock_default:
+        mock_creds = Mock()
+        mock_default.return_value = (mock_creds, default_project)
+        cred = GoogleCredentials(
+            project=project, token="google_default", access="read_only"
+        )
+
+    assert cred.project == expected
+    assert cred.credentials is mock_creds
+    assert cred.method == "google_default"
+
+
+def test_default_credentials_used_when_project_differs():
+    """With token=None, a project other than the default one must not make
+    the default credentials be skipped in favour of the next method."""
+    with patch("gcsfs.credentials.gauth.default") as mock_default:
+        mock_creds = Mock()
+        mock_default.return_value = (mock_creds, "default-project")
+        with patch.object(GoogleCredentials, "_connect_cloud") as mock_cloud:
+            cred = GoogleCredentials(
+                project="my-project", token=None, access="read_only"
+            )
+
+    assert cred.method == "google_default"
+    assert cred.credentials is mock_creds
+    assert cred.project == "my-project"
+    mock_cloud.assert_not_called()
+
+
 def test_connect_cloud_success():
     with patch("google.auth.compute_engine.Credentials") as mock_creds_class:
         mock_creds = Mock()
