@@ -3,6 +3,7 @@ import os
 from unittest.mock import Mock, patch
 
 import pytest
+from google.auth.exceptions import DefaultCredentialsError
 
 from gcsfs import GCSFileSystem
 from gcsfs.credentials import GoogleCredentials
@@ -13,9 +14,19 @@ MOCK_EXP_TIMESTAMP = 1764620492  # 2025-12-01 20:21:32 UTC
 
 
 def test_googlecredentials_none():
-    credentials = GoogleCredentials(project="myproject", token=None, access="read_only")
+    """With token=None and no credentials to be found, requests are anonymous."""
+    with patch.dict(os.environ, {"NO_GCE_CHECK": "true"}):
+        with patch(
+            "gcsfs.credentials.gauth.default",
+            side_effect=DefaultCredentialsError("no default credentials"),
+        ):
+            credentials = GoogleCredentials(
+                project="myproject", token=None, access="read_only"
+            )
+    assert credentials.credentials is None
     headers = {}
     credentials.apply(headers)
+    assert headers == {}
 
 
 def test_no_gce_check_skips_cloud():
