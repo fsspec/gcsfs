@@ -743,21 +743,61 @@ def test_zonal_file_text_mode_failed_write_surfaces_its_error(
     )
 
 
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_with_block_exception_closes_without_finalizing(
-    extended_gcsfs, zonal_write_mocks, file_path
+    extended_gcsfs, zonal_write_mocks, file_path, mode
 ):
     """An exception raised by other code inside the `with` block propagates, and
     the file is closed without finalizing the partial object."""
-    if not zonal_write_mocks:
-        pytest.skip("Unit test for with-block failures with mocks.")
+    is_rcu = (
+        zonal_write_mocks["storage_class"] == "RAPID"
+        if zonal_write_mocks
+        else extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu
+    )
+    open_kwargs = {} if is_rcu else {"finalize_on_close": True}
 
     with pytest.raises(RuntimeError, match="caller failed"):
-        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+        with extended_gcsfs.open(file_path, mode, **open_kwargs) as f:
+            assert f.finalize_on_close is True
             f.write(test_data)
             raise RuntimeError("caller failed")
 
     assert f.closed
-    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=False)
+    if zonal_write_mocks:
+        zonal_write_mocks["aaow"].close.assert_awaited_once_with(
+            finalize_on_close=False
+        )
+    else:
+        extended_gcsfs.invalidate_cache(file_path)
+        assert extended_gcsfs.info(file_path).get("timeFinalized") is None
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_with_block_exception_before_write_does_not_open_writer(
+    extended_gcsfs, zonal_write_mocks, file_path, mode
+):
+    """Raising before the first write() closes without opening the writer,
+    leaving any existing object intact and the caller's exception unmasked."""
+    if zonal_write_mocks:
+        zonal_write_mocks["init_aaow"].side_effect = FileExistsError("must not open")
+    else:
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as existing:
+            existing.write(test_data)
+
+    with pytest.raises(RuntimeError, match="caller failed"):
+        with extended_gcsfs.open(file_path, mode, finalize_on_close=True) as f:
+            raise RuntimeError("caller failed")
+
+    assert f.closed
+    if zonal_write_mocks:
+        zonal_write_mocks["init_aaow"].assert_not_awaited()
+        zonal_write_mocks["aaow"].close.assert_not_awaited()
+    else:
+        extended_gcsfs.invalidate_cache(file_path)
+        assert extended_gcsfs.info(file_path).get("timeFinalized") is not None
+        assert extended_gcsfs.cat(file_path) == test_data
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
