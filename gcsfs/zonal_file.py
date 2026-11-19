@@ -106,6 +106,8 @@ class ZonalFile(GCSFile):
         self.flush_interval_bytes = flush_interval_bytes
         self.gcsfs = gcsfs
         self.pool_size = pool_size
+        self.concurrency = kwargs.get("concurrency", pool_size)
+        self.mrd = None
         caller_size = kwargs.pop("size", None)
         object_size = None
         if self.mode == "rb":
@@ -129,31 +131,40 @@ class ZonalFile(GCSFile):
         # asyn.sync() does not cancel the checkout when the caller is interrupted
         # (e.g. by Ctrl-C), so whichever side sees the abort closes the pool.
         handoff_lock = threading.Lock()
-        handoff = {"aborted": False, "pool": None}
+        handoff = {"aborted": False, "mrd": None}
 
-        async def _checkout_pool():
-            pool = await self.gcsfs._mrd_pool_cache.get(
+        async def _checkout_mrd():
+            cache = getattr(self.gcsfs, "_mrd_cache", None)
+            if cache is None:
+                cache = getattr(self.gcsfs, "_mrd_manager", None)
+            if cache is None:
+                cache = getattr(self.gcsfs, "_mrd_pool_cache", None)
+            mrd = await cache.get(
                 bucket,
                 key,
                 generation,
-                pool_size=self.pool_size,
+                concurrency=self.concurrency,
                 cache_type=resolved_cache_type,
                 cache_source=resolved_cache_source,
             )
             with handoff_lock:
                 if not handoff["aborted"]:
-                    handoff["pool"] = pool
-                    return pool
-            await pool.close()  # The caller already gave up.
+                    handoff["mrd"] = mrd
+                    return mrd
+            await mrd.close()  # The caller already gave up.
 
         # The pool checkout and everything after it run under the cleanup below.
         try:
             if self.mode == "rb":
-                self.mrd_pool = asyn.sync(self.gcsfs.loop, _checkout_pool)
-            if self.mrd_pool is not None:
-                if getattr(self.mrd_pool, "details", None) is not None:
-                    self._details = self.mrd_pool.details
-                object_size = self.mrd_pool.persisted_size
+                self.mrd = asyn.sync(self.gcsfs.loop, _checkout_mrd)
+                self.mrd_pool = self.mrd
+            if self.mrd is not None:
+                details = getattr(self.mrd, "details", None)
+                if isinstance(details, dict):
+                    self._details = details
+                persisted_size = getattr(self.mrd, "persisted_size", None)
+                if isinstance(persisted_size, int):
+                    object_size = persisted_size
 
                 if object_size is None:
                     logger.warning(
@@ -187,8 +198,9 @@ class ZonalFile(GCSFile):
         except BaseException:
             with handoff_lock:
                 handoff["aborted"] = True
-                if self.mrd_pool is None:
-                    self.mrd_pool = handoff["pool"]
+                if getattr(self, "mrd", None) is None:
+                    self.mrd = handoff["mrd"]
+                    self.mrd_pool = self.mrd
             self.closed = True
             # GCSFile.__init__ leaves the prefetcher to _close_impl(), which a
             # file marked closed never reaches, so stop it here. Like
@@ -199,14 +211,16 @@ class ZonalFile(GCSFile):
             if prefetcher is not None:
                 cache._prefetcher = None
                 prefetcher.close()
-            if self.mrd_pool is not None:
-                pool, self.mrd_pool = self.mrd_pool, None
+            mrd_to_close = getattr(self, "mrd", None) or getattr(self, "mrd_pool", None)
+            if mrd_to_close is not None:
+                self.mrd = None
+                self.mrd_pool = None
                 try:
                     sync_teardown(
                         self.gcsfs.loop,
-                        pool.close,
+                        mrd_to_close.close,
                         timeout=timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS,
-                        description=f"closing mrd_pool for {path} after failed open",
+                        description=f"closing mrd for {path} after failed open",
                     )
                 except Exception as e:
                     logger.warning(
@@ -216,7 +230,11 @@ class ZonalFile(GCSFile):
             raise
 
     def _reopen_kwargs(self):
-        return {**super()._reopen_kwargs(), "pool_size": self.pool_size}
+        return {
+            **super()._reopen_kwargs(),
+            "pool_size": self.pool_size,
+            "concurrency": getattr(self, "concurrency", self.pool_size),
+        }
 
     async def _init_mrd(self, bucket_name, object_name, generation=None):
         """
@@ -308,7 +326,7 @@ class ZonalFile(GCSFile):
                     start=start,
                     chunk_lengths=chunk_lengths,
                     size=self.size,
-                    mrd=self.mrd_pool,
+                    mrd=getattr(self, "mrd", self.mrd_pool),
                     cache_type=self.cache_type,
                     cache_source=self.cache_source,
                 )
@@ -318,7 +336,7 @@ class ZonalFile(GCSFile):
                 start=start,
                 end=end,
                 concurrency=self.concurrency,
-                mrd=self.mrd_pool,
+                mrd=getattr(self, "mrd", self.mrd_pool),
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
             )
@@ -333,7 +351,7 @@ class ZonalFile(GCSFile):
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """The native coroutine called by the BackgroundPrefetcher."""
         return await self.gcsfs._concurrent_mrd_fetch(
-            start_offset, total_size, split_factor, self.mrd_pool
+            start_offset, total_size, split_factor, getattr(self, "mrd", self.mrd_pool)
         )
 
     def write(self, data):
@@ -519,17 +537,21 @@ class ZonalFile(GCSFile):
 
         timeout = self.timeout or DEFAULT_TEARDOWN_TIMEOUT_SECONDS
 
-        # Teardown the read-side MRD pool if initialized.
-        if hasattr(self, "mrd_pool") and self.mrd_pool:
+        # Teardown the read-side MRD if initialized.
+        mrd_to_close = getattr(self, "mrd", None) or getattr(self, "mrd_pool", None)
+        if mrd_to_close:
             try:
                 sync_teardown(
                     self.gcsfs.loop,
-                    self.mrd_pool.close,
+                    mrd_to_close.close,
                     timeout=timeout,
-                    description=f"closing mrd_pool for {self.path}",
+                    description=f"closing mrd for {self.path}",
                 )
             except Exception as e:
                 errors.append(e)
+            finally:
+                self.mrd = None
+                self.mrd_pool = None
 
         # Finalize and close the write-side AAOW stream.
         # Wrapped independently so a read pool failure does not abandon write finalization.

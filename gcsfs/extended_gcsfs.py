@@ -207,7 +207,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self,
         *args,
         finalize_on_close=None,
-        mrd_pool_cache_size=16,
+        mrd_cache_size=16,
+        mrd_pool_cache_size=None,
         max_mrd_pool_cache_queue_size=16,
         fast_lro_polling=True,
         rcu_rapid_write=False,
@@ -222,8 +223,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Zonal buckets default to ``False`` (left unfinalized to allow
             appends) and files in RCU buckets, which use these writers only
             with ``rcu_rapid_write=True``, default to ``True``.
-        mrd_pool_cache_size : int, default 16
-            Maximum number of idle pools to retain in the cache.
+        mrd_cache_size : int, default 16
+            Maximum number of idle MRDs to retain in the cache.
+        mrd_pool_cache_size : int, optional
+            Legacy alias for mrd_cache_size.
         max_mrd_pool_cache_queue_size : int, default 16
             Maximum number of idle MRDs per key in the cache.
         fast_lro_polling : bool, default True
@@ -284,16 +287,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             max_workers=kwargs.get("memmove_max_workers", 8)
         )
         weakref.finalize(self, self._memmove_executor.shutdown)
-        self._mrd_pool_cache = zb_hns_utils.MRDPoolCache(
+        if mrd_pool_cache_size is not None:
+            mrd_cache_size = mrd_pool_cache_size
+        self._mrd_cache = zb_hns_utils.MRDCache(
             self,
-            max_idle_pools=mrd_pool_cache_size,
-            max_queue_size=max_mrd_pool_cache_queue_size,
+            max_idle_mrds=mrd_cache_size,
         )
+        self._mrd_pool_cache = self._mrd_cache
+        self._mrd_manager = self._mrd_cache
         weakref.finalize(
             self,
-            self._finalize_mrd_pool_cache,
+            self._finalize_mrd_cache,
             self.loop,
-            self._mrd_pool_cache,
+            self._mrd_cache,
         )
 
     async def _get_threshold_for_disk_reads(self, bucket):
@@ -304,8 +310,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return await super()._get_threshold_for_disk_reads(bucket)
 
     @staticmethod
-    def _finalize_mrd_pool_cache(loop, cache):
-        """Tear down the MRDPoolCache when ExtendedGcsFileSystem is garbage collected."""
+    def _finalize_mrd_cache(loop, cache):
+        """Tear down the MRDCache when ExtendedGcsFileSystem is garbage collected."""
         if cache is None or getattr(cache, "_closed", False):
             return
 
@@ -323,6 +329,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 asyn.sync(asyn.loop[0], cache.close, timeout=5.0)
             except fsspec.FSTimeoutError:
                 pass
+
+    _finalize_mrd_pool_cache = _finalize_mrd_cache
 
     @property
     def _user_project(self):
@@ -771,11 +779,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if mrd is None:
             # If no mrd is provided, we create one with pool size equal to passed concurrency.
             pool_size = min(len(chunk_lengths), concurrency)
-            mrd = await self._mrd_pool_cache.get(
+            mrd = await self._mrd_cache.get(
                 bucket,
                 object_name,
                 generation,
-                pool_size=pool_size,
+                concurrency=pool_size,
                 cache_type=cache_type,
                 cache_source=cache_source,
             )
@@ -929,12 +937,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     path, start=start, end=end, concurrency=concurrency, **kwargs
                 )
 
-            # Instantiate an MRDPool locally for this call
-            mrd = await self._mrd_pool_cache.get(
+            # Instantiate an MRD locally for this call
+            mrd = await self._mrd_cache.get(
                 bucket,
                 object_name,
                 generation,
-                pool_size=concurrency,
+                concurrency=concurrency,
                 cache_type=cache_type,
                 cache_source=cache_source,
             )
@@ -1101,11 +1109,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 if initialized:
                     return
                 try:
-                    pool = await self._mrd_pool_cache.get(
+                    pool = await self._mrd_cache.get(
                         bucket,
                         object_name,
                         generation,
-                        pool_size=num_streams,
+                        concurrency=num_streams,
                         cache_type=cache_type,
                         cache_source=cache_source,
                     )
@@ -2650,59 +2658,58 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         cache_type, cache_source = self._resolve_cache_config(kwargs)
 
-        mrd_pool = await self._mrd_pool_cache.get(
+        mrd = await self._mrd_cache.get(
             bucket,
             key,
             generation,
-            pool_size=1,
+            concurrency=1,
             cache_type=cache_type,
             cache_source=cache_source,
         )
         try:
-            async with mrd_pool.get_mrd() as mrd:
-                size = mrd.persisted_size
-                if size is None:
-                    logger.warning(
-                        f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
-                        "Falling back to _info() to get the file size. "
-                        "This may result in incorrect behavior for unfinalized objects."
+            size = mrd.persisted_size
+            if size is None:
+                logger.warning(
+                    f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
+                    "Falling back to _info() to get the file size. "
+                    "This may result in incorrect behavior for unfinalized objects."
+                )
+                size = (await self._info(rpath, **kwargs)).get("size", 0)
+
+            callback.set_size(size)
+
+            lparent = os.path.dirname(lpath) or os.curdir
+            os.makedirs(lparent, exist_ok=True)
+
+            chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
+            offset = 0
+
+            with open(lpath, "wb") as f2:
+                while True:
+                    if offset >= size:
+                        break
+
+                    data = await zb_hns_utils.download_range(
+                        offset=offset, length=chunksize, mrd=mrd
                     )
-                    size = (await self._info(rpath, **kwargs)).get("size", 0)
+                    if not data:
+                        break
 
-                callback.set_size(size)
+                    f2.write(data)
+                    offset += len(data)
+                    callback.relative_update(len(data))
 
-                lparent = os.path.dirname(lpath) or os.curdir
-                os.makedirs(lparent, exist_ok=True)
-
-                chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
-                offset = 0
-
-                with open(lpath, "wb") as f2:
-                    while True:
-                        if offset >= size:
-                            break
-
-                        data = await zb_hns_utils.download_range(
-                            offset=offset, length=chunksize, mrd=mrd
-                        )
-                        if not data:
-                            break
-
-                        f2.write(data)
-                        offset += len(data)
-                        callback.relative_update(len(data))
-
-                if offset != size:
-                    raise aiohttp.ClientError(
-                        f"Expected {size} bytes, but only received {offset} bytes"
-                    )
+            if offset != size:
+                raise aiohttp.ClientError(
+                    f"Expected {size} bytes, but only received {offset} bytes"
+                )
         except Exception as e:
             # Clean up the corrupted file before raising error
             if os.path.exists(lpath):
                 os.remove(lpath)
             raise e
         finally:
-            await mrd_pool.close()
+            await mrd.close()
 
     async def _get_file_concurrent(
         self,
@@ -2736,31 +2743,31 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         cache_type, cache_source = self._resolve_cache_config(kwargs)
 
-        # Initialize the MRDPool once for this concurrent operation
-        mrd_pool = await self._mrd_pool_cache.get(
+        # Initialize the MRD once for this concurrent operation
+        mrd = await self._mrd_cache.get(
             bucket,
             key,
             generation,
-            pool_size=concurrency,
+            concurrency=concurrency,
             cache_type=cache_type,
             cache_source=cache_source,
         )
 
-        # Define a custom fetcher that passes the pool to _cat_file
+        # Define a custom fetcher that passes the mrd to _cat_file
         async def custom_fetcher(start, size, split_factor=1):
             return await self._cat_file(
                 rpath,
                 start=start,
                 end=start + size,
-                mrd=mrd_pool,  # Inject the shared pool here
+                mrd=mrd,
                 concurrency=split_factor,
                 headers=headers,
                 **kwargs,
             )
 
         try:
-            details = dict(mrd_pool.details or {})
-            size = await _get_mrd_size(mrd_pool)
+            details = dict(mrd.details or {})
+            size = await _get_mrd_size(mrd)
             if size is None:
                 logger.warning(
                     f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
@@ -2789,8 +2796,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 **kwargs,
             )
         finally:
-            # Ensure the pool is closed when the download completes or fails
-            await mrd_pool.close()
+            # Ensure the MRD is closed when the download completes or fails
+            await mrd.close()
 
     async def _do_list_objects(
         self,
