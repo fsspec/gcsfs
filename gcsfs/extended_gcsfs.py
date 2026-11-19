@@ -58,6 +58,7 @@ logger = logging.getLogger("gcsfs")
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
+DEFAULT_PARALLEL_UPLOAD_THRESHOLD = 128 * 2**20
 
 # Default maximum number of batch delete requests that a recursive ``rm`` keeps
 # in flight on HNS buckets (including zonal buckets, which are hierarchical).
@@ -212,6 +213,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         max_mrd_pool_cache_queue_size=16,
         fast_lro_polling=True,
         rcu_rapid_write=False,
+        parallel_upload=False,
+        parallel_upload_threshold=DEFAULT_PARALLEL_UPLOAD_THRESHOLD,
+        parallel_upload_segment_size=None,
         **kwargs,
     ):
         """
@@ -247,6 +251,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             ``fsspec.config.conf.setdefault("gcs", {})["rcu_rapid_write"] = True``.
             Has no effect on Zonal buckets, which always use the appendable
             writer.
+        parallel_upload : bool, default False
+            Opt in to parallel uploads of large writes. No write path uses this
+            option so far. Can also be set with
+            ``FSSPEC_GCS_PARALLEL_UPLOAD=true`` or
+            ``fsspec.config.conf.setdefault("gcs", {})["parallel_upload"] = True``.
+        parallel_upload_threshold : int, default 128 MiB
+            Smallest write, in bytes, that uses a parallel upload.
+        parallel_upload_segment_size : int, optional
+            Preferred segment size, in bytes, for parallel uploads. ``None`` (the
+            default) leaves the size to the SDK.
         **kwargs : dict
             Additional arguments passed to GCSFileSystem.
             Supports retry configuration overrides for Storage Control API:
@@ -258,6 +272,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         self.fast_lro_polling = fast_lro_polling
         self.rcu_rapid_write = _parse_bool_flag(rcu_rapid_write, "rcu_rapid_write")
+        self.parallel_upload = _parse_bool_flag(parallel_upload, "parallel_upload")
+        self.parallel_upload_threshold = parallel_upload_threshold
+        self.parallel_upload_segment_size = parallel_upload_segment_size
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
