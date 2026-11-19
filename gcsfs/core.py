@@ -84,6 +84,31 @@ GCS_MIN_BLOCK_SIZE = 2**18
 GCS_MAX_BLOCK_SIZE = 2**28
 DEFAULT_BLOCK_SIZE = 5 * 2**20
 
+# Default maximum number of batch delete requests that a recursive ``rm`` keeps
+# in flight on standard (non-HNS) buckets. Deletes count as writes, and a
+# standard bucket initially supports about 1000 writes/s
+# (https://cloud.google.com/storage/docs/request-rate). The default of 4 keeps
+# deletes well below that limit to leave headroom for other writes (e.g.
+# application writes) to the same bucket, so that neither the deletes nor
+# those writes get throttled. Callers can pass a higher ``concurrency`` for
+# buckets that have scaled to higher rates.
+DEFAULT_RM_CONCURRENCY = 4
+
+
+def _validate_rm_concurrency(concurrency):
+    """Check the ``concurrency`` argument of ``rm``: None or a positive int."""
+    if concurrency is None:
+        return
+    if (
+        isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or concurrency < 1
+    ):
+        raise ValueError(
+            f"concurrency must be a positive integer or None, got {concurrency!r}"
+        )
+
+
 SUPPORTED_FIXED_KEY_METADATA = {
     "content_encoding": "contentEncoding",
     "cache_control": "cacheControl",
@@ -1768,8 +1793,11 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             or _MTLS_HOST in self._location.lower()
         )
 
-    async def _delete_files(self, files, batchsize):
-        """Helper to delete files in batches."""
+    async def _delete_files(self, files, batchsize, concurrency):
+        """Helper to delete files in batches.
+
+        At most ``concurrency`` batch requests are in flight at once.
+        """
         if self.on_google:
             # emulators do not support batch
             chunk_results = await asyn._run_coros_in_chunks(
@@ -1778,6 +1806,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     for i in range(0, len(files), batchsize)
                 ],
                 return_exceptions=True,
+                batch_size=concurrency,
             )
             out = []
             for r in chunk_results:
@@ -1791,14 +1820,22 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 [self._rm_file(f) for f in files], return_exceptions=True, batch_size=5
             )
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=100):
+    async def _rm(
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=None
+    ):
         # 100 is the maximum number of operations allowed in a single GCS batch
         # request (https://cloud.google.com/storage/docs/batch); using the full
         # limit minimizes the number of round-trips when deleting many objects.
+        #
+        # ``concurrency`` is the maximum number of batch requests in flight;
+        # None uses DEFAULT_RM_CONCURRENCY (see its comment for the rationale).
+        _validate_rm_concurrency(concurrency)
+        if concurrency is None:
+            concurrency = DEFAULT_RM_CONCURRENCY
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
-        exs = await self._delete_files(files, batchsize)
+        exs = await self._delete_files(files, batchsize, concurrency=concurrency)
 
         # buckets
         exs.extend(
@@ -3308,6 +3345,9 @@ async def simple_upload(
     experimental features for Zonal buckets, and RCU buckets with ``rcu_rapid_write``, to
     upload data using gRPC.
     """
+    if content_type is not None and ("\r" in content_type or "\n" in content_type):
+        raise ValueError("content_type must not contain CR or LF characters")
+
     from .extended_gcsfs import ExtendedGcsFileSystem
     from .extended_gcsfs import simple_upload as ext_simple_upload
 
@@ -3342,13 +3382,22 @@ async def simple_upload(
         kw["kmsKeyName"] = kms_key_name
     metadata.update(_convert_fixed_key_metadata(fixed_key_metadata))
     metadata = json.dumps(metadata)
+    datain = as_byte_buffer(datain)
+    boundary = uuid.uuid4().hex
+    # `in` on a memoryview compares integer elements, so search views with re.
+    while (
+        boundary.encode("ascii") in datain
+        if isinstance(datain, bytes)
+        else re.search(boundary.encode("ascii"), datain)
+    ) or boundary in metadata:
+        boundary = uuid.uuid4().hex
     template = (
-        "--==0=="
+        f"--{boundary}"
         "\nContent-Type: application/json; charset=UTF-8"
-        "\n\n" + metadata + "\n--==0==" + f"\nContent-Type: {content_type}" + "\n\n"
+        f"\n\n{metadata}\n--{boundary}\nContent-Type: {content_type}\n\n"
     )
 
-    data = template.encode() + datain + b"\n--==0==--"
+    data = b"".join((template.encode(), datain, f"\n--{boundary}--".encode("ascii")))
     # aiohttp handles bytes and memoryview natively and zero-copy;
     # no need to wrap in UnclosableBytesIO.
     payload = (
@@ -3361,7 +3410,7 @@ async def simple_upload(
             "POST",
             path,
             uploadType="multipart",
-            headers={"Content-Type": 'multipart/related; boundary="==0=="'},
+            headers={"Content-Type": f'multipart/related; boundary="{boundary}"'},
             data=payload,
             json_out=True,
             **kw,

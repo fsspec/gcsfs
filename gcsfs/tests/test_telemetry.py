@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import io
 import os
@@ -35,6 +36,7 @@ from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
+    _telemetry_context,
     mirror_gcs_methods,
     wrap_file_methods,
 )
@@ -137,6 +139,41 @@ def test_framework_detector_ignores_internal_and_test_prefixes(monkeypatch):
     assert detector.detect() is None
 
 
+@pytest.mark.parametrize(
+    "module_names, expected",
+    [
+        # FsspecArtifactService I/O runs in a worker thread via `asyncio.to_thread`.
+        (
+            (
+                "threading",
+                "concurrent.futures.thread",
+                "google.adk.integrations.fsspec._fsspec_artifact_service",
+                "fsspec.spec",
+                "gcsfs.core",
+                "google.auth.transport.requests",
+            ),
+            "adk",
+        ),
+        # Outermost framework wins in both directions.
+        (("google.adk.runners", "pandas.io.parquet", "gcsfs.core"), "adk"),
+        (("ray.serve", "google.adk.runners", "gcsfs.core"), "ray"),
+        # Other `google` packages and lookalikes are not frameworks.
+        (("google", "gcsfs.core"), None),
+        (("google.auth.transport.requests", "gcsfs.core"), None),
+        (("google.cloud.storage.client", "gcsfs.core"), None),
+        (("google.adkx.tools", "gcsfs.core"), None),
+        (("google_adk", "gcsfs.core"), None),
+    ],
+)
+def test_framework_detector_google_adk(monkeypatch, module_names, expected):
+    frame = None
+    for module_name in module_names:
+        frame = _create_mock_frame(module_name, frame)
+
+    monkeypatch.setattr(sys, "_getframe", lambda: frame)
+    assert FrameworkDetector().detect() == expected
+
+
 def test_framework_detector_handles_empty_and_invalid_frames(monkeypatch):
     detector = FrameworkDetector()
 
@@ -172,7 +209,7 @@ def test_telemetry_tracker_opt_out(monkeypatch):
     # With GCSFS_NO_TELEMETRY=1
     monkeypatch.setenv("GCSFS_NO_TELEMETRY", "1")
     assert not tracker.is_enabled()
-    assert tracker.collect_tokens_map() == {}
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {}
     assert tracker.get_tokens() == []
 
     # With GCSFS_NO_TELEMETRY=true
@@ -183,7 +220,7 @@ def test_telemetry_tracker_opt_out(monkeypatch):
     # With DO_NOT_TRACK=1
     monkeypatch.setenv("DO_NOT_TRACK", "1")
     assert not tracker.is_enabled()
-    assert tracker.collect_tokens_map() == {}
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {}
     assert tracker.get_tokens() == []
 
     # With DO_NOT_TRACK=true
@@ -389,14 +426,14 @@ def test_collect_tokens_map_caches_detector_exception():
 
     tracker = UsageMetricsTracker(detectors=[FailingDetector()])
 
-    tokens1 = tracker.collect_tokens_map()
+    tokens1 = tracker.collect_tokens_map(call_scoped_only=False)
     assert tokens1 == {Dimension.FRAMEWORK.value: ""}
     assert call_count == 1
 
     # Second call
     t = set_telemetry_context(tokens1)
     try:
-        tokens2 = tracker.collect_tokens_map()
+        tokens2 = tracker.collect_tokens_map(call_scoped_only=False)
     finally:
         reset_telemetry_context(t)
     assert tokens2 == {Dimension.FRAMEWORK.value: ""}
@@ -436,7 +473,7 @@ def test_collect_tokens_map_records_empty_for_none_detection():
             return None
 
     tracker = UsageMetricsTracker(detectors=[DummyNoneDetector()])
-    tokens_map = tracker.collect_tokens_map()
+    tokens_map = tracker.collect_tokens_map(call_scoped_only=False)
     assert tokens_map == {"fw": ""}
     assert call_count == 1
 
@@ -447,11 +484,144 @@ def test_collect_tokens_map_records_empty_for_none_detection():
         # must now be O(1) without re-running detect()
         assert tracker.get_tokens() == []
         assert tracker.get_dimension(Dimension.FRAMEWORK) is None
-        tokens_map_2 = tracker.collect_tokens_map()
+        tokens_map_2 = tracker.collect_tokens_map(call_scoped_only=False)
         assert tokens_map_2 == {"fw": ""}
         assert call_count == 1  # Still 1, no additional detect() calls!
     finally:
         reset_telemetry_context(token)
+
+
+class _CallScopedFrameworkDetector(BaseDetector):
+    name = Dimension.FRAMEWORK
+
+    def detect(self):
+        return "pandas"
+
+
+class _ProcessScopedEnvDetector(BaseDetector):
+    """Process-wide detector whose value can change mid-call, like an in-flight probe."""
+
+    name = Dimension.ENVIRONMENT
+    call_scoped = False
+
+    def __init__(self, value="gke"):
+        self.value = value
+        self.calls = 0
+
+    def detect(self):
+        self.calls += 1
+        return self.value
+
+
+def _tracker_with(env_detector):
+    return UsageMetricsTracker(detectors=[_CallScopedFrameworkDetector(), env_detector])
+
+
+def test_collect_tokens_map_requires_call_scoped_only():
+    tracker = _tracker_with(_ProcessScopedEnvDetector())
+
+    with pytest.raises(TypeError):
+        tracker.collect_tokens_map()
+
+
+def test_collect_tokens_map_call_scoped_only_skips_process_scoped_detectors():
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    assert tracker.collect_tokens_map(call_scoped_only=True) == {"fw": "pandas"}
+    assert env_detector.calls == 0
+
+    assert tracker.collect_tokens_map(call_scoped_only=False) == {
+        "fw": "pandas",
+        "env": "gke",
+    }
+    assert env_detector.calls == 1
+
+
+def test_get_tokens_reads_process_scoped_detectors_every_request():
+    """Request tokens include env and re-read it per call, even inside a per-call context."""
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+
+    token = set_telemetry_context(tracker.collect_tokens_map(call_scoped_only=True))
+    try:
+        assert get_telemetry_context() == {"fw": "pandas"}
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+        assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+    finally:
+        reset_telemetry_context(token)
+    assert env_detector.calls == 3
+
+
+def test_explicit_context_value_wins_over_process_scoped_detector():
+    env_detector = _ProcessScopedEnvDetector()
+    tracker = _tracker_with(env_detector)
+
+    token = set_telemetry_context({"env": "custom"})
+    try:
+        assert tracker.collect_tokens_map(call_scoped_only=True) == {
+            "env": "custom",
+            "fw": "pandas",
+        }
+        assert tracker.get_tokens() == ["env/custom", "fw/pandas"]
+    finally:
+        reset_telemetry_context(token)
+    assert env_detector.calls == 0
+
+
+def _check_env_resolves_mid_call(tracker, env_detector):
+    # The per-call snapshot holds only call-scoped dimensions while env is unresolved.
+    assert get_telemetry_context() == {"fw": "pandas"}
+    assert tracker.get_tokens() == ["fw/pandas"]
+    # The background probe resolves mid-call; later requests in the same call pick it up.
+    env_detector.value = "gke"
+    assert tracker.get_tokens() == ["fw/pandas", "env/gke"]
+
+
+def _run_in_telemetry_context(check):
+    with _telemetry_context():
+        check()
+
+
+def _run_in_native_async_gen(check):
+    async def steps():
+        check()
+        yield None
+
+    async def consume():
+        return [item async for item in _gcs_async_wrapper(steps)()]
+
+    asyncio.run(consume())
+
+
+def _run_in_sync_gen(check):
+    class GenFS(fsspec.asyn.AsyncFileSystem):
+        async def _steps(self):
+            check()
+            yield None
+
+        steps = _gcs_sync_wrapper(_steps)
+
+    list(GenFS(skip_instance_cache=True).steps())
+
+
+@pytest.mark.parametrize(
+    "run_call",
+    [_run_in_telemetry_context, _run_in_native_async_gen, _run_in_sync_gen],
+    ids=["telemetry_context", "native_async_gen", "sync_gen"],
+)
+def test_per_call_snapshot_never_freezes_unresolved_env(monkeypatch, run_call):
+    """Each wrapper snapshot site leaves env out, so an env that resolves mid-call is sent."""
+    env_detector = _ProcessScopedEnvDetector(value=None)
+    tracker = _tracker_with(env_detector)
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+
+    run_call(lambda: _check_env_resolves_mid_call(tracker, env_detector))
+
+    assert env_detector.value == "gke"
+    assert get_telemetry_context() == {}
 
 
 # ============================================================================
@@ -1380,6 +1550,44 @@ def _connector_error():
     )
 
 
+def _fake_winreg(entries=None, *, open_error=None):
+    """Fake winreg module for Windows registry lookups."""
+    if not isinstance(entries, dict):
+        entries = {r"SYSTEM\HardwareConfig\Current": entries}
+    opened_keys = []
+
+    key_read = 0x20019
+    key_query_value = 0x0001
+
+    def open_key(root, sub_key, reserved=0, access=key_read):
+        assert root == "HKEY_LOCAL_MACHINE"
+        assert reserved == 0
+        assert access == key_query_value
+        opened_keys.append(sub_key)
+        if open_error is not None:
+            raise open_error
+        if sub_key not in entries:
+            raise FileNotFoundError(2, "missing key", sub_key)
+        return contextlib.nullcontext((root, sub_key))
+
+    def query_value_ex(key, value_name):
+        root, sub_key = key
+        assert root == "HKEY_LOCAL_MACHINE"
+        assert value_name == "SystemProductName"
+        outcome = entries[sub_key]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome, 1
+
+    return types.SimpleNamespace(
+        HKEY_LOCAL_MACHINE="HKEY_LOCAL_MACHINE",
+        KEY_QUERY_VALUE=key_query_value,
+        OpenKey=open_key,
+        QueryValueEx=query_value_ex,
+        opened_keys=opened_keys,
+    )
+
+
 def _wait_until_probe_settles(detector: EnvironmentDetector, timeout: float = 5.0):
     deadline = time.monotonic() + timeout
     while detector._probe_in_flight:
@@ -2237,3 +2445,171 @@ def test_stub_environment_detection_skips_live_benchmark_runs(monkeypatch):
         assert EnvironmentDetector().detect() is None
     finally:
         unit_gen.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entries,mds_outcome,expected,expected_keys",
+    [
+        pytest.param(
+            "Google Compute Engine ",
+            _mds_response(404),
+            "gce",
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="gce-vm",
+        ),
+        pytest.param(
+            {r"HARDWARE\DESCRIPTION\System\BIOS": "Google Compute Engine"},
+            _mds_response(200, body="win-cluster"),
+            "gke",
+            [r"SYSTEM\HardwareConfig\Current", r"HARDWARE\DESCRIPTION\System\BIOS"],
+            id="gke-pod-bios-fallback",
+        ),
+        pytest.param(
+            "Google",
+            _mds_response(200, body="win-cluster"),
+            "gke",
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="gke-node",
+        ),
+    ],
+)
+async def test_windows_gce_bios_probes_metadata_server(
+    fake_host, monkeypatch, entries, mds_outcome, expected, expected_keys
+):
+    winreg = _fake_winreg(entries)
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winreg", winreg)
+    fake_host.outcomes = [mds_outcome]
+    detector = EnvironmentDetector()
+
+    assert detector.detect() is None
+    await _settle_probe(detector)
+    detected = detector.detect()
+
+    assert detected == expected
+    assert winreg.opened_keys == expected_keys
+    assert fake_host.dmi_reads == []
+    assert fake_host.requests == [
+        (_DEFAULT_CLUSTER_NAME_URL, {"Metadata-Flavor": "Google"})
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entries,no_gce_check,mds_outcomes,expected_requests,expected_keys",
+    [
+        pytest.param(
+            {r"HARDWARE\DESCRIPTION\System\BIOS": "Google"},
+            "true",
+            [],
+            0,
+            [r"SYSTEM\HardwareConfig\Current", r"HARDWARE\DESCRIPTION\System\BIOS"],
+            id="no-gce-check",
+        ),
+        pytest.param(
+            "Google",
+            None,
+            [_mds_response(404, flavor=False)],
+            1,
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="metadata-failure",
+        ),
+    ],
+)
+async def test_windows_gce_bios_falls_back_to_gke_on_kubernetes(
+    fake_host,
+    monkeypatch,
+    entries,
+    no_gce_check,
+    mds_outcomes,
+    expected_requests,
+    expected_keys,
+):
+    winreg = _fake_winreg(entries)
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winreg", winreg)
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    if no_gce_check is not None:
+        monkeypatch.setenv("NO_GCE_CHECK", no_gce_check)
+    else:
+        monkeypatch.delenv("NO_GCE_CHECK", raising=False)
+    fake_host.outcomes = mds_outcomes
+    detector = EnvironmentDetector()
+
+    first = detector.detect()
+    if no_gce_check is not None:
+        assert first == "gke"
+    else:
+        assert first is None
+        await _settle_probe(detector)
+        assert detector.detect() == "gke"
+
+    assert winreg.opened_keys == expected_keys
+    assert len(fake_host.requests) == expected_requests
+    assert fake_host.opened_sessions == expected_requests
+
+
+@pytest.mark.parametrize(
+    "entries,open_error,expected_keys",
+    [
+        pytest.param(
+            "Virtual Machine",
+            None,
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="non-google-product",
+        ),
+        pytest.param(
+            123,
+            None,
+            [r"SYSTEM\HardwareConfig\Current"],
+            id="non-string-value",
+        ),
+        pytest.param(
+            None,
+            PermissionError("access denied"),
+            list(environment_module._WINDOWS_PRODUCT_NAME_KEYS),
+            id="open-key-error",
+        ),
+        pytest.param(
+            {
+                key: FileNotFoundError("missing value")
+                for key in environment_module._WINDOWS_PRODUCT_NAME_KEYS
+            },
+            None,
+            list(environment_module._WINDOWS_PRODUCT_NAME_KEYS),
+            id="missing-registry-value",
+        ),
+        pytest.param(None, None, None, id="winreg-import-error"),
+    ],
+)
+def test_non_gcp_windows_host_skips_probe(
+    fake_host, monkeypatch, entries, open_error, expected_keys
+):
+    monkeypatch.setattr(environment_module.sys, "platform", "win32")
+    if expected_keys is None:
+        monkeypatch.setitem(sys.modules, "winreg", None)
+        winreg = None
+    else:
+        winreg = _fake_winreg(entries, open_error=open_error)
+        monkeypatch.setitem(sys.modules, "winreg", winreg)
+    detector = EnvironmentDetector()
+
+    detected = detector.detect()
+
+    assert detected == "oth"
+    assert detector._gcp_bios is False
+    if winreg is not None:
+        assert winreg.opened_keys == expected_keys
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0
+
+
+def test_non_linux_non_windows_platform_skips_probe(fake_host, monkeypatch):
+    monkeypatch.setattr(environment_module.sys, "platform", "darwin")
+    monkeypatch.delitem(sys.modules, "winreg", raising=False)
+    detector = EnvironmentDetector()
+
+    assert detector.detect() == "oth"
+    assert fake_host.dmi_reads == []
+    assert fake_host.opened_sessions == 0

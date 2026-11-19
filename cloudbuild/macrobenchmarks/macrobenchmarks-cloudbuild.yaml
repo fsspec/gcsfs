@@ -25,7 +25,7 @@ substitutions:
   # auto-generated per-run seed; with _SEED_CHECKPOINT=false, fresh run / no restore.
   _CHECKPOINT_LOAD_PATH: ""
   _REQUIREMENTS: ""
-  _IMAGE: "nvcr.io/nvidia/pytorch:26.05-py3"
+  _IMAGE: "nvcr.io/nvidia/pytorch:26.10-py3"
   _TRAINING_STRATEGY: "ddp"
   # ModelParallelStrategy mesh (model_parallel_* only). TP x DP must equal
   # _NODES x _RANKS_PER_NODE. Default: TP=4 intra-node, DP=2 across nodes.
@@ -46,9 +46,10 @@ substitutions:
   _EPOCHS: "3"
   # HF streaming shuffle buffer size (0 to disable). Seed is fixed at 42.
   _SHUFFLE_BUFFER_SIZE: "10000"
-  # Shards the shuffle buffer interleaves. Higher = better mixing, but it divides
-  # the shard count; keep the result a multiple of _NODES x _RANKS_PER_NODE or
-  # every rank re-reads the whole dataset.
+  # Shards the shuffle buffer interleaves per node/worker. Higher = better
+  # mixing; it does not change the shard count (datasets >= 5.1), so keep the
+  # dataset's Parquet file count a multiple of _NODES x _RANKS_PER_NODE or every
+  # rank re-reads the whole dataset.
   _SHUFFLE_MAX_BUFFER_INPUT_SHARDS: "10"
   # Batches to prefetch per dataloader worker.
   _DATALOADER_PREFETCH_FACTOR: "2"
