@@ -743,6 +743,23 @@ def test_zonal_file_text_mode_failed_write_surfaces_its_error(
     )
 
 
+def test_zonal_file_with_block_exception_closes_without_finalizing(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """An exception raised by other code inside the `with` block propagates, and
+    the file is closed without finalizing the partial object."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for with-block failures with mocks.")
+
+    with pytest.raises(RuntimeError, match="caller failed"):
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+            f.write(test_data)
+            raise RuntimeError("caller failed")
+
+    assert f.closed
+    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=False)
+
+
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
 def test_zonal_file_open_write_mode_with_if_generation_match(
     extended_gcsfs, zonal_write_mocks, file_path

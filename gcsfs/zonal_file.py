@@ -68,9 +68,12 @@ class ZonalFile(GCSFile):
         called explicitly or `finalize_on_close` must be set to `True`.
         On Zonal and RCU buckets an overwrite replaces the existing object as
         soon as the writer opens, so a failed append, flush or commit leaves
-        the partially written object in its place, unfinalized. An exception
-        raised by other code inside a `with` block still closes the file, which
-        finalizes the partial object when `finalize_on_close` is `True`.
+        the partially written object in its place, unfinalized. So does an
+        exception raised by other code inside the file's own `with` block
+        (`with fs.open(path, "wb") as f:`). A wrapper that only closes the
+        file when its block exits, such as a text-mode file or
+        `fsspec.open()`, does not pass the exception on, so there the partial
+        object is still finalized when `finalize_on_close` is `True`.
 
         For Zonal and RCU buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
@@ -499,6 +502,13 @@ class ZonalFile(GCSFile):
         raise NotImplementedError(
             "_upload_chunk is not implemented yet for ZonalFile. Please use write() instead."
         )
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # Code inside the `with` block raised: still close the file, but leave
+        # the partially written object unfinalized.
+        if exc_type is not None and self.mode != "rb" and not self.finalized:
+            self.finalize_on_close = False
+        return super().__exit__(exc_type, exc_value, traceback)
 
     def _close_impl(self):
         errors = []
