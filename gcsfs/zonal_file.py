@@ -506,7 +506,7 @@ class ZonalFile(GCSFile):
     def __exit__(self, exc_type, exc_value, traceback):
         # Code inside the `with` block raised: still close the file, but leave
         # the partially written object unfinalized.
-        if exc_type is not None and self.mode != "rb" and not self.finalized:
+        if exc_type is not None and self.writable() and not self.finalized:
             self.finalize_on_close = False
         return super().__exit__(exc_type, exc_value, traceback)
 
