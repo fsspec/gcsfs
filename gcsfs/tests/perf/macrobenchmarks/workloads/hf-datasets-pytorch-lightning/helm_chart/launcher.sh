@@ -10,7 +10,7 @@ set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 
-# The default workload image is nvcr.io/nvidia/pytorch:26.05-py3 (see
+# The default workload image is nvcr.io/nvidia/pytorch:26.10-py3 (see
 # values_base.yaml), which already ships curl/ca-certificates, so this guard is
 # a no-op there. It exists for minimal Debian-based fallback images (e.g.
 # python:3.11-slim) that omit curl/ca-certificates, which the gcloud install +

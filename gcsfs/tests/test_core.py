@@ -98,7 +98,7 @@ def test_exists(gcs):
     assert gcs.exists(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.exists(nb)
 
 
@@ -124,7 +124,7 @@ def test_isdir(gcs):
     assert gcs.isdir(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.isdir(nb)
 
 
@@ -153,7 +153,7 @@ def test_isfile(gcs):
     assert not gcs.isfile(dn + "/")
 
     # Non-existent bucket
-    nb = "non-existent-bucket-name-" + str(uuid4())
+    nb = "gcsfs-test-non-existent-" + str(uuid4())
     assert not gcs.isfile(nb)
 
     # Generation
@@ -221,6 +221,103 @@ def test_simple_upload(gcs):
     with gcs.open(fn, "wb") as f:
         f.write(b"zz")
     assert gcs.cat(fn) == b"zz"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"before\r\n--==0==--\r\nafter",
+        b"before\n--==0==--\nafter",
+    ],
+    ids=["crlf_boundary", "lf_boundary"],
+)
+def test_simple_upload_payload_with_multipart_boundary(gcs, payload):
+    fn = f"{TEST_BUCKET}/multipart_boundary_payload"
+    assert gcs.consistency == "none"
+    gcs.pipe_file(fn, payload)
+    assert gcs.cat_file(fn) == payload
+
+
+@pytest.mark.parametrize(
+    "make_data",
+    [bytes, bytearray, memoryview],
+    ids=["bytes", "bytearray", "memoryview"],
+)
+def test_simple_upload_boundary_collision_retry(gcs, skip_if_zonal, make_data):
+    first = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    second = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    raw = b"before\r\n--" + first.hex.encode("ascii") + b"--\r\nafter"
+    key = "boundary_collision"
+    fn = f"{TEST_BUCKET}/{key}"
+
+    with (
+        mock.patch("gcsfs.core.uuid.uuid4", side_effect=[first, second]) as mock_uuid,
+        mock.patch.object(gcs, "_call", wraps=gcs._call) as spy_call,
+    ):
+        sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key, make_data(raw))
+
+    assert mock_uuid.call_count == 2
+    call_kwargs = spy_call.call_args.kwargs
+    expected_boundary = second.hex
+    assert (
+        call_kwargs["headers"]["Content-Type"]
+        == f'multipart/related; boundary="{expected_boundary}"'
+    )
+    body = bytes(call_kwargs["data"])
+    assert body.startswith(f"--{expected_boundary}\n".encode("ascii"))
+    assert f"\n--{expected_boundary}\n".encode("ascii") in body
+    assert body.endswith(f"\n--{expected_boundary}--".encode("ascii"))
+    assert gcs.cat_file(fn) == raw
+
+
+def test_simple_upload_memoryview(gcs):
+    fn1 = f"{TEST_BUCKET}/simple_upload_mv_pipe"
+    mv1 = memoryview(b"hello --==0==-- world")
+    gcs.pipe_file(fn1, mv1)
+    assert gcs.cat_file(fn1) == bytes(mv1)
+
+    key2 = "simple_upload_mv_direct"
+    fn2 = f"{TEST_BUCKET}/{key2}"
+    mv2 = memoryview(b"hello\r\n--==0==--\r\nworld")
+    sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key2, mv2)
+    assert gcs.cat_file(fn2) == bytes(mv2)
+
+    key3 = "simple_upload_mv_typed"
+    fn3 = f"{TEST_BUCKET}/{key3}"
+    mv3 = memoryview(array.array("H", [1, 2, 3]))
+    sync(
+        gcs.loop,
+        gcsfs.core.simple_upload,
+        gcs,
+        TEST_BUCKET,
+        key3,
+        mv3,
+        consistency="size",
+    )
+    assert gcs.cat_file(fn3) == bytes(mv3)
+
+
+@pytest.mark.parametrize(
+    "bad_content_type",
+    [
+        "text/plain\r\nX-Injected: 1",
+        "text/plain\n\nmalicious-body",
+        "text/plain\rX-Injected: 1",
+    ],
+    ids=["crlf_header", "lf_body", "cr_header"],
+)
+def test_simple_upload_rejects_crlf_in_content_type(
+    gcs, skip_if_zonal, bad_content_type
+):
+    fn = f"{TEST_BUCKET}/bad_content_type"
+    with mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        with pytest.raises(ValueError, match="content_type"):
+            gcs.pipe_file(fn, b"hello", content_type=bad_content_type)
+        mock_call.assert_not_called()
+
+        mock_call.return_value = {"size": "5", "md5Hash": "", "crc32c": ""}
+        gcs.pipe_file(fn, b"hello", content_type=None, consistency="none")
+        mock_call.assert_called_once()
 
 
 def test_simple_upload_with_kms(gcs):
@@ -654,10 +751,89 @@ async def test_delete_files_with_exception(gcs):
         mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
     ):
         # Act
-        result = await gcs._delete_files(files, batchsize=2)
+        result = await gcs._delete_files(files, batchsize=2, concurrency=5)
 
         # Assert
         assert result == [True, True, exc]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency", [1, 5, 8])
+async def test_delete_files_bounds_concurrency(gcs, concurrency):
+    # Arrange
+    files = [f"{TEST_BUCKET}/file_{i}" for i in range(50)]
+    in_flight = 0
+    max_in_flight = 0
+
+    async def mock_rm_files(batch):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        # Yield to the event loop so the other scheduled batch requests start
+        # before this one finishes. Without an await, each mock would complete
+        # immediately and at most one would ever be in flight. sleep(0) yields
+        # without adding wall-clock delay.
+        await asyncio.sleep(0)
+        in_flight -= 1
+        return list(batch)
+
+    with (
+        mock.patch.object(
+            type(gcs),
+            "on_google",
+            new_callable=mock.PropertyMock(return_value=True),
+        ),
+        mock.patch.object(gcs, "_rm_files", side_effect=mock_rm_files),
+    ):
+        # Act
+        result = await gcs._delete_files(files, batchsize=2, concurrency=concurrency)
+
+    # Assert
+    assert result == files
+    # 25 batches are available, so the cap is what limits in-flight requests.
+    assert max_in_flight == concurrency
+
+
+def test_rm_passes_concurrency_to_delete_files(gcs):
+    # Arrange
+    path = f"{TEST_BUCKET}/test_rm_concurrency_{uuid.uuid4().hex}"
+    files = [f"{path}/file_{i}" for i in range(3)]
+    # Call the flat-bucket implementation directly: on HNS/zonal test buckets
+    # ExtendedGcsFileSystem._rm would route to the HNS path instead. Run it on
+    # the filesystem's own loop, as the sync API does.
+    core_rm = gcsfs.core.GCSFileSystem._rm
+
+    with (
+        mock.patch.object(gcs, "_expand_path", new=mock.AsyncMock(return_value=files)),
+        mock.patch.object(
+            gcs, "_delete_files", new=mock.AsyncMock(return_value=files)
+        ) as mock_delete_files,
+    ):
+        # Act
+        sync(gcs.loop, core_rm, gcs, path, recursive=True)
+        sync(gcs.loop, core_rm, gcs, path, recursive=True, batchsize=10, concurrency=2)
+
+    # Assert
+    assert mock_delete_files.await_args_list == [
+        mock.call(files, 100, concurrency=4),
+        mock.call(files, 10, concurrency=2),
+    ]
+
+
+@pytest.mark.parametrize("concurrency", [0, -1, True, 2.5, "4"])
+def test_rm_rejects_invalid_concurrency(gcs, concurrency):
+    # Goes through the public rm(), so it covers GCSFileSystem and, when the
+    # suite runs with ExtendedGcsFileSystem (standard, HNS and zonal buckets),
+    # its HNS-aware _rm as well.
+    path = f"{TEST_BUCKET}/test_rm_invalid_concurrency_{uuid.uuid4().hex}"
+
+    with mock.patch.object(
+        gcs, "_delete_files", new=mock.AsyncMock()
+    ) as mock_delete_files:
+        with pytest.raises(ValueError, match="positive integer"):
+            gcs.rm(path, recursive=True, concurrency=concurrency)
+
+        mock_delete_files.assert_not_called()
 
 
 def test_rm_wildcards_in_directory(gcs):
@@ -2540,7 +2716,7 @@ def test_bucket_location(gcs_factory, location):
     gcs = gcs_factory(default_location=location)
     if not gcs.on_google:
         pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
-    bucket_name = str(uuid4())
+    bucket_name = f"gcsfs-test-{uuid4()}"
     try:
         gcs.mkdir(bucket_name)
         bucket = [
@@ -2557,7 +2733,7 @@ def test_bucket_default_location_overwrite(gcs_factory):
     gcs = gcs_factory(default_location="US")
     if not gcs.on_google:
         pytest.skip("emulator can only create buckets in the 'US-CENTRAL1' location.")
-    bucket_name = str(uuid4())
+    bucket_name = f"gcsfs-test-{uuid4()}"
     try:
         gcs.mkdir(bucket_name, location="EUROPE-WEST3")
         bucket = [

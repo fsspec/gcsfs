@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 import pytest
+import yarl
 
 from gcsfs.core import GCSFileSystem
 from gcsfs.inventory_report import InventoryReport, InventoryReportConfig
@@ -53,6 +54,22 @@ class TestInventoryReport:
                 inventory_report_info=inventory_report_info
             )
 
+    @pytest.mark.parametrize("field", ["location", "id"])
+    @pytest.mark.parametrize("bad_value", ["", ".", "..", None])
+    def test_validate_inventory_report_info_rejects_invalid_segments(
+        self, field, bad_value
+    ):
+        inventory_report_info = {
+            "use_snapshot_listing": True,
+            "location": "us-west1",
+            "id": "report-123",
+            field: bad_value,
+        }
+        with pytest.raises(ValueError):
+            InventoryReport._validate_inventory_report_info(
+                inventory_report_info=inventory_report_info
+            )
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "location, id, exception, expected_result",
@@ -89,9 +106,142 @@ class TestInventoryReport:
                 gcs_file_system=gcs_file_system, location=location, id=id
             )
             gcs_file_system._call.assert_called_once_with(
-                "GET", mock.ANY, json_out=True
+                "GET",
+                f"{InventoryReport.BASE_URL}/projects/{{}}/locations/{{}}/reportConfigs/{{}}",
+                "project",
+                location,
+                id,
+                json_out=True,
             )
             assert result == expected_result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "project, location, report_id, expected_raw_parts",
+        [
+            (
+                "my-project",
+                "../other-project/locations/us-central1/reportConfigs/other-id",
+                "report-1",
+                (
+                    "/",
+                    "v1",
+                    "projects",
+                    "my-project",
+                    "locations",
+                    "..%2Fother-project%2Flocations%2Fus-central1%2FreportConfigs%2Fother-id",
+                    "reportConfigs",
+                    "report-1",
+                ),
+            ),
+            (
+                "my-project",
+                "us-central1/sub?alt=media",
+                "report/1?alt=media#frag",
+                (
+                    "/",
+                    "v1",
+                    "projects",
+                    "my-project",
+                    "locations",
+                    "us-central1%2Fsub%3Falt=media",
+                    "reportConfigs",
+                    "report%2F1%3Falt=media%23frag",
+                ),
+            ),
+            (
+                "proj/../evil?x=1#frag",
+                "us-west1#frag",
+                "../other-id?foo=bar",
+                (
+                    "/",
+                    "v1",
+                    "projects",
+                    "proj%2F..%2Fevil%3Fx=1%23frag",
+                    "locations",
+                    "us-west1%23frag",
+                    "reportConfigs",
+                    "..%2Fother-id%3Ffoo=bar",
+                ),
+            ),
+        ],
+    )
+    async def test_fetch_raw_inventory_report_config_quotes_url_segments(
+        self, project, location, report_id, expected_raw_parts
+    ):
+        fs = GCSFileSystem(
+            project=project,
+            token="anon",
+            asynchronous=True,
+            skip_instance_cache=True,
+        )
+        try:
+            await fs._set_session()
+            response = mock.Mock()
+            response.status = 200
+            response.headers = {}
+            response.read = mock.AsyncMock(return_value=b'{"config": "ok"}')
+            response.request_info = mock.Mock()
+
+            with mock.patch.object(
+                fs.session,
+                "request",
+                return_value=mock.AsyncMock(
+                    __aenter__=mock.AsyncMock(return_value=response)
+                ),
+            ) as mock_request:
+                result = await InventoryReport._fetch_raw_inventory_report_config(
+                    gcs_file_system=fs,
+                    location=location,
+                    id=report_id,
+                )
+
+            assert result == {"config": "ok"}
+            mock_request.assert_called_once()
+            actual_url = mock_request.call_args.kwargs["url"]
+            parsed = yarl.URL(actual_url)
+            assert parsed.scheme == "https"
+            assert parsed.host == "storageinsights.googleapis.com"
+            assert parsed.raw_parts == expected_raw_parts
+            assert dict(parsed.query) == {}
+            assert parsed.fragment == ""
+        finally:
+            if fs._session is not None:
+                await fs._session.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "project, location, report_id",
+        [
+            ("my-project", "", "report-1"),
+            ("my-project", ".", "report-1"),
+            ("my-project", "..", "report-1"),
+            ("my-project", None, "report-1"),
+            ("my-project", "us-central1", ""),
+            ("my-project", "us-central1", "."),
+            ("my-project", "us-central1", ".."),
+            ("my-project", "us-central1", None),
+            ("", "us-central1", "report-1"),
+            (".", "us-central1", "report-1"),
+            ("..", "us-central1", "report-1"),
+            (None, "us-central1", "report-1"),
+        ],
+    )
+    async def test_fetch_raw_inventory_report_config_rejects_dot_and_empty_segments(
+        self, project, location, report_id
+    ):
+        gcs_file_system = mock.MagicMock()
+        gcs_file_system.project = project
+        gcs_file_system._call = mock.AsyncMock(return_value={"config": "unexpected"})
+
+        with pytest.raises(ValueError):
+            await InventoryReport._fetch_raw_inventory_report_config(
+                gcs_file_system=gcs_file_system,
+                location=location,
+                id=report_id,
+            )
+
+        gcs_file_system._call.assert_not_called()
 
     def test_parse_raw_inventory_report_config_invalid_date(self):
         today = datetime.today().date()
