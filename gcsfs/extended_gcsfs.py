@@ -149,6 +149,12 @@ async def _get_mrd_size(mrd_or_pool):
     """Helper to extract the persisted_size from either a pool or a single MRD."""
     if mrd_or_pool is None:
         return None
+    if (
+        isinstance(mrd_or_pool, MRDPool)
+        and getattr(mrd_or_pool, "finalized", False) is True
+        and isinstance(getattr(mrd_or_pool, "persisted_size", None), int)
+    ):
+        return mrd_or_pool.persisted_size
     async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m:
         return m.persisted_size
 
@@ -1127,9 +1133,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     generation = _coalesce_generation(
                         kwargs.get("generation"), path_generation
                     )
-                    gen_kwargs = (
-                        {"generation": generation} if generation is not None else {}
-                    )
                     pool = await self._mrd_pool_cache.get(
                         bucket,
                         object_name,
@@ -1137,6 +1140,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         pool_size=num_streams,
                         cache_type=cache_type,
                         cache_source=cache_source,
+                    )
+                    effective_gen = (
+                        generation
+                        if generation is not None
+                        else (
+                            getattr(pool, "generation", None)
+                            if isinstance(pool, MRDPool)
+                            else None
+                        )
+                    )
+                    gen_kwargs = (
+                        {"generation": effective_gen}
+                        if effective_gen is not None
+                        else {}
                     )
                     # MRDPool.initialize() copies persisted_size from its first MRD.
                     file_size = pool.persisted_size
@@ -2683,13 +2700,31 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         try:
             async with mrd_pool.get_mrd() as mrd:
                 size = mrd.persisted_size
+                if (
+                    size is None
+                    and getattr(mrd_pool, "finalized", False) is True
+                    and isinstance(getattr(mrd_pool, "persisted_size", None), int)
+                ):
+                    size = mrd_pool.persisted_size
                 if size is None:
                     logger.warning(
                         f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
                         "Falling back to _info() to get the file size. "
                         "This may result in incorrect behavior for unfinalized objects."
                     )
-                    size = (await self._info(rpath, **kwargs)).get("size", 0)
+                    effective_gen = (
+                        generation
+                        if generation is not None
+                        else (
+                            getattr(mrd_pool, "generation", None)
+                            if isinstance(mrd_pool, MRDPool)
+                            else None
+                        )
+                    )
+                    info_kwargs = dict(kwargs)
+                    if effective_gen is not None:
+                        info_kwargs["generation"] = effective_gen
+                    size = (await self._info(rpath, **info_kwargs)).get("size", 0)
 
                 callback.set_size(size)
 

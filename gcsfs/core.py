@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import mimetypes
+import numbers
 import os
 import queue
 import re
@@ -256,10 +257,23 @@ def _chunks(lst, n):
 
 def _coalesce_generation(*args):
     """Helper to coalesce a list of object generations down to one."""
-    defined = [g for g in args if g is not None]
+    defined = []
+    parsed_values = set()
+    for g in args:
+        if g is None:
+            continue
+        if isinstance(g, bool) or not isinstance(g, (numbers.Integral, str)):
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        if isinstance(g, str) and not (g.isascii() and g.isdigit()):
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        val = int(g)
+        if val < 0:
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        defined.append(g)
+        parsed_values.add(val)
     if not defined:
         return None
-    if len({str(g) for g in defined}) > 1:
+    if len(parsed_values) > 1:
         raise ValueError(
             "Cannot coalesce generations where more than one are defined,"
             f" {set(defined)}"
@@ -783,12 +797,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 bucket,
                 json_out=True,
                 prefix=key,
-                maxResults=1 if not generation else None,
-                versions="true" if generation else None,
+                maxResults=1 if generation is None else None,
+                versions="true" if generation is not None else None,
             )
             for item in resp.get("items", []):
                 if item["name"] == key and (
-                    not generation
+                    generation is None
                     or (
                         item.get("generation") is not None
                         and str(item.get("generation")) == str(generation)
@@ -1377,7 +1391,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             self._location,
             bucket,
             object,
-            f"&generation={generation}" if generation else "",
+            f"&generation={generation}" if generation is not None else "",
         )
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
@@ -3053,6 +3067,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         if is_empty_range(start, end, self.size):
             return b""
+        gen_kwargs = (
+            {"generation": self.generation} if self.generation is not None else {}
+        )
         try:
             return self.fs.cat_file(
                 self.path,
@@ -3061,6 +3078,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 concurrency=self.concurrency,
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
+                **gen_kwargs,
             )
         except (RuntimeError, HttpError) as e:
             if "not satisfiable" in str(e) or "InvalidRange" in str(e):
@@ -3069,6 +3087,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """Async fetcher mapped to the Prefetcher engine for regional buckets."""
+        gen_kwargs = (
+            {"generation": self.generation} if self.generation is not None else {}
+        )
         return await self.gcsfs._cat_file_concurrent(
             self.path,
             start=start_offset,
@@ -3076,6 +3097,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             concurrency=split_factor,
             cache_type=self.cache_type,
             cache_source=self.cache_source,
+            **gen_kwargs,
         )
 
     def close(self):
