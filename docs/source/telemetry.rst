@@ -27,6 +27,7 @@ The detector recognizes major ecosystem libraries, including:
 
 - **Data Processing & Analytics:** ``pandas`` (``fw/pandas``), ``polars`` (``fw/polars``), ``dask`` (``fw/dask``), ``ray`` (``fw/ray``), ``pyspark`` (``fw/spark``), ``pyarrow`` (``fw/pyarrow``), ``duckdb`` (``fw/duckdb``), ``xarray`` (``fw/xarray``), ``fastparquet`` (``fw/fastparquet``).
 - **Machine Learning & Deep Learning:** ``torch`` (``fw/torch``), ``torchdata`` (``fw/torchdata``), ``lightning`` / ``pytorch_lightning`` (``fw/lightning``), ``datasets`` (``fw/datasets``), ``transformers`` (``fw/transformers``), ``orbax`` (``fw/orbax``), ``tensorstore`` (``fw/tensorstore``), ``tensorflow`` (``fw/tensorflow``), ``jax`` (``fw/jax``).
+- **AI Agents:** Agent Development Kit, ``google.adk`` (``fw/adk``).
 
 If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only a single token for the outermost recognized framework (``fw/dask``) is included.
 
@@ -50,9 +51,12 @@ How the environment is detected
   platform environment variables and resolve to ``oth`` without any network request, unless
   the process runs inside Kubernetes.
 - **Hosts that are not Google Cloud VMs** resolve to ``oth`` without any network request,
-  unless ``GCE_METADATA_*`` is set. On Linux, ``gcsfs`` reads the hardware product name from
-  ``/sys/class/dmi/id/product_name`` and treats ``Google`` or ``Google Compute Engine`` as a
-  Google Cloud VM; other operating systems resolve to ``oth``.
+  unless ``GCE_METADATA_*`` is set. ``gcsfs`` reads the hardware product name from
+  ``/sys/class/dmi/id/product_name`` on Linux and ``SystemProductName`` under
+  ``HKLM\SYSTEM\HardwareConfig\Current`` (or ``HKLM\HARDWARE\DESCRIPTION\System\BIOS`` in
+  Windows containers where ``HardwareConfig\Current`` is absent) on Windows, and treats
+  ``Google`` or ``Google Compute Engine`` as a Google Cloud VM; other operating systems
+  resolve to ``oth``.
 - **Google Cloud VMs** (and hosts with ``GCE_METADATA_*`` set): when the filesystem is
   created, ``gcsfs`` queries the metadata server in the background for the instance's
   ``cluster-name`` attribute. If it is set, the host resolves to ``gke``, otherwise ``gce``

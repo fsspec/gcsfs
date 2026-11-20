@@ -25,7 +25,9 @@ from google.api_core import exceptions as api_exceptions
 from google.cloud import storage_control_v2
 from google.rpc import code_pb2
 
+from gcsfs import core as gcsfs_core
 from gcsfs.extended_gcsfs import (
+    DEFAULT_HNS_RM_CONCURRENCY,
     BucketLayout,
     CachingTier,
     ExtendedGcsFileSystem,
@@ -3178,6 +3180,8 @@ class TestExtendedGcsFileSystemRm:
     """Unit tests for the rm method in ExtendedGcsFileSystem."""
 
     BATCH_SIZE = 100
+    # Default for HNS buckets; flat buckets are delegated with concurrency=None.
+    CONCURRENCY = 15
 
     def _get_delete_folder_request(self, gcsfs, dir_path):
         """Constructs a DeleteFolderRequest for testing."""
@@ -3210,7 +3214,94 @@ class TestExtendedGcsFileSystemRm:
             )
             # _info should not be called as details are fetched via _expand_path
             mocks["info"].assert_not_called()
-            mock_delete_files.assert_awaited_once_with([file_path], self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(
+                [file_path], self.BATCH_SIZE, concurrency=self.CONCURRENCY
+            )
+
+    def test_rm_hns_concurrency_override(self, gcs_hns, gcs_hns_mocks):
+        """Test that an explicit concurrency passed to rm() reaches _delete_files."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/file_to_rm.txt"
+
+        mock_expand = mock.AsyncMock(return_value=[{"name": file_path, "type": "file"}])
+        mock_delete_files = mock.AsyncMock(return_value=[])
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD_HIERARCHICAL, gcsfs),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            gcsfs.rm(file_path, batchsize=10, concurrency=2)
+
+            mock_delete_files.assert_awaited_once_with([file_path], 10, concurrency=2)
+
+    def test_rm_flat_concurrency_override(self, gcs_hns, gcs_hns_mocks):
+        """Test that an explicit concurrency passed to rm() reaches the flat path."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+
+        with gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks:
+            gcsfs.rm(flat_file, batchsize=10, concurrency=2)
+
+            mocks["super_rm"].assert_awaited_once_with(
+                [flat_file],
+                recursive=False,
+                maxdepth=None,
+                batchsize=10,
+                concurrency=2,
+            )
+
+    def test_rm_default_concurrency_constants(self):
+        """Pin the default concurrencies used by rm() for each bucket type."""
+        assert gcsfs_core.DEFAULT_RM_CONCURRENCY == 4
+        assert DEFAULT_HNS_RM_CONCURRENCY == 15
+        assert self.CONCURRENCY == DEFAULT_HNS_RM_CONCURRENCY
+
+    def test_rm_flat_default_concurrency_reaches_delete_files(
+        self, gcs_hns, gcs_hns_mocks
+    ):
+        """Test that rm() on a flat bucket uses the standard default of 4."""
+        gcsfs = gcs_hns
+        flat_file = "flat-bucket/file.txt"
+        real_core_rm = gcsfs_core.GCSFileSystem._rm
+        mock_delete_files = mock.AsyncMock(return_value=[flat_file])
+
+        async def call_real_core_rm(*args, **kwargs):
+            return await real_core_rm(gcsfs, *args, **kwargs)
+
+        with (
+            gcs_hns_mocks(layouts.STANDARD, gcsfs) as mocks,
+            mock.patch.object(
+                gcsfs, "_expand_path", new=mock.AsyncMock(return_value=[flat_file])
+            ),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            # Run the real flat-bucket implementation instead of the mock.
+            mocks["super_rm"].side_effect = call_real_core_rm
+
+            gcsfs.rm(flat_file)
+
+            mock_delete_files.assert_awaited_once_with(
+                [flat_file], self.BATCH_SIZE, concurrency=4
+            )
+
+    def test_rm_zonal_default_concurrency(self, gcs_hns, gcs_hns_mocks):
+        """Test that zonal buckets, which are hierarchical, use the HNS default."""
+        gcsfs = gcs_hns
+        file_path = f"{TEST_HNS_BUCKET}/file_to_rm.txt"
+        mock_expand = mock.AsyncMock(return_value=[{"name": file_path, "type": "file"}])
+        mock_delete_files = mock.AsyncMock(return_value=[])
+
+        with (
+            gcs_hns_mocks(layouts.ZONAL_HIERARCHICAL, gcsfs),
+            mock.patch.object(gcsfs, "_expand_path_with_details", new=mock_expand),
+            mock.patch.object(gcsfs, "_delete_files", new=mock_delete_files),
+        ):
+            gcsfs.rm(file_path)
+
+            mock_delete_files.assert_awaited_once_with(
+                [file_path], self.BATCH_SIZE, concurrency=DEFAULT_HNS_RM_CONCURRENCY
+            )
 
     def test_rm_recursive_hns(self, gcs_hns, gcs_hns_mocks):
         """Test sync recursive rm on a directory in an HNS bucket."""
@@ -3256,7 +3347,9 @@ class TestExtendedGcsFileSystemRm:
             files_to_delete = sorted(
                 [file_path, nested_file1, nested_file2] + [base_dir]
             )
-            mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(
+                mock.ANY, self.BATCH_SIZE, concurrency=self.CONCURRENCY
+            )
             assert sorted(mock_delete_files.await_args[0][0]) == files_to_delete
             expected_delete_folder_requests = [
                 mock.call(
@@ -3394,7 +3487,9 @@ class TestExtendedGcsFileSystemRm:
 
             gcsfs.rm(f"{base_dir}{suffix}", recursive=True)
 
-            mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(
+                mock.ANY, self.BATCH_SIZE, concurrency=self.CONCURRENCY
+            )
             # The coexisting object 'a' is deleted, but the nested folder name
             # 'a/b' is never deleted as an object.
             assert sorted(mock_delete_files.await_args[0][0]) == sorted(
@@ -3432,7 +3527,7 @@ class TestExtendedGcsFileSystemRm:
         # A listing of `base_dir` caches both entries for the shared name.
         gcsfs.dircache[base_dir] = [dir_entry, file_entry]
 
-        async def fake_delete_files(files, batchsize):
+        async def fake_delete_files(files, batchsize, concurrency=None):
             # Emulates a successful batch delete of the objects.
             await gcsfs._rm_files_cache_update(files)
             return list(files)
@@ -3455,7 +3550,9 @@ class TestExtendedGcsFileSystemRm:
                 with pytest.raises(OSError, match="Pre condition failed"):
                     gcsfs.rm(dir_path, recursive=True)
 
-                mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+                mock_delete_files.assert_awaited_once_with(
+                    [dir_path], self.BATCH_SIZE, concurrency=self.CONCURRENCY
+                )
                 assert gcsfs.dircache[base_dir] == [dir_entry]
         finally:
             gcsfs.invalidate_cache()
@@ -3499,7 +3596,9 @@ class TestExtendedGcsFileSystemRm:
 
             gcsfs.rm(TEST_HNS_BUCKET, recursive=True, maxdepth=maxdepth)
 
-            mock_delete_files.assert_awaited_once_with(expected_files, self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(
+                expected_files, self.BATCH_SIZE, concurrency=self.CONCURRENCY
+            )
             mocks["super_rmdir"].assert_awaited_once_with(TEST_HNS_BUCKET)
 
     def test_rm_non_hns_fallback(self, gcs_hns, gcs_hns_mocks):
@@ -3512,7 +3611,11 @@ class TestExtendedGcsFileSystemRm:
 
             # Verify it called the parent's _rm and not the HNS-specific logic
             mocks["super_rm"].assert_awaited_once_with(
-                [path], recursive=True, maxdepth=None, batchsize=self.BATCH_SIZE
+                [path],
+                recursive=True,
+                maxdepth=None,
+                batchsize=self.BATCH_SIZE,
+                concurrency=None,
             )
 
     def test_rm_non_existent_path_hns(self, gcs_hns, gcs_hns_mocks):
@@ -3559,7 +3662,9 @@ class TestExtendedGcsFileSystemRm:
             )
             # The directory name is also deleted as an object (see
             # test_rm_recursive_deletes_object_sharing_name_with_folder).
-            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(
+                [dir_path], self.BATCH_SIZE, concurrency=self.CONCURRENCY
+            )
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -3594,7 +3699,9 @@ class TestExtendedGcsFileSystemRm:
             )
             # The directory name is also deleted as an object (see
             # test_rm_recursive_deletes_object_sharing_name_with_folder).
-            mock_delete_files.assert_awaited_once_with([dir_path], self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(
+                [dir_path], self.BATCH_SIZE, concurrency=self.CONCURRENCY
+            )
             expected_request = self._get_delete_folder_request(gcsfs, dir_path)
             mocks["control_client"].delete_folder.assert_called_once_with(
                 request=expected_request, retry=mock.ANY, timeout=mock.ANY
@@ -3670,7 +3777,11 @@ class TestExtendedGcsFileSystemRm:
 
             # Flat bucket routes to the parent _rm with ONLY the flat path.
             mocks["super_rm"].assert_awaited_once_with(
-                [flat_file], recursive=True, maxdepth=None, batchsize=self.BATCH_SIZE
+                [flat_file],
+                recursive=True,
+                maxdepth=None,
+                batchsize=self.BATCH_SIZE,
+                concurrency=None,
             )
             # HNS bucket routes to HNS-specific deletion with ONLY the HNS path.
             mock_expand.assert_awaited_once_with(
@@ -3716,7 +3827,9 @@ class TestExtendedGcsFileSystemRm:
             mock_expand.assert_awaited_once_with(
                 [hns_file1, hns_file2], recursive=False, maxdepth=None, detail=True
             )
-            mock_delete_files.assert_awaited_once_with(mock.ANY, self.BATCH_SIZE)
+            mock_delete_files.assert_awaited_once_with(
+                mock.ANY, self.BATCH_SIZE, concurrency=self.CONCURRENCY
+            )
             assert sorted(mock_delete_files.await_args[0][0]) == sorted(
                 [hns_file1, hns_file2]
             )
@@ -3737,6 +3850,7 @@ class TestExtendedGcsFileSystemRm:
                 recursive=False,
                 maxdepth=None,
                 batchsize=self.BATCH_SIZE,
+                concurrency=None,
             )
 
     def test_rm_mixed_buckets_all_dne_raises_error(self, gcs_hns, gcs_hns_mocks):
