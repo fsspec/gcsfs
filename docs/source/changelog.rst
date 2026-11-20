@@ -14,19 +14,23 @@ Unreleased
   needs the ``roles/iam.serviceAccountTokenCreator`` role on itself.
   ``service_account_email`` and ``access_token`` can also be passed explicitly,
   and explicitly passed ``credentials`` are used as given (#653).
-* **Recursive** ``rm()`` **now keeps at most 5 batch delete requests in flight**
-  by default (new ``concurrency`` argument, e.g.
-  ``fs.rm(path, recursive=True, concurrency=10)``). This keeps deletes below
-  the initial write rate of a standard (non-HNS) bucket, about 1000 writes/s
+* **Recursive** ``rm()`` **now limits how many batch delete requests are in
+  flight**: at most 4 by default on standard buckets and 15 on HNS (including
+  zonal) buckets (new ``concurrency`` argument, e.g.
+  ``fs.rm(path, recursive=True, concurrency=10)``). Deletes count as writes,
+  so these defaults stay well below the initial write rate of each bucket type
   (see the
-  `request rate guidelines <https://cloud.google.com/storage/docs/request-rate>`_),
-  so they are not throttled and do not slow down other writes to the same
-  bucket. Pass a higher ``concurrency`` for buckets that have already scaled
-  up.
+  `request rate guidelines <https://cloud.google.com/storage/docs/request-rate>`_
+  and the `HNS overview <https://cloud.google.com/storage/docs/hns-overview>`_),
+  leaving headroom for other writes to the same bucket. Pass a higher
+  ``concurrency`` for buckets that have already scaled up.
 * Restored the ``USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`` environment variable and the
   ``use_experimental_adaptive_prefetching`` ``open()`` argument. Setting either to false
   when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back
   to ``readahead``, as in 2026.8.x (#1172).
+* Framework telemetry now recognizes the Agent Development Kit (``google.adk``) and
+  sends ``fw/adk`` in the ``User-Agent`` header. Other ``google`` packages, such as
+  ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
 
 2026.10.0
 ---------

@@ -40,9 +40,11 @@ from gcsfs.core import (
     _get_prefetcher_and_cache_config,
     _location,
     _resolve_generation_match,
+    _validate_rm_concurrency,
 )
 from gcsfs.poller import poll_lro, unwrap_operation_result
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.telemetry.grpc import ControlPlaneTelemetryInterceptor
 from gcsfs.telemetry.wrapper import (
     _gcs_sync_wrapper,
     mirror_gcs_methods,
@@ -57,6 +59,15 @@ logger = logging.getLogger("gcsfs")
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
+
+# Default maximum number of batch delete requests that a recursive ``rm`` keeps
+# in flight on HNS buckets (including zonal buckets, which are hierarchical).
+# HNS buckets support a higher initial request rate than standard buckets
+# (https://cloud.google.com/storage/docs/hns-overview), so they get a higher
+# default than DEFAULT_RM_CONCURRENCY while still keeping deletes well below
+# that higher rate, leaving headroom for other writes to the same bucket.
+# Callers can override it with ``concurrency``.
+DEFAULT_HNS_RM_CONCURRENCY = 15
 
 
 class StorageClass(Enum):
@@ -379,6 +390,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "credentials": self.credential,
                 "options": [("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
                 "quota_project_id": self._user_project,
+                # Prepend before transport_cls(channel=...) appends its logging interceptor.
+                "interceptors": [ControlPlaneTelemetryInterceptor()],
             }
             if self._grpc_location:
                 # Extract host:port safely (strips protocol and trailing URL paths if any).
@@ -2024,7 +2037,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return out
 
     async def _rm(
-        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=5
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=None
     ):
         """
         Deletes files and directories.
@@ -2045,9 +2058,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             recursive (bool): If True, deletes directories and their contents.
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
-            concurrency (int): The maximum number of batch delete requests in
-                flight at once. Defaults to 5; see ``GCSFileSystem._rm``.
+            concurrency (int, optional): The maximum number of batch delete
+                requests in flight at once (a positive integer). None (default)
+                uses ``DEFAULT_HNS_RM_CONCURRENCY`` for HNS (including zonal)
+                buckets and ``DEFAULT_RM_CONCURRENCY`` for standard buckets.
         """
+        _validate_rm_concurrency(concurrency)
         # Normalize to a list so single-path and multi-path inputs share a
         # single code path.
         if isinstance(path, str):
@@ -2111,6 +2127,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     ):
         """Helper method to handle the rm operation for paths within a single bucket."""
         if not await self._is_bucket_hns_enabled(bucket):
+            # concurrency=None makes the parent use DEFAULT_RM_CONCURRENCY.
             return await super()._rm(
                 path,
                 recursive=recursive,
@@ -2118,6 +2135,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 batchsize=batchsize,
                 concurrency=concurrency,
             )
+
+        if concurrency is None:
+            concurrency = DEFAULT_HNS_RM_CONCURRENCY
 
         paths = await self._expand_path_with_details(
             path, recursive=recursive, maxdepth=maxdepth, detail=True
