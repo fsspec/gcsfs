@@ -1300,6 +1300,40 @@ class TestExtendedGcsFileSystemMvFile:
         assert dst_dir in entries
         assert f"{parent}/keep.txt" in names
 
+    @pytest.mark.asyncio
+    async def test_mv_file_layout_lookup_failure_after_move_invalidates(self):
+        """A failed layout lookup after a successful moveTo must not report
+        the move as failed (which would trigger the copy/delete fallback on an
+        already-moved object); the cache update falls back to broad
+        invalidation instead."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        src = f"{parent}/src.txt"
+        dst = f"{parent}/dst.txt"
+        fs.dircache[parent] = [{"name": src, "type": "file"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
+
+        response = {"bucket": TEST_HNS_BUCKET, "name": "parent/dst.txt", "size": 1}
+        with (
+            mock.patch.object(
+                fs,
+                "_is_bucket_hns_enabled",
+                side_effect=api_exceptions.RetryError("unavailable", None),
+            ),
+            mock.patch.object(
+                fs, "_call", new_callable=mock.AsyncMock, return_value=response
+            ) as mock_call,
+            mock.patch(
+                "fsspec.asyn.AsyncFileSystem._mv_file", new_callable=mock.AsyncMock
+            ) as mock_copy_delete,
+        ):
+            await fs._mv_file(src, dst)
+
+        mock_call.assert_awaited_once()
+        mock_copy_delete.assert_not_called()
+        assert parent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
 
 class TestExtendedGcsFileSystemRmFile:
     """Unit tests for the _rm_file cache update in ExtendedGcsFileSystem."""
@@ -1410,6 +1444,31 @@ class TestExtendedGcsFileSystemRmFile:
 
         assert parent not in fs.dircache
         assert grandparent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("batch", [False, True])
+    async def test_rm_layout_lookup_failure_after_delete_invalidates(self, batch):
+        """A failed layout lookup after a successful delete must not report the
+        delete as failed; the cache update falls back to broad invalidation."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        path = f"{parent}/file1.txt"
+        fs.dircache[parent] = [{"name": path, "type": "file"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
+
+        with mock.patch.object(
+            fs,
+            "_is_bucket_hns_enabled",
+            side_effect=api_exceptions.RetryError("unavailable", None),
+        ):
+            if batch:
+                await fs._rm_files_cache_update([path])
+            else:
+                with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock):
+                    await fs._rm_file(path)
+
+        assert parent not in fs.dircache
         assert TEST_HNS_BUCKET not in fs.dircache
 
     @pytest.mark.asyncio

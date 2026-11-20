@@ -22,6 +22,9 @@ Both are mixed into a filesystem class and rely on the host class for
 """
 
 import asyncio
+import logging
+
+logger = logging.getLogger("gcsfs")
 
 
 class DirCacheUpdater:
@@ -87,6 +90,25 @@ class HnsDirCacheUpdater(DirCacheUpdater):
     write path is bucket-type-agnostic and handled entirely by
     :meth:`DirCacheUpdater._write_file_cache_update`.
     """
+
+    async def _is_bucket_hns_for_cache_update(self, bucket):
+        """HNS status of ``bucket`` for a post-mutation cache update.
+
+        The mutation has already succeeded, so a failed layout lookup must not
+        surface as an error of the operation. Report the bucket as non-HNS
+        instead, so the caller falls back to the broad invalidation, which is
+        correct for every bucket layout.
+        """
+        try:
+            return await self._is_bucket_hns_enabled(bucket)
+        except Exception as e:
+            logger.debug(
+                "Bucket layout lookup for %s failed (%s); invalidating the "
+                "dircache broadly.",
+                bucket,
+                e,
+            )
+            return False
 
     def _cache_drop_entries(self, parent, names, entry_type="file"):
         """Remove entries of ``entry_type`` whose ``name`` is in ``names`` from
@@ -216,7 +238,9 @@ class HnsDirCacheUpdater(DirCacheUpdater):
         src_bucket, _, _ = self.split_path(path1)
         dest_bucket, _, _ = self.split_path(path2)
 
-        if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
+        if src_bucket == dest_bucket and await self._is_bucket_hns_for_cache_update(
+            src_bucket
+        ):
             # Source: removing the entry never changes an ancestor's listing, so
             # drop it in place.
             self._cache_drop_entries(
@@ -259,7 +283,10 @@ class HnsDirCacheUpdater(DirCacheUpdater):
             zip(
                 buckets,
                 await asyncio.gather(
-                    *(self._is_bucket_hns_enabled(bucket) for bucket in buckets)
+                    *(
+                        self._is_bucket_hns_for_cache_update(bucket)
+                        for bucket in buckets
+                    )
                 ),
             )
         )
