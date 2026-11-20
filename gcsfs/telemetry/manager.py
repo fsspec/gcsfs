@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from typing import Dict, List, Optional
 
 from gcsfs.telemetry.context import (
-    ALL_DIMENSIONS,
     USER_AGENT_DIMENSIONS,
     Dimension,
     get_telemetry_context,
@@ -89,7 +88,7 @@ class UsageMetricsTracker:
 
     def get_tokens(
         self,
-        dimensions: frozenset[Dimension] = ALL_DIMENSIONS,
+        dimensions: Optional[frozenset[Dimension]] = None,
         tokens_map: Optional[Mapping[str, str]] = None,
     ) -> List[str]:
         """
@@ -98,28 +97,22 @@ class UsageMetricsTracker:
         Parameters
         ----------
         dimensions:
-            Dimensions to include in the returned token list.
+            Dimensions to include, or None to include all active dimensions.
         tokens_map:
-            Optional pre-collected dimension-to-token mapping to reuse without
-            re-running detectors.
+            Optional mapping already returned by ``collect_tokens_map()``; used
+            as is without re-running detectors or re-checking opt-out.
 
         Returns
         -------
         List[str]: List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
-        if not self.is_enabled():
-            return []
-
         if tokens_map is None:
             # Include process-wide dimensions (e.g. env), read fresh per request.
             tokens_map = self.collect_tokens_map(call_scoped_only=False)
 
-        include_custom = dimensions == ALL_DIMENSIONS
         out = []
         for dim_key, val in tokens_map.items():
-            if dim_key in dimensions or (
-                include_custom and dim_key not in ALL_DIMENSIONS
-            ):
+            if dimensions is None or dim_key in dimensions:
                 clean_val = sanitize_token(val)
                 if clean_val:
                     out.append(f"{dim_key}/{clean_val}")
@@ -155,9 +148,6 @@ class UsageMetricsTracker:
         self, tokens_map: Optional[Mapping[str, str]] = None
     ) -> Optional[str]:
         """Return web-safe base64 encoded GcsfsFeatures for active telemetry state."""
-        if not self.is_enabled():
-            return None
-
         if tokens_map is None:
             tokens_map = self.collect_tokens_map(call_scoped_only=False)
         if not any(tokens_map.values()):
@@ -174,7 +164,7 @@ class UsageMetricsTracker:
         include_features: bool = True,
     ) -> tuple[List[str], Optional[str]]:
         """Collect HTTP User-Agent tokens and encoded GcsfsFeatures in one lookup."""
-        if not (include_tokens or include_features) or not self.is_enabled():
+        if not (include_tokens or include_features):
             return [], None
 
         tokens_map = self.collect_tokens_map(call_scoped_only=False)

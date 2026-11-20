@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import inspect
 import io
 import logging
@@ -32,7 +33,6 @@ from gcsfs.core import GCSFileSystem
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.telemetry import schema as telemetry_schema
 from gcsfs.telemetry.context import (
-    ALL_DIMENSIONS,
     GRPC_METADATA_KEY,
     HTTP_HEADER_KEY,
     USER_AGENT_DIMENSIONS,
@@ -3169,98 +3169,270 @@ async def test_control_plane_interceptor_preserves_caller_header_and_call_detail
 # ============================================================================
 
 
-def test_get_headers_single_lookup_and_caller_precedence(monkeypatch):
+@pytest.mark.parametrize(
+    (
+        "caller",
+        "expected_calls",
+        "expected_keys",
+        "expected_ua_key",
+        "expected_ua_token",
+        "expected_feat_key",
+        "expected_feat_val",
+    ),
+    [
+        pytest.param(
+            None,
+            1,
+            ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
+            "User-Agent",
+            "fw/pandas",
+            "X-Goog-Storage-Gcsfs-Features",
+            "EAE=",
+            id="none-headers",
+        ),
+        pytest.param(
+            {},
+            1,
+            ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
+            "User-Agent",
+            "fw/pandas",
+            "X-Goog-Storage-Gcsfs-Features",
+            "EAE=",
+            id="empty-dict",
+        ),
+        pytest.param(
+            {"Range": "bytes=0-15"},
+            1,
+            ("Range", "User-Agent", "X-Goog-Storage-Gcsfs-Features"),
+            "User-Agent",
+            "fw/pandas",
+            "X-Goog-Storage-Gcsfs-Features",
+            "EAE=",
+            id="unrelated-range-header",
+        ),
+        pytest.param(
+            {"User-Agent": "custom-ua"},
+            1,
+            ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
+            "User-Agent",
+            "custom-ua",
+            "X-Goog-Storage-Gcsfs-Features",
+            "EAE=",
+            id="caller-user-agent-title-case",
+        ),
+        pytest.param(
+            {"user-agent": "custom-lower-ua"},
+            1,
+            ("user-agent", "X-Goog-Storage-Gcsfs-Features"),
+            "user-agent",
+            "custom-lower-ua",
+            "X-Goog-Storage-Gcsfs-Features",
+            "EAE=",
+            id="caller-user-agent-lowercase",
+        ),
+        pytest.param(
+            {"x-goog-storage-gcsfs-features": "caller-lower"},
+            1,
+            ("x-goog-storage-gcsfs-features", "User-Agent"),
+            "User-Agent",
+            "fw/pandas",
+            "x-goog-storage-gcsfs-features",
+            "caller-lower",
+            id="caller-features-lowercase",
+        ),
+        pytest.param(
+            {"X-GOOG-STORAGE-GCSFS-FEATURES": "caller-upper"},
+            1,
+            ("X-GOOG-STORAGE-GCSFS-FEATURES", "User-Agent"),
+            "User-Agent",
+            "fw/pandas",
+            "X-GOOG-STORAGE-GCSFS-FEATURES",
+            "caller-upper",
+            id="caller-features-uppercase",
+        ),
+        pytest.param(
+            {
+                "User-Agent": "custom-ua",
+                "X-Goog-Storage-Gcsfs-Features": "caller-both",
+            },
+            0,
+            ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
+            "User-Agent",
+            "custom-ua",
+            "X-Goog-Storage-Gcsfs-Features",
+            "caller-both",
+            id="caller-both-canonical-case",
+        ),
+        pytest.param(
+            {
+                "user-agent": "custom-lower-ua",
+                "x-goog-storage-gcsfs-features": "caller-lower-both",
+            },
+            0,
+            ("user-agent", "x-goog-storage-gcsfs-features"),
+            "user-agent",
+            "custom-lower-ua",
+            "x-goog-storage-gcsfs-features",
+            "caller-lower-both",
+            id="caller-both-lowercase",
+        ),
+    ],
+)
+def test_get_headers_single_lookup_and_caller_precedence(
+    monkeypatch,
+    caller,
+    expected_calls,
+    expected_keys,
+    expected_ua_key,
+    expected_ua_token,
+    expected_feat_key,
+    expected_feat_val,
+):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    counting = _CountingDetector("pandas")
+    tracker = UsageMetricsTracker(detectors=[counting])
+    collect_spy = mock.create_autospec(
+        tracker.collect_tokens_map, wraps=tracker.collect_tokens_map
+    )
+    enabled_spy = mock.create_autospec(tracker.is_enabled, wraps=tracker.is_enabled)
+    monkeypatch.setattr(tracker, "collect_tokens_map", collect_spy)
+    monkeypatch.setattr(tracker, "is_enabled", enabled_spy)
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
+    snapshot = copy.copy(caller)
+
+    headers = fs._get_headers(caller)
+
+    assert HTTP_HEADER_KEY == "X-Goog-Storage-Gcsfs-Features"
+    assert (
+        collect_spy.call_count,
+        enabled_spy.call_count,
+        len(counting.calls),
+    ) == (expected_calls, expected_calls, expected_calls)
+    assert caller == snapshot
+    assert headers is not caller
+    assert tuple(headers) == expected_keys
+    assert (caller or {}).items() <= headers.items()
+    assert expected_ua_token in headers[expected_ua_key]
+    assert headers[expected_feat_key] == expected_feat_val
+
+
+def test_get_headers_skips_schema_import_when_no_tokens_active(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    empty_tracker = UsageMetricsTracker(detectors=[_CountingDetector(None)])
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", empty_tracker)
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    monkeypatch.delitem(sys.modules, "gcsfs.telemetry.schema", raising=False)
+    monkeypatch.delattr(sys.modules["gcsfs.telemetry"], "schema", raising=False)
+
+    headers = fs._get_headers(None, cache_type="none", cache_source="explicit")
+
+    assert "gcsfs.telemetry.schema" not in sys.modules
+    assert "cache_type/none:e" in headers["User-Agent"]
+    assert "fw/" not in headers["User-Agent"]
+    assert HTTP_HEADER_KEY not in headers
+
+
+def test_get_headers_includes_process_scoped_env_with_call_context(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    env_tracker = _tracker_with(_ProcessScopedEnvDetector("gke"))
+    monkeypatch.setattr(manager_mod, "default_usage_tracker", env_tracker)
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    token = set_telemetry_context(env_tracker.collect_tokens_map(call_scoped_only=True))
+
+    try:
+        headers = fs._get_headers(None)
+    finally:
+        reset_telemetry_context(token)
+
+    assert "fw/pandas" in headers["User-Agent"]
+    assert "env/gke" in headers["User-Agent"]
+    assert headers[HTTP_HEADER_KEY] == "EAEYAg=="
+
+
+def test_get_http_telemetry_skips_collection_when_nothing_requested(monkeypatch):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
     counting = _CountingDetector("pandas")
     tracker = UsageMetricsTracker(detectors=[counting])
-    collect_spy = mock.MagicMock(wraps=tracker.collect_tokens_map)
-    monkeypatch.setattr(tracker, "collect_tokens_map", collect_spy)
-    monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
-    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
-    feat_hdr = "x-goog-storage-gcsfs-features"
-    caller_cases = [
-        None,
-        {"User-Agent": "custom-ua"},
-        {"user-agent": "custom-lower-ua"},
-        {feat_hdr: "caller-lower"},
-        {"X-GOOG-STORAGE-GCSFS-FEATURES": "caller-upper"},
-        {"User-Agent": "custom-ua", HTTP_HEADER_KEY: "caller-both"},
-        {"user-agent": "custom-lower-ua", feat_hdr: "caller-lower-both"},
-    ]
-    results = []
-
-    for caller in caller_cases:
-        snapshot = dict(caller) if caller is not None else None
-        before = (collect_spy.call_count, len(counting.calls))
-        headers = fs._get_headers(caller)
-        delta = (collect_spy.call_count - before[0], len(counting.calls) - before[1])
-        results.append((caller, snapshot, headers, delta))
-
-    assert HTTP_HEADER_KEY == "X-Goog-Storage-Gcsfs-Features"
-    calls_before_empty = collect_spy.call_count
-    assert tracker.get_http_telemetry(include_tokens=False, include_features=False) == (
-        [],
-        None,
+    collect_spy = mock.create_autospec(
+        tracker.collect_tokens_map, wraps=tracker.collect_tokens_map
     )
-    assert collect_spy.call_count == calls_before_empty
-    for caller, snapshot, headers, delta in results:
-        ua_keys = [k for k in (caller or {}) if k.lower() == "user-agent"]
-        feat_keys = [k for k in (caller or {}) if k.lower() == feat_hdr]
-        exp_calls = 0 if (ua_keys and feat_keys) else 1
-        ua_key = ua_keys[0] if ua_keys else "User-Agent"
-        feat_key = feat_keys[0] if feat_keys else HTTP_HEADER_KEY
-        assert delta == (exp_calls, exp_calls)
-        if snapshot is not None:
-            assert caller == snapshot
-        assert [k for k in headers if k.lower() == "user-agent"] == [ua_key]
-        if ua_keys:
-            assert headers[ua_key] == caller[ua_key]
-        else:
-            assert "fw/pandas" in headers[ua_key]
-        assert [k for k in headers if k.lower() == feat_hdr] == [feat_key]
-        assert headers[feat_key] == (caller[feat_key] if feat_keys else "EAE=")
+    enabled_spy = mock.create_autospec(tracker.is_enabled, wraps=tracker.is_enabled)
+    monkeypatch.setattr(tracker, "collect_tokens_map", collect_spy)
+    monkeypatch.setattr(tracker, "is_enabled", enabled_spy)
+
+    result = tracker.get_http_telemetry(include_tokens=False, include_features=False)
+
+    assert result == ([], None)
+    assert (
+        collect_spy.call_count,
+        enabled_spy.call_count,
+        len(counting.calls),
+    ) == (0, 0, 0)
+
+
+def test_tracker_reuses_tokens_map_and_filters_dimensions(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    counting = _CountingDetector("pandas")
+    tracker = UsageMetricsTracker(detectors=[counting])
+    collect_spy = mock.create_autospec(
+        tracker.collect_tokens_map, wraps=tracker.collect_tokens_map
+    )
+    enabled_spy = mock.create_autospec(tracker.is_enabled, wraps=tracker.is_enabled)
+    monkeypatch.setattr(tracker, "collect_tokens_map", collect_spy)
+    monkeypatch.setattr(tracker, "is_enabled", enabled_spy)
+    sample_map = {
+        Dimension.FRAMEWORK: "pandas",
+        Dimension.ENVIRONMENT: "",
+        Dimension.METHOD: "cat",
+        "app": "myapp",
+    }
+
+    empty_map_tokens = tracker.get_tokens(USER_AGENT_DIMENSIONS, {})
+    ua_key_tokens = tracker.get_tokens(USER_AGENT_DIMENSIONS, sample_map)
+    enum_only_tokens = tracker.get_tokens(frozenset(Dimension), sample_map)
+    unfiltered_tokens = tracker.get_tokens(tokens_map=sample_map)
+    empty_encoded = tracker.encode_features({})
+    explicit_encoded = tracker.encode_features({"fw": "pandas"})
+
+    assert empty_map_tokens == []
+    assert ua_key_tokens == ["fw/pandas"]
+    assert enum_only_tokens == ["fw/pandas", "m/cat"]
+    assert unfiltered_tokens == ["fw/pandas", "m/cat", "app/myapp"]
+    assert empty_encoded is None
+    assert explicit_encoded == "EAE="
+    assert (
+        collect_spy.call_count,
+        enabled_spy.call_count,
+        len(counting.calls),
+    ) == (0, 0, 0)
 
 
 def test_http_user_agent_excludes_method_and_method_params(monkeypatch):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
-    counting = _CountingDetector("pandas")
-    tracker = UsageMetricsTracker(detectors=[counting])
+    tracker = UsageMetricsTracker(detectors=[_CountingDetector("pandas")])
     monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
     fs = GCSFileSystem(token="anon", skip_instance_cache=True)
-    ctx = {"m": "cat", "mp": "recursive,cache_options", "fw": "pandas", "env": "gke"}
-
-    empty_map_tokens = tracker.get_tokens(USER_AGENT_DIMENSIONS, {})
-    empty_map_calls = len(counting.calls)
-    enum_key_tokens = tracker.get_tokens(
-        USER_AGENT_DIMENSIONS,
-        {Dimension.FRAMEWORK: "pandas", Dimension.METHOD: "cat", "app": "myapp"},
+    token = set_telemetry_context(
+        {"m": "cat", "mp": "recursive,cache_options", "fw": "pandas", "env": "gke"}
     )
-    all_key_tokens = tracker.get_tokens(
-        ALL_DIMENSIONS,
-        {Dimension.FRAMEWORK: "pandas", Dimension.METHOD: "cat", "app": "myapp"},
-    )
-    import gcsfs.core as core_mod
 
-    token = set_telemetry_context(ctx)
     try:
-        headers = fs._get_headers(None)
-        direct_ua = core_mod._build_user_agent(
-            cache_type="none", cache_source="explicit"
-        )
+        headers = fs._get_headers(None, cache_type="none", cache_source="explicit")
     finally:
         reset_telemetry_context(token)
 
     ua = headers["User-Agent"]
     decoded = _decode_features(headers[HTTP_HEADER_KEY])
-    assert empty_map_tokens == [] and empty_map_calls == 0
-    assert enum_key_tokens == ["fw/pandas"]
-    assert all_key_tokens == ["fw/pandas", "m/cat", "app/myapp"]
+    assert "cache_type/none:e" in ua
     assert "fw/pandas" in ua and "env/gke" in ua
     assert "m/" not in ua and "mp/" not in ua
-    assert "fw/pandas" in direct_ua and "env/gke" in direct_ua
-    assert "m/" not in direct_ua and "mp/" not in direct_ua
     assert (decoded.method, decoded.framework, decoded.environment) == (
         GcsfsMethod.GCSFS_METHOD_CAT,
         GcsfsFramework.GCSFS_FRAMEWORK_PANDAS,
@@ -3289,16 +3461,14 @@ def test_wrapped_fs_and_open_file_dynamic_opt_out_toggle(mock_gcs_harness, monke
             enabled = fs1._get_headers(None)
             calls_before = len(counting.calls)
             monkeypatch.setenv(env_var, env_val)
-            ua_tokens = tracker.get_tokens(USER_AGENT_DIMENSIONS, {"fw": "pandas"})
-            all_tokens = tracker.get_tokens(
-                ALL_DIMENSIONS, {"fw": "pandas", "env": "gke"}
-            )
+            ua_tokens, http_encoded = tracker.get_http_telemetry()
+            all_tokens = tracker.get_tokens()
             encoded = manager_mod.default_usage_tracker.encode_features()
             disabled = fs2._get_headers(None)
             disabled_caller = fs2._get_headers(caller_headers)
             calls_delta = len(counting.calls) - calls_before
             monkeypatch.delenv(env_var, raising=False)
-            noop = (ua_tokens, all_tokens, encoded, calls_delta)
+            noop = (ua_tokens, all_tokens, encoded, http_encoded, calls_delta)
             env_results.append((enabled, disabled, disabled_caller, noop))
         reenabled = fs1._get_headers(None)
     finally:
@@ -3320,7 +3490,7 @@ def test_wrapped_fs_and_open_file_dynamic_opt_out_toggle(mock_gcs_harness, monke
     for enabled, disabled, disabled_caller, noop in env_results:
         assert "fw/pandas" in enabled["User-Agent"]
         assert enabled[HTTP_HEADER_KEY] == "EAE="
-        assert noop == ([], [], None, 0)
+        assert noop == ([], [], None, None, 0)
         assert "fw/" not in disabled["User-Agent"]
         assert not any(k.lower() == "x-goog-storage-gcsfs-features" for k in disabled)
         assert disabled_caller["x-goog-storage-gcsfs-features"] == "caller-opt-out"

@@ -45,7 +45,7 @@ from .retry import (
     validate_response,
 )
 from .telemetry import manager as telemetry_manager
-from .telemetry.context import HTTP_HEADER_KEY, USER_AGENT_DIMENSIONS, Dimension
+from .telemetry.context import HTTP_HEADER_KEY, Dimension
 from .telemetry.wrapper import (
     _run_sync,
     bind_gcs_sync_methods,
@@ -286,7 +286,10 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
-def _build_user_agent(cache_type=None, cache_source=None, telemetry_tokens=None):
+_HTTP_HEADER_KEY_LOWER = HTTP_HEADER_KEY.lower()
+
+
+def _build_user_agent(cache_type=None, cache_source=None, telemetry_tokens=()):
     """Build the standard User-Agent header string for HTTP requests."""
     tokens = [f"python-gcsfs/{version}"]
 
@@ -294,10 +297,6 @@ def _build_user_agent(cache_type=None, cache_source=None, telemetry_tokens=None)
     if cache_val:
         tokens.append(cache_val)
 
-    if telemetry_tokens is None:
-        telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens(
-            dimensions=USER_AGENT_DIMENSIONS
-        )
     if telemetry_tokens:
         tokens.extend(telemetry_tokens)
 
@@ -641,10 +640,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         return params
 
     def _get_headers(self, headers, cache_type=None, cache_source=None):
-        out = dict(headers) if headers is not None else {}
-        need_ua = not any(k.lower() == "user-agent" for k in out)
-        features_key_lower = HTTP_HEADER_KEY.lower()
-        need_features = not any(k.lower() == features_key_lower for k in out)
+        out = dict(headers) if headers else {}
+        need_ua = True
+        need_features = True
+        for k in out:
+            k_lower = k.lower()
+            if k_lower == "user-agent":
+                need_ua = False
+            elif k_lower == _HTTP_HEADER_KEY_LOWER:
+                need_features = False
         if need_ua or need_features:
             ua_tokens, encoded = (
                 telemetry_manager.default_usage_tracker.get_http_telemetry(

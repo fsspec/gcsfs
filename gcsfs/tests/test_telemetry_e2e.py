@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import http.server
 import threading
 import uuid
@@ -30,9 +29,7 @@ from urllib.parse import urlparse
 import aiohttp
 import fsspec
 import pytest
-from fsspec import asyn
 
-import gcsfs
 import gcsfs.telemetry.detector as detector_mod
 from gcsfs.telemetry.context import (
     HTTP_HEADER_KEY,
@@ -310,14 +307,14 @@ def test_env_token_on_first_op_after_filesystem_init(
         thread.join(timeout=5)
 
 
-def test_http_telemetry_opt_out_and_reenable_e2e(gcs, wire, monkeypatch, tmp_path):
+def test_http_telemetry_opt_out_and_reenable_e2e(
+    gcs_factory, wire, monkeypatch, tmp_path
+):
     """Verify HTTP telemetry opt-out and re-enablement across request paths on one singleton."""
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
-    gcsfs.GCSFileSystem.clear_instance_cache()
-    storage_options = dict(gcs.storage_options)
-    fs1 = gcsfs.GCSFileSystem(**storage_options)
-    fs2 = gcsfs.GCSFileSystem(**storage_options)
+    fs1 = gcs_factory()
+    fs2 = type(fs1)(**fs1.storage_options)
     assert fs1 is fs2
     remote_path = f"{_unique_prefix()}/opt-out.bin"
     payload = b"telemetry-e2e-payload"
@@ -373,11 +370,3 @@ def test_http_telemetry_opt_out_and_reenable_e2e(gcs, wire, monkeypatch, tmp_pat
         wire.assert_all_tagged("pandas")
     finally:
         reset_telemetry_context(token)
-        try:
-            with contextlib.suppress(FileNotFoundError):
-                gcs.rm(remote_path)
-        finally:
-            if hasattr(fs1, "_close_resources"):
-                asyn.sync(fs1.loop, fs1._close_resources)
-            gcsfs.GCSFileSystem.close_session(fs1.loop, fs1._session, fs1.asynchronous)
-            gcsfs.GCSFileSystem.clear_instance_cache()

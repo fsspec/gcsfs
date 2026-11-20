@@ -23,7 +23,6 @@ class Dimension(StrEnum):
 
 GRPC_METADATA_KEY = "x-goog-storage-gcsfs-features"
 HTTP_HEADER_KEY = "X-Goog-Storage-Gcsfs-Features"
-ALL_DIMENSIONS: frozenset[Dimension] = frozenset(Dimension)
 USER_AGENT_DIMENSIONS: frozenset[Dimension] = frozenset(
     {Dimension.ENVIRONMENT, Dimension.FRAMEWORK}
 )
