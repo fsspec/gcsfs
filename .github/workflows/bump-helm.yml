@@ -20,7 +20,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout source
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
 
@@ -84,8 +84,9 @@ jobs:
           set -euo pipefail
           branch="automation/bump-helm-${VERSION}"
           # Outside an `if` so a failed lookup stops the step instead of
-          # force-pushing over an existing PR's branch.
-          existing="$(gh pr list --head "$branch" --state all --json number --jq '.[0].number')"
+          # force-pushing over an existing PR's branch. Scoped to this repo's
+          # owner: `gh pr list --head` also matches same-named fork branches.
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=all" --jq '.[0].number')"
           if [[ -n "$existing" ]]; then
             echo "PR #${existing} for helm ${VERSION} already exists; nothing to do."
             exit 0
