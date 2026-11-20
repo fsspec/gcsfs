@@ -1962,6 +1962,7 @@ def test_errors(gcs):
         with gcs.open(TEST_BUCKET + "/temp", "wb") as f:
             f.read()
 
+    gcs.touch(TEST_BUCKET + "/temp")
     with pytest.raises(ValueError):
         f = gcs.open(TEST_BUCKET + "/temp", "rb")
         f.close()

@@ -8,6 +8,7 @@ test_hns_unit.py or test_hns.py.
 
 import array
 import asyncio
+import concurrent.futures
 import logging
 import os
 import sys
@@ -741,6 +742,147 @@ def test_zonal_file_text_mode_failed_write_surfaces_its_error(
     assert not any(
         c.kwargs.get("finalize_on_close") for c in aaow.close.await_args_list
     )
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_with_block_exception_closes_without_finalizing(
+    extended_gcsfs, zonal_write_mocks, file_path, mode
+):
+    """An exception raised by other code inside the `with` block propagates, and
+    the file is closed without the closing flush and without finalizing the
+    partial object."""
+    is_rcu = (
+        zonal_write_mocks["storage_class"] == "RAPID"
+        if zonal_write_mocks
+        else extended_gcsfs._sync_lookup_bucket_layout(TEST_ZONAL_BUCKET).is_rcu
+    )
+    open_kwargs = {} if is_rcu else {"finalize_on_close": True}
+
+    seed_gen = None
+    if not zonal_write_mocks and mode == "ab":
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=False) as seed:
+            seed.write(b"seed-")
+        extended_gcsfs.invalidate_cache(file_path)
+        seed_gen = extended_gcsfs.info(file_path)["generation"]
+
+    with pytest.raises(RuntimeError, match="caller failed"):
+        with extended_gcsfs.open(file_path, mode, **open_kwargs) as f:
+            assert f.finalize_on_close is True
+            f.write(test_data)
+            raise RuntimeError("caller failed")
+
+    assert f.closed
+    if zonal_write_mocks:
+        zonal_write_mocks["aaow"].flush.assert_not_awaited()
+        zonal_write_mocks["aaow"].close.assert_awaited_once_with(
+            finalize_on_close=False
+        )
+    else:
+        extended_gcsfs.invalidate_cache(file_path)
+        info = extended_gcsfs.info(file_path)
+        assert info.get("timeFinalized") is None
+        if seed_gen is not None:
+            assert info["generation"] == seed_gen
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_with_block_exception_before_write_does_not_open_writer(
+    extended_gcsfs, zonal_write_mocks, file_path, mode
+):
+    """Raising before the first write() closes without opening the writer,
+    leaving any existing object intact and the caller's exception unmasked."""
+    parent = extended_gcsfs._parent(file_path)
+    if zonal_write_mocks:
+        zonal_write_mocks["init_aaow"].side_effect = FileExistsError("must not open")
+        extended_gcsfs.dircache[parent] = []
+    else:
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as existing:
+            existing.write(test_data)
+        extended_gcsfs.invalidate_cache(file_path)
+        before_gen = extended_gcsfs.info(file_path)["generation"]
+
+    with pytest.raises(RuntimeError, match="caller failed"):
+        with extended_gcsfs.open(file_path, mode, finalize_on_close=True) as f:
+            raise RuntimeError("caller failed")
+
+    assert f.closed
+    assert not f.forced
+    if zonal_write_mocks:
+        assert parent in extended_gcsfs.dircache
+        zonal_write_mocks["init_aaow"].assert_not_awaited()
+        zonal_write_mocks["aaow"].close.assert_not_awaited()
+    else:
+        extended_gcsfs.invalidate_cache(file_path)
+        after_info = extended_gcsfs.info(file_path)
+        assert after_info["generation"] == before_gen
+        assert after_info.get("timeFinalized") is not None
+        assert extended_gcsfs.cat(file_path) == test_data
+
+        missing_path = f"{file_path}-missing"
+        with pytest.raises(RuntimeError, match="caller failed"):
+            with extended_gcsfs.open(missing_path, mode, finalize_on_close=True) as f2:
+                raise RuntimeError("caller failed")
+        assert f2.closed
+        extended_gcsfs.invalidate_cache(missing_path)
+        assert not extended_gcsfs.exists(missing_path)
+
+
+@pytest.mark.parametrize(
+    "teardown_error",
+    [FSTimeoutError, concurrent.futures.CancelledError],
+    ids=["failing", "cancelled"],
+)
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_with_block_exception_is_not_masked_by_close_error(
+    extended_gcsfs, zonal_write_mocks, file_path, teardown_error, caplog
+):
+    """A close that fails or is cancelled after the `with` block raised is
+    logged and does not replace the caller's exception."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for close failures with mocks.")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"),
+        mock.patch(
+            "gcsfs.zonal_file.sync_teardown", side_effect=teardown_error("close failed")
+        ),
+        pytest.raises(RuntimeError, match="caller failed"),
+    ):
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+            f.write(test_data)
+            raise RuntimeError("caller failed")
+
+    assert f.closed
+    assert "Failed to close" in caplog.text
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_file_with_block_exception_after_commit_keeps_object_finalized(
+    extended_gcsfs, zonal_write_mocks, file_path, caplog
+):
+    """Raising after commit() leaves the finalized object as it is: no closing
+    flush, no warning about one, and no second close of the stream."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for raising after commit() with mocks.")
+    aaow = zonal_write_mocks["aaow"]
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs.zonal_file"),
+        pytest.raises(RuntimeError, match="caller failed"),
+    ):
+        with extended_gcsfs.open(file_path, "wb", finalize_on_close=True) as f:
+            f.write(test_data)
+            f.commit()
+            raise RuntimeError("caller failed")
+
+    assert f.closed
+    assert f.finalized
+    aaow.finalize.assert_awaited_once()
+    aaow.flush.assert_not_awaited()
+    aaow.close.assert_not_awaited()
+    assert "already finalized" not in caplog.text
 
 
 @pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
