@@ -333,9 +333,7 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
         )
 
     def _assert_tagged_features(slices, expected_methods_by_slice):
-        for (uas, features), expected_methods in zip(
-            slices, expected_methods_by_slice
-        ):
+        for (uas, features), expected_methods in zip(slices, expected_methods_by_slice):
             assert uas
             assert all("fw/pandas" in ua for ua in uas)
             assert len(features) == len(uas)
@@ -354,9 +352,7 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
     )
     token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
     try:
-        _assert_tagged_features(
-            _run_round_trip(fs1, "enabled"), expected_slice_methods
-        )
+        _assert_tagged_features(_run_round_trip(fs1, "enabled"), expected_slice_methods)
         wire.assert_all_tagged("pandas")
 
         for env_key, env_val, header_key, caller_val in (

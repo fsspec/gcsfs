@@ -34,6 +34,11 @@ The detector recognizes major ecosystem libraries, including:
 
 If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only a single token for the outermost recognized framework (``fw/dask``) is included.
 
+Method Names
+~~~~~~~~~~~~
+
+``gcsfs`` also records the outermost public ``GCSFileSystem`` or ``fsspec`` method name (such as ``ls``, ``cat_file``, ``find``, or ``open``) in the ``X-Goog-Storage-Gcsfs-Features`` HTTP header and ``x-goog-storage-gcsfs-features`` gRPC metadata, never in ``User-Agent``. Nested calls made inside that method (such as ``ls`` inside ``find``) keep the outer method name. After standalone ``open()`` returns, operations on the file handle record ``file_read``, ``file_write``, ``file_flush``, ``file_close``, ``file_info``, ``file_details``, ``file_commit``, or ``file_discard``, while handles opened inside a higher-level method such as ``read_text`` or ``head`` preserve that outer method across worker threads and pickled reopens. Implicit buffer flushes inside ``write()`` keep ``file_write``, whereas explicit ``flush(force=True)`` (or ``ZonalFile.flush()``) records ``file_flush``.
+
 Compute Environments
 ~~~~~~~~~~~~~~~~~~~~
 
@@ -93,7 +98,7 @@ Caller-supplied ``x-goog-storage-gcsfs-features`` metadata is preserved verbatim
 Privacy & Security Guarantees
 -----------------------------
 
-Telemetry collection is strictly limited to open-source library names and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
+Telemetry collection is strictly limited to open-source library names, public method names, and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
 
 - **No User Data or Payloads:** Object contents read or written are never inspected or recorded.
 - **No File Paths or Bucket Names:** Bucket names, object keys, folder hierarchies, and URIs are never collected.

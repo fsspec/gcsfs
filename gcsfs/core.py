@@ -2898,7 +2898,10 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         kwargs["consistency"] = self.consistency
         if self.timeout is not None:
             kwargs["timeout"] = self.timeout
-        if getattr(self, "_telemetry_disabled", False):
+        if (
+            getattr(self, "_telemetry_disabled", False)
+            or not telemetry_manager.default_usage_tracker.is_enabled()
+        ):
             kwargs["_reopen_telemetry"] = None
         else:
             kwargs["_reopen_telemetry"] = (
